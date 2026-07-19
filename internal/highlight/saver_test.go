@@ -183,9 +183,9 @@ func TestSaver_HandleTrigger_ClipAndRow(t *testing.T) {
 	saver, store, blobs, _ := newTestSaver(t)
 	vsID, campID, tenID := uuid.New(), uuid.New(), uuid.New()
 
-	saver.Begin(vsID, campID, tenID)
-	saver.HandleTrigger(newTrigger())
-	if err := saver.Finalize(context.Background()); err != nil {
+	sink := saver.Begin(vsID, campID, tenID)
+	sink.HandleTrigger(newTrigger())
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 
@@ -222,7 +222,7 @@ func TestSaver_Finalize_SchedulesPurge(t *testing.T) {
 
 	saver.Begin(vsID, uuid.New(), uuid.New())
 	before := time.Now().Add(purgeDelay)
-	if err := saver.Finalize(context.Background()); err != nil {
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	after := time.Now().Add(purgeDelay)
@@ -245,13 +245,13 @@ func TestSaver_Finalize_DrainTimeoutStillEnqueues(t *testing.T) {
 	defer close(blobs.gate)          // release on test exit so the worker goroutine can reap
 
 	vsID := uuid.New()
-	saver.Begin(vsID, uuid.New(), uuid.New())
-	saver.HandleTrigger(newTrigger()) // the worker will block on the gated Put
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	sink.HandleTrigger(newTrigger()) // the worker will block on the gated Put
 
 	// A ctx that is already effectively expired: the drain times out.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
-	err := saver.Finalize(ctx)
+	err := saver.Finalize(ctx, vsID)
 	if err == nil {
 		t.Fatalf("want a drain-timeout error, got nil")
 	}
@@ -268,7 +268,7 @@ func TestSaver_Finalize_DrainTimeoutStillEnqueues(t *testing.T) {
 
 func TestSaver_Finalize_IdleNoop(t *testing.T) {
 	saver, _, _, enq := newTestSaver(t)
-	if err := saver.Finalize(context.Background()); err != nil {
+	if err := saver.Finalize(context.Background(), uuid.New()); err != nil {
 		t.Fatalf("idle finalize: %v", err)
 	}
 	if enq.calls != 0 {
@@ -276,17 +276,70 @@ func TestSaver_Finalize_IdleNoop(t *testing.T) {
 	}
 }
 
+// TestSaver_TwoSessions_Isolated pins #488 test-sequence (8): two Begins bind two
+// independent workers, and Finalize(id) drains ONLY that session — the other's
+// binding (and its buffered trigger) survives untouched until its own Finalize.
+func TestSaver_TwoSessions_Isolated(t *testing.T) {
+	saver, store, _, enq := newTestSaver(t)
+	vs1, vs2 := uuid.New(), uuid.New()
+	camp1, camp2 := uuid.New(), uuid.New()
+
+	sink1 := saver.Begin(vs1, camp1, uuid.New())
+	sink2 := saver.Begin(vs2, camp2, uuid.New())
+	sink1.HandleTrigger(newTrigger())
+	sink2.HandleTrigger(newTrigger())
+
+	// Finalize session 1: its worker drains + a purge is scheduled for vs1 only.
+	if err := saver.Finalize(context.Background(), vs1); err != nil {
+		t.Fatalf("finalize vs1: %v", err)
+	}
+	if enq.calls != 1 {
+		t.Fatalf("finalize(vs1) scheduled %d purges, want exactly 1", enq.calls)
+	}
+	if p, ok := enq.payload.(purgePayload); !ok || p.VoiceSessionID != vs1 {
+		t.Fatalf("finalize(vs1) purge payload = %#v, want vs1 %s", enq.payload, vs1)
+	}
+
+	// Session 2 is still live: its trigger is still routable and Finalize drains it.
+	sink2.HandleTrigger(newTrigger())
+	if err := saver.Finalize(context.Background(), vs2); err != nil {
+		t.Fatalf("finalize vs2: %v", err)
+	}
+	if enq.calls != 2 {
+		t.Fatalf("finalize(vs2) did not schedule its own purge: calls=%d", enq.calls)
+	}
+
+	// Every saved row carries its own session's owning ids — no cross-feed.
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, h := range store.created {
+		switch h.VoiceSessionID {
+		case vs1:
+			if h.CampaignID != camp1 {
+				t.Fatalf("vs1 row carries wrong campaign %s", h.CampaignID)
+			}
+		case vs2:
+			if h.CampaignID != camp2 {
+				t.Fatalf("vs2 row carries wrong campaign %s", h.CampaignID)
+			}
+		default:
+			t.Fatalf("row with foreign voice session %s", h.VoiceSessionID)
+		}
+	}
+}
+
 func TestSaver_HandleTrigger_NonBlockingDropsWhenFull(t *testing.T) {
 	saver, store, blobs, _ := newTestSaver(t)
 	blobs.gate = make(chan struct{}) // hold the worker inside the first Put
 
-	saver.Begin(uuid.New(), uuid.New(), uuid.New())
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
 
 	// Push far more than the mailbox holds; none of these must block.
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < saveQueue+64; i++ {
-			saver.HandleTrigger(newTrigger())
+			sink.HandleTrigger(newTrigger())
 		}
 		close(done)
 	}()
@@ -298,7 +351,7 @@ func TestSaver_HandleTrigger_NonBlockingDropsWhenFull(t *testing.T) {
 
 	// Release the worker and let it drain the buffered triggers.
 	close(blobs.gate)
-	if err := saver.Finalize(context.Background()); err != nil {
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	// At most one in-flight + saveQueue buffered ever get saved; the rest dropped.
@@ -320,9 +373,10 @@ func TestSaver_CompensationSurvivesExhaustedBudget(t *testing.T) {
 	saver.saveTimeout = 50 * time.Millisecond // shrink the budget so the stall expires it quickly
 	store.stall = true                        // CreateHighlight outlives the budget, fails with ctx.Err()
 
-	saver.Begin(uuid.New(), uuid.New(), uuid.New())
-	saver.HandleTrigger(newTrigger()) // Put succeeds on residual budget, row insert exhausts it
-	if err := saver.Finalize(context.Background()); err != nil {
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	sink.HandleTrigger(newTrigger()) // Put succeeds on residual budget, row insert exhausts it
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 
@@ -338,10 +392,11 @@ func TestSaver_WorkerFailureSurvives(t *testing.T) {
 	saver, store, blobs, _ := newTestSaver(t)
 	store.failNext = true // first CreateHighlight fails
 
-	saver.Begin(uuid.New(), uuid.New(), uuid.New())
-	saver.HandleTrigger(newTrigger()) // Put ok, then CreateHighlight fails
-	saver.HandleTrigger(newTrigger()) // must still be processed
-	if err := saver.Finalize(context.Background()); err != nil {
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	sink.HandleTrigger(newTrigger()) // Put ok, then CreateHighlight fails
+	sink.HandleTrigger(newTrigger()) // must still be processed
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	if store.count() != 1 {

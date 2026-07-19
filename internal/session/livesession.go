@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -25,16 +27,17 @@ type LiveSession struct {
 	as *activeSession
 }
 
-// Live returns a handle to the currently active Voice Session, or nil when idle
-// (the caller's ErrNoActiveSession moment). The handle stays valid only while
-// that same session is the active one; see [LiveSession].
-func (m *Manager) Live() *LiveSession {
+// Live returns a handle to tenantID's currently active Voice Session, or nil when
+// that Tenant has none (the caller's ErrNoActiveSession moment). The handle stays
+// valid only while that same session is the Tenant's active one; see [LiveSession].
+func (m *Manager) Live(tenantID uuid.UUID) *LiveSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil {
+	as := m.active[tenantID]
+	if as == nil {
 		return nil
 	}
-	return &LiveSession{m: m, as: m.active}
+	return &LiveSession{m: m, as: as}
 }
 
 // revalidate is THE one implementation of the capture → drop-lock → revalidate
@@ -47,7 +50,7 @@ func (m *Manager) Live() *LiveSession {
 func (l *LiveSession) revalidate(fn func()) error {
 	l.m.mu.Lock()
 	defer l.m.mu.Unlock()
-	if l.m.active != l.as {
+	if l.m.active[l.as.tenantID] != l.as {
 		return ErrNoActiveSession
 	}
 	if fn != nil {
@@ -96,8 +99,8 @@ func (l *LiveSession) SetAgentMute(ctx context.Context, agentID string, muted bo
 		return nil, ErrAgentNotInCampaign
 	}
 
-	l.m.pubMu.Lock()
-	defer l.m.pubMu.Unlock()
+	l.as.pubMu.Lock()
+	defer l.as.pubMu.Unlock()
 
 	var (
 		changed bool
@@ -140,8 +143,8 @@ func (l *LiveSession) SetAllMute(ctx context.Context, muted bool) ([]string, err
 		return nil, fmt.Errorf("session: list agents for mute-all: %w", err)
 	}
 
-	l.m.pubMu.Lock()
-	defer l.m.pubMu.Unlock()
+	l.as.pubMu.Lock()
+	defer l.as.pubMu.Unlock()
 
 	var (
 		changes []voiceevent.MuteChanged
@@ -294,50 +297,53 @@ func (l *LiveSession) ReplayHighlight(_ context.Context, clipKey string) error {
 // forever stale. Idle maps to the same ErrNoActiveSession a stale handle
 // reports, so callers see one error contract either way.
 
-// SetAgentMute routes to [LiveSession.SetAgentMute] on the current session;
-// idle is ErrNoActiveSession (AC4).
-func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error) {
-	l := m.Live()
+// SetAgentMute routes to [LiveSession.SetAgentMute] on tenantID's session; no
+// session for that Tenant is ErrNoActiveSession (AC4). Tenant-scoped end-to-end
+// (#488): the op resolves and acts on m.active[tenantID] under the lock, so the
+// old snapshot-check-act TOCTOU gap is gone.
+func (m *Manager) SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error) {
+	l := m.Live(tenantID)
 	if l == nil {
 		return nil, ErrNoActiveSession
 	}
 	return l.SetAgentMute(ctx, agentID, muted)
 }
 
-// SetAllMute routes to [LiveSession.SetAllMute] on the current session; idle is
-// ErrNoActiveSession.
-func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) {
-	l := m.Live()
+// SetAllMute routes to [LiveSession.SetAllMute] on tenantID's session; no session
+// for that Tenant is ErrNoActiveSession.
+func (m *Manager) SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error) {
+	l := m.Live(tenantID)
 	if l == nil {
 		return nil, ErrNoActiveSession
 	}
 	return l.SetAllMute(ctx, muted)
 }
 
-// SayAs routes to [LiveSession.SayAs] on the current session; idle is
-// ErrNoActiveSession (refused before any roster lookup).
-func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
-	l := m.Live()
+// SayAs routes to [LiveSession.SayAs] on tenantID's session; no session for that
+// Tenant is ErrNoActiveSession (refused before any roster lookup).
+func (m *Manager) SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error {
+	l := m.Live(tenantID)
 	if l == nil {
 		return ErrNoActiveSession
 	}
 	return l.SayAs(ctx, agentID, text)
 }
 
-// SpeakAsButler routes to [LiveSession.SpeakAsButler] on the current session
-// (satisfies presence.ButlerVoicer structurally); idle is ErrNoActiveSession.
-func (m *Manager) SpeakAsButler(ctx context.Context, text string) error {
-	l := m.Live()
+// SpeakAsButler routes to [LiveSession.SpeakAsButler] on tenantID's session
+// (satisfies presence.ButlerVoicer structurally); no session for that Tenant is
+// ErrNoActiveSession.
+func (m *Manager) SpeakAsButler(ctx context.Context, tenantID uuid.UUID, text string) error {
+	l := m.Live(tenantID)
 	if l == nil {
 		return ErrNoActiveSession
 	}
 	return l.SpeakAsButler(ctx, text)
 }
 
-// ReplayHighlight routes to [LiveSession.ReplayHighlight] on the current
-// session; idle is ErrNoActiveSession and publishes nothing.
-func (m *Manager) ReplayHighlight(ctx context.Context, clipKey string) error {
-	l := m.Live()
+// ReplayHighlight routes to [LiveSession.ReplayHighlight] on tenantID's session;
+// no session for that Tenant is ErrNoActiveSession and publishes nothing.
+func (m *Manager) ReplayHighlight(ctx context.Context, tenantID uuid.UUID, clipKey string) error {
+	l := m.Live(tenantID)
 	if l == nil {
 		return ErrNoActiveSession
 	}

@@ -25,23 +25,28 @@ import (
 // handler is exercised without Discord.
 type SessionManager interface {
 	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
-	Stop(ctx context.Context) (storage.VoiceSession, error)
-	Snapshot() (storage.VoiceSession, bool)
-	// SetAgentMute / SetAllMute toggle the live per-Agent mute set (#211), returning
-	// the resulting sorted muted-id set; both fail ErrNoActiveSession when idle. The
-	// set is the Character NPCs only — the Address-Only Butler is not a mute target
-	// (voiced since the ADR-0009 #299 amendment, but mute is matcher-owned and
+	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
+	// Active reports tenantID's live Voice Session (S3, #488): the per-Tenant read
+	// replacing the single-active Snapshot, so with N concurrent sessions this
+	// operator sees only their own Tenant's session.
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
+	// SetAgentMute / SetAllMute toggle tenantID's live per-Agent mute set (#211,
+	// #488), returning the resulting sorted muted-id set; both fail
+	// ErrNoActiveSession when that Tenant has no live session. The set is the
+	// Character NPCs only — the Address-Only Butler is not a mute target (voiced
+	// since the ADR-0009 #299 amendment, but mute is matcher-owned and
 	// Character-only), so SetAllMute skips it and SetAgentMute fails
 	// ErrAgentNotInCampaign for it, just as for an agent outside the active session's
 	// Campaign (all validated atomically against that session).
-	SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error)
-	SetAllMute(ctx context.Context, muted bool) ([]string, error)
-	// MutedAgentIDs is the reload truth (AC5): the muted set while active, nil idle.
-	MutedAgentIDs() []string
-	// Spend snapshots the active session's spend meter (#130, ADR-0046): estimated
-	// USD + cap state, the reload truth for the Session screen's spend-cap badge. The
-	// zero Status when idle or no caps are configured.
-	Spend() spend.Status
+	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
+	SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error)
+	// MutedAgentIDs is the reload truth (AC5): tenantID's muted set while active, nil
+	// when that Tenant has no live session.
+	MutedAgentIDs(tenantID uuid.UUID) []string
+	// Spend snapshots tenantID's active session spend meter (#130, ADR-0046):
+	// estimated USD + cap state, the reload truth for the Session screen's spend-cap
+	// badge. The zero Status when that Tenant is idle or no caps are configured.
+	Spend(tenantID uuid.UUID) spend.Status
 }
 
 // SessionStore is the narrow storage surface SessionServer needs: the operator's
@@ -148,14 +153,19 @@ func (s *SessionServer) GetSession(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetSessionRequest],
 ) (*connect.Response[managementv1.GetSessionResponse], error) {
-	if vs, active := s.mgr.Snapshot(); active {
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if vs, active, aerr := s.mgr.Active(ctx, tenantID); aerr == nil && active {
 		// Spend-cap reload truth while live (#130): the badge reads the meter state +
-		// estimated spend the same way muted_agent_ids reads the mute set (AC5).
-		sp := s.mgr.Spend()
+		// estimated spend the same way muted_agent_ids reads the mute set (AC5). All
+		// scoped to THIS Tenant's session (#488).
+		sp := s.mgr.Spend(tenantID)
 		return connect.NewResponse(&managementv1.GetSessionResponse{
 			Session:           toProtoVoiceSession(vs),
 			Active:            true,
-			MutedAgentIds:     s.mgr.MutedAgentIDs(), // reload truth while live (AC5)
+			MutedAgentIds:     s.mgr.MutedAgentIDs(tenantID), // reload truth while live (AC5)
 			SpendCapState:     string(sp.State),
 			EstimatedSpendUsd: sp.EstimatedUSD,
 		}), nil
@@ -217,11 +227,17 @@ func (s *SessionServer) StartSession(
 	}), nil
 }
 
-// liveCampaign reports the live Voice Session's campaign id, if any, off the
-// manager Snapshot — the live-first input to resolveActiveCampaign (#222).
-func (s *SessionServer) liveCampaign() (uuid.UUID, bool) {
-	vs, active := s.mgr.Snapshot()
-	return vs.CampaignID, active
+// liveCampaign reports the CALLER's Tenant live Voice Session campaign id, if any
+// — the live-first input to resolveActiveCampaign (#222, #488). It reads the
+// per-Tenant [session.Manager.Active] rather than the process-wide single-active
+// snapshot, so with N concurrent sessions the live-first pivot uses only this
+// operator's own Tenant's session (never a foreign Tenant's).
+func (s *SessionServer) liveCampaign(ctx context.Context, tenantID uuid.UUID) (uuid.UUID, bool) {
+	vs, active, err := s.mgr.Active(ctx, tenantID)
+	if err != nil || !active {
+		return uuid.Nil, false
+	}
+	return vs.CampaignID, true
 }
 
 // startCampaign resolves the campaign a web Start binds to, honoring the durable
@@ -232,7 +248,9 @@ func (s *SessionServer) liveCampaign() (uuid.UUID, bool) {
 // idle Start/GetSession paths the live step is a no-op (no session runs yet), so
 // this resolves the durable selection then the most-recent fallback.
 func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, error) {
-	return resolveActiveCampaign(ctx, s.liveCampaign, s.store)
+	tenantID, _ := auth.TenantID(ctx)
+	live := func() (uuid.UUID, bool) { return s.liveCampaign(ctx, tenantID) }
+	return resolveActiveCampaign(ctx, live, s.store)
 }
 
 // startError maps a manager Start failure onto a Connect status code: the
@@ -259,6 +277,12 @@ func (s *SessionServer) startError(err error) error {
 		// message — the estimate resets with the next calendar month.
 		return connect.NewError(connect.CodeResourceExhausted,
 			errors.New("the plan's monthly usage allowance is exhausted; it resets next month (estimates, ADR-0046)"))
+	case errors.Is(err, session.ErrSessionLimit):
+		// #488: the process is at its concurrent-session cap
+		// (GLYPHOXA_MAX_VOICE_SESSIONS). Distinct, user-visible, and retryable once a
+		// running session ends — the ErrAllowanceExhausted ResourceExhausted precedent.
+		return connect.NewError(connect.CodeResourceExhausted,
+			errors.New("the server is already running the maximum number of concurrent voice sessions; try again once one ends"))
 	case errors.Is(err, session.ErrManagerClosed):
 		// The manager is in its terminal closed state (#157): the process is
 		// shutting down. Unavailable, so the client retries the restarted process.
@@ -274,7 +298,11 @@ func (s *SessionServer) StopSession(
 	ctx context.Context,
 	_ *connect.Request[managementv1.StopSessionRequest],
 ) (*connect.Response[managementv1.StopSessionResponse], error) {
-	vs, err := s.mgr.Stop(ctx)
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	vs, err := s.mgr.Stop(ctx, tenantID)
 	if errors.Is(err, session.ErrNoActiveSession) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
 	}
@@ -302,8 +330,12 @@ func (s *SessionServer) SetAgentMute(
 	if _, err := uuid.Parse(req.Msg.GetAgentId()); err != nil {
 		return nil, notFound // a non-UUID id names no Agent (session-independent)
 	}
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	ids, err := s.mgr.SetAgentMute(ctx, req.Msg.GetAgentId(), req.Msg.GetMuted())
+	ids, err := s.mgr.SetAgentMute(ctx, tenantID, req.Msg.GetAgentId(), req.Msg.GetMuted())
 	switch {
 	case errors.Is(err, session.ErrNoActiveSession):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
@@ -323,7 +355,11 @@ func (s *SessionServer) SetAllMute(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetAllMuteRequest],
 ) (*connect.Response[managementv1.SetAllMuteResponse], error) {
-	ids, err := s.mgr.SetAllMute(ctx, req.Msg.GetMuted())
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := s.mgr.SetAllMute(ctx, tenantID, req.Msg.GetMuted())
 	if errors.Is(err, session.ErrNoActiveSession) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
 	}
@@ -520,8 +556,10 @@ func (s *SessionServer) ResolveActiveCampaign(ctx context.Context) (uuid.UUID, b
 // never-run state the caller answers with an empty result. A storage error other
 // than ErrNotFound is returned.
 func (s *SessionServer) searchCampaign(ctx context.Context) (uuid.UUID, bool, error) {
-	if vs, active := s.mgr.Snapshot(); active {
-		return vs.CampaignID, true, nil
+	if tenantID, ok := auth.TenantID(ctx); ok {
+		if vs, active, err := s.mgr.Active(ctx, tenantID); err == nil && active {
+			return vs.CampaignID, true, nil
+		}
 	}
 	campaign, err := s.startCampaign(ctx)
 	if errors.Is(err, storage.ErrNotFound) {

@@ -293,7 +293,7 @@ func TestStartStopLifecycle(t *testing.T) {
 		t.Errorf("Snapshot = %+v active=%v, want active %s", snap, active, vs.ID)
 	}
 
-	ended, err := mgr.Stop(context.Background())
+	ended, err := mgr.Stop(context.Background(), tenantID)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestStart_OverlaysGMSpeakerForTenant(t *testing.T) {
 	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 	select {
 	case <-runner.started:
 	case <-time.After(2 * time.Second):
@@ -403,7 +403,7 @@ func TestSecondStartRejected(t *testing.T) {
 	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 
 	_, err := mgr.Start(context.Background(), tenantID, campaignID)
 	if !errors.Is(err, session.ErrSessionActive) {
@@ -448,10 +448,11 @@ func TestStartUsesSavedToken(t *testing.T) {
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{}, cipher,
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 
 	select {
 	case <-runner.started:
@@ -473,10 +474,11 @@ func TestStartFallsBackToEnvToken(t *testing.T) {
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "env-bot-token"}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 
 	select {
 	case <-runner.started:
@@ -564,7 +566,8 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 	fin := &fakeFinalizer{count: 9}
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Transcript: fin})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	tenantID := uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -574,7 +577,7 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	ended, err := mgr.Stop(context.Background())
+	ended, err := mgr.Stop(context.Background(), tenantID)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -589,25 +592,31 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 // spyHighlighter records Begin/Finalize so a test can assert the Manager binds
 // and unbinds the Session Highlights pipeline at Start/loop-exit (#308).
 type spyHighlighter struct {
-	mu         sync.Mutex
-	beginArgs  [3]uuid.UUID
-	beginCalls int
-	finalizes  int
+	mu           sync.Mutex
+	beginArgs    [3]uuid.UUID
+	beginCalls   int
+	finalizes    int
+	finalizeArgs []uuid.UUID
 }
 
-func (s *spyHighlighter) HandleTrigger(highlight.Trigger) {}
+// spySink is the per-session Sink spyHighlighter.Begin hands back (#488).
+type spySink struct{}
 
-func (s *spyHighlighter) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) {
+func (spySink) HandleTrigger(highlight.Trigger) {}
+
+func (s *spyHighlighter) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) highlight.Sink {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beginArgs = [3]uuid.UUID{voiceSessionID, campaignID, tenantID}
 	s.beginCalls++
+	return spySink{}
 }
 
-func (s *spyHighlighter) Finalize(context.Context) error {
+func (s *spyHighlighter) Finalize(_ context.Context, voiceSessionID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.finalizes++
+	s.finalizeArgs = append(s.finalizeArgs, voiceSessionID)
 	return nil
 }
 
@@ -643,7 +652,7 @@ func TestManagerBeginsAndFinalizesHighlights(t *testing.T) {
 		t.Fatalf("Begin args = %v, want session/campaign/tenant %v/%v/%v", spy.beginArgs, vs.ID, campaignID, tenantID)
 	}
 
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if begins, finals := spy.seen(); begins != 1 || finals != 1 {
@@ -670,7 +679,8 @@ func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Transcript: slowFinalizer{}})
 	mgr.SetEndTimeoutForTest(50 * time.Millisecond)
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	tenantID := uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -680,7 +690,7 @@ func TestSlowFinalizeStillEndsRow(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	ended, err := mgr.Stop(context.Background())
+	ended, err := mgr.Stop(context.Background(), tenantID)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -708,7 +718,8 @@ func TestStopSurfacesEndWriteFailure(t *testing.T) {
 	runner := newBlockingRunner()
 	mgr := newManager(t, store, runner.run, true)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -717,7 +728,7 @@ func TestStopSurfacesEndWriteFailure(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	got, err := mgr.Stop(context.Background())
+	got, err := mgr.Stop(context.Background(), tenantID)
 	if err == nil {
 		t.Fatalf("Stop = %+v with nil error, want the end-write failure surfaced", got)
 	}
@@ -729,7 +740,7 @@ func TestStopSurfacesEndWriteFailure(t *testing.T) {
 // TestStopWithoutActiveSession returns ErrNoActiveSession.
 func TestStopWithoutActiveSession(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)
-	if _, err := mgr.Stop(context.Background()); !errors.Is(err, session.ErrNoActiveSession) {
+	if _, err := mgr.Stop(context.Background(), uuid.New()); !errors.Is(err, session.ErrNoActiveSession) {
 		t.Errorf("Stop with no session = %v, want ErrNoActiveSession", err)
 	}
 }
@@ -829,7 +840,8 @@ func TestShutdownIdempotentStopSafe(t *testing.T) {
 	runner := newBlockingRunner()
 	mgr := newManager(t, store, runner.run, true)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -844,7 +856,7 @@ func TestShutdownIdempotentStopSafe(t *testing.T) {
 	}
 	mgr.Shutdown() // idempotent: no second end write, no hang
 
-	if _, err := mgr.Stop(context.Background()); !errors.Is(err, session.ErrNoActiveSession) {
+	if _, err := mgr.Stop(context.Background(), tenantID); !errors.Is(err, session.ErrNoActiveSession) {
 		t.Errorf("Stop after Shutdown = %v, want ErrNoActiveSession", err)
 	}
 	if _, ended := store.counts(); ended != 1 {
@@ -971,7 +983,8 @@ func TestCancelledLoopEndsCleanNilReason(t *testing.T) {
 	runner := newBlockingRunner()
 	mgr := newManager(t, store, runner.run, true)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -980,7 +993,7 @@ func TestCancelledLoopEndsCleanNilReason(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	ended, err := mgr.Stop(context.Background())
+	ended, err := mgr.Stop(context.Background(), tenantID)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -1030,7 +1043,8 @@ func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 	flusher := &fakeChunkFinalizer{store: store}
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Chunker: flusher})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	tenantID := uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1040,7 +1054,7 @@ func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
@@ -1061,7 +1075,8 @@ func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true,
 		session.Deps{Chunker: &fakeChunkFinalizer{store: store, err: errors.New("chunk writer wedged")}})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -1070,7 +1085,7 @@ func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
 		t.Fatal("loop runner never started")
 	}
 
-	ended, err := mgr.Stop(context.Background())
+	ended, err := mgr.Stop(context.Background(), tenantID)
 	if err != nil {
 		t.Fatalf("Stop returned %v, want nil (a chunk-flush error must not fail Stop)", err)
 	}

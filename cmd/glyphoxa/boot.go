@@ -365,6 +365,27 @@ func gatewayIdentifyWarnThreshold(getenv func(string) string) int {
 	return n
 }
 
+// defaultMaxVoiceSessions is the process-wide concurrent-Voice-Session cap when
+// GLYPHOXA_MAX_VOICE_SESSIONS is unset (#488, ADR-0057's per-process K). It is 1 —
+// today's single-session default — so a stock deployment behaves byte-identically
+// until an operator deliberately raises the cap (a change soak-gated for DAVE, #493).
+const defaultMaxVoiceSessions = 1
+
+// maxVoiceSessions reads the GLYPHOXA_MAX_VOICE_SESSIONS cap (#488): the process
+// refuses a session Start beyond this many concurrent live sessions with the
+// distinct, user-visible session.ErrSessionLimit. A blank, non-numeric, zero, or
+// negative value falls back to [defaultMaxVoiceSessions] (1) — a mis-set env var
+// must never silently uncap the process or wedge it at zero. Parsed HERE in the
+// composition root (never in internal/session), so the cap is a deployment knob.
+func maxVoiceSessions(getenv func(string) string) int {
+	v := strings.TrimSpace(getenv("GLYPHOXA_MAX_VOICE_SESSIONS"))
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return defaultMaxVoiceSessions
+	}
+	return n
+}
+
 // forceLoopback rewrites a listen address to bind 127.0.0.1, preserving the port
 // (":8080" → "127.0.0.1:8080", "0.0.0.0:9000" → "127.0.0.1:9000"). GLYPHOXA_DEV_MODE
 // pins the host to loopback so a mis-set flag in production is blunted: a

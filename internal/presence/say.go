@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/disgoorg/disgo/discord"
+	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -15,13 +16,16 @@ import (
 // autocomplete/resolver list against) and the direct-speech publish. *session.Manager
 // satisfies it structurally — no import, mirroring the mute seam (SessionMuter).
 type SayControl interface {
-	Snapshot() (storage.VoiceSession, bool)
+	// Active reports THIS Tenant's live Voice Session (S3, #488): Tenant-keyed, so a
+	// GM in Tenant B never sees (nor can puppet) Tenant A's session.
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
 	// SayAs asks the voiced Character NPC with agentID to speak text verbatim in the
-	// live Voice Session, bypassing Address Detection and the LLM (GM puppeteering,
-	// ADR-0024). It validates the active session + campaign membership atomically and
-	// returns an error (mapped here to the same ephemeral no-session refusal) when the
-	// session ended or the agent is not a voiced NPC of the Active Campaign.
-	SayAs(ctx context.Context, agentID, text string) error
+	// Tenant's live Voice Session, bypassing Address Detection and the LLM (GM
+	// puppeteering, ADR-0024). It validates the active session + campaign membership
+	// atomically and returns an error (mapped here to the same ephemeral no-session
+	// refusal) when the session ended or the agent is not a voiced NPC of the Active
+	// Campaign.
+	SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error
 }
 
 // SayCommand builds the FLAT /say <text> as:<agent> command (ADR-0010: GM-only,
@@ -60,8 +64,8 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 			},
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			vs, active := mgr.Snapshot()
-			if !active || !sessionInTenant(ctx, agents, vs, ac.TenantID()) {
+			vs, active, err := mgr.Active(ctx, ac.TenantID())
+			if err != nil || !active {
 				return nil, nil // no session for this Tenant: nothing to puppet, offer nothing
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
@@ -83,9 +87,10 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 			return choices, nil
 		},
 		Handle: func(ctx context.Context, ic *Interaction) error {
-			vs, active := mgr.Snapshot()
-			if !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
-				// No session, or the single active session belongs to another Tenant (#490).
+			vs, active, err := mgr.Active(ctx, ic.TenantID())
+			if err != nil || !active {
+				// No session for THIS Tenant (#488): a session live for another Tenant is
+				// invisible here, so a GM can never puppet a foreign Tenant's session.
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			text, _ := ic.String("text")
@@ -101,7 +106,7 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 			if !found {
 				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
 			}
-			if err := mgr.SayAs(ctx, agent.ID.String(), text); err != nil {
+			if err := mgr.SayAs(ctx, ic.TenantID(), agent.ID.String(), text); err != nil {
 				// The expected failures are a session ending between the snapshot and the
 				// publish, or the resolved Agent no longer being in the (now-different)
 				// active Campaign; both surface as the same ephemeral guard rather than a

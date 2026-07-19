@@ -6,9 +6,12 @@
 // Registry) — which is exactly why the seam is inverted here: the sources are
 // injected as narrow interfaces and this package is the production wiring.
 //
-// It mirrors the kgfacts pattern (internal/kgfacts): a Store for the reads plus a
-// Sessions source for the active Campaign, with "no active session → error" so a
-// Tool called outside a live turn reports it cleanly rather than reading nothing.
+// It mirrors the kgfacts pattern (internal/kgfacts): a Store for the reads plus the
+// run context's [session.Identity] for the active Campaign (#488 — no session seam,
+// so N concurrent sessions each scope to their OWN Campaign from the ambient run
+// context rather than a single-active global read), with "no session Identity →
+// error" so a Tool called outside a live turn reports it cleanly rather than
+// reading nothing.
 // The prompt-facing KG fact reads run exclusively through the [PromptKG] seam,
 // which has no method that can return a gm_private row (#450) — filtering is
 // enforced by that interface, see the gm_private seam test in internal/storage.
@@ -24,6 +27,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/textnorm"
 	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
@@ -81,42 +85,37 @@ type Store interface {
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 }
 
-// Sessions reports the active Voice Session (for its Campaign). *session.Manager
-// satisfies it via Snapshot, the same shape kgfacts depends on; defined locally
-// so this package does not import session.
-type Sessions interface {
-	Snapshot() (storage.VoiceSession, bool)
-}
-
 // Adapter implements both tool.TranscriptSearcher and tool.KGReader over a
-// storage Store, the prompt-facing [PromptKG] read seam, and the active-session
-// source. Safe for concurrent use (its deps are). Build it once at web boot and
-// set it on the session Manager's base config.
+// storage Store and the prompt-facing [PromptKG] read seam. Safe for concurrent use
+// (its deps are). Build it once at web boot and set it on the session Manager's
+// base config; each Tool call resolves its Campaign from the run context's
+// [session.Identity], so N concurrent sessions each read their own Campaign (#488).
 type Adapter struct {
-	store    Store
-	kg       PromptKG // prompt-facing KG fact reads ONLY (#450)
-	sessions Sessions
+	store Store
+	kg    PromptKG // prompt-facing KG fact reads ONLY (#450)
 }
 
-// New builds the adapter over the non-prompt store reads, the prompt-facing KG
-// read seam (pass storage's PromptKG() view), and the session source. All deps
-// must be non-nil — they are wiring requirements, so a nil is a boot bug, not a
-// runtime condition.
-func New(store Store, kg PromptKG, sessions Sessions) *Adapter {
-	if store == nil || kg == nil || sessions == nil {
-		panic("knowledge: New: nil store, prompt KG, or sessions")
+// New builds the adapter over the non-prompt store reads and the prompt-facing KG
+// read seam (pass storage's PromptKG() view). Both deps must be non-nil — they are
+// wiring requirements, so a nil is a boot bug, not a runtime condition. The active
+// Campaign is no longer a construction dep (#488): it comes from the per-call run
+// context's [session.Identity].
+func New(store Store, kg PromptKG) *Adapter {
+	if store == nil || kg == nil {
+		panic("knowledge: New: nil store or prompt KG")
 	}
-	return &Adapter{store: store, kg: kg, sessions: sessions}
+	return &Adapter{store: store, kg: kg}
 }
 
-// activeCampaign resolves the Campaign the live session scopes reads to, or
-// ErrNoActiveSession when idle.
-func (a *Adapter) activeCampaign() (uuid.UUID, error) {
-	s, ok := a.sessions.Snapshot()
+// activeCampaign resolves the Campaign the current turn's Voice Session scopes reads
+// to, from the run context's [session.Identity] (#488), or ErrNoActiveSession when
+// the ctx carries none (a Tool called outside a live turn).
+func (a *Adapter) activeCampaign(ctx context.Context) (uuid.UUID, error) {
+	id, ok := session.FromContext(ctx)
 	if !ok {
 		return uuid.Nil, ErrNoActiveSession
 	}
-	return s.CampaignID, nil
+	return id.CampaignID, nil
 }
 
 // SearchTranscript implements [tool.TranscriptSearcher]. It searches the active
@@ -125,7 +124,7 @@ func (a *Adapter) activeCampaign() (uuid.UUID, error) {
 // never the caller, so the search can never cross Campaigns. No session yields
 // ErrNoActiveSession.
 func (a *Adapter) SearchTranscript(ctx context.Context, query string, limit int) ([]tool.TranscriptHit, error) {
-	campaignID, err := a.activeCampaign()
+	campaignID, err := a.activeCampaign(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +168,7 @@ func (a *Adapter) OwnNodeFacts(ctx context.Context, agentID string) ([]tool.KGFa
 // filtering enforced by that interface, #450 — see the seam test in
 // internal/storage). No session yields ErrNoActiveSession.
 func (a *Adapter) SearchFacts(ctx context.Context, query string, limit int) ([]tool.KGFact, error) {
-	campaignID, err := a.activeCampaign()
+	campaignID, err := a.activeCampaign(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +231,7 @@ func (a *Adapter) OwnNode(ctx context.Context, agentID string) (tool.KGNodeRef, 
 // barge-in (turn ctx cancel) does not roll back a proposal the NPC already made
 // (ADR-0052), while a wedged DB still cannot leak the goroutine.
 func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.ProposedWrite) error {
-	campaignID, err := a.activeCampaign()
+	campaignID, err := a.activeCampaign(ctx)
 	if err != nil {
 		return err
 	}
@@ -270,7 +269,7 @@ func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.Pro
 // must never surface into a prompt via the echo (ADR-0008). No session ⇒
 // ErrNoActiveSession; the comparison itself is the handler's.
 func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
-	campaignID, err := a.activeCampaign()
+	campaignID, err := a.activeCampaign(ctx)
 	if err != nil {
 		return tool.KnownForTarget{}, err
 	}

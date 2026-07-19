@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -16,7 +18,7 @@ func TestReplayHighlight_IdleReturnsNoActiveSession(t *testing.T) {
 	var got []voiceevent.ReplayRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.ReplayRequested) { got = append(got, e) }))
 
-	if err := mgr.ReplayHighlight(context.Background(), "clip/abc"); err != session.ErrNoActiveSession {
+	if err := mgr.ReplayHighlight(context.Background(), uuid.New(), "clip/abc"); err != session.ErrNoActiveSession {
 		t.Fatalf("ReplayHighlight while idle = %v, want ErrNoActiveSession", err)
 	}
 	if len(got) != 0 {
@@ -29,12 +31,12 @@ func TestReplayHighlight_IdleReturnsNoActiveSession(t *testing.T) {
 // TurnID (ADR-0005: the KEY, never audio).
 func TestReplayHighlight_HappyPublishesReplayRequested(t *testing.T) {
 	mgr, bus := muteManager(t, newFakeStore())
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var got []voiceevent.ReplayRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.ReplayRequested) { got = append(got, e) }))
 
-	if err := mgr.ReplayHighlight(context.Background(), "clip/abc"); err != nil {
+	if err := mgr.ReplayHighlight(context.Background(), tenantID, "clip/abc"); err != nil {
 		t.Fatalf("ReplayHighlight happy path: %v", err)
 	}
 	if len(got) != 1 {

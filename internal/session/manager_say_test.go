@@ -26,7 +26,7 @@ func TestSayAs_IdleReturnsNoActiveSession(t *testing.T) {
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SayAs(context.Background(), uuid.NewString(), "hello"); err != session.ErrNoActiveSession {
+	if err := mgr.SayAs(context.Background(), uuid.New(), uuid.NewString(), "hello"); err != session.ErrNoActiveSession {
 		t.Fatalf("SayAs while idle = %v, want ErrNoActiveSession", err)
 	}
 	if len(got) != 0 {
@@ -41,11 +41,11 @@ func TestSayAs_ForeignAgentRejected(t *testing.T) {
 	store := newFakeStore()
 	seedAgents(store, 1)
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SayAs(context.Background(), uuid.NewString(), "hello"); err != session.ErrAgentNotInCampaign {
+	if err := mgr.SayAs(context.Background(), tenantID, uuid.NewString(), "hello"); err != session.ErrAgentNotInCampaign {
 		t.Fatalf("SayAs with a foreign agent = %v, want ErrAgentNotInCampaign", err)
 	}
 	if len(got) != 0 {
@@ -64,12 +64,12 @@ func TestSayAs_ButlerPublishesButlerRole(t *testing.T) {
 	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}
 	store.agents = []storage.Agent{butler}
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SayAs(context.Background(), butler.ID.String(), "At your service."); err != nil {
+	if err := mgr.SayAs(context.Background(), tenantID, butler.ID.String(), "At your service."); err != nil {
 		t.Fatalf("SayAs with the Butler: %v", err)
 	}
 	if len(got) != 1 {
@@ -100,12 +100,12 @@ func TestSpeakAsButler_PublishesButlerLine(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
 	store.agents = []storage.Agent{bart, butler}
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SpeakAsButler(context.Background(), "Here is your recap."); err != nil {
+	if err := mgr.SpeakAsButler(context.Background(), tenantID, "Here is your recap."); err != nil {
 		t.Fatalf("SpeakAsButler: %v", err)
 	}
 	if len(got) != 1 {
@@ -136,7 +136,7 @@ func TestSpeakAsButler_IdleReturnsNoActiveSession(t *testing.T) {
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SpeakAsButler(context.Background(), "hello"); err != session.ErrNoActiveSession {
+	if err := mgr.SpeakAsButler(context.Background(), uuid.New(), "hello"); err != session.ErrNoActiveSession {
 		t.Fatalf("SpeakAsButler while idle = %v, want ErrNoActiveSession", err)
 	}
 	if len(got) != 0 {
@@ -155,11 +155,11 @@ func TestSpeakAsButler_VoicelessRefused(t *testing.T) {
 	// No Voice column → VoiceFromJSON zero → empty VoiceID → voiceless.
 	store.agents = []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}}
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SpeakAsButler(context.Background(), "hello"); err != session.ErrButlerVoiceless {
+	if err := mgr.SpeakAsButler(context.Background(), tenantID, "hello"); err != session.ErrButlerVoiceless {
 		t.Fatalf("SpeakAsButler with a voiceless Butler = %v, want ErrButlerVoiceless", err)
 	}
 	if len(got) != 0 {
@@ -174,11 +174,11 @@ func TestSpeakAsButler_NoButlerRejected(t *testing.T) {
 	store := newFakeStore()
 	store.agents = []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}}
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SpeakAsButler(context.Background(), "hello"); err != session.ErrAgentNotInCampaign {
+	if err := mgr.SpeakAsButler(context.Background(), tenantID, "hello"); err != session.ErrAgentNotInCampaign {
 		t.Fatalf("SpeakAsButler with no Butler = %v, want ErrAgentNotInCampaign", err)
 	}
 	if len(got) != 0 {
@@ -195,12 +195,12 @@ func TestSayAs_HappyPublishesSpeakRequested(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
 	store.agents = []storage.Agent{bart}
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var got []voiceevent.SpeakRequested
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
 
-	if err := mgr.SayAs(context.Background(), bart.ID.String(), "Welcome, travelers."); err != nil {
+	if err := mgr.SayAs(context.Background(), tenantID, bart.ID.String(), "Welcome, travelers."); err != nil {
 		t.Fatalf("SayAs happy path: %v", err)
 	}
 	if len(got) != 1 {

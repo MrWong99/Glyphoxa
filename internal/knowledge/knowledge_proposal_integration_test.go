@@ -20,6 +20,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -78,11 +79,10 @@ func seedProposalWorld(t *testing.T, dsn string) (*storage.Store, *pgxpool.Pool,
 func TestRememberKnowledge_OwnNodeProposal_RealDB(t *testing.T) {
 	dsn := startPostgres(t)
 	store, pool, campaignID, agentID, nodeID := seedProposalWorld(t, dsn)
-	ctx := context.Background()
+	// The adapter resolves its Campaign from the run context's session.Identity (#488).
+	ctx := session.NewContext(context.Background(), session.Identity{CampaignID: campaignID})
 
-	adapter := knowledge.New(store, store.PromptKG(), staticSession{
-		sess: storage.VoiceSession{CampaignID: campaignID}, live: true,
-	})
+	adapter := knowledge.New(store, store.PromptKG())
 	rk := tool.NewRememberKnowledge(adapter)
 
 	// The full handler path: own_node grant, caller stamped on the ctx.
@@ -158,11 +158,9 @@ func TestRememberKnowledge_OwnNodeProposal_RealDB(t *testing.T) {
 func TestRememberKnowledge_DoubleRememberOneRow_RealDB(t *testing.T) {
 	dsn := startPostgres(t)
 	store, _, campaignID, agentID, _ := seedProposalWorld(t, dsn)
-	ctx := context.Background()
+	ctx := session.NewContext(context.Background(), session.Identity{CampaignID: campaignID})
 
-	adapter := knowledge.New(store, store.PromptKG(), staticSession{
-		sess: storage.VoiceSession{CampaignID: campaignID}, live: true,
-	})
+	adapter := knowledge.New(store, store.PromptKG())
 	rk := tool.NewRememberKnowledge(adapter)
 	callCtx := tool.WithCaller(ctx, agentID.String())
 	args := json.RawMessage(`{"kind":"fact","fact":"I brew the finest ale in the realm"}`)

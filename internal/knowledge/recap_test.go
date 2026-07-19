@@ -54,7 +54,7 @@ func runningSession() storage.VoiceSession {
 // is never called.
 func TestRecapAdapterIdleNoSession(t *testing.T) {
 	eng := &fakeRecapEngine{text: "x"}
-	a := knowledge.NewRecap(eng, &fakeRecapStore{}, fakeSessions{live: false})
+	a := knowledge.NewRecap(eng, &fakeRecapStore{})
 	_, err := a.RecapLastSessions(context.Background(), 1)
 	if !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("err = %v, want ErrNoActiveSession", err)
@@ -77,9 +77,9 @@ func TestRecapAdapterPicksNewestEndedNonEmpty(t *testing.T) {
 		endedSession(9),
 	}}
 	eng := &fakeRecapEngine{text: "the recap"}
-	a := knowledge.NewRecap(eng, store, liveSession(cid))
+	a := knowledge.NewRecap(eng, store)
 
-	out, err := a.RecapLastSessions(context.Background(), 1)
+	out, err := a.RecapLastSessions(liveCtx(cid), 1)
 	if err != nil {
 		t.Fatalf("RecapLastSessions: %v", err)
 	}
@@ -100,9 +100,9 @@ func TestRecapAdapterTakesNNewest(t *testing.T) {
 	first, second, third := endedSession(4), endedSession(5), endedSession(6)
 	store := &fakeRecapStore{sessions: []storage.VoiceSession{first, second, third}}
 	eng := &fakeRecapEngine{text: "two"}
-	a := knowledge.NewRecap(eng, store, liveSession(uuid.New()))
+	a := knowledge.NewRecap(eng, store)
 
-	if _, err := a.RecapLastSessions(context.Background(), 2); err != nil {
+	if _, err := a.RecapLastSessions(liveCtx(uuid.New()), 2); err != nil {
 		t.Fatalf("RecapLastSessions: %v", err)
 	}
 	if len(eng.gotIDs) != 2 || eng.gotIDs[0] != first.ID || eng.gotIDs[1] != second.ID {
@@ -118,9 +118,9 @@ func TestRecapAdapterNoneRecappable(t *testing.T) {
 		{ID: uuid.New(), Status: storage.VoiceSessionEnded, LineCount: 0},
 	}}
 	eng := &fakeRecapEngine{text: "x"}
-	a := knowledge.NewRecap(eng, store, liveSession(uuid.New()))
+	a := knowledge.NewRecap(eng, store)
 
-	_, err := a.RecapLastSessions(context.Background(), 1)
+	_, err := a.RecapLastSessions(liveCtx(uuid.New()), 1)
 	if err == nil {
 		t.Fatal("want a no-recappable-session error")
 	}
@@ -135,9 +135,9 @@ func TestRecapAdapterNoneRecappable(t *testing.T) {
 func TestRecapAdapterMapsNoTranscript(t *testing.T) {
 	store := &fakeRecapStore{sessions: []storage.VoiceSession{endedSession(3)}}
 	eng := &fakeRecapEngine{err: recap.ErrNoTranscript}
-	a := knowledge.NewRecap(eng, store, liveSession(uuid.New()))
+	a := knowledge.NewRecap(eng, store)
 
-	_, err := a.RecapLastSessions(context.Background(), 1)
+	_, err := a.RecapLastSessions(liveCtx(uuid.New()), 1)
 	if err == nil {
 		t.Fatal("want the friendly no-session error")
 	}
@@ -149,9 +149,8 @@ func TestRecapAdapterMapsNoTranscript(t *testing.T) {
 // TestNewRecapNilDepsPanics pins the wiring-bug guard (mirrors knowledge.New).
 func TestNewRecapNilDepsPanics(t *testing.T) {
 	cases := map[string]func(){
-		"nil engine":   func() { knowledge.NewRecap(nil, &fakeRecapStore{}, fakeSessions{}) },
-		"nil store":    func() { knowledge.NewRecap(&fakeRecapEngine{}, nil, fakeSessions{}) },
-		"nil sessions": func() { knowledge.NewRecap(&fakeRecapEngine{}, &fakeRecapStore{}, nil) },
+		"nil engine": func() { knowledge.NewRecap(nil, &fakeRecapStore{}) },
+		"nil store":  func() { knowledge.NewRecap(&fakeRecapEngine{}, nil) },
 	}
 	for name, fn := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -65,7 +65,7 @@ type fakeReplayer struct {
 	err      error
 }
 
-func (f *fakeReplayer) ReplayHighlight(_ context.Context, clipKey string) error {
+func (f *fakeReplayer) ReplayHighlight(_ context.Context, _ uuid.UUID, clipKey string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {

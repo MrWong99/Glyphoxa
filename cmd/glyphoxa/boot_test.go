@@ -699,6 +699,32 @@ func TestGatewayIdentifyWarnThreshold(t *testing.T) {
 	}
 }
 
+// TestMaxVoiceSessions pins the GLYPHOXA_MAX_VOICE_SESSIONS parse (#488): a valid
+// positive integer caps concurrent Voice Sessions; blank, non-numeric, zero and
+// negative values fall back to the default of 1 (today's single-session behaviour),
+// so a fat-fingered env var never uncaps the process nor wedges it at zero.
+func TestMaxVoiceSessions(t *testing.T) {
+	const def = 1
+	cases := []struct {
+		val  string
+		want int
+	}{
+		{"", def},
+		{"   ", def},
+		{"abc", def},
+		{"0", def},
+		{"-5", def},
+		{"1", 1},
+		{"2", 2},
+		{" 8 ", 8},
+	}
+	for _, c := range cases {
+		if got := maxVoiceSessions(envMap(map[string]string{"GLYPHOXA_MAX_VOICE_SESSIONS": c.val})); got != c.want {
+			t.Errorf("maxVoiceSessions(%q) = %d, want %d", c.val, got, c.want)
+		}
+	}
+}
+
 // TestForceLoopback pins the listen host to 127.0.0.1 while preserving the port,
 // so a GLYPHOXA_DEV_MODE instance is structurally unreachable from a container
 // port-mapping (ADR-0041) regardless of the configured -web-addr.

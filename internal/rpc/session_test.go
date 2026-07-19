@@ -63,7 +63,7 @@ func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.
 	return f.current, nil
 }
 
-func (f *fakeSessionManager) Stop(_ context.Context) (storage.VoiceSession, error) {
+func (f *fakeSessionManager) Stop(_ context.Context, _ uuid.UUID) (storage.VoiceSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stopErr != nil {
@@ -79,13 +79,22 @@ func (f *fakeSessionManager) Stop(_ context.Context) (storage.VoiceSession, erro
 	return f.current, nil
 }
 
+func (f *fakeSessionManager) Active(_ context.Context, _ uuid.UUID) (storage.VoiceSession, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.current, f.active, nil
+}
+
+// Snapshot satisfies the CampaignServer/VoiceServer activeSessionSource seam (the
+// single-operator web-tier convenience reads that stay on Snapshot, #488): the fake
+// is single-session, so it mirrors Active's single-session view.
 func (f *fakeSessionManager) Snapshot() (storage.VoiceSession, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.current, f.active
 }
 
-func (f *fakeSessionManager) SetAgentMute(_ context.Context, agentID string, muted bool) ([]string, error) {
+func (f *fakeSessionManager) SetAgentMute(_ context.Context, _ uuid.UUID, agentID string, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.active {
@@ -114,7 +123,7 @@ func (f *fakeSessionManager) inRoster(agentID string) bool {
 	return false
 }
 
-func (f *fakeSessionManager) SetAllMute(_ context.Context, muted bool) ([]string, error) {
+func (f *fakeSessionManager) SetAllMute(_ context.Context, _ uuid.UUID, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.active {
@@ -131,7 +140,7 @@ func (f *fakeSessionManager) SetAllMute(_ context.Context, muted bool) ([]string
 	return f.mutedIDsLocked(), nil
 }
 
-func (f *fakeSessionManager) MutedAgentIDs() []string {
+func (f *fakeSessionManager) MutedAgentIDs(_ uuid.UUID) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.active {
@@ -140,7 +149,7 @@ func (f *fakeSessionManager) MutedAgentIDs() []string {
 	return f.mutedIDsLocked()
 }
 
-func (f *fakeSessionManager) Spend() spend.Status {
+func (f *fakeSessionManager) Spend(_ uuid.UUID) spend.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.spend
@@ -678,6 +687,20 @@ func TestSessionStartAlreadyActive(t *testing.T) {
 	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
 	if connect.CodeOf(err) != connect.CodeAlreadyExists {
 		t.Errorf("already-active code = %v, want AlreadyExists", connect.CodeOf(err))
+	}
+}
+
+// TestSessionStartSessionLimit maps the process concurrent-session cap
+// (session.ErrSessionLimit, #488) to CodeResourceExhausted — the distinct,
+// user-visible refusal, mirroring the ErrAllowanceExhausted precedent (#488 test 9).
+func TestSessionStartSessionLimit(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeSessionManager{startErr: session.ErrSessionLimit}
+	client := newSessionClient(t, mgr, activeStore())
+
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Errorf("session-limit code = %v, want ResourceExhausted", connect.CodeOf(err))
 	}
 }
 

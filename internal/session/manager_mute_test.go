@@ -34,14 +34,14 @@ func muteManager(t *testing.T, store session.Store) (*session.Manager, *voiceeve
 }
 
 // startMuteSession starts a session and returns its campaign id.
-func startMuteSession(t *testing.T, mgr *session.Manager) uuid.UUID {
+func startMuteSession(t *testing.T, mgr *session.Manager) (tenantID, campaignID uuid.UUID) {
 	t.Helper()
-	campaignID := uuid.New()
-	if _, err := mgr.Start(context.Background(), uuid.New(), campaignID); err != nil {
+	tenantID, campaignID = uuid.New(), uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
-	return campaignID
+	return tenantID, campaignID
 }
 
 // seedAgents makes n agents and puts them on the store's ListAgents roster (the
@@ -61,7 +61,7 @@ func seedAgents(store *fakeStore, n int) []storage.Agent {
 // (AC4): muting with no live session is refused before any roster lookup.
 func TestSetAgentMute_IdleReturnsNoActiveSession(t *testing.T) {
 	mgr, _ := muteManager(t, newFakeStore())
-	if _, err := mgr.SetAgentMute(context.Background(), uuid.NewString(), true); err != session.ErrNoActiveSession {
+	if _, err := mgr.SetAgentMute(context.Background(), uuid.New(), uuid.NewString(), true); err != session.ErrNoActiveSession {
 		t.Fatalf("SetAgentMute while idle = %v, want ErrNoActiveSession", err)
 	}
 }
@@ -72,8 +72,8 @@ func TestSetAgentMute_ForeignAgentRejected(t *testing.T) {
 	store := newFakeStore()
 	seedAgents(store, 1)
 	mgr, _ := muteManager(t, store)
-	startMuteSession(t, mgr)
-	if _, err := mgr.SetAgentMute(context.Background(), uuid.NewString(), true); err != session.ErrAgentNotInCampaign {
+	tenantID, _ := startMuteSession(t, mgr)
+	if _, err := mgr.SetAgentMute(context.Background(), tenantID, uuid.NewString(), true); err != session.ErrAgentNotInCampaign {
 		t.Fatalf("muting a foreign agent = %v, want ErrAgentNotInCampaign", err)
 	}
 }
@@ -90,19 +90,19 @@ func TestSetAgentMute_ButlerRejected(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
 	store.agents = []storage.Agent{butler, bart}
 	mgr, _ := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
-	if _, err := mgr.SetAgentMute(context.Background(), butler.ID.String(), true); err != session.ErrAgentNotInCampaign {
+	if _, err := mgr.SetAgentMute(context.Background(), tenantID, butler.ID.String(), true); err != session.ErrAgentNotInCampaign {
 		t.Fatalf("muting the Butler = %v, want ErrAgentNotInCampaign", err)
 	}
 	if mgr.Muted(butler.ID.String()) {
 		t.Fatal("a rejected Butler mute must not enter the mute set")
 	}
-	if got := mgr.MutedAgentIDs(); len(got) != 0 {
+	if got := mgr.MutedAgentIDs(tenantID); len(got) != 0 {
 		t.Fatalf("MutedAgentIDs after rejected Butler mute = %v, want none (no phantom id)", got)
 	}
 	// The voiced Character NPC is still muteable.
-	if _, err := mgr.SetAgentMute(context.Background(), bart.ID.String(), true); err != nil {
+	if _, err := mgr.SetAgentMute(context.Background(), tenantID, bart.ID.String(), true); err != nil {
 		t.Fatalf("muting a voiced Character = %v, want success", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestSetAgentMute_PublishesOncePerActualChange(t *testing.T) {
 	bart := seedAgents(store, 1)[0]
 	bartID := bart.ID.String()
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var mu sync.Mutex
 	var events []voiceevent.MuteChanged
@@ -126,7 +126,7 @@ func TestSetAgentMute_PublishesOncePerActualChange(t *testing.T) {
 	}))
 	eventCount := func() int { mu.Lock(); defer mu.Unlock(); return len(events) }
 
-	ids, err := mgr.SetAgentMute(context.Background(), bartID, true)
+	ids, err := mgr.SetAgentMute(context.Background(), tenantID, bartID, true)
 	if err != nil {
 		t.Fatalf("SetAgentMute: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestSetAgentMute_PublishesOncePerActualChange(t *testing.T) {
 	}
 
 	// Idempotent re-mute publishes nothing and stays muted.
-	if _, err := mgr.SetAgentMute(context.Background(), bartID, true); err != nil {
+	if _, err := mgr.SetAgentMute(context.Background(), tenantID, bartID, true); err != nil {
 		t.Fatalf("re-mute: %v", err)
 	}
 	if eventCount() != 1 {
@@ -149,7 +149,7 @@ func TestSetAgentMute_PublishesOncePerActualChange(t *testing.T) {
 	}
 
 	// Unmute publishes one and clears the set.
-	ids, err = mgr.SetAgentMute(context.Background(), bartID, false)
+	ids, err = mgr.SetAgentMute(context.Background(), tenantID, bartID, false)
 	if err != nil {
 		t.Fatalf("unmute: %v", err)
 	}
@@ -170,16 +170,16 @@ func TestMutedAgentIDs_SortedSnapshot(t *testing.T) {
 	store := newFakeStore()
 	agents := seedAgents(store, 2)
 	mgr, _ := muteManager(t, store)
-	startMuteSession(t, mgr)
-	if got := mgr.MutedAgentIDs(); len(got) != 0 {
+	tenantID, _ := startMuteSession(t, mgr)
+	if got := mgr.MutedAgentIDs(tenantID); len(got) != 0 {
 		t.Fatalf("a fresh session has muted ids %v, want none (AC5 all-unmuted at start)", got)
 	}
 	for _, a := range agents {
-		if _, err := mgr.SetAgentMute(context.Background(), a.ID.String(), true); err != nil {
+		if _, err := mgr.SetAgentMute(context.Background(), tenantID, a.ID.String(), true); err != nil {
 			t.Fatalf("mute %s: %v", a.ID, err)
 		}
 	}
-	got := mgr.MutedAgentIDs()
+	got := mgr.MutedAgentIDs(tenantID)
 	if len(got) != 2 {
 		t.Fatalf("MutedAgentIDs = %v, want 2", got)
 	}
@@ -192,28 +192,29 @@ func TestMutedAgentIDs_SortedSnapshot(t *testing.T) {
 // unmuted — the volatile set is fresh per Start, so a mute from a prior session
 // does not leak.
 func TestStartResetsMuteSet(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	bartID := bart.ID.String()
 	mgr, _ := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start 1: %v", err)
 	}
-	if _, err := mgr.SetAgentMute(context.Background(), bartID, true); err != nil {
+	if _, err := mgr.SetAgentMute(context.Background(), tenantID, bartID, true); err != nil {
 		t.Fatalf("mute: %v", err)
 	}
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
 	if mgr.Muted(bartID) {
 		t.Fatal("a new Voice Session must start with Bart unmuted (AC5)")
 	}
-	if got := mgr.MutedAgentIDs(); len(got) != 0 {
+	if got := mgr.MutedAgentIDs(tenantID); len(got) != 0 {
 		t.Fatalf("a new session has muted ids %v, want none", got)
 	}
 }
@@ -230,7 +231,7 @@ func TestSetAllMute_MutesEveryVoicedAgent(t *testing.T) {
 	store.agents = []storage.Agent{butler, bart}
 
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	var mu sync.Mutex
 	var events []voiceevent.MuteChanged
@@ -241,7 +242,7 @@ func TestSetAllMute_MutesEveryVoicedAgent(t *testing.T) {
 	}))
 	eventCount := func() int { mu.Lock(); defer mu.Unlock(); return len(events) }
 
-	ids, err := mgr.SetAllMute(context.Background(), true)
+	ids, err := mgr.SetAllMute(context.Background(), tenantID, true)
 	if err != nil {
 		t.Fatalf("SetAllMute(true): %v", err)
 	}
@@ -261,7 +262,7 @@ func TestSetAllMute_MutesEveryVoicedAgent(t *testing.T) {
 	mu.Lock()
 	events = nil
 	mu.Unlock()
-	ids, err = mgr.SetAllMute(context.Background(), false)
+	ids, err = mgr.SetAllMute(context.Background(), tenantID, false)
 	if err != nil {
 		t.Fatalf("SetAllMute(false): %v", err)
 	}
@@ -276,7 +277,7 @@ func TestSetAllMute_MutesEveryVoicedAgent(t *testing.T) {
 // TestSetAllMute_IdleReturnsNoActiveSession pins the active-session requirement.
 func TestSetAllMute_IdleReturnsNoActiveSession(t *testing.T) {
 	mgr, _ := muteManager(t, newFakeStore())
-	if _, err := mgr.SetAllMute(context.Background(), true); err != session.ErrNoActiveSession {
+	if _, err := mgr.SetAllMute(context.Background(), uuid.New(), true); err != session.ErrNoActiveSession {
 		t.Fatalf("SetAllMute while idle = %v, want ErrNoActiveSession", err)
 	}
 }
@@ -291,7 +292,7 @@ func TestMute_ConcurrentOpsConvergeSubscriberToManager(t *testing.T) {
 	store := newFakeStore()
 	agents := seedAgents(store, 6)
 	mgr, bus := muteManager(t, store)
-	startMuteSession(t, mgr)
+	tenantID, _ := startMuteSession(t, mgr)
 
 	// The subscriber mimics wirenpc.wireMutes: on each event it re-reads the
 	// authoritative view (Manager.Muted), NOT the event payload.
@@ -309,14 +310,14 @@ func TestMute_ConcurrentOpsConvergeSubscriberToManager(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = mgr.SetAllMute(context.Background(), true)
+		_, _ = mgr.SetAllMute(context.Background(), tenantID, true)
 	}()
 	for i := 0; i < len(agents); i += 2 {
 		a := agents[i]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = mgr.SetAgentMute(context.Background(), a.ID.String(), false)
+			_, _ = mgr.SetAgentMute(context.Background(), tenantID, a.ID.String(), false)
 		}()
 	}
 	wg.Wait()

@@ -23,12 +23,13 @@ func startedManagerOnBus(t *testing.T, reg *session.Registry, bus *voiceevent.Bu
 	runner := newBlockingRunner()
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "test-token", Bus: bus}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg})
-	vs, err := mgr.Start(context.Background(), uuid.New(), campaignID)
+	tenantID := uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 	return mgr, vs
 }
 
@@ -152,7 +153,7 @@ func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *test
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 
 	id := <-gotID
 	want := session.Identity{SessionID: vs.ID, CampaignID: campaignID, TenantID: tenantID}
@@ -208,7 +209,8 @@ func TestManager_EndWindowIsUnresolvable(t *testing.T) {
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "test-token", Bus: voiceevent.NewBus()}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg, Transcript: probe})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), campaignID)
+	tenantID := uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -220,7 +222,7 @@ func TestManager_EndWindowIsUnresolvable(t *testing.T) {
 		t.Fatal("live session does not Resolve")
 	}
 
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if !probe.ran {

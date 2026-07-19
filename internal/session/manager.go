@@ -36,9 +36,16 @@ const endTimeout = 5 * time.Second
 
 // Sentinel errors the RPC layer maps onto Connect status codes.
 var (
-	// ErrSessionActive is returned by Start when a session is already running —
-	// the single-active-session guard (AC2). Mapped to CodeAlreadyExists.
+	// ErrSessionActive is returned by Start when THIS Tenant already has a running
+	// session — the per-Tenant single-active guard (AC2, #488): a Tenant is capped
+	// at one live Voice Session, so a second Start for the same Tenant (even for a
+	// different Campaign) collides. Mapped to CodeAlreadyExists.
 	ErrSessionActive = errors.New("session: a voice session is already active")
+	// ErrSessionLimit is returned by Start when the process is already running its
+	// configured maximum of concurrent Voice Sessions (Deps.MaxSessions, #488): a
+	// distinct, user-visible refusal separate from the per-Tenant ErrSessionActive.
+	// Mapped to CodeResourceExhausted (the ErrAllowanceExhausted precedent).
+	ErrSessionLimit = errors.New("session: the process concurrent voice session limit is reached")
 	// ErrNoActiveSession is returned by Stop when nothing is running. Mapped to
 	// CodeFailedPrecondition.
 	ErrNoActiveSession = errors.New("session: no active voice session")
@@ -134,17 +141,16 @@ type TranscriptFinalizer interface {
 }
 
 // Highlighter is the Session Highlights persistence pipeline (#308, Epic 8): the
-// Manager Begins it at Start (binding the session's owning ids), the live detector
-// feeds it Triggers through cfg.Highlights, and the Manager Finalizes it at loop
-// exit (scheduling the 7-day candidate purge) — beside transcript.Finalize, at
-// EVERY exit path. *highlight.Saver satisfies it. It embeds highlight.Sink so the
-// SAME value wires onto the base voice config's cfg.Highlights. Defined here (not
-// imported as a concrete type) to keep the seam narrow; nil (highlights off, or a
-// web-only Manager that drives no voice) makes Begin/Finalize no-ops.
+// Manager Begins it at Start (binding the session's owning ids) and receives back
+// the PER-SESSION [highlight.Sink] it wires as that session's cfg.Highlights (#488),
+// so N concurrent sessions each feed their own binding; the Manager Finalizes it at
+// loop exit BY SESSION ID (scheduling the 7-day candidate purge) — beside
+// transcript.Finalize, at EVERY exit path. *highlight.Saver satisfies it. Defined
+// here (not imported as a concrete type) to keep the seam narrow; nil (highlights
+// off, or a web-only Manager that drives no voice) makes Begin/Finalize no-ops.
 type Highlighter interface {
-	highlight.Sink
-	Begin(voiceSessionID, campaignID, tenantID uuid.UUID)
-	Finalize(ctx context.Context) error
+	Begin(voiceSessionID, campaignID, tenantID uuid.UUID) highlight.Sink
+	Finalize(ctx context.Context, voiceSessionID uuid.UUID) error
 }
 
 // ChunkFinalizer closes a session's open Transcript Chunk on Stop / loop exit
@@ -224,6 +230,18 @@ type activeSession struct {
 	// trip before it cancels the run ctx (#130). runLoop reads it under Manager.mu
 	// and stamps it onto the clean-close write. Empty for an ordinary stop.
 	endReasonOverride string
+
+	// pubMu serializes the whole write-set→publish-MuteChanged sequence across THIS
+	// session's mute ops (#211), so two overlapping ops (a per-Agent toggle racing a
+	// mute-all) can never publish events in the reverse order of their set writes —
+	// which would let a stale event de-sync the wirenpc matcher from the
+	// authoritative set. It lives PER SESSION (#488): #487 kept one global pubMu on
+	// the Manager, but with N concurrent sessions the ordering guarantee is
+	// per-session (each session has its own bus + mute set), so splitting it here
+	// keeps two tenants' mute bursts from needlessly serializing against each other.
+	// Ordered AFTER Manager.mu: an op takes pubMu, then Manager.mu for the set write,
+	// drops Manager.mu, publishes while still holding pubMu, then drops pubMu.
+	pubMu sync.Mutex
 }
 
 // spendHardReason is the end_reason a hard-cap-ended session records: an 'ended'
@@ -238,8 +256,8 @@ const spendHardReason = "spend_cap_hard: estimated spend crossed the hard cap"
 // policy stops apart.
 const allowanceHardReason = "allowance_exhausted: estimated spend crossed the plan's monthly allowance"
 
-// Manager owns at most one live voice session at a time (the single-active
-// guard). It is safe for concurrent use.
+// Manager owns up to MaxSessions concurrent live Voice Sessions, at most one per
+// Tenant (the per-Tenant single-active guard, #488). It is safe for concurrent use.
 type Manager struct {
 	store      Store
 	run        LoopRunner
@@ -254,24 +272,25 @@ type Manager struct {
 	// gmSpeakerForTenant overlays cfg.GMSpeaker per Start with the session's Tenant
 	// (#490); nil leaves the base deployment-wide gate.
 	gmSpeakerForTenant func(tenantID uuid.UUID, discordUserID string) bool
-	log                *slog.Logger
-	enabled            bool          // false in web-only mode: Start is rejected (ADR-0039)
-	endTimeout         time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
+	// speakerNameForCampaign overlays cfg.SpeakerName per Start with the session's
+	// Campaign (#488): agent.Config.SpeakerName carries no ctx, so a base closure
+	// shared by N sessions would resolve every one against a single-active global
+	// read. The Manager rebinds it here per session, pinning THIS session's Campaign.
+	// nil leaves the base cfg.SpeakerName untouched (voice-standalone / test).
+	speakerNameForCampaign func(campaignID uuid.UUID, speakerID string) string
+	log                    *slog.Logger
+	enabled                bool          // false in web-only mode: Start is rejected (ADR-0039)
+	endTimeout             time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
+	// maxSessions is the process-wide cap on concurrent live Voice Sessions
+	// (Deps.MaxSessions, #488, ADR-0057's per-process K): a Start when
+	// len(active) == maxSessions is refused with ErrSessionLimit. Always >= 1
+	// (NewManager clamps a 0/negative Deps value to 1 — today's single-session
+	// default, byte-identical behaviour).
+	maxSessions int
 
 	mu     sync.Mutex
-	active *activeSession
-	closed bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
-
-	// pubMu serializes the whole write-set→publish-MuteChanged sequence across the
-	// [LiveSession] mute ops (#211), so two overlapping ops (a per-Agent toggle
-	// racing a mute-all) can never publish events in the reverse order of their set
-	// writes — which would let a stale event de-sync the wirenpc matcher from the
-	// authoritative set. Ordered AFTER m.mu: an op takes pubMu, then m.mu for the
-	// set write, drops m.mu, publishes while still holding pubMu, then drops pubMu.
-	// Muted() (the re-read subscribers do during that publish) takes only m.mu,
-	// which is free — no inversion. It lives on the Manager (not the handle) so the
-	// ordering is global across ALL handles to the session.
-	pubMu sync.Mutex
+	active map[uuid.UUID]*activeSession // keyed by tenantID; at most maxSessions entries
+	closed bool                         // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
 }
 
 // Deps are the Manager's construction-time collaborator seams (#448): the six
@@ -348,6 +367,17 @@ type Deps struct {
 	// Tenant B session). nil (voice-standalone / test / web-only) leaves the base
 	// cfg.GMSpeaker untouched.
 	GMSpeakerForTenant func(tenantID uuid.UUID, discordUserID string) bool
+	// SpeakerNameForCampaign, when non-nil, is the per-Campaign Speaker-Lane display
+	// resolver (#488): Start overlays cfg.SpeakerName with a closure pinning THIS
+	// session's Campaign, so N concurrent sessions each attribute user lines against
+	// their OWN roster instead of a single-active global read. nil leaves the base
+	// cfg.SpeakerName untouched (voice-standalone / test / web-only).
+	SpeakerNameForCampaign func(campaignID uuid.UUID, speakerID string) string
+	// MaxSessions is the process-wide cap on concurrent live Voice Sessions (#488,
+	// ADR-0057's per-process K): a Start beyond it is refused ErrSessionLimit. The
+	// zero value (unset) means 1 — today's single-session default, byte-identical
+	// behaviour; the composition root reads GLYPHOXA_MAX_VOICE_SESSIONS into it.
+	MaxSessions int
 }
 
 // NewManager wraps the store, loop runner, base config and collaborator deps in
@@ -367,21 +397,28 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	if log == nil {
 		log = slog.Default()
 	}
+	maxSessions := deps.MaxSessions
+	if maxSessions < 1 {
+		maxSessions = 1 // unset / invalid ⇒ today's single-session default (byte-identical)
+	}
 	m := &Manager{
-		store:              store,
-		run:                run,
-		base:               base,
-		cipher:             cipher,
-		transcript:         deps.Transcript,
-		chunker:            deps.Chunker,
-		highlights:         deps.Highlights,
-		usage:              deps.Usage,
-		allowance:          deps.Allowance,
-		clients:            deps.Clients,
-		gmSpeakerForTenant: deps.GMSpeakerForTenant,
-		log:                log,
-		enabled:            enabled,
-		endTimeout:         endTimeout,
+		store:                  store,
+		run:                    run,
+		base:                   base,
+		cipher:                 cipher,
+		transcript:             deps.Transcript,
+		chunker:                deps.Chunker,
+		highlights:             deps.Highlights,
+		usage:                  deps.Usage,
+		allowance:              deps.Allowance,
+		clients:                deps.Clients,
+		gmSpeakerForTenant:     deps.GMSpeakerForTenant,
+		speakerNameForCampaign: deps.SpeakerNameForCampaign,
+		log:                    log,
+		enabled:                enabled,
+		endTimeout:             endTimeout,
+		maxSessions:            maxSessions,
+		active:                 map[uuid.UUID]*activeSession{},
 	}
 	// The Manager IS the live mute view (#211): it owns the session-local mute set,
 	// so wire it as the base voice config's MuteView. Every session Start copies
@@ -390,10 +427,10 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	m.base.Memory = deps.Memory
 	m.base.Facts = deps.Facts
 	m.base.ToolDeps = deps.Tools
-	// The SAME Highlighter the Manager Begins/Finalizes per session is the base
-	// config's detector Sink (#308), so triggers land in the pipeline the Manager
-	// owns the lifecycle of.
-	m.base.Highlights = deps.Highlights
+	// cfg.Highlights is NO LONGER wired on the base config (#488): with N concurrent
+	// sessions the detector Sink must be per-session, so Start sets cfg.Highlights to
+	// the session-bound Sink that Highlighter.Begin returns instead of a single
+	// shared value.
 	if deps.Registry != nil {
 		deps.Registry.register(m)
 	}
@@ -439,8 +476,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if m.closed {
 		return storage.VoiceSession{}, ErrManagerClosed
 	}
-	if m.active != nil {
+	// Per-Tenant single-active guard FIRST (#488): a Tenant that already runs a
+	// session collides with ErrSessionActive even if the process is below its cap —
+	// and even for a different Campaign (decision: one live session per Tenant).
+	if _, ok := m.active[tenantID]; ok {
 		return storage.VoiceSession{}, ErrSessionActive
+	}
+	// Process-wide cap SECOND (#488, ADR-0057 K): a start for a NEW Tenant when the
+	// process is already at maxSessions is refused with the distinct ErrSessionLimit.
+	if len(m.active) >= m.maxSessions {
+		return storage.VoiceSession{}, ErrSessionLimit
 	}
 
 	dep, err := m.store.GetDeploymentConfig(ctx, tenantID)
@@ -483,8 +528,20 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// BEFORE the insert so a failure never strands a 'running' row (#433), and
 	// a read failure fails the start CLOSED. The month-to-date figure is the
 	// flushed ledger only — the running session's own spend is exactly what the
-	// tightened meter bounds. Concurrent-session caveat: each Start snapshots
-	// the same remainder (the D0/D6 concurrency epic inherits this, noted).
+	// tightened meter bounds.
+	//
+	// CONCURRENT-SESSION CAVEAT (#488, RE-DOCUMENTED not fixed): with the cap raised
+	// >1, two of a Tenant's-scope sessions cannot both be live (one session per
+	// Tenant), so a Tenant never double-snapshots its OWN allowance. Across Tenants
+	// the allowance is per-Tenant, so there is no shared remainder to double-count.
+	// The residual caveat is intra-Tenant SEQUENTIAL overlap only: a session started
+	// while a prior one for a DIFFERENT Tenant is live still snapshots against the
+	// month-to-date FLUSHED ledger, which excludes any in-flight session's not-yet
+	// -flushed spend — so two concurrent sessions can each be admitted against the
+	// same remainder and jointly overspend the plan allowance by up to one session's
+	// worth before either flushes. Redistributing a live allowance across concurrent
+	// sessions is a later epic; today the meter still hard-stops each session at its
+	// own snapshot, and the estimate resets monthly (ADR-0046/0055).
 	var allowanceRemaining *float64
 	if m.allowance != nil {
 		state, err := m.allowance.AllowanceState(ctx, tenantID)
@@ -519,6 +576,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if m.gmSpeakerForTenant != nil {
 		gate := m.gmSpeakerForTenant
 		cfg.GMSpeaker = func(discordUserID string) bool { return gate(tenantID, discordUserID) }
+	}
+
+	// Per-Campaign Speaker-Lane display resolver (#488): agent.Config.SpeakerName
+	// carries no ctx, so a base closure shared by N sessions would resolve every one
+	// against a single-active global read. Rebind it here, pinning THIS session's
+	// Campaign, so each concurrent session attributes user lines against its own
+	// roster. nil seam (voice-standalone / test / web-only) leaves the base untouched.
+	if m.speakerNameForCampaign != nil {
+		resolve := m.speakerNameForCampaign
+		cfg.SpeakerName = func(speakerID string) string { return resolve(campaignID, speakerID) }
 	}
 
 	// Borrow this Tenant's standing Discord client from the per-tenant registry
@@ -606,14 +673,17 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	}
 
 	// Bind the Highlights pipeline to this session before the loop (and its
-	// detector) can fire a Trigger (#308): Begin records the owning ids the Saver
-	// stamps onto every candidate row + its blob key. Finalize (runLoop) unbinds and
-	// schedules the purge. A nil Highlighter (highlights off / web-only) is skipped.
+	// detector) can fire a Trigger (#308, #488): Begin records the owning ids the
+	// Saver stamps onto every candidate row + its blob key and returns THIS session's
+	// Sink, which becomes cfg.Highlights (the detector's per-session sink — never a
+	// shared base value now that N sessions run). Finalize (runLoop) drains + unbinds
+	// this session by id and schedules the purge. A nil Highlighter (highlights off /
+	// web-only) leaves cfg.Highlights nil (no detector wiring).
 	if m.highlights != nil {
-		m.highlights.Begin(vs.ID, campaignID, tenantID)
+		cfg.Highlights = m.highlights.Begin(vs.ID, campaignID, tenantID)
 	}
 
-	m.active = as
+	m.active[tenantID] = as
 	go m.runLoop(runCtx, as, cfg)
 	return vs, nil
 }
@@ -646,7 +716,7 @@ func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	return func() {
 		go func() {
 			m.mu.Lock()
-			if m.active != as || as.ended {
+			if m.active[as.tenantID] != as || as.ended {
 				m.mu.Unlock()
 				return // this session already ended / rolled over
 			}
@@ -666,16 +736,18 @@ func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	}
 }
 
-// Spend returns a snapshot of the active session's spend meter (#130): estimated
-// USD, cap state, and configured caps. Idle, or a session with no caps configured,
-// reports the zero Status (no state, zero spend) — the feature-off surface.
-func (m *Manager) Spend() spend.Status {
+// Spend returns a snapshot of tenantID's active session spend meter (#130, #488):
+// estimated USD, cap state, and configured caps. No session for that Tenant, or one
+// with no caps configured, reports the zero Status (no state, zero spend) — the
+// feature-off surface. Per-session, so one Tenant's spend never reads another's.
+func (m *Manager) Spend(tenantID uuid.UUID) spend.Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil || m.active.meter == nil {
+	as := m.active[tenantID]
+	if as == nil || as.meter == nil {
 		return spend.Status{}
 	}
-	return m.active.meter.Status()
+	return as.meter.Status()
 }
 
 // runLoop runs the voice loop to completion (cancel or self-exit), then writes
@@ -748,7 +820,7 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	// purge horizon (ADR-0051). nil (highlights off) is skipped.
 	if m.highlights != nil {
 		hlCtx, hlCancel := context.WithTimeout(base, m.endTimeout)
-		if err := m.highlights.Finalize(hlCtx); err != nil {
+		if err := m.highlights.Finalize(hlCtx, as.session.ID); err != nil {
 			m.log.Warn("finalize highlights before end", "err", err, "voice_session", as.session.ID)
 		}
 		hlCancel()
@@ -817,8 +889,8 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	} else {
 		as.session = ended
 	}
-	if m.active == as {
-		m.active = nil
+	if m.active[as.tenantID] == as {
+		delete(m.active, as.tenantID)
 	}
 	m.mu.Unlock()
 }
@@ -842,9 +914,9 @@ func failureReason(loopErr error) string {
 // WITH the failure — never a plain success carrying status='running' (#143). If
 // ctx is cancelled while waiting, it returns ctx.Err() — the loop still unwinds
 // in the background.
-func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
+func (m *Manager) Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error) {
 	m.mu.Lock()
-	as := m.active
+	as := m.active[tenantID]
 	m.mu.Unlock()
 	if as == nil {
 		return storage.VoiceSession{}, ErrNoActiveSession
@@ -860,28 +932,55 @@ func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
 	}
 }
 
-// Snapshot returns the active session and true, or the zero value and false when
-// idle — the in-process read backing GetSession (the screen's live status).
+// Active returns tenantID's live Voice Session and true, or the zero value and
+// false when that Tenant has none (the S3 read backing GetSession, mute/say/end
+// guards, and the slash Active-Campaign resolver, #488). It reports false the
+// instant the session begins ending (as.ended, the #487 tombstone) so a caller
+// never operates on a session mid-teardown. The ctx/error shape matches the S3
+// contract (and #491's DB-backed sibling); this in-process impl never errors.
+func (m *Manager) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	as := m.active[tenantID]
+	if as == nil || as.ended {
+		return storage.VoiceSession{}, false, nil
+	}
+	return as.session, true, nil
+}
+
+// Snapshot returns SOME live Voice Session across all Tenants and true, or the zero
+// value and false when the process is idle. Under the default cap (MaxSessions=1)
+// it is unambiguous — the single active session — and backs the web-tier
+// single-operator convenience reads (the Discord health check, the CampaignService
+// live-first Active-Campaign pivot) that predate concurrency and are not yet
+// per-Tenant (ADR-0039). It skips a session already ending (as.ended). With the cap
+// raised >1 those consumers migrate to a Tenant-scoped read; this convenience
+// retires with them (#488 rollout note).
 func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil {
-		return storage.VoiceSession{}, false
+	for _, as := range m.active {
+		if !as.ended {
+			return as.session, true
+		}
 	}
-	return m.active.session, true
+	return storage.VoiceSession{}, false
 }
 
-// Lookup returns this Manager's active Voice Session and true when its id is
-// sessionID, or the zero value and false otherwise (idle, or running a different
-// session). It is the per-Manager read [Registry.Resolve] fans out across every
-// registered Manager to attribute a stamped bus event to its origin session.
+// Lookup returns the live Voice Session with id sessionID and true, scanning every
+// Tenant's active session (session ids are globally unique), or the zero value and
+// false when none matches (idle, ended, or a foreign id). It is the per-Manager
+// read [Registry.Resolve] fans out to attribute a stamped bus event to its origin
+// session — now scanning N concurrent sessions rather than the single-active one.
 func (m *Manager) Lookup(sessionID uuid.UUID) (storage.VoiceSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil || m.active.ended || m.active.session.ID != sessionID {
-		return storage.VoiceSession{}, false
+	for _, as := range m.active {
+		if !as.ended && as.session.ID == sessionID {
+			return as.session, true
+		}
 	}
-	return m.active.session, true
+	return storage.VoiceSession{}, false
 }
 
 // PublishToCampaign publishes e onto this Manager's live session bus when it is
@@ -893,12 +992,17 @@ func (m *Manager) Lookup(sessionID uuid.UUID) (storage.VoiceSession, bool) {
 // [Registry.PublishToCampaign].
 func (m *Manager) PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) bool {
 	m.mu.Lock()
-	if m.active == nil || m.active.ended || m.active.campaignID != campaignID {
-		m.mu.Unlock()
+	var bus *voiceevent.Bus
+	for _, as := range m.active {
+		if !as.ended && as.campaignID == campaignID {
+			bus = as.bus
+			break
+		}
+	}
+	m.mu.Unlock()
+	if bus == nil {
 		return false
 	}
-	bus := m.active.bus
-	m.mu.Unlock()
 	bus.Publish(e)
 	return true
 }
@@ -911,35 +1015,45 @@ func (m *Manager) PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) bo
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	m.closed = true
-	as := m.active
-	m.mu.Unlock()
-	if as == nil {
-		return
+	sessions := make([]*activeSession, 0, len(m.active))
+	for _, as := range m.active {
+		sessions = append(sessions, as)
 	}
-	as.cancel()
-	<-as.done
+	m.mu.Unlock()
+	// Cancel every live session, then wait for each loop to end and its ended_at
+	// write to land (#488): a SIGTERM must leave NO Tenant's row stuck 'running'.
+	for _, as := range sessions {
+		as.cancel()
+	}
+	for _, as := range sessions {
+		<-as.done
+	}
 }
 
-// Muted reports whether the Agent with agentID is muted in the live session,
-// satisfying [orchestrator.MuteView] (#211). It is the authoritative live read the
-// voice loop's replier gate consults per route. Idle (no active session) is
-// always unmuted — the feature is off between sessions.
+// Muted reports whether the Agent with agentID is muted in ANY live session,
+// satisfying [orchestrator.MuteView] (#211). Agent ids are globally unique (a
+// Campaign's roster), and the voice loop that consults this per route belongs to
+// exactly one session, so scanning every Tenant's mute set (#488) is correct and
+// unambiguous: a muted agent belongs to only one live session's set. It stays
+// tenant-free precisely because the loop already knows which agent it is asking
+// about. No live session ⇒ always unmuted (the feature is off between sessions).
 func (m *Manager) Muted(agentID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil {
-		return false
+	for _, as := range m.active {
+		if _, ok := as.muted[agentID]; ok {
+			return true
+		}
 	}
-	_, ok := m.active.muted[agentID]
-	return ok
+	return false
 }
 
-// MutedAgentIDs is a sorted snapshot of the currently-muted Agent ids, or nil when
-// idle. It backs GetSession's reload truth (AC5): a mid-session page reload reads
-// the true current mute state from here. It routes through the current
-// [LiveSession] (#448).
-func (m *Manager) MutedAgentIDs() []string {
-	l := m.Live()
+// MutedAgentIDs is a sorted snapshot of tenantID's currently-muted Agent ids, or
+// nil when that Tenant has no live session. It backs GetSession's reload truth
+// (AC5): a mid-session page reload reads the true current mute state from here. It
+// routes through that Tenant's [LiveSession] (#448, #488).
+func (m *Manager) MutedAgentIDs(tenantID uuid.UUID) []string {
+	l := m.Live(tenantID)
 	if l == nil {
 		return nil
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -86,15 +87,6 @@ func seedCampaign(t *testing.T, dsn string) (*storage.Store, uuid.UUID) {
 	return storage.New(pool), campaignID
 }
 
-// staticSession is a knowledge.Sessions returning a fixed active session (or
-// none), standing in for the live *session.Manager.
-type staticSession struct {
-	sess storage.VoiceSession
-	live bool
-}
-
-func (s staticSession) Snapshot() (storage.VoiceSession, bool) { return s.sess, s.live }
-
 func TestAdapter_SearchFactsDropsGMPrivate_RealDB(t *testing.T) {
 	dsn := startPostgres(t)
 	store, campaignID := seedCampaign(t, dsn)
@@ -120,11 +112,14 @@ func TestAdapter_SearchFactsDropsGMPrivate_RealDB(t *testing.T) {
 		}
 	}
 
-	adapter := knowledge.New(store, store.PromptKG(), staticSession{sess: storage.VoiceSession{CampaignID: campaignID}, live: true})
+	adapter := knowledge.New(store, store.PromptKG())
+
+	// The adapter resolves its Campaign from the run context's session.Identity (#488).
+	liveCtx := session.NewContext(ctx, session.Identity{CampaignID: campaignID})
 
 	// LIMIT 1 is the discriminating case: the private rows out-rank the public one,
 	// so only a BEFORE-LIMIT exclusion can return the public fact.
-	facts, err := adapter.SearchFacts(ctx, "duke", 1)
+	facts, err := adapter.SearchFacts(liveCtx, "duke", 1)
 	if err != nil {
 		t.Fatalf("SearchFacts: %v", err)
 	}
@@ -154,9 +149,10 @@ func TestAdapter_SearchTranscriptCampaignScoped_RealDB(t *testing.T) {
 		t.Fatalf("upsert transcript line: %v", err)
 	}
 
-	adapter := knowledge.New(store, store.PromptKG(), staticSession{sess: sess, live: true})
+	adapter := knowledge.New(store, store.PromptKG())
+	liveCtx := session.NewContext(ctx, session.Identity{CampaignID: campaignID})
 
-	hits, err := adapter.SearchTranscript(ctx, "promise", 10)
+	hits, err := adapter.SearchTranscript(liveCtx, "promise", 10)
 	if err != nil {
 		t.Fatalf("SearchTranscript: %v", err)
 	}
@@ -165,7 +161,7 @@ func TestAdapter_SearchTranscriptCampaignScoped_RealDB(t *testing.T) {
 	}
 
 	// No active session → the campaign-scoped reads error, never read cross-campaign.
-	idle := knowledge.New(store, store.PromptKG(), staticSession{live: false})
+	idle := knowledge.New(store, store.PromptKG())
 	if _, err := idle.SearchTranscript(ctx, "promise", 10); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchTranscript idle = %v, want ErrNoActiveSession", err)
 	}
