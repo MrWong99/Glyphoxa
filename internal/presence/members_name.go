@@ -23,12 +23,15 @@ var ErrNoGuild = errors.New("presence: no configured guild for member lookup")
 // name. A wait-state (no known Guild) or a REST failure returns an error, and the
 // resolver negative-caches it as unresolved.
 //
-// Interim, label-only (#489): with the per-Tenant registry there is no single
-// configured Guild, so this scans the standing clients and their registered
-// Guilds for the first that resolves the member. #490's TenantResolver replaces
-// the scan with a per-Tenant lookup. This satisfies speaker.MemberNamer; the
-// fetch is off-bus (a Warm goroutine, never a synchronous bus callback), so the
-// REST round-trip never stalls the voice pipeline.
+// Interim, label-only (#489/#490): the ONLY caller — the transcript resolver
+// (speaker.Resolver) — is campaign-keyed and carries no Tenant, so per #490's
+// carried review item (b) there is no tenant-carrying label path to narrow. This
+// stays the all-entries scan across the standing clients and their registered
+// Guilds, returning the first that resolves the member (the documented interim
+// fallback for a label path WITHOUT a Tenant). When a tenant-carrying label path
+// appears, narrow it to that Tenant's Guild via GuildForTenant + clientFor. This
+// satisfies speaker.MemberNamer; the fetch is off-bus (a Warm goroutine, never a
+// synchronous bus callback), so the REST round-trip never stalls the voice pipeline.
 func (c *Clients) MemberDisplayName(ctx context.Context, discordUserID string) (string, error) {
 	userID, err := snowflake.Parse(discordUserID)
 	if err != nil {

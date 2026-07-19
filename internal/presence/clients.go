@@ -62,11 +62,16 @@ type IntegrationStatus struct {
 }
 
 // TenantStore is the deployment-config read surface the registry needs:
-// per-Tenant for a scoped ensure, and a full list for the boot seed.
+// per-Tenant for a scoped ensure, a full list for the boot seed, and the
+// Guild→Tenant read the member picker uses to confirm ownership (#490).
 // *storage.Store satisfies it.
 type TenantStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	ListDeploymentConfigs(ctx context.Context) ([]storage.DeploymentConfig, error)
+	// GetTenantIDByGuildID resolves a Guild to its OWNING Tenant, newest-wins on a
+	// duplicated guild_id — the SAME authority the interaction router uses, so the
+	// member picker and interaction routing agree (#490).
+	GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error)
 }
 
 // ClientBuilder constructs a standing disgo client for a Bot token. The prod
@@ -523,8 +528,10 @@ func (c *Clients) GuildForTenant(tenantID uuid.UUID) string {
 }
 
 // KnownGuild reports whether guildID is the configured Guild of ANY resolved
-// Tenant — the interim Gate check the interaction dispatch uses until #490's
-// TenantResolver maps a Guild to its Tenant. A DM ("") is never known.
+// Tenant. It was #489's interim Gate check; #490 superseded that with the storage
+// TenantResolver (which maps a Guild to its OWNING Tenant, newest-wins), so the
+// Gate no longer calls this. Retained as an in-memory Guild-membership probe for
+// the reconcile tests. A DM ("") is never known.
 func (c *Clients) KnownGuild(guildID string) bool {
 	if guildID == "" {
 		return false

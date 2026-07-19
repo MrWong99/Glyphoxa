@@ -124,7 +124,7 @@ func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler 
 			return handleRecap(ctx, ic, store, voice, eng, butler)
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			c, err := resolveActiveCampaign(ctx, store, voice, ac.UserID())
+			c, err := resolveActiveCampaign(ctx, store, voice, ac.TenantID(), ac.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
 				// No Active Campaign yet → offer nothing (empty picker); not an error.
 				return nil, nil
@@ -156,21 +156,25 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 	sessionOpt, _ := ic.String("session")
 	sessionOpt = strings.TrimSpace(sessionOpt)
 
-	// A `voiced` request can only truly voice when a ButlerVoicer is wired AND a
-	// session is live; otherwise it degrades to public text (decision 6a). Known here
-	// without a DB round trip. A successful text reply is PUBLIC for `public` and for
-	// a degraded `voiced`, else GM-only ephemeral.
-	_, live := voice.Snapshot()
-	voiceMode := delivery == deliveryVoiced && butler != nil && live
-	publicReply := !voiceMode && (delivery == deliveryPublic || delivery == deliveryVoiced)
-
 	if err := ic.Defer(true); err != nil {
 		return fmt.Errorf("presence: defer recap: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, recapOpTimeout)
 	defer cancel()
 
-	c, err := resolveActiveCampaign(ctx, store, voice, ic.UserID())
+	// A `voiced` request can only truly voice when a ButlerVoicer is wired AND a
+	// session is live FOR THIS TENANT; otherwise it degrades to public text (decision
+	// 6a). The Manager is single-active (#488 not merged) and the Snapshot carries no
+	// Tenant, so without the sessionInTenant guard a Tenant B recap would be spoken
+	// into Tenant A's channel (SpeakAsButler) AND persisted as a KindButler line in
+	// A's transcript (#490). A successful text reply is PUBLIC for `public` and for a
+	// degraded `voiced`, else GM-only ephemeral.
+	vs, live := voice.Snapshot()
+	liveHere := live && sessionInTenant(ctx, store, vs, ic.TenantID())
+	voiceMode := delivery == deliveryVoiced && butler != nil && liveHere
+	publicReply := !voiceMode && (delivery == deliveryPublic || delivery == deliveryVoiced)
+
+	c, err := resolveActiveCampaign(ctx, store, voice, ic.TenantID(), ic.UserID())
 	if errors.Is(err, ErrNoActiveCampaign) {
 		return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
 	}

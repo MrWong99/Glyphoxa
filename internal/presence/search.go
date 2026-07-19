@@ -92,8 +92,9 @@ func SearchCommand(store SearchStore, voice VoiceControl) Command {
 			defer cancel()
 
 			// The SAME resolver /glyphoxa start uses (no divergent copy): live session
-			// → durable /glyphoxa use selection → ErrNoActiveCampaign.
-			c, err := resolveActiveCampaign(dbCtx, store, voice, ic.UserID())
+			// → durable /glyphoxa use selection → ErrNoActiveCampaign, all within the
+			// invoking Tenant (#490).
+			c, err := resolveActiveCampaign(dbCtx, store, voice, ic.TenantID(), ic.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
 				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
 			}

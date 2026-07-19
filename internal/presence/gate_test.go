@@ -1,8 +1,13 @@
 package presence
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 const (
@@ -12,64 +17,96 @@ const (
 	strangerID = "222222222222"
 )
 
-// fixedGuild builds a KnownGuild predicate that treats a single id as the only
-// known Guild (a non-empty id). fixedGuild("") knows no Guild — the wait-state.
-func fixedGuild(id string) func(string) bool {
-	return func(g string) bool { return id != "" && g == id }
-}
+var (
+	tenantA = uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000000")
+	tenantB = uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000000")
+)
 
-// gmList is a scripted GMChecker: the listed snowflakes are GMs.
-type gmList map[string]struct{}
+// fakeTenants is a scripted TenantResolver: a Guild→Tenant map; an unlisted Guild
+// resolves to storage.ErrNotFound (the unknown-Guild reject).
+type fakeTenants map[string]uuid.UUID
 
-func gms(ids ...string) gmList {
-	s := gmList{}
-	for _, id := range ids {
-		if id != "" {
-			s[id] = struct{}{}
-		}
+func (f fakeTenants) TenantForGuild(_ context.Context, guildID string) (uuid.UUID, error) {
+	if id, ok := f[guildID]; ok {
+		return id, nil
 	}
-	return s
+	return uuid.Nil, storage.ErrNotFound
 }
 
-func (g gmList) IsGM(discordUserID string) bool {
-	_, ok := g[discordUserID]
+// gmInTenants is a scripted per-Tenant GMChecker: a (tenantID,userID) is GM when
+// listed.
+type gmInTenants map[uuid.UUID]map[string]struct{}
+
+func (g gmInTenants) IsGMInTenant(tenantID uuid.UUID, discordUserID string) bool {
+	_, ok := g[tenantID][discordUserID]
 	return ok
 }
 
-func TestGateCheckGuild(t *testing.T) {
-	g := NewGate(gms(), fixedGuild(testGuild))
+// gmIn builds a per-Tenant GMChecker granting userID GM standing in tenantID.
+func gmIn(tenantID uuid.UUID, userIDs ...string) gmInTenants {
+	m := gmInTenants{tenantID: {}}
+	for _, id := range userIDs {
+		m[tenantID][id] = struct{}{}
+	}
+	return m
+}
 
-	if err := g.CheckGuild(testGuild); err != nil {
-		t.Errorf("CheckGuild(configured) = %v, want nil", err)
+func TestGateAuthorizeGuild(t *testing.T) {
+	g := NewGate(gmInTenants{}, fakeTenants{testGuild: tenantA})
+	ctx := context.Background()
+
+	// A non-GM command from a known Guild passes and returns its Tenant.
+	got, err := g.Authorize(ctx, testGuild, operatorID, false)
+	if err != nil {
+		t.Fatalf("Authorize(known guild) = %v, want nil", err)
 	}
-	if err := g.CheckGuild(otherGuild); !errors.Is(err, ErrWrongGuild) {
-		t.Errorf("CheckGuild(other) = %v, want ErrWrongGuild", err)
+	if got != tenantA {
+		t.Errorf("Authorize returned tenant %s, want %s", got, tenantA)
 	}
-	if err := g.CheckGuild(""); !errors.Is(err, ErrWrongGuild) {
-		t.Errorf("CheckGuild(DM) = %v, want ErrWrongGuild", err)
+
+	// An unknown Guild is denied ErrWrongGuild.
+	if _, err := g.Authorize(ctx, otherGuild, operatorID, false); !errors.Is(err, ErrWrongGuild) {
+		t.Errorf("Authorize(unknown guild) = %v, want ErrWrongGuild", err)
+	}
+
+	// A DM (empty Guild) is denied ErrWrongGuild — before any resolver call.
+	if _, err := g.Authorize(ctx, "", operatorID, false); !errors.Is(err, ErrWrongGuild) {
+		t.Errorf("Authorize(DM) = %v, want ErrWrongGuild", err)
 	}
 }
 
-func TestGateCheckGuildWaitState(t *testing.T) {
-	// No configured Guild yet (presence wait-state): deny everything, even a
-	// well-formed Guild id.
-	g := NewGate(gms(operatorID), fixedGuild(""))
-	if err := g.CheckGuild(testGuild); !errors.Is(err, ErrWrongGuild) {
-		t.Errorf("CheckGuild while unconfigured = %v, want ErrWrongGuild", err)
+func TestGateAuthorizeGM(t *testing.T) {
+	g := NewGate(gmIn(tenantA, operatorID), fakeTenants{testGuild: tenantA})
+	ctx := context.Background()
+
+	// GM of the resolved Tenant passes a GM-only command.
+	if _, err := g.Authorize(ctx, testGuild, operatorID, true); err != nil {
+		t.Errorf("Authorize(GM, gmOnly) = %v, want nil", err)
+	}
+	// A stranger in the same Guild is denied ErrNotOperator.
+	if _, err := g.Authorize(ctx, testGuild, strangerID, true); !errors.Is(err, ErrNotOperator) {
+		t.Errorf("Authorize(stranger, gmOnly) = %v, want ErrNotOperator", err)
+	}
+	// Unknown Guild fails on the Guild resolution before the GM check.
+	if _, err := g.Authorize(ctx, otherGuild, operatorID, true); !errors.Is(err, ErrWrongGuild) {
+		t.Errorf("Authorize(GM, unknown guild) = %v, want ErrWrongGuild", err)
 	}
 }
 
-func TestGateCheckGM(t *testing.T) {
-	g := NewGate(gms(operatorID), fixedGuild(testGuild))
+// TestGateAuthorizeCrossTenantEscalation is the escalation regression (#490 AC):
+// tenant A's operator invoking a GM-only command in tenant B's Guild resolves to
+// tenant B, where it is NOT a GM — so it is denied ErrNotOperator, never granted
+// tenant A's standing in tenant B.
+func TestGateAuthorizeCrossTenantEscalation(t *testing.T) {
+	// operatorID is GM in tenant A only. guildB routes to tenant B.
+	g := NewGate(gmIn(tenantA, operatorID), fakeTenants{testGuild: tenantA, otherGuild: tenantB})
+	ctx := context.Background()
 
-	if err := g.CheckGM(testGuild, operatorID); err != nil {
-		t.Errorf("CheckGM(GM in guild) = %v, want nil", err)
+	if _, err := g.Authorize(ctx, otherGuild, operatorID, true); !errors.Is(err, ErrNotOperator) {
+		t.Fatalf("tenant-A operator in tenant-B guild = %v, want ErrNotOperator (no cross-tenant escalation)", err)
 	}
-	if err := g.CheckGM(testGuild, strangerID); !errors.Is(err, ErrNotOperator) {
-		t.Errorf("CheckGM(stranger in guild) = %v, want ErrNotOperator", err)
-	}
-	// Wrong Guild fails on the Guild check before the GM check.
-	if err := g.CheckGM(otherGuild, operatorID); !errors.Is(err, ErrWrongGuild) {
-		t.Errorf("CheckGM(GM wrong guild) = %v, want ErrWrongGuild", err)
+	// Sanity: the same operator IS GM in its own Guild.
+	if _, err := g.Authorize(ctx, testGuild, operatorID, true); err != nil {
+		t.Errorf("tenant-A operator in tenant-A guild = %v, want nil", err)
 	}
 }

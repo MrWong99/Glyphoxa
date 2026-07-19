@@ -40,14 +40,22 @@ func (f *fakeMuter) SetAllMute(_ context.Context, muted bool) ([]string, error) 
 	return f.mutedIDs, nil
 }
 
-// fakeLister is an AgentLister for the mute-command tests.
+// fakeLister is an AgentLister for the mute/say-command tests. tenantID is the
+// Tenant its (single) campaign belongs to — the live session's Tenant for the
+// cross-tenant guard (#490); the zero value (uuid.Nil) matches an Interaction built
+// without a resolved Tenant, so the pre-#490 success tests keep passing.
 type fakeLister struct {
-	agents []storage.Agent
-	err    error
+	agents   []storage.Agent
+	err      error
+	tenantID uuid.UUID
 }
 
 func (f *fakeLister) ListAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
 	return f.agents, f.err
+}
+
+func (f *fakeLister) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{ID: id, TenantID: f.tenantID}, nil
 }
 
 func muteIC(resp *fakeResponder, npc string) *Interaction {
@@ -106,6 +114,49 @@ func TestMuteCommand_IdleEphemeral(t *testing.T) {
 	}
 	if len(mgr.agentCalls) != 0 {
 		t.Fatalf("idle handler muted %v, want nothing", mgr.agentCalls)
+	}
+}
+
+// TestMuteCommand_ForeignTenantSessionRefused pins the cross-tenant guard (#490):
+// the Manager is single-active, so a GM in Tenant A whose live session actually
+// belongs to Tenant B must NOT mute it — the handler refuses ephemerally and mutes
+// nothing. (If sessionInTenant wrongly returned true, the mute would proceed.)
+func TestMuteCommand_ForeignTenantSessionRefused(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	// The live session's campaign belongs to tenantB; the interaction is tenantA.
+	agents := &fakeLister{agents: []storage.Agent{bart}, tenantID: tenantB}
+	cmd := MuteCommand(mgr, agents)
+	resp := &fakeResponder{}
+	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"npc": bart.ID.String()}}, resp: resp}
+
+	if err := cmd.Handle(context.Background(), ic); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(mgr.agentCalls) != 0 {
+		t.Fatalf("muted a foreign Tenant's session: %+v", mgr.agentCalls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.replies)
+	}
+}
+
+// TestMuteAllCommand_ForeignTenantSessionRefused is the muteall sibling of the guard.
+func TestMuteAllCommand_ForeignTenantSessionRefused(t *testing.T) {
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	agents := &fakeLister{tenantID: tenantB}
+	cmd := MuteAllCommand(mgr, agents)
+	resp := &fakeResponder{}
+	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, resp: resp}
+
+	if err := cmd.Handle(context.Background(), ic); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(mgr.allCalls) != 0 {
+		t.Fatalf("muteall drove a foreign Tenant's session: %v", mgr.allCalls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.replies)
 	}
 }
 
@@ -266,7 +317,7 @@ func TestMuteCommand_AutocompleteCapsAt25(t *testing.T) {
 // TestMuteAllCommand pins /glyphoxa muteall (AC4): GM-only, idle-ephemeral, and an
 // active session mutes every Agent (SetAllMute(true)).
 func TestMuteAllCommand(t *testing.T) {
-	cmd := MuteAllCommand(&fakeMuter{})
+	cmd := MuteAllCommand(&fakeMuter{}, &fakeLister{})
 	if cmd.Path != "glyphoxa muteall" || !cmd.GMOnly {
 		t.Fatalf("MuteAllCommand shape = {path %q GMOnly %v}, want GM-only /glyphoxa muteall", cmd.Path, cmd.GMOnly)
 	}
@@ -274,7 +325,7 @@ func TestMuteAllCommand(t *testing.T) {
 	// Idle: ephemeral, mutes nothing.
 	idleMgr := &fakeMuter{active: false}
 	idleResp := &fakeResponder{}
-	if err := MuteAllCommand(idleMgr).Handle(context.Background(), &Interaction{guildID: testGuild, userID: operatorID, resp: idleResp}); err != nil {
+	if err := MuteAllCommand(idleMgr, &fakeLister{}).Handle(context.Background(), &Interaction{guildID: testGuild, userID: operatorID, resp: idleResp}); err != nil {
 		t.Fatalf("Handle idle: %v", err)
 	}
 	if len(idleResp.replies) != 1 || !idleResp.replies[0].ephemeral || len(idleMgr.allCalls) != 0 {
@@ -284,7 +335,7 @@ func TestMuteAllCommand(t *testing.T) {
 	// Active: mutes all.
 	mgr := &fakeMuter{active: true, campaignID: uuid.New(), mutedIDs: []string{"a", "b"}}
 	resp := &fakeResponder{}
-	if err := MuteAllCommand(mgr).Handle(context.Background(), &Interaction{guildID: testGuild, userID: operatorID, resp: resp}); err != nil {
+	if err := MuteAllCommand(mgr, &fakeLister{}).Handle(context.Background(), &Interaction{guildID: testGuild, userID: operatorID, resp: resp}); err != nil {
 		t.Fatalf("Handle active: %v", err)
 	}
 	if len(mgr.allCalls) != 1 || !mgr.allCalls[0] {
@@ -301,7 +352,7 @@ func TestMuteCommands_RefusedForNonOperator(t *testing.T) {
 	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
 	reg := testRegistry(testGuild, operatorID)
 	reg.Register(MuteCommand(mgr, &fakeLister{agents: []storage.Agent{{ID: uuid.New(), Name: "Bart"}}}))
-	reg.Register(MuteAllCommand(mgr))
+	reg.Register(MuteAllCommand(mgr, &fakeLister{}))
 
 	resp := &fakeResponder{}
 	reg.dispatch(context.Background(), "glyphoxa mute", &Interaction{guildID: testGuild, userID: strangerID, opts: fakeOpts{s: map[string]string{"npc": "Bart"}}, resp: resp})

@@ -561,27 +561,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var clients *presence.Clients
 	var reg *presence.Registry
 	if withVoice {
-		// Butler GM-only voice-address gate (#280, ADR-0024): arm the
-		// AddressDetector's Butler gate with GM identity — the same checker that
-		// guards the slash-command surface and the transcript GM labels, reused
-		// (not re-built) so the GM is one server-side source of truth
-		// (ADR-0055). Dev mode admits every speaker (mirrors dev auto-auth). Set
-		// on the base config BEFORE the Manager copies it, so every
-		// manager-started Voice Session inherits the gate. Only the
-		// voice-driving `all` mode reaches here; the env-only bench path leaves
-		// it nil (standalone voice mode arms its own — see runVoice).
+		// Butler GM-only voice-address gate (#280, ADR-0024): the per-session Butler
+		// gate is now TENANT-scoped (#490) — the Manager overlays cfg.GMSpeaker per
+		// Start from Deps.GMSpeakerForTenant (wired below), so a Tenant A operator is
+		// not a GM in a Tenant B session. The base cfg.GMSpeaker stays the
+		// deployment-wide label-only gate as a fallback for any non-manager path.
+		// Dev mode admits every speaker (mirrors dev auto-auth).
 		cfg.GMSpeaker = gmSpeakerGate(dev, gmID.IsGM)
 		if !dev && gmID.Empty() {
 			log.Warn("butler voice-address gate armed with no GM identity source (no tenant-operator binding, empty allowlist); Butler unaddressable by voice")
 		}
-		// Interim Gate check (#489): with the per-tenant client registry there is no
-		// single configured Guild, so a slash interaction is authorized when it comes
-		// from ANY resolved Tenant's Guild (Clients.KnownGuild). #490's TenantResolver
-		// narrows an interaction to its owning Tenant. clients is captured by closure
-		// (nil in the wait-state before NewClients runs, and in web-only mode).
-		gate := presence.NewGate(gmID, func(guildID string) bool {
-			return clients != nil && clients.KnownGuild(guildID)
-		})
+		// Server-side interaction Gate (#490, ADR-0010): it resolves each interaction's
+		// owning Tenant from its Guild (storage GetTenantIDByGuildID, newest-wins on a
+		// duplicated guild_id — the SAME determinism the member picker uses) and then
+		// applies the per-Tenant GM rule, replacing #489's interim "any known Guild"
+		// seam. A DM or an unknown Guild is cleanly rejected.
+		gate := presence.NewGate(gmID, presence.NewStorageTenantResolver(store))
 		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
 		// Rollover-tape consent buttons (#306, ADR-0051): the disclosure message's
@@ -758,6 +753,19 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	if clients != nil {
 		deps.Clients = clients
 	}
+	// Per-Tenant Butler GM-address gate (#490, ADR-0055): the Manager overlays
+	// cfg.GMSpeaker per Start with the session's Tenant, so GM standing in the voice
+	// channel is scoped to the session's Tenant (a Tenant A operator is not GM in a
+	// Tenant B session). Dev mode admits every speaker (mirrors dev auto-auth and the
+	// base gate); only the voice-driving `all` mode wires it.
+	if withVoice {
+		deps.GMSpeakerForTenant = func(tenantID uuid.UUID, discordUserID string) bool {
+			if dev {
+				return true
+			}
+			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
+		}
+	}
 
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
@@ -896,7 +904,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		reg.Register(
 			presence.UseCommand(store),
 			presence.StartCommand(store, mgr),
-			presence.EndCommand(mgr),
+			presence.EndCommand(mgr, store),
 			presence.SearchCommand(store, mgr),
 			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
 			// Session via the SAME shared slash resolver, delivered per the invoker's
@@ -908,7 +916,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
-			presence.MuteAllCommand(mgr),
+			presence.MuteAllCommand(mgr, store),
 			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
 			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
 			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the

@@ -43,6 +43,28 @@ func sayIC(resp *fakeResponder, text, as string) *Interaction {
 	}
 }
 
+// TestSayCommand_ForeignTenantSessionRefused pins the cross-tenant guard (#490): a
+// GM in Tenant A whose single active session belongs to Tenant B cannot puppet it —
+// the handler refuses ephemerally and publishes no SpeakRequested.
+func TestSayCommand_ForeignTenantSessionRefused(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	mgr := &fakeSayer{active: true, campaignID: uuid.New()}
+	agents := &fakeLister{agents: []storage.Agent{bart}, tenantID: tenantB}
+	cmd := SayCommand(mgr, agents)
+	resp := &fakeResponder{}
+	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"text": "hi", "as": bart.ID.String()}}, resp: resp}
+
+	if err := cmd.Handle(context.Background(), ic); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(mgr.calls) != 0 {
+		t.Fatalf("puppeted a foreign Tenant's session: %+v", mgr.calls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.replies)
+	}
+}
+
 func sayAC(as string) *Autocomplete {
 	return &Autocomplete{
 		guildID: testGuild,
