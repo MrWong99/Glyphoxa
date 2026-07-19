@@ -130,8 +130,11 @@ func TestIdentityContext_RoundTrip(t *testing.T) {
 func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *testing.T) {
 	reg := session.NewRegistry()
 	procBus := voiceevent.NewBus()
-	var got []voiceevent.Event
-	t.Cleanup(procBus.Subscribe(func(e voiceevent.Event) { got = append(got, e) }))
+	// Capture forwarded events through a channel, not a shared slice: the Forward
+	// bridge republishes on the Manager's runLoop goroutine, so a plain slice append
+	// would race the test's read (the channel receive is the happens-after edge).
+	published := make(chan voiceevent.Event, 4)
+	t.Cleanup(procBus.Subscribe(func(e voiceevent.Event) { published <- e }))
 
 	tenantID, campaignID := uuid.New(), uuid.New()
 	gotID := make(chan session.Identity, 1)
@@ -157,13 +160,15 @@ func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *test
 		t.Errorf("run ctx Identity = %+v, want %+v", id, want)
 	}
 
-	if len(got) != 1 {
-		t.Fatalf("process bus got %d events, want 1 (the loop's STTFinal, stamped)", len(got))
-	}
-	if _, ok := got[0].(voiceevent.STTFinal); !ok {
-		t.Fatalf("process bus event = %T, want STTFinal", got[0])
-	}
-	if sid := voiceevent.SessionIDOf(got[0]); sid != vs.ID.String() {
-		t.Errorf("session loop event stamped %q, want %q", sid, vs.ID.String())
+	select {
+	case ev := <-published:
+		if _, ok := ev.(voiceevent.STTFinal); !ok {
+			t.Fatalf("process bus event = %T, want STTFinal", ev)
+		}
+		if sid := voiceevent.SessionIDOf(ev); sid != vs.ID.String() {
+			t.Errorf("session loop event stamped %q, want %q", sid, vs.ID.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event arrived on the process bus (the loop's STTFinal, stamped)")
 	}
 }

@@ -194,10 +194,12 @@ func linkAgent(t *testing.T, st *storage.Store, campID, npcID uuid.UUID, name st
 // gone — an unlinked NPC injects nothing).
 func TestKGFacts_EndToEnd_Integration(t *testing.T) {
 	pool, campID := seedCampaign(t, startPostgres(t))
-	ctx := context.Background()
+	// The turn ctx carries the session Identity the ctx-scoped Facts guard reads
+	// (#487) — in production it descends from Manager.Start's run context.
+	ctx := liveCtx(campID)
 	st := storage.New(pool)
 
-	rec := kgfacts.New(st, activeSessions(campID), &fakeMetrics{}, nil, kgfacts.Config{})
+	rec := kgfacts.New(st, &fakeMetrics{}, nil, kgfacts.Config{})
 
 	// runTurn drives one batch turn for the given Agent id and returns the assembled
 	// system prompt.
@@ -271,10 +273,10 @@ func TestKGFacts_EndToEnd_Integration(t *testing.T) {
 // what's under test.
 func TestKGFacts_PerNPCDivergence_Integration(t *testing.T) {
 	pool, campID := seedCampaign(t, startPostgres(t))
-	ctx := context.Background()
+	ctx := liveCtx(campID) // #487: the turn ctx carries the session Identity
 	st := storage.New(pool)
 
-	rec := kgfacts.New(st, activeSessions(campID), &fakeMetrics{}, nil, kgfacts.Config{})
+	rec := kgfacts.New(st, &fakeMetrics{}, nil, kgfacts.Config{})
 
 	// runStream drives one streaming turn for the Agent and returns the assembled
 	// system prompt captured by the streaming engine.
