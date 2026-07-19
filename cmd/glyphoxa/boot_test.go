@@ -673,6 +673,32 @@ func TestSTTStreaming(t *testing.T) {
 	}
 }
 
+// TestGatewayIdentifyWarnThreshold: the IDENTIFY-budget warning threshold (#486)
+// defaults to 500 (well below Discord's 1000/token/24h reset limit) and accepts a
+// positive integer override; blank, non-numeric, zero and negative values fall
+// back to the default so a fat-fingered env var never disables the alarm.
+func TestGatewayIdentifyWarnThreshold(t *testing.T) {
+	const def = 500
+	cases := []struct {
+		val  string
+		want int
+	}{
+		{"", def},
+		{"   ", def},
+		{"abc", def},
+		{"0", def},
+		{"-5", def},
+		{"1", 1},
+		{"250", 250},
+		{" 900 ", 900},
+	}
+	for _, c := range cases {
+		if got := gatewayIdentifyWarnThreshold(envMap(map[string]string{"GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD": c.val})); got != c.want {
+			t.Errorf("gatewayIdentifyWarnThreshold(%q) = %d, want %d", c.val, got, c.want)
+		}
+	}
+}
+
 // TestForceLoopback pins the listen host to 127.0.0.1 while preserving the port,
 // so a GLYPHOXA_DEV_MODE instance is structurally unreachable from a container
 // port-mapping (ADR-0041) regardless of the configured -web-addr.

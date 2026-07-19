@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -342,6 +343,26 @@ func sttStreaming(getenv func(string) string) bool {
 		return false
 	}
 	return true
+}
+
+// defaultGatewayIdentifyWarn is the per-application 24h IDENTIFY count above which
+// the gateway-budget observer warns (#486). It sits well below Discord's
+// 1000/token/24h hard limit — exhausting that budget resets the token and drops
+// every session (a central-token outage) — so an operator sees the trend with
+// head-room to react.
+const defaultGatewayIdentifyWarn = 500
+
+// gatewayIdentifyWarnThreshold reads the GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD
+// override for the IDENTIFY-budget alarm (#486). A blank, non-numeric, zero or
+// negative value falls back to [defaultGatewayIdentifyWarn], so a mis-set env var
+// never silently disables the alarm.
+func gatewayIdentifyWarnThreshold(getenv func(string) string) int {
+	v := strings.TrimSpace(getenv("GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD"))
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultGatewayIdentifyWarn
+	}
+	return n
 }
 
 // forceLoopback rewrites a listen address to bind 127.0.0.1, preserving the port
