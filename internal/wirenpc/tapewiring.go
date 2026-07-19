@@ -3,6 +3,7 @@ package wirenpc
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,22 @@ type TapeConsentReader interface {
 	ListTapeConsent(ctx context.Context, campaignID uuid.UUID) ([]string, error)
 }
 
+// defaultTapeConsentReconcileInterval is the poller cadence when
+// GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL is unset or non-positive (#492).
+const defaultTapeConsentReconcileInterval = 5 * time.Second
+
+// tapeConsentReconcileInterval reads the cross-pod consent poller cadence from
+// GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL (#492), falling back to 5s on a blank,
+// unparsable, or non-positive value. Parsed in the composition root (RunFromDB) so
+// the cadence stays a deployment knob.
+func tapeConsentReconcileInterval(getenv func(string) string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(getenv("GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL")))
+	if err != nil || d <= 0 {
+		return defaultTapeConsentReconcileInterval
+	}
+	return d
+}
+
 // wireTapeConsent keeps the tape's consent set converged to the DURABLE truth
 // (#306, ADR-0051), the exact discipline the mute wiring uses (wireMutes): it
 // re-reads the authoritative consent rows rather than trusting an event payload, so
@@ -60,10 +77,20 @@ type TapeConsentReader interface {
 //   - On every TapeConsentChanged it filters e.CampaignID to THIS session's campaign
 //     — a press against a stale disclosure for another campaign (a reused channel)
 //     must not arm a lane here — then re-reads the store and reconciles the whole set.
+//     This is the same-pod fast path: instant when the consent handler and the tape
+//     share a process bus.
+//   - It runs a poller goroutine that reconciles every `interval` until ctx (the
+//     cycle ctx) is done (#492). In the fleet the consent button is dispatched by the
+//     elected presence OWNER, which publishes TapeConsentChanged on ITS OWN bus — but
+//     the tape may run on a DIFFERENT pod (a claim-plane worker) whose bus never sees
+//     that event, so the bus fast path alone would strand the change cross-pod. The
+//     poller bounds cross-pod staleness to one interval; ADR-0051 holds because
+//     ReconcileConsent authoritatively clears a revoked Speaker's ring.
 //
-// It returns the unsubscribe func for the caller to defer. A nil tape (campaign not
-// armed) does nothing.
-func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, campaignID uuid.UUID, store TapeConsentReader, log *slog.Logger) func() {
+// It returns the unsubscribe func for the caller to defer; the poller stops on ctx
+// done (the cycle ctx), so it dies with the cycle. A nil tape (campaign not armed)
+// does nothing.
+func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, campaignID uuid.UUID, store TapeConsentReader, interval time.Duration, log *slog.Logger) func() {
 	if t == nil {
 		return func() {}
 	}
@@ -74,6 +101,9 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 		// seed rather than crashing the session.
 		log.Error("tape: armed but no consent reader wired; live consent changes will not apply", "campaign", campaignID)
 		return func() {}
+	}
+	if interval <= 0 {
+		interval = defaultTapeConsentReconcileInterval
 	}
 	reconcile := func() {
 		consented, err := store.ListTapeConsent(ctx, campaignID)
@@ -93,5 +123,19 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 		reconcile() // re-read the durable truth; ignore the (possibly stale/reordered) payload
 	})
 	reconcile() // authoritative reseed at cycle start (catches changes during a reconnect gap)
+	// Cross-pod poller (#492): reconcile every interval until the cycle ctx is done.
+	// A reconcile error is logged inside reconcile and the ticker keeps going.
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
 	return unsub
 }

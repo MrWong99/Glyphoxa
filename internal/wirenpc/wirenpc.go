@@ -322,6 +322,15 @@ type Config struct {
 	// consent-button listener (all mode's presence owns its own). Set by RunFromDB
 	// alongside Tape; nil when the campaign is not armed.
 	TapeConsent TapeConsentStore
+	// TapeConsentReconcileInterval is how often the per-cycle consent poller re-reads
+	// the durable tape_consent rows (#492): a consent button is dispatched by the
+	// elected presence OWNER, which publishes TapeConsentChanged on ITS OWN process
+	// bus — but in the fleet the tape may run on a DIFFERENT pod (a claim-plane
+	// worker) whose bus never sees that event. The poller closes that cross-pod gap
+	// so a grant/revoke converges on the tape within one interval, bounding staleness.
+	// Read from GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL by RunFromDB; <=0 takes the
+	// 5s default. Wired only when Tape is non-nil.
+	TapeConsentReconcileInterval time.Duration
 
 	// Highlights, when non-nil, is the Session Highlights trigger sink (#307/#308,
 	// ADR-0051): connectAndServe builds the moment detector ONLY when both Tape and

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/goleak"
 
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -84,7 +85,7 @@ func TestTapeWiring_NilTapeWiresNothing(t *testing.T) {
 	// wireTapeConsent(nil) returns an inert unsubscribe and subscribes nothing:
 	// publishing an event must not panic.
 	bus := voiceevent.NewBus()
-	unsub := wireTapeConsent(context.Background(), bus, nil, uuid.New(), newFakeConsentStore(), discardLog())
+	unsub := wireTapeConsent(context.Background(), bus, nil, uuid.New(), newFakeConsentStore(), 0, discardLog())
 	bus.Publish(voiceevent.TapeConsentChanged{SpeakerID: "111", Granted: true})
 	unsub()
 }
@@ -112,7 +113,7 @@ func TestTapeWiring_ArmedTapeNoStoreDoesNotPanic(t *testing.T) {
 	defer tp.Close()
 	bus := voiceevent.NewBus()
 
-	unsub := wireTapeConsent(context.Background(), bus, tp, uuid.New(), nil, discardLog())
+	unsub := wireTapeConsent(context.Background(), bus, tp, uuid.New(), nil, 0, discardLog())
 	// Publishing must not reach a nil-store reconcile.
 	bus.Publish(voiceevent.TapeConsentChanged{CampaignID: uuid.New().String(), SpeakerID: "111", Granted: true})
 	unsub()
@@ -131,7 +132,11 @@ func TestTapeWiring_ReseedsAndReconcilesAuthoritatively(t *testing.T) {
 	tp := tape.New(tape.Window, nil, nil) // fresh tape, nothing seeded in-memory
 	defer tp.Close()
 	bus := voiceevent.NewBus()
-	unsub := wireTapeConsent(context.Background(), bus, tp, cid, store, discardLog())
+	// A long interval so the poller never fires here — this test exercises the seed +
+	// bus fast path; a cancellable ctx stops the poller goroutine at test end.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := wireTapeConsent(ctx, bus, tp, cid, store, time.Hour, discardLog())
 	defer unsub()
 
 	// Reseed at cycle start armed 111 from the store (finding 2).
@@ -160,7 +165,9 @@ func TestTapeWiring_IgnoresOtherCampaign(t *testing.T) {
 	tp := tape.New(tape.Window, nil, nil)
 	defer tp.Close()
 	bus := voiceevent.NewBus()
-	unsub := wireTapeConsent(context.Background(), bus, tp, sessionCID, store, discardLog())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := wireTapeConsent(ctx, bus, tp, sessionCID, store, time.Hour, discardLog())
 	defer unsub()
 
 	if !laneCaptured(tp, "111", time.Now()) {
@@ -173,6 +180,143 @@ func TestTapeWiring_IgnoresOtherCampaign(t *testing.T) {
 	bus.Publish(voiceevent.TapeConsentChanged{CampaignID: otherCID.String(), SpeakerID: "111", Granted: false})
 	if !laneCaptured(tp, "111", time.Now().Add(time.Second)) {
 		t.Fatalf("an event for a different campaign reconciled this session's tape")
+	}
+}
+
+// errConsentStore wraps a fakeConsentStore to fail ListTapeConsent a bounded number
+// of times, so a test can assert the poller logs the error and keeps ticking.
+type errConsentStore struct {
+	*fakeConsentStore
+	mu    sync.Mutex
+	fails int
+	reads int
+}
+
+func (e *errConsentStore) ListTapeConsent(ctx context.Context, cid uuid.UUID) ([]string, error) {
+	e.mu.Lock()
+	e.reads++
+	fail := e.fails > 0
+	if fail {
+		e.fails--
+	}
+	e.mu.Unlock()
+	if fail {
+		return nil, context.DeadlineExceeded
+	}
+	return e.fakeConsentStore.ListTapeConsent(ctx, cid)
+}
+
+func (e *errConsentStore) readCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.reads
+}
+
+// TestTapeWiring_PollerConvergesCrossPod covers #492 (a): a consent row flip with NO
+// bus event — the cross-pod case, where the OWNER pod published TapeConsentChanged on
+// its own bus and this worker's bus never saw it — converges the tape within one
+// poll interval.
+func TestTapeWiring_PollerConvergesCrossPod(t *testing.T) {
+	cid := uuid.New()
+	store := newFakeConsentStore() // empty at cycle start: nobody consents
+
+	tp := tape.New(tape.Window, nil, nil)
+	defer tp.Close()
+	bus := voiceevent.NewBus()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := wireTapeConsent(ctx, bus, tp, cid, store, 10*time.Millisecond, discardLog())
+	defer unsub()
+
+	// A grant lands in the DB out of band (the button was dispatched on ANOTHER pod),
+	// so NO TapeConsentChanged reaches this bus. The poller must pick it up.
+	store.set(cid, "111")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if laneCaptured(tp, "111", time.Now()) {
+			return // converged
+		}
+		select {
+		case <-deadline:
+			t.Fatal("poller did not converge the tape to the durable grant within the window")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestTapeWiring_PollerStopsOnCtxCancel covers #492 (c): the poller goroutine dies
+// with the cycle ctx (goleak catches a survivor).
+func TestTapeWiring_PollerStopsOnCtxCancel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	cid := uuid.New()
+	store := newFakeConsentStore()
+	tp := tape.New(tape.Window, nil, nil)
+	defer tp.Close()
+	bus := voiceevent.NewBus()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	unsub := wireTapeConsent(ctx, bus, tp, cid, store, 5*time.Millisecond, discardLog())
+
+	// Let the poller run a few ticks, then cancel: the goroutine must exit.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	unsub()
+	// Give the goroutine a moment to observe ctx.Done before goleak inspects.
+	time.Sleep(20 * time.Millisecond)
+}
+
+// TestTapeWiring_PollerContinuesAfterError covers #492 (d): a reconcile error is
+// logged and the ticker keeps going — a later tick still converges the tape once the
+// store recovers.
+func TestTapeWiring_PollerContinuesAfterError(t *testing.T) {
+	cid := uuid.New()
+	base := newFakeConsentStore()
+	store := &errConsentStore{fakeConsentStore: base, fails: 2} // first two reads (incl the seed) error
+
+	tp := tape.New(tape.Window, nil, nil)
+	defer tp.Close()
+	bus := voiceevent.NewBus()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := wireTapeConsent(ctx, bus, tp, cid, store, 10*time.Millisecond, discardLog())
+	defer unsub()
+
+	base.set(cid, "111") // durable grant, but the next read(s) still error
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if laneCaptured(tp, "111", time.Now()) {
+			if store.readCount() < 3 {
+				t.Fatalf("converged after %d reads, want the ticker to have survived the errors", store.readCount())
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("poller did not recover and converge after the store errors")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestTapeConsentReconcileInterval covers the env knob (#492): a valid duration is
+// honored; blank/unparsable/non-positive falls back to the 5s default.
+func TestTapeConsentReconcileInterval(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":       defaultTapeConsentReconcileInterval,
+		"bogus":  defaultTapeConsentReconcileInterval,
+		"0s":     defaultTapeConsentReconcileInterval,
+		"-3s":    defaultTapeConsentReconcileInterval,
+		"250ms":  250 * time.Millisecond,
+		"  10s ": 10 * time.Second,
+	}
+	for in, want := range cases {
+		got := tapeConsentReconcileInterval(func(string) string { return in })
+		if got != want {
+			t.Errorf("tapeConsentReconcileInterval(%q) = %s, want %s", in, got, want)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -110,6 +111,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 		defer tp.Close()
 		cfg.Tape = tp
 		cfg.TapeConsent = st
+		cfg.TapeConsentReconcileInterval = tapeConsentReconcileInterval(os.Getenv)
 		log.Info("rollover tape armed", "campaign", cfg.CampaignID, "consented_speakers", len(consented))
 	}
 
