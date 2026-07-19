@@ -227,6 +227,43 @@ func (s *Store) GetVoiceSessionIntent(ctx context.Context, id uuid.UUID) (VoiceS
 	return v, nil
 }
 
+// IsCampaignLiveIntent reports whether campaignID has any non-terminal
+// (pending/claimed/live) intent — the split-mode archive/delete live-guard
+// (#491): the web tier drives no in-process session, so "is this Campaign live"
+// is a claim-plane read rather than a Manager scan. Correct across the worker
+// pool.
+func (s *Store) IsCampaignLiveIntent(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+	var one int
+	err := s.db.QueryRow(ctx,
+		`SELECT 1 FROM voice_session_intents
+		  WHERE campaign_id = $1 AND status IN ('pending', 'claimed', 'live')
+		  LIMIT 1`, campaignID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage: campaign %s live-intent check: %w", campaignID, err)
+	}
+	return true, nil
+}
+
+// AnyLiveVoiceSessionIntent reports whether ANY non-terminal intent exists — the
+// split-mode health signal (#491, the claim-plane sibling of Manager.AnyLive) the
+// web tier reads for the Discord health short-circuit.
+func (s *Store) AnyLiveVoiceSessionIntent(ctx context.Context) (bool, error) {
+	var one int
+	err := s.db.QueryRow(ctx,
+		`SELECT 1 FROM voice_session_intents
+		  WHERE status IN ('pending', 'claimed', 'live') LIMIT 1`).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage: any-live-intent check: %w", err)
+	}
+	return true, nil
+}
+
 // GetLiveVoiceSessionIntentForTenant returns the Tenant's current non-terminal
 // (pending/claimed/live) intent, or ErrNotFound when the Tenant has none — the
 // per-Tenant read backing IntentControl.Active (the split-mode sibling of

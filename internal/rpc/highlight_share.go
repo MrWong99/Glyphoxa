@@ -243,6 +243,9 @@ func (s *SessionServer) replayToVoice(
 	// already campaign-ownership-checked to the caller's Tenant, so h.TenantID is the
 	// operator's Tenant — the session the clip belongs in.
 	if err := s.replayer.ReplayHighlight(ctx, h.TenantID, h.ClipKey); err != nil {
+		if errors.Is(err, session.ErrSplitMode) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, errSplitMode)
+		}
 		if errors.Is(err, session.ErrNoActiveSession) {
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no live Voice Session to replay into"))
 		}

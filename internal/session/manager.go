@@ -82,6 +82,19 @@ var (
 	// session's mute set. Mapped to CodeNotFound.
 	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
 
+	// ErrIntentPending is returned by IntentControl.Start when the claim plane wrote
+	// the intent but no -mode voice worker claimed and drove it live within the Start
+	// budget (#491, split mode): the session is queued, not failed. The RPC layer
+	// maps it to CodeUnavailable ("voice worker has not claimed the session yet") so
+	// the operator retries.
+	ErrIntentPending = errors.New("session: voice worker has not claimed the session yet")
+	// ErrSplitMode is returned by the IntentControl methods that only the in-process
+	// Manager can serve — live mute/say/replay/spend reads (#491): in a split
+	// (-mode web + -mode voice) deployment the web tier holds no live session state,
+	// so these degrade rather than lie. The RPC layer maps it to
+	// CodeFailedPrecondition ("not available in a split deployment").
+	ErrSplitMode = errors.New("session: not available in a split deployment")
+
 	// ErrButlerVoiceless is returned by SpeakAsButler when the Active Campaign's
 	// Butler has no synthesizable Voice (empty VoiceID — the default auto-Butler is
 	// voiceless). Voicing it would publish a KindButler transcript line that never

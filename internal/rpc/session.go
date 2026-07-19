@@ -79,6 +79,12 @@ type RecapEngine interface {
 	Recap(ctx context.Context, sessionIDs []uuid.UUID) (recap.Result, error)
 }
 
+// errSplitMode is the static client message for a live-session control invoked on
+// the web tier of a split (-mode web + -mode voice) deployment (#491): the live
+// state lives in the worker, so mute/say/replay/spend degrade with
+// CodeFailedPrecondition rather than lie (ADR-0057 consequence).
+var errSplitMode = errors.New("not available in a split deployment (the voice worker holds the live session)")
+
 // searchTranscriptLimit caps a transcript search result set (#120). It is a fixed
 // server policy for the single-operator web tier (ADR-0039), mirroring
 // searchNodesLimit; the client sends no limit.
@@ -287,6 +293,11 @@ func (s *SessionServer) startError(err error) error {
 		// The manager is in its terminal closed state (#157): the process is
 		// shutting down. Unavailable, so the client retries the restarted process.
 		return connect.NewError(connect.CodeUnavailable, errors.New("the server is shutting down; try again shortly"))
+	case errors.Is(err, session.ErrIntentPending):
+		// Split mode (#491): the intent is written but no -mode voice worker has
+		// claimed and driven it live within the Start budget. Unavailable, so the
+		// operator retries — the worker picks it up on its next poll.
+		return connect.NewError(connect.CodeUnavailable, errors.New("voice worker has not claimed the session yet; try again shortly"))
 	default:
 		s.log.Error("StartSession: manager start failed", "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -337,6 +348,8 @@ func (s *SessionServer) SetAgentMute(
 
 	ids, err := s.mgr.SetAgentMute(ctx, tenantID, req.Msg.GetAgentId(), req.Msg.GetMuted())
 	switch {
+	case errors.Is(err, session.ErrSplitMode):
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errSplitMode)
 	case errors.Is(err, session.ErrNoActiveSession):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
 	case errors.Is(err, session.ErrAgentNotInCampaign):
@@ -360,6 +373,9 @@ func (s *SessionServer) SetAllMute(
 		return nil, err
 	}
 	ids, err := s.mgr.SetAllMute(ctx, tenantID, req.Msg.GetMuted())
+	if errors.Is(err, session.ErrSplitMode) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errSplitMode)
+	}
 	if errors.Is(err, session.ErrNoActiveSession) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
 	}
