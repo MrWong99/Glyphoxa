@@ -9,21 +9,28 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 )
 
 func strptr(s string) *string { return &s }
 
-// newNameTestPresence builds a bare Presence with a configured Guild and an
-// injected member fetch, bypassing the standing gateway so MemberDisplayName is
-// unit-tested without a live Discord client.
-func newNameTestPresence(guildID string, fetch func(ctx context.Context, r rest.Rest, gid, uid snowflake.ID) (*discord.Member, error)) *Presence {
-	p := &Presence{}
-	p.guildID.Store(guildID)
-	p.fetchMember = fetch
-	// A non-nil standing client so MemberDisplayName's single client borrow
-	// succeeds; its Rest is handed to the injected fetch, which ignores it.
-	p.client.Store(&bot.Client{})
-	return p
+// newNameTestPresence builds a bare Clients registry with one standing client
+// whose entry registers guildID (empty = no known Guild, the wait-state), plus an
+// injected member fetch, so MemberDisplayName is unit-tested without a live
+// gateway. Its Rest is handed to the injected fetch, which ignores it.
+func newNameTestPresence(guildID string, fetch func(ctx context.Context, r rest.Rest, gid, uid snowflake.ID) (*discord.Member, error)) *Clients {
+	c := &Clients{
+		entries: map[string]*clientEntry{},
+		tenants: map[uuid.UUID]*tenantState{},
+	}
+	c.fetchMember = fetch
+	entry := &clientEntry{token: "tok", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(&bot.Client{})
+	if guildID != "" {
+		entry.registeredGuilds[guildID] = true
+	}
+	c.entries["tok"] = entry
+	return c
 }
 
 func TestMemberDisplayNamePrecedence(t *testing.T) {

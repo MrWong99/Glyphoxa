@@ -23,10 +23,10 @@ func TestProviderPresenceRefresher(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	srv := rpc.NewProviderServer(store, testCipher(t), nil)
-	fired := make(chan struct{}, 4)
-	srv.SetPresenceRefresher(func() { fired <- struct{}{} })
-
 	tenantID := uuid.New()
+	fired := make(chan uuid.UUID, 4)
+	srv.SetPresenceRefresher(func(id uuid.UUID) { fired <- id })
+
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			return next(auth.WithTenant(ctx, tenantID), req)
@@ -48,7 +48,10 @@ func TestProviderPresenceRefresher(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 	select {
-	case <-fired:
+	case got := <-fired:
+		if got != tenantID {
+			t.Fatalf("refresher fired for tenant %s, want the saving tenant %s (#489: only that tenant refreshes)", got, tenantID)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("presence refresher did not fire after a successful save")
 	}

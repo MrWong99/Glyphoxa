@@ -45,27 +45,34 @@ func (s *Store) GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (De
 	return d, nil
 }
 
-// GetLatestDeploymentConfig returns the most-recently-updated deployment config,
-// or ErrNotFound when none is saved. The standing presence (#102, ADR-0010)
-// reads this at boot, before any request — so, like GetActiveCampaign, it has no
-// tenant context and reads the single-operator global latest (ADR-0039). More
-// than one deployment_config row only exists under the deferred multi-tenant
-// tier; this returns the newest, and a later WHERE tenant_id = $1 narrows it
-// then (as GetDeploymentConfig already does for the request path).
-func (s *Store) GetLatestDeploymentConfig(ctx context.Context) (DeploymentConfig, error) {
-	row := s.db.QueryRow(ctx,
+// ListDeploymentConfigs returns every saved deployment config, one per Tenant,
+// ordered oldest-updated first for a deterministic boot seed. The per-tenant
+// Discord client registry (#489, ADR-0010) reads this once at boot — before any
+// request, with no tenant context — to stand up one standing client per distinct
+// Bot token; each request-path read still narrows to a single Tenant via
+// GetDeploymentConfig. An empty table returns a nil slice, not an error.
+func (s *Store) ListDeploymentConfigs(ctx context.Context) ([]DeploymentConfig, error) {
+	rows, err := s.db.Query(ctx,
 		`SELECT `+deploymentConfigColumns+`
 		   FROM deployment_config
-		  ORDER BY updated_at DESC, tenant_id DESC
-		  LIMIT 1`)
-	d, err := scanDeploymentConfig(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return DeploymentConfig{}, ErrNotFound
-	}
+		  ORDER BY updated_at ASC, tenant_id ASC`)
 	if err != nil {
-		return DeploymentConfig{}, fmt.Errorf("storage: get latest deployment_config: %w", err)
+		return nil, fmt.Errorf("storage: list deployment_config: %w", err)
 	}
-	return d, nil
+	defer rows.Close()
+
+	var out []DeploymentConfig
+	for rows.Next() {
+		d, err := scanDeploymentConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan deployment_config: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list deployment_config: %w", err)
+	}
+	return out, nil
 }
 
 // SaveDiscordBotToken upserts only the deployment Bot token columns (sealed

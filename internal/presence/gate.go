@@ -27,27 +27,29 @@ type GMChecker interface {
 }
 
 // Gate is the server-side authorization check for slash-command interactions
-// (ADR-0010). It resolves the configured Guild lazily via guildID (the presence
-// only learns its Guild once the deployment config is loaded), so a wait-state
-// presence ("" Guild) denies every command until a Guild is configured.
+// (ADR-0010). Under the per-Tenant client registry (#489) the presence no longer
+// has one configured Guild, so the Gate accepts any KNOWN Guild — the configured
+// Guild of some resolved Tenant (wired to Clients.KnownGuild) — until #490's
+// TenantResolver narrows an interaction to its owning Tenant. A wait-state (no
+// Tenant resolved yet) knows no Guild and denies every command.
 type Gate struct {
-	gm      GMChecker
-	guildID func() string
+	gm    GMChecker
+	known func(guildID string) bool
 }
 
-// NewGate builds a Gate over the GM identity checker and a resolver for the
-// configured Guild (wired to Presence.GuildID). guildID must be non-nil.
-func NewGate(gm GMChecker, guildID func() string) *Gate {
-	return &Gate{gm: gm, guildID: guildID}
+// NewGate builds a Gate over the GM identity checker and a predicate reporting
+// whether a Guild is a known (resolved-Tenant) Guild (wired to
+// Clients.KnownGuild). known must be non-nil.
+func NewGate(gm GMChecker, known func(guildID string) bool) *Gate {
+	return &Gate{gm: gm, known: known}
 }
 
-// CheckGuild passes when the interaction happened in the configured Guild. This
-// is the /roll rule (ADR-0010): anyone in the configured Guild, no user check.
-// A DM (empty interactionGuildID) is denied, as is any interaction while the
-// presence has no configured Guild yet.
+// CheckGuild passes when the interaction happened in a known Guild. This is the
+// /roll rule (ADR-0010): anyone in a configured Guild, no user check. A DM (empty
+// interactionGuildID) is denied, as is any interaction in an unknown Guild
+// (including while no Tenant is resolved yet).
 func (g *Gate) CheckGuild(interactionGuildID string) error {
-	want := g.guildID()
-	if want == "" || interactionGuildID != want {
+	if interactionGuildID == "" || !g.known(interactionGuildID) {
 		return ErrWrongGuild
 	}
 	return nil

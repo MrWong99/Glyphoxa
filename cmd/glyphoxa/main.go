@@ -545,7 +545,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// surviving with no Voice Session active. Built only when this Instance drives
 	// voice (`all` mode); a web-only replica runs no Bot. Declared at function
 	// scope so the shutdown path below can Close it after the Manager drains.
-	var pres *presence.Presence
+	var clients *presence.Clients
 	var reg *presence.Registry
 	if withVoice {
 		// Butler GM-only voice-address gate (#280, ADR-0024): arm the
@@ -561,11 +561,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		if !dev && gmID.Empty() {
 			log.Warn("butler voice-address gate armed with no GM identity source (no tenant-operator binding, empty allowlist); Butler unaddressable by voice")
 		}
-		gate := presence.NewGate(gmID, func() string {
-			if pres == nil {
-				return ""
-			}
-			return pres.GuildID()
+		// Interim Gate check (#489): with the per-tenant client registry there is no
+		// single configured Guild, so a slash interaction is authorized when it comes
+		// from ANY resolved Tenant's Guild (Clients.KnownGuild). #490's TenantResolver
+		// narrows an interaction to its owning Tenant. clients is captured by closure
+		// (nil in the wait-state before NewClients runs, and in web-only mode).
+		gate := presence.NewGate(gmID, func(guildID string) bool {
+			return clients != nil && clients.KnownGuild(guildID)
 		})
 		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
@@ -574,17 +576,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// TapeConsentChanged on the SAME process-wide bus the session Manager uses, so
 		// a live tape arms or clears that Speaker's lane.
 		reg.RegisterComponentHandler(presence.NewConsentButtons(store, eventBus, log).HandleComponent)
-		pres = presence.New(store, cipher, reg, cfg.Token, log)
-		// The voice loop borrows this one client instead of dialing its own per
-		// session; set BEFORE the Manager copies cfg into its base config. Note:
-		// pres.Ensure is deliberately NOT called here — it opens the gateway, whose
-		// interaction goroutines read `mgr` via the /glyphoxa search resolver, so it
-		// must run AFTER mgr is assigned (below) to establish the happens-before edge.
-		cfg.Client = pres.ClientProvider()
-		// Ensure is deferred until after the Manager is built: the GM session commands
-		// (#108), /glyphoxa search (#120) and /glyphoxa mute/muteall (#211) all need
-		// the Manager, so they register below and the single Ensure then registers the
-		// FULL command surface in one per-Guild registration.
+		clients = presence.NewClients(store, cipher, reg, cfg.Token, log)
+		// The voice loop borrows the Tenant's standing client from the registry via
+		// the session Manager's Deps.Clients (wired below), NOT a single shared
+		// ClientProvider on the base config — a per-session start resolves the client
+		// keyed by its own Tenant's Bot token. EnsureAll is deferred until after the
+		// Manager is built: the GM session commands (#108), /glyphoxa search (#120)
+		// and /glyphoxa mute/muteall (#211) all need the Manager, so they register
+		// below and the single EnsureAll then registers the FULL command surface.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
@@ -620,8 +619,8 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// is the shared GM-identity checker (ADR-0055). Shared by the relay, chunker,
 	// and the Character CRUD invalidation hook.
 	var speakerNamer speaker.MemberNamer
-	if pres != nil {
-		speakerNamer = pres
+	if clients != nil {
+		speakerNamer = clients
 	}
 	speakerResolver := speaker.NewResolver(store, speakerNamer, gmID, log)
 
@@ -729,6 +728,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			KGW:         knowledgeAdapter,
 			Recap:       knowledge.NewRecap(recapEngine, store, sessions),
 		},
+	}
+	// Per-tenant Discord client registry (#489): every manager-started Voice
+	// Session borrows the standing client keyed by its own Tenant's resolved Bot
+	// token, so a start touches only that Tenant's client (never the global-latest
+	// singleton). Set only when a standing presence exists (`all` mode) so a
+	// web-only Manager leaves Clients a true nil interface. A typed-nil
+	// *presence.Clients would make m.clients != nil and panic at Start.
+	if clients != nil {
+		deps.Clients = clients
 	}
 
 	// Resolve the process embeddings provider ONCE and share it across the two
@@ -887,13 +895,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// voiced roster for the resolver + autocomplete.
 			presence.SayCommand(mgr, store),
 		)
-		// Bring the presence up at boot (AC: the commands appear with no Voice
-		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
-		// — it stays in the wait-state and the RPC refresher retries on the next save.
-		if err := pres.Ensure(ctx); err != nil {
-			log.Warn("presence: initial ensure failed; the slash-command surface "+
+		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
+		// Session), one standing client per distinct Bot token (#489, ADR-0039
+		// presence-before-request). Non-fatal per Tenant: a bad or absent token
+		// leaves that Tenant in the wait-state and the RPC refresher retries on its
+		// next save, without blocking the others. Then a background poll reconciles
+		// out-of-band changes (a raw DB write / a missed refresher) on the interval.
+		if err := clients.EnsureAll(ctx); err != nil {
+			log.Warn("presence: initial seed failed; the slash-command surface "+
 				"will retry when Discord settings are next saved", "err", err)
 		}
+		go clients.Run(ctx)
 	}
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
@@ -905,23 +917,38 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// settings save (#102), so a newly-saved Bot token / Guild registers the
 	// slash-command surface without a restart. bg-context so it outlives the RPC
 	// request; nil in web-only mode (no presence).
-	var presenceRefresh func()
-	if pres != nil {
-		presenceRefresh = func() {
-			if err := pres.Ensure(context.Background()); err != nil {
+	var presenceRefresh func(tenantID uuid.UUID)
+	if clients != nil {
+		presenceRefresh = func(tenantID uuid.UUID) {
+			if err := clients.EnsureTenant(context.Background(), tenantID); err != nil {
 				log.Warn("presence: refresh after Discord settings save failed; "+
-					"will retry on the next save or Voice Session cycle", "err", err)
+					"will retry on the next save or Voice Session cycle", "tenant", tenantID, "err", err)
 			}
 		}
 	}
-	// The Players panel member picker (#279) resolves the operator's voice channel
-	// from the deployment config and reads its occupants off the standing presence's
-	// voice-state cache. nil in web-only mode (no presence) so the RPC serves empty.
+	// Per-tenant Discord integration health for the Configuration read (#489):
+	// "ok"/"waiting"/"failed" + detail for the request Tenant's standing client.
+	// nil in web-only mode (no presence).
+	var integrationStatus func(tenantID uuid.UUID) (string, string)
+	if clients != nil {
+		integrationStatus = func(tenantID uuid.UUID) (string, string) {
+			st := clients.IntegrationStatus(tenantID)
+			return st.State, st.Detail
+		}
+	}
+	// The Players panel member picker (#279) resolves the REQUEST Tenant's voice
+	// channel from its deployment config (#489 — tenant-scoped) and reads its
+	// occupants off that Tenant's standing client's voice-state cache. nil in
+	// web-only mode (no presence) so the RPC serves empty.
 	var memberLister func(context.Context) ([]presence.Member, error)
-	if pres != nil {
-		pres := pres
+	if clients != nil {
+		clients := clients
 		memberLister = func(ctx context.Context) ([]presence.Member, error) {
-			dep, err := store.GetLatestDeploymentConfig(ctx)
+			tenantID, ok := auth.TenantID(ctx)
+			if !ok {
+				return nil, fmt.Errorf("resolve voice channel: no tenant in context")
+			}
+			dep, err := store.GetDeploymentConfig(ctx, tenantID)
 			if err != nil {
 				return nil, fmt.Errorf("resolve voice channel: %w", err)
 			}
@@ -929,10 +956,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			if err != nil {
 				return nil, fmt.Errorf("parse voice channel id %q: %w", dep.VoiceChannelID, err)
 			}
-			return pres.VoiceChannelMembers(ctx, channelID)
+			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -970,10 +997,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// 'running' and the loop's ended_at write never races a closing pool.
 	err = runWebTier(ctx, srv)
 	mgr.Shutdown()
-	// Close the standing presence AFTER the Manager drains, so a live session
-	// releases the shared client before it is torn down (#102).
-	if pres != nil {
-		pres.Close()
+	// Close every standing client AFTER the Manager drains, so a live session
+	// releases its borrowed client before it is torn down (#489).
+	if clients != nil {
+		clients.Close()
 	}
 	return err
 }
@@ -1046,7 +1073,7 @@ var plainMountPolicy = map[string]auth.TenantMode{
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each a row in the guarded mount table
 // (#446 — the Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1142,6 +1169,11 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// token / Guild registers the slash-command surface without a restart (#102).
 	if presenceRefresh != nil {
 		providerSrv.SetPresenceRefresher(presenceRefresh)
+	}
+	// The Configuration read surfaces THIS Tenant's Discord integration health
+	// (#489): ok / waiting / failed (+ detail) for its standing client.
+	if integrationStatus != nil {
+		providerSrv.SetIntegrationStatusSource(integrationStatus)
 	}
 	// The OAuth client id is the Discord application id; ListProviderConfigs
 	// echoes it so the Configuration screen builds the bot-authorization URL

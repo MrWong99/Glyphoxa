@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 )
 
 // Member is one Discord User currently in a voice channel (#279): the snowflake
@@ -47,8 +48,11 @@ type voiceOccupant struct {
 // one member (logged) rather than dropping the whole list. A wait-state presence
 // (no Bot token yet) returns ErrNoClient, which the RPC handler maps to an empty
 // list so the picker falls back to free-text entry (ADR-0003).
-func (p *Presence) VoiceChannelMembers(ctx context.Context, channelID snowflake.ID) ([]Member, error) {
-	client, err := p.Client()
+//
+// The Tenant's standing client is resolved from the registry (#489), so a member
+// picker read touches only that Tenant's client.
+func (c *Clients) VoiceChannelMembers(ctx context.Context, tenantID uuid.UUID, channelID snowflake.ID) ([]Member, error) {
+	client, err := c.ClientForTenant(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +75,7 @@ func (p *Presence) VoiceChannelMembers(ctx context.Context, channelID snowflake.
 
 	members := make([]Member, 0, len(occupants))
 	for _, o := range occupants {
-		m, err := p.fetchMember(ctx, client.Rest, o.guildID, o.userID)
+		m, err := c.fetchMember(ctx, client.Rest, o.guildID, o.userID)
 		if err != nil {
 			// One member failing (rate limit, gone) must not blank the whole picker;
 			// skip it and keep the rest.
