@@ -399,6 +399,17 @@ jobs:
       - name: helm-validate self-test
         run: scripts/helm-validate-test.sh
 
+      # The SaaS install/update scripts (deploy/saas/): their --dry-run paths
+      # generate the values file the chart is installed with, so their
+      # self-tests belong with the chart gates — they helm-template the
+      # generated values against the local chart (both admission modes) and
+      # pin the version-decision logic. Offline: no cluster, no network.
+      - name: saas install script self-test
+        run: deploy/saas/install-test.sh
+
+      - name: saas update script self-test
+        run: deploy/saas/update-test.sh
+
   e2e:
     name: deploy e2e (k3d smoke)
     # Wait for the `image` job so its cache-to (mode=max) has populated the gha

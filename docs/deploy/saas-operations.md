@@ -195,8 +195,10 @@ schema change.
 - [ ] Provider dashboards (Groq/ElevenLabs) checked against the ledger's
       estimates for the first month — calibrate expectations; the price map is
       an estimate by design.
-- [ ] Backups running and restore-tested ([k3s-proxmox.md §8](k3s-proxmox.md))
-      — the ledger and subscription history are now business records.
+- [ ] Backups running and restore-tested ([k3s-proxmox.md §8](k3s-proxmox.md);
+      on a scripted cloud install, `deploy/saas/install.sh`'s backup option +
+      the pre-upgrade dump `deploy/saas/update.sh` takes) — the ledger and
+      subscription history are now business records.
 - [ ] `plans.json` (or the Helm values catalog) in version control.
 - [ ] Terms with your users about recording/consent (the Rollover Tape is
       consent-gated by design, ADR-0051 — point users at it).
