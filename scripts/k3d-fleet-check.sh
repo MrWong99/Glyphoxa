@@ -7,7 +7,9 @@
 # cluster to convince yourself of the four things the unit/helm tests can only
 # prove in the small:
 #
-#   1. replicas=2 both reach Available (the shared pool boots N Voice Instances);
+#   1. replicas=2 both reach Available AS CLAIM-PLANE WORKERS (the pods run
+#      `glyphoxa -mode voice` with NO -guild/-channel — the shared pool takes each
+#      session's target from the Tenant's saved config, #491);
 #   2. `/roll` is handled EXACTLY ONCE with two replicas up (ADR-0057 (c): every
 #      gateway session on the shared token sees the interaction, but only the one
 #      elected presence owner dispatches it — the non-owner drops its duplicate);
@@ -19,6 +21,13 @@
 #      replicas booting on the shared token must NOT blow the 1000/24h budget —
 #      the glyphoxa_gateway_identify_total counters stay small and sane.
 #
+# WORKER TOPOLOGY, not standalone: `glyphoxa -mode voice` boots as the claim-plane
+# worker (with the OwnerElector) ONLY when BOTH -guild and -channel are unset
+# (main.go); setting either flips it to the LEGACY STANDALONE node, which has no
+# elector and no presence_owner row. So this script leaves voice.guild/voice.channel
+# EMPTY. The elector electing an owner (a presence_owner row appearing) is itself
+# part of what step 3 verifies.
+#
 # The claim plane (#491) and presence-owner election (#492) are what make several
 # voice pods coexist on one central token; this script exercises the whole shape
 # end to end on a real cluster.
@@ -27,13 +36,13 @@
 #
 #   k3d cluster create gx-fleet
 #   docker build -t glyphoxa:fleet . && k3d image import glyphoxa:fleet -c gx-fleet
-#   DISCORD_BOT_TOKEN=... VOICE_GUILD=... VOICE_CHANNEL=... ./scripts/k3d-fleet-check.sh
+#   DISCORD_BOT_TOKEN=... ./scripts/k3d-fleet-check.sh
 #   k3d cluster delete gx-fleet
 #
-# All knobs are env vars with defaults. A LIVE DISCORD_BOT_TOKEN is REQUIRED
-# (step 2/3 need the bot online to receive `/roll`); without it the script still
-# runs steps 1 and 4 but SKIPS the interaction and failover-dispatch checks with a
-# loud notice.
+# All knobs are env vars with defaults. A LIVE DISCORD_BOT_TOKEN is REQUIRED for
+# steps 2 and 3 (the bot must be online to receive `/roll` and to elect an owner);
+# without it the script still runs steps 1 and 4 but SKIPS the interaction and
+# failover checks with a loud notice.
 set -euo pipefail
 
 RELEASE="${RELEASE:-glyphoxa-fleet}"
@@ -50,11 +59,16 @@ FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-45}"
 # Local port the per-pod /metrics listener is forwarded to for the IDENTIFY scrape.
 METRICS_LOCAL_PORT="${METRICS_LOCAL_PORT:-19091}"
 
-# Live Discord credentials for the interaction checks (steps 2 and 3). Optional:
-# absent, those steps are skipped with a notice.
+# Resource names. The chart's fullname == RELEASE when RELEASE contains the chart
+# name "glyphoxa" (the default does); the StatefulSet/Deployment suffixes mirror
+# scripts/e2e-deploy-smoke.sh.
+PG="${RELEASE}-postgres"     # Postgres StatefulSet
+VOICE="${RELEASE}-voice"     # voice Deployment
+
+# Live Discord credentials for the interaction/election checks (steps 2 and 3).
+# Optional: absent, those steps are skipped with a notice. NOTE: no VOICE_GUILD/
+# VOICE_CHANNEL — worker mode requires them UNSET (see the header).
 DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
-VOICE_GUILD="${VOICE_GUILD:-}"
-VOICE_CHANNEL="${VOICE_CHANNEL:-}"
 
 note() { printf '\n\033[1;36mk3d-fleet-check: %s\033[0m\n' "$*"; }
 warn() { printf '\n\033[1;33mk3d-fleet-check: %s\033[0m\n' "$*"; }
@@ -63,58 +77,68 @@ fail() { printf '\n\033[1;31mk3d-fleet-check: %s\033[0m\n' "$*" >&2; exit 1; }
 command -v kubectl >/dev/null || fail "kubectl not found"
 command -v helm >/dev/null || fail "helm not found"
 
-# psql against the in-cluster Postgres (the migrate/seed hooks' DB). Reads the DSN
-# the chart wired into the app Secret, then runs the query inside the postgres pod.
+# psql against the in-cluster Postgres. Postgres is a StatefulSet (not a Deployment),
+# so exec into statefulset/<pg> (mirrors e2e-deploy-smoke.sh's statefulset/ handle).
 psql_query() {
   local sql="$1"
-  kubectl -n "$NAMESPACE" exec deploy/"$RELEASE"-glyphoxa-postgres -- \
+  kubectl -n "$NAMESPACE" exec "statefulset/${PG}" -- \
     psql -qtAX -U glyphoxa -d glyphoxa -c "$sql"
 }
 
-# The elected presence owner's instance_id is the presence_owner singleton row;
-# its prefix is the owning pod's hostname (== pod name), so it maps a claim back
-# to a pod (newVoiceInstanceID: hostname-uuid8).
+# The elected presence owner's instance_id is the presence_owner singleton row; its
+# prefix is the owning pod's hostname (== pod name), so it maps a claim back to a pod
+# (newVoiceInstanceID: hostname-uuid8).
 current_owner_instance() { psql_query "SELECT instance_id FROM presence_owner;"; }
 
 install_release() {
-  note "installing $RELEASE with voice.replicas=$REPLICAS (image $IMAGE_REPO:$IMAGE_TAG)"
+  note "installing $RELEASE with voice.replicas=$REPLICAS (image $IMAGE_REPO:$IMAGE_TAG), voice-only WORKER mode"
+  # A dummy 32-byte base64 app secret: voice pods now MOUNT GLYPHOXA_SECRET (#492,
+  # ADR-0057 (d)) so the chart requires appSecret even with the web tier off. No real
+  # BYOK decryption happens in this check.
+  local app_secret
+  app_secret="$(head -c 32 /dev/zero | base64)"
   local args=(
     --namespace "$NAMESPACE" --create-namespace
     --set image.repository="$IMAGE_REPO" --set image.tag="$IMAGE_TAG"
     --set voice.replicas="$REPLICAS"
-    # A voice-only fleet: the web tier is not needed for this check, and disabling
-    # it drops the OAuth-credential requirements.
+    # Voice-only fleet: web off drops the OAuth-credential requirements.
     --set web.enabled=false
+    # WORKER MODE: guild/channel stay EMPTY so the pods run the claim-plane worker
+    # with the OwnerElector, NOT the legacy standalone node (see the header).
+    --set-string voice.guild=""
+    --set-string voice.channel=""
+    --set-string appSecret="$app_secret"
     --wait --timeout "$TIMEOUT"
   )
+  # The bot token (required by the chart) plus dummy provider keys (no provider is
+  # called here). A live token lets the pods actually open the gateway and elect an
+  # owner; a placeholder still boots them to Ready (#44 resilience — /readyz pings the
+  # DB, not Discord) for steps 1 and 4.
   if [[ -n "$DISCORD_BOT_TOKEN" ]]; then
-    [[ -n "$VOICE_GUILD" && -n "$VOICE_CHANNEL" ]] || fail "with DISCORD_BOT_TOKEN set, VOICE_GUILD and VOICE_CHANNEL are required"
-    args+=(--set-string discordBotToken="$DISCORD_BOT_TOKEN"
-           --set-string voice.guild="$VOICE_GUILD"
-           --set-string voice.channel="$VOICE_CHANNEL")
+    args+=(--set-string discordBotToken="$DISCORD_BOT_TOKEN")
   else
-    # No live token: a placeholder still lets the pods reach Available (#44
-    # resilience — /readyz pings the DB, not Discord), enough for steps 1 and 4.
-    args+=(--set-string discordBotToken=placeholder-fleet-token
-           --set-string voice.guild="111111111111111111"
-           --set-string voice.channel="222222222222222222")
+    args+=(--set-string discordBotToken=placeholder-fleet-token)
   fi
-  # The provider keys are `required` when voice.enabled; dummies suffice (no
-  # provider is called in this check).
   args+=(--set-string elevenLabsApiKey=placeholder
          --set-string geminiApiKey=placeholder
          --set-string groqApiKey=placeholder)
   helm upgrade --install "$RELEASE" "$CHART" "${args[@]}"
 }
 
-# --- Step 1: both replicas Available -----------------------------------------
+# --- Step 1: both replicas Available as workers -------------------------------
 step_replicas_available() {
-  note "step 1: waiting for $REPLICAS voice replicas to be Available"
-  kubectl -n "$NAMESPACE" rollout status deploy/"$RELEASE"-glyphoxa-voice --timeout "$TIMEOUT"
+  note "step 1: waiting for $REPLICAS voice replicas (claim-plane workers) to be Available"
+  kubectl -n "$NAMESPACE" rollout status "deployment/${VOICE}" --timeout "$TIMEOUT"
   local ready
-  ready=$(kubectl -n "$NAMESPACE" get deploy/"$RELEASE"-glyphoxa-voice -o jsonpath='{.status.readyReplicas}')
+  ready=$(kubectl -n "$NAMESPACE" get "deployment/${VOICE}" -o jsonpath='{.status.readyReplicas}')
   [[ "$ready" == "$REPLICAS" ]] || fail "step 1: readyReplicas=$ready, want $REPLICAS"
-  note "step 1 OK: $ready/$REPLICAS voice pods Ready"
+  # Confirm the pods really are workers (no -guild/-channel in the arg vector).
+  local args
+  args=$(kubectl -n "$NAMESPACE" get "deployment/${VOICE}" -o jsonpath='{.spec.template.spec.containers[0].args}')
+  if grep -q -- '-guild' <<<"$args"; then
+    fail "step 1: voice args carry -guild → pods run LEGACY STANDALONE, not workers: $args"
+  fi
+  note "step 1 OK: $ready/$REPLICAS worker pods Ready (no -guild/-channel)"
 }
 
 # --- Step 4: IDENTIFY counters sane under cold-start -------------------------
@@ -140,9 +164,6 @@ step_identify_budget() {
     note "  $pod: identify_total=$n"
     total=$((total + n))
   done
-  # A sane cold-start is a few IDENTIFYs per pod. Flag a blowout (an obvious
-  # threshold well under the 1000/24h budget) so a serialization regression is
-  # caught even without live traffic.
   note "step 4: fleet identify_total=$total"
   if (( total > 50 )); then
     fail "step 4: identify_total=$total looks like a budget blowout — is IDENTIFY serialization (#486) intact?"
@@ -153,20 +174,28 @@ step_identify_budget() {
 # --- Step 3: failover — kill owner, survivor re-elected ----------------------
 step_failover() {
   note "step 3: presence-owner failover"
-  local owner_instance owner_pod
-  owner_instance=$(current_owner_instance)
-  [[ -n "$owner_instance" ]] || fail "step 3: no presence_owner row — did an owner ever get elected? (needs a live token)"
+  # An elected owner presupposes the pods opened the gateway — only a LIVE token does
+  # that. Wait for the row to appear (the elector's first successful acquire).
+  local owner_instance owner_pod deadline
+  deadline=$(( SECONDS + FAILOVER_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    owner_instance=$(current_owner_instance || true)
+    [[ -n "$owner_instance" ]] && break
+    sleep 2
+  done
+  [[ -n "$owner_instance" ]] || fail "step 3: no presence_owner row appeared — did an owner get elected? (needs a live token so the gateway opens)"
   # instance_id is <pod-name>-<uuid8>; strip the uuid8 suffix to get the pod name.
   owner_pod="${owner_instance%-*}"
   note "step 3: current owner instance=$owner_instance (pod $owner_pod)"
   note "step 3: deleting the owner pod"
   kubectl -n "$NAMESPACE" delete pod "$owner_pod" --wait=false
 
-  local deadline=$(( SECONDS + FAILOVER_TIMEOUT )) new_owner=""
+  deadline=$(( SECONDS + FAILOVER_TIMEOUT ))
+  local new_owner=""
   while (( SECONDS < deadline )); do
     new_owner=$(current_owner_instance || true)
     if [[ -n "$new_owner" && "$new_owner" != "$owner_instance" ]]; then
-      note "step 3 OK: survivor elected new owner=$new_owner within $(( SECONDS - (deadline - FAILOVER_TIMEOUT) ))s"
+      note "step 3 OK: survivor elected new owner=$new_owner (was $owner_instance)"
       return
     fi
     sleep 2
@@ -177,14 +206,14 @@ step_failover() {
 # --- Step 2: /roll handled exactly once (human in the loop) ------------------
 step_roll_once() {
   note "step 2: exactly-once /roll (MANUAL — needs you at a Discord client)"
-  cat <<'EOF'
-  With BOTH voice replicas up and one elected presence owner:
-    1. In the configured guild, run  /roll 1d20  (or any /roll).
+  cat <<EOF
+  With BOTH voice worker replicas up and one elected presence owner:
+    1. In a guild the bot is in, run  /roll 1d20  (or any /roll).
     2. You must see EXACTLY ONE reply. Two replies = the SetActive gate failed and
        both replicas dispatched (ADR-0057 (c) regression). Zero replies = the
        owner is not registering commands (election or client-registry problem).
     3. Cross-check the logs: exactly one pod should log the dispatch. Run:
-         kubectl -n NAMESPACE logs -l app.kubernetes.io/component=voice \
+         kubectl -n ${NAMESPACE} logs -l app.kubernetes.io/component=voice \\
            --prefix --tail=200 | grep -i 'slash command'
        and confirm a single pod handled it.
 EOF
@@ -198,7 +227,7 @@ if [[ -n "$DISCORD_BOT_TOKEN" ]]; then
   step_roll_once
   step_failover
 else
-  warn "DISCORD_BOT_TOKEN unset: skipping step 2 (/roll) and step 3 (failover dispatch) — set it plus VOICE_GUILD/VOICE_CHANNEL to run them"
+  warn "DISCORD_BOT_TOKEN unset: skipping step 2 (/roll) and step 3 (failover) — set it to run them (guild/channel MUST stay unset for worker mode)"
 fi
 
 note "done. Tear the release down with: helm -n $NAMESPACE uninstall $RELEASE"
