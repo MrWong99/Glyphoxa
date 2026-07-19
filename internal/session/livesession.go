@@ -34,7 +34,11 @@ func (m *Manager) Live(tenantID uuid.UUID) *LiveSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	as := m.active[tenantID]
-	if as == nil {
+	// A session in its end window (as.ended, the #487 tombstone) is already tearing
+	// down — its bus bridge is cut — so hand out no handle: a mute/say/replay then
+	// would publish onto a detached bus and falsely report success (#488 review item
+	// 6). Idle (nil) and ending both map to the caller's ErrNoActiveSession.
+	if as == nil || as.ended {
 		return nil
 	}
 	return &LiveSession{m: m, as: as}
@@ -50,7 +54,11 @@ func (m *Manager) Live(tenantID uuid.UUID) *LiveSession {
 func (l *LiveSession) revalidate(fn func()) error {
 	l.m.mu.Lock()
 	defer l.m.mu.Unlock()
-	if l.m.active[l.as.tenantID] != l.as {
+	// Stale once this handle's session is no longer the Tenant's active one, OR once
+	// it has entered its end window (as.ended, the #487 tombstone): an op arriving
+	// during teardown must refuse rather than publish onto the already-detached bus
+	// and report a phantom success (#488 review item 6).
+	if l.m.active[l.as.tenantID] != l.as || l.as.ended {
 		return ErrNoActiveSession
 	}
 	if fn != nil {

@@ -165,20 +165,29 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 	}
 }
 
-// activeSessionSource reports the live voice session, if any.
-// *session.Manager satisfies it; tests drive a fake.
+// activeSessionSource is the live Voice Session read the CampaignService Active-
+// Campaign resolution + archive/delete guard need (#488 review items 1/2):
+// Active resolves the CALLER's Tenant session (Tenant-scoped live-first) and
+// IsCampaignLive scans ALL sessions for the archive guard. *session.Manager
+// satisfies it; tests drive a fake.
 type activeSessionSource interface {
-	Snapshot() (storage.VoiceSession, bool)
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
+	IsCampaignLive(campaignID uuid.UUID) bool
+}
+
+// voiceLiveSource reports whether ANY voice session is running in this process —
+// the tenant-agnostic health signal the Discord probe needs (#150). *session.Manager
+// satisfies it via AnyLive.
+type voiceLiveSource interface {
+	AnyLive() bool
 }
 
 // SetSessions wires the live session source the Discord health check consults
-// (#150). Called once at boot, after the session manager exists and before the
-// server serves, so no lock is needed.
-func (s *VoiceServer) SetSessions(src activeSessionSource) {
-	s.sessionActive = func() bool {
-		_, active := src.Snapshot()
-		return active
-	}
+// (#150): a process-wide "is any voice session running" signal (tenant-agnostic,
+// correct at any cap, #488). Called once at boot, after the session manager exists
+// and before the server serves, so no lock is needed.
+func (s *VoiceServer) SetSessions(src voiceLiveSource) {
+	s.sessionActive = src.AnyLive
 }
 
 // SetKeyEntitlement wires the platform-key entitlement every provider-key

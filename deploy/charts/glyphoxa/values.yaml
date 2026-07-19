@@ -303,11 +303,14 @@ web:
   # distinct, user-visible error (mapped to Connect ResourceExhausted).
   #
   # RELEASE GATE: the default 1 keeps today's single-session behaviour BYTE-IDENTICAL
-  # — nothing about a stock deploy changes. Raising it >1 turns on true concurrency;
-  # that is SAFE now that per-tenant Discord clients (#489) and per-tenant GM scoping
-  # (#490) are merged (both prerequisites named in ADR-0057 are satisfied), but it is
-  # still SOAK-GATED for DAVE/central-token deploys (#493) — raise it only once the
-  # soak passes for your deployment shape. Values <1 are treated as 1 by the binary.
+  # — nothing about a stock deploy changes. Raising it >1 turns on true concurrency.
+  # The web-tier reads are Tenant-scoped for this: the CampaignService live-first
+  # Active-Campaign pivot resolves the caller's OWN Tenant session (not an arbitrary
+  # one) and the archive/delete guard scans ALL sessions (#488). Prerequisites named
+  # in ADR-0057 are satisfied: per-tenant Discord clients (#489) + per-tenant GM
+  # scoping (#490) are merged. It is still SOAK-GATED for DAVE/central-token deploys
+  # (#493) — raise it only once the soak passes for your deployment shape. Values <1
+  # are treated as 1 by the binary.
   maxVoiceSessions: 1
 
   # Single replica for v1.0 (ADR-0039): the self-host web tier holds sessions

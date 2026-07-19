@@ -249,7 +249,7 @@ func (s *SessionServer) liveCampaign(ctx context.Context, tenantID uuid.UUID) (u
 // this resolves the durable selection then the most-recent fallback.
 func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, error) {
 	tenantID, _ := auth.TenantID(ctx)
-	live := func() (uuid.UUID, bool) { return s.liveCampaign(ctx, tenantID) }
+	live := func(c context.Context) (uuid.UUID, bool) { return s.liveCampaign(c, tenantID) }
 	return resolveActiveCampaign(ctx, live, s.store)
 }
 

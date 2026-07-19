@@ -264,7 +264,7 @@ func TestSoftCap_SessionKeepsRunning(t *testing.T) {
 	if len(evs) != 1 || evs[0].Level != voiceevent.SpendCapSoft {
 		t.Fatalf("published spend-cap events = %+v, want one soft", evs)
 	}
-	if _, active := mgr.Snapshot(); !active {
+	if !mgr.AnyLive() {
 		t.Fatal("soft cap must NOT end the session")
 	}
 	if runner.wasCancelled() {
@@ -329,7 +329,7 @@ func waitInactive(t *testing.T, mgr *session.Manager) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, active := mgr.Snapshot(); !active {
+		if !mgr.AnyLive() {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

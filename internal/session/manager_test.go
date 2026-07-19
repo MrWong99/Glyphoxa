@@ -37,7 +37,9 @@ type fakeStore struct {
 	agents       []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
 	onListAgents func()          // mid-op hook: runs during ListAgents, no store lock held (#448)
 	caps         storage.SpendCaps
-	capsErr      error // injected GetTenantSpendCaps failure (#130)
+	capsErr      error         // injected GetTenantSpendCaps failure (#130)
+	depGate      chan struct{} // when non-nil, the first GetDeploymentConfig blocks on it (#488 item 3)
+	depEntered   chan struct{} // the gated GetDeploymentConfig signals here before it parks
 }
 
 func newFakeStore() *fakeStore {
@@ -56,6 +58,22 @@ func (f *fakeStore) now() time.Time {
 }
 
 func (f *fakeStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
+	// depGate lets a test park the FIRST Start inside its unlocked I/O phase (#488
+	// review item 3): a nil gate never blocks; a set gate is ONE-SHOT — the first
+	// caller clears it, signals depEntered (so the test knows THIS Start is parked and
+	// the gate is now clear), and waits, so a concurrent second Tenant's Start sails
+	// past.
+	f.mu.Lock()
+	gate := f.depGate
+	f.depGate = nil
+	entered := f.depEntered
+	f.mu.Unlock()
+	if gate != nil {
+		if entered != nil {
+			entered <- struct{}{}
+		}
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.depReads++
@@ -288,9 +306,9 @@ func TestStartStopLifecycle(t *testing.T) {
 		t.Errorf("loop cfg guild/channel = %q/%q, want saved 111222333/444555666", got.Guild, got.Channel)
 	}
 
-	// Snapshot reflects the active session.
-	if snap, active := mgr.Snapshot(); !active || snap.ID != vs.ID {
-		t.Errorf("Snapshot = %+v active=%v, want active %s", snap, active, vs.ID)
+	// Active reflects the running session for its Tenant.
+	if snap, active, _ := mgr.Active(context.Background(), tenantID); !active || snap.ID != vs.ID {
+		t.Errorf("Active = %+v active=%v, want active %s", snap, active, vs.ID)
 	}
 
 	ended, err := mgr.Stop(context.Background(), tenantID)
@@ -306,8 +324,8 @@ func TestStartStopLifecycle(t *testing.T) {
 	if !runner.wasCancelled() {
 		t.Error("cancellation did not propagate to the loop")
 	}
-	if _, active := mgr.Snapshot(); active {
-		t.Error("Snapshot still active after Stop")
+	if mgr.AnyLive() {
+		t.Error("still active after Stop")
 	}
 }
 
@@ -876,10 +894,7 @@ func TestLoopExitClearsActive(t *testing.T) {
 	}
 	// Wait for the self-exiting loop to End the session and clear active.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, active := mgr.Snapshot(); !active {
-			break
-		}
+	for mgr.AnyLive() {
 		if time.Now().After(deadline) {
 			t.Fatal("active session not cleared after the loop exited")
 		}
@@ -890,13 +905,13 @@ func TestLoopExitClearsActive(t *testing.T) {
 	}
 }
 
-// waitIdle polls Snapshot until the Manager reports no active session — the loop
+// waitIdle polls AnyLive until the Manager reports no active session — the loop
 // exited and the terminal row landed. Fails the test if it stays active.
 func waitIdle(t *testing.T, mgr *session.Manager) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, active := mgr.Snapshot(); !active {
+		if !mgr.AnyLive() {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -939,8 +954,8 @@ func TestFatalLoopErrorRecordsFailed(t *testing.T) {
 	}
 
 	// Guard freed: idle after the fatal exit, and a new Start is accepted (AC4).
-	if _, active := mgr.Snapshot(); active {
-		t.Error("Snapshot still active after a fatal loop exit")
+	if mgr.AnyLive() {
+		t.Error("still active after a fatal loop exit")
 	}
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Errorf("Start after a fatal failure = %v, want success (single-active guard freed)", err)

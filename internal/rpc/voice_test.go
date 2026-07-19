@@ -584,13 +584,11 @@ func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
 	}
 }
 
-// fakeSessions is an activeSessionSource whose Snapshot reports a live voice
-// session iff active is true.
+// fakeSessions is a voiceLiveSource whose AnyLive reports a live voice session iff
+// active is true (#150, #488).
 type fakeSessions struct{ active bool }
 
-func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{}, f.active
-}
+func (f *fakeSessions) AnyLive() bool { return f.active }
 
 // TestGetProviderHealth_ActiveSessionSkipsDiscordProbe pins #150: while a voice
 // session is active, the Discord check short-circuits to healthy WITHOUT

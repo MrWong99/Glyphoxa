@@ -39,6 +39,17 @@ type fakeSessionManager struct {
 	spend            spend.Status // the live meter snapshot GetSession surfaces (#130)
 	startTenant      uuid.UUID    // the tenant id StartSession threaded into Start (#473 coherence)
 	startCampaign    uuid.UUID    // the campaign id StartSession resolved and passed to Start (#473 coherence)
+	// tenantID keys the fake's live session by Tenant (#488 review item 8): when set,
+	// Active/Stop/mute/spend match ONLY the passed tenant, so a test proves the handler
+	// forwards the auth-ctx tenant (a wrong/Nil tenant then misses). uuid.Nil = match
+	// any (back-compat for the tenant-agnostic tests that inject a random tenant).
+	tenantID uuid.UUID
+}
+
+// matchesTenant reports whether the fake's session answers for tenantID (#488 item
+// 8). Unset (uuid.Nil) matches any; otherwise the passed tenant must equal it.
+func (f *fakeSessionManager) matchesTenant(tenantID uuid.UUID) bool {
+	return f.tenantID == uuid.Nil || tenantID == f.tenantID
 }
 
 func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
@@ -63,13 +74,13 @@ func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.
 	return f.current, nil
 }
 
-func (f *fakeSessionManager) Stop(_ context.Context, _ uuid.UUID) (storage.VoiceSession, error) {
+func (f *fakeSessionManager) Stop(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stopErr != nil {
 		return storage.VoiceSession{}, f.stopErr
 	}
-	if !f.active {
+	if !f.active || !f.matchesTenant(tenantID) {
 		return storage.VoiceSession{}, session.ErrNoActiveSession
 	}
 	end := time.Date(2026, 6, 27, 19, 0, 0, 0, time.UTC)
@@ -79,25 +90,34 @@ func (f *fakeSessionManager) Stop(_ context.Context, _ uuid.UUID) (storage.Voice
 	return f.current, nil
 }
 
-func (f *fakeSessionManager) Active(_ context.Context, _ uuid.UUID) (storage.VoiceSession, bool, error) {
+func (f *fakeSessionManager) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.matchesTenant(tenantID) {
+		return storage.VoiceSession{}, false, nil
+	}
 	return f.current, f.active, nil
 }
 
-// Snapshot satisfies the CampaignServer/VoiceServer activeSessionSource seam (the
-// single-operator web-tier convenience reads that stay on Snapshot, #488): the fake
-// is single-session, so it mirrors Active's single-session view.
-func (f *fakeSessionManager) Snapshot() (storage.VoiceSession, bool) {
+// IsCampaignLive satisfies the CampaignService archive/delete guard seam (#488
+// review item 2): the fake reports its single session's campaign live.
+func (f *fakeSessionManager) IsCampaignLive(campaignID uuid.UUID) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.current, f.active
+	return f.active && f.current.CampaignID == campaignID
 }
 
-func (f *fakeSessionManager) SetAgentMute(_ context.Context, _ uuid.UUID, agentID string, muted bool) ([]string, error) {
+// AnyLive satisfies the VoiceServer health seam (#150, #488): any session running.
+func (f *fakeSessionManager) AnyLive() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.active {
+	return f.active
+}
+
+func (f *fakeSessionManager) SetAgentMute(_ context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.active || !f.matchesTenant(tenantID) {
 		return nil, session.ErrNoActiveSession
 	}
 	if !f.inRoster(agentID) {
@@ -123,10 +143,10 @@ func (f *fakeSessionManager) inRoster(agentID string) bool {
 	return false
 }
 
-func (f *fakeSessionManager) SetAllMute(_ context.Context, _ uuid.UUID, muted bool) ([]string, error) {
+func (f *fakeSessionManager) SetAllMute(_ context.Context, tenantID uuid.UUID, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.active {
+	if !f.active || !f.matchesTenant(tenantID) {
 		return nil, session.ErrNoActiveSession
 	}
 	if muted {
@@ -140,18 +160,21 @@ func (f *fakeSessionManager) SetAllMute(_ context.Context, _ uuid.UUID, muted bo
 	return f.mutedIDsLocked(), nil
 }
 
-func (f *fakeSessionManager) MutedAgentIDs(_ uuid.UUID) []string {
+func (f *fakeSessionManager) MutedAgentIDs(tenantID uuid.UUID) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.active {
+	if !f.active || !f.matchesTenant(tenantID) {
 		return nil
 	}
 	return f.mutedIDsLocked()
 }
 
-func (f *fakeSessionManager) Spend(_ uuid.UUID) spend.Status {
+func (f *fakeSessionManager) Spend(tenantID uuid.UUID) spend.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.matchesTenant(tenantID) {
+		return spend.Status{}
+	}
 	return f.spend
 }
 
@@ -335,6 +358,57 @@ func newSessionClientAs(t *testing.T, mgr rpc.SessionManager, store rpc.SessionS
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+}
+
+// newSessionClientWithTenant injects a SPECIFIED tenant, so a test can assert the
+// handler forwards THAT tenant into the Manager calls (#488 review item 8).
+func newSessionClientWithTenant(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore, tenantID uuid.UUID) managementv1connect.SessionServiceClient {
+	t.Helper()
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			return next(auth.WithTenant(ctx, tenantID), req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(mgr, store, nil, nil).Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+}
+
+// TestGetSessionForwardsCtxTenant is #488 review item 8: GetSession must pass the
+// auth-ctx tenant into Manager.Active — the fake is keyed by Tenant, so a session
+// owned by tenant T is visible ONLY when the injected tenant is T, and a session
+// owned by a DIFFERENT tenant reads idle. This proves the handler threads the ctx
+// tenant rather than discarding it.
+func TestGetSessionForwardsCtxTenant(t *testing.T) {
+	t.Parallel()
+	tenantT := uuid.New()
+	campaign := uuid.New()
+
+	// Fake session owned by tenant T, live.
+	mgr := &fakeSessionManager{active: true, tenantID: tenantT, current: storage.VoiceSession{ID: uuid.New(), CampaignID: campaign, Status: storage.VoiceSessionRunning}}
+
+	// Injected tenant == T: the handler forwards T, the fake matches, session is live.
+	okClient := newSessionClientWithTenant(t, mgr, activeStore(), tenantT)
+	resp, err := okClient.GetSession(context.Background(), connect.NewRequest(&managementv1.GetSessionRequest{}))
+	if err != nil {
+		t.Fatalf("GetSession(T): %v", err)
+	}
+	if !resp.Msg.GetActive() {
+		t.Fatal("GetSession with the owning tenant reported idle — handler did not forward the ctx tenant")
+	}
+
+	// Injected tenant != T: the handler forwards the WRONG tenant, the fake misses,
+	// GetSession reads idle. (activeStore has no latest session, so idle → inactive.)
+	otherClient := newSessionClientWithTenant(t, mgr, activeStore(), uuid.New())
+	resp2, err := otherClient.GetSession(context.Background(), connect.NewRequest(&managementv1.GetSessionRequest{}))
+	if err != nil {
+		t.Fatalf("GetSession(other): %v", err)
+	}
+	if resp2.Msg.GetActive() {
+		t.Fatal("GetSession with a foreign tenant reported the session live — tenant not enforced end-to-end")
+	}
 }
 
 func activeStore() *fakeSessionStore {

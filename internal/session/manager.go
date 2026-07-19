@@ -290,7 +290,15 @@ type Manager struct {
 
 	mu     sync.Mutex
 	active map[uuid.UUID]*activeSession // keyed by tenantID; at most maxSessions entries
-	closed bool                         // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
+	// reservations holds the Tenants with a Start in its I/O phase (#488 review item
+	// 3): Start reserves a slot under mu, RELEASES mu for the store round-trips
+	// (deployment config, token, caps, allowance, CreateVoiceSession), then re-takes
+	// mu only to commit — so one Tenant's slow Start never freezes Muted()/Lookup/
+	// Active/Stop for the others. A reservation counts toward both guards (a reserving
+	// Tenant collides ErrSessionActive; a reservation fills a cap slot), so the
+	// per-Tenant-single and cap-K invariants hold even while the I/O is unlocked.
+	reservations map[uuid.UUID]struct{}
+	closed       bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
 }
 
 // Deps are the Manager's construction-time collaborator seams (#448): the six
@@ -419,6 +427,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		endTimeout:             endTimeout,
 		maxSessions:            maxSessions,
 		active:                 map[uuid.UUID]*activeSession{},
+		reservations:           map[uuid.UUID]struct{}{},
 	}
 	// The Manager IS the live mute view (#211): it owns the session-local mute set,
 	// so wire it as the base voice config's MuteView. Every session Start copies
@@ -468,31 +477,51 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, ErrVoiceUnavailable
 	}
 
+	// Reserve a slot under mu, then RELEASE mu for the store I/O below (#488 review
+	// item 3): holding mu across the deployment/token/caps/allowance/CreateVoiceSession
+	// round-trips would freeze Muted() (the voice hot path), Lookup (every bus event),
+	// Active and Stop for EVERY other Tenant behind one Tenant's slow store. The
+	// reservation counts toward both guards, so the per-Tenant-single and cap-K
+	// invariants hold even while the I/O runs unlocked.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	// The closed check lives under the same lock Shutdown takes, so a Start that
-	// wins the lock after Shutdown returned can never insert a row or spawn a
-	// loop nothing will cancel (#157).
 	if m.closed {
+		m.mu.Unlock()
 		return storage.VoiceSession{}, ErrManagerClosed
 	}
-	// Per-Tenant single-active guard FIRST (#488): a Tenant that already runs a
-	// session collides with ErrSessionActive even if the process is below its cap —
-	// and even for a different Campaign (decision: one live session per Tenant).
-	if _, ok := m.active[tenantID]; ok {
+	// Per-Tenant single-active guard FIRST (#488): a Tenant already live OR reserving
+	// collides with ErrSessionActive even below the cap — and even for a different
+	// Campaign (decision: one live session per Tenant).
+	if _, live := m.active[tenantID]; live {
+		m.mu.Unlock()
 		return storage.VoiceSession{}, ErrSessionActive
 	}
-	// Process-wide cap SECOND (#488, ADR-0057 K): a start for a NEW Tenant when the
-	// process is already at maxSessions is refused with the distinct ErrSessionLimit.
-	if len(m.active) >= m.maxSessions {
+	if _, reserving := m.reservations[tenantID]; reserving {
+		m.mu.Unlock()
+		return storage.VoiceSession{}, ErrSessionActive
+	}
+	// Process-wide cap SECOND (#488, ADR-0057 K): live + reserving both fill slots.
+	if len(m.active)+len(m.reservations) >= m.maxSessions {
+		m.mu.Unlock()
 		return storage.VoiceSession{}, ErrSessionLimit
+	}
+	m.reservations[tenantID] = struct{}{}
+	m.mu.Unlock()
+
+	// releaseReservation drops this Tenant's slot; called on EVERY early return in
+	// the unlocked I/O phase (and at commit, replaced by the active entry).
+	releaseReservation := func() {
+		m.mu.Lock()
+		delete(m.reservations, tenantID)
+		m.mu.Unlock()
 	}
 
 	dep, err := m.store.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: load deployment config: %w", err)
 	}
 	if dep.GuildID == "" || dep.VoiceChannelID == "" {
+		releaseReservation()
 		return storage.VoiceSession{}, ErrDiscordNotConfigured
 	}
 
@@ -504,9 +533,11 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if err != nil {
 		// A real saved token that won't decrypt: surface ErrDiscordTokenUndecryptable
 		// (errors.Is at the RPC layer) while keeping the actionable detail in the chain.
+		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("%w: %w", ErrDiscordTokenUndecryptable, err)
 	}
 	if token == "" {
+		releaseReservation()
 		return storage.VoiceSession{}, ErrDiscordTokenMissing
 	}
 
@@ -518,6 +549,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// can never strand a 'running' row (#433).
 	storeCaps, err := m.store.GetTenantSpendCaps(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: load spend caps: %w", err)
 	}
 
@@ -526,29 +558,28 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// allowance, an exhausted one refuses the start outright and a remaining
 	// one tightens this session's hard cap below. Like the caps read, it runs
 	// BEFORE the insert so a failure never strands a 'running' row (#433), and
-	// a read failure fails the start CLOSED. The month-to-date figure is the
-	// flushed ledger only — the running session's own spend is exactly what the
-	// tightened meter bounds.
+	// a read failure fails the start CLOSED.
 	//
-	// CONCURRENT-SESSION CAVEAT (#488, RE-DOCUMENTED not fixed): with the cap raised
-	// >1, two of a Tenant's-scope sessions cannot both be live (one session per
-	// Tenant), so a Tenant never double-snapshots its OWN allowance. Across Tenants
-	// the allowance is per-Tenant, so there is no shared remainder to double-count.
-	// The residual caveat is intra-Tenant SEQUENTIAL overlap only: a session started
-	// while a prior one for a DIFFERENT Tenant is live still snapshots against the
-	// month-to-date FLUSHED ledger, which excludes any in-flight session's not-yet
-	// -flushed spend — so two concurrent sessions can each be admitted against the
-	// same remainder and jointly overspend the plan allowance by up to one session's
-	// worth before either flushes. Redistributing a live allowance across concurrent
-	// sessions is a later epic; today the meter still hard-stops each session at its
-	// own snapshot, and the estimate resets monthly (ADR-0046/0055).
+	// ALLOWANCE SNAPSHOT CAVEAT (#488, RE-DOCUMENTED not fixed): the month-to-date
+	// figure is the FLUSHED usage_ledger only. A running session's own spend is not in
+	// it until the ledger flushes at loop exit — and that flush is BEST-EFFORT
+	// (see runLoop: a flush failure only warns). So the real residual is a
+	// flush-undercount, orthogonal to concurrency: whenever a prior session's ledger
+	// flush failed (or has not yet run), THIS Start's remaining-allowance snapshot is
+	// computed against a month-to-date total that understates true spend, so the gate
+	// admits a start it might have refused (or tightens the hard cap less than it
+	// should). It never OVER-refuses. The meter still hard-stops this session at its
+	// own snapshot, and the estimate resets monthly (ADR-0046/0055). A durable
+	// per-Tenant running-total that survives a failed flush is a later epic.
 	var allowanceRemaining *float64
 	if m.allowance != nil {
 		state, err := m.allowance.AllowanceState(ctx, tenantID)
 		if err != nil {
+			releaseReservation()
 			return storage.VoiceSession{}, fmt.Errorf("session: load plan allowance: %w", err)
 		}
 		if state.Exhausted() {
+			releaseReservation()
 			return storage.VoiceSession{}, ErrAllowanceExhausted
 		}
 		allowanceRemaining = state.RemainingUSD()
@@ -556,6 +587,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 
 	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
 	if err != nil {
+		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
 	}
 
@@ -683,8 +715,35 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		cfg.Highlights = m.highlights.Begin(vs.ID, campaignID, tenantID)
 	}
 
+	// COMMIT (#488 review item 3): re-take mu only now, after all the store I/O, to
+	// swap this Tenant's reservation for its live session and launch the loop. The
+	// reservation blocked any concurrent same-Tenant Start and held the cap slot the
+	// whole time, so no second session for this Tenant can exist here — only Shutdown
+	// can have raced in, which the closed check catches.
+	m.mu.Lock()
+	delete(m.reservations, tenantID)
+	if m.closed {
+		m.mu.Unlock()
+		// A Shutdown landed during our I/O phase: never launch a loop nothing will
+		// cancel (#157). Tear down what we built and close the freshly-created row so
+		// it is not left 'running' (the boot reconciliation is the backstop, #143).
+		as.cancel()
+		stopForward()
+		if m.highlights != nil {
+			hlCtx, hlCancel := context.WithTimeout(context.Background(), m.endTimeout)
+			_ = m.highlights.Finalize(hlCtx, vs.ID)
+			hlCancel()
+		}
+		endCtx, endCancel := context.WithTimeout(context.Background(), m.endTimeout)
+		if _, cerr := m.store.CloseVoiceSession(endCtx, vs.ID, storage.VoiceSessionEnded, vs.LineCount, nil); cerr != nil {
+			m.log.Error("close voice session after shutdown-race Start", "err", cerr, "voice_session", vs.ID)
+		}
+		endCancel()
+		return storage.VoiceSession{}, ErrManagerClosed
+	}
 	m.active[tenantID] = as
 	go m.runLoop(runCtx, as, cfg)
+	m.mu.Unlock()
 	return vs, nil
 }
 
@@ -948,23 +1007,35 @@ func (m *Manager) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSe
 	return as.session, true, nil
 }
 
-// Snapshot returns SOME live Voice Session across all Tenants and true, or the zero
-// value and false when the process is idle. Under the default cap (MaxSessions=1)
-// it is unambiguous — the single active session — and backs the web-tier
-// single-operator convenience reads (the Discord health check, the CampaignService
-// live-first Active-Campaign pivot) that predate concurrency and are not yet
-// per-Tenant (ADR-0039). It skips a session already ending (as.ended). With the cap
-// raised >1 those consumers migrate to a Tenant-scoped read; this convenience
-// retires with them (#488 rollout note).
-func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
+// IsCampaignLive reports whether ANY live Voice Session across all Tenants is bound
+// to campaignID (#488 review item 2). It backs the archive/delete live-guard
+// (rpc/campaign_archive.go): at cap >1 the correct guard is "is this Campaign live
+// in ANY session", not "is it the single active session" — so it scans the whole
+// map rather than one arbitrary session. A session already ending (as.ended) no
+// longer counts as live. Correct at any cap.
+func (m *Manager) IsCampaignLive(campaignID uuid.UUID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, as := range m.active {
+		if !as.ended && as.campaignID == campaignID {
+			return true
+		}
+	}
+	return false
+}
+
+// AnyLive reports whether ANY Voice Session is currently running in this process
+// (#150, #488): the tenant-agnostic health signal the Discord probe reads. A
+// session in its end window (as.ended) no longer counts. Correct at any cap.
+func (m *Manager) AnyLive() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, as := range m.active {
 		if !as.ended {
-			return as.session, true
+			return true
 		}
 	}
-	return storage.VoiceSession{}, false
+	return false
 }
 
 // Lookup returns the live Voice Session with id sessionID and true, scanning every
