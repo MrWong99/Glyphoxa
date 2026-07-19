@@ -247,6 +247,12 @@ helm upgrade glyphoxa deploy/charts/glyphoxa \
   --namespace glyphoxa --values glyphoxa-values.yaml
 ```
 
+> On a cloud box installed with
+> [`deploy/saas/install.sh`](../../deploy/saas/install.sh), use
+> [`deploy/saas/update.sh`](../../deploy/saas/update.sh) instead — it resolves
+> the latest release, takes a pre-upgrade dump, and upgrades with that
+> release's own chart ([cloud-providers.md](cloud-providers.md)).
+
 The migrate hook runs before the new pod rolls (pre-upgrade hook, ADR-0034);
 `all` mode uses a `Recreate` strategy, so expect a brief (seconds) outage per
 upgrade — schedule around live Voice Sessions.
@@ -287,7 +293,7 @@ spec:
                 - name: GLYPHOXA_DATABASE_URL
                   valueFrom:
                     secretKeyRef:
-                      name: glyphoxa        # the chart's app Secret
+                      name: glyphoxa-db     # the chart's app Secret: <fullname>-db
                       key: database-url
               volumeMounts:
                 - name: backup
@@ -312,6 +318,12 @@ spec:
 Copy the dumps off the VM regularly (rsync to a NAS, restic to any S3) — a
 backup on the same physical disk is not a backup. Restore with
 `pg_restore -d "$DSN" --clean --if-exists <file>.dump`.
+
+[`deploy/saas/install.sh`](../../deploy/saas/install.sh) sets up an
+equivalent CronJob for you (writing to a host path instead of a PVC — on a
+single cloud box that is the disk you have), and
+[`deploy/saas/update.sh`](../../deploy/saas/update.sh) triggers a run of it
+before every upgrade.
 
 ## 9. Monitoring
 

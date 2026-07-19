@@ -54,6 +54,40 @@ order-of-magnitude for comparison, and check current pricing before deciding.
 **Total: ~€5–10/mo.** This is the natural first step off the home lab: same
 operational model, real IP, real uptime, no CG-NAT worries.
 
+#### Scripted install & updates
+
+Two scripts automate this exact single-box path (they are generic k3s, but
+Hetzner is the deployment they were written for):
+
+- [`deploy/saas/install.sh`](../../deploy/saas/install.sh) — the whole of
+  the home-lab guide's §2–§8 on a bare box: prompts for the DNS name, ACME
+  email, Discord credentials, Admission Mode and (optionally) a nightly
+  `pg_dump` backup directory on disk; installs k3s + helm + cert-manager;
+  installs the **latest released** version with chart and image pinned to the
+  same tag. Every prompt can be pre-answered with the `GX_*` env var it
+  names, so unattended installs work too.
+- [`deploy/saas/update.sh`](../../deploy/saas/update.sh) — updates a scripted
+  install to the latest release (or `--version vX.Y.Z`): takes a pre-upgrade
+  dump when backups are configured, then `helm upgrade`s with the target
+  release's own chart — the pre-upgrade migrate hook brings the schema
+  current before the new pod rolls. Downgrades are refused (ADR-0055's
+  rollback caveat) unless forced.
+
+```sh
+# on the fresh server, as root
+curl -fsSLO https://raw.githubusercontent.com/MrWong99/Glyphoxa/main/deploy/saas/install.sh
+chmod +x install.sh && ./install.sh        # prompts for everything it needs
+
+# any later day
+curl -fsSLO https://raw.githubusercontent.com/MrWong99/Glyphoxa/main/deploy/saas/update.sh
+chmod +x update.sh && ./update.sh          # latest release + schema migration
+```
+
+State lands in `/etc/glyphoxa/` (values file `0600`, install state, backup
+manifest); re-running the installer reuses it — secrets, notably
+`appSecret`, are never rotated on a re-run (ADR-0004: rotating it strands
+every sealed BYOK credential).
+
 ### 2. netcup (or similar EU VPS: Contabo, IONOS) — cheapest raw compute
 
 Root/VPS servers with generous specs (~€5–8/mo for 4 vCPU/8 GiB) and no hourly
