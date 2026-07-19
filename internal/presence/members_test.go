@@ -10,25 +10,42 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 )
 
-// newMembersTestPresence builds a bare Presence with a real (in-memory) disgo
-// cache — populated directly via Put/SetSelfUser, no gateway involved — and an
-// injected member fetch, so VoiceChannelMembers is unit-tested without a live
-// Discord client. This reuses the same fetchMember seam as MemberDisplayName
-// (see newNameTestPresence in members_name_test.go): VoiceChannelMembers' one
-// disgo-specific dependency the existing seam doesn't cover is the voice-state
-// cache and SelfUser, and the real in-memory cache impl exercises those exactly
-// as production does, so no second injected seam is needed for them.
-func newMembersTestPresence(fetch func(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error)) *Presence {
-	p := &Presence{}
-	p.fetchMember = fetch
-	p.client.Store(&bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))})
-	return p
+// membersRig is a bare Clients registry with one standing client (a real
+// in-memory disgo cache, populated directly via Put/SetSelfUser — no gateway) and
+// an injected member fetch, so VoiceChannelMembers is unit-tested without a live
+// Discord client. entry.client is exposed so a test can nil it mid-loop.
+type membersRig struct {
+	c      *Clients
+	tenant uuid.UUID
+	entry  *clientEntry
+	client *bot.Client
 }
 
-func putVoiceState(p *Presence, guildID, channelID, userID snowflake.ID) {
-	p.client.Load().Caches.VoiceStateCache().Put(guildID, userID, discord.VoiceState{
+func newMembersTestPresence(fetch func(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error)) *membersRig {
+	c := &Clients{
+		entries: map[string]*clientEntry{},
+		tenants: map[uuid.UUID]*tenantState{},
+	}
+	c.fetchMember = fetch
+	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
+	entry := &clientEntry{token: "tok", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(cl)
+	tid := uuid.New()
+	entry.refs[tid] = struct{}{}
+	c.entries["tok"] = entry
+	c.tenants[tid] = &tenantState{token: "tok", guild: "100"}
+	return &membersRig{c: c, tenant: tid, entry: entry, client: cl}
+}
+
+func (r *membersRig) members(ctx context.Context, channelID snowflake.ID) ([]Member, error) {
+	return r.c.VoiceChannelMembers(ctx, r.tenant, channelID)
+}
+
+func putVoiceState(cl *bot.Client, guildID, channelID, userID snowflake.ID) {
+	cl.Caches.VoiceStateCache().Put(guildID, userID, discord.VoiceState{
 		GuildID:   guildID,
 		ChannelID: &channelID,
 		UserID:    userID,
@@ -42,16 +59,16 @@ func TestVoiceChannelMembers_SkipsMemberOnGetMemberError(t *testing.T) {
 	const badUser snowflake.ID = 2
 
 	sentinel := errors.New("rate limited")
-	p := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+	rig := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
 		if userID == badUser {
 			return nil, sentinel
 		}
 		return &discord.Member{User: discord.User{ID: userID, Username: "ok-user"}}, nil
 	})
-	putVoiceState(p, guildID, channelID, okUser)
-	putVoiceState(p, guildID, channelID, badUser)
+	putVoiceState(rig.client, guildID, channelID, okUser)
+	putVoiceState(rig.client, guildID, channelID, badUser)
 
-	members, err := p.VoiceChannelMembers(context.Background(), channelID)
+	members, err := rig.members(context.Background(), channelID)
 	if err != nil {
 		t.Fatalf("VoiceChannelMembers err = %v", err)
 	}
@@ -69,24 +86,24 @@ func TestVoiceChannelMembers_ClientClearedMidLoopStillServesSnapshot(t *testing.
 	const userA snowflake.ID = 1
 	const userB snowflake.ID = 2
 
-	var p *Presence
+	var rig *membersRig
 	// Simulate a concurrent Close/token-rebuild landing between the first and
 	// second member fetch: the standing client pointer goes nil mid-loop. Because
 	// VoiceChannelMembers borrowed the rest.Rest once up front and hands that same
 	// snapshot to every fetch, both members must still resolve — a re-borrow would
 	// return ErrNoClient for userB and blank it from the picker.
 	fetched := 0
-	p = newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+	rig = newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
 		fetched++
 		if fetched == 1 {
-			p.client.Store(nil) // wait-state now; a per-member p.Client() would fail/nil-panic here on
+			rig.entry.client.Store(nil) // wait-state now; a per-member re-borrow would fail here
 		}
 		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
 	})
-	putVoiceState(p, guildID, channelID, userA)
-	putVoiceState(p, guildID, channelID, userB)
+	putVoiceState(rig.client, guildID, channelID, userA)
+	putVoiceState(rig.client, guildID, channelID, userB)
 
-	members, err := p.VoiceChannelMembers(context.Background(), channelID)
+	members, err := rig.members(context.Background(), channelID)
 	if err != nil {
 		t.Fatalf("VoiceChannelMembers err = %v", err)
 	}
@@ -101,14 +118,14 @@ func TestVoiceChannelMembers_FiltersSelfWhenKnown(t *testing.T) {
 	const botUser snowflake.ID = 1
 	const otherUser snowflake.ID = 2
 
-	p := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+	rig := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
 		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
 	})
-	p.client.Load().Caches.SetSelfUser(discord.OAuth2User{User: discord.User{ID: botUser}})
-	putVoiceState(p, guildID, channelID, botUser)
-	putVoiceState(p, guildID, channelID, otherUser)
+	rig.client.Caches.SetSelfUser(discord.OAuth2User{User: discord.User{ID: botUser}})
+	putVoiceState(rig.client, guildID, channelID, botUser)
+	putVoiceState(rig.client, guildID, channelID, otherUser)
 
-	members, err := p.VoiceChannelMembers(context.Background(), channelID)
+	members, err := rig.members(context.Background(), channelID)
 	if err != nil {
 		t.Fatalf("VoiceChannelMembers err = %v", err)
 	}
@@ -122,18 +139,18 @@ func TestVoiceChannelMembers_BotAppearsWhenSelfUnknown(t *testing.T) {
 	const channelID snowflake.ID = 200
 	const botUser snowflake.ID = 1
 
-	p := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+	rig := newMembersTestPresence(func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
 		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
 	})
 	// SelfUser deliberately left unset (unknown). Include an occupant whose id is
-	// the ZERO snowflake: this pins the members.go:47-49 guard exactly. If the
+	// the ZERO snowflake: this pins the members.go self-filter guard exactly. If the
 	// self-filter fired on an unknown SelfUser, the cached zero-value self.ID (0)
 	// would masquerade as this occupant and wrongly drop it. It must appear.
 	const zeroUser snowflake.ID = 0
-	putVoiceState(p, guildID, channelID, botUser)
-	putVoiceState(p, guildID, channelID, zeroUser)
+	putVoiceState(rig.client, guildID, channelID, botUser)
+	putVoiceState(rig.client, guildID, channelID, zeroUser)
 
-	members, err := p.VoiceChannelMembers(context.Background(), channelID)
+	members, err := rig.members(context.Background(), channelID)
 	if err != nil {
 		t.Fatalf("VoiceChannelMembers err = %v", err)
 	}
@@ -143,5 +160,51 @@ func TestVoiceChannelMembers_BotAppearsWhenSelfUnknown(t *testing.T) {
 	}
 	if !got[botUser] || !got[zeroUser] || len(members) != 2 {
 		t.Fatalf("VoiceChannelMembers = %+v, want both botUser and the zero-id occupant to appear when SelfUser is unknown", members)
+	}
+}
+
+// TestVoiceChannelMembers_ScopedToTenantGuild pins finding 2: a central-token
+// client's voice-state cache holds occupants of every Tenant's Guild that shares
+// the token. VoiceChannelMembers must scope to the CALLING Tenant's own Guild, so
+// Tenant A configuring Tenant B's channel snowflake never lists B's occupants.
+func TestVoiceChannelMembers_ScopedToTenantGuild(t *testing.T) {
+	const guildA snowflake.ID = 100
+	const guildB snowflake.ID = 200
+	const channel snowflake.ID = 999
+	const userInB snowflake.ID = 7
+
+	c := &Clients{entries: map[string]*clientEntry{}, tenants: map[uuid.UUID]*tenantState{}}
+	c.fetchMember = func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
+	}
+	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
+	entry := &clientEntry{token: "central", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(cl)
+	a, b := uuid.New(), uuid.New()
+	entry.refs[a] = struct{}{}
+	entry.refs[b] = struct{}{}
+	c.entries["central"] = entry
+	c.tenants[a] = &tenantState{token: "central", guild: guildA.String()}
+	c.tenants[b] = &tenantState{token: "central", guild: guildB.String()}
+
+	// A user sits in Tenant B's Guild, in a channel snowflake Tenant A also names.
+	putVoiceState(cl, guildB, channel, userInB)
+
+	// Tenant A lists that channel: scoped to Guild A → B's occupant is invisible.
+	membersA, err := c.VoiceChannelMembers(context.Background(), a, channel)
+	if err != nil {
+		t.Fatalf("A members: %v", err)
+	}
+	if len(membersA) != 0 {
+		t.Fatalf("Tenant A saw %d members in another Tenant's Guild (cross-tenant leak), want 0", len(membersA))
+	}
+
+	// Tenant B lists the same channel: its own Guild → the occupant appears.
+	membersB, err := c.VoiceChannelMembers(context.Background(), b, channel)
+	if err != nil {
+		t.Fatalf("B members: %v", err)
+	}
+	if len(membersB) != 1 || membersB[0].ID != userInB {
+		t.Fatalf("Tenant B members = %+v, want its own Guild's occupant", membersB)
 	}
 }

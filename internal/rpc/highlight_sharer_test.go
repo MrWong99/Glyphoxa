@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -17,8 +20,14 @@ type fakeDeploymentReader struct {
 	err error
 }
 
-func (f fakeDeploymentReader) GetLatestDeploymentConfig(context.Context) (storage.DeploymentConfig, error) {
+func (f fakeDeploymentReader) GetDeploymentConfig(context.Context, uuid.UUID) (storage.DeploymentConfig, error) {
 	return f.dep, f.err
+}
+
+// shareCtx carries a resolved Tenant so the tenant-scoped resolve (#489) finds
+// one — the share path runs behind the auth stack in production.
+func shareCtx() context.Context {
+	return auth.WithTenant(context.Background(), uuid.New())
 }
 
 // TestDeploymentSharer_NoTokenPaths pins that every unsaved-token shape is
@@ -39,10 +48,10 @@ func TestDeploymentSharer_NoTokenPaths(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := rpc.NewDeploymentSharer(c.deps, c.cipher, slog.Default())
-			if _, err := s.ListTextChannels(context.Background()); !errors.Is(err, rpc.ErrNoDiscordToken) {
+			if _, err := s.ListTextChannels(shareCtx()); !errors.Is(err, rpc.ErrNoDiscordToken) {
 				t.Fatalf("ListTextChannels err = %v, want ErrNoDiscordToken", err)
 			}
-			if err := s.PostClip(context.Background(), "c", "cap", "highlight.wav", "audio/wav", []byte("x")); !errors.Is(err, rpc.ErrNoDiscordToken) {
+			if err := s.PostClip(shareCtx(), "c", "cap", "highlight.wav", "audio/wav", []byte("x")); !errors.Is(err, rpc.ErrNoDiscordToken) {
 				t.Fatalf("PostClip err = %v, want ErrNoDiscordToken", err)
 			}
 		})
@@ -77,7 +86,7 @@ func TestDeploymentSharer_ResolvesTokenAndCalls(t *testing.T) {
 		},
 	)
 
-	chs, err := s.ListTextChannels(context.Background())
+	chs, err := s.ListTextChannels(shareCtx())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -88,7 +97,7 @@ func TestDeploymentSharer_ResolvesTokenAndCalls(t *testing.T) {
 		t.Fatalf("channels = %+v", chs)
 	}
 
-	if err := s.PostClip(context.Background(), "chan9", "cap", "highlight.wav", "audio/wav", []byte("WAV")); err != nil {
+	if err := s.PostClip(shareCtx(), "chan9", "cap", "highlight.wav", "audio/wav", []byte("WAV")); err != nil {
 		t.Fatalf("post: %v", err)
 	}
 	if gotToken != "bot-token-xyz" || gotChannel != "chan9" || string(gotData) != "WAV" {

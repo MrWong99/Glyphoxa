@@ -81,6 +81,10 @@ function mockBackend(
     // discordApplicationId seeds the server-provided Discord application id the
     // read echoes so the screen composes the bot-authorization URL (#110).
     discordApplicationId?: string;
+    // integrationState / integrationDetail seed this tenant's standing Discord
+    // client health the read surfaces (#489): "ok" / "waiting" / "failed" + detail.
+    integrationState?: string;
+    integrationDetail?: string;
     // inviteResolve seeds the guild + voice channels ResolveGuildInvite returns
     // for a pasted invite (#105). inviteError makes it fail instead.
     inviteResolve?: { guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] };
@@ -137,6 +141,8 @@ function mockBackend(
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
           discordApplicationId: opts.discordApplicationId ?? "",
+          integrationState: opts.integrationState ?? "",
+          integrationDetail: opts.integrationDetail ?? "",
         }),
       saveProviderConfig: (req) => {
         opts.providerSaves?.push({ provider: req.provider, secret: req.secret, model: req.model });
@@ -241,6 +247,26 @@ describe("Configuration", () => {
     // elevenlabs, gemini).
     expect(await screen.findAllByText(/key needed/i)).toHaveLength(4);
     expect(screen.queryByText(/healthy/i)).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed Discord integration to the tenant (#489)", async () => {
+    renderScreen(
+      mockBackend({
+        integrationState: "failed",
+        integrationDetail: "invalid_bot_token: gateway rejected identify (close 4004)",
+      }),
+    );
+    const badge = await screen.findByText(/discord integration failed/i);
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("invalid_bot_token"));
+  });
+
+  it("shows no integration badge in the waiting/web-only state (#489)", async () => {
+    renderScreen();
+    // Default mock leaves integrationState empty → nothing rendered.
+    await screen.findByText(CAMPAIGN.name);
+    expect(screen.queryByText(/discord integration failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
   });
 
   it("saves the Gemini image key write-only: the row masks and shows Replace", async () => {

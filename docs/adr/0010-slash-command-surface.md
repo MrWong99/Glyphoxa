@@ -38,3 +38,15 @@ Behavior:
 Discord **deprecated the first-followup-edits shim** — the server-side behavior where the first `CreateFollowupMessage` after a deferred response implicitly edited the "thinking…" placeholder. A followup now ALWAYS creates a fresh message honoring its own ephemeral flag; the ONLY way to resolve the deferred placeholder is `EditOriginal` (Edit Original Interaction Response), whose visibility stays fixed to the Defer's.
 
 The presence dispatch layer therefore owns one **registry-wide routing rule**, not a per-command one: after a Defer, the FIRST reply (from any of `Reply`/`ReplyEphemeral`/`Followup`) resolves the placeholder via `EditOriginal`, and every LATER reply is a real `CreateFollowupMessage`. This lives on the `Interaction` (`sendPostDefer`), so every command behaves identically and no handler leaves a dangling placeholder. `/glyphoxa recap`'s public path no longer calls `EditOriginal` by hand — it just posts its short ephemeral "Recap posted below." note (which lands as the placeholder edit) and then the public recap followups.
+
+## Amendment: per-tenant client registry replaces the standing singleton (2026-07-19, #489)
+
+The #102 amendment above put the command surface on ONE standing shared client built from the **globally-newest** `deployment_config` row (tenant-unscoped). Under the multi-tenant tier that is a presence-**hijack**: Tenant B saving Discord settings rebuilt the single client from B's row, tearing down Tenant A's live presence and commands (ADR-0055 open-mode blocker).
+
+Decided:
+
+- **The standing presence is a registry of clients keyed by resolved Bot token**, not a singleton. A per-Tenant `EnsureTenant` reads the **tenant-scoped** `deployment_config` (the global-latest read is gone from the presence path) and builds/reuses one client per distinct token. A per-Tenant ensure/rebuild touches only that Tenant's client, so a Tenant B save can never disconnect Tenant A.
+- **Central-token mode**: every Tenant resolves to the same token → ONE shared client serving many Guilds, refcounted — a Tenant swapping to its own BYOK token detaches its ref without closing a client another Tenant still holds. **BYOK mode**: a Tenant's own token gets its own client whose terminal token-death (close 4004 / REST 401, ADR-0043) marks THAT Tenant's integration `failed` (surfaced on the Configuration read) without affecting others.
+- **Commands still register per configured Guild** via the idempotent bulk overwrite; a repeat ensure with an unchanged token+Guild re-PUTs nothing, and central-token Tenants share one client without duplicate registration churn.
+- **Voice Sessions borrow the Tenant's client from the registry** (`session.ClientSource`) instead of a single shared `ClientProvider`; a session start resolves the client keyed by its own Tenant's token.
+- **Interim GM/Guild gate**: with no single configured Guild, the server-side Gate authorizes an interaction from ANY resolved Tenant's Guild (`Clients.KnownGuild`); #490's `TenantResolver` narrows an interaction to its owning Tenant (and restores per-Tenant GM scoping).

@@ -160,19 +160,23 @@ func TestDeploymentConfigTokenAndChannels(t *testing.T) {
 	}
 }
 
-// TestGetLatestDeploymentConfig asserts the standing presence's boot read (#102,
-// ADR-0010): no row yields ErrNotFound, a saved config is returned, and with more
-// than one deployment_config row the most-recently-updated one wins (the
-// single-operator "latest", tenant-unscoped like GetActiveCampaign).
-func TestGetLatestDeploymentConfig(t *testing.T) {
+// TestListDeploymentConfigs asserts the per-tenant client registry's boot seed
+// read (#489, ADR-0010): an empty table yields no rows (not an error), a single
+// saved config is returned, and every tenant's row appears — oldest-updated
+// first — so EnsureAll can stand up one standing client per distinct Bot token.
+func TestListDeploymentConfigs(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, _ := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	// Empty → ErrNotFound.
-	if _, err := st.GetLatestDeploymentConfig(ctx); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("get latest on empty: got %v, want ErrNotFound", err)
+	// Empty → no rows, no error.
+	got, err := st.ListDeploymentConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list on empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("list on empty = %d rows, want 0", len(got))
 	}
 
 	// One tenant's config.
@@ -182,15 +186,15 @@ func TestGetLatestDeploymentConfig(t *testing.T) {
 	if _, err := st.SaveDiscordBotToken(ctx, tenantID, []byte{0x01, 0x99}, "tok1"); err != nil {
 		t.Fatalf("save token: %v", err)
 	}
-	got, err := st.GetLatestDeploymentConfig(ctx)
+	got, err = st.ListDeploymentConfigs(ctx)
 	if err != nil {
-		t.Fatalf("get latest: %v", err)
+		t.Fatalf("list: %v", err)
 	}
-	if got.TenantID != tenantID || got.GuildID != "472093001100" || got.DiscordBotTokenLast4 != "tok1" {
-		t.Fatalf("latest = %+v, want the saved single-tenant config", got)
+	if len(got) != 1 || got[0].TenantID != tenantID || got[0].GuildID != "472093001100" || got[0].DiscordBotTokenLast4 != "tok1" {
+		t.Fatalf("list = %+v, want the saved single-tenant config", got)
 	}
 
-	// A second tenant with a strictly-newer deployment_config must win "latest".
+	// A second tenant's row must also appear, ordered oldest-updated first.
 	var tenant2 uuid.UUID
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO tenant (name) VALUES ('Beta TTRPG') RETURNING id`).Scan(&tenant2); err != nil {
@@ -202,12 +206,12 @@ func TestGetLatestDeploymentConfig(t *testing.T) {
 		tenant2); err != nil {
 		t.Fatalf("insert tenant2 deployment_config: %v", err)
 	}
-	got, err = st.GetLatestDeploymentConfig(ctx)
+	got, err = st.ListDeploymentConfigs(ctx)
 	if err != nil {
-		t.Fatalf("get latest after second tenant: %v", err)
+		t.Fatalf("list after second tenant: %v", err)
 	}
-	if got.TenantID != tenant2 || got.GuildID != "888888888888" {
-		t.Errorf("latest = %+v, want the newer tenant2 config", got)
+	if len(got) != 2 || got[0].TenantID != tenantID || got[1].TenantID != tenant2 {
+		t.Errorf("list = %+v, want both tenants oldest-first", got)
 	}
 }
 

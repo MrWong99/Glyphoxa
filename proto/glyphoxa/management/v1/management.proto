@@ -1212,6 +1212,15 @@ message ListProviderConfigsResponse {
   // operator login (ADR-0016), reused for the bot-authorization URL; non-secret;
   // empty when DISCORD_OAUTH_CLIENT_ID unset.
   string discord_application_id = 4;
+  // integration_state is this Tenant's standing Discord client health from the
+  // per-tenant client registry (#489): "ok" (client up), "waiting" (no Bot token
+  // yet), or "failed" (the Bot token was rejected terminally — revoked/invalid).
+  // Empty in web-only mode (no standing presence). Non-secret.
+  string integration_state = 5;
+  // integration_detail is the human-readable failure prose when integration_state
+  // is "failed" (the classified terminal reason, e.g. "invalid_bot_token: …"),
+  // empty otherwise.
+  string integration_detail = 6;
 }
 
 // SaveProviderConfigRequest seals one BYOK provider key.
