@@ -82,6 +82,30 @@ var (
 	// session's mute set. Mapped to CodeNotFound.
 	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
 
+	// ErrIntentPending is returned by IntentControl.Start when the claim plane wrote
+	// the intent but no -mode voice worker claimed and drove it live within the Start
+	// budget (#491, split mode): the session is queued, not failed. The RPC layer
+	// maps it to CodeUnavailable ("voice worker has not claimed the session yet") so
+	// the operator retries.
+	ErrIntentPending = errors.New("session: voice worker has not claimed the session yet")
+	// ErrIntentCancelled is returned by IntentControl.Start when the intent it was
+	// waiting on went to a terminal 'done' WITHOUT ever going live (#491 review item
+	// 7): a stop landed on the still-pending row, so the start was cancelled — a
+	// distinct outcome from ErrIntentPending (still queued). The RPC maps it to
+	// CodeAborted so the operator sees "start was cancelled", not "not claimed yet".
+	ErrIntentCancelled = errors.New("session: the voice session start was cancelled before a worker claimed it")
+	// ErrStopPending is returned by IntentControl.Stop when the owning worker did not
+	// confirm the wind-down within the Stop budget (#491 review item 7): the session
+	// may still be running, so it is surfaced as an error (→ CodeUnavailable, retry)
+	// rather than a false success carrying a still-'running' row.
+	ErrStopPending = errors.New("session: the voice worker has not confirmed the stop yet")
+	// ErrSplitMode is returned by the IntentControl methods that only the in-process
+	// Manager can serve — live mute/say/replay/spend reads (#491): in a split
+	// (-mode web + -mode voice) deployment the web tier holds no live session state,
+	// so these degrade rather than lie. The RPC layer maps it to
+	// CodeFailedPrecondition ("not available in a split deployment").
+	ErrSplitMode = errors.New("session: not available in a split deployment")
+
 	// ErrButlerVoiceless is returned by SpeakAsButler when the Active Campaign's
 	// Butler has no synthesizable Voice (empty VoiceID — the default auto-Butler is
 	// voiceless). Voicing it would publish a KindButler transcript line that never
@@ -1022,6 +1046,18 @@ func (m *Manager) IsCampaignLive(campaignID uuid.UUID) bool {
 		}
 	}
 	return false
+}
+
+// HasCapacity reports whether the Manager can accept another Voice Session — its
+// live + reserving count is below MaxSessions (#491). The -mode voice claim loop
+// consults it before claiming an intent, so it never claims work it cannot run
+// (avoiding an ErrSessionLimit strand): claim only while there is a free slot. A
+// snapshot under the lock; in the single-worker interim (#492 elects the sole
+// claimer) nothing else fills a slot between this read and the following Start.
+func (m *Manager) HasCapacity() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active)+len(m.reservations) < m.maxSessions
 }
 
 // AnyLive reports whether ANY Voice Session is currently running in this process

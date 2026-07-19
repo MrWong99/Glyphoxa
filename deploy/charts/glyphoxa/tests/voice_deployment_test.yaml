@@ -83,6 +83,24 @@ tests:
             - -metrics-addr
             - ":9090"
 
+  - it: drops -guild/-channel in claim-plane worker mode (empty values)
+    # #491 (ADR-0057): with voice.guild/voice.channel empty the pod is the
+    # claim-plane worker — DB-driven assignment, no static target flags. The arg
+    # vector is mode + metrics-addr only; the worker takes each session's channel
+    # from the Tenant's saved deployment config.
+    set:
+      voice:
+        guild: ""
+        channel: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - -mode
+            - voice
+            - -metrics-addr
+            - ":9090"
+
   - it: rejects a numeric guild rather than deploying a truncated snowflake
     # A snowflake passed as a NUMBER is already truncated by float64 before the
     # template runs (111111111111111111 -> 111111111111111104), and int64 can't

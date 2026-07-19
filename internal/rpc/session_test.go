@@ -32,6 +32,7 @@ type fakeSessionManager struct {
 	current          storage.VoiceSession
 	startErr         error
 	stopErr          error
+	muteErr          error // injected mute failure (e.g. session.ErrSplitMode, #491)
 	startCalls       int
 	muted            map[string]struct{}
 	rosterIDs        []string     // ids SetAllMute mutes (the campaign roster the real Manager lists)
@@ -117,6 +118,9 @@ func (f *fakeSessionManager) AnyLive() bool {
 func (f *fakeSessionManager) SetAgentMute(_ context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.muteErr != nil {
+		return nil, f.muteErr
+	}
 	if !f.active || !f.matchesTenant(tenantID) {
 		return nil, session.ErrNoActiveSession
 	}
@@ -146,6 +150,9 @@ func (f *fakeSessionManager) inRoster(agentID string) bool {
 func (f *fakeSessionManager) SetAllMute(_ context.Context, tenantID uuid.UUID, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.muteErr != nil {
+		return nil, f.muteErr
+	}
 	if !f.active || !f.matchesTenant(tenantID) {
 		return nil, session.ErrNoActiveSession
 	}
@@ -1480,5 +1487,55 @@ func TestStartSessionTenantCampaignCoherence(t *testing.T) {
 	}
 	if mgr.startCampaign != campaign.ID {
 		t.Errorf("session started for campaign %s, want %s", mgr.startCampaign, campaign.ID)
+	}
+}
+
+// TestSplitModeStartPending maps IntentControl's queue-timeout (ErrIntentPending)
+// to CodeUnavailable so the operator retries (#491).
+func TestSplitModeStartPending(t *testing.T) {
+	t.Parallel()
+	client := newSessionClient(t, &fakeSessionManager{startErr: session.ErrIntentPending}, activeStore())
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("ErrIntentPending code = %v, want Unavailable", got)
+	}
+}
+
+// TestSplitModeStartCancelled maps a start cancelled before any worker claimed it
+// (ErrIntentCancelled) to CodeAborted — distinct from still-pending (#491 item 7).
+func TestSplitModeStartCancelled(t *testing.T) {
+	t.Parallel()
+	client := newSessionClient(t, &fakeSessionManager{startErr: session.ErrIntentCancelled}, activeStore())
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeAborted {
+		t.Errorf("ErrIntentCancelled code = %v, want Aborted", got)
+	}
+}
+
+// TestSplitModeStopPending maps a Stop the worker did not confirm within budget
+// (ErrStopPending) to CodeUnavailable — never a false success (#491 item 7).
+func TestSplitModeStopPending(t *testing.T) {
+	t.Parallel()
+	client := newSessionClient(t, &fakeSessionManager{stopErr: session.ErrStopPending}, activeStore())
+	_, err := client.StopSession(context.Background(), connect.NewRequest(&managementv1.StopSessionRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("ErrStopPending code = %v, want Unavailable", got)
+	}
+}
+
+// TestSplitModeMuteDegrades maps the Manager-only mute controls' ErrSplitMode to
+// CodeFailedPrecondition on the web tier of a split deployment (#491 item 6).
+func TestSplitModeMuteDegrades(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeSessionManager{muteErr: session.ErrSplitMode}
+	client := newSessionClient(t, mgr, activeStore())
+
+	_, err := client.SetAgentMute(context.Background(), connect.NewRequest(&managementv1.SetAgentMuteRequest{AgentId: uuid.NewString(), Muted: true}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("SetAgentMute ErrSplitMode code = %v, want FailedPrecondition", got)
+	}
+	_, err = client.SetAllMute(context.Background(), connect.NewRequest(&managementv1.SetAllMuteRequest{Muted: true}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("SetAllMute ErrSplitMode code = %v, want FailedPrecondition", got)
 	}
 }

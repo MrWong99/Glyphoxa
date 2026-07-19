@@ -147,6 +147,54 @@ type VoiceSession struct {
 	EndReason  *string
 }
 
+// VoiceSessionIntentStatus is a Voice Session Intent's lifecycle state (#491,
+// ADR-0057 (b)): the claim-plane row a web-tier Start writes and a -mode voice
+// worker claims. 'pending' → 'claimed' (a worker took it) → 'live' (its loop is
+// up) → 'done' (clean end) / 'failed' (loop fault) / 'dead' (the worker's
+// heartbeat went stale — no takeover, ADR-0006). The three non-terminal states
+// share the one-live-per-tenant partial UNIQUE index.
+type VoiceSessionIntentStatus string
+
+const (
+	// VoiceIntentPending: written by Start, not yet claimed by any worker.
+	VoiceIntentPending VoiceSessionIntentStatus = "pending"
+	// VoiceIntentClaimed: a worker won the FOR UPDATE SKIP LOCKED claim and stamped
+	// its instance_id; its loop is starting but not yet live.
+	VoiceIntentClaimed VoiceSessionIntentStatus = "claimed"
+	// VoiceIntentLive: the worker's voice loop is up and the voice_sessions row is
+	// bound; the worker heartbeats while in this state.
+	VoiceIntentLive VoiceSessionIntentStatus = "live"
+	// VoiceIntentDone: terminal clean end (Stop honored, or the loop self-exited).
+	VoiceIntentDone VoiceSessionIntentStatus = "done"
+	// VoiceIntentDead: terminal — the owning worker's heartbeat went stale, so the
+	// reaper marked it dead. No mid-session takeover (ADR-0006/0057 (e)): the Tenant
+	// restarts; the session is NEVER handed to another Voice Instance.
+	VoiceIntentDead VoiceSessionIntentStatus = "dead"
+	// VoiceIntentFailed: terminal — the claiming worker could not run the session
+	// (e.g. the Manager refused it), last_error carries the readable cause.
+	VoiceIntentFailed VoiceSessionIntentStatus = "failed"
+)
+
+// VoiceSessionIntent is one row of the voice-session claim plane (#491): a
+// tenant-keyed intent a web Start writes and a -mode voice worker claims, runs,
+// and heartbeats. VoiceSessionID is set once the worker goes live; ClaimedAt /
+// HeartbeatAt / EndedAt track the claim lifecycle; LastError carries a fault's
+// readable cause. Mirrors the storage.Job shape (ADR-0049).
+type VoiceSessionIntent struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	CampaignID     uuid.UUID
+	Status         VoiceSessionIntentStatus
+	InstanceID     string
+	VoiceSessionID uuid.NullUUID
+	StopRequested  bool
+	LastError      string
+	CreatedAt      time.Time
+	ClaimedAt      *time.Time
+	HeartbeatAt    *time.Time
+	EndedAt        *time.Time
+}
+
 // Agent is an AI-controlled persona — Butler or Character NPC (ADR-0009).
 type Agent struct {
 	ID         uuid.UUID

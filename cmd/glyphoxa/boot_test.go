@@ -16,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -993,3 +994,96 @@ func TestArmVoiceGMGate(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvDuration pins the claim-plane duration parse (#491): a valid Go duration
+// wins; blank, unparsable, zero and negative values fall back to the default —
+// a mis-set knob must never wedge the claim loop at zero or flip it negative.
+func TestEnvDuration(t *testing.T) {
+	const def = 7 * time.Second
+	cases := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"", def},
+		{"   ", def},
+		{"nope", def},
+		{"0s", def},
+		{"-3s", def},
+		{"2s", 2 * time.Second},
+		{"500ms", 500 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := envDuration(envMap(map[string]string{"K": c.val}), "K", def); got != c.want {
+			t.Errorf("envDuration(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
+// TestVoiceClaimLoopConfig pins the three claim-loop cadence knobs (#491): unset
+// yields the 2s/5s/30s defaults, and each env var overrides its field.
+func TestVoiceClaimLoopConfig(t *testing.T) {
+	def := voiceClaimLoopConfig(envMap(nil))
+	if def.Poll != defaultVoiceClaimPoll || def.Heartbeat != defaultVoiceHeartbeatInterval || def.Expiry != defaultVoiceHeartbeatExpiry {
+		t.Fatalf("defaults = %+v, want 2s/5s/30s", def)
+	}
+	got := voiceClaimLoopConfig(envMap(map[string]string{
+		"GLYPHOXA_VOICE_CLAIM_POLL":         "1s",
+		"GLYPHOXA_VOICE_HEARTBEAT_INTERVAL": "3s",
+		"GLYPHOXA_VOICE_HEARTBEAT_EXPIRY":   "20s",
+	}))
+	if got.Poll != time.Second || got.Heartbeat != 3*time.Second || got.Expiry != 20*time.Second {
+		t.Fatalf("overridden = %+v, want 1s/3s/20s", got)
+	}
+}
+
+// TestNewVoiceInstanceID pins the instance-id shape (#491): hostname + "-" +
+// 8 hex, distinct per call (the uuid suffix), never empty.
+func TestNewVoiceInstanceID(t *testing.T) {
+	a, b := newVoiceInstanceID(), newVoiceInstanceID()
+	if a == "" || b == "" {
+		t.Fatal("instance id is empty")
+	}
+	if a == b {
+		t.Fatalf("instance ids not distinct: %q == %q", a, b)
+	}
+	var host, suffix string
+	if i := strings.LastIndex(a, "-"); i >= 0 {
+		host = a[:i]
+		suffix = a[i+1:]
+	}
+	if host == "" || len(suffix) != 8 {
+		t.Fatalf("instance id %q is not <host>-<8hex>", a)
+	}
+}
+
+// TestWarnClaimCadence pins the headroom guard (#491 item 9): healthy defaults
+// stay quiet; expiry at/below the heartbeat interval, or under 10s headroom, warns.
+func TestWarnClaimCadence(t *testing.T) {
+	countWarns := func(cfg session.ClaimLoopConfig) int {
+		h := &countingHandler{}
+		warnClaimCadence(cfg, slog.New(h))
+		return h.warns
+	}
+	if n := countWarns(session.ClaimLoopConfig{Poll: 2 * time.Second, Heartbeat: 5 * time.Second, Expiry: 30 * time.Second}); n != 0 {
+		t.Errorf("healthy defaults warned %d times, want 0", n)
+	}
+	if n := countWarns(session.ClaimLoopConfig{Heartbeat: 5 * time.Second, Expiry: 3 * time.Second}); n != 1 {
+		t.Errorf("expiry below interval warned %d times, want 1", n)
+	}
+	if n := countWarns(session.ClaimLoopConfig{Heartbeat: 5 * time.Second, Expiry: 12 * time.Second}); n != 1 {
+		t.Errorf("thin headroom warned %d times, want 1", n)
+	}
+}
+
+// countingHandler is a minimal slog.Handler that counts WARN records.
+type countingHandler struct{ warns int }
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		h.warns++
+	}
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }

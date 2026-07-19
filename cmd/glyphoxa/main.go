@@ -46,6 +46,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/speaker"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/transcript"
@@ -183,6 +184,14 @@ func main() {
 // orchestrator stage/turn latency + provider series (Config.StageMetrics →
 // buildConversation: the bus subscriber + the agenttool provider adapter).
 func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *observe.PrometheusRecorder, metricsAddr string) error {
+	// #491 (ADR-0057): -mode voice WITHOUT -guild/-channel and WITH a database is
+	// the claim-plane worker — DB-driven assignment, no static target flags. WITH
+	// -guild/-channel (or -hardcoded) it stays the legacy standalone node below,
+	// byte-for-byte unchanged.
+	if !hardcoded && cfg.Guild == "" && cfg.Channel == "" && databaseURL() != "" {
+		return runVoiceWorker(log, cfg, metrics, metricsAddr)
+	}
+
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	if cfg.Token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set")
@@ -282,6 +291,203 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	log.Info("standalone voice mode: knowledge Tools (transcript_search, kg_query) are unavailable; run -mode all or web to enable them")
 
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
+}
+
+// runVoiceWorker is the -mode voice claim-plane worker (#491, ADR-0057): instead
+// of a single static guild/channel it polls the voice_session_intents table,
+// claims the oldest pending intent (FOR UPDATE SKIP LOCKED, ADR-0049), runs it
+// through the tenant-aware Manager (#488) over the per-Tenant Discord client
+// registry (#489), heartbeats while live, and finishes the row on end. No
+// mid-session takeover (ADR-0006): a stale heartbeat marks the claim dead and the
+// Tenant restarts. SIGTERM stops claiming and drains live sessions cleanly within
+// the window. The voice role reads $GLYPHOXA_SECRET to decrypt BYOK Tenant tokens
+// (ADR-0057 (d)).
+//
+// This process is the single interim claimer (#492 elects the presence owner when
+// replicas > 1): the presence Registry is active so the worker registers the
+// tenant command surface, and the per-Tenant clients drive voice.
+func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, metricsAddr string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cfg.Logger = log
+	cfg.Metrics = metrics
+	cfg.StageMetrics = metrics
+	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN") // central-token fallback; BYOK tenants override per-session
+
+	dsn := databaseURL()
+	// ADR-0031: the worker never migrates (only -mode all does); verify the schema
+	// is current and fail loud with the actionable message if behind.
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err != nil {
+		return err
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("voice worker: open db pool: %w", err)
+	}
+	defer pool.Close()
+	store := storage.New(pool)
+	blobStore := blob.NewPostgres(pool)
+
+	// The BYOK credential cipher (ADR-0004/0057 (d)): the voice role now decrypts
+	// per-Tenant Bot tokens itself. Best-effort — a worker with no $GLYPHOXA_SECRET
+	// still serves central-token Tenants on the env fallback.
+	cipher, err := appCipher()
+	if err != nil {
+		log.Warn("provider credential decryption disabled; the worker serves only env-token tenants until $GLYPHOXA_SECRET is set", "err", err)
+		cipher = nil
+	}
+
+	if metricsAddr != "" {
+		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
+	}
+
+	// Worker-scoped boot reconciliation (#491, reviewer-flagged): a plain
+	// ReconcileOrphanedVoiceSessions is process-blind — two workers booting would
+	// close each other's live 'running' rows. Close ONLY rows whose owning intent
+	// went terminal (a crashed worker's leftovers), never one an intent still holds
+	// live. Required before replicas > 1 (#492).
+	if n, err := store.ReconcileWorkerOrphanedVoiceSessions(ctx); err != nil {
+		return fmt.Errorf("voice worker: reconcile orphaned sessions: %w", err)
+	} else if n > 0 {
+		log.Warn("voice worker: closed orphaned voice sessions behind terminal intents", "count", n)
+	}
+
+	instanceID := newVoiceInstanceID()
+	log.Info("voice worker starting", "instance", instanceID)
+
+	// ONE process bus; each session gets its own bus Forwarded onto this (#487).
+	eventBus := voiceevent.NewBus()
+	cfg.Bus = eventBus
+	sessions := session.NewRegistry()
+
+	// GM identity (ADR-0055): the per-Tenant Butler voice-address gate + transcript
+	// GM labels. A failed load degrades to the env allowlist alone, never a boot
+	// failure.
+	allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+	gmID := auth.NewGMIdentity(store, allow, log)
+	if err := gmID.Refresh(ctx); err != nil {
+		log.Warn("voice worker: loading tenant-operator GM bindings failed; falling back to the allowlist", "err", err)
+	}
+	cfg.GMSpeaker = gmSpeakerGate(false, gmID.IsGM)
+
+	// Effective Admission Mode (ADR-0055) drives the plan-allowance + platform-key
+	// entitlement gates the session Manager applies at Start — the worker READS the
+	// posture the web tier records; it does not record it.
+	admission := auth.AdmissionAllowlist
+	if res, aerr := resolveAdmissionMode(ctx, store, os.Getenv); aerr != nil {
+		log.Warn("voice worker: resolve admission mode; defaulting to allowlist gates", "err", aerr)
+	} else {
+		admission = res.Effective
+	}
+	keyEnt := entitlementForMode(admission, store)
+	cfg.KeyEntitlement = keyEnt
+
+	// Per-Tenant Discord client registry (#489): the standing client keyed by each
+	// Tenant's resolved Bot token, plus the tenant command surface. The worker IS
+	// the active presence owner in the single-worker interim (#492 flips this to an
+	// elector when replicas > 1).
+	gate := presence.NewGate(gmID, presence.NewStorageTenantResolver(store))
+	reg := presence.NewRegistry(gate, log)
+	reg.Register(presence.RollCommand(tool.NewDice()))
+	reg.RegisterComponentHandler(presence.NewConsentButtons(store, sessions, log).HandleComponent)
+	clients := presence.NewClients(store, cipher, reg, cfg.Token, log)
+	clients.SetGatewayBudget(cfg.GatewayBudget)
+
+	// The Manager's persistence deps (the buildVoiceDeps set, #491): the relay's
+	// headless line writer/finalizer, the chunk writer, the Highlight saver, NPC
+	// recall + KG-facts, the knowledge Tools, the durable Usage ledger, the
+	// plan-allowance gate, and the per-Campaign speaker resolver. The relay is
+	// headless here — no SSE mounts (ADR-0014 Hop-A stays deferred on the voice
+	// tier); it exists only to persist transcript lines and finalize them at Stop.
+	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
+	speakerResolver := speaker.NewResolver(store, clients, gmID, log)
+	relay := transcript.NewRelay(eventBus, sessions, store, log)
+	relay.SetResolver(speakerResolver)
+	chunker := transcript.NewChunker(eventBus, sessions, store, metrics, log, transcript.ChunkerConfig{})
+	chunker.SetResolver(speakerResolver)
+	highlightSaver := highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log)
+	knowledgeAdapter := knowledge.New(store, store.PromptKG())
+
+	deps := session.Deps{
+		Registry:   sessions,
+		Transcript: relay,
+		Chunker:    chunker,
+		Highlights: highlightSaver,
+		Clients:    clients,
+		SpeakerNameForCampaign: func(campaignID uuid.UUID, speakerID string) string {
+			return speakerResolver.Lookup(campaignID, speakerID).Name
+		},
+		GMSpeakerForTenant: func(tenantID uuid.UUID, discordUserID string) bool {
+			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
+		},
+		MaxSessions: maxVoiceSessions(os.Getenv),
+		Usage:       store,
+		Allowance:   allowanceForMode(admission, store),
+		Facts:       kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
+		Tools: tool.Deps{
+			Transcripts: knowledgeAdapter,
+			KG:          knowledgeAdapter,
+			KGW:         knowledgeAdapter,
+			Recap:       knowledge.NewRecap(recapEngine, store),
+		},
+	}
+
+	// NPC memory recall (#122): resolved once over the shared embeddings provider.
+	// An unavailable provider leaves recall off (loud-but-non-fatal), exactly as in
+	// the web/all boot.
+	if provider, _, err := embedworker.ResolveProvider(ctx, store); err != nil {
+		log.Error("voice worker: embeddings provider unavailable; NPC memory recall disabled", "err", err)
+	} else {
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		context.AfterFunc(ctx, recaller.Close)
+		deps.Memory = recaller
+	}
+
+	runner := func(rctx context.Context, c wirenpc.Config) error {
+		return wirenpc.RunFromDB(rctx, c, pool, cipher)
+	}
+	mgr := session.NewManager(store, runner, cfg, cipher, log, true, deps)
+
+	// The claim-plane session control (#491 review item 1): in WORKER mode
+	// /glyphoxa start and end must NOT drive the Manager directly — that would run a
+	// slash-started session with NO intent row (no heartbeat, the one-live-per-tenant
+	// invariant false, IntentControl/archive guards blind, an unreconcilable crash
+	// row). Route them through IntentControl so /glyphoxa start writes an intent this
+	// same worker's loop claims (typically within one poll) and /glyphoxa end
+	// requests the stop the loop honors — exactly the plane the web tier uses. The
+	// live controls (search/recap/mute/say) still drive the Manager, which holds the
+	// live session this worker is running.
+	intentControl := session.NewIntentControl(store, log, voiceIntentControlConfig(os.Getenv))
+
+	// Register the full tenant command surface (start/end/search/mute/say/recap),
+	// then seed the standing clients so the commands appear with no session live.
+	reg.Register(
+		presence.UseCommand(store),
+		presence.StartCommand(store, intentControl),
+		presence.EndCommand(intentControl),
+		presence.SearchCommand(store, mgr),
+		presence.RecapCommand(store, mgr, recapEngine, mgr),
+		presence.MuteCommand(mgr, store),
+		presence.MuteAllCommand(mgr, store),
+		presence.SayCommand(mgr, store),
+	)
+	if err := clients.EnsureAll(ctx); err != nil {
+		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
+	}
+	go clients.Run(ctx)
+
+	// Run the claim loop until SIGTERM. It stops claiming on ctx cancel and drains
+	// its live sessions cleanly (AC5); then tear down the Manager (a no-op backstop
+	// after the drain) and close the standing clients.
+	claimCfg := voiceClaimLoopConfig(os.Getenv)
+	warnClaimCadence(claimCfg, log)
+	loop := session.NewClaimLoop(store, mgr, instanceID, log, claimCfg)
+	loop.Run(ctx)
+	mgr.Shutdown()
+	clients.Close()
+	return nil
 }
 
 // ensureSchemaReady runs the boot schema preflight for the web/all entrypoint
@@ -836,6 +1042,19 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return fmt.Errorf("web: %w", err)
 	}
 
+	// Web-tier Voice-Session control (#491, ADR-0057): -mode all drives the
+	// in-process Manager directly (byte-identical to today — NO intent rows). A
+	// split -mode web tier instead drives the Postgres claim plane through
+	// IntentControl: its StartSession writes a voice_session_intents row a -mode
+	// voice worker claims and runs, and the live-only controls (mute/say/replay/
+	// spend) degrade with CodeFailedPrecondition because that state lives in the
+	// worker, not here (the ADR-0057 consequence). The choice pivots on withVoice:
+	// an all-mode process owns the loop; a web-only one delegates to the plane.
+	var sessionCtl sessionControl = mgr
+	if !withVoice {
+		sessionCtl = session.NewIntentControl(store, log, voiceIntentControlConfig(os.Getenv))
+	}
+
 	// Background job runner (#286, ADR-0049): one DB-backed generic runner over the
 	// `job` table, safe across web/all replicas by construction (the claim is a
 	// FOR UPDATE SKIP LOCKED, ADR-0039). It runs in web AND all mode (the
@@ -1012,7 +1231,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1126,7 +1345,25 @@ var plainMountPolicy = map[string]auth.TenantMode{
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each a row in the guarded mount table
 // (#446 — the Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
+// sessionControl is the web tier's Voice-Session control surface (#491): the RPC
+// SessionManager plus the campaign/health/replay seams the mounts wire. BOTH
+// *session.Manager (in-process, -mode all) and *session.IntentControl (claim-plane
+// driven, -mode web of a split deployment) satisfy it, so managementMounts is
+// mode-agnostic — runWeb picks which one to pass.
+type sessionControl interface {
+	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
+	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
+	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
+	SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error)
+	MutedAgentIDs(tenantID uuid.UUID) []string
+	Spend(tenantID uuid.UUID) spend.Status
+	IsCampaignLive(campaignID uuid.UUID) bool
+	AnyLive() bool
+	ReplayHighlight(ctx context.Context, tenantID uuid.UUID, clipKey string) error
+}
+
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
