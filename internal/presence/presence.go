@@ -90,8 +90,13 @@ type Presence struct {
 	// budget observes the standing client's gateway session establishments for the
 	// IDENTIFY-budget metrics (#486). Set once at boot via SetGatewayBudget before
 	// the first Ensure; read lazily by the default client builder, so a nil budget
-	// (never set) simply attaches no listeners. Not mu-guarded: it is written once
-	// before any Ensure and only read thereafter.
+	// (never set) simply attaches no instrumentation.
+	//
+	// This write is intentionally NOT mu-guarded: SetGatewayBudget must be called on
+	// the boot goroutine BEFORE the first Ensure — which is what spawns the gateway
+	// read goroutines that (indirectly) read it — so boot ordering, not a mutex,
+	// establishes the happens-before edge. Calling SetGatewayBudget after a gateway
+	// is open would be a data race.
 	budget wirenpc.GatewayBudgetRecorder
 }
 
@@ -110,10 +115,10 @@ func New(store Store, cipher *crypto.Cipher, reg *Registry, envToken string, log
 		log:      log,
 	}
 	p.guildID.Store("")
-	// The listener provider is read at build time (each Ensure that rebuilds the
+	// The budget opts are read at build time (each Ensure that rebuilds the
 	// client), so a SetGatewayBudget between New and the first Ensure still lands.
-	p.build = defaultClientBuilder(reg, log, p.invalidate, func() []bot.EventListener {
-		return wirenpc.GatewayBudgetListeners(p.budget)
+	p.build = defaultClientBuilder(reg, log, p.invalidate, func(token string) []bot.ConfigOpt {
+		return wirenpc.GatewayBudgetClientOpts(token, p.budget)
 	})
 	p.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	p.register = restRegister
@@ -291,13 +296,13 @@ func (p *Presence) Close() {
 // disgo client with the SAME options the per-session voice wiring used (so a
 // shared-client Voice Session keeps its DAVE encryption and voice-state intents,
 // ADR-0006) plus the interaction listeners and async event delivery.
-func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetListeners func() []bot.EventListener) ClientBuilder {
+func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetOpts func(token string) []bot.ConfigOpt) ClientBuilder {
 	return func(token string) (*bot.Client, error) {
 		// client is captured by the close handler below; disgo.New assigns it
 		// before any gateway open, so it is non-nil by the time a close can fire.
 		var client *bot.Client
 		var err error
-		client, err = disgo.New(token,
+		opts := []bot.ConfigOpt{
 			bot.WithLogger(log),
 			bot.WithDefaultGateway(),
 			// Guilds + GuildVoiceStates are the minimum for the voice join path
@@ -319,16 +324,17 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot
 			// Message-component (button) interactions: the rollover-tape consent
 			// buttons (#306) and any future component surface fan out from here.
 			bot.WithEventListenerFunc(reg.HandleComponent),
-			// Gateway IDENTIFY-budget observability (#486): classify the standing
-			// client's session establishments (Ready→identify, Resumed→resume). Empty
-			// when no budget is set. The voice-cycle clients that BORROW this client
-			// (wirenpc.Config.Client) inherit these listeners, so they are not
-			// re-instrumented on the borrow path — no double-counting.
-			bot.WithEventListeners(budgetListeners()...),
 			// Deliver events asynchronously so an interaction handler never runs on
 			// the gateway read goroutine and starves voice events (ADR-0010).
 			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
-		)
+		}
+		// Gateway IDENTIFY-budget observability (#486): count the standing client's
+		// IDENTIFYs at send time (identify rate-limiter wrapper) and RESUMEs on the
+		// Resumed event. Empty when no budget is set. The voice-cycle clients that
+		// BORROW this client (wirenpc.Config.Client) inherit this instrumentation, so
+		// they are NOT re-instrumented on the borrow path — no double-counting.
+		opts = append(opts, budgetOpts(token)...)
+		client, err = disgo.New(token, opts...)
 		return client, err
 	}
 }

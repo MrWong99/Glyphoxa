@@ -217,10 +217,14 @@ Two Prometheus counters on `/metrics` (the `-metrics-addr` listener, default
 `:9090`) make this observable, labelled by the non-secret bot **application id**
 (never the token):
 
-- `glyphoxa_gateway_identify_total{application_id="…"}` — fresh sessions
-  (budget-consuming).
+- `glyphoxa_gateway_identify_total{application_id="…"}` — **IDENTIFYs sent**
+  (budget-consuming). Counted at the point the gateway sends the IDENTIFY, not
+  when a session reaches `Ready` — so a connect that spends the budget but never
+  succeeds (an `InvalidSession` reply, a close before dispatch, a reconnect loop
+  that keeps re-identifying) is still counted. That is the whole point: a silent
+  connect-fail loop is the fastest way to burn the budget.
 - `glyphoxa_gateway_resume_total{application_id="…"}` — reattached sessions
-  (budget-free).
+  (budget-free), counted on the `Resumed` event.
 
 **What to watch.** A rising `identify_total` rate — especially a reconnect loop
 that identifies instead of resuming — is the early sign of budget burn. Alert on

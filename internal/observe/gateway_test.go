@@ -88,6 +88,37 @@ func TestGatewayBudgetWarnsWhenIdentifiesExceedThreshold(t *testing.T) {
 	}
 }
 
+// TestGatewayBudgetWarnRefiresAfterWindowDrains proves the warning is not latched
+// forever: once the window drains back under the threshold, a fresh crossing warns
+// again (a regression that leaves warned=true permanently must fail here).
+func TestGatewayBudgetWarnRefiresAfterWindowDrains(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	b := NewGatewayBudget(prometheus.NewRegistry(), 2, log)
+
+	now := time.Now()
+	b.now = func() time.Time { return now }
+
+	// First crossing: 3 > 2 → one warning.
+	for range 3 {
+		b.RecordIdentify("app-1")
+	}
+	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
+		t.Fatalf("first-crossing warnings = %d, want 1", n)
+	}
+
+	// Drain the window past 24h so the earlier three roll off and the alarm rearms.
+	now = now.Add(25 * time.Hour)
+
+	// Second crossing after the drain: another 3 → a SECOND warning.
+	for range 3 {
+		b.RecordIdentify("app-1")
+	}
+	if n := strings.Count(buf.String(), "level=WARN"); n != 2 {
+		t.Fatalf("warnings after second crossing = %d, want 2 (alarm must rearm, not latch)", n)
+	}
+}
+
 // TestGatewayBudgetWindowRollsOff proves identifies older than 24h leave the
 // window, so a slow trickle never trips the alarm.
 func TestGatewayBudgetWindowRollsOff(t *testing.T) {

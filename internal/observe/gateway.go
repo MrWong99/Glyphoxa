@@ -15,17 +15,22 @@ import (
 const identifyWindow = 24 * time.Hour
 
 // GatewayBudget observes Discord gateway session establishments, classifying each
-// as an IDENTIFY (a fresh session, budget-consuming) or a RESUME (budget-free),
-// exporting Prometheus counters labeled by the non-secret bot application id, and
-// logging a structured warning when one application's IDENTIFYs cross a
-// configurable threshold inside the rolling 24h window (#486, ADR-0032).
+// as an IDENTIFY (budget-consuming) or a RESUME (budget-free), exporting Prometheus
+// counters labeled by the non-secret bot application id, and logging a structured
+// warning when one application's IDENTIFYs cross a configurable threshold inside
+// the rolling 24h window (#486, ADR-0032).
+//
+// IDENTIFY is counted at SEND time (the wirenpc identify rate-limiter wrapper), not
+// when a session reaches Ready, so a connect that spends the budget but never
+// succeeds still counts — that is the exact failure mode this metric pre-warns.
+// RESUME is counted on the Resumed dispatch.
 //
 // The token is NEVER a label or a log field — only the application id, which is a
 // public, bounded identifier (one per bot; a handful across tenants), so the
 // series stays within the ADR-0032 cardinality bounds.
 //
-// Its Record* methods fire from disgo's gateway read goroutines (the Ready /
-// Resumed dispatch), so all state is mutex-guarded.
+// Its Record* methods fire from disgo's gateway read goroutines (the identify send
+// path / the Resumed dispatch), so all state is mutex-guarded.
 type GatewayBudget struct {
 	identify *prometheus.CounterVec // application_id
 	resume   *prometheus.CounterVec // application_id
