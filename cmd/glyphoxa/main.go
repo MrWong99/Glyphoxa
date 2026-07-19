@@ -303,9 +303,14 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 // the window. The voice role reads $GLYPHOXA_SECRET to decrypt BYOK Tenant tokens
 // (ADR-0057 (d)).
 //
-// This process is the single interim claimer (#492 elects the presence owner when
-// replicas > 1): the presence Registry is active so the worker registers the
-// tenant command surface, and the per-Tenant clients drive voice.
+// Interactions are dispatched by exactly ONE elected presence owner (#492,
+// ADR-0057 (c)): every gateway session on the shared central token receives every
+// INTERACTION_CREATE (P5), so with replicas > 1 each worker would otherwise handle
+// the same slash command. The presence Registry boots INACTIVE and an OwnerElector,
+// running beside the ClaimLoop on this same instanceID, flips it active only while
+// this Instance holds the singleton presence_owner claim; a non-owner drops the
+// duplicate events it still receives. Voice itself needs no such election — a pod
+// holding no connection for a guild simply ignores that guild's voice events (P6).
 func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, metricsAddr string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -385,11 +390,13 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	cfg.KeyEntitlement = keyEnt
 
 	// Per-Tenant Discord client registry (#489): the standing client keyed by each
-	// Tenant's resolved Bot token, plus the tenant command surface. The worker IS
-	// the active presence owner in the single-worker interim (#492 flips this to an
-	// elector when replicas > 1).
+	// Tenant's resolved Bot token, plus the tenant command surface. The Registry
+	// boots INACTIVE (#492): the OwnerElector below flips it active only while this
+	// Instance wins the presence_owner election, so exactly one worker on the shared
+	// central token dispatches each interaction (ADR-0057 (c)).
 	gate := presence.NewGate(gmID, presence.NewStorageTenantResolver(store))
 	reg := presence.NewRegistry(gate, log)
+	reg.SetActive(false)
 	reg.Register(presence.RollCommand(tool.NewDice()))
 	reg.RegisterComponentHandler(presence.NewConsentButtons(store, sessions, log).HandleComponent)
 	clients := presence.NewClients(store, cipher, reg, cfg.Token, log)
@@ -478,16 +485,50 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	}
 	go clients.Run(ctx)
 
+	// Presence-owner election (#492, ADR-0057 (c)): runs beside the claim loop on the
+	// SAME instanceID, flipping the Registry active only while this Instance owns the
+	// singleton presence_owner row. It runs on its OWN context so the drain can
+	// sequence its Release AFTER the Manager finishes its rows (below) — releasing
+	// the owner claim is the LAST coordination write, so a survivor takes over
+	// interaction dispatch only once this instance has cleanly wound its sessions
+	// down.
+	elector := presence.NewOwnerElector(store, instanceID, reg.SetActive, log, voicePresenceElectorConfig(os.Getenv))
+	electorCtx, electorStop := context.WithCancel(context.Background())
+	electorDone := make(chan struct{})
+	go func() { defer close(electorDone); elector.Run(electorCtx) }()
+
 	// Run the claim loop until SIGTERM. It stops claiming on ctx cancel and drains
-	// its live sessions cleanly (AC5); then tear down the Manager (a no-op backstop
-	// after the drain) and close the standing clients.
+	// its live sessions cleanly (AC5). Drain order (ADR-0006/0057): stop claiming →
+	// Manager Shutdown (Finish the live rows) → release the presence-owner claim →
+	// close the standing clients. The Manager finishes its rows BEFORE the owner
+	// claim is released so no survivor starts dispatching for this instance's guilds
+	// mid-teardown.
 	claimCfg := voiceClaimLoopConfig(os.Getenv)
 	warnClaimCadence(claimCfg, log)
 	loop := session.NewClaimLoop(store, mgr, instanceID, log, claimCfg)
-	loop.Run(ctx)
-	mgr.Shutdown()
-	clients.Close()
+	drainVoiceWorker(
+		func() { loop.Run(ctx) },
+		mgr.Shutdown,
+		func() { electorStop(); <-electorDone },
+		clients.Close,
+	)
 	return nil
+}
+
+// drainVoiceWorker runs the -mode voice worker to SIGTERM and then tears it down in
+// the ONE correct order (#492, ADR-0006/0057): run blocks claiming the plane and
+// serving until ctx cancel; then stopClaimingAndFinish (the Manager's Shutdown)
+// Finishes every live intent row; then releaseOwner drops the presence-owner claim;
+// then closeClients tears the standing Discord clients down. The owner claim is the
+// LAST coordination write before the clients go — a survivor must not begin
+// dispatching interactions for this instance's guilds until its sessions are wound
+// down, so releaseOwner strictly follows stopClaimingAndFinish. Extracted from
+// runVoiceWorker so this ordering is unit-testable without a live DB or Discord.
+func drainVoiceWorker(run, stopClaimingAndFinish, releaseOwner, closeClients func()) {
+	run()
+	stopClaimingAndFinish()
+	releaseOwner()
+	closeClients()
 }
 
 // ensureSchemaReady runs the boot schema preflight for the web/all entrypoint
