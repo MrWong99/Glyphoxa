@@ -16,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -1054,3 +1055,35 @@ func TestNewVoiceInstanceID(t *testing.T) {
 		t.Fatalf("instance id %q is not <host>-<8hex>", a)
 	}
 }
+
+// TestWarnClaimCadence pins the headroom guard (#491 item 9): healthy defaults
+// stay quiet; expiry at/below the heartbeat interval, or under 10s headroom, warns.
+func TestWarnClaimCadence(t *testing.T) {
+	countWarns := func(cfg session.ClaimLoopConfig) int {
+		h := &countingHandler{}
+		warnClaimCadence(cfg, slog.New(h))
+		return h.warns
+	}
+	if n := countWarns(session.ClaimLoopConfig{Poll: 2 * time.Second, Heartbeat: 5 * time.Second, Expiry: 30 * time.Second}); n != 0 {
+		t.Errorf("healthy defaults warned %d times, want 0", n)
+	}
+	if n := countWarns(session.ClaimLoopConfig{Heartbeat: 5 * time.Second, Expiry: 3 * time.Second}); n != 1 {
+		t.Errorf("expiry below interval warned %d times, want 1", n)
+	}
+	if n := countWarns(session.ClaimLoopConfig{Heartbeat: 5 * time.Second, Expiry: 12 * time.Second}); n != 1 {
+		t.Errorf("thin headroom warned %d times, want 1", n)
+	}
+}
+
+// countingHandler is a minimal slog.Handler that counts WARN records.
+type countingHandler struct{ warns int }
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		h.warns++
+	}
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }

@@ -343,6 +343,23 @@ func TestShareHighlight_VoiceReplayNoSession(t *testing.T) {
 	}
 }
 
+// TestShareHighlight_VoiceReplaySplitMode pins ErrSplitMode → FailedPrecondition:
+// a live-channel replay needs the worker's outbound pump, so it degrades on the
+// web tier of a split deployment (#491 item 6).
+func TestShareHighlight_VoiceReplaySplitMode(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightPromoted)
+	replayer := &fakeReplayer{err: session.ErrSplitMode}
+
+	client := newShareClient(t, tenantID, store, &fakeRPCBlobs{}, campaignSessionStore(campaignID), &fakeSharer{}, replayer, newFakeShareStore())
+	_, err := client.ShareHighlight(context.Background(), connect.NewRequest(shareReplayReq(h.ID.String())))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("split mode: want CodeFailedPrecondition, got %v", err)
+	}
+}
+
 // TestListShareChannels_ChannelsAndLast pins the dialog source: the guild's channels
 // plus the campaign's remembered channel.
 func TestListShareChannels_ChannelsAndLast(t *testing.T) {

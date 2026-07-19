@@ -32,6 +32,11 @@ type IntentControlStore interface {
 	GetVoiceSession(ctx context.Context, id uuid.UUID) (storage.VoiceSession, error)
 	IsCampaignLiveIntent(ctx context.Context, campaignID uuid.UUID) (bool, error)
 	AnyLiveVoiceSessionIntent(ctx context.Context) (bool, error)
+	// ReapVoiceSessionIntentIfExpired marks the given claimed/live intent dead when
+	// its heartbeat is stale — the zero-worker escape (#491 review item 4): Start
+	// unblocks a Tenant whose prior worker died and left a claimed/live row no tick
+	// will ever sweep. Returns whether it reaped.
+	ReapVoiceSessionIntentIfExpired(ctx context.Context, id uuid.UUID, expiry time.Duration) (bool, error)
 }
 
 // IntentControlConfig carries IntentControl's poll cadence and budgets (#491). A
@@ -43,8 +48,13 @@ type IntentControlConfig struct {
 	// before returning ErrIntentPending (the operator retries). Default 20s.
 	StartBudget time.Duration
 	// StopBudget bounds how long Stop waits for the worker to wind the session down
-	// before returning the intent's last-known row. Default 30s.
+	// before returning ErrStopPending. Default 30s.
 	StopBudget time.Duration
+	// Expiry is the heartbeat-staleness horizon (matching the worker's
+	// GLYPHOXA_VOICE_HEARTBEAT_EXPIRY): Start reaps a blocking claimed/live intent
+	// whose heartbeat is older than this before failing ErrSessionActive — the
+	// zero-worker escape (review item 4). Default 30s.
+	Expiry time.Duration
 }
 
 // IntentControl drives voice sessions through the Postgres claim plane (#491).
@@ -69,6 +79,9 @@ func NewIntentControl(store IntentControlStore, log *slog.Logger, cfg IntentCont
 	if cfg.StopBudget <= 0 {
 		cfg.StopBudget = 30 * time.Second
 	}
+	if cfg.Expiry <= 0 {
+		cfg.Expiry = 30 * time.Second
+	}
 	return &IntentControl{store: store, log: log, cfg: cfg}
 }
 
@@ -82,7 +95,16 @@ func NewIntentControl(store IntentControlStore, log *slog.Logger, cfg IntentCont
 func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
 	intent, err := c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
 	if errors.Is(err, storage.ErrIntentActive) {
-		return storage.VoiceSession{}, ErrSessionActive
+		// Zero-worker escape (review item 4): the blocking intent may be a dead
+		// worker's claimed/live row that no tick will ever sweep. Reap it if its
+		// heartbeat is stale, then retry the create ONCE. A still-live row (fresh
+		// beat) or an in-flight pending Start is left alone → ErrSessionActive.
+		if reaped, rerr := c.reapBlockingIfExpired(ctx, tenantID); rerr == nil && reaped {
+			intent, err = c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+		}
+		if errors.Is(err, storage.ErrIntentActive) {
+			return storage.VoiceSession{}, ErrSessionActive
+		}
 	}
 	if err != nil {
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session intent: %w", err)
@@ -98,22 +120,31 @@ func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUI
 		}
 		switch cur.Status {
 		case storage.VoiceIntentLive:
-			if !cur.VoiceSessionID.Valid {
-				break // live but the id has not landed yet — keep polling
+			if cur.VoiceSessionID.Valid {
+				vs, err := c.store.GetVoiceSession(ctx, cur.VoiceSessionID.UUID)
+				if err != nil {
+					return storage.VoiceSession{}, fmt.Errorf("session: load live voice session: %w", err)
+				}
+				return vs, nil
 			}
-			vs, err := c.store.GetVoiceSession(ctx, cur.VoiceSessionID.UUID)
-			if err != nil {
-				return storage.VoiceSession{}, fmt.Errorf("session: load live voice session: %w", err)
-			}
-			return vs, nil
+			// live but the id has not landed yet — keep polling.
 		case storage.VoiceIntentFailed, storage.VoiceIntentDead:
 			return storage.VoiceSession{}, fmt.Errorf("session: voice worker could not start the session: %s", intentReason(cur))
 		case storage.VoiceIntentDone:
-			// Stopped before it ever went live (a stop hit the pending row): treat as
-			// a benign no-session outcome, not a fault.
-			return storage.VoiceSession{}, ErrIntentPending
+			// Stopped before it ever went live (an external stop hit the pending row):
+			// a distinct cancelled outcome, NOT the still-queued ErrIntentPending
+			// (review item 7).
+			return storage.VoiceSession{}, ErrIntentCancelled
 		}
 		if time.Now().After(deadline) {
+			// Budget spent and still not live: CANCEL the pending intent so a retry
+			// does not 23505 into a dead-end AlreadyExists and a worker booting later
+			// does not claim a stale row nobody is watching (review item 3). Then
+			// "try again shortly" is honest. A concurrent claim turns the cancel into
+			// a stop_requested the claiming worker honors — also correct.
+			if _, cerr := c.store.RequestVoiceSessionStop(ctx, intent.ID); cerr != nil && !errors.Is(cerr, storage.ErrNotFound) {
+				c.log.Warn("intent control: cancel pending intent after start timeout", "intent", intent.ID, "err", cerr)
+			}
 			return storage.VoiceSession{}, ErrIntentPending
 		}
 		select {
@@ -122,6 +153,25 @@ func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUI
 		case <-ticker.C:
 		}
 	}
+}
+
+// reapBlockingIfExpired reaps the Tenant's current blocking intent when it is a
+// claimed/live row whose heartbeat is stale (its worker died) — the single-row
+// zero-worker escape (review item 4). A pending or fresh row is left untouched
+// (false). It is best-effort: any error is returned so Start falls back to the
+// plain ErrSessionActive.
+func (c *IntentControl) reapBlockingIfExpired(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	blocking, err := c.store.GetLiveVoiceSessionIntentForTenant(ctx, tenantID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return false, nil // it already cleared — the retry will succeed
+	}
+	if err != nil {
+		return false, err
+	}
+	if blocking.Status != storage.VoiceIntentClaimed && blocking.Status != storage.VoiceIntentLive {
+		return false, nil // pending: an in-flight Start owns it, not a dead worker
+	}
+	return c.store.ReapVoiceSessionIntentIfExpired(ctx, blocking.ID, c.cfg.Expiry)
 }
 
 // Stop flags the Tenant's live intent for the owning worker to wind down and
@@ -153,9 +203,10 @@ func (c *IntentControl) Stop(ctx context.Context, tenantID uuid.UUID) (storage.V
 			return c.loadRow(ctx, cur)
 		}
 		if time.Now().After(deadline) {
-			// The worker has not confirmed within the budget; return the last-known
-			// row (still running) so the caller can re-poll GetSession.
-			return c.loadRow(ctx, cur)
+			// The worker has not confirmed within the budget: the session may still be
+			// running, so surface an error (→ CodeUnavailable, retry) rather than a
+			// false success carrying a still-'running' row (review item 7).
+			return storage.VoiceSession{}, ErrStopPending
 		}
 		select {
 		case <-ctx.Done():

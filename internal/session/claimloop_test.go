@@ -17,9 +17,11 @@ import (
 // semantics (pending → claimed → live → terminal, instance fencing, reap) so the
 // ClaimLoop is exercised without Postgres.
 type fakeIntentStore struct {
-	mu      sync.Mutex
-	intents map[uuid.UUID]*storage.VoiceSessionIntent
-	reaped  int
+	mu          sync.Mutex
+	intents     map[uuid.UUID]*storage.VoiceSessionIntent
+	reaped      int
+	reapReturns int64 // how many rows ReapDead reports this tick (drives reconcile-after-reap)
+	reconciled  int   // ReconcileWorkerOrphanedVoiceSessions call count
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -125,7 +127,20 @@ func (f *fakeIntentStore) ReapDeadVoiceSessionIntents(_ context.Context, _ time.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reaped++
+	return f.reapReturns, nil
+}
+
+func (f *fakeIntentStore) ReconcileWorkerOrphanedVoiceSessions(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconciled++
 	return 0, nil
+}
+
+func (f *fakeIntentStore) reconcileCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reconciled
 }
 
 func newClaimLoop(t *testing.T, store session.IntentStore, mgr *session.Manager) *session.ClaimLoop {
@@ -245,6 +260,31 @@ func TestClaimLoop_GracefulDrain(t *testing.T) {
 	}
 	if !runner.wasCancelled() {
 		t.Fatal("session loop not cancelled on graceful shutdown")
+	}
+}
+
+// TestClaimLoop_ReconcileAfterReap covers review item 2: a tick that reaps stale
+// intents (reap > 0) also runs the worker-orphan reconcile, so a fast restart's
+// leftover 'running' rows are closed the moment their intent expires — not only
+// at the next boot. A tick with no reap does NOT reconcile (cheap).
+func TestClaimLoop_ReconcileAfterReap(t *testing.T) {
+	mstore := newFakeStore()
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	istore := newFakeIntentStore()
+	loop := newClaimLoop(t, istore, mgr)
+
+	// No reap this tick → no reconcile.
+	istore.reapReturns = 0
+	loop.TickForTest(context.Background())
+	if got := istore.reconcileCount(); got != 0 {
+		t.Fatalf("reconcile ran %d times with no reap, want 0", got)
+	}
+
+	// A reap → reconcile runs.
+	istore.reapReturns = 2
+	loop.TickForTest(context.Background())
+	if got := istore.reconcileCount(); got != 1 {
+		t.Fatalf("reconcile ran %d times after a reap, want 1", got)
 	}
 }
 

@@ -431,6 +431,26 @@ func voiceClaimLoopConfig(getenv func(string) string) session.ClaimLoopConfig {
 func voiceIntentControlConfig(getenv func(string) string) session.IntentControlConfig {
 	return session.IntentControlConfig{
 		Poll: envDuration(getenv, "GLYPHOXA_VOICE_CLAIM_POLL", defaultVoiceClaimPoll),
+		// Matches the worker's reaper horizon so Start's zero-worker escape (review
+		// item 4) judges a blocking claim stale on the same clock the worker would.
+		Expiry: envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+	}
+}
+
+// warnClaimCadence checks the claim-plane cadence has sane headroom (#491 review
+// item 9): the heartbeat expiry must sit comfortably above one heartbeat interval
+// plus a session's wind-down, or a healthy-but-slow worker risks being reaped
+// mid-drain. It warns (never clamps — an operator may know their timing) when the
+// margin above one heartbeat interval is under 10s.
+func warnClaimCadence(cfg session.ClaimLoopConfig, log *slog.Logger) {
+	if cfg.Expiry <= cfg.Heartbeat {
+		log.Warn("GLYPHOXA_VOICE_HEARTBEAT_EXPIRY <= _HEARTBEAT_INTERVAL: a live worker will be reaped between beats",
+			"expiry", cfg.Expiry, "interval", cfg.Heartbeat)
+		return
+	}
+	if cfg.Expiry-cfg.Heartbeat < 10*time.Second {
+		log.Warn("thin claim-plane headroom: HEARTBEAT_EXPIRY minus HEARTBEAT_INTERVAL is under 10s; a slow drain may trip the reaper",
+			"expiry", cfg.Expiry, "interval", cfg.Heartbeat)
 	}
 }
 

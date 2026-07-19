@@ -33,6 +33,11 @@ type IntentStore interface {
 	HeartbeatVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string) (bool, error)
 	FinishVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string, status storage.VoiceSessionIntentStatus, lastError string) (storage.VoiceSessionIntent, error)
 	ReapDeadVoiceSessionIntents(ctx context.Context, expiry time.Duration) (int64, error)
+	// ReconcileWorkerOrphanedVoiceSessions closes 'running' voice_sessions rows
+	// behind a NOW-terminal intent (#491): run in the tick right after a reap so a
+	// fast pod restart's leftover rows are closed the moment their intent is reaped
+	// dead, not only at the next boot (review item 2).
+	ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error)
 }
 
 // ClaimLoopConfig carries the claim loop's three poll durations (#491), read
@@ -115,6 +120,15 @@ func (l *ClaimLoop) tick(ctx context.Context) {
 		l.log.Warn("claim loop: reap dead intents", "err", err)
 	} else if n > 0 {
 		l.log.Warn("claim loop: reaped dead voice session intents (worker heartbeats expired)", "count", n)
+		// A reap just made some intents terminal: close any 'running' voice_sessions
+		// rows behind them NOW (review item 2), so a crashed worker's leftover row is
+		// reconciled the moment its intent expires — not only at the next boot, which
+		// a fast pod restart could postpone indefinitely.
+		if rn, err := l.store.ReconcileWorkerOrphanedVoiceSessions(ctx); err != nil {
+			l.log.Warn("claim loop: reconcile orphaned sessions after reap", "err", err)
+		} else if rn > 0 {
+			l.log.Warn("claim loop: closed orphaned voice sessions behind reaped intents", "count", rn)
+		}
 	}
 
 	for l.mgr.HasCapacity() {
@@ -149,15 +163,23 @@ func (l *ClaimLoop) startClaimed(ctx context.Context, intent storage.VoiceSessio
 
 	live, err := l.store.MarkVoiceSessionIntentLive(ctx, intent.ID, l.instanceID, vs.ID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			l.log.Warn("claim loop: claim superseded before live (reaped); stopping the started session",
-				"intent", intent.ID)
-		} else {
-			l.log.Warn("claim loop: mark intent live", "intent", intent.ID, "err", err)
-		}
+		// Stop the just-started session either way. NotFound means the row was
+		// already reaped dead (a superseded claim) — the row is terminal, so no
+		// finish. Any OTHER error (a DB blip, or a SIGTERM cancelling ctx between
+		// Claim and MarkLive) left the row 'claimed' with no heartbeat goroutine, so
+		// finish it 'failed' on a detached ctx (mirroring the Start-refusal path) —
+		// otherwise it lingers 'claimed' until the reaper marks it the wrong state
+		// (review item 5, AC5's claimed-not-yet-live SIGTERM case).
 		if _, serr := l.mgr.Stop(l.detached(), intent.TenantID); serr != nil && !errors.Is(serr, ErrNoActiveSession) {
 			l.log.Warn("claim loop: stop after failed mark-live", "intent", intent.ID, "err", serr)
 		}
+		if errors.Is(err, storage.ErrNotFound) {
+			l.log.Warn("claim loop: claim superseded before live (reaped); stopped the started session",
+				"intent", intent.ID)
+			return
+		}
+		l.log.Warn("claim loop: mark intent live; finishing failed", "intent", intent.ID, "err", err)
+		l.finish(intent.ID, storage.VoiceIntentFailed, "mark-live failed: "+err.Error())
 		return
 	}
 

@@ -88,6 +88,17 @@ var (
 	// maps it to CodeUnavailable ("voice worker has not claimed the session yet") so
 	// the operator retries.
 	ErrIntentPending = errors.New("session: voice worker has not claimed the session yet")
+	// ErrIntentCancelled is returned by IntentControl.Start when the intent it was
+	// waiting on went to a terminal 'done' WITHOUT ever going live (#491 review item
+	// 7): a stop landed on the still-pending row, so the start was cancelled — a
+	// distinct outcome from ErrIntentPending (still queued). The RPC maps it to
+	// CodeAborted so the operator sees "start was cancelled", not "not claimed yet".
+	ErrIntentCancelled = errors.New("session: the voice session start was cancelled before a worker claimed it")
+	// ErrStopPending is returned by IntentControl.Stop when the owning worker did not
+	// confirm the wind-down within the Stop budget (#491 review item 7): the session
+	// may still be running, so it is surfaced as an error (→ CodeUnavailable, retry)
+	// rather than a false success carrying a still-'running' row.
+	ErrStopPending = errors.New("session: the voice worker has not confirmed the stop yet")
 	// ErrSplitMode is returned by the IntentControl methods that only the in-process
 	// Manager can serve — live mute/say/replay/spend reads (#491): in a split
 	// (-mode web + -mode voice) deployment the web tier holds no live session state,

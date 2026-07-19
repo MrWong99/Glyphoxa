@@ -240,6 +240,29 @@ func (s *Store) ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64
 	return tag.RowsAffected(), nil
 }
 
+// ReapVoiceSessionIntentIfExpired marks ONE claimed/live intent dead when its
+// heartbeat is older than expiry — the zero-worker escape (#491 review item 4):
+// the reaper otherwise runs only inside a worker's claim tick, so with NO healthy
+// worker a dead claimed/live intent would never expire and its Tenant would stay
+// blocked (ErrIntentActive) forever. IntentControl.Start calls this on the exact
+// row blocking a retry. Fenced by id + a stale heartbeat, so a live row (fresh
+// beat) or a foreign status is untouched. Returns whether it reaped a row.
+func (s *Store) ReapVoiceSessionIntentIfExpired(ctx context.Context, id uuid.UUID, expiry time.Duration) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE voice_session_intents
+		    SET status = 'dead',
+		        last_error = CASE WHEN last_error = '' THEN 'worker heartbeat expired' ELSE last_error END,
+		        ended_at = now()
+		  WHERE id = $1
+		    AND status IN ('claimed', 'live')
+		    AND heartbeat_at < now() - make_interval(secs => $2)`,
+		id, expiry.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("storage: reap voice session intent %s if expired: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // GetVoiceSessionIntent loads one intent by id, or ErrNotFound. It backs the
 // IntentControl poll (the web tier watching a Start it wrote) and tests.
 func (s *Store) GetVoiceSessionIntent(ctx context.Context, id uuid.UUID) (VoiceSessionIntent, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/session"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -23,6 +24,10 @@ type fakeControlStore struct {
 	*fakeIntentStore
 	mu       sync.Mutex
 	sessions map[uuid.UUID]storage.VoiceSession
+	// onGet, when set, runs against an intent on each GetVoiceSessionIntent — a hook
+	// to simulate an external transition (e.g. a stop landing on a pending row) mid
+	// Start poll. Guarded by the fakeIntentStore mutex the caller already holds.
+	onGet func(*storage.VoiceSessionIntent)
 }
 
 func newFakeControlStore() *fakeControlStore {
@@ -59,6 +64,9 @@ func (f *fakeControlStore) GetVoiceSessionIntent(_ context.Context, id uuid.UUID
 	i, ok := f.intents[id]
 	if !ok {
 		return storage.VoiceSessionIntent{}, storage.ErrNotFound
+	}
+	if f.onGet != nil {
+		f.onGet(i)
 	}
 	return *i, nil
 }
@@ -112,6 +120,38 @@ func (f *fakeControlStore) IsCampaignLiveIntent(_ context.Context, campaignID uu
 	}
 	return false, nil
 }
+
+// reapExpiry is the age threshold the test uses; a heartbeat older than now minus
+// this is stale. Tests set an intent's heartbeat via markStaleHeartbeat.
+func (f *fakeControlStore) ReapVoiceSessionIntentIfExpired(_ context.Context, id uuid.UUID, expiry time.Duration) (bool, error) {
+	f.intents_mu().Lock()
+	defer f.intents_mu().Unlock()
+	i, ok := f.intents[id]
+	if !ok || (i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
+		return false, nil
+	}
+	if i.HeartbeatAt == nil || time.Since(*i.HeartbeatAt) < expiry {
+		return false, nil
+	}
+	now := time.Now()
+	i.Status = storage.VoiceIntentDead
+	i.LastError = "worker heartbeat expired"
+	i.EndedAt = &now
+	return true, nil
+}
+
+// markStaleHeartbeat ages an intent's heartbeat so ReapVoiceSessionIntentIfExpired
+// treats it as a dead worker's row.
+func (f *fakeControlStore) markStaleHeartbeat(id uuid.UUID) {
+	f.intents_mu().Lock()
+	defer f.intents_mu().Unlock()
+	old := time.Now().Add(-time.Hour)
+	f.intents[id].HeartbeatAt = &old
+}
+
+// intents_mu exposes the embedded fakeIntentStore mutex for the control-store
+// methods that touch the shared intent map.
+func (f *fakeControlStore) intents_mu() *sync.Mutex { return &f.fakeIntentStore.mu }
 
 func (f *fakeControlStore) AnyLiveVoiceSessionIntent(_ context.Context) (bool, error) {
 	f.fakeIntentStore.mu.Lock()
@@ -258,4 +298,117 @@ func (r *recordingStore) CloseVoiceSession(ctx context.Context, id uuid.UUID, st
 		r.control.putSession(vs)
 	}
 	return vs, err
+}
+
+// TestIntentControl_StartCancelsPendingOnTimeout covers review item 3: when no
+// worker claims within the Start budget, IntentControl cancels the pending intent
+// (so a retry does not 23505) and returns ErrIntentPending.
+func TestIntentControl_StartCancelsPendingOnTimeout(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 20 * time.Millisecond, StopBudget: time.Second, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	_, err := ctl.Start(context.Background(), tenantID, campaignID)
+	if !errors.Is(err, session.ErrIntentPending) {
+		t.Fatalf("Start err = %v, want ErrIntentPending", err)
+	}
+	// The pending intent was cancelled to 'done', so a fresh Start does not collide.
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID); !errors.Is(err, session.ErrIntentPending) {
+		t.Fatalf("retry Start err = %v, want ErrIntentPending (no 23505 dead-end)", err)
+	}
+}
+
+// TestIntentControl_StartCancelledOutcome covers review item 7: an external stop
+// landing on the still-pending row is a distinct ErrIntentCancelled, not
+// ErrIntentPending.
+func TestIntentControl_StartCancelledOutcome(t *testing.T) {
+	store := newFakeControlStore()
+	// On the first poll, flip the pending intent straight to done (an external stop).
+	store.onGet = func(i *storage.VoiceSessionIntent) {
+		if i.Status == storage.VoiceIntentPending {
+			now := time.Now()
+			i.Status = storage.VoiceIntentDone
+			i.EndedAt = &now
+		}
+	}
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Second, StopBudget: time.Second, Expiry: 30 * time.Second})
+	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrIntentCancelled) {
+		t.Fatalf("Start err = %v, want ErrIntentCancelled", err)
+	}
+}
+
+// TestIntentControl_ZeroWorkerReapsStaleBlocker covers review item 4: a Start
+// blocked by a dead worker's stale claimed/live intent reaps it and proceeds
+// (no worker present, so it then times out) — never a permanent AlreadyExists.
+func TestIntentControl_ZeroWorkerReapsStaleBlocker(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 20 * time.Millisecond, StopBudget: time.Second, Expiry: time.Millisecond})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	old := store.add(tenantID, campaignID)
+	claimed, _ := store.ClaimVoiceSessionIntent(context.Background(), "dead-worker")
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning}
+	store.putSession(vs)
+	if _, err := store.MarkVoiceSessionIntentLive(context.Background(), claimed.ID, "dead-worker", vs.ID); err != nil {
+		t.Fatalf("mark live: %v", err)
+	}
+	store.markStaleHeartbeat(claimed.ID)
+
+	_, err := ctl.Start(context.Background(), tenantID, campaignID)
+	if !errors.Is(err, session.ErrIntentPending) {
+		t.Fatalf("Start err = %v, want ErrIntentPending (reaped then queued)", err)
+	}
+	if got := store.get(old.ID).Status; got != storage.VoiceIntentDead {
+		t.Fatalf("stale blocker status = %q, want dead (reaped)", got)
+	}
+}
+
+// TestIntentControl_StopBudgetError covers review item 7: a Stop whose worker
+// never confirms within the budget returns ErrStopPending, not a false success.
+func TestIntentControl_StopBudgetError(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Second, StopBudget: 20 * time.Millisecond, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	store.add(tenantID, campaignID)
+	claimed, _ := store.ClaimVoiceSessionIntent(context.Background(), "worker-1")
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning}
+	store.putSession(vs)
+	if _, err := store.MarkVoiceSessionIntentLive(context.Background(), claimed.ID, "worker-1", vs.ID); err != nil {
+		t.Fatalf("mark live: %v", err)
+	}
+
+	// The worker never winds down (no loop), so Stop only flags and polls to budget.
+	_, err := ctl.Stop(context.Background(), tenantID)
+	if !errors.Is(err, session.ErrStopPending) {
+		t.Fatalf("Stop err = %v, want ErrStopPending", err)
+	}
+}
+
+// TestIntentControl_MgrOnlyDegrade covers review item 6: the Manager-only live
+// controls degrade with ErrSplitMode on the web tier of a split deployment.
+func TestIntentControl_MgrOnlyDegrade(t *testing.T) {
+	ctl := session.NewIntentControl(newFakeControlStore(), slog.New(slog.DiscardHandler), session.IntentControlConfig{})
+	tenantID := uuid.New()
+
+	if _, err := ctl.SetAgentMute(context.Background(), tenantID, uuid.NewString(), true); !errors.Is(err, session.ErrSplitMode) {
+		t.Errorf("SetAgentMute err = %v, want ErrSplitMode", err)
+	}
+	if _, err := ctl.SetAllMute(context.Background(), tenantID, true); !errors.Is(err, session.ErrSplitMode) {
+		t.Errorf("SetAllMute err = %v, want ErrSplitMode", err)
+	}
+	if err := ctl.ReplayHighlight(context.Background(), tenantID, "clip-key"); !errors.Is(err, session.ErrSplitMode) {
+		t.Errorf("ReplayHighlight err = %v, want ErrSplitMode", err)
+	}
+	if ids := ctl.MutedAgentIDs(tenantID); ids != nil {
+		t.Errorf("MutedAgentIDs = %v, want nil", ids)
+	}
+	if sp := ctl.Spend(tenantID); sp != (spend.Status{}) {
+		t.Errorf("Spend = %+v, want zero", sp)
+	}
 }

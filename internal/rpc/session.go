@@ -294,10 +294,15 @@ func (s *SessionServer) startError(err error) error {
 		// shutting down. Unavailable, so the client retries the restarted process.
 		return connect.NewError(connect.CodeUnavailable, errors.New("the server is shutting down; try again shortly"))
 	case errors.Is(err, session.ErrIntentPending):
-		// Split mode (#491): the intent is written but no -mode voice worker has
-		// claimed and driven it live within the Start budget. Unavailable, so the
-		// operator retries — the worker picks it up on its next poll.
+		// Split mode (#491): the intent was written but no -mode voice worker claimed
+		// and drove it live within the Start budget, so IntentControl CANCELLED the
+		// pending row before returning. Unavailable, so the operator's retry starts a
+		// fresh intent rather than colliding — the worker picks it up on its next poll.
 		return connect.NewError(connect.CodeUnavailable, errors.New("voice worker has not claimed the session yet; try again shortly"))
+	case errors.Is(err, session.ErrIntentCancelled):
+		// Split mode (#491): the queued start was stopped before any worker claimed
+		// it — a distinct cancelled outcome, not a fault and not still-pending.
+		return connect.NewError(connect.CodeAborted, errors.New("the voice session start was cancelled before it began"))
 	default:
 		s.log.Error("StartSession: manager start failed", "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -316,6 +321,12 @@ func (s *SessionServer) StopSession(
 	vs, err := s.mgr.Stop(ctx, tenantID)
 	if errors.Is(err, session.ErrNoActiveSession) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
+	}
+	if errors.Is(err, session.ErrStopPending) {
+		// Split mode (#491): the worker has not confirmed the wind-down within the
+		// Stop budget. Unavailable so the operator retries — never a false success
+		// carrying a still-'running' row.
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("the voice worker has not confirmed the stop yet; try again shortly"))
 	}
 	if err != nil {
 		s.log.Error("StopSession: manager stop failed", "err", err)

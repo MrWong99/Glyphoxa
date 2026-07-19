@@ -450,12 +450,23 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	}
 	mgr := session.NewManager(store, runner, cfg, cipher, log, true, deps)
 
+	// The claim-plane session control (#491 review item 1): in WORKER mode
+	// /glyphoxa start and end must NOT drive the Manager directly — that would run a
+	// slash-started session with NO intent row (no heartbeat, the one-live-per-tenant
+	// invariant false, IntentControl/archive guards blind, an unreconcilable crash
+	// row). Route them through IntentControl so /glyphoxa start writes an intent this
+	// same worker's loop claims (typically within one poll) and /glyphoxa end
+	// requests the stop the loop honors — exactly the plane the web tier uses. The
+	// live controls (search/recap/mute/say) still drive the Manager, which holds the
+	// live session this worker is running.
+	intentControl := session.NewIntentControl(store, log, voiceIntentControlConfig(os.Getenv))
+
 	// Register the full tenant command surface (start/end/search/mute/say/recap),
 	// then seed the standing clients so the commands appear with no session live.
 	reg.Register(
 		presence.UseCommand(store),
-		presence.StartCommand(store, mgr),
-		presence.EndCommand(mgr),
+		presence.StartCommand(store, intentControl),
+		presence.EndCommand(intentControl),
 		presence.SearchCommand(store, mgr),
 		presence.RecapCommand(store, mgr, recapEngine, mgr),
 		presence.MuteCommand(mgr, store),
@@ -470,7 +481,9 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// Run the claim loop until SIGTERM. It stops claiming on ctx cancel and drains
 	// its live sessions cleanly (AC5); then tear down the Manager (a no-op backstop
 	// after the drain) and close the standing clients.
-	loop := session.NewClaimLoop(store, mgr, instanceID, log, voiceClaimLoopConfig(os.Getenv))
+	claimCfg := voiceClaimLoopConfig(os.Getenv)
+	warnClaimCadence(claimCfg, log)
+	loop := session.NewClaimLoop(store, mgr, instanceID, log, claimCfg)
 	loop.Run(ctx)
 	mgr.Shutdown()
 	clients.Close()
