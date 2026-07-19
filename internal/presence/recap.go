@@ -74,7 +74,7 @@ type RecapStore interface {
 // it can't truly be voiced: no wired voicer, no live session, or a VOICELESS Butler
 // (SpeakAsButler returns an error, which deliverRecap turns into the same degrade).
 type ButlerVoicer interface {
-	SpeakAsButler(ctx context.Context, text string) error
+	SpeakAsButler(ctx context.Context, tenantID uuid.UUID, text string) error
 }
 
 // compile-time proofs the concrete store/engine satisfy the seams.
@@ -164,13 +164,15 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 
 	// A `voiced` request can only truly voice when a ButlerVoicer is wired AND a
 	// session is live FOR THIS TENANT; otherwise it degrades to public text (decision
-	// 6a). The Manager is single-active (#488 not merged) and the Snapshot carries no
-	// Tenant, so without the sessionInTenant guard a Tenant B recap would be spoken
-	// into Tenant A's channel (SpeakAsButler) AND persisted as a KindButler line in
-	// A's transcript (#490). A successful text reply is PUBLIC for `public` and for a
-	// degraded `voiced`, else GM-only ephemeral.
-	vs, live := voice.Snapshot()
-	liveHere := live && sessionInTenant(ctx, store, vs, ic.TenantID())
+	// 6a). Active is Tenant-keyed (#488), so a session live for another Tenant is
+	// invisible — a Tenant B recap can never be spoken into Tenant A's channel nor
+	// persisted as a KindButler line in A's transcript (the #490 guard, now for
+	// free). A successful text reply is PUBLIC for `public` and for a degraded
+	// `voiced`, else GM-only ephemeral.
+	_, liveHere, aerr := voice.Active(ctx, ic.TenantID())
+	if aerr != nil {
+		liveHere = false
+	}
 	voiceMode := delivery == deliveryVoiced && butler != nil && liveHere
 	publicReply := !voiceMode && (delivery == deliveryPublic || delivery == deliveryVoiced)
 
@@ -262,7 +264,9 @@ func isRecappable(vs storage.VoiceSession) bool {
 // kept under Discord's 2000-char cap (never truncated, #271).
 func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voiceMode bool, delivery string, publicReply bool, text string) error {
 	if voiceMode {
-		if err := butler.SpeakAsButler(ctx, text); err == nil {
+		// Voice into THIS Tenant's live session (#488): deliverRecap reads the Tenant
+		// off the interaction it already carries.
+		if err := butler.SpeakAsButler(ctx, ic.TenantID(), text); err == nil {
 			// The confirmation is GM-only, matching the ephemeral placeholder. As the first
 			// post-Defer reply it lands as the placeholder edit (registry-wide rule, #335) at
 			// the Defer's ephemeral visibility — exactly right.

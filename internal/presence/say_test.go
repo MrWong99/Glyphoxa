@@ -15,6 +15,7 @@ import (
 // and reports whether a session is active.
 type fakeSayer struct {
 	active     bool
+	tenantID   uuid.UUID
 	campaignID uuid.UUID
 	sayErr     error
 	calls      []sayCall
@@ -25,11 +26,14 @@ type sayCall struct {
 	text    string
 }
 
-func (f *fakeSayer) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{CampaignID: f.campaignID}, f.active
+func (f *fakeSayer) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
+	if !f.active || tenantID != f.tenantID {
+		return storage.VoiceSession{}, false, nil
+	}
+	return storage.VoiceSession{CampaignID: f.campaignID}, true, nil
 }
 
-func (f *fakeSayer) SayAs(_ context.Context, agentID, text string) error {
+func (f *fakeSayer) SayAs(_ context.Context, _ uuid.UUID, agentID, text string) error {
 	f.calls = append(f.calls, sayCall{agentID, text})
 	return f.sayErr
 }
@@ -48,8 +52,10 @@ func sayIC(resp *fakeResponder, text, as string) *Interaction {
 // the handler refuses ephemerally and publishes no SpeakRequested.
 func TestSayCommand_ForeignTenantSessionRefused(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
-	mgr := &fakeSayer{active: true, campaignID: uuid.New()}
-	agents := &fakeLister{agents: []storage.Agent{bart}, tenantID: tenantB}
+	// Live session belongs to tenantB; the interaction is tenantA. Active is
+	// Tenant-keyed (#488), so the tenantA query sees no session.
+	mgr := &fakeSayer{active: true, tenantID: tenantB, campaignID: uuid.New()}
+	agents := &fakeLister{agents: []storage.Agent{bart}}
 	cmd := SayCommand(mgr, agents)
 	resp := &fakeResponder{}
 	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"text": "hi", "as": bart.ID.String()}}, resp: resp}

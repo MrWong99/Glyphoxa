@@ -17,7 +17,7 @@ import (
 // maps that to the same ErrNoActiveSession the Manager pass-throughs report.
 func TestLive_IdleReturnsNil(t *testing.T) {
 	mgr, _ := muteManager(t, newFakeStore())
-	if l := mgr.Live(); l != nil {
+	if l := mgr.Live(uuid.New()); l != nil {
 		t.Fatalf("Live() while idle = %v, want nil", l)
 	}
 }
@@ -27,13 +27,14 @@ func TestLive_IdleReturnsNil(t *testing.T) {
 // operation with the existing ErrNoActiveSession semantics — nothing is
 // published, nothing is mutated.
 func TestLiveSession_StaleAfterStopRefused(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, bus := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	live := mgr.Live()
+	live := mgr.Live(tenantID)
 	if live == nil {
 		t.Fatal("Live() during an active session = nil, want a handle")
 	}
@@ -45,7 +46,7 @@ func TestLiveSession_StaleAfterStopRefused(t *testing.T) {
 	var muteEvents []voiceevent.MuteChanged
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.MuteChanged) { muteEvents = append(muteEvents, e) }))
 
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
@@ -80,13 +81,14 @@ func TestLiveSession_StaleAfterStopRefused(t *testing.T) {
 // must refuse ErrNoActiveSession and publish nothing — deleting the inner
 // revalidate would fail this test.
 func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, bus := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	live := mgr.Live()
+	live := mgr.Live(tenantID)
 
 	var muteEvents []voiceevent.MuteChanged
 	t.Cleanup(voiceevent.On(bus, func(e voiceevent.MuteChanged) { muteEvents = append(muteEvents, e) }))
@@ -100,7 +102,7 @@ func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
 		store.mu.Lock()
 		store.onListAgents = nil
 		store.mu.Unlock()
-		if _, err := mgr.Stop(context.Background()); err != nil {
+		if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 			t.Errorf("mid-op Stop: %v", err)
 		}
 	}
@@ -115,17 +117,17 @@ func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
 
 	// Same window for SayAs: entry check passes, the session ends during the
 	// roster read, the publish-guarding revalidate must refuse.
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
-	live = mgr.Live()
+	live = mgr.Live(tenantID)
 	store.mu.Lock()
 	store.onListAgents = func() {
 		store.mu.Lock()
 		store.onListAgents = nil
 		store.mu.Unlock()
-		if _, err := mgr.Stop(context.Background()); err != nil {
+		if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 			t.Errorf("mid-op Stop 2: %v", err)
 		}
 	}
@@ -143,17 +145,18 @@ func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
 // active — the revalidation is same-session, not merely any-session — so a
 // racing op can never mutate or voice into a successor session's state.
 func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, _ := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start 1: %v", err)
 	}
-	stale := mgr.Live()
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	stale := mgr.Live(tenantID)
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
@@ -161,7 +164,7 @@ func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
 	if _, err := stale.SetAgentMute(context.Background(), bart.ID.String(), true); err != session.ErrNoActiveSession {
 		t.Errorf("rolled-over SetAgentMute = %v, want ErrNoActiveSession", err)
 	}
-	if got := mgr.MutedAgentIDs(); len(got) != 0 {
+	if got := mgr.MutedAgentIDs(tenantID); len(got) != 0 {
 		t.Errorf("session 2 mute set = %v after a stale handle's write, want empty", got)
 	}
 	if err := stale.SayAs(context.Background(), bart.ID.String(), "hi"); err != session.ErrNoActiveSession {
@@ -169,7 +172,7 @@ func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
 	}
 
 	// A FRESH handle to session 2 works: the staleness is per-handle, not sticky.
-	fresh := mgr.Live()
+	fresh := mgr.Live(tenantID)
 	if fresh == nil {
 		t.Fatal("Live() during session 2 = nil, want a handle")
 	}
@@ -189,13 +192,14 @@ func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
 // Registry — the double-bind panic it also guarded is gone by design, covered by
 // TestRegistry_TwoManagersNoPanic.)
 func TestRegistry_ResolveTracksManagerLifecycle(t *testing.T) {
+	tenantID := uuid.New()
 	reg := session.NewRegistry()
 	store := newFakeStore()
 	mgr := session.NewManager(store, reRunnableRunner,
 		wirenpc.Config{Token: "test-token", Bus: voiceevent.NewBus()}, nil, slog.New(slog.DiscardHandler), true,
 		session.Deps{Registry: reg})
 
-	started, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	started, err := mgr.Start(context.Background(), tenantID, uuid.New())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -205,7 +209,7 @@ func TestRegistry_ResolveTracksManagerLifecycle(t *testing.T) {
 		t.Fatalf("Resolve(started) = (%v, %v), want the started session %s", vs.ID, ok, started.ID)
 	}
 
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if _, ok := reg.Resolve(started.ID); ok {

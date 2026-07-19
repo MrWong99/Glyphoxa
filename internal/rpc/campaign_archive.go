@@ -70,7 +70,10 @@ type HighlightClipSweeper interface {
 // after this check — accepted for the single-operator web tier, where the window
 // is negligible and the DB cascade is still safe either way.
 func (s *campaignArchive) liveGuard(id uuid.UUID, verb string) error {
-	if lid, active := s.active.liveID(); active && lid == id {
+	// Scans ALL live sessions (#488 review item 2): at cap >1 a GM must not
+	// archive/DELETE a campaign live in ANOTHER Tenant's session, so the guard is
+	// process-wide, not scoped to the resolved Active Campaign.
+	if s.active.isCampaignLive(id) {
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("campaign backs the live Voice Session and cannot be "+verb+" while it runs"))
 	}

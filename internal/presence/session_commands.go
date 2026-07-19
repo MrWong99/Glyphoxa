@@ -51,8 +51,13 @@ type SessionStore interface {
 // (AC4). *session.Manager satisfies it; tests use a fake.
 type VoiceControl interface {
 	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
-	Stop(ctx context.Context) (storage.VoiceSession, error)
-	Snapshot() (storage.VoiceSession, bool)
+	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
+	// Active reports THIS Tenant's live Voice Session (S3, #488): the per-Tenant read
+	// replacing the process-wide Snapshot, so start/end/search resolve against only
+	// the invoking Tenant's own session — a session live for another Tenant is simply
+	// invisible here, which is exactly the cross-tenant guard #490 needed (now for
+	// free, no post-hoc campaign re-check).
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
 }
 
 // UseCommand builds `/glyphoxa use <campaign>` (ADR-0010, GM only): it durably
@@ -152,7 +157,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 // running returns a clear ephemeral error (AC3). Like start it Defers, because
 // Stop waits on the loop unwinding plus the ended_at write, and follows up
 // ephemerally.
-func EndCommand(voice VoiceControl, store campaignTenantReader) Command {
+func EndCommand(voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa end",
 		Description: "End the active voice session.",
@@ -164,15 +169,11 @@ func EndCommand(voice VoiceControl, store campaignTenantReader) Command {
 			ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
 			defer cancel()
 
-			// Cross-tenant guard (#490): the Manager is single-active (#488 not merged),
-			// so a Tenant B GM authorized in its OWN Guild must NOT stop a live session
-			// belonging to Tenant A. Refuse when the running session isn't this Tenant's,
-			// treating it as "nothing to end here".
-			if vs, active := voice.Snapshot(); active && !sessionInTenant(ctx, store, vs, ic.TenantID()) {
-				return ic.ReplyEphemeral("No voice session is running.")
-			}
-
-			if _, err := voice.Stop(ctx); err != nil {
+			// Tenant-scoped end-to-end (#488): Stop keys on the invoking Tenant, so a
+			// Tenant B GM's /glyphoxa end can only ever stop Tenant B's own session — a
+			// session live for Tenant A is invisible and reports ErrNoActiveSession. The
+			// #490 cross-tenant guard collapses into the keyed op (no Snapshot pre-check).
+			if _, err := voice.Stop(ctx, ic.TenantID()); err != nil {
 				if errors.Is(err, session.ErrNoActiveSession) {
 					return ic.ReplyEphemeral("No voice session is running.")
 				}
@@ -193,23 +194,19 @@ func EndCommand(voice VoiceControl, store campaignTenantReader) Command {
 func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceControl, tenantID uuid.UUID, discordUserID string) (storage.Campaign, error) {
 	// (1) A live Voice Session pins the Active Campaign to its own campaign, so
 	// start/end operate on exactly what is running (and a second start collides).
-	// It counts ONLY when the running session belongs to THIS Tenant (#490): the
-	// manager is still single-active (#488 not merged), so a session live for
-	// another Tenant must not pivot this Tenant's command onto a foreign campaign.
-	// The Snapshot carries no Tenant, so the campaign it loads is re-checked against
-	// the Tenant (mismatch → treat as absent) — the explicit c.TenantID==tenant
-	// check the contract requires, which also guards a stale/renamed snapshot.
-	if vs, active := voice.Snapshot(); active {
-		c, err := store.GetCampaign(ctx, vs.CampaignID)
+	// Active is Tenant-keyed (#488), so it returns ONLY this Tenant's live session —
+	// a session live for another Tenant is invisible, so the #490 cross-tenant
+	// re-check is no longer needed. A running session whose campaign row has vanished
+	// (ErrNotFound) falls through to the durable selection rather than failing.
+	if vs, active, err := voice.Active(ctx, tenantID); err == nil && active {
+		c, cerr := store.GetCampaign(ctx, vs.CampaignID)
 		switch {
-		case err == nil && c.TenantID == tenantID:
+		case cerr == nil:
 			return c, nil
-		case err == nil || errors.Is(err, storage.ErrNotFound):
-			// A running session whose campaign row has vanished or belongs to another
-			// Tenant is not expected here; fall through to the durable selection rather
-			// than fail the command.
+		case errors.Is(cerr, storage.ErrNotFound):
+			// fall through to the durable selection
 		default:
-			return storage.Campaign{}, err
+			return storage.Campaign{}, cerr
 		}
 	}
 
@@ -233,6 +230,11 @@ func startErrorMessage(err error) (string, bool) {
 	switch {
 	case errors.Is(err, session.ErrSessionActive):
 		return "A voice session is already active — /glyphoxa end it first.", true
+	case errors.Is(err, session.ErrSessionLimit):
+		// #488: the process is at its concurrent-session cap
+		// (GLYPHOXA_MAX_VOICE_SESSIONS). A distinct, user-visible refusal — retryable
+		// once another Tenant's session ends.
+		return "The server is already running the maximum number of concurrent voice sessions — try again once one ends.", true
 	case errors.Is(err, session.ErrDiscordNotConfigured):
 		return "Discord isn't configured yet — set the Guild and voice channel on the web Configuration screen.", true
 	case errors.Is(err, session.ErrDiscordTokenMissing):

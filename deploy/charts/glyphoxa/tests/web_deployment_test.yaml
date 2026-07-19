@@ -289,6 +289,29 @@ tests:
             name: GLYPHOXA_OLLAMA_URL
             value: http://host.k3d.internal:11434
 
+  - it: omits GLYPHOXA_MAX_VOICE_SESSIONS at the default cap of 1
+    # Release gate (#488): the default 1 emits no env, so a stock deploy keeps the
+    # binary's single-session default byte-identical — nothing about it changes.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_MAX_VOICE_SESSIONS
+          any: true
+
+  - it: emits GLYPHOXA_MAX_VOICE_SESSIONS when the cap is raised above 1
+    # Raising the cap turns on true concurrency (soak-gated, #493): only then is the
+    # env var set (ADR-0057's per-process K).
+    set:
+      web:
+        maxVoiceSessions: 3
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_MAX_VOICE_SESSIONS
+            value: "3"
+
   - it: exposes the public http port and the internal metrics port as named ports
     asserts:
       - contains:

@@ -36,10 +36,12 @@ type activeCampaignResolver interface {
 //  3. else the most-recently-created campaign, so a fresh install that has never
 //     run /glyphoxa use still resolves.
 //
-// live reports the live Voice Session's campaign id; it is nil when the caller has
-// no session source (e.g. keyless unit tests), which skips step 1. The Manager
-// enforces a single active session (ErrSessionActive), so there is at most one
-// live campaign — no multi-session tie-break is needed.
+// live reports the CALLER's Tenant live Voice Session campaign id (#488 review item
+// 1): it is Tenant-scoped, reading the ctx's tenant, so with N concurrent sessions
+// step 1 pivots on THIS operator's own Tenant's session — never an arbitrary session
+// belonging to another Tenant (which would hard-fail every CampaignService surface
+// with NotFound while another Tenant voices). nil when the caller has no session
+// source (keyless unit tests), which skips step 1.
 //
 // Two sibling surfaces implement DELIBERATE variants of this walk, not drift:
 // the slash surface (internal/presence.resolveActiveCampaign) drops step 3 and
@@ -57,10 +59,10 @@ type activeCampaignResolver interface {
 // pivoting every campaign-scoped surface onto the victim tenant (self-signup design
 // §0a). The RPC interceptor stack always injects a tenant; a request with none
 // resolves against the nil tenant and matches nothing (fail closed).
-func resolveActiveCampaign(ctx context.Context, live func() (uuid.UUID, bool), store activeCampaignResolver) (storage.Campaign, error) {
+func resolveActiveCampaign(ctx context.Context, live func(context.Context) (uuid.UUID, bool), store activeCampaignResolver) (storage.Campaign, error) {
 	tenantID, _ := auth.TenantID(ctx)
 	if live != nil {
-		if id, active := live(); active {
+		if id, active := live(ctx); active {
 			return store.GetCampaignInTenant(ctx, tenantID, id)
 		}
 	}
@@ -84,12 +86,17 @@ func resolveActiveCampaign(ctx context.Context, live func() (uuid.UUID, bool), s
 // the same campaign — and SetSessions wiring the closure once at boot reaches all
 // of them.
 type activeCampaignSource struct {
-	// live reports the live Voice Session's campaign id, if any. Nil until
-	// SetSessions wires it (keyless deployments and most unit tests leave it nil,
-	// which skips the live-first step). Set once at boot before serving, so no
-	// lock is needed.
-	live  func() (uuid.UUID, bool)
-	store activeCampaignResolver
+	// live reports the CALLER's Tenant live Voice Session campaign id, if any
+	// (Tenant-scoped, #488). Nil until SetSessions wires it (keyless deployments and
+	// most unit tests leave it nil, which skips the live-first step). Set once at boot
+	// before serving, so no lock is needed.
+	live func(context.Context) (uuid.UUID, bool)
+	// campaignLive reports whether campaignID is live in ANY session across all
+	// Tenants (#488 review item 2): the archive/delete guard needs the process-wide
+	// truth, not one Tenant's, so a GM can never archive/DELETE a campaign live in
+	// another Tenant's session. Nil until SetSessions wires it (unwired = never live).
+	campaignLive func(campaignID uuid.UUID) bool
+	store        activeCampaignResolver
 }
 
 // resolve resolves the operator's Active Campaign via the one shared
@@ -99,13 +106,11 @@ func (a *activeCampaignSource) resolve(ctx context.Context) (storage.Campaign, e
 	return resolveActiveCampaign(ctx, a.live, a.store)
 }
 
-// liveID reports the LIVE Voice Session's campaign id, nil-safe for an unwired
-// source. The archive/delete live-guard reads it directly — the campaign that is
-// currently voicing must not be archived or deleted, whether or not it is the
-// resolved Active Campaign (#265).
-func (a *activeCampaignSource) liveID() (uuid.UUID, bool) {
-	if a.live == nil {
-		return uuid.Nil, false
-	}
-	return a.live()
+// isCampaignLive reports whether campaignID is currently voicing in ANY session
+// (#488 review item 2), nil-safe for an unwired source. The archive/delete
+// live-guard reads it — the campaign that is currently voicing must not be archived
+// or deleted, whether or not it is the resolved Active Campaign and regardless of
+// which Tenant is running it (#265).
+func (a *activeCampaignSource) isCampaignLive(campaignID uuid.UUID) bool {
+	return a.campaignLive != nil && a.campaignLive(campaignID)
 }

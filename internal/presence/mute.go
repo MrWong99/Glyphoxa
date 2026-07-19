@@ -16,9 +16,12 @@ import (
 // autocomplete lists against) and the per-Agent / all mute toggles.
 // *session.Manager satisfies it structurally — no import, mirroring the RPC seam.
 type SessionMuter interface {
-	Snapshot() (storage.VoiceSession, bool)
-	SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error)
-	SetAllMute(ctx context.Context, muted bool) ([]string, error)
+	// Active reports THIS Tenant's live Voice Session (S3, #488): Tenant-keyed, so a
+	// GM in Tenant B never sees (nor can mute) Tenant A's session — the #490
+	// cross-tenant guard is subsumed by the keyed read, no campaign re-check needed.
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
+	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
+	SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error)
 }
 
 // AgentLister is the Active Campaign roster read the mute/say autocomplete +
@@ -27,33 +30,8 @@ type SessionMuter interface {
 // The mute surface narrows this to the Character NPCs (see voiced): the Butler is
 // voiced now (ADR-0009 #299 amendment) but stays Address-Only and is never offered
 // as a mute target (mute is matcher-owned and Character-only).
-//
-// GetCampaign loads the live session's campaign so the handler can enforce the
-// TENANT guard (#490): the manager is single-active and its VoiceSession Snapshot
-// carries no Tenant, so a GM must confirm the running session's campaign belongs to
-// the invoking Tenant before muting/puppeting it — otherwise a GM in Tenant B could
-// drive Tenant A's live session.
 type AgentLister interface {
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-}
-
-// campaignTenantReader loads one Campaign by id — the narrow read the cross-tenant
-// session guard needs (#490). *storage.Store, AgentLister and SessionStore all
-// satisfy it.
-type campaignTenantReader interface {
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-}
-
-// sessionInTenant reports whether the live Voice Session (its campaign) belongs to
-// tenantID — the cross-tenant guard shared by mute/say/muteall/end and the voiced
-// recap (#490): the Manager is single-active (#488 not merged) and its Snapshot
-// carries no Tenant, so a GM in Tenant B must confirm the running session's campaign
-// is its OWN before driving it. A missing/foreign campaign reads as false, so the
-// caller treats the session as "not active for this Tenant".
-func sessionInTenant(ctx context.Context, r campaignTenantReader, vs storage.VoiceSession, tenantID uuid.UUID) bool {
-	c, err := r.GetCampaign(ctx, vs.CampaignID)
-	return err == nil && c.TenantID == tenantID
 }
 
 // maxAutocompleteChoices is Discord's hard cap on autocomplete choices per
@@ -84,8 +62,8 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			},
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			vs, active := mgr.Snapshot()
-			if !active || !sessionInTenant(ctx, agents, vs, ac.TenantID()) {
+			vs, active, err := mgr.Active(ctx, ac.TenantID())
+			if err != nil || !active {
 				return nil, nil // no session for this Tenant: nothing to mute, offer nothing
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
@@ -107,10 +85,10 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			return choices, nil
 		},
 		Handle: func(ctx context.Context, ic *Interaction) error {
-			vs, active := mgr.Snapshot()
-			if !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
-				// No session, or the single active session belongs to another Tenant (#490):
-				// a GM must never mute a foreign Tenant's live session.
+			vs, active, err := mgr.Active(ctx, ic.TenantID())
+			if err != nil || !active {
+				// No session for THIS Tenant (#488): a session live for another Tenant is
+				// invisible here, so a GM can never mute a foreign Tenant's session.
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			input, _ := ic.String("npc")
@@ -125,7 +103,7 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			if !found {
 				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
 			}
-			if _, err := mgr.SetAgentMute(ctx, agent.ID.String(), true); err != nil {
+			if _, err := mgr.SetAgentMute(ctx, ic.TenantID(), agent.ID.String(), true); err != nil {
 				// The expected failures are a session ending between the snapshot and the
 				// write, or the resolved Agent no longer being in the (now-different)
 				// active Campaign; both surface as the same ephemeral guard rather than a
@@ -147,10 +125,10 @@ func MuteAllCommand(mgr SessionMuter, agents AgentLister) Command {
 		Description: "Mute every NPC voice in the active Voice Session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
-			if vs, active := mgr.Snapshot(); !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
+			if _, active, err := mgr.Active(ctx, ic.TenantID()); err != nil || !active {
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
-			ids, err := mgr.SetAllMute(ctx, true)
+			ids, err := mgr.SetAllMute(ctx, ic.TenantID(), true)
 			if err != nil {
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}

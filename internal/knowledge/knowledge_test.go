@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -85,16 +86,11 @@ func (f *fakeStore) AgentNodeFacts(_ context.Context, aid uuid.UUID) ([]storage.
 	return f.agentNodes, nil
 }
 
-// fakeSessions is a scripted active-session source.
-type fakeSessions struct {
-	sess storage.VoiceSession
-	live bool
-}
-
-func (f fakeSessions) Snapshot() (storage.VoiceSession, bool) { return f.sess, f.live }
-
-func liveSession(campaignID uuid.UUID) fakeSessions {
-	return fakeSessions{sess: storage.VoiceSession{CampaignID: campaignID}, live: true}
+// liveCtx returns a run context carrying a session.Identity for campaignID (#488),
+// so the adapter's per-call activeCampaign resolves it exactly as a live turn does.
+// The idle path is a bare context.Background() (no Identity → ErrNoActiveSession).
+func liveCtx(campaignID uuid.UUID) context.Context {
+	return session.NewContext(context.Background(), session.Identity{CampaignID: campaignID})
 }
 
 // TestSearchFactsUsesPublicSearchScoped pins that SearchFacts routes through the
@@ -107,9 +103,9 @@ func TestSearchFactsUsesPublicSearchScoped(t *testing.T) {
 	store := &fakeStore{nodes: []storage.KGNode{
 		{Name: "Public Duke", Type: storage.KGNodeNPC, Body: "rules openly"},
 	}}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
-	facts, err := adapter.SearchFacts(context.Background(), "duke", 5)
+	facts, err := adapter.SearchFacts(liveCtx(cid), "duke", 5)
 	if err != nil {
 		t.Fatalf("SearchFacts: %v", err)
 	}
@@ -123,7 +119,7 @@ func TestSearchFactsUsesPublicSearchScoped(t *testing.T) {
 
 // TestSearchFactsNoSessionErrors pins the no-active-session error path.
 func TestSearchFactsNoSessionErrors(t *testing.T) {
-	adapter := knowledge.New(&fakeStore{}, &fakeStore{}, fakeSessions{live: false})
+	adapter := knowledge.New(&fakeStore{}, &fakeStore{})
 	if _, err := adapter.SearchFacts(context.Background(), "x", 5); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchFacts with no session = %v, want ErrNoActiveSession", err)
 	}
@@ -136,9 +132,9 @@ func TestSearchTranscriptCampaignScoped(t *testing.T) {
 	store := &fakeStore{lines: []storage.TranscriptLine{
 		{Who: "Bart", Kind: "npc", Text: "I remember."},
 	}}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
-	hits, err := adapter.SearchTranscript(context.Background(), "remember", 5)
+	hits, err := adapter.SearchTranscript(liveCtx(cid), "remember", 5)
 	if err != nil {
 		t.Fatalf("SearchTranscript: %v", err)
 	}
@@ -149,7 +145,7 @@ func TestSearchTranscriptCampaignScoped(t *testing.T) {
 		t.Errorf("hits = %+v, want the one Bart line", hits)
 	}
 
-	idle := knowledge.New(store, store, fakeSessions{live: false})
+	idle := knowledge.New(store, store)
 	if _, err := idle.SearchTranscript(context.Background(), "x", 5); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchTranscript with no session = %v, want ErrNoActiveSession", err)
 	}
@@ -163,9 +159,9 @@ func TestOwnNodeFactsResolvesAgent(t *testing.T) {
 	store := &fakeStore{agentNodes: []storage.KGNode{
 		{Name: "Mara", Type: storage.KGNodeCharacter, Body: "owes you"},
 	}}
-	adapter := knowledge.New(store, store, liveSession(uuid.New()))
+	adapter := knowledge.New(store, store)
 
-	facts, err := adapter.OwnNodeFacts(context.Background(), aid.String())
+	facts, err := adapter.OwnNodeFacts(liveCtx(uuid.New()), aid.String())
 	if err != nil {
 		t.Fatalf("OwnNodeFacts: %v", err)
 	}
@@ -178,7 +174,7 @@ func TestOwnNodeFactsResolvesAgent(t *testing.T) {
 
 	// Empty caller id → no neighbourhood, no store read, no error.
 	store.agentQueried = false
-	empty, err := adapter.OwnNodeFacts(context.Background(), "")
+	empty, err := adapter.OwnNodeFacts(liveCtx(uuid.New()), "")
 	if err != nil {
 		t.Fatalf("OwnNodeFacts(empty): %v", err)
 	}
@@ -197,9 +193,9 @@ func TestOwnNodeResolvesLinkedNode(t *testing.T) {
 	aid := uuid.New()
 	nid := uuid.New()
 	store := &fakeStore{linkedNode: storage.KGNode{ID: nid, Name: "Bartholomew"}, linkedOK: true}
-	adapter := knowledge.New(store, store, liveSession(uuid.New()))
+	adapter := knowledge.New(store, store)
 
-	ref, ok, err := adapter.OwnNode(context.Background(), aid.String())
+	ref, ok, err := adapter.OwnNode(liveCtx(uuid.New()), aid.String())
 	if err != nil || !ok {
 		t.Fatalf("OwnNode: ok=%v err=%v", ok, err)
 	}
@@ -210,12 +206,12 @@ func TestOwnNodeResolvesLinkedNode(t *testing.T) {
 		t.Errorf("ref = %+v, want id %s name Bartholomew", ref, nid)
 	}
 
-	if _, ok, err := adapter.OwnNode(context.Background(), ""); ok || err != nil {
+	if _, ok, err := adapter.OwnNode(liveCtx(uuid.New()), ""); ok || err != nil {
 		t.Errorf("empty caller: ok=%v err=%v, want false/nil", ok, err)
 	}
 
 	store.linkedOK = false
-	if _, ok, _ := adapter.OwnNode(context.Background(), aid.String()); ok {
+	if _, ok, _ := adapter.OwnNode(liveCtx(uuid.New()), aid.String()); ok {
 		t.Error("unlinked agent should report ok=false")
 	}
 }
@@ -228,11 +224,11 @@ func TestCreateProposalShapeAndScope(t *testing.T) {
 	cid := uuid.New()
 	aid := uuid.New()
 	store := &fakeStore{}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
 	// The turn ctx is ALREADY cancelled (barge) when the write starts; the store's
 	// write ctx must NOT observe it (context.WithoutCancel).
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(session.NewContext(context.Background(), session.Identity{CampaignID: cid}))
 	cancel()
 	w := tool.ProposedWrite{V: 1, Kind: "fact", NodeID: "node-1", Subject: "Bartholomew", Fact: "brews ale"}
 	if err := adapter.CreateProposal(ctx, aid.String(), w); err != nil {
@@ -264,7 +260,7 @@ func TestCreateProposalShapeAndScope(t *testing.T) {
 // TestCreateProposalNoSessionErrors pins the no-active-session error path for the
 // write seam.
 func TestCreateProposalNoSessionErrors(t *testing.T) {
-	adapter := knowledge.New(&fakeStore{}, &fakeStore{}, fakeSessions{live: false})
+	adapter := knowledge.New(&fakeStore{}, &fakeStore{})
 	err := adapter.CreateProposal(context.Background(), uuid.New().String(),
 		tool.ProposedWrite{V: 1, Kind: "fact", Fact: "x"})
 	if !errors.Is(err, knowledge.ErrNoActiveSession) {

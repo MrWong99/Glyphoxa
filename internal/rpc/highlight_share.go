@@ -47,7 +47,7 @@ type HighlightSharer interface {
 // *session.Manager satisfies it; a replay with no live session is
 // [session.ErrNoActiveSession].
 type HighlightReplayer interface {
-	ReplayHighlight(ctx context.Context, clipKey string) error
+	ReplayHighlight(ctx context.Context, tenantID uuid.UUID, clipKey string) error
 }
 
 // ShareChannelStore reads/writes the Campaign's remembered share channel (#310) so
@@ -239,7 +239,10 @@ func (s *SessionServer) replayToVoice(
 	if s.replayer == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("voice replay is not enabled on this server"))
 	}
-	if err := s.replayer.ReplayHighlight(ctx, h.ClipKey); err != nil {
+	// Replay into the Highlight's OWN Tenant's live session (#488): the Highlight was
+	// already campaign-ownership-checked to the caller's Tenant, so h.TenantID is the
+	// operator's Tenant — the session the clip belongs in.
+	if err := s.replayer.ReplayHighlight(ctx, h.TenantID, h.ClipKey); err != nil {
 		if errors.Is(err, session.ErrNoActiveSession) {
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no live Voice Session to replay into"))
 		}

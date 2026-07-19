@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/recap"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -59,25 +60,26 @@ type RecapStore interface {
 	ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error)
 }
 
-// RecapAdapter implements tool.Recapper over a recap engine, a storage read, and
-// the active-session source. It is the production wiring behind the recap Tool
-// (#372): the Tool asks for the last N sessions' recap; this adapter resolves WHICH
-// sessions entirely from server state — the active Campaign's newest ENDED non-empty
-// rows — so the LLM never names a session id (ADR-0029) and can never recap another
-// Campaign. Safe for concurrent use (its deps are). Built once at web boot.
+// RecapAdapter implements tool.Recapper over a recap engine and a storage read. It
+// is the production wiring behind the recap Tool (#372): the Tool asks for the last
+// N sessions' recap; this adapter resolves WHICH sessions entirely from server
+// state — the active Campaign's newest ENDED non-empty rows — so the LLM never names
+// a session id (ADR-0029) and can never recap another Campaign. The active Campaign
+// comes from the run context's [session.Identity] (#488), so N concurrent sessions
+// each recap their own Campaign. Safe for concurrent use (its deps are). Built once
+// at web boot.
 type RecapAdapter struct {
-	eng      RecapEngine
-	store    RecapStore
-	sessions Sessions
+	eng   RecapEngine
+	store RecapStore
 }
 
-// NewRecap builds the adapter. All three deps must be non-nil — they are wiring
+// NewRecap builds the adapter. Both deps must be non-nil — they are wiring
 // requirements, so a nil is a boot bug, not a runtime condition (mirrors New).
-func NewRecap(eng RecapEngine, store RecapStore, sessions Sessions) *RecapAdapter {
-	if eng == nil || store == nil || sessions == nil {
-		panic("knowledge: NewRecap: nil engine, store or sessions")
+func NewRecap(eng RecapEngine, store RecapStore) *RecapAdapter {
+	if eng == nil || store == nil {
+		panic("knowledge: NewRecap: nil engine or store")
 	}
-	return &RecapAdapter{eng: eng, store: store, sessions: sessions}
+	return &RecapAdapter{eng: eng, store: store}
 }
 
 // RecapLastSessions implements [tool.Recapper]. It resolves the active Campaign from
@@ -89,11 +91,11 @@ func NewRecap(eng RecapEngine, store RecapStore, sessions Sessions) *RecapAdapte
 // let an empty row through). The recap prose is returned verbatim for the Tool to
 // relay.
 func (a *RecapAdapter) RecapLastSessions(ctx context.Context, n int) (string, error) {
-	s, ok := a.sessions.Snapshot()
+	id, ok := session.FromContext(ctx)
 	if !ok {
 		return "", ErrNoActiveSession
 	}
-	sessions, err := a.store.ListVoiceSessions(ctx, s.CampaignID, recapListLimit)
+	sessions, err := a.store.ListVoiceSessions(ctx, id.CampaignID, recapListLimit)
 	if err != nil {
 		return "", fmt.Errorf("knowledge: list voice sessions for recap: %w", err)
 	}

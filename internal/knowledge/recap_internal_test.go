@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/recap"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -27,13 +28,6 @@ func (stubStore) ListVoiceSessions(_ context.Context, _ uuid.UUID, _ int) ([]sto
 	return []storage.VoiceSession{{ID: uuid.New(), Status: storage.VoiceSessionEnded, LineCount: 3}}, nil
 }
 
-// stubSessions reports a live session (resolves the Campaign).
-type stubSessions struct{}
-
-func (stubSessions) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{CampaignID: uuid.New()}, true
-}
-
 // TestRecapAdapterTimeoutMapsFriendlyAndTurnSurvives pins finding 1: when the recap
 // engine blows the recapToolTimeout (a slow LLM), the child deadline fires BELOW the
 // turn deadline, so RecapLastSessions returns the friendly took-too-long text as a
@@ -47,8 +41,10 @@ func TestRecapAdapterTimeoutMapsFriendlyAndTurnSurvives(t *testing.T) {
 	// Parent turn ctx: alive far longer than the recap child budget.
 	turnCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// The recap adapter resolves its Campaign from the run context's Identity (#488).
+	turnCtx = session.NewContext(turnCtx, session.Identity{CampaignID: uuid.New()})
 
-	a := NewRecap(blockingEngine{}, stubStore{}, stubSessions{})
+	a := NewRecap(blockingEngine{}, stubStore{})
 	out, err := a.RecapLastSessions(turnCtx, 1)
 	if err != nil {
 		t.Fatalf("RecapLastSessions returned an error, want friendly result text: %v", err)

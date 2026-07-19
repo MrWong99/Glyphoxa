@@ -19,6 +19,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -132,10 +133,23 @@ var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 // mid-session. Called once at boot, after the session manager exists and before
 // the server serves, so no lock is needed — mirrors VoiceServer.SetSessions.
 func (s *CampaignServer) SetSessions(src activeSessionSource) {
-	s.active.live = func() (uuid.UUID, bool) {
-		vs, active := src.Snapshot()
-		return vs.CampaignID, active
+	// Tenant-scoped live-first (#488 review item 1): resolve the CALLER's own Tenant's
+	// live session, never an arbitrary one — at cap >1 a shared Snapshot would pivot
+	// Tenant B's whole CampaignService onto Tenant A's live campaign (NotFound flap).
+	s.active.live = func(ctx context.Context) (uuid.UUID, bool) {
+		// Use the ctx's tenant (zero value when absent, exactly like
+		// resolveActiveCampaign's own store reads): in prod the interceptor always
+		// injects the real tenant, so this is Tenant-scoped; an unauthenticated request
+		// resolves against the nil tenant and matches nothing real.
+		tenantID, _ := auth.TenantID(ctx)
+		vs, active, err := src.Active(ctx, tenantID)
+		if err != nil || !active {
+			return uuid.Nil, false
+		}
+		return vs.CampaignID, true
 	}
+	// The archive/delete guard checks ALL sessions (#488 review item 2).
+	s.active.campaignLive = src.IsCampaignLive
 }
 
 // SetAssist wires the on-demand LLM campaign-creation engine (#479) the

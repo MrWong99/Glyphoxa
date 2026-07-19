@@ -45,7 +45,7 @@ type fakeButlerVoicer struct {
 	err    error
 }
 
-func (f *fakeButlerVoicer) SpeakAsButler(_ context.Context, text string) error {
+func (f *fakeButlerVoicer) SpeakAsButler(_ context.Context, _ uuid.UUID, text string) error {
 	f.calls++
 	f.spoken = text
 	return f.err
@@ -612,8 +612,9 @@ func TestRecapVoicedForeignTenantSessionDegradesToText(t *testing.T) {
 	}
 	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
 	voicer := &fakeButlerVoicer{}
-	// A live session for ANOTHER Tenant's campaign.
-	live := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreign.ID}}
+	// A live session for ANOTHER Tenant. Active is Tenant-keyed (#488), so the tenantA
+	// recap query sees no session here → the voiced request degrades to public text.
+	live := &fakeVoice{active: true, tenantID: tenantB, snap: storage.VoiceSession{CampaignID: foreign.ID}}
 
 	resp := dispatchRecap(t, store, live, eng, voicer, map[string]string{"delivery": deliveryVoiced})
 

@@ -192,6 +192,14 @@ spec:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: signup-plan-slug
+            {{- if gt (int .Values.web.maxVoiceSessions) 1 }}
+            # Process-wide concurrent Voice Session cap (#488, ADR-0057 K). Emitted
+            # ONLY when raised >1 so a stock deploy sets no env var and the binary's
+            # default 1 keeps today's single-session behaviour byte-identical. Raising
+            # this is soak-gated (#493) — see web.maxVoiceSessions in values.yaml.
+            - name: GLYPHOXA_MAX_VOICE_SESSIONS
+              value: {{ .Values.web.maxVoiceSessions | quote }}
+            {{- end }}
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json

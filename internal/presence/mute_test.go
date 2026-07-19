@@ -12,9 +12,14 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// fakeMuter is a SessionMuter for the mute-command tests.
+// fakeMuter is a SessionMuter for the mute-command tests. tenantID is the Tenant
+// its live session belongs to (#488): Active is Tenant-keyed, so a query for a
+// different Tenant reports no session — the cross-tenant guard, now on the read
+// itself. The zero value (uuid.Nil) matches an Interaction built without a resolved
+// Tenant, so the pre-#490 success tests (muteIC has no tenant) keep passing.
 type fakeMuter struct {
 	active     bool
+	tenantID   uuid.UUID
 	campaignID uuid.UUID
 	agentCalls []muteCall
 	allCalls   []bool
@@ -26,36 +31,31 @@ type muteCall struct {
 	muted bool
 }
 
-func (f *fakeMuter) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{CampaignID: f.campaignID}, f.active
+func (f *fakeMuter) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
+	if !f.active || tenantID != f.tenantID {
+		return storage.VoiceSession{}, false, nil
+	}
+	return storage.VoiceSession{CampaignID: f.campaignID}, true, nil
 }
 
-func (f *fakeMuter) SetAgentMute(_ context.Context, id string, muted bool) ([]string, error) {
+func (f *fakeMuter) SetAgentMute(_ context.Context, _ uuid.UUID, id string, muted bool) ([]string, error) {
 	f.agentCalls = append(f.agentCalls, muteCall{id, muted})
 	return f.mutedIDs, nil
 }
 
-func (f *fakeMuter) SetAllMute(_ context.Context, muted bool) ([]string, error) {
+func (f *fakeMuter) SetAllMute(_ context.Context, _ uuid.UUID, muted bool) ([]string, error) {
 	f.allCalls = append(f.allCalls, muted)
 	return f.mutedIDs, nil
 }
 
-// fakeLister is an AgentLister for the mute/say-command tests. tenantID is the
-// Tenant its (single) campaign belongs to — the live session's Tenant for the
-// cross-tenant guard (#490); the zero value (uuid.Nil) matches an Interaction built
-// without a resolved Tenant, so the pre-#490 success tests keep passing.
+// fakeLister is an AgentLister for the mute/say-command tests.
 type fakeLister struct {
-	agents   []storage.Agent
-	err      error
-	tenantID uuid.UUID
+	agents []storage.Agent
+	err    error
 }
 
 func (f *fakeLister) ListAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
 	return f.agents, f.err
-}
-
-func (f *fakeLister) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
-	return storage.Campaign{ID: id, TenantID: f.tenantID}, nil
 }
 
 func muteIC(resp *fakeResponder, npc string) *Interaction {
@@ -123,9 +123,10 @@ func TestMuteCommand_IdleEphemeral(t *testing.T) {
 // nothing. (If sessionInTenant wrongly returned true, the mute would proceed.)
 func TestMuteCommand_ForeignTenantSessionRefused(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
-	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
-	// The live session's campaign belongs to tenantB; the interaction is tenantA.
-	agents := &fakeLister{agents: []storage.Agent{bart}, tenantID: tenantB}
+	// The live session belongs to tenantB; the interaction is tenantA. Active is
+	// Tenant-keyed, so the tenantA query sees no session (#488 subsumes the #490 guard).
+	mgr := &fakeMuter{active: true, tenantID: tenantB, campaignID: uuid.New()}
+	agents := &fakeLister{agents: []storage.Agent{bart}}
 	cmd := MuteCommand(mgr, agents)
 	resp := &fakeResponder{}
 	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"npc": bart.ID.String()}}, resp: resp}
@@ -143,8 +144,8 @@ func TestMuteCommand_ForeignTenantSessionRefused(t *testing.T) {
 
 // TestMuteAllCommand_ForeignTenantSessionRefused is the muteall sibling of the guard.
 func TestMuteAllCommand_ForeignTenantSessionRefused(t *testing.T) {
-	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
-	agents := &fakeLister{tenantID: tenantB}
+	mgr := &fakeMuter{active: true, tenantID: tenantB, campaignID: uuid.New()}
+	agents := &fakeLister{}
 	cmd := MuteAllCommand(mgr, agents)
 	resp := &fakeResponder{}
 	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, resp: resp}

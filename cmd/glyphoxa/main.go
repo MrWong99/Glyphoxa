@@ -653,17 +653,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	// Agent-facing transcript attribution (the transcript-names seam): every
 	// NPC's Agent loop prefixes its user lines "<Name>: <text>" via the SAME
-	// resolver the relay/chunker use (#281), scoped to the active session's
-	// Campaign. Lookup is cache-only and never blocks (the relay Warms it on
-	// VADSpeechStart, ~1.7s before the reply path reads it); a miss degrades to
-	// the loop's generic "Player / DM" label, matching the relay/chunker. Set on
-	// the base voice config BEFORE NewManager so every session's copy carries it.
-	cfg.SpeakerName = func(speakerID string) string {
-		vs, ok := sessions.Snapshot()
-		if !ok {
-			return ""
-		}
-		return speakerResolver.Lookup(vs.CampaignID, speakerID).Name
+	// resolver the relay/chunker use (#281), scoped to the session's Campaign.
+	// Lookup is cache-only and never blocks (the relay Warms it on VADSpeechStart,
+	// ~1.7s before the reply path reads it); a miss degrades to the loop's generic
+	// "Player / DM" label, matching the relay/chunker. Wired PER SESSION via
+	// Deps.SpeakerNameForCampaign (#488): the Manager rebinds cfg.SpeakerName in
+	// Start with THIS session's Campaign, so N concurrent sessions each attribute
+	// against their own roster instead of a single-active global read.
+	speakerNameForCampaign := func(campaignID uuid.UUID, speakerID string) string {
+		return speakerResolver.Lookup(campaignID, speakerID).Name
 	}
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
@@ -715,7 +713,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
 	// the base voice config every session copies; in web-only mode the Manager starts
 	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
-	knowledgeAdapter := knowledge.New(store, store.PromptKG(), sessions)
+	knowledgeAdapter := knowledge.New(store, store.PromptKG())
 
 	// Monthly plan-allowance gate (ADR-0055 gate (b)): store-backed only in
 	// `open` Admission Mode; nil in allowlist mode, where the gate is a no-op
@@ -724,13 +722,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	// The Manager's construction-time deps (#448): the finalizers/pipelines it
 	// drives per session and the collaborators riding its base voice config — one
-	// immutable struct instead of six back-wired setters. Everything here was
-	// constructed against the View that NewManager binds below.
+	// immutable struct instead of six back-wired setters. Everything here is
+	// registered in the Registry NewManager registers the Manager into below (#487).
 	deps := session.Deps{
 		Registry:   sessions,
 		Transcript: relay,
 		Chunker:    chunker,
 		Highlights: highlightSaver,
+		// Per-Campaign Speaker-Lane attribution (#488): the Manager rebinds
+		// cfg.SpeakerName per Start with the session's Campaign so N concurrent
+		// sessions each attribute user lines against their own roster.
+		SpeakerNameForCampaign: speakerNameForCampaign,
+		// Process-wide cap on concurrent Voice Sessions (#488, ADR-0057 K), from
+		// GLYPHOXA_MAX_VOICE_SESSIONS. Default 1 keeps today's single-session
+		// behaviour byte-identical; raising it >1 is soak-gated (#493, DAVE) and safe
+		// only now that per-tenant clients (#489) + GM scoping (#490) are merged.
+		MaxSessions: maxVoiceSessions(os.Getenv),
 		// Durable Usage Ledger (ADR-0054): every manager-started session's metered
 		// usage lands in the usage_ledger table at loop exit, attributed to its
 		// Tenant — the cost side of the SaaS billing report. Attribution only;
@@ -753,7 +760,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			Transcripts: knowledgeAdapter,
 			KG:          knowledgeAdapter,
 			KGW:         knowledgeAdapter,
-			Recap:       knowledge.NewRecap(recapEngine, store, sessions),
+			Recap:       knowledge.NewRecap(recapEngine, store),
 		},
 	}
 	// Per-tenant Discord client registry (#489): every manager-started Voice
@@ -916,7 +923,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		reg.Register(
 			presence.UseCommand(store),
 			presence.StartCommand(store, mgr),
-			presence.EndCommand(mgr, store),
+			presence.EndCommand(mgr),
 			presence.SearchCommand(store, mgr),
 			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
 			// Session via the SAME shared slash resolver, delivered per the invoker's

@@ -26,11 +26,13 @@ import (
 // goroutine does the blocking I/O (WAVClip → blob.Put → CreateHighlight). A save
 // failure logs and is dropped — one missed highlight never crashes the session.
 //
-// The Saver is a process singleton bound to one Voice Session at a time (there is
-// only ever one live session, ADR-0039). Begin binds a session and starts its
-// worker; Finalize drains the worker, schedules the purge, and unbinds. It rides
-// the VOICE process; the RPC read side and clip serve ride the WEB process — they
-// meet only through Postgres (the blob backend), never shared memory.
+// The Saver holds one binding PER live Voice Session, keyed by its id (#488
+// concurrent sessions): Begin binds a session, starts its worker, and returns the
+// per-session [Sink] the Manager wires as that session's cfg.Highlights; Finalize
+// drains THAT session's worker, schedules its purge, and unbinds it — leaving any
+// other live session's binding untouched. It rides the VOICE process; the RPC read
+// side and clip serve ride the WEB process — they meet only through Postgres (the
+// blob backend), never shared memory.
 
 // saveQueue bounds a session's pending-trigger mailbox. A detector emits at most
 // MaxCandidates (#305: 10) triggers a session, so 16 is generous headroom; a
@@ -77,8 +79,11 @@ type Saver struct {
 	// production, shrunk by tests that need the budget to expire (#435).
 	saveTimeout time.Duration
 
-	mu   sync.Mutex
-	sess *saverSession // nil when unbound (idle)
+	// mu guards sessions. sessions holds one binding per live Voice Session, keyed
+	// by its id (#488): N concurrent sessions each own an independent worker +
+	// mailbox, so a Begin/Finalize for one never disturbs another.
+	mu       sync.Mutex
+	sessions map[uuid.UUID]*saverSession
 }
 
 // saverSession is the Saver's per-Voice-Session binding: the owning ids and the
@@ -96,20 +101,22 @@ func NewSaver(store Store, blobs blob.Store, enqueue JobEnqueuer, log *slog.Logg
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Saver{store: store, blobs: blobs, enqueue: enqueue, log: log, saveTimeout: saveTimeout}
+	return &Saver{store: store, blobs: blobs, enqueue: enqueue, log: log, saveTimeout: saveTimeout, sessions: map[uuid.UUID]*saverSession{}}
 }
 
-// Begin binds the Saver to a new Voice Session and starts its worker goroutine.
-// The Manager calls it at Start, before any trigger can fire. A Begin while a
-// prior session is still bound (a missing Finalize) replaces the binding after
-// tearing the old worker down — defensive; the normal path is Finalize then Begin.
-func (s *Saver) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) {
+// Begin binds a new Voice Session, starts its worker goroutine, and returns the
+// per-session [Sink] the Manager wires as that session's cfg.Highlights (#488).
+// The Manager calls it at Start, before any trigger can fire; each live session
+// gets its OWN binding, so a second concurrent Begin never disturbs the first.
+// A Begin re-using an id still bound (a missing Finalize) replaces that binding
+// after tearing its old worker down — defensive; the normal path is Finalize
+// then Begin.
+func (s *Saver) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) Sink {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sess != nil {
-		close(s.sess.queue)
-		old := s.sess
-		s.sess = nil
+	if old, ok := s.sessions[voiceSessionID]; ok {
+		close(old.queue)
+		delete(s.sessions, voiceSessionID)
 		go func() { <-old.done }() // reap without blocking Begin
 	}
 	ss := &saverSession{
@@ -119,28 +126,36 @@ func (s *Saver) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) {
 		queue:          make(chan Trigger, saveQueue),
 		done:           make(chan struct{}),
 	}
-	s.sess = ss
+	s.sessions[voiceSessionID] = ss
 	go s.worker(ss)
+	return sessionSink{saver: s, ss: ss}
 }
 
-// HandleTrigger is the [Sink] impl: a non-blocking hand-off to the bound
-// session's worker. It runs on the detector's worker goroutine, so it never does
-// I/O inline and never blocks — a full mailbox drops the trigger and logs, and a
-// trigger arriving with no session bound (a detector outliving Finalize) is
-// likewise dropped. Guarded by mu so a concurrent Finalize can never close the
-// queue mid-send.
-func (s *Saver) HandleTrigger(t Trigger) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ss := s.sess
-	if ss == nil {
-		s.log.Warn("highlight saver: trigger with no bound session, dropping", "score", t.Score)
+// sessionSink is the per-session [Sink] Begin hands back: it routes every Trigger
+// to exactly the session it was bound to (#488), so two concurrent detectors never
+// cross-feed. A nil-safe zero value is never produced (Begin always sets both).
+type sessionSink struct {
+	saver *Saver
+	ss    *saverSession
+}
+
+// HandleTrigger is the [Sink] impl: a non-blocking hand-off to THIS session's
+// worker. It runs on the detector's worker goroutine, so it never does I/O inline
+// and never blocks — a full mailbox drops the trigger and logs, and a trigger
+// arriving after this session's Finalize (its binding gone, or replaced) is
+// likewise dropped. Guarded by the Saver mu so a concurrent Finalize can never
+// close the queue mid-send.
+func (h sessionSink) HandleTrigger(t Trigger) {
+	h.saver.mu.Lock()
+	defer h.saver.mu.Unlock()
+	if cur, ok := h.saver.sessions[h.ss.voiceSessionID]; !ok || cur != h.ss {
+		h.saver.log.Warn("highlight saver: trigger after finalize, dropping", "score", t.Score)
 		return
 	}
 	select {
-	case ss.queue <- t:
+	case h.ss.queue <- t:
 	default:
-		s.log.Warn("highlight saver: save queue full, dropping trigger", "score", t.Score)
+		h.saver.log.Warn("highlight saver: save queue full, dropping trigger", "score", t.Score)
 	}
 }
 
@@ -149,21 +164,24 @@ func (s *Saver) HandleTrigger(t Trigger) {
 // it runs on a fresh short budget rather than an already-dead context.
 const enqueueTimeout = 5 * time.Second
 
-// Finalize drains the bound session's worker (a flush barrier: it closes the
+// Finalize drains ONE Voice Session's worker (a flush barrier: it closes the
 // mailbox and waits for the worker to finish every queued trigger), then
-// schedules the 7-day candidate purge job and unbinds. The Manager calls it at
-// EVERY loop exit beside transcript.Finalize (Stop, self-exit, Shutdown), so a
-// session's candidates always get a purge horizon. Idle (no bound session) is a
-// no-op. A ctx timeout during the drain is returned (the Manager logs it) but the
-// purge is STILL scheduled off the captured session id — a drain timeout must not
-// lose the purge horizon (that would strand candidates until the boot sweep, which
-// is a backstop, not the primary path).
-func (s *Saver) Finalize(ctx context.Context) error {
+// schedules the 7-day candidate purge job and unbinds THAT session — leaving every
+// other live session's binding untouched (#488). The Manager calls it at EVERY
+// loop exit beside transcript.Finalize (Stop, self-exit, Shutdown), keyed by the
+// session's id, so a session's candidates always get a purge horizon. An unknown /
+// already-finalized id is a no-op. A ctx timeout during the drain is returned (the
+// Manager logs it) but the purge is STILL scheduled off the captured session id —
+// a drain timeout must not lose the purge horizon (that would strand candidates
+// until the boot sweep, which is a backstop, not the primary path).
+func (s *Saver) Finalize(ctx context.Context, voiceSessionID uuid.UUID) error {
 	s.mu.Lock()
-	ss := s.sess
-	s.sess = nil
+	ss, ok := s.sessions[voiceSessionID]
+	if ok {
+		delete(s.sessions, voiceSessionID)
+	}
 	s.mu.Unlock()
-	if ss == nil {
+	if !ok {
 		return nil
 	}
 

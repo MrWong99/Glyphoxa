@@ -177,9 +177,13 @@ type startCall struct {
 }
 
 // fakeVoice is a configurable VoiceControl for the start/end command tests.
+// tenantID is the Tenant its live session belongs to (#488): Active/Stop are
+// Tenant-keyed, so a query for a different Tenant misses. The zero value (uuid.Nil)
+// matches ANY query tenant, so the pre-#490 success tests keep passing unchanged.
 type fakeVoice struct {
 	snap       storage.VoiceSession
 	active     bool
+	tenantID   uuid.UUID
 	startVS    storage.VoiceSession
 	startErr   error
 	started    *startCall
@@ -196,12 +200,20 @@ func (f *fakeVoice) Start(_ context.Context, tenantID, campaignID uuid.UUID) (st
 	return f.startVS, nil
 }
 
-func (f *fakeVoice) Stop(context.Context) (storage.VoiceSession, error) {
+func (f *fakeVoice) Stop(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, error) {
+	if f.tenantID != uuid.Nil && tenantID != f.tenantID {
+		return storage.VoiceSession{}, session.ErrNoActiveSession
+	}
 	f.stopCalled = true
 	return f.stopVS, f.stopErr
 }
 
-func (f *fakeVoice) Snapshot() (storage.VoiceSession, bool) { return f.snap, f.active }
+func (f *fakeVoice) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
+	if !f.active || (f.tenantID != uuid.Nil && tenantID != f.tenantID) {
+		return storage.VoiceSession{}, false, nil
+	}
+	return f.snap, true, nil
+}
 
 // campaign builds a Campaign in tenantA — the Tenant that testGuild resolves to in
 // the dispatch tests (see testRegistry), so a dispatched command's ic.TenantID()
@@ -376,7 +388,7 @@ func TestStartDiscordNotConfigured(t *testing.T) {
 func TestEndSuccess(t *testing.T) {
 	voice := &fakeVoice{stopVS: storage.VoiceSession{ID: uuid.New()}}
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(EndCommand(voice, &fakeSessionStore{}))
+	reg.Register(EndCommand(voice))
 
 	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
 
@@ -395,7 +407,7 @@ func TestEndSuccess(t *testing.T) {
 func TestEndNoneRunning(t *testing.T) {
 	voice := &fakeVoice{stopErr: session.ErrNoActiveSession}
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(EndCommand(voice, &fakeSessionStore{}))
+	reg.Register(EndCommand(voice))
 
 	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
 
@@ -412,10 +424,11 @@ func TestEndNoneRunning(t *testing.T) {
 // belongs to Tenant B — end refuses and never calls Stop.
 func TestEndForeignTenantSessionRefused(t *testing.T) {
 	foreign := campaignIn(tenantB, "Tenant B session")
-	store := &fakeSessionStore{byID: map[uuid.UUID]storage.Campaign{foreign.ID: foreign}}
-	voice := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreign.ID}}
+	// The live session belongs to tenantB; end runs as tenantA. Stop is Tenant-keyed
+	// (#488), so a tenantA end reports ErrNoActiveSession — it can never stop it.
+	voice := &fakeVoice{active: true, tenantID: tenantB, snap: storage.VoiceSession{CampaignID: foreign.ID}}
 	reg := testRegistry(testGuild, operatorID) // testGuild → tenantA
-	reg.Register(EndCommand(voice, store))
+	reg.Register(EndCommand(voice))
 
 	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
 
@@ -432,7 +445,7 @@ func TestSessionCommandsRefusedForNonGM(t *testing.T) {
 	store := &fakeSessionStore{list: []storage.Campaign{lost}, forUser: &lost}
 	voice := &fakeVoice{}
 	reg := testRegistry(testGuild, operatorID) // only operatorID is allowlisted
-	reg.Register(UseCommand(store), StartCommand(store, voice), EndCommand(voice, store))
+	reg.Register(UseCommand(store), StartCommand(store, voice), EndCommand(voice))
 
 	for _, key := range []string{"glyphoxa use", "glyphoxa start", "glyphoxa end"} {
 		resp := dispatchAs(reg, key, strangerID, map[string]string{"campaign": "Lost Mine"})
@@ -487,7 +500,7 @@ func TestResolveActiveCampaignLiveSessionForeignTenant(t *testing.T) {
 		byID:    map[uuid.UUID]storage.Campaign{foreignLive.ID: foreignLive},
 		forUser: &mine,
 	}
-	voice := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreignLive.ID}}
+	voice := &fakeVoice{active: true, tenantID: tenantB, snap: storage.VoiceSession{CampaignID: foreignLive.ID}}
 
 	c, err := resolveActiveCampaign(ctx, store, voice, tenantA, operatorID)
 	if err != nil || c.ID != mine.ID {

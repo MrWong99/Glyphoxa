@@ -114,12 +114,13 @@ func bigGroqLLM(rec observe.StageRecorder) {
 // set the session gets NO gate and its StageMetrics is the base recorder untouched
 // — today's behavior. Spend() reports the zero Status.
 func TestStart_NoCaps_ByteForByteToday(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore() // default caps: both nil
 	runner := newReRunner()
 	spy := &usageSpy{}
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), spy)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -131,7 +132,7 @@ func TestStart_NoCaps_ByteForByteToday(t *testing.T) {
 	if cfg.StageMetrics != observe.StageRecorder(spy) {
 		t.Fatal("no caps configured: cfg.StageMetrics must be the base recorder, untouched (no tee)")
 	}
-	if s := mgr.Spend(); s.State != spend.CapNone || s.EstimatedUSD != 0 {
+	if s := mgr.Spend(tenantID); s.State != spend.CapNone || s.EstimatedUSD != 0 {
 		t.Fatalf("Spend() with no caps = %+v, want zero Status", s)
 	}
 	mgr.Shutdown()
@@ -142,13 +143,14 @@ func TestStart_NoCaps_ByteForByteToday(t *testing.T) {
 // refuses new turns, the base recorder still saw the call (tee, not replace), and
 // Spend() reflects the same accumulator.
 func TestStart_WithCaps_GatesAndTees(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	store.caps = storage.SpendCaps{SoftUSD: fp(1.0)} // soft-only
 	runner := newReRunner()
 	spy := &usageSpy{}
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), spy)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -171,7 +173,7 @@ func TestStart_WithCaps_GatesAndTees(t *testing.T) {
 	if spy.count() != 1 {
 		t.Fatalf("base recorder LLMTokens count = %d, want 1 (tee must wrap, not replace, the base)", spy.count())
 	}
-	if s := mgr.Spend(); s.State != spend.CapSoft || s.EstimatedUSD <= 0 {
+	if s := mgr.Spend(tenantID); s.State != spend.CapSoft || s.EstimatedUSD <= 0 {
 		t.Fatalf("Spend() after crossing soft = %+v, want soft state + positive estimate", s)
 	}
 	mgr.Shutdown()
@@ -244,6 +246,7 @@ func TestStart_CapsLoadNotFound_IsNoCaps(t *testing.T) {
 // SpendCapReached{soft}, but the session stays live (soft never ends it) and
 // Spend() reports the soft state.
 func TestSoftCap_SessionKeepsRunning(t *testing.T) {
+	tenantID := uuid.New()
 	store := newFakeStore()
 	store.caps = storage.SpendCaps{SoftUSD: fp(1.0)}
 	runner := newReRunner()
@@ -251,7 +254,7 @@ func TestSoftCap_SessionKeepsRunning(t *testing.T) {
 	events := collectSpendCaps(bus)
 	mgr := spendManager(t, store, runner.run, bus, &usageSpy{})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -261,13 +264,13 @@ func TestSoftCap_SessionKeepsRunning(t *testing.T) {
 	if len(evs) != 1 || evs[0].Level != voiceevent.SpendCapSoft {
 		t.Fatalf("published spend-cap events = %+v, want one soft", evs)
 	}
-	if _, active := mgr.Snapshot(); !active {
+	if !mgr.AnyLive() {
 		t.Fatal("soft cap must NOT end the session")
 	}
 	if runner.wasCancelled() {
 		t.Fatal("soft cap must not cancel the run ctx")
 	}
-	if s := mgr.Spend(); s.State != spend.CapSoft {
+	if s := mgr.Spend(tenantID); s.State != spend.CapSoft {
 		t.Fatalf("Spend().State = %q, want soft", s.State)
 	}
 	mgr.Shutdown()
@@ -326,7 +329,7 @@ func waitInactive(t *testing.T, mgr *session.Manager) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, active := mgr.Snapshot(); !active {
+		if !mgr.AnyLive() {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

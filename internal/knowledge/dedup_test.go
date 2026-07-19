@@ -34,10 +34,10 @@ func TestExistingKnowledge_OwnNodeGathersPendingAndEstablished(t *testing.T) {
 			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: uuid.New().String(), Subject: "Arturus", Fact: "ist ein Ritter"}), // different target
 		},
 	}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
 	w := tool.ProposedWrite{Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "something new"}
-	known, err := adapter.ExistingKnowledge(context.Background(), aid.String(), w)
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), aid.String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
 	}
@@ -65,10 +65,10 @@ func TestExistingKnowledge_CampaignBySubjectName(t *testing.T) {
 			pendingRow(cid, tool.ProposedWrite{Kind: "fact", Subject: "the duke", Fact: "is old"}),
 		},
 	}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
 	w := tool.ProposedWrite{Kind: "fact", Subject: "The Duke", Fact: "new fact"}
-	known, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), w)
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
 	}
@@ -94,12 +94,12 @@ func TestExistingKnowledge_UnifiesOwnNodeAndCampaignKeys(t *testing.T) {
 			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: gesaID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
 		},
 	}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 
 	// The Butler now re-proposes the same fact campaign-scoped (no node id, subject
 	// by name) — it must see the NPC's pending row via the unified key.
 	w := tool.ProposedWrite{Kind: "fact", Subject: "Gesa", Fact: "ist die Schwester von Arturus"}
-	known, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), w)
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
 	}
@@ -116,9 +116,9 @@ func TestExistingKnowledge_SkipsGMPrivateEstablished(t *testing.T) {
 	store := &fakeStore{
 		allNodes: []storage.KGNode{{ID: secretID, Name: "The Traitor", Body: "is secretly the spy", GMPrivate: true}},
 	}
-	adapter := knowledge.New(store, store, liveSession(cid))
+	adapter := knowledge.New(store, store)
 	w := tool.ProposedWrite{Kind: "fact", Subject: "The Traitor", Fact: "is secretly the spy"}
-	known, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), w)
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestExistingKnowledge_SkipsGMPrivateEstablished(t *testing.T) {
 
 // No active session is a clean error the handler can fail open on.
 func TestExistingKnowledge_NoSessionErrors(t *testing.T) {
-	adapter := knowledge.New(&fakeStore{}, &fakeStore{}, fakeSessions{live: false})
+	adapter := knowledge.New(&fakeStore{}, &fakeStore{})
 	if _, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), tool.ProposedWrite{Kind: "fact", Subject: "X", Fact: "y"}); err == nil {
 		t.Error("want error with no active session")
 	}
