@@ -40,24 +40,48 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: runs exactly one replica
-    # Voice is stateful per channel (one gateway connection / one channel join),
-    # so the workload is pinned to a single replica — scaling out would have two
-    # bots fighting over the same voice channel.
+  - it: defaults to a single replica
+    # A self-host install needs no fleet; the shared-pool tunable defaults to 1.
     asserts:
       - equal:
           path: spec.replicas
           value: 1
 
-  - it: uses the Recreate strategy so an upgrade never runs two pods on one channel
-    # The default RollingUpdate would surge a second voice pod that reports Ready
-    # on the DB-only /readyz while the old pod still holds the Discord gateway —
-    # two pods on the same guild+channel with the same token. Recreate tears the
-    # old pod down first, keeping at most one session-holder.
+  - it: renders the configured replica count for a fleet
+    # The shared voice-worker pool (#492, ADR-0057) makes replicas a real tunable:
+    # the Postgres claim plane (#491) and the elected-presence-owner interaction
+    # gate (ADR-0057 (c)) let N replicas coexist on the central token.
+    set:
+      voice:
+        replicas: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: uses RollingUpdate with a safe surge so a fleet upgrades without a full gap
+    # The claim plane (one live intent per Tenant) plus the per-Tenant guard make a
+    # brief pod overlap safe (#492, ADR-0057): a surging pod that has not claimed an
+    # intent holds no channel, and the elected owner still dispatches interactions.
+    # maxUnavailable 0 keeps capacity during the roll; maxSurge 1 bounds the overlap.
     asserts:
       - equal:
           path: spec.strategy.type
-          value: Recreate
+          value: RollingUpdate
+      - equal:
+          path: spec.strategy.rollingUpdate.maxSurge
+          value: 1
+      - equal:
+          path: spec.strategy.rollingUpdate.maxUnavailable
+          value: 0
+
+  - it: sets the termination grace period so a mid-session drain completes
+    # SIGTERM drains live Voice Sessions cleanly before SIGKILL (#492, ADR-0006):
+    # stop claiming, Finish the rows, release the owner claim, close the clients.
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 300
 
   - it: is NOT a Helm hook so it applies after the migrate and seed hooks
     # The migrate (-5) and seed (-4) hooks complete before any non-hook resource;
@@ -230,13 +254,14 @@ tests:
             name: GLYPHOXA_OLLAMA_URL
             value: http://host.k3d.internal:11434
 
-  - it: does NOT carry GLYPHOXA_SECRET
-    # Voice never decrypts the sealed provider_config: loadSeededNPC takes no
-    # cipher and the adapters read real keys from their own env vars. The cipher
-    # key stays on the seed Job; leaking it into the long-lived serving pod would
-    # widen its blast radius for no reason.
+  - it: carries GLYPHOXA_SECRET to decrypt BYOK tenant tokens
+    # ADR-0057 (d): a worker in the shared pool holds BYOK Tenants' Discord clients
+    # and must decrypt their bot tokens itself, so the voice role now reads the
+    # platform cipher — a deliberate blast-radius widening from the old posture
+    # (ADR-0034 amended by ADR-0057). Resolved on #492 as a mounted secret (vs
+    # forwarded short-lived credentials).
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: GLYPHOXA_SECRET

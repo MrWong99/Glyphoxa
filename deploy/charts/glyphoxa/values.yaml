@@ -167,10 +167,32 @@ voice:
   guild: ""
   channel: ""
 
-  # Single replica, by intent: voice is stateful per channel (one gateway
-  # connection and one channel join), so two replicas would fight over the same
-  # voice channel. Not surfaced as a tunable — scaling out is a design change,
-  # not a value.
+  # Voice Instance replica count (#492, ADR-0057). The shared voice-worker pool
+  # makes scaling out a real tunable, not a design change: session assignment is a
+  # Postgres claim plane (one live intent per Tenant, #491) and interaction
+  # dispatch is gated to a single elected presence owner (ADR-0057 (c)), so N
+  # replicas coexist on the central token without fighting over a channel or
+  # double-handling a slash command. Default 1 (a self-host install needs no
+  # fleet); set > 1 for the SaaS deploy, which also arms the PodDisruptionBudget
+  # below.
+  replicas: 1
+
+  # Termination grace period (#492, ADR-0006/0057): SIGTERM stops the worker
+  # claiming, drains its live Voice Sessions cleanly (each intent Finished 'done'),
+  # releases its presence-owner claim, and closes its clients. Sized generously so
+  # a mid-session drain completes a DAVE/MLS wind-down before the kubelet SIGKILLs
+  # the pod — a session is ENDED on drain (ADR-0006), never migrated, so this is
+  # the whole clean-shutdown budget. Default 300s.
+  terminationGracePeriodSeconds: 300
+
+  # PodDisruptionBudget for the voice pool (#492). Armed only when replicas > 1 —
+  # a single-replica install has no availability to protect and a PDB with
+  # minAvailable 1 over one pod would BLOCK voluntary drains (node upgrades). With
+  # a fleet it keeps at least minAvailable pods serving through a voluntary
+  # disruption so interaction dispatch and live sessions are never fully torn down
+  # at once.
+  pdb:
+    minAvailable: 1
 
   # Optional per-workload image override. When repository/tag are set here they
   # win over the shared top-level `image`; otherwise the voice pod runs the same

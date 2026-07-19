@@ -1,12 +1,18 @@
 {{/*
 Voice-mode Deployment (#36) — the serving workload of the chart.
 
-It runs the single image as `glyphoxa -mode voice -guild <id> -channel <id>`,
-joining one Discord guild+channel and giving the seeded NPC a live voice loop.
+It runs the single image as `glyphoxa -mode voice` (a claim-plane worker in the
+shared pool) or, with -guild/-channel set, the legacy standalone node joining one
+static channel.
 
-- ONE replica, by intent: voice is stateful per channel (one Discord gateway
-  connection, one channel join), so two replicas would fight over the same
-  channel. The replica count is fixed here rather than surfaced as a tunable.
+- A TUNABLE replica count (#492, ADR-0057): the shared voice-worker pool makes
+  scaling out a value, not a design change. Session assignment is a Postgres
+  claim plane — one live intent per Tenant, claimed FOR UPDATE SKIP LOCKED (#491)
+  — and interaction dispatch is gated to a single elected presence owner (the
+  presence_owner row, ADR-0057 (c)), so N replicas coexist on the central token
+  without fighting over a channel or double-handling a slash command. A pod
+  holding no connection for a guild simply ignores that guild's voice events
+  (P6). Default 1; the SaaS deploy sets it higher and arms the PDB.
 - NOT a Helm hook: a plain resource applies after every pre-install/pre-upgrade
   hook, so the migrate (-5) and seed (-4) hooks have completed — the schema is
   current and the demo NPC seeded — before this pod starts.
@@ -15,10 +21,12 @@ joining one Discord guild+channel and giving the seeded NPC a live voice loop.
   with the actionable `migrate up` message if the schema is behind, rather than
   auto-migrating under a serving process.
 - Credentials come from the app Secret (ADR-0034): DISCORD_BOT_TOKEN plus the
-  three provider keys each adapter reads at request time (BYOK, ADR-0004). It
-  does NOT read GLYPHOXA_SECRET — loadSeededNPC takes no cipher and never
-  decrypts the sealed placeholder credentials; keeping the cipher key off this
-  long-lived pod keeps its blast radius small.
+  three provider keys each adapter reads at request time (BYOK, ADR-0004), AND
+  GLYPHOXA_SECRET (ADR-0057 (d), superseding ADR-0034's "does NOT read
+  GLYPHOXA_SECRET" posture): a worker in the pool holds BYOK Tenants' Discord
+  clients and must decrypt their bot tokens itself, so the voice role now reads
+  the platform cipher — a deliberate blast-radius widening resolved on #492 as a
+  mounted secret (vs forwarded short-lived credentials).
 - Health/metrics (#33, ADR-0032): the metrics-only listener serves /metrics for
   scraping plus the /healthz liveness and /readyz readiness probes on the metrics
   port. Liveness targets /healthz (process-up; it ignores DB health so a DB blip
@@ -39,20 +47,21 @@ metadata:
     {{- include "glyphoxa.labels" . | nindent 4 }}
     app.kubernetes.io/component: voice
 spec:
-  # Voice is stateful per channel — a single replica by intent (see the header).
-  replicas: 1
-  # Recreate, NOT the default RollingUpdate: on a `helm upgrade` (e.g. an image
-  # bump) RollingUpdate would surge a second voice pod and keep the old one until
-  # the new is Ready. But /readyz only pings the DB — the Discord gateway is
-  # opened later in Run(), after the readiness server is already serving — so the
-  # new pod reports Ready on DB alone while the old pod still holds the gateway
-  # session. For the surge window TWO pods would mgr.Open the SAME guild+channel
-  # with the SAME token, the single-replica-per-channel violation this chart
-  # exists to prevent. Recreate tears the old pod down before the new one starts,
-  # so at most one pod ever holds the channel (at the cost of a brief gap on
-  # upgrade, which is correct for a single-session voice workload).
+  # A tunable replica count (#492, ADR-0057): the shared voice-worker pool serves
+  # K sessions across many Tenants. Default 1 for a self-host install.
+  replicas: {{ .Values.voice.replicas }}
+  # RollingUpdate, NOT Recreate: the claim plane (one live intent per Tenant, #491)
+  # and the per-Tenant client guard make a brief pod overlap SAFE (#492, ADR-0057),
+  # unlike the old single-channel model this chart used to protect with Recreate. A
+  # surging pod that has not yet claimed an intent holds no channel, and interaction
+  # dispatch stays with the one elected presence owner (ADR-0057 (c)) regardless of
+  # how many pods report Ready. maxUnavailable 0 keeps serving capacity through the
+  # roll; maxSurge 1 bounds the overlap to one extra pod.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
@@ -69,6 +78,11 @@ spec:
         prometheus.io/port: {{ .Values.voice.metricsPort | quote }}
         prometheus.io/path: /metrics
     spec:
+      # Clean-shutdown budget (#492, ADR-0006/0057): SIGTERM stops claiming, drains
+      # live Voice Sessions (each intent Finished 'done'), releases the presence-owner
+      # claim, and closes the clients — a session is ENDED on drain, never migrated,
+      # so this window must cover a DAVE/MLS wind-down before the kubelet SIGKILLs.
+      terminationGracePeriodSeconds: {{ .Values.voice.terminationGracePeriodSeconds }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -112,12 +126,23 @@ spec:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: database-url
-            # Required by runVoice to open the Discord gateway.
+            # Required by runVoice to open the Discord gateway (the central-token
+            # fallback; a BYOK Tenant's client overrides it per session).
             - name: DISCORD_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: discord-bot-token
+            # The credential cipher (ADR-0004/0057 (d)): a worker in the shared pool
+            # holds BYOK Tenants' Discord clients and decrypts their bot tokens itself,
+            # so the voice role now reads GLYPHOXA_SECRET — a deliberate blast-radius
+            # widening from ADR-0034's old posture, resolved on #492 as a mounted
+            # secret (vs forwarded short-lived credentials).
+            - name: GLYPHOXA_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: app-secret
             # Provider keys each adapter reads from its own env var at request
             # time (BYOK, ADR-0004): ElevenLabs (STT + TTS), Gemini, Groq (LLM).
             - name: ELEVENLABS_API_KEY

@@ -115,6 +115,11 @@ validate_path external-db \
 # needs none of the web OAuth credentials.
 validate_path web-disabled --set web.enabled=false
 
+# The voice-fleet render path (#492, ADR-0057): replicas > 1 arms the
+# PodDisruptionBudget alongside the Deployment, so a policy/v1 PDB must render and
+# schema-validate. Exercises the shared-voice-worker-pool branch end to end.
+validate_path voice-fleet --set voice.replicas=3
+
 # The Ingress render paths (#121 AC): enabled with an externally supplied TLS
 # Secret (cert-manager off) and enabled with the cert-manager cluster-issuer
 # path must each produce a schema-valid networking.k8s.io/v1 Ingress. Only a

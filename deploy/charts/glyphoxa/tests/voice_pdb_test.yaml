@@ -1,0 +1,57 @@
+suite: voice-mode PodDisruptionBudget
+# The voice PodDisruptionBudget (#492, ADR-0057) protects the shared voice-worker
+# pool through voluntary disruptions (node drains/upgrades): with a fleet it keeps
+# at least minAvailable pods serving so interaction dispatch and live sessions are
+# never all torn down at once. It is armed ONLY when voice.replicas > 1 — a
+# single-replica install has no availability to protect, and a minAvailable-1 PDB
+# over one pod would block every voluntary drain.
+templates:
+  - templates/voice-pdb.yaml
+set:
+  voice:
+    guild: "111111111111111111"
+    channel: "222222222222222222"
+  discordBotToken: unit-test-discord-token-placeholder
+  elevenLabsApiKey: unit-test-elevenlabs-placeholder
+  geminiApiKey: unit-test-gemini-placeholder
+  groqApiKey: unit-test-groq-placeholder
+tests:
+  - it: is absent for a single-replica install
+    # replicas 1 (the default): no PDB, so a node drain is never blocked.
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: is absent when voice is disabled
+    set:
+      voice:
+        enabled: false
+        replicas: 3
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a PodDisruptionBudget for a fleet
+    set:
+      voice:
+        replicas: 3
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-voice
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  - it: selects the voice pods
+    set:
+      voice:
+        replicas: 2
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: voice
