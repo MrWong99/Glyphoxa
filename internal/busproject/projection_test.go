@@ -33,12 +33,6 @@ func (m *mapSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
 	return vs, ok
 }
 
-func (m *mapSessions) remove(id uuid.UUID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.live, id)
-}
-
 // testTurn is a minimal per-turn state for the scaffold tests.
 type testTurn struct {
 	text string
@@ -181,9 +175,11 @@ func TestProjection_DropsUnattributable(t *testing.T) {
 
 // TestProjection_CloseOnlyThatEntry pins explicit-Close isolation (#487): Closing
 // one session runs its FinishSession with its FKs still visible and tears down
-// ONLY its entry — the other session's state is untouched, and a later event for
-// the closed session (a straggler the registry no longer resolves) is dropped
-// rather than reviving it.
+// ONLY its entry — the other session's state is untouched, and a straggler for
+// the closed session that is STILL RESOLVABLE (the production ordering: the
+// Manager Closes the projection before the registry stops resolving the session)
+// is dropped rather than reviving it, so no fresh live frame lands after the
+// terminal idle (#144).
 func TestProjection_CloseOnlyThatEntry(t *testing.T) {
 	vsA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
 	vsB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
@@ -191,10 +187,12 @@ func TestProjection_CloseOnlyThatEntry(t *testing.T) {
 
 	var mu sync.Mutex
 	var finishSaw []storage.VoiceSession
+	var starts []string
 	var p *Projection[testTurn]
 	p = New[testTurn](ss, &mu, nil, Hooks{
 		Fold:          func(e voiceevent.Event) { p.Turn(voiceevent.SessionIDOf(e), "t").text += "." },
 		FinishSession: func(sid string) { finishSaw = append(finishSaw, p.Session(sid)) },
+		StartSession:  func(sid string) { starts = append(starts, sid) },
 	})
 	bus := voiceevent.NewBus()
 	p.Subscribe(bus)
@@ -203,8 +201,9 @@ func TestProjection_CloseOnlyThatEntry(t *testing.T) {
 	bus.Publish(stampedFinal(a, 1))
 	bus.Publish(stampedFinal(b, 2))
 
-	// Close A only. The session leaves the registry (its finalizer ran).
-	ss.remove(vsA.ID)
+	// Close A only. Crucially, A is STILL in the registry (Resolve would succeed) —
+	// this is the resurrection window the Manager narrows: the projection Closes
+	// before the registry forgets the session.
 	p.Close(a)
 
 	if len(finishSaw) != 1 || finishSaw[0].ID != vsA.ID {
@@ -223,12 +222,17 @@ func TestProjection_CloseOnlyThatEntry(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// A straggler for the closed session A is dropped, not revived.
+	// A straggler for the Closed-but-still-Resolvable session A must be dropped by
+	// the tombstone — NOT re-Resolved into a fresh entry + StartSession.
+	startsBefore := len(starts)
 	bus.Publish(stampedFinal(a, 3))
 	mu.Lock()
 	defer mu.Unlock()
 	if p.Has(a) {
-		t.Error("a straggler revived the closed session A")
+		t.Error("a straggler resurrected the Closed (still-Resolvable) session A")
+	}
+	if len(starts) != startsBefore {
+		t.Errorf("straggler fired StartSession %d extra times, want 0 (tombstoned, never re-Resolved)", len(starts)-startsBefore)
 	}
 }
 

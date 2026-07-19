@@ -121,7 +121,8 @@ type openChunk struct {
 // Chunker projects bus events into Transcript Chunks and writes them async. Safe
 // for concurrent use: the bus callback, the window timer and FlushSession all take
 // the same lock — c.mu, shared with the busproject scaffold that owns the
-// subscription, the session rollover, and the turn map (#447).
+// subscription, the per-session attribution, and the per-session turn map
+// (#447/#487).
 type Chunker struct {
 	store  ChunkStore
 	gauge  BacklogGauge
@@ -148,10 +149,11 @@ type Chunker struct {
 	queue *busproject.Queue[*storage.TranscriptChunk]
 }
 
-// NewChunker subscribes to the bus once and returns a Chunker ready to fold
-// events. The subscription lives for the process (single active session across
-// reconnects/sessions, ADR-0039). A nil store disables writes (no writer
-// goroutine); a nil gauge disables the backlog update.
+// NewChunker subscribes to the process bus once and returns a Chunker ready to
+// fold events. The subscription lives for the process; each event folds into its
+// stamped session's own open chunk (#487), so concurrent sessions never share a
+// chunk. A nil store disables writes (no writer goroutine); a nil gauge disables
+// the backlog update.
 func NewChunker(bus *voiceevent.Bus, sessions Sessions, store ChunkStore, gauge BacklogGauge, log *slog.Logger, cfg ChunkerConfig) *Chunker {
 	if log == nil {
 		log = slog.Default()
@@ -193,11 +195,11 @@ func (c *Chunker) SetResolver(res SpeakerResolver) {
 	c.mu.Unlock()
 }
 
-// fold applies one attributed event to the open chunk — the chunker's fold
-// rules (ADR-0012: delivered-only, commit at FirstAudio). The scaffold has
-// already taken the event's ONE session Snapshot (like the relay, #149) and
-// rolled over on a session change; fold runs under c.mu and must not block
-// (the bus delivers synchronously): the only outward call, closeChunk's
+// fold applies one attributed event to the session's open chunk — the chunker's
+// fold rules (ADR-0012: delivered-only, commit at FirstAudio). The scaffold has
+// already attributed the event to its stamped session (#487); fold looks the open
+// chunk up by session id and runs under c.mu and must not block (the bus delivers
+// synchronously): the only outward call, closeChunk's
 // enqueue, is non-blocking.
 func (c *Chunker) fold(e voiceevent.Event) {
 	sid := voiceevent.SessionIDOf(e)

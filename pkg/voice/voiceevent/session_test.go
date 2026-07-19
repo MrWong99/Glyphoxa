@@ -3,8 +3,10 @@ package voiceevent
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -75,11 +77,13 @@ func TestSessionIDOf_UnstampedIsEmpty(t *testing.T) {
 	}
 }
 
-// TestWithSessionID_TaxonomyComplete is the completeness guard: it scans event.go
-// for every type carrying an EventName method (the wire taxonomy, ADR-0020) and
-// fails if any is missing from taxonomy() above — which would mean WithSessionID's
-// exhaustive type switch is also missing it, silently dropping the session
-// identity on that event.
+// TestWithSessionID_TaxonomyComplete is the completeness guard: it scans EVERY
+// non-test .go file in the package for every type carrying an EventName method
+// (the wire taxonomy, ADR-0020) and fails if any is missing from taxonomy() above
+// — which would mean WithSessionID's exhaustive type switch is also missing it,
+// silently dropping the session identity on that event. Scanning the whole
+// package (not just event.go) means a future Event declared in another file can't
+// evade the guard.
 func TestWithSessionID_TaxonomyComplete(t *testing.T) {
 	t.Parallel()
 
@@ -96,31 +100,41 @@ func TestWithSessionID_TaxonomyComplete(t *testing.T) {
 	// And no phantom types in the list that the source doesn't declare.
 	for name := range have {
 		if !source[name] {
-			t.Errorf("taxonomy() lists %s but no EventName() method declares it in event.go", name)
+			t.Errorf("taxonomy() lists %s but no EventName() method declares it in the package", name)
 		}
 	}
 }
 
-// sourceEventTypes parses event.go for the receiver type of every EventName
-// method — the authoritative taxonomy the wire is built on.
+// sourceEventTypes parses every non-test .go file in the package for the receiver
+// type of every EventName method — the authoritative taxonomy the wire is built
+// on, wherever an Event type is declared.
 func sourceEventTypes(t *testing.T) map[string]bool {
 	t.Helper()
-	f, err := os.Open("event.go")
+	files, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("open event.go: %v", err)
+		t.Fatalf("glob package files: %v", err)
 	}
-	defer f.Close()
-
 	re := regexp.MustCompile(`^func \(([A-Za-z0-9_]+)\) EventName\(\) string`)
 	out := map[string]bool{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if m := re.FindStringSubmatch(sc.Text()); m != nil {
-			out[m[1]] = true
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan event.go: %v", err)
+		f, err := os.Open(name)
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			if m := re.FindStringSubmatch(sc.Text()); m != nil {
+				out[m[1]] = true
+			}
+		}
+		err = sc.Err()
+		f.Close()
+		if err != nil {
+			t.Fatalf("scan %s: %v", name, err)
+		}
 	}
 	return out
 }

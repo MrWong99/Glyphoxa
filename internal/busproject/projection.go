@@ -100,6 +100,13 @@ type Projection[T any] struct {
 	log      *slog.Logger
 
 	entries map[string]*entry[T] // keyed by session id string
+	// closed tombstones every session id ever Closed (#487): a straggler event for
+	// a Closed session — arriving in the window before the Manager cuts the bridge —
+	// is dropped here WITHOUT re-Resolving, so it can never re-create a fresh entry
+	// (a live frame after the terminal idle, #144) even if the registry still
+	// resolves it. Session ids are unique uuids and never reused, so a tombstone is
+	// never a false drop of a genuinely new session.
+	closed map[string]struct{}
 }
 
 // New returns a Projection guarding its state with the host's mu and calling
@@ -115,6 +122,7 @@ func New[T any](sessions Sessions, mu sync.Locker, log *slog.Logger, hooks Hooks
 		hooks:    hooks,
 		log:      log,
 		entries:  map[string]*entry[T]{},
+		closed:   map[string]struct{}{},
 	}
 }
 
@@ -145,6 +153,13 @@ func (p *Projection[T]) project(e voiceevent.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if _, gone := p.closed[sid]; gone {
+		// A straggler for a session already Closed: drop it without re-Resolving, so
+		// it can never resurrect a torn-down entry (#487/#144).
+		p.log.Debug("busproject: dropping straggler event for a closed session", "event", e.EventName(), "session", sid)
+		return
+	}
+
 	if _, ok := p.entries[sid]; !ok {
 		uid, err := uuid.Parse(sid)
 		if err != nil {
@@ -174,6 +189,10 @@ func (p *Projection[T]) project(e voiceevent.Event) {
 func (p *Projection[T]) Close(sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Tombstone the session so any straggler racing this Close is dropped, whether
+	// or not the session folded events (a Close for a zero-event session still
+	// arms the guard) — #487/#144.
+	p.closed[sessionID] = struct{}{}
 	if _, ok := p.entries[sessionID]; !ok {
 		return
 	}

@@ -126,7 +126,7 @@ type AllowanceChecker interface {
 // calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
 // matches the persisted rows. *transcript.Relay satisfies it; defined here (not
 // imported) so the manager does NOT depend on the relay — the relay already
-// depends on the active-session read via its Sessions seam (a [View], #448), and
+// resolves each event's session via its Sessions seam (a [Registry], #487), and
 // the reverse import would cycle. nil (not wired / persistence off) leaves
 // line_count at the in-memory default.
 type TranscriptFinalizer interface {
@@ -151,8 +151,8 @@ type Highlighter interface {
 // (#104, ADR-0011): a lone trailing utterance is flushed ONLY here, at session
 // end. *transcript.Chunker satisfies it; defined here (not imported) so the
 // manager does NOT depend on the transcript package — the chunker already depends
-// on the active-session read via its Sessions seam (a [View], #448), and the
-// reverse import would cycle (mirrors TranscriptFinalizer). nil (no chunking /
+// resolves each event's session via its Sessions seam (a [Registry], #487), and
+// the reverse import would cycle (mirrors TranscriptFinalizer). nil (no chunking /
 // voice-standalone) is a no-op.
 type ChunkFinalizer interface {
 	FlushSession(ctx context.Context, sessionID uuid.UUID) error
@@ -198,6 +198,12 @@ type activeSession struct {
 	// practice — set in Start before the loop launches).
 	bus         *voiceevent.Bus
 	stopForward func()
+	// ended is set true under Manager.mu the instant the loop returns — BEFORE the
+	// finalizers Close the projections — so Lookup/Resolve/PublishToCampaign and
+	// hardCapTrip all treat the session as gone during the multi-second end window,
+	// closing the #487 resurrection race. Distinct from m.active clearing (which
+	// happens only after the terminal DB write).
+	ended bool
 	// muted is the volatile, session-local per-Agent mute set (#211), keyed by
 	// AgentID. Fresh-empty per Start, so every new Voice Session begins with all
 	// Agents unmuted (AC5) — there is NO DB column and NO migration; the set dies
@@ -272,11 +278,11 @@ type Manager struct {
 // ordering in the composition root. Every field is optional; the zero value is
 // a Manager with every collaborator off (the voice-standalone / test posture).
 //
-// Five of the collaborators themselves need the active-session read (the
-// Manager's Snapshot) — the old Manager ↔ projector construction cycle that
-// forced the setters. The cycle breaks at its true seam: they depend only on a
-// narrow Sessions{Snapshot} interface, so they are constructed FIRST against a
-// [View], and the View is bound to the Manager here at construction.
+// Several collaborators themselves need to resolve the session behind a bus event
+// (or the single-active read) — the old Manager ↔ projector construction cycle
+// that forced the setters. The cycle breaks at its true seam: they depend only on
+// a narrow [Sessions] interface, so they are constructed FIRST against a
+// [Registry], and each Manager registers itself in it here at construction (#487).
 type Deps struct {
 	// Transcript is the finalizer that drains the live transcript's writer queue on
 	// Stop / loop exit and returns the authoritative persisted line_count (#74,
@@ -612,13 +618,15 @@ func (m *Manager) softCapTrip(as *activeSession) func() {
 // lock-order pattern): the meter fires it outside its own mutex, but it must take
 // Manager.mu to record the deliberate end_reason override, then publish + cancel
 // OUTSIDE Manager.mu — the relay's SpendCapReached handler calls Snapshot (Manager.mu),
-// so publishing under the lock would deadlock. Guarded by m.active == as so a trip
-// arriving after the session already rolled over is a no-op.
+// so publishing under the lock would deadlock. Guarded by m.active == as AND
+// !as.ended so a trip arriving after the session already rolled over — or during
+// the end window after the loop returned (#487) — is a no-op: publishing then
+// would race the bridge cut and try to stamp a hard-cap onto an ended session.
 func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	return func() {
 		go func() {
 			m.mu.Lock()
-			if m.active != as {
+			if m.active != as || as.ended {
 				m.mu.Unlock()
 				return // this session already ended / rolled over
 			}
@@ -655,15 +663,30 @@ func (m *Manager) Spend() spend.Status {
 // a Stop waiting on done observes both the updated session and the freed guard.
 func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Config) {
 	defer close(as.done)
-	// Detach the session→process bus bridge (#487): the loop has produced its last
-	// session event by the time it returns, and a lingering bridge would keep this
-	// ended session's straggler events flowing onto the process bus. The
-	// process-wide consumers additionally drop any post-Resolve straggler (Resolve
-	// reports false once the session is gone), so this is the primary cut, not the
-	// only guard.
-	defer as.stopForward()
 
 	loopErr := m.run(ctx, cfg)
+
+	// End the session's bridge and resolvability IMMEDIATELY — before the
+	// multi-second finalizers (transcript/highlight/chunk flush, CloseVoiceSession)
+	// run and before m.active clears (#487 resurrection window). Bus.Publish is
+	// synchronous, so every tail event the loop produced (final TurnEnded, …) is
+	// already forwarded onto the process bus; nothing is lost by cutting here.
+	//
+	// Two cuts, together closing the window a straggler could resurrect a Closed
+	// projection through: (1) stopForward detaches the session→process bridge, so a
+	// late publish on the session bus (a tape-consent PublishToCampaign, a web
+	// mute/say, a racing hardCapTrip) no longer reaches the process-wide consumers;
+	// (2) ended=true makes Lookup/Resolve report this session gone at once, so even
+	// a direct Resolve during the finalizer window returns false. Without this a
+	// straggler arriving after relay.Finalize/chunker.FlushSession Closed their
+	// entry would re-create it — a fresh "status: live" frame after the terminal
+	// idle (#144 regression) and a permanently leaked entry (Close never fires
+	// again). ended is written under m.mu; hardCapTrip reads it there too.
+	m.mu.Lock()
+	as.ended = true
+	m.mu.Unlock()
+	as.stopForward()
+
 	// A non-nil loop error while ctx was NOT cancelled is a real failure, not the
 	// expected Stop/Shutdown cancellation: the session ends 'failed' with a readable
 	// reason instead of the clean 'ended' (#123). A fatal gateway rejection carries a
@@ -835,7 +858,7 @@ func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
 func (m *Manager) Lookup(sessionID uuid.UUID) (storage.VoiceSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil || m.active.session.ID != sessionID {
+	if m.active == nil || m.active.ended || m.active.session.ID != sessionID {
 		return storage.VoiceSession{}, false
 	}
 	return m.active.session, true
@@ -850,7 +873,7 @@ func (m *Manager) Lookup(sessionID uuid.UUID) (storage.VoiceSession, bool) {
 // [Registry.PublishToCampaign].
 func (m *Manager) PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) bool {
 	m.mu.Lock()
-	if m.active == nil || m.active.campaignID != campaignID {
+	if m.active == nil || m.active.ended || m.active.campaignID != campaignID {
 		m.mu.Unlock()
 		return false
 	}

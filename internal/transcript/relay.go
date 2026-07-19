@@ -6,9 +6,10 @@
 // #281), keeps a per-session ~500-event ring buffer for Last-Event-ID replay,
 // and serves two endpoints: a Server-Sent-Events live tail and a JSON snapshot.
 //
-// There is no DB write here: line persistence is issue #74. The buffer is the
-// only state, scoped to the single active session (ADR-0039 single-operator) —
-// a fresh buffer starts when the active session id changes.
+// There is no DB write here: line persistence is issue #74. Display state is
+// per-session (#487): each stamped event folds into the buffer keyed by its
+// origin SessionID, so concurrent sessions never share a ring; a session's
+// buffer starts on its first folded event and is torn down on its Finalize.
 package transcript
 
 import (
@@ -269,10 +270,10 @@ type Relay struct {
 	closeOnce sync.Once
 }
 
-// NewRelay subscribes to the bus once and returns a Relay ready to serve. The
-// subscription lives for the process: the same bus persists across reconnect
-// cycles AND across sessions (single active session, ADR-0039), so the relay
-// sees every event without re-subscribing.
+// NewRelay subscribes to the process bus once and returns a Relay ready to serve.
+// The subscription lives for the process: every session's events reach this one
+// bus (each stamped with its origin SessionID via voiceevent.Forward, #487), so
+// the relay projects any number of concurrent sessions without re-subscribing.
 func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog.Logger) *Relay {
 	if log == nil {
 		log = slog.Default()
@@ -338,10 +339,11 @@ func (r *Relay) tenantScope() TenantScope {
 }
 
 // fold applies one attributed event to the transcript — the relay's projection
-// rules (ADR-0040: display text enters the line at TTSInvoked). The scaffold
-// has already taken the event's ONE session Snapshot (#149) and rolled the
-// buffer over on a session change; fold runs under r.mu and must not block
-// (the bus delivers synchronously): all sends to live subscribers are
+// rules (ADR-0040: display text enters the line at TTSInvoked). The scaffold has
+// already attributed the event to its stamped session (creating the session's
+// entry on first sight, #487); fold looks up that session's display state by id
+// and runs under r.mu and must not block (the bus delivers synchronously): all
+// sends to live subscribers are
 // non-blocking.
 func (r *Relay) fold(e voiceevent.Event) {
 	sid := voiceevent.SessionIDOf(e)

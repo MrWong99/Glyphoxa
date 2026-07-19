@@ -172,3 +172,68 @@ func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *test
 		t.Fatal("no event arrived on the process bus (the loop's STTFinal, stamped)")
 	}
 }
+
+// windowProbe is a TranscriptFinalizer that records, at Finalize time (the
+// session's end window, AFTER the loop returned but BEFORE m.active clears),
+// whether the Registry still Resolves the ending session and still routes a
+// PublishToCampaign into it. Both MUST be false by then — the #487 resurrection
+// window is closed (ended tombstone + bridge cut happen before finalizers).
+type windowProbe struct {
+	reg          *session.Registry
+	sessionID    uuid.UUID
+	campaignID   uuid.UUID
+	resolvedMid  bool
+	publishedMid bool
+	ran          bool
+}
+
+func (w *windowProbe) Finalize(_ context.Context, id uuid.UUID) (int, error) {
+	w.ran = true
+	_, w.resolvedMid = w.reg.Resolve(w.sessionID)
+	w.publishedMid = w.reg.PublishToCampaign(w.campaignID, voiceevent.TapeConsentChanged{})
+	return 0, nil
+}
+
+// TestManager_EndWindowIsUnresolvable pins the #487 resurrection-window fix: by
+// the time the end finalizers run, the Registry no longer Resolves the session
+// and no longer routes a PublishToCampaign into it — so a straggler (tape-consent
+// button, web mute/say) arriving during the multi-second end write cannot revive
+// a Closed relay/chunker projection.
+func TestManager_EndWindowIsUnresolvable(t *testing.T) {
+	reg := session.NewRegistry()
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	campaignID := uuid.New()
+	probe := &windowProbe{reg: reg, campaignID: campaignID}
+	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "test-token", Bus: voiceevent.NewBus()}, nil,
+		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg, Transcript: probe})
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), campaignID)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	probe.sessionID = vs.ID
+	<-runner.started
+
+	// Sanity: while live, the session resolves.
+	if _, ok := reg.Resolve(vs.ID); !ok {
+		t.Fatal("live session does not Resolve")
+	}
+
+	if _, err := mgr.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !probe.ran {
+		t.Fatal("the finalizer never ran")
+	}
+	if probe.resolvedMid {
+		t.Error("Registry still Resolved the session during its end window (#487 resurrection window open)")
+	}
+	if probe.publishedMid {
+		t.Error("PublishToCampaign still routed into the session during its end window (#487)")
+	}
+	// And fully gone after Stop returns.
+	if _, ok := reg.Resolve(vs.ID); ok {
+		t.Error("Registry still Resolves the session after Stop")
+	}
+}
