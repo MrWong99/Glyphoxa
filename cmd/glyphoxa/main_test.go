@@ -201,7 +201,10 @@ func TestRunWebTierClosesSSEStreamsOnShutdown(t *testing.T) {
 	var resp *http.Response
 	for {
 		if addr := srv.Addr(); addr != "127.0.0.1:0" {
-			bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "attach", TurnID: "t1"})
+			// Stamp the event with the session id (#487): on the process bus every
+			// event carries its origin SessionID via voiceevent.Forward, and the relay
+			// drops unstamped events — so this seeds the session's "status: live" frame.
+			bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "attach", TurnID: "t1", SessionID: sessions.id.String()})
 			r, err := http.Get("http://" + addr + "/api/v1/sessions/" + sessions.id.String() + "/events")
 			if err == nil {
 				resp = r
