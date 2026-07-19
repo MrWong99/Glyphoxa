@@ -251,9 +251,12 @@ type Manager struct {
 	usage      UsageWriter         // persists the Usage Ledger at loop exit (ADR-0054); nil = no durable usage
 	allowance  AllowanceChecker    // the Start-time plan-allowance gate (ADR-0055 gate (b)); nil = no gate
 	clients    ClientSource        // resolves the Tenant's standing Discord client per session (#489); nil = base provider
-	log        *slog.Logger
-	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
-	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
+	// gmSpeakerForTenant overlays cfg.GMSpeaker per Start with the session's Tenant
+	// (#490); nil leaves the base deployment-wide gate.
+	gmSpeakerForTenant func(tenantID uuid.UUID, discordUserID string) bool
+	log                *slog.Logger
+	enabled            bool          // false in web-only mode: Start is rejected (ADR-0039)
+	endTimeout         time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
 
 	mu     sync.Mutex
 	active *activeSession
@@ -338,6 +341,13 @@ type Deps struct {
 	// client. nil (web-only / voice standalone) leaves cfg.Client on the base
 	// config's provider.
 	Clients ClientSource
+	// GMSpeakerForTenant, when non-nil, is the per-Tenant GM-address verdict wired
+	// to auth.GMIdentity.IsGMInTenant (#490): Start overlays cfg.GMSpeaker with a
+	// closure that pins THIS session's Tenant, so the Butler voice-address gate
+	// scopes GM standing to the session's Tenant (a Tenant A operator is not GM in a
+	// Tenant B session). nil (voice-standalone / test / web-only) leaves the base
+	// cfg.GMSpeaker untouched.
+	GMSpeakerForTenant func(tenantID uuid.UUID, discordUserID string) bool
 }
 
 // NewManager wraps the store, loop runner, base config and collaborator deps in
@@ -358,19 +368,20 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		log = slog.Default()
 	}
 	m := &Manager{
-		store:      store,
-		run:        run,
-		base:       base,
-		cipher:     cipher,
-		transcript: deps.Transcript,
-		chunker:    deps.Chunker,
-		highlights: deps.Highlights,
-		usage:      deps.Usage,
-		allowance:  deps.Allowance,
-		clients:    deps.Clients,
-		log:        log,
-		enabled:    enabled,
-		endTimeout: endTimeout,
+		store:              store,
+		run:                run,
+		base:               base,
+		cipher:             cipher,
+		transcript:         deps.Transcript,
+		chunker:            deps.Chunker,
+		highlights:         deps.Highlights,
+		usage:              deps.Usage,
+		allowance:          deps.Allowance,
+		clients:            deps.Clients,
+		gmSpeakerForTenant: deps.GMSpeakerForTenant,
+		log:                log,
+		enabled:            enabled,
+		endTimeout:         endTimeout,
 	}
 	// The Manager IS the live mute view (#211): it owns the session-local mute set,
 	// so wire it as the base voice config's MuteView. Every session Start copies
@@ -500,6 +511,15 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// roster/language load, so the voiced roster can never diverge from the bound
 	// Active Campaign.
 	cfg.CampaignID = campaignID
+
+	// Per-Tenant Butler GM-address gate (#490, ADR-0055): overlay the base's
+	// deployment-wide GMSpeaker with THIS session's Tenant, so a Tenant A operator
+	// is not a GM in a Tenant B session's voice channel. nil seam (voice-standalone /
+	// test / web-only) leaves the base gate untouched.
+	if m.gmSpeakerForTenant != nil {
+		gate := m.gmSpeakerForTenant
+		cfg.GMSpeaker = func(discordUserID string) bool { return gate(tenantID, discordUserID) }
+	}
 
 	// Borrow this Tenant's standing Discord client from the per-tenant registry
 	// (#489): the loop resolves the client keyed by THIS Tenant's resolved Bot

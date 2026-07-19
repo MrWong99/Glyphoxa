@@ -75,8 +75,21 @@ func (c *Clients) VoiceChannelMembers(ctx context.Context, tenantID uuid.UUID, c
 	// a Tenant configuring another Tenant's channel snowflake would otherwise list
 	// that Guild's occupants (finding 2). Scope to this Tenant's own Guild; an
 	// unconfigured/unparseable Guild (wait-state) scopes to nothing.
-	wantGuild, guildKnown := parseGuild(c.GuildForTenant(tenantID))
+	guildStr := c.GuildForTenant(tenantID)
+	wantGuild, guildKnown := parseGuild(guildStr)
 	if !guildKnown {
+		return []Member{}, nil
+	}
+
+	// Guild-ownership agreement (#490): two Tenants CAN save the same guild_id
+	// (it is tenant-controlled Configuration), and the interaction router resolves
+	// such a Guild to its NEWEST-updated owner (GetTenantIDByGuildID). The member
+	// picker must agree on that SAME authority, or a stale LOSING row would read the
+	// winner's voice channel. Confirm this Tenant is the resolved owner of the Guild
+	// it configured; a loser (or a resolve failure) is cleanly rejected with an empty
+	// list, so the picker falls back to free-text entry (ADR-0003).
+	owner, err := c.store.GetTenantIDByGuildID(ctx, guildStr)
+	if err != nil || owner != tenantID {
 		return []Member{}, nil
 	}
 

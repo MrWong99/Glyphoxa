@@ -3,7 +3,7 @@
 // Proves the `/glyphoxa use` surface excludes archived campaigns against a real
 // Postgres (#269, decided on #265). The exclusion is transitive — UseCommand's
 // autocomplete + free-text match both read store.ListCampaigns, which filters
-// archived rows — so this pins it at the presence layer: a future change that
+// archived rows via ListCampaignsInTenant — so this pins it at the presence layer: a future change that
 // swapped the source for an archive-inclusive read would re-expose archived
 // campaigns and this test would catch it. Tag-isolated behind `integration`.
 
@@ -87,9 +87,12 @@ func TestUseCommandExcludesArchivedCampaign(t *testing.T) {
 	cmd := UseCommand(st)
 
 	// --- Autocomplete must NOT offer the archived campaign (empty typed = all).
+	// The autocomplete is tenant-scoped (#490): set the resolved Tenant the dispatch
+	// would populate, so ListCampaignsInTenant reads this Tenant's campaigns.
 	ac := &Autocomplete{
-		guildID: testGuild,
-		userID:  operatorID,
+		guildID:  testGuild,
+		userID:   operatorID,
+		tenantID: tenantID,
 		data: discord.AutocompleteInteractionData{
 			CommandName: "glyphoxa use",
 			Options: map[string]discord.AutocompleteOption{
@@ -113,10 +116,10 @@ func TestUseCommandExcludesArchivedCampaign(t *testing.T) {
 	}
 
 	// --- Free-text match can't resolve the archived campaign either (same
-	// archive-excluding source): neither its name nor its id resolves.
-	list, err := st.ListCampaigns(ctx)
+	// archive-excluding, tenant-scoped source): neither its name nor its id resolves.
+	list, err := st.ListCampaignsInTenant(ctx, tenantID)
 	if err != nil {
-		t.Fatalf("ListCampaigns: %v", err)
+		t.Fatalf("ListCampaignsInTenant: %v", err)
 	}
 	if _, ok := matchCampaign(list, "Zombie Vault"); ok {
 		t.Errorf("free-text name resolved an archived campaign, want not-found")

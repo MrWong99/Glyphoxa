@@ -897,11 +897,24 @@ func TestEnableDevMode(t *testing.T) {
 	}
 }
 
-// listerFunc adapts a func to auth.TenantOperatorLister for gate-arming tests.
+// listerFunc adapts a func returning bound Discord snowflakes to
+// auth.TenantOperatorLister for gate-arming tests. Each snowflake is attributed to a
+// fixed synthetic Tenant — the standalone voice node's gate reads the deployment-wide
+// IsGM verdict, so the per-Tenant attribution is immaterial here.
 type listerFunc func(context.Context) ([]string, error)
 
-func (f listerFunc) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, error) {
-	return f(ctx)
+var boottestTenant = uuid.MustParse("99999999-9999-9999-9999-999999999999")
+
+func (f listerFunc) ListTenantOperatorBindings(ctx context.Context) ([]storage.TenantOperatorBinding, error) {
+	ids, err := f(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.TenantOperatorBinding, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, storage.TenantOperatorBinding{TenantID: boottestTenant, DiscordUserID: id})
+	}
+	return out, nil
 }
 
 // TestArmVoiceGMGate pins the standalone voice node's Butler GM-gate arming

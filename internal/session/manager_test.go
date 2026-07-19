@@ -335,6 +335,63 @@ func TestStart_PassesCampaignIDToLoop(t *testing.T) {
 	}
 }
 
+// TestStart_OverlaysGMSpeakerForTenant pins the per-Tenant Butler gate (#490):
+// Start overlays cfg.GMSpeaker with a closure that pins THIS session's Tenant, so
+// the loop's GM-address verdict is scoped to the session's Tenant. A GM of Tenant A
+// must not read as GM in a Tenant B session — the overlay forwards the Start's
+// tenantID (not any other) to Deps.GMSpeakerForTenant.
+func TestStart_OverlaysGMSpeakerForTenant(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+
+	type call struct {
+		tenantID uuid.UUID
+		user     string
+	}
+	var mu sync.Mutex
+	var calls []call
+	deps := session.Deps{GMSpeakerForTenant: func(tenantID uuid.UUID, discordUserID string) bool {
+		mu.Lock()
+		calls = append(calls, call{tenantID, discordUserID})
+		mu.Unlock()
+		return discordUserID == "gm-of-this-tenant"
+	}}
+	mgr := newManagerDeps(t, store, runner.run, true, deps)
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	gate := runner.cfg().GMSpeaker
+	if gate == nil {
+		t.Fatal("Start did not overlay cfg.GMSpeaker from Deps.GMSpeakerForTenant")
+	}
+	if !gate("gm-of-this-tenant") {
+		t.Error("the tenant's GM read as non-GM through the overlay")
+	}
+	if gate("stranger") {
+		t.Error("a stranger read as GM through the overlay")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("the overlay never forwarded to GMSpeakerForTenant")
+	}
+	for _, c := range calls {
+		if c.tenantID != tenantID {
+			t.Errorf("overlay forwarded tenant %s, want the session's Tenant %s", c.tenantID, tenantID)
+		}
+	}
+}
+
 // TestSecondStartRejected is AC2: a second Start while one is active is rejected
 // (single-active-session guard), and no second row is written.
 func TestSecondStartRejected(t *testing.T) {

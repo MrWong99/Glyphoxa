@@ -122,42 +122,20 @@ func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, cam
 	return nil
 }
 
-// GetActiveCampaignForUser returns the Campaign the operator selected via
-// /glyphoxa use (#108, ADR-0009 step 2), joining the users row's
-// active_campaign_id to campaign. ErrNotFound when the operator has no row, has
-// made no selection, the chosen campaign has since been deleted (the FK's ON
-// DELETE SET NULL nulled the pointer), or the chosen campaign is now archived
-// (#269: an archived durable selection is treated as absent, so the caller falls
-// through to the GetActiveCampaign fallback — which also skips archived — exactly
-// as it does for a deleted one). The caller then falls through to the
-// GetActiveCampaign fallback (step 3). The columns are qualified to `c` because
-// users and campaign share id/name/created_at/updated_at.
-func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID string) (Campaign, error) {
-	row := s.db.QueryRow(ctx,
-		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
-		        c.created_at, c.updated_at, c.archived_at, c.tape_armed
-		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
-		  WHERE u.discord_user_id = $1 AND c.archived_at IS NULL`, discordUserID)
-	c, err := scanCampaign(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Campaign{}, ErrNotFound
-	}
-	if err != nil {
-		return Campaign{}, fmt.Errorf("storage: active campaign for %q: %w", discordUserID, err)
-	}
-	return c, nil
-}
-
 // GetActiveCampaignForUserInTenant is the tenant-scoped durable-selection read
-// (#473): it resolves the operator's active_campaign_id ONLY when the selected
-// campaign is in the caller's tenant (`AND c.tenant_id = $2`). A selection pointing
-// at another tenant's campaign — which SetActiveCampaign's FK-only write cannot
-// prevent by itself — reads back as ErrNotFound here, so it can never pivot a
-// stranger's campaign-scoped surfaces onto the victim tenant (self-signup design
-// §0a). It is the web/RPC-tier analogue of GetActiveCampaignForUser; the standalone
-// voice node keeps the tenant-free variant. Same absent-selection semantics: no
-// row / no selection / deleted / archived → ErrNotFound, so the caller falls
-// through to the GetActiveCampaignInTenant most-recent fallback.
+// (#473, and the ONLY per-operator durable read after #490 removed the tenant-free
+// GetActiveCampaignForUser — every slash/RPC caller now carries a resolved Tenant,
+// so a tenant-free read can no longer be grabbed by the next handler): it resolves
+// the operator's active_campaign_id ONLY when the selected campaign is in the
+// caller's tenant (`AND c.tenant_id = $2`). A selection pointing at another tenant's
+// campaign — which SetActiveCampaign's FK-only write cannot prevent by itself —
+// reads back as ErrNotFound here, so it can never pivot a stranger's campaign-scoped
+// surfaces onto the victim tenant (self-signup design §0a). The standalone voice
+// node uses the context-free GetOperatorActiveCampaign instead. Absent-selection
+// semantics: no row / no selection / deleted (FK ON DELETE SET NULL) / archived
+// (#269) → ErrNotFound, so the caller falls through to the GetActiveCampaignInTenant
+// most-recent fallback. The columns are qualified to `c` because users and campaign
+// share id/name/created_at/updated_at.
 func (s *Store) GetActiveCampaignForUserInTenant(ctx context.Context, tenantID uuid.UUID, discordUserID string) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
@@ -178,7 +156,7 @@ func (s *Store) GetActiveCampaignForUserInTenant(ctx context.Context, tenantID u
 // GetOperatorActiveCampaign returns the durable Active Campaign selection of the
 // single operator, for a surface with NO logged-in user context — the standalone
 // voice node (#323, ADR-0039 single-operator pass-through). It is the
-// context-free analogue of GetActiveCampaignForUser: it joins any users row
+// context-free analogue of GetActiveCampaignForUserInTenant: it joins any users row
 // carrying a non-null active_campaign_id to a non-archived campaign. Single
 // operator, so at most one such selection is meaningful; a tie breaks on the
 // most-recently-updated users row — the freshest login-or-selection, NOT strictly
@@ -187,7 +165,7 @@ func (s *Store) GetActiveCampaignForUserInTenant(ctx context.Context, tenantID u
 // not a selection clock. Acceptable under the single-operator model (ADR-0039),
 // where at most one operator has a durable selection anyway. ErrNotFound when
 // no operator has a durable, non-archived selection (deleted/archived selections
-// are treated as absent, matching GetActiveCampaignForUser), so the caller falls
+// are treated as absent, matching GetActiveCampaignForUserInTenant), so the caller falls
 // through to the GetActiveCampaign recent fallback.
 func (s *Store) GetOperatorActiveCampaign(ctx context.Context) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
@@ -205,6 +183,48 @@ func (s *Store) GetOperatorActiveCampaign(ctx context.Context) (Campaign, error)
 		return Campaign{}, fmt.Errorf("storage: operator active campaign: %w", err)
 	}
 	return c, nil
+}
+
+// TenantOperatorBinding pairs a Tenant with its operator's Discord snowflake —
+// one row of the per-Tenant GM-identity source (#490). It lets GMIdentity scope GM
+// standing to the OWNING Tenant (IsGMInTenant) instead of the deployment-wide union
+// ListTenantOperatorDiscordIDs feeds, closing ADR-0055's deployment-scope caveat: a
+// Tenant A operator is GM in Tenant A only, never in Tenant B's Guild.
+type TenantOperatorBinding struct {
+	TenantID      uuid.UUID
+	DiscordUserID string
+}
+
+// ListTenantOperatorBindings returns each Tenant paired with its operator's Discord
+// snowflake (tenant.operator_user_id → users.discord_user_id) — the per-Tenant
+// GM-identity source (#490, ADR-0055). It is the tenant-scoped analogue of
+// ListTenantOperatorDiscordIDs and shares its exclusions: the synthetic dev operator
+// ([DevOperatorDiscordID]) never appears (it can match no real speaker/interaction
+// user) and a SUSPENDED operator drops out (open-mode revocation reaches GM on the
+// next snapshot refresh). Sorted for determinism. An empty result is not an error.
+func (s *Store) ListTenantOperatorBindings(ctx context.Context) ([]TenantOperatorBinding, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT t.id, u.discord_user_id
+		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
+		  WHERE u.discord_user_id <> $1
+		    AND u.suspended_at IS NULL
+		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
+	}
+	defer rows.Close()
+	var out []TenantOperatorBinding
+	for rows.Next() {
+		var b TenantOperatorBinding
+		if err := rows.Scan(&b.TenantID, &b.DiscordUserID); err != nil {
+			return nil, fmt.Errorf("storage: scan tenant operator binding: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
+	}
+	return out, nil
 }
 
 // NewSession is the input to CreateSession. Token is the opaque random secret

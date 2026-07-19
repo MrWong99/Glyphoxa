@@ -40,7 +40,7 @@ func TestActiveCampaignRoundTrip(t *testing.T) {
 	st := storage.New(pool)
 
 	// No selection yet (and no user row at all) → ErrNotFound.
-	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetActiveCampaignForUser before any selection = %v, want ErrNotFound", err)
 	}
 
@@ -51,7 +51,7 @@ func TestActiveCampaignRoundTrip(t *testing.T) {
 	if _, err := st.GetUserByDiscordID(ctx, gmSnowflake); err != nil {
 		t.Fatalf("SetActiveCampaign did not create the user row: %v", err)
 	}
-	got, err := st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	got, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake)
 	if err != nil {
 		t.Fatalf("GetActiveCampaignForUser: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestActiveCampaignRoundTrip(t *testing.T) {
 	if err := st.SetActiveCampaign(ctx, gmSnowflake, second); err != nil {
 		t.Fatalf("SetActiveCampaign (re-select): %v", err)
 	}
-	got, err = st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	got, err = st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake)
 	if err != nil || got.ID != second {
 		t.Fatalf("after re-select = %s, %v; want %s", got.ID, err, second)
 	}
@@ -74,7 +74,7 @@ func TestActiveCampaignRoundTrip(t *testing.T) {
 // restart": a fresh Store over the same DSN reads the same selection.
 func TestActiveCampaignPersistsAcrossReopen(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 
 	if err := storage.New(pool).SetActiveCampaign(ctx, gmSnowflake, campaignID); err != nil {
@@ -83,7 +83,7 @@ func TestActiveCampaignPersistsAcrossReopen(t *testing.T) {
 
 	// A brand-new pool + Store (a "restarted process") sees the persisted choice.
 	reopened := storage.New(openPool(t, dsn))
-	got, err := reopened.GetActiveCampaignForUser(ctx, gmSnowflake)
+	got, err := reopened.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake)
 	if err != nil || got.ID != campaignID {
 		t.Fatalf("after reopen = %s, %v; want %s", got.ID, err, campaignID)
 	}
@@ -113,7 +113,7 @@ func TestActiveCampaignOverridesImplicitDefault(t *testing.T) {
 	if err := st.SetActiveCampaign(ctx, gmSnowflake, older); err != nil {
 		t.Fatalf("SetActiveCampaign: %v", err)
 	}
-	got, err := st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	got, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake)
 	if err != nil || got.ID != older {
 		t.Fatalf("per-operator selection = %s, %v; want the older campaign %s", got.ID, err, older)
 	}
@@ -170,7 +170,7 @@ func TestGetActiveCampaignForUserClearedOnDeletedCampaign(t *testing.T) {
 	if _, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: gmSnowflake}); err != nil {
 		t.Fatalf("UpsertUser: %v", err)
 	}
-	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("NULL selection = %v, want ErrNotFound", err)
 	}
 
@@ -182,7 +182,7 @@ func TestGetActiveCampaignForUserClearedOnDeletedCampaign(t *testing.T) {
 	if _, err := pool.Exec(ctx, `DELETE FROM campaign WHERE id = $1`, victim); err != nil {
 		t.Fatalf("delete campaign: %v", err)
 	}
-	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("selection after campaign delete = %v, want ErrNotFound (FK SET NULL)", err)
 	}
 }
