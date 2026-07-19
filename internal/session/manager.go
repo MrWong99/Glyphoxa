@@ -1024,6 +1024,18 @@ func (m *Manager) IsCampaignLive(campaignID uuid.UUID) bool {
 	return false
 }
 
+// HasCapacity reports whether the Manager can accept another Voice Session — its
+// live + reserving count is below MaxSessions (#491). The -mode voice claim loop
+// consults it before claiming an intent, so it never claims work it cannot run
+// (avoiding an ErrSessionLimit strand): claim only while there is a free slot. A
+// snapshot under the lock; in the single-worker interim (#492 elects the sole
+// claimer) nothing else fills a slot between this read and the following Start.
+func (m *Manager) HasCapacity() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active)+len(m.reservations) < m.maxSessions
+}
+
 // AnyLive reports whether ANY Voice Session is currently running in this process
 // (#150, #488): the tenant-agnostic health signal the Discord probe reads. A
 // session in its end window (as.ended) no longer counts. Correct at any cap.
