@@ -114,6 +114,57 @@ func TestOwnerElectorReleasesOnCancel(t *testing.T) {
 	}
 }
 
+// TestOwnerElectorSelfDemotesAfterExpiry covers the review item: a partitioned
+// owner that can no longer reach Postgres self-demotes (SetActive(false)) once the
+// MONOTONIC elapsed since its last successful renew reaches Expiry — before that it
+// keeps ownership — and it does NOT Release on demotion (DB unreachable). Re-promotion
+// comes only via the next successful acquire. Drives reconcile directly against a
+// fake clock for determinism.
+func TestOwnerElectorSelfDemotesAfterExpiry(t *testing.T) {
+	store := &fakeOwnerStore{
+		outcomes: []bool{true, true, true, true},
+		errs:     []error{nil, errors.New("partition"), errors.New("partition"), nil},
+	}
+	changes := make(chan bool, 8)
+	cfg := OwnerElectorConfig{Interval: 5 * time.Second, Expiry: 15 * time.Second}
+	e := NewOwnerElector(store, "instance-a", func(owner bool) { changes <- owner }, nil, cfg)
+
+	base := time.Now()
+	clk := base
+	e.now = func() time.Time { return clk }
+	ctx := context.Background()
+
+	// Boot: successful acquire → own, lastRenew stamped.
+	e.reconcile(ctx)
+	if got := <-changes; got != true {
+		t.Fatalf("boot onChange = %v, want true", got)
+	}
+
+	// A blip BEFORE expiry: keep ownership, no demotion, no onChange.
+	clk = base.Add(cfg.Expiry - time.Millisecond)
+	e.reconcile(ctx)
+	if len(changes) != 0 {
+		t.Fatalf("demoted before expiry: %d changes queued", len(changes))
+	}
+
+	// Still failing, now AT expiry: self-demote to inactive, WITHOUT Release.
+	clk = base.Add(cfg.Expiry)
+	e.reconcile(ctx)
+	if got := <-changes; got != false {
+		t.Fatalf("expiry onChange = %v, want false (self-demote)", got)
+	}
+	if store.wasReleased() {
+		t.Error("self-demotion must NOT Release the claim (DB unreachable; lease expiry hands over)")
+	}
+
+	// The DB recovers: the next successful acquire re-promotes.
+	clk = base.Add(cfg.Expiry + cfg.Interval)
+	e.reconcile(ctx)
+	if got := <-changes; got != true {
+		t.Fatalf("recovery onChange = %v, want true (re-promote via successful acquire)", got)
+	}
+}
+
 // TestOwnerElectorErrorKeepsState covers sequence (3): a transient acquire error
 // does not flip a live owner inactive — it logs and retains the last state, since a
 // DB blip that fails our renew also fails a challenger's acquire.

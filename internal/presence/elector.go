@@ -53,6 +53,17 @@ type OwnerElector struct {
 	// it. Seeded false because a -mode voice worker boots inactive.
 	current bool
 
+	// lastRenew is the local (monotonic) instant of the last SUCCESSFUL acquire/renew.
+	// Self-demotion is judged against elapsed since this — never the DB heartbeat_at
+	// or a wall clock — so a partitioned owner that can no longer reach Postgres
+	// deactivates its Registry before another node's lease-expiry claim could make two
+	// owners dispatch the same interaction.
+	lastRenew time.Time
+
+	// now is the clock (default time.Now, which carries a monotonic reading). Injected
+	// in tests to drive the demotion timer deterministically.
+	now func() time.Time
+
 	// ticks, when non-nil, replaces the internal time.Ticker so tests drive
 	// elections deterministically. nil in production → a real ticker at cfg.Interval.
 	ticks <-chan time.Time
@@ -65,7 +76,7 @@ func NewOwnerElector(store OwnerStore, instanceID string, onChange func(owner bo
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &OwnerElector{store: store, instanceID: instanceID, onChange: onChange, cfg: cfg, log: log}
+	return &OwnerElector{store: store, instanceID: instanceID, onChange: onChange, cfg: cfg, log: log, now: time.Now}
 }
 
 // Run drives the election until ctx is cancelled. It attempts an immediate claim at
@@ -93,16 +104,46 @@ func (e *OwnerElector) Run(ctx context.Context) {
 	}
 }
 
-// reconcile runs one acquire/renew and signals a transition. A transient error
-// leaves the last state untouched (no flip): a DB blip that fails our renew also
-// fails any challenger's acquire, so relinquishing would only risk a needless gap.
+// reconcile runs one acquire/renew and signals a transition. The acquire is bounded
+// by a per-op DB timeout (min(interval, 3s)) so a stuck connection can never block
+// the loop past its own tick — otherwise the demotion check below would never run.
+//
+// On success it stamps lastRenew and signals ownership. On error it SELF-DEMOTES —
+// SetActive(false) via set — once the monotonic elapsed since the last successful
+// renew reaches Expiry: a partitioned owner that can no longer reach Postgres must
+// stop dispatching before another node's lease-expiry claim promotes a second owner
+// (else both dispatch the same interaction). It does NOT Release on demotion — the
+// DB is unreachable by assumption, so a local deactivation is all that is possible
+// and the row's own lease expiry hands ownership over. Re-promotion happens ONLY via
+// the next SUCCESSFUL acquire in the normal loop (which re-stamps lastRenew and
+// re-signals true). Before the elapsed reaches Expiry a transient blip keeps
+// ownership: the same blip fails a challenger's acquire too, so relinquishing early
+// would only risk a needless gap.
 func (e *OwnerElector) reconcile(ctx context.Context) {
-	owner, err := e.store.AcquireOrRenewPresenceOwner(ctx, e.instanceID, e.cfg.Expiry)
+	opCtx, cancel := context.WithTimeout(ctx, e.opTimeout())
+	owner, err := e.store.AcquireOrRenewPresenceOwner(opCtx, e.instanceID, e.cfg.Expiry)
+	cancel()
 	if err != nil {
-		e.log.Warn("presence: owner election acquire/renew failed; keeping current ownership", "instance", e.instanceID, "owner", e.current, "err", err)
+		e.log.Warn("presence: owner election acquire/renew failed", "instance", e.instanceID, "owner", e.current, "err", err)
+		if e.current && e.now().Sub(e.lastRenew) >= e.cfg.Expiry {
+			e.log.Warn("presence: owner lease unrenewed past expiry; self-demoting (no Release — DB unreachable)", "instance", e.instanceID, "expiry", e.cfg.Expiry)
+			e.set(false)
+		}
 		return
 	}
+	e.lastRenew = e.now()
 	e.set(owner)
+}
+
+// opTimeout bounds a single acquire/renew DB call: min(Interval, 3s), so a stuck
+// connection cannot pin the loop past its tick and starve the self-demotion check.
+// Falls back to 3s when Interval is non-positive.
+func (e *OwnerElector) opTimeout() time.Duration {
+	const cap = 3 * time.Second
+	if e.cfg.Interval > 0 && e.cfg.Interval < cap {
+		return e.cfg.Interval
+	}
+	return cap
 }
 
 // set fires onChange only when ownership actually changes.
