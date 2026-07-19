@@ -66,3 +66,18 @@ getaddrinfo would dlopen NSS libs absent from scratch). The live tags are
 `-tags "opus dave nolibopusfile"`; the smoke test's static assertion (ldd:
 "not a dynamic executable") is unchanged and CI's fast gate mirrors the
 static CGO build.
+
+**Amendment (2026-07-19, SaaS voice Deployment: pool, not single replica;
+GLYPHOXA_SECRET mounted, #485):** **ADR-0057** supersedes the voice Helm
+template's single-replica-by-intent posture and its "does NOT read
+GLYPHOXA_SECRET" comment (`deploy/charts/glyphoxa/templates/voice-deployment.yaml:7-19`)
+for the SaaS chart. The voice Deployment now runs a **pool of Voice
+Instances** coordinated through a Postgres claim plane, not one replica
+holding one Discord gateway connection by fiat — `replicas` becomes a real
+tunable there. It mounts `GLYPHOXA_SECRET` because a Voice Instance holding a
+BYOK Tenant's per-tenant client must be able to decrypt that Tenant's bot
+token; this widens the voice pod's secret blast radius deliberately (open
+knob on whether decryption happens in the voice role or credentials arrive
+pre-decrypted from the web role, #492). The self-host `-mode all` systemd
+target is unaffected: it already reads GLYPHOXA_SECRET and stays a
+single-process arrangement.
