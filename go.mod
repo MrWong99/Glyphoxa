@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/disgoorg/disgo v0.19.6 // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; bump deliberately
+	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -40,7 +40,7 @@ require (
 	github.com/containerd/platforms v0.2.1 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/disgoorg/godave v0.2.0 // indirect
+	github.com/disgoorg/godave v0.3.0 // indirect
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
