@@ -56,6 +56,17 @@ func (s *fakeEnsemble) speakerFor(id string) string {
 	return s.speakers[id]
 }
 
+// speakerRecorded reports the recorded SpeakerID and whether Draft/Speak was
+// invoked for id at all — a candidate cancelled before its draft goroutine ran
+// records nothing, which is legitimate coordinator behavior, not a propagation
+// failure.
+func (s *fakeEnsemble) speakerRecorded(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got, ok := s.speakers[id]
+	return got, ok
+}
+
 func (s *fakeEnsemble) Draft(ctx context.Context, e voiceevent.AddressRouted) (string, error) {
 	id := e.Target.AgentID
 	s.recordSpeaker(id, e.SpeakerID)
@@ -211,7 +222,10 @@ func TestReplier_Ensemble_FastestDraftLeadsAndSpeaks(t *testing.T) {
 	if got := spk.speakerFor(bartTarget.AgentID); got != "spk-ens" {
 		t.Errorf("Lead's route SpeakerID = %q, want spk-ens", got)
 	}
-	if got := spk.speakerFor(goblinTarget.AgentID); got != "spk-ens" {
+	// The loser's draft may be cancelled before its goroutine ever invokes
+	// Draft (the winner completes instantly here) — assert the SpeakerID only
+	// when the draft actually ran; a wrong ID is a failure, absence is not.
+	if got, ok := spk.speakerRecorded(goblinTarget.AgentID); ok && got != "spk-ens" {
 		t.Errorf("losing candidate's Draft SpeakerID = %q, want spk-ens", got)
 	}
 }
