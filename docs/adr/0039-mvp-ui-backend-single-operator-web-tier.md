@@ -73,3 +73,14 @@ The whole increment is built **test-first, slice by slice** (ADR-0019): each ver
 ## Amendment: the anonymous human lane ends (2026-07-07, #275)
 
 The `SpeakerID` seam this ADR anticipated is now specified: **ADR-0050** decides N-lane per-speaker segmentation and adds `SpeakerID` to `STTPartial`/`STTFinal`/`VADSpeechStart`/`BargeDetected`. Speaker-to-Character rendering policy is decided on #281 (persist-time snapshots; guild-display-name fallback).
+
+## Amendment: voice.v1 VoiceControlService claim superseded (2026-07-19, #485)
+
+The claim above that "the `voice.v1 VoiceControlService` proto (`claim_session`
+/ `release_session` / `push_event`) is authored now" was stale: `proto/`
+contains only `management.proto`, and no such service was ever authored.
+**ADR-0057** decides the split-Mode session-assignment mechanism instead — a
+Postgres `voice_session_intents` claim plane (`FOR UPDATE SKIP LOCKED` plus
+heartbeat, poll-only), not a gRPC control service. `all` Mode's in-process
+`SessionManager` direct-call path, described elsewhere in this ADR, is
+unaffected.
