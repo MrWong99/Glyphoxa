@@ -11,33 +11,32 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
-// scriptedSessions is a Sessions fake whose Snapshot answer the test scripts
-// per call — the tool for pinning interleavings where the Voice Session state
-// changes BETWEEN two Snapshot reads inside one projection (#149).
-type scriptedSessions struct {
-	mu    sync.Mutex
-	fn    func(call int) (storage.VoiceSession, bool)
-	calls int
+// mapSessions is a Sessions fake resolving a fixed set of live Voice Sessions by
+// id — the multi-session registry stand-in.
+type mapSessions struct {
+	mu   sync.Mutex
+	live map[uuid.UUID]storage.VoiceSession
 }
 
-func (s *scriptedSessions) set(fn func(call int) (storage.VoiceSession, bool)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fn = fn
-	s.calls = 0
+func newMapSessions(vss ...storage.VoiceSession) *mapSessions {
+	m := &mapSessions{live: map[uuid.UUID]storage.VoiceSession{}}
+	for _, vs := range vss {
+		m.live[vs.ID] = vs
+	}
+	return m
 }
 
-func (s *scriptedSessions) Snapshot() (storage.VoiceSession, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls++
-	return s.fn(s.calls)
+func (m *mapSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	vs, ok := m.live[id]
+	return vs, ok
 }
 
-func (s *scriptedSessions) snapshotCalls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls
+func (m *mapSessions) remove(id uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.live, id)
 }
 
 // testTurn is a minimal per-turn state for the scaffold tests.
@@ -45,257 +44,252 @@ type testTurn struct {
 	text string
 }
 
-func event(sec int) voiceevent.Event {
-	return voiceevent.STTFinal{At: time.Date(2026, 6, 27, 18, 0, sec, 0, time.UTC), Text: "x", TurnID: "t"}
+// stampedFinal is an STTFinal already stamped with sid (as voiceevent.Forward
+// leaves it on the process bus).
+func stampedFinal(sid string, sec int) voiceevent.Event {
+	return voiceevent.STTFinal{
+		At:        time.Date(2026, 6, 27, 18, 0, sec, 0, time.UTC),
+		Text:      "x",
+		TurnID:    "t",
+		SessionID: sid,
+	}
 }
 
-// TestProjection_OneSnapshotPerEvent is the #149 invariant, mid-event session
-// change: the Voice Session ends between the event's projection and any
-// hypothetical second capture read. The scaffold must take exactly ONE
-// Snapshot per event — serving both the id comparison and the FK capture — so
-// the triggering event is attributed to the session that Snapshot returned,
-// never to uuid.Nil and never dropped.
-func TestProjection_OneSnapshotPerEvent(t *testing.T) {
-	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	ss := &scriptedSessions{}
-	// The FIRST Snapshot of the event sees B active; any LATER Snapshot sees no
-	// active session (B ended mid-projection).
-	ss.set(func(call int) (storage.VoiceSession, bool) {
-		if call == 1 {
-			return sessB, true
+// TestProjection_TwoSessionsInterleaveNoCrossTalk is the #487 isolation invariant:
+// two sessions publishing interleaved events fold into their OWN entries — each
+// event attributed to the Voice Session its SessionID names, each session's turn
+// state kept separate, one Resolve per session (cached thereafter).
+func TestProjection_TwoSessionsInterleaveNoCrossTalk(t *testing.T) {
+	vsA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	vsB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	ss := newMapSessions(vsA, vsB)
+
+	var mu sync.Mutex
+	var foldSessions []storage.VoiceSession
+	var starts []string
+	var p *Projection[testTurn]
+	p = New[testTurn](ss, &mu, nil, Hooks{
+		Fold: func(e voiceevent.Event) {
+			sid := voiceevent.SessionIDOf(e)
+			foldSessions = append(foldSessions, p.Session(sid))
+			p.Turn(sid, "t").text += sid[:1]
+		},
+		StartSession: func(sid string) { starts = append(starts, sid) },
+	})
+	bus := voiceevent.NewBus()
+	p.Subscribe(bus)
+
+	a, b := vsA.ID.String(), vsB.ID.String()
+	// Interleave A, B, A, B.
+	bus.Publish(stampedFinal(a, 1))
+	bus.Publish(stampedFinal(b, 2))
+	bus.Publish(stampedFinal(a, 3))
+	bus.Publish(stampedFinal(b, 4))
+
+	if len(starts) != 2 {
+		t.Fatalf("StartSession fired %d times, want 2 (once per session)", len(starts))
+	}
+	if len(foldSessions) != 4 {
+		t.Fatalf("folded %d events, want 4", len(foldSessions))
+	}
+	// Each fold saw the FKs of the session its event named — never the other's.
+	wantByCall := []storage.VoiceSession{vsA, vsB, vsA, vsB}
+	for i, want := range wantByCall {
+		if foldSessions[i].ID != want.ID || foldSessions[i].CampaignID != want.CampaignID {
+			t.Errorf("fold %d attributed to %+v, want %s/%s", i, foldSessions[i], want.ID, want.CampaignID)
 		}
-		return storage.VoiceSession{}, false
-	})
-
-	var mu sync.Mutex
-	var folded []storage.VoiceSession
-	var p *Projection[testTurn]
-	p = New[testTurn](ss, &mu, Hooks{
-		Fold: func(voiceevent.Event) { folded = append(folded, p.Session()) },
-	})
-	bus := voiceevent.NewBus()
-	p.Subscribe(bus)
-
-	bus.Publish(event(1))
-
-	if got := ss.snapshotCalls(); got != 1 {
-		t.Fatalf("projection took %d Snapshots for one event, want exactly 1 (#149)", got)
 	}
-	if len(folded) != 1 {
-		t.Fatalf("folded %d events, want 1", len(folded))
-	}
-	if folded[0].ID != sessB.ID || folded[0].CampaignID != sessB.CampaignID {
-		t.Errorf("event attributed to %+v, want session B (%s/%s) — never uuid.Nil", folded[0], sessB.ID, sessB.CampaignID)
-	}
-	if folded[0].ID == uuid.Nil {
-		t.Errorf("event attributed to uuid.Nil")
-	}
-}
-
-// TestProjection_RolloverAttribution is the stale-snapshot attribution half of
-// #149 plus the rollover hook contract: FinishSession observes the OUTGOING
-// session's FKs (a stale flush there must keep the OLD session's ids —
-// TestChunker_RolloverFlushKeepsOldSessionIDs depends on this), StartSession
-// and Fold observe the new session's, and the turn map resets wholesale.
-func TestProjection_RolloverAttribution(t *testing.T) {
-	sessA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return sessA, true })
-
-	var mu sync.Mutex
-	var finishSaw, startSaw, foldSaw []storage.VoiceSession
-	var p *Projection[testTurn]
-	p = New[testTurn](ss, &mu, Hooks{
-		Fold:          func(voiceevent.Event) { foldSaw = append(foldSaw, p.Session()) },
-		FinishSession: func() { finishSaw = append(finishSaw, p.Session()) },
-		StartSession:  func() { startSaw = append(startSaw, p.Session()) },
-	})
-	bus := voiceevent.NewBus()
-	p.Subscribe(bus)
-
-	// First event under A: the first rollover fires FinishSession with the
-	// process-start zero state, then StartSession + Fold under A.
-	bus.Publish(event(1))
-	mu.Lock()
-	p.Turn("t1").text = "under A"
-	mu.Unlock()
-
-	// A ends, B starts: FinishSession must still see A (old FKs), everything
-	// after must see B, and A's turn state must be gone.
-	ss.set(func(int) (storage.VoiceSession, bool) { return sessB, true })
-	bus.Publish(event(2))
-
-	if len(finishSaw) != 2 || finishSaw[0].ID != uuid.Nil || finishSaw[1].ID != sessA.ID {
-		t.Errorf("FinishSession saw %+v, want [zero, session A] (old FKs at flush time)", finishSaw)
-	}
-	if len(startSaw) != 2 || startSaw[0].ID != sessA.ID || startSaw[1].ID != sessB.ID {
-		t.Errorf("StartSession saw %+v, want [A, B]", startSaw)
-	}
-	if len(foldSaw) != 2 || foldSaw[0].ID != sessA.ID || foldSaw[1].ID != sessB.ID {
-		t.Errorf("Fold saw %+v, want [A, B]", foldSaw)
-	}
-	if foldSaw[1].CampaignID != sessB.CampaignID {
-		t.Errorf("post-rollover fold campaign = %s, want B's %s", foldSaw[1].CampaignID, sessB.CampaignID)
-	}
-
+	// Turn state is per-session: A's turn saw only A's events, B's only B's.
 	mu.Lock()
 	defer mu.Unlock()
-	if got := p.Lookup("t1"); got != nil {
-		t.Errorf("turn map survived the rollover: %+v", got)
+	if got := p.Turn(a, "t").text; got != vsA.ID.String()[:1]+vsA.ID.String()[:1] {
+		t.Errorf("session A turn text = %q, want two A-marks (no B leakage)", got)
 	}
-	if got := p.ActiveID(); got != sessB.ID.String() {
-		t.Errorf("ActiveID = %q, want session B", got)
+	if got := p.Turn(b, "t").text; got != vsB.ID.String()[:1]+vsB.ID.String()[:1] {
+		t.Errorf("session B turn text = %q, want two B-marks (no A leakage)", got)
 	}
 }
 
-// TestProjection_InactiveDropsEvent: with no active Voice Session the event is
-// dropped (ADR-0039) — no rollover, no fold, no state change.
-func TestProjection_InactiveDropsEvent(t *testing.T) {
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return storage.VoiceSession{}, false })
+// TestProjection_ResolveOncePerSession pins the one-Resolve-per-session cost
+// model: the FIRST event for a session Resolves it and caches the FKs; later
+// events for the same session never Resolve again.
+func TestProjection_ResolveOncePerSession(t *testing.T) {
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	ss := &countingSessions{inner: newMapSessions(vs)}
 
 	var mu sync.Mutex
+	p := New[testTurn](ss, &mu, nil, Hooks{Fold: func(voiceevent.Event) {}})
+	bus := voiceevent.NewBus()
+	p.Subscribe(bus)
+
+	sid := vs.ID.String()
+	bus.Publish(stampedFinal(sid, 1))
+	bus.Publish(stampedFinal(sid, 2))
+	bus.Publish(stampedFinal(sid, 3))
+
+	if got := ss.calls(); got != 1 {
+		t.Errorf("Resolve called %d times for one session, want 1 (cached after first)", got)
+	}
+}
+
+// countingSessions counts Resolve calls.
+type countingSessions struct {
+	inner *mapSessions
+	mu    sync.Mutex
+	n     int
+}
+
+func (c *countingSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.inner.Resolve(id)
+}
+func (c *countingSessions) calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// TestProjection_DropsUnattributable pins the three drop paths: an event with no
+// SessionID, an unparsable one, and one for a session the registry does not
+// resolve are all dropped — never folded, no entry created.
+func TestProjection_DropsUnattributable(t *testing.T) {
+	ss := newMapSessions() // resolves nothing
+	var mu sync.Mutex
 	folds := 0
-	p := New[testTurn](ss, &mu, Hooks{
-		Fold:          func(voiceevent.Event) { folds++ },
-		FinishSession: func() { t.Error("FinishSession fired with no active session") },
-		StartSession:  func() { t.Error("StartSession fired with no active session") },
+	p := New[testTurn](ss, &mu, nil, Hooks{
+		Fold:         func(voiceevent.Event) { folds++ },
+		StartSession: func(string) { t.Error("StartSession fired for an unattributable event") },
 	})
 	bus := voiceevent.NewBus()
 	p.Subscribe(bus)
 
-	bus.Publish(event(1))
+	bus.Publish(voiceevent.STTFinal{Text: "no session id"})                // "" → drop
+	bus.Publish(voiceevent.STTFinal{Text: "bad", SessionID: "not-a-uuid"}) // parse fail → drop
+	bus.Publish(stampedFinal(uuid.New().String(), 1))                      // unresolved → drop
 
 	if folds != 0 {
-		t.Errorf("folded %d events with no active session, want 0", folds)
+		t.Errorf("folded %d unattributable events, want 0", folds)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if p.ActiveID() != "" {
-		t.Errorf("ActiveID = %q after dropped event, want \"\"", p.ActiveID())
+	if p.Has(uuid.New().String()) {
+		t.Error("Has reported an entry for an event that was dropped")
 	}
 }
 
-// TestProjection_InactiveStragglerKeepsState: an event arriving AFTER the
-// active Voice Session ended (Snapshot flips inactive between the session's
-// last fold and Finalize) is dropped WITHOUT touching the captured state — the
-// relay's endSession guard compares against ActiveID, so a straggler that
-// cleared it would suppress the terminal `status: idle` frame (#144), and a
-// cleared turn map would break a same-session resume.
-func TestProjection_InactiveStragglerKeepsState(t *testing.T) {
-	sess := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return sess, true })
+// TestProjection_CloseOnlyThatEntry pins explicit-Close isolation (#487): Closing
+// one session runs its FinishSession with its FKs still visible and tears down
+// ONLY its entry — the other session's state is untouched, and a later event for
+// the closed session (a straggler the registry no longer resolves) is dropped
+// rather than reviving it.
+func TestProjection_CloseOnlyThatEntry(t *testing.T) {
+	vsA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	vsB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	ss := newMapSessions(vsA, vsB)
 
 	var mu sync.Mutex
-	folds := 0
+	var finishSaw []storage.VoiceSession
 	var p *Projection[testTurn]
-	p = New[testTurn](ss, &mu, Hooks{
-		Fold: func(voiceevent.Event) { folds++; p.Turn("t1").text = "kept" },
+	p = New[testTurn](ss, &mu, nil, Hooks{
+		Fold:          func(e voiceevent.Event) { p.Turn(voiceevent.SessionIDOf(e), "t").text += "." },
+		FinishSession: func(sid string) { finishSaw = append(finishSaw, p.Session(sid)) },
 	})
 	bus := voiceevent.NewBus()
 	p.Subscribe(bus)
 
-	bus.Publish(event(1)) // attributed to sess; creates turn t1
+	a, b := vsA.ID.String(), vsB.ID.String()
+	bus.Publish(stampedFinal(a, 1))
+	bus.Publish(stampedFinal(b, 2))
 
-	// The session ends; a straggler event is dropped, state untouched.
-	ss.set(func(int) (storage.VoiceSession, bool) { return storage.VoiceSession{}, false })
-	bus.Publish(event(2))
+	// Close A only. The session leaves the registry (its finalizer ran).
+	ss.remove(vsA.ID)
+	p.Close(a)
 
-	if folds != 1 {
-		t.Fatalf("folded %d events, want 1 (straggler dropped)", folds)
+	if len(finishSaw) != 1 || finishSaw[0].ID != vsA.ID {
+		t.Fatalf("FinishSession saw %+v, want [session A] with its FKs still visible", finishSaw)
 	}
+
 	mu.Lock()
-	if got := p.ActiveID(); got != sess.ID.String() {
-		t.Errorf("ActiveID = %q after dropped straggler, want the ended session's id retained", got)
+	if p.Has(a) {
+		t.Error("session A entry survived Close")
 	}
-	if got := p.Session(); got.ID != sess.ID || got.CampaignID != sess.CampaignID {
-		t.Errorf("Session = %+v after dropped straggler, want the captured FKs retained", got)
+	if !p.Has(b) {
+		t.Error("session B entry was torn down by A's Close")
 	}
-	if turn := p.Lookup("t1"); turn == nil || turn.text != "kept" {
-		t.Errorf("turn state = %+v after dropped straggler, want it retained", turn)
+	if p.Turn(b, "t").text != "." {
+		t.Errorf("session B turn state = %q, want it untouched by A's Close", p.Turn(b, "t").text)
 	}
 	mu.Unlock()
 
-	// The SAME session reported active again (Snapshot raced, not a new
-	// session): no rollover — folding resumes on the retained turn state.
-	ss.set(func(int) (storage.VoiceSession, bool) { return sess, true })
-	bus.Publish(event(3))
-
+	// A straggler for the closed session A is dropped, not revived.
+	bus.Publish(stampedFinal(a, 3))
 	mu.Lock()
 	defer mu.Unlock()
-	if folds != 2 {
-		t.Fatalf("folded %d events, want 2", folds)
-	}
-	if turn := p.Lookup("t1"); turn == nil || turn.text != "kept" {
-		t.Errorf("turn state = %+v after resume, want no rollover for the same session id", turn)
+	if p.Has(a) {
+		t.Error("a straggler revived the closed session A")
 	}
 }
 
-// TestProjection_SameSessionNoRollover: consecutive events under one session
-// fold without re-firing the rollover hooks, and turn state persists.
-func TestProjection_SameSessionNoRollover(t *testing.T) {
-	sess := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return sess, true })
-
+// TestProjection_CloseUnknownNoop: Closing a session that folded no events (or is
+// already closed) is a no-op — no FinishSession, no panic.
+func TestProjection_CloseUnknownNoop(t *testing.T) {
+	ss := newMapSessions()
 	var mu sync.Mutex
-	rollovers := 0
-	var p *Projection[testTurn]
-	p = New[testTurn](ss, &mu, Hooks{
-		Fold:         func(voiceevent.Event) { p.Turn("t1").text += "." },
-		StartSession: func() { rollovers++ },
+	p := New[testTurn](ss, &mu, nil, Hooks{
+		FinishSession: func(string) { t.Error("FinishSession fired for an unknown session") },
 	})
+	p.Close(uuid.New().String()) // must not panic
+}
+
+// TestProjection_TurnLifecycle: Turn lazy-creates once per (session, turn) within
+// a known session, Lookup never creates, and both return nil for an unknown
+// session.
+func TestProjection_TurnLifecycle(t *testing.T) {
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	ss := newMapSessions(vs)
+	var mu sync.Mutex
+	var p *Projection[testTurn]
+	p = New[testTurn](ss, &mu, nil, Hooks{Fold: func(e voiceevent.Event) {
+		sid := voiceevent.SessionIDOf(e)
+		p.Turn(sid, "t1")
+	}})
 	bus := voiceevent.NewBus()
 	p.Subscribe(bus)
 
-	bus.Publish(event(1))
-	bus.Publish(event(2))
-	bus.Publish(event(3))
-
-	if rollovers != 1 {
-		t.Errorf("rolled over %d times for one session, want 1", rollovers)
-	}
+	sid := vs.ID.String()
 	mu.Lock()
-	defer mu.Unlock()
-	if got := p.Turn("t1").text; got != "..." {
-		t.Errorf("turn state = %q, want it to coalesce across the session's events", got)
+	if got := p.Turn("unknown-session", "t1"); got != nil {
+		t.Errorf("Turn on unknown session = %+v, want nil", got)
 	}
-}
+	if got := p.Lookup(sid, "t1"); got != nil {
+		t.Errorf("Lookup before any event = %+v, want nil", got)
+	}
+	mu.Unlock()
 
-// TestProjection_TurnLifecycle: Turn lazy-creates exactly once per id and
-// Lookup never creates.
-func TestProjection_TurnLifecycle(t *testing.T) {
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return storage.VoiceSession{}, false })
-	var mu sync.Mutex
-	p := New[testTurn](ss, &mu, Hooks{Fold: func(voiceevent.Event) {}})
+	bus.Publish(stampedFinal(sid, 1)) // creates the session entry + turn t1
 
 	mu.Lock()
 	defer mu.Unlock()
-	if got := p.Lookup("t1"); got != nil {
-		t.Fatalf("Lookup created a turn: %+v", got)
-	}
-	first := p.Turn("t1")
+	first := p.Turn(sid, "t1")
 	if first == nil {
-		t.Fatal("Turn returned nil")
+		t.Fatal("Turn returned nil for a known session")
 	}
 	first.text = "kept"
-	if again := p.Turn("t1"); again != first {
-		t.Errorf("Turn returned a fresh state for a seen id")
+	if again := p.Turn(sid, "t1"); again != first {
+		t.Error("Turn returned a fresh state for a seen (session, turn)")
 	}
-	if got := p.Lookup("t1"); got != first {
+	if got := p.Lookup(sid, "t1"); got != first {
 		t.Errorf("Lookup = %+v, want the created turn", got)
 	}
 }
 
-// TestProjection_NilBusSubscribeNoop: an event-less host (unit tests driving
-// the fold directly) subscribes nothing and does not panic.
+// TestProjection_NilBusSubscribeNoop: an event-less host subscribes nothing and
+// does not panic.
 func TestProjection_NilBusSubscribeNoop(t *testing.T) {
-	ss := &scriptedSessions{}
-	ss.set(func(int) (storage.VoiceSession, bool) { return storage.VoiceSession{}, false })
+	ss := newMapSessions()
 	var mu sync.Mutex
-	p := New[testTurn](ss, &mu, Hooks{Fold: func(voiceevent.Event) {}})
+	p := New[testTurn](ss, &mu, nil, Hooks{Fold: func(voiceevent.Event) {}})
 	p.Subscribe(nil)
 }
