@@ -75,6 +75,35 @@ func (s *Store) ListDeploymentConfigs(ctx context.Context) ([]DeploymentConfig, 
 	return out, nil
 }
 
+// GetTenantIDByGuildID resolves a Discord Guild snowflake to the Tenant that
+// configured it — the interaction→Tenant routing read (#490): an inbound slash
+// interaction carries its Guild, and this maps it to the owning Tenant before any
+// storage read touches campaigns, so a command only ever reaches its own Tenant's
+// data. An unknown Guild returns ErrNotFound, which the Gate maps to a clean
+// ephemeral rejection.
+//
+// Two Tenants CAN persist the same guild_id (guild_id is tenant-controlled
+// Configuration, not a unique key): the NEWEST-updated row wins
+// (`ORDER BY updated_at DESC LIMIT 1`). That determinism is the authority every
+// Guild→Tenant consumer shares — the interaction router here AND the member-picker
+// path (presence.Clients.VoiceChannelMembers) — so a stale losing row can never
+// see the winner's data.
+func (s *Store) GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx,
+		`SELECT tenant_id FROM deployment_config
+		  WHERE guild_id = $1
+		  ORDER BY updated_at DESC
+		  LIMIT 1`, guildID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("storage: tenant for guild %q: %w", guildID, err)
+	}
+	return id, nil
+}
+
 // SaveDiscordBotToken upserts only the deployment Bot token columns (sealed
 // ciphertext + last4), leaving the Guild / Voice channel IDs untouched. It
 // returns the resulting row. The ciphertext is the caller-sealed secret.

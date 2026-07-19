@@ -35,7 +35,7 @@ type fakeSessionStore struct {
 	setCalls   []setActiveCall
 }
 
-func (f *fakeSessionStore) ListCampaigns(context.Context) ([]storage.Campaign, error) {
+func (f *fakeSessionStore) ListCampaignsInTenant(_ context.Context, _ uuid.UUID) ([]storage.Campaign, error) {
 	return f.list, f.listErr
 }
 
@@ -55,7 +55,7 @@ func (f *fakeSessionStore) SetActiveCampaign(_ context.Context, discordUserID st
 	return f.setErr
 }
 
-func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+func (f *fakeSessionStore) GetActiveCampaignForUserInTenant(_ context.Context, _ uuid.UUID, _ string) (storage.Campaign, error) {
 	if f.forUserErr != nil {
 		return storage.Campaign{}, f.forUserErr
 	}
@@ -63,6 +63,111 @@ func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (st
 		return storage.Campaign{}, storage.ErrNotFound
 	}
 	return *f.forUser, nil
+}
+
+// tenantCampaignStore is a SessionStore whose campaign lists AND durable selections
+// are keyed by Tenant — so a dispatch test can prove a command sees ONLY the
+// invoking Tenant's campaigns (#490). GetCampaign resolves across all Tenants (the
+// live-session step re-checks the Tenant itself).
+type tenantCampaignStore struct {
+	byTenant map[uuid.UUID][]storage.Campaign
+	setCalls []setActiveCall
+}
+
+func (s *tenantCampaignStore) ListCampaignsInTenant(_ context.Context, tenantID uuid.UUID) ([]storage.Campaign, error) {
+	return s.byTenant[tenantID], nil
+}
+func (s *tenantCampaignStore) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	for _, list := range s.byTenant {
+		for _, c := range list {
+			if c.ID == id {
+				return c, nil
+			}
+		}
+	}
+	return storage.Campaign{}, storage.ErrNotFound
+}
+func (s *tenantCampaignStore) SetActiveCampaign(_ context.Context, discordUserID string, campaignID uuid.UUID) error {
+	s.setCalls = append(s.setCalls, setActiveCall{discordUserID, campaignID})
+	return nil
+}
+func (s *tenantCampaignStore) GetActiveCampaignForUserInTenant(_ context.Context, _ uuid.UUID, _ string) (storage.Campaign, error) {
+	return storage.Campaign{}, storage.ErrNotFound
+}
+
+// twoTenantRegistry builds a Registry whose Gate routes guildA→tenantA and
+// guildB→tenantB, with operatorID a GM in BOTH.
+func twoTenantRegistry(store SessionStore) *Registry {
+	gate := NewGate(
+		gmInTenants{tenantA: {operatorID: {}}, tenantB: {operatorID: {}}},
+		fakeTenants{"gA": tenantA, "gB": tenantB},
+	)
+	reg := NewRegistry(gate, nil)
+	reg.Register(UseCommand(store))
+	return reg
+}
+
+// TestUseSameCommandTwoTenantsActsOnOwnData pins #490 test (7): the SAME
+// /glyphoxa use command invoked in two Tenants' Guilds acts on the correct Tenant's
+// campaign — even when both Tenants have a campaign of the identical name.
+func TestUseSameCommandTwoTenantsActsOnOwnData(t *testing.T) {
+	aCamp := campaignIn(tenantA, "Shared Name")
+	bCamp := campaignIn(tenantB, "Shared Name")
+	store := &tenantCampaignStore{byTenant: map[uuid.UUID][]storage.Campaign{
+		tenantA: {aCamp},
+		tenantB: {bCamp},
+	}}
+	reg := twoTenantRegistry(store)
+	ctx := context.Background()
+
+	use := func(guild string) {
+		reg.dispatch(ctx, "glyphoxa use", &Interaction{
+			guildID: guild, userID: operatorID,
+			opts: fakeOpts{s: map[string]string{"campaign": "Shared Name"}},
+			resp: &fakeResponder{},
+		})
+	}
+	use("gA")
+	use("gB")
+
+	if len(store.setCalls) != 2 {
+		t.Fatalf("SetActiveCampaign calls = %d, want 2", len(store.setCalls))
+	}
+	if store.setCalls[0].campaignID != aCamp.ID {
+		t.Errorf("guild A selected %s, want tenant A's campaign %s", store.setCalls[0].campaignID, aCamp.ID)
+	}
+	if store.setCalls[1].campaignID != bCamp.ID {
+		t.Errorf("guild B selected %s, want tenant B's campaign %s", store.setCalls[1].campaignID, bCamp.ID)
+	}
+}
+
+// TestUseForeignCampaignUUIDNotMatched pins #490 test (6): a pasted campaign UUID
+// belonging to ANOTHER Tenant is not matchable — /glyphoxa use in Tenant A cannot
+// select Tenant B's campaign by id (it never appears in the tenant-scoped list), so
+// nothing is set and the GM gets the graceful "no match" reply.
+func TestUseForeignCampaignUUIDNotMatched(t *testing.T) {
+	aCamp := campaignIn(tenantA, "Alpha")
+	bCamp := campaignIn(tenantB, "Bravo")
+	store := &tenantCampaignStore{byTenant: map[uuid.UUID][]storage.Campaign{
+		tenantA: {aCamp},
+		tenantB: {bCamp},
+	}}
+	reg := twoTenantRegistry(store)
+
+	resp := &fakeResponder{}
+	// Invoked in Guild A, but naming Tenant B's campaign UUID.
+	reg.dispatch(context.Background(), "glyphoxa use", &Interaction{
+		guildID: "gA", userID: operatorID,
+		opts: fakeOpts{s: map[string]string{"campaign": bCamp.ID.String()}},
+		resp: resp,
+	})
+
+	if len(store.setCalls) != 0 {
+		t.Fatalf("a foreign campaign UUID was selected: %+v, want none", store.setCalls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral || !strings.Contains(resp.replies[0].content, "No campaign matches") {
+		t.Errorf("reply = %+v, want an ephemeral no-match", resp.replies)
+	}
 }
 
 // startCall records the (tenant, campaign) a Start was driven with.
@@ -98,8 +203,16 @@ func (f *fakeVoice) Stop(context.Context) (storage.VoiceSession, error) {
 
 func (f *fakeVoice) Snapshot() (storage.VoiceSession, bool) { return f.snap, f.active }
 
+// campaign builds a Campaign in tenantA — the Tenant that testGuild resolves to in
+// the dispatch tests (see testRegistry), so a dispatched command's ic.TenantID()
+// matches the campaign's Tenant. Cross-tenant tests build campaigns in tenantB
+// explicitly.
 func campaign(name string) storage.Campaign {
-	return storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: name}
+	return campaignIn(tenantA, name)
+}
+
+func campaignIn(tenantID uuid.UUID, name string) storage.Campaign {
+	return storage.Campaign{ID: uuid.New(), TenantID: tenantID, Name: name}
 }
 
 // dispatchAs runs one interaction through the registry as the given user with
@@ -323,20 +436,42 @@ func TestResolveActiveCampaignOrder(t *testing.T) {
 		forUser: &selected,
 	}
 	v1 := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: live.ID}}
-	if c, err := resolveActiveCampaign(ctx, s1, v1, operatorID); err != nil || c.ID != live.ID {
+	if c, err := resolveActiveCampaign(ctx, s1, v1, tenantA, operatorID); err != nil || c.ID != live.ID {
 		t.Errorf("step 1: got %s, %v; want live session campaign %s", c.ID, err, live.ID)
 	}
 
 	// (2) No live session → the operator's durable selection.
 	s2 := &fakeSessionStore{forUser: &selected}
-	if c, err := resolveActiveCampaign(ctx, s2, &fakeVoice{}, operatorID); err != nil || c.ID != selected.ID {
+	if c, err := resolveActiveCampaign(ctx, s2, &fakeVoice{}, tenantA, operatorID); err != nil || c.ID != selected.ID {
 		t.Errorf("step 2: got %s, %v; want selection %s", c.ID, err, selected.ID)
 	}
 
 	// (3) No session and no selection → FAIL (no most-recently-created fallback on
 	// the slash surface, ADR-0009).
-	if _, err := resolveActiveCampaign(ctx, &fakeSessionStore{}, &fakeVoice{}, operatorID); err != ErrNoActiveCampaign {
+	if _, err := resolveActiveCampaign(ctx, &fakeSessionStore{}, &fakeVoice{}, tenantA, operatorID); err != ErrNoActiveCampaign {
 		t.Errorf("no session + no selection: err = %v, want ErrNoActiveCampaign", err)
+	}
+}
+
+// TestResolveActiveCampaignLiveSessionForeignTenant pins #490 test (8): with the
+// manager still single-active (#488 unmerged), a live Voice Session belonging to
+// ANOTHER Tenant must NOT pin this Tenant's Active Campaign onto the foreign
+// campaign. Step 1 counts the live session only when its campaign is in THIS Tenant;
+// otherwise it falls through to the durable selection.
+func TestResolveActiveCampaignLiveSessionForeignTenant(t *testing.T) {
+	ctx := context.Background()
+	foreignLive := campaignIn(tenantB, "Tenant B live") // running session's campaign, other Tenant
+	mine := campaign("My durable pick")                 // tenantA durable selection
+
+	store := &fakeSessionStore{
+		byID:    map[uuid.UUID]storage.Campaign{foreignLive.ID: foreignLive},
+		forUser: &mine,
+	}
+	voice := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreignLive.ID}}
+
+	c, err := resolveActiveCampaign(ctx, store, voice, tenantA, operatorID)
+	if err != nil || c.ID != mine.ID {
+		t.Errorf("got %s, %v; want the tenant-A durable selection %s (foreign live session ignored)", c.ID, err, mine.ID)
 	}
 }
 

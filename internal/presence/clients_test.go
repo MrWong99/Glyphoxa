@@ -61,6 +61,28 @@ func (f *fakeTenantStore) ListDeploymentConfigs(context.Context) ([]storage.Depl
 	return out, nil
 }
 
+// GetTenantIDByGuildID resolves a Guild to its newest-updated owning Tenant, the
+// storage newest-wins semantics (#490) modelled over the in-memory map.
+func (f *fakeTenantStore) GetTenantIDByGuildID(_ context.Context, guildID string) (uuid.UUID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var owner uuid.UUID
+	var newest time.Time
+	found := false
+	for id, d := range f.deps {
+		if d.GuildID != guildID {
+			continue
+		}
+		if !found || d.UpdatedAt.After(newest) {
+			owner, newest, found = id, d.UpdatedAt, true
+		}
+	}
+	if !found {
+		return uuid.Nil, storage.ErrNotFound
+	}
+	return owner, nil
+}
+
 // clientsRig wires a *Clients with recording seams.
 type clientsRig struct {
 	c      *Clients
@@ -83,7 +105,7 @@ func newClientsRig(t *testing.T, envToken string) *clientsRig {
 		t.Fatalf("crypto.New: %v", err)
 	}
 	store := newFakeTenantStore()
-	reg := NewRegistry(NewGate(gms(), fixedGuild("")), nil)
+	reg := NewRegistry(NewGate(gmInTenants{}, fakeTenants{}), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 
 	rig := &clientsRig{cipher: cipher, store: store}

@@ -93,3 +93,41 @@ func TestMemberDisplayNameNoGuild(t *testing.T) {
 		t.Fatal("MemberDisplayName err = nil, want error in the wait-state (no Guild)")
 	}
 }
+
+// TestMemberDisplayNameInTenant pins the tenant-narrowed label path (#490 review
+// item b): it resolves the name ONLY from the given Tenant's OWN Guild — the fetch
+// must be called with that Guild — so a member who also sits in another Tenant's
+// Guild is never labelled from the foreign Guild.
+func TestMemberDisplayNameInTenant(t *testing.T) {
+	const user = "111111111111111111"
+	const tenantGuild snowflake.ID = 222222222222222222
+	tenantID := uuid.New()
+
+	var fetchedGuild snowflake.ID
+	c := &Clients{entries: map[string]*clientEntry{}, tenants: map[uuid.UUID]*tenantState{}}
+	c.fetchMember = func(_ context.Context, _ rest.Rest, gid, _ snowflake.ID) (*discord.Member, error) {
+		fetchedGuild = gid
+		return &discord.Member{Nick: strptr("Kira the Bold"), User: discord.User{Username: "kira_u"}}, nil
+	}
+	entry := &clientEntry{token: "tok", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(&bot.Client{})
+	entry.refs[tenantID] = struct{}{}
+	c.entries["tok"] = entry
+	c.tenants[tenantID] = &tenantState{token: "tok", guild: tenantGuild.String()}
+
+	got, err := c.MemberDisplayNameInTenant(context.Background(), tenantID, user)
+	if err != nil {
+		t.Fatalf("MemberDisplayNameInTenant err = %v", err)
+	}
+	if got != "Kira the Bold" {
+		t.Errorf("name = %q, want %q", got, "Kira the Bold")
+	}
+	if fetchedGuild != tenantGuild {
+		t.Errorf("fetched from guild %d, want the Tenant's own Guild %d", fetchedGuild, tenantGuild)
+	}
+
+	// A Tenant with no configured Guild (wait-state) is ErrNoGuild, fetch not run.
+	if _, err := c.MemberDisplayNameInTenant(context.Background(), uuid.New(), user); !errors.Is(err, ErrNoGuild) {
+		t.Errorf("unknown-tenant err = %v, want ErrNoGuild", err)
+	}
+}

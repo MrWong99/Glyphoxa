@@ -94,8 +94,29 @@ type fakeOpts struct {
 func (f fakeOpts) OptString(name string) (string, bool) { v, ok := f.s[name]; return v, ok }
 func (f fakeOpts) OptInt(name string) (int, bool)       { v, ok := f.i[name]; return v, ok }
 
+// testRegistry builds a Registry whose Gate maps `guild` to tenantA and grants
+// `gmID` GM standing in tenantA. An unmapped Guild (e.g. otherGuild) resolves to no
+// Tenant → ErrWrongGuild.
 func testRegistry(guild string, gmID string) *Registry {
-	return NewRegistry(NewGate(gms(gmID), fixedGuild(guild)), nil)
+	return NewRegistry(NewGate(gmIn(tenantA, gmID), fakeTenants{guild: tenantA}), nil)
+}
+
+// TestDispatchPopulatesTenantID pins #490 test (5): dispatch resolves the
+// interaction's Guild to its owning Tenant via the Gate and threads it onto the
+// Interaction, so every tenant-scoped handler reads ic.TenantID().
+func TestDispatchPopulatesTenantID(t *testing.T) {
+	reg := testRegistry(testGuild, operatorID)
+	var got = tenantB // seed with the wrong value so a no-op is caught
+	reg.Register(Command{Path: "grab", GMOnly: true, Handle: func(_ context.Context, ic *Interaction) error {
+		got = ic.TenantID()
+		return ic.Reply("ok")
+	}})
+
+	reg.dispatch(context.Background(), "grab", &Interaction{guildID: testGuild, userID: operatorID, resp: &fakeResponder{}})
+
+	if got != tenantA {
+		t.Errorf("handler saw tenant %s, want the Guild's resolved tenant %s", got, tenantA)
+	}
 }
 
 func TestDefinitionsMergeFlatAndGroup(t *testing.T) {

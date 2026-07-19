@@ -11,6 +11,8 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // membersRig is a bare Clients registry with one standing client (a real
@@ -22,10 +24,34 @@ type membersRig struct {
 	tenant uuid.UUID
 	entry  *clientEntry
 	client *bot.Client
+	store  *memberOwnerStore
+}
+
+// memberOwnerStore is the minimal TenantStore the member-picker tests need: it
+// answers GetTenantIDByGuildID (the Guild→owning-Tenant authority the picker checks,
+// #490). The deployment-config reads are unused on this path.
+type memberOwnerStore struct {
+	owner map[string]uuid.UUID // guild_id -> newest-wins owning Tenant
+}
+
+func (s *memberOwnerStore) GetDeploymentConfig(context.Context, uuid.UUID) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
+}
+func (s *memberOwnerStore) ListDeploymentConfigs(context.Context) ([]storage.DeploymentConfig, error) {
+	return nil, nil
+}
+func (s *memberOwnerStore) GetTenantIDByGuildID(_ context.Context, guildID string) (uuid.UUID, error) {
+	if id, ok := s.owner[guildID]; ok {
+		return id, nil
+	}
+	return uuid.Nil, storage.ErrNotFound
 }
 
 func newMembersTestPresence(fetch func(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error)) *membersRig {
+	tid := uuid.New()
+	store := &memberOwnerStore{owner: map[string]uuid.UUID{"100": tid}}
 	c := &Clients{
+		store:   store,
 		entries: map[string]*clientEntry{},
 		tenants: map[uuid.UUID]*tenantState{},
 	}
@@ -33,11 +59,10 @@ func newMembersTestPresence(fetch func(ctx context.Context, r rest.Rest, guildID
 	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
 	entry := &clientEntry{token: "tok", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
 	entry.client.Store(cl)
-	tid := uuid.New()
 	entry.refs[tid] = struct{}{}
 	c.entries["tok"] = entry
 	c.tenants[tid] = &tenantState{token: "tok", guild: "100"}
-	return &membersRig{c: c, tenant: tid, entry: entry, client: cl}
+	return &membersRig{c: c, tenant: tid, entry: entry, client: cl, store: store}
 }
 
 func (r *membersRig) members(ctx context.Context, channelID snowflake.ID) ([]Member, error) {
@@ -173,14 +198,18 @@ func TestVoiceChannelMembers_ScopedToTenantGuild(t *testing.T) {
 	const channel snowflake.ID = 999
 	const userInB snowflake.ID = 7
 
-	c := &Clients{entries: map[string]*clientEntry{}, tenants: map[uuid.UUID]*tenantState{}}
+	a, b := uuid.New(), uuid.New()
+	c := &Clients{
+		store:   &memberOwnerStore{owner: map[string]uuid.UUID{guildA.String(): a, guildB.String(): b}},
+		entries: map[string]*clientEntry{},
+		tenants: map[uuid.UUID]*tenantState{},
+	}
 	c.fetchMember = func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
 		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
 	}
 	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
 	entry := &clientEntry{token: "central", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
 	entry.client.Store(cl)
-	a, b := uuid.New(), uuid.New()
 	entry.refs[a] = struct{}{}
 	entry.refs[b] = struct{}{}
 	c.entries["central"] = entry
@@ -206,5 +235,57 @@ func TestVoiceChannelMembers_ScopedToTenantGuild(t *testing.T) {
 	}
 	if len(membersB) != 1 || membersB[0].ID != userInB {
 		t.Fatalf("Tenant B members = %+v, want its own Guild's occupant", membersB)
+	}
+}
+
+// TestVoiceChannelMembers_TwoTenantsSameGuildLoserRejected pins the guild-ownership
+// agreement (#490 review item a): two Tenants configure the SAME guild_id, and the
+// interaction router resolves it to the NEWEST-updated owner. The member picker must
+// agree — the winner reads its channel, the stale LOSING row is cleanly rejected
+// (empty list), so it can never see the winner's voice-channel occupants even though
+// its own tenantState still names that Guild.
+func TestVoiceChannelMembers_TwoTenantsSameGuildLoserRejected(t *testing.T) {
+	const guild snowflake.ID = 100
+	const channel snowflake.ID = 999
+	const occupant snowflake.ID = 7
+
+	winner, loser := uuid.New(), uuid.New()
+	c := &Clients{
+		// The store resolves the shared Guild to the winner (newest-wins authority).
+		store:   &memberOwnerStore{owner: map[string]uuid.UUID{guild.String(): winner}},
+		entries: map[string]*clientEntry{},
+		tenants: map[uuid.UUID]*tenantState{},
+	}
+	c.fetchMember = func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
+	}
+	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
+	entry := &clientEntry{token: "central", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(cl)
+	entry.refs[winner] = struct{}{}
+	entry.refs[loser] = struct{}{}
+	c.entries["central"] = entry
+	// BOTH Tenants' state still names the same Guild — the loser's stale row.
+	c.tenants[winner] = &tenantState{token: "central", guild: guild.String()}
+	c.tenants[loser] = &tenantState{token: "central", guild: guild.String()}
+
+	putVoiceState(cl, guild, channel, occupant)
+
+	// The winner (newest-wins owner) reads its channel's occupant.
+	membersWin, err := c.VoiceChannelMembers(context.Background(), winner, channel)
+	if err != nil {
+		t.Fatalf("winner members: %v", err)
+	}
+	if len(membersWin) != 1 || membersWin[0].ID != occupant {
+		t.Fatalf("winner members = %+v, want the occupant", membersWin)
+	}
+
+	// The loser is cleanly rejected — no view into the winner's channel.
+	membersLose, err := c.VoiceChannelMembers(context.Background(), loser, channel)
+	if err != nil {
+		t.Fatalf("loser members: %v", err)
+	}
+	if len(membersLose) != 0 {
+		t.Fatalf("stale losing Tenant saw %d members of the shared Guild (cross-tenant leak), want 0", len(membersLose))
 	}
 }

@@ -124,7 +124,7 @@ func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler 
 			return handleRecap(ctx, ic, store, voice, eng, butler)
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			c, err := resolveActiveCampaign(ctx, store, voice, ac.UserID())
+			c, err := resolveActiveCampaign(ctx, store, voice, ac.TenantID(), ac.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
 				// No Active Campaign yet → offer nothing (empty picker); not an error.
 				return nil, nil
@@ -170,7 +170,7 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 	ctx, cancel := context.WithTimeout(ctx, recapOpTimeout)
 	defer cancel()
 
-	c, err := resolveActiveCampaign(ctx, store, voice, ic.UserID())
+	c, err := resolveActiveCampaign(ctx, store, voice, ic.TenantID(), ic.UserID())
 	if errors.Is(err, ErrNoActiveCampaign) {
 		return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
 	}

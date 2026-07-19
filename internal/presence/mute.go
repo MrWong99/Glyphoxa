@@ -21,14 +21,29 @@ type SessionMuter interface {
 	SetAllMute(ctx context.Context, muted bool) ([]string, error)
 }
 
-// AgentLister is the Active Campaign roster read the mute autocomplete + resolver
-// need (#211): the Butler + Character NPCs, from the agents table (not the voiced
-// wirenpc Roster, which is unreachable here). *storage.Store satisfies it. The
-// mute surface narrows this to the Character NPCs (see voiced): the Butler is
+// AgentLister is the Active Campaign roster read the mute/say autocomplete +
+// resolver need (#211): the Butler + Character NPCs, from the agents table (not the
+// voiced wirenpc Roster, which is unreachable here). *storage.Store satisfies it.
+// The mute surface narrows this to the Character NPCs (see voiced): the Butler is
 // voiced now (ADR-0009 #299 amendment) but stays Address-Only and is never offered
 // as a mute target (mute is matcher-owned and Character-only).
+//
+// GetCampaign loads the live session's campaign so the handler can enforce the
+// TENANT guard (#490): the manager is single-active and its VoiceSession Snapshot
+// carries no Tenant, so a GM must confirm the running session's campaign belongs to
+// the invoking Tenant before muting/puppeting it — otherwise a GM in Tenant B could
+// drive Tenant A's live session.
 type AgentLister interface {
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+}
+
+// sessionInTenant reports whether the live Voice Session (its campaign) belongs to
+// tenantID — the mute/say cross-tenant guard (#490). A missing/foreign campaign
+// reads as false, so the caller treats the session as "not active for this Tenant".
+func sessionInTenant(ctx context.Context, agents AgentLister, vs storage.VoiceSession, tenantID uuid.UUID) bool {
+	c, err := agents.GetCampaign(ctx, vs.CampaignID)
+	return err == nil && c.TenantID == tenantID
 }
 
 // maxAutocompleteChoices is Discord's hard cap on autocomplete choices per
@@ -60,8 +75,8 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			vs, active := mgr.Snapshot()
-			if !active {
-				return nil, nil // no session: nothing to mute, offer nothing
+			if !active || !sessionInTenant(ctx, agents, vs, ac.TenantID()) {
+				return nil, nil // no session for this Tenant: nothing to mute, offer nothing
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
 			if err != nil {
@@ -83,7 +98,9 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 		},
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active := mgr.Snapshot()
-			if !active {
+			if !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
+				// No session, or the single active session belongs to another Tenant (#490):
+				// a GM must never mute a foreign Tenant's live session.
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			input, _ := ic.String("npc")
@@ -114,13 +131,13 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 // voiced Agent of the Active Campaign (the Character NPCs; the Address-Only Butler
 // is excluded) in the live Voice Session, refused ephemerally when no Voice
 // Session is active. Un-muting everyone is the web panel's job.
-func MuteAllCommand(mgr SessionMuter) Command {
+func MuteAllCommand(mgr SessionMuter, agents AgentLister) Command {
 	return Command{
 		Path:        "glyphoxa muteall",
 		Description: "Mute every NPC voice in the active Voice Session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
-			if _, active := mgr.Snapshot(); !active {
+			if vs, active := mgr.Snapshot(); !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			ids, err := mgr.SetAllMute(ctx, true)

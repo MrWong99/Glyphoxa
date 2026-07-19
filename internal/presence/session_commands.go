@@ -32,15 +32,17 @@ const discordChoiceLimit = 25
 // GM has right there.
 var ErrNoActiveCampaign = errors.New("presence: no active campaign")
 
-// SessionStore is the storage surface the /glyphoxa session commands need:
-// listing campaigns for `use` and its autocomplete, loading one by id, durably
-// persisting the operator's Active Campaign choice, and reading that per-operator
-// selection back. *storage.Store satisfies it; tests use a fake.
+// SessionStore is the storage surface the /glyphoxa session commands need, all
+// TENANT-SCOPED (#490): listing the invoking Tenant's campaigns for `use` and its
+// autocomplete, loading one by id (with an explicit Tenant check by the caller),
+// durably persisting the operator's Active Campaign choice, and reading that
+// per-operator selection back within the Tenant. *storage.Store satisfies it; tests
+// use a fake.
 type SessionStore interface {
-	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	ListCampaignsInTenant(ctx context.Context, tenantID uuid.UUID) ([]storage.Campaign, error)
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
-	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
+	GetActiveCampaignForUserInTenant(ctx context.Context, tenantID uuid.UUID, discordUserID string) (storage.Campaign, error)
 }
 
 // VoiceControl is the in-process voice-loop control surface /glyphoxa start and
@@ -79,7 +81,10 @@ func UseCommand(store SessionStore) Command {
 			if input == "" {
 				return ic.ReplyEphemeral("Name a campaign, e.g. /glyphoxa use campaign:<name>.")
 			}
-			campaigns, err := store.ListCampaigns(ctx)
+			// Tenant-scoped: only the invoking Tenant's own campaigns are matchable, so
+			// a free-text name or a pasted foreign UUID can never select another
+			// Tenant's campaign (#490).
+			campaigns, err := store.ListCampaignsInTenant(ctx, ic.TenantID())
 			if err != nil {
 				return fmt.Errorf("presence: list campaigns: %w", err)
 			}
@@ -94,7 +99,7 @@ func UseCommand(store SessionStore) Command {
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			_, typed := ac.Focused()
-			campaigns, err := store.ListCampaigns(ctx)
+			campaigns, err := store.ListCampaignsInTenant(ctx, ac.TenantID())
 			if err != nil {
 				return nil, err
 			}
@@ -122,7 +127,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 			ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
 			defer cancel()
 
-			c, err := resolveActiveCampaign(ctx, store, voice, ic.UserID())
+			c, err := resolveActiveCampaign(ctx, store, voice, ic.TenantID(), ic.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
 				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
 			}
@@ -171,29 +176,38 @@ func EndCommand(voice VoiceControl) Command {
 }
 
 // resolveActiveCampaign resolves the operator's Active Campaign in the ADR-0009
-// order: (1) the campaign of the live Voice Session, if one is running; (2) the
-// operator's durable /glyphoxa use selection; else (3) FAIL with
-// ErrNoActiveCampaign. There is deliberately NO most-recently-created fallback on
-// the slash surface (unlike the web tier) — the GM has the /glyphoxa use
-// affordance right there, so the strict path avoids silently binding the wrong
-// campaign.
-func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceControl, discordUserID string) (storage.Campaign, error) {
+// order, all TENANT-SCOPED (#490): (1) the campaign of the live Voice Session, if
+// one is running IN THIS TENANT; (2) the operator's durable /glyphoxa use selection
+// within this Tenant; else (3) FAIL with ErrNoActiveCampaign. There is deliberately
+// NO most-recently-created fallback on the slash surface (unlike the web tier) —
+// the GM has the /glyphoxa use affordance right there, so the strict path avoids
+// silently binding the wrong campaign.
+func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceControl, tenantID uuid.UUID, discordUserID string) (storage.Campaign, error) {
 	// (1) A live Voice Session pins the Active Campaign to its own campaign, so
 	// start/end operate on exactly what is running (and a second start collides).
+	// It counts ONLY when the running session belongs to THIS Tenant (#490): the
+	// manager is still single-active (#488 not merged), so a session live for
+	// another Tenant must not pivot this Tenant's command onto a foreign campaign.
+	// The Snapshot carries no Tenant, so the campaign it loads is re-checked against
+	// the Tenant (mismatch → treat as absent) — the explicit c.TenantID==tenant
+	// check the contract requires, which also guards a stale/renamed snapshot.
 	if vs, active := voice.Snapshot(); active {
 		c, err := store.GetCampaign(ctx, vs.CampaignID)
-		if err == nil {
+		switch {
+		case err == nil && c.TenantID == tenantID:
 			return c, nil
-		}
-		if !errors.Is(err, storage.ErrNotFound) {
+		case err == nil || errors.Is(err, storage.ErrNotFound):
+			// A running session whose campaign row has vanished or belongs to another
+			// Tenant is not expected here; fall through to the durable selection rather
+			// than fail the command.
+		default:
 			return storage.Campaign{}, err
 		}
-		// A running session whose campaign row has vanished is not expected; fall
-		// through to the durable selection rather than fail the command.
 	}
 
-	// (2) The operator's explicit, durable choice.
-	c, err := store.GetActiveCampaignForUser(ctx, discordUserID)
+	// (2) The operator's explicit, durable choice — resolved only when it points at
+	// a campaign in THIS Tenant (a selection pointing elsewhere reads back absent).
+	c, err := store.GetActiveCampaignForUserInTenant(ctx, tenantID, discordUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return storage.Campaign{}, ErrNoActiveCampaign
 	}

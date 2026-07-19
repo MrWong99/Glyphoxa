@@ -12,6 +12,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 )
 
 // interactionTimeout bounds a handler's work well under Discord's 3s
@@ -197,10 +198,14 @@ func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
 		r.log.Warn("presence: unknown slash command", "command", key)
 		return
 	}
-	if err := r.authorize(cmd, ic.guildID, ic.userID); err != nil {
+	tenantID, err := r.gate.Authorize(base, ic.guildID, ic.userID, cmd.GMOnly)
+	if err != nil {
 		_ = ic.ReplyEphemeral(gateMessage(err))
 		return
 	}
+	// Thread the resolved Tenant into the handler: every campaign read below is
+	// tenant-scoped (#490), so a command only ever touches its own Tenant's data.
+	ic.tenantID = tenantID
 	// Bound the handler by Discord's ~3s first-response deadline via a watchdog
 	// that cancels the ctx. A Defer (which ACKs within that window and opens the
 	// minutes-long follow-up window) stops the watchdog so a slow deferred handler
@@ -242,9 +247,13 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 	if !ok || cmd.Autocomplete == nil {
 		return empty
 	}
-	if err := r.authorize(cmd, ac.guildID, ac.userID); err != nil {
+	tenantID, err := r.gate.Authorize(base, ac.guildID, ac.userID, cmd.GMOnly)
+	if err != nil {
 		return empty
 	}
+	// Tenant-scope the autocomplete so a command's campaign choices are leak-free
+	// (a foreign Tenant's campaigns never appear, #490).
+	ac.tenantID = tenantID
 	ctx, cancel := context.WithTimeout(base, r.responseTimeout)
 	defer cancel()
 	choices, err := cmd.Autocomplete(ctx, ac)
@@ -256,16 +265,6 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 		return empty
 	}
 	return choices
-}
-
-// authorize applies the command's server-side permission rule: GM-only commands
-// require an allowlisted operator in the configured Guild, others just require
-// the configured Guild.
-func (r *Registry) authorize(cmd Command, guildID, userID string) error {
-	if cmd.GMOnly {
-		return r.gate.CheckGM(guildID, userID)
-	}
-	return r.gate.CheckGuild(guildID)
 }
 
 func (r *Registry) lookup(key string) (Command, bool) {
@@ -303,8 +302,12 @@ func gateMessage(err error) string {
 type Interaction struct {
 	guildID string
 	userID  string
-	opts    optionSource
-	resp    responder
+	// tenantID is the Guild's resolved owning Tenant, set by dispatch after the
+	// Gate authorizes the interaction (#490). uuid.Nil outside dispatch (tests that
+	// invoke a handler directly set it explicitly).
+	tenantID uuid.UUID
+	opts     optionSource
+	resp     responder
 	// deferred is set once Defer succeeds: after it, Reply/ReplyEphemeral route
 	// through the post-Defer path, because the interaction is already acknowledged
 	// and a fresh CreateMessage would be a Discord 40060 ("already acknowledged").
@@ -321,6 +324,11 @@ type Interaction struct {
 
 // GuildID is the Guild the interaction happened in, or "" for a DM.
 func (ic *Interaction) GuildID() string { return ic.guildID }
+
+// TenantID is the Guild's resolved owning Tenant (#490), set by dispatch before
+// the handler runs. Handlers thread it into the tenant-scoped storage reads so a
+// command only ever touches its own Tenant's data.
+func (ic *Interaction) TenantID() uuid.UUID { return ic.tenantID }
 
 // UserID is the invoking Discord User's snowflake.
 func (ic *Interaction) UserID() string { return ic.userID }
@@ -414,10 +422,15 @@ func (ic *Interaction) Followup(content string, ephemeral bool) error {
 
 // Autocomplete is the handler's view of one autocomplete interaction.
 type Autocomplete struct {
-	guildID string
-	userID  string
-	data    discord.AutocompleteInteractionData
+	guildID  string
+	userID   string
+	tenantID uuid.UUID
+	data     discord.AutocompleteInteractionData
 }
+
+// TenantID is the Guild's resolved owning Tenant (#490), set by the autocomplete
+// dispatch so choices are tenant-scoped (leak-free).
+func (ac *Autocomplete) TenantID() uuid.UUID { return ac.tenantID }
 
 // Focused is the option the user is currently typing (its name and partial
 // value). The value is decoded defensively: disgo's own accessor panics on a

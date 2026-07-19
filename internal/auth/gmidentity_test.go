@@ -6,20 +6,31 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// fakeBindings is a scripted TenantOperatorLister: it returns the configured
-// snowflakes (or err), counts calls, and can block each list on a gate so the
-// async-refresh dedup is observable.
+// defaultTenant is the Tenant every `ids`-shorthand binding is attributed to, so
+// the deployment-wide IsGM tests keep their terse string form while the snapshot is
+// per-Tenant underneath.
+var defaultTenant = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+// fakeBindings is a scripted TenantOperatorBindingLister: it returns the configured
+// bindings (or err), counts calls, and can block each list on a gate so the
+// async-refresh dedup is observable. The `ids` shorthand attributes each snowflake
+// to defaultTenant; `bindings` sets explicit per-Tenant rows.
 type fakeBindings struct {
-	mu    sync.Mutex
-	ids   []string
-	err   error
-	gate  chan struct{} // when non-nil, each List blocks on it before returning
-	calls int
+	mu       sync.Mutex
+	ids      []string
+	bindings []storage.TenantOperatorBinding
+	err      error
+	gate     chan struct{} // when non-nil, each List blocks on it before returning
+	calls    int
 }
 
-func (f *fakeBindings) ListTenantOperatorDiscordIDs(context.Context) ([]string, error) {
+func (f *fakeBindings) ListTenantOperatorBindings(context.Context) ([]storage.TenantOperatorBinding, error) {
 	if f.gate != nil {
 		<-f.gate
 	}
@@ -29,7 +40,11 @@ func (f *fakeBindings) ListTenantOperatorDiscordIDs(context.Context) ([]string, 
 	if f.err != nil {
 		return nil, f.err
 	}
-	return append([]string(nil), f.ids...), nil
+	out := append([]storage.TenantOperatorBinding(nil), f.bindings...)
+	for _, id := range f.ids {
+		out = append(out, storage.TenantOperatorBinding{TenantID: defaultTenant, DiscordUserID: id})
+	}
+	return out, nil
 }
 
 func (f *fakeBindings) callCount() int {
@@ -41,7 +56,7 @@ func (f *fakeBindings) callCount() int {
 func (f *fakeBindings) set(ids []string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ids, f.err = ids, err
+	f.ids, f.bindings, f.err = ids, nil, err
 }
 
 const (
@@ -74,6 +89,45 @@ func TestGMIdentityUnion(t *testing.T) {
 		t.Error("unbound, non-allowlisted snowflake must not be GM")
 	}
 	if g.IsGM("") {
+		t.Error("the empty (unattributed) speaker must never be GM")
+	}
+}
+
+// TestIsGMInTenant: GM standing is per-Tenant (#490, ADR-0055 deployment-scope
+// caveat closed). A tenant-bound operator is GM in its OWN Tenant only — a Tenant A
+// operator invoking in Tenant B is NOT GM there (the cross-tenant escalation the
+// regression guards). The env allowlist stays a DEPLOYMENT-WIDE override: an
+// allowlisted snowflake is GM in EVERY Tenant (interim platform-admin identity).
+func TestIsGMInTenant(t *testing.T) {
+	tenantA := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000000")
+	tenantB := uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000000")
+
+	bindings := &fakeBindings{bindings: []storage.TenantOperatorBinding{
+		{TenantID: tenantA, DiscordUserID: boundGM},
+	}}
+	g := NewGMIdentity(bindings, ParseOperatorAllowlist(allowedGM), nil)
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// Bound operator: GM in its own Tenant, NOT in another.
+	if !g.IsGMInTenant(tenantA, boundGM) {
+		t.Error("tenant-A operator must be GM in tenant A")
+	}
+	if g.IsGMInTenant(tenantB, boundGM) {
+		t.Error("tenant-A operator must NOT be GM in tenant B (cross-tenant escalation)")
+	}
+
+	// Allowlisted snowflake: deployment-wide override — GM in every Tenant.
+	if !g.IsGMInTenant(tenantA, allowedGM) || !g.IsGMInTenant(tenantB, allowedGM) {
+		t.Error("allowlisted snowflake must be GM in every tenant (deployment-wide override)")
+	}
+
+	// Stranger and the empty speaker: never GM.
+	if g.IsGMInTenant(tenantA, strangerGM) {
+		t.Error("unbound, non-allowlisted snowflake must not be GM in any tenant")
+	}
+	if g.IsGMInTenant(tenantA, "") {
 		t.Error("the empty (unattributed) speaker must never be GM")
 	}
 }

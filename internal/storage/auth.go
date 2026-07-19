@@ -207,6 +207,48 @@ func (s *Store) GetOperatorActiveCampaign(ctx context.Context) (Campaign, error)
 	return c, nil
 }
 
+// TenantOperatorBinding pairs a Tenant with its operator's Discord snowflake —
+// one row of the per-Tenant GM-identity source (#490). It lets GMIdentity scope GM
+// standing to the OWNING Tenant (IsGMInTenant) instead of the deployment-wide union
+// ListTenantOperatorDiscordIDs feeds, closing ADR-0055's deployment-scope caveat: a
+// Tenant A operator is GM in Tenant A only, never in Tenant B's Guild.
+type TenantOperatorBinding struct {
+	TenantID      uuid.UUID
+	DiscordUserID string
+}
+
+// ListTenantOperatorBindings returns each Tenant paired with its operator's Discord
+// snowflake (tenant.operator_user_id → users.discord_user_id) — the per-Tenant
+// GM-identity source (#490, ADR-0055). It is the tenant-scoped analogue of
+// ListTenantOperatorDiscordIDs and shares its exclusions: the synthetic dev operator
+// ([DevOperatorDiscordID]) never appears (it can match no real speaker/interaction
+// user) and a SUSPENDED operator drops out (open-mode revocation reaches GM on the
+// next snapshot refresh). Sorted for determinism. An empty result is not an error.
+func (s *Store) ListTenantOperatorBindings(ctx context.Context) ([]TenantOperatorBinding, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT t.id, u.discord_user_id
+		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
+		  WHERE u.discord_user_id <> $1
+		    AND u.suspended_at IS NULL
+		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
+	}
+	defer rows.Close()
+	var out []TenantOperatorBinding
+	for rows.Next() {
+		var b TenantOperatorBinding
+		if err := rows.Scan(&b.TenantID, &b.DiscordUserID); err != nil {
+			return nil, fmt.Errorf("storage: scan tenant operator binding: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
+	}
+	return out, nil
+}
+
 // NewSession is the input to CreateSession. Token is the opaque random secret
 // the auth tier minted; ExpiresAt is the absolute expiry the validator enforces.
 type NewSession struct {

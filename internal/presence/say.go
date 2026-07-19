@@ -61,8 +61,8 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			vs, active := mgr.Snapshot()
-			if !active {
-				return nil, nil // no session: nothing to puppet, offer nothing
+			if !active || !sessionInTenant(ctx, agents, vs, ac.TenantID()) {
+				return nil, nil // no session for this Tenant: nothing to puppet, offer nothing
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
 			if err != nil {
@@ -84,7 +84,8 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 		},
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active := mgr.Snapshot()
-			if !active {
+			if !active || !sessionInTenant(ctx, agents, vs, ic.TenantID()) {
+				// No session, or the single active session belongs to another Tenant (#490).
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			text, _ := ic.String("text")
