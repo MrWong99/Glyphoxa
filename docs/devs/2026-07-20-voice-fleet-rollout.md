@@ -1,7 +1,7 @@
 # Multi-replica voice fleet rollout (#492, ADR-0057)
 
 Builds on the claim plane (#491, `2026-07-19-voice-claim-plane-rollout.md`). That
-note made `-mode voice` a claim worker; this one lets the chart run **more than
+note made `-mode voice` a claim-plane Voice Instance; this one lets the chart run **more than
 one** of them on the shared central token. The two mechanisms that make N replicas
 safe are the Postgres claim plane (session assignment) and the presence-owner
 election (interaction dispatch).
@@ -15,7 +15,7 @@ the same `/roll`. A singleton `presence_owner` claim row elects exactly ONE
 Instance to register command listeners and dispatch interactions; every non-owner
 Registry is `SetActive(false)` and drops the duplicate events it still receives.
 
-- The `-mode voice` worker boots its Registry **inactive**; an `OwnerElector`
+- A `-mode voice` Voice Instance boots its Registry **inactive**; an `OwnerElector`
   runs beside the claim loop on the same `instanceID` and flips it active only
   while this Instance holds the `presence_owner` row.
 - `-mode all` and the legacy standalone node are always their own single owner —
@@ -59,7 +59,7 @@ live voice (P6).
 
 A pod holding no voice connection for a guild simply receives and ignores that
 guild's voice gateway events (ADR-0057 P6). The claim plane already guarantees one
-worker per live session (one live intent per Tenant), so duplicate voice events on
+Voice Instance per live session (one live intent per Tenant), so duplicate voice events on
 the shared token are inert — only interaction dispatch needed the owner gate.
 
 ## Drain order (SIGTERM)
@@ -84,7 +84,7 @@ catching a serialization regression even without live traffic.
 
 Voice pods **mount** `GLYPHOXA_SECRET` (the `app-secret` key) — the "mounted
 secret" arm of the knob ADR-0057 (d) left open, chosen over forwarding short-lived
-credentials from the web tier. A worker in the pool holds BYOK Tenants' Discord
+credentials from the web tier. A Voice Instance in the pool holds BYOK Tenants' Discord
 clients and must decrypt their bot tokens itself, so the voice role reads the
 platform cipher; this deliberately widens the voice blast radius from ADR-0034's
 old "does NOT read GLYPHOXA_SECRET" posture (which ADR-0057 already amends).
@@ -93,7 +93,7 @@ old "does NOT read GLYPHOXA_SECRET" posture (which ADR-0057 already amends).
 
 A tape-consent button (`/…grant`/`revoke`) is dispatched by the elected presence
 OWNER, which publishes `TapeConsentChanged` on ITS OWN process bus. But in the fleet
-the live tape may be running on a DIFFERENT pod (a claim-plane worker), whose bus
+the live tape may be running on a DIFFERENT pod (a claim-plane Voice Instance), whose bus
 never sees that event — so the same-pod bus fast path alone would strand a cross-pod
 grant/revoke. `wireTapeConsent` therefore also runs a poller goroutine on the cycle
 ctx that re-reads the durable `tape_consent` rows every

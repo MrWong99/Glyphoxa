@@ -76,8 +76,8 @@ Instances** coordinated through a Postgres claim plane, not one replica
 holding one Discord gateway connection by fiat — `replicas` becomes a real
 tunable there. It mounts `GLYPHOXA_SECRET` because a Voice Instance holding a
 BYOK Tenant's per-tenant client must be able to decrypt that Tenant's bot
-token; this widens the voice pod's secret blast radius deliberately (open
-knob on whether decryption happens in the voice role or credentials arrive
-pre-decrypted from the web role, #492). The self-host `-mode all` systemd
+token; this widens the voice pod's secret blast radius deliberately (knob
+resolved on #492: voice pods mount `app-secret` and decrypt directly — see
+`docs/devs/2026-07-20-voice-fleet-rollout.md` § Secret posture). The self-host `-mode all` systemd
 target is unaffected: it already reads GLYPHOXA_SECRET and stays a
 single-process arrangement.
