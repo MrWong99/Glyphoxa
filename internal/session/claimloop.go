@@ -322,12 +322,61 @@ func (l *ClaimLoop) finishSelfExit(intent storage.VoiceSessionIntent) {
 
 // endSession stops the Manager's session for the tenant (blocking until its loop
 // ends and the voice_sessions row lands) and finishes the intent, both on a
-// detached ctx so a cancelled run ctx cannot abort the clean wind-down.
+// detached ctx so a cancelled run ctx cannot abort the clean wind-down. While
+// Stop blocks — finalizers + CloseVoiceSession can take several seconds — a
+// drain heartbeat keeps the claim fresh (#505): winding down is ALIVE, and
+// without it a clean drain inside the budget could cross Expiry unheartbeated
+// and be reaped 'dead' mid-drain. Beats end BEFORE the finish (stopBeat waits
+// out the goroutine), so no beat is ever ordered after the terminal write.
 func (l *ClaimLoop) endSession(tenant uuid.UUID, intentID uuid.UUID, status storage.VoiceSessionIntentStatus, lastError string) {
+	stopBeat := l.startDrainHeartbeat(intentID)
 	if _, err := l.mgr.Stop(l.detached(), tenant); err != nil && !errors.Is(err, ErrNoActiveSession) {
 		l.log.Warn("claim loop: stop session", "intent", intentID, "err", err)
 	}
+	stopBeat()
 	l.finish(intentID, status, lastError)
+}
+
+// startDrainHeartbeat keeps intentID's heartbeat fresh while endSession blocks
+// in Manager.Stop (#505): it beats every cfg.Heartbeat on detached bounded ctxs
+// (the run ctx may already be cancelled — SIGTERM — and one beat may never eat
+// more than dbOpTimeout(Heartbeat)). ErrNotFound means the claim was reaped
+// anyway (a multi-beat DB outage crossed Expiry): log and stop beating — the
+// wind-down itself continues, and this goroutine NEVER calls mgr.Stop (the
+// session is already stopping; ADR-0006: superseded-mid-drain means stop
+// stamping and let the wind-down finish, never re-claim). stop_requested is
+// ignored — the session is already ending. The returned func cancels the
+// goroutine and waits for it to exit.
+func (l *ClaimLoop) startDrainHeartbeat(intentID uuid.UUID) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(l.cfg.Heartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				hbCtx, cancelHB := context.WithTimeout(context.Background(), dbOpTimeout(l.cfg.Heartbeat))
+				_, err := l.store.HeartbeatVoiceSessionIntent(hbCtx, intentID, l.instanceID)
+				cancelHB()
+				if errors.Is(err, storage.ErrNotFound) {
+					l.log.Warn("claim loop: drain heartbeat superseded (claim reaped); letting wind-down finish",
+						"intent", intentID)
+					return
+				}
+				if err != nil {
+					l.log.Warn("claim loop: drain heartbeat", "intent", intentID, "err", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // finish writes the intent's terminal state on a detached, bounded ctx. A

@@ -25,8 +25,19 @@ type fakeIntentStore struct {
 	reapReturns int64 // how many rows ReapDead reports this tick (drives reconcile-after-reap)
 	reconciled  int   // ReconcileWorkerOrphanedVoiceSessions call count
 	heartbeats  int   // HeartbeatVoiceSessionIntent call count (#506 finalize-heartbeat test)
+	// timeline records the order of claim-plane calls ("hb" / "finish") with
+	// timestamps — the #505 drain-heartbeat tests assert beats keep landing
+	// through a slow wind-down and that no beat is ordered after the finish.
+	timeline []timelineEvent
 	// sessionOutcome scripts GetVoiceSession — the self-exit outcome read (#483 L4).
 	sessionOutcome func(uuid.UUID) (storage.VoiceSession, error)
+}
+
+// timelineEvent is one recorded claim-plane call: kind "hb" (heartbeat) or
+// "finish", stamped when the call landed.
+type timelineEvent struct {
+	kind string
+	at   time.Time
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -104,6 +115,7 @@ func (f *fakeIntentStore) HeartbeatVoiceSessionIntent(_ context.Context, id uuid
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heartbeats++
+	f.timeline = append(f.timeline, timelineEvent{kind: "hb", at: time.Now()})
 	i, ok := f.intents[id]
 	if !ok || i.InstanceID != instanceID ||
 		(i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
@@ -123,6 +135,7 @@ func (f *fakeIntentStore) heartbeatCount() int {
 func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UUID, instanceID string, status storage.VoiceSessionIntentStatus, lastError string) (storage.VoiceSessionIntent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.timeline = append(f.timeline, timelineEvent{kind: "finish", at: time.Now()})
 	i, ok := f.intents[id]
 	if !ok || i.InstanceID != instanceID ||
 		(i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
@@ -159,6 +172,12 @@ func (f *fakeIntentStore) GetVoiceSession(_ context.Context, id uuid.UUID) (stor
 		return storage.VoiceSession{}, storage.ErrNotFound
 	}
 	return hook(id)
+}
+
+func (f *fakeIntentStore) timelineCopy() []timelineEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]timelineEvent(nil), f.timeline...)
 }
 
 func (f *fakeIntentStore) reconcileCount() int {
@@ -478,6 +497,55 @@ func TestClaimLoop_HeartbeatsThroughSlowFinalize(t *testing.T) {
 	close(closeGate)
 	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
 	loop.DrainForTest()
+}
+
+// TestClaimLoop_DrainHeartbeatDuringSigterm covers #505 AC1/AC3: a SIGTERM drain
+// whose CloseVoiceSession runs slowly (the slow-finalizer window, parked on the
+// gate) must KEEP heartbeating while endSession blocks in Manager.Stop — before
+// #505 the drain window (up to the Manager's end budgets) went unheartbeated, so
+// a clean wind-down could cross Expiry and be reaped 'dead' mid-drain. Assert
+// beats keep landing during the Stop window, the intent stays live (not
+// terminal) until the finalizer releases, and only THEN finishes 'done'.
+func TestClaimLoop_DrainHeartbeatDuringSigterm(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // parks CloseVoiceSession → the slow wind-down
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { loop.Run(ctx); close(done) }()
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// SIGTERM: runSession's ctx.Done branch enters endSession → Manager.Stop
+	// parks on the close gate. Beats must continue through that window.
+	cancel()
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent status = %q during the drain window, want still live (heartbeating)", got)
+	}
+
+	// Release the slow finalizer: the wind-down completes and the intent
+	// finishes 'done' — a clean drain within budget is never 'dead'.
+	close(closeGate)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not drain after the finalizer released")
+	}
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDone {
+		t.Fatalf("intent status after drain = %q, want done", got)
+	}
 }
 
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
