@@ -55,7 +55,7 @@ jobs:
       # `COPY . .` then embeds. The build imports the generated gen/ts stubs, so
       # it must run AFTER `buf generate`.
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
