@@ -46,6 +46,47 @@ func EncodeStartFailure(err error) string {
 	return err.Error()
 }
 
+// controlFailCodes pairs each typed live-control refusal with its durable code
+// (#503): a hosting worker's Manager control error crosses the plane as
+// voice_session_controls.last_error, and the requester re-maps it to the same
+// sentinel the -mode all path returns. Same encoding rules as startFailCodes.
+var controlFailCodes = []struct {
+	code string
+	err  error
+}{
+	{"no_active_session", ErrNoActiveSession},
+	{"agent_not_in_campaign", ErrAgentNotInCampaign},
+	{"butler_voiceless", ErrButlerVoiceless},
+}
+
+// EncodeControlFailure renders a Manager live-control refusal for
+// voice_session_controls.last_error: "code=<code>: <message>" for a typed
+// sentinel, else the plain message (the requester then surfaces it verbatim).
+func EncodeControlFailure(err error) string {
+	for _, fc := range controlFailCodes {
+		if errors.Is(err, fc.err) {
+			return failCodePrefix + fc.code + ": " + err.Error()
+		}
+	}
+	return err.Error()
+}
+
+// DecodeControlFailure maps an encoded control last_error back to its typed
+// sentinel; ok is false for an uncoded (or unknown-coded) string.
+func DecodeControlFailure(lastError string) (error, bool) {
+	rest, found := strings.CutPrefix(lastError, failCodePrefix)
+	if !found {
+		return nil, false
+	}
+	code, _, _ := strings.Cut(rest, ":")
+	for _, fc := range controlFailCodes {
+		if fc.code == code {
+			return fc.err, true
+		}
+	}
+	return nil, false
+}
+
 // DecodeStartFailure maps an encoded last_error back to its typed sentinel. ok
 // is false for a last_error without a (known) code — older rows, plain loop
 // errors, or a future code this binary does not know.

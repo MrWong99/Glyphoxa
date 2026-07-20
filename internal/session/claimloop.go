@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -42,6 +43,12 @@ type IntentStore interface {
 	// (#483 L4): a session that ended 'failed' on its own finishes its intent
 	// 'failed' with the row's end_reason, not a clean-looking 'done'.
 	GetVoiceSession(ctx context.Context, id uuid.UUID) (storage.VoiceSession, error)
+	// The requested-control queue (#503): the HOSTING worker drains its live
+	// intents' pending control rows each heartbeat tick and finishes each with a
+	// fenced terminal write; the tick sweep retires pendings of terminal intents.
+	ListPendingVoiceSessionControls(ctx context.Context, intentID uuid.UUID) ([]storage.VoiceSessionControl, error)
+	FinishVoiceSessionControl(ctx context.Context, id uuid.UUID, status storage.VoiceSessionControlStatus, resultIDs []string, lastError string) (storage.VoiceSessionControl, error)
+	SweepOrphanedVoiceSessionControls(ctx context.Context) (int64, error)
 }
 
 // dbOpCap caps a single claim-plane DB call (#483 M1), mirroring the presence
@@ -159,6 +166,18 @@ func (l *ClaimLoop) tick(ctx context.Context) {
 		l.log.Warn("claim loop: closed orphaned voice sessions behind terminal intents", "count", rn)
 	}
 	cancelRec()
+
+	// Retire pending controls whose intent is already terminal (#503): controls
+	// are never dispatched during a wind-down (dispatch is gated on live in the
+	// heartbeat branch), so a stopping session's stragglers die here instead of
+	// sitting pending forever.
+	swCtx, cancelSw := context.WithTimeout(ctx, dbOpTimeout(l.cfg.Poll))
+	if sn, err := l.store.SweepOrphanedVoiceSessionControls(swCtx); err != nil {
+		l.log.Warn("claim loop: sweep orphaned controls", "err", err)
+	} else if sn > 0 {
+		l.log.Warn("claim loop: failed orphaned voice session controls behind terminal intents", "count", sn)
+	}
+	cancelSw()
 
 	for l.mgr.HasCapacity() {
 		claimCtx, cancelClaim := context.WithTimeout(ctx, dbOpTimeout(l.cfg.Poll))
@@ -291,7 +310,69 @@ func (l *ClaimLoop) runSession(ctx context.Context, intent storage.VoiceSessionI
 				l.endSession(tenant, intent.ID, storage.VoiceIntentDone, "")
 				return
 			}
+			if live {
+				l.dispatchControls(ctx, intent) // #503 — the ONLY #503 line in runSession
+			}
 		}
+	}
+}
+
+// dispatchControls drains the intent's pending control rows (#503) in
+// (created_at, id) order and executes each against the LOCAL Manager — this
+// worker HOSTS the session, so the dispatch never moves it (ADR-0006/0057 (e)).
+// Each execute and each terminal write is bounded by a dbOpTimeout-style cap so
+// a hung roster read can never starve the heartbeat this runs after (the
+// heartbeat ALWAYS lands first in the tick). A fenced Finish that NotFounds
+// (the requester's budget cancel, or the sweep, won the race) is swallowed —
+// the row is already settled and the requester was answered honestly.
+func (l *ClaimLoop) dispatchControls(ctx context.Context, intent storage.VoiceSessionIntent) {
+	listCtx, cancelList := context.WithTimeout(ctx, dbOpTimeout(l.cfg.Heartbeat))
+	pending, err := l.store.ListPendingVoiceSessionControls(listCtx, intent.ID)
+	cancelList()
+	if err != nil {
+		l.log.Warn("claim loop: list pending controls", "intent", intent.ID, "err", err)
+		return
+	}
+	for _, c := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		resultIDs, execErr := l.executeControl(ctx, intent.TenantID, c)
+		status, lastError := storage.VoiceControlDone, ""
+		if execErr != nil {
+			status, lastError = storage.VoiceControlFailed, EncodeControlFailure(execErr)
+		}
+		finCtx, cancelFin := context.WithTimeout(ctx, dbOpCap)
+		_, ferr := l.store.FinishVoiceSessionControl(finCtx, c.ID, status, resultIDs, lastError)
+		cancelFin()
+		if ferr != nil && !errors.Is(ferr, storage.ErrNotFound) {
+			l.log.Warn("claim loop: finish control", "control", c.ID, "err", ferr)
+		}
+	}
+}
+
+// controlExecTimeout caps ONE control's Manager execute (a roster read plus an
+// in-process write/publish) so a black-holed store call cannot pin the
+// heartbeat goroutine (#503; mirrors dbOpCap's posture).
+const controlExecTimeout = 5 * time.Second
+
+// executeControl runs one control verb against the local Manager.
+func (l *ClaimLoop) executeControl(ctx context.Context, tenantID uuid.UUID, c storage.VoiceSessionControl) ([]string, error) {
+	execCtx, cancel := context.WithTimeout(ctx, controlExecTimeout)
+	defer cancel()
+	switch c.Kind {
+	case storage.VoiceControlMuteAgent:
+		return l.mgr.SetAgentMute(execCtx, tenantID, c.AgentID, c.Muted)
+	case storage.VoiceControlMuteAll:
+		return l.mgr.SetAllMute(execCtx, tenantID, c.Muted)
+	case storage.VoiceControlSay:
+		return nil, l.mgr.SayAs(execCtx, tenantID, c.AgentID, c.SayText)
+	case storage.VoiceControlButlerSay:
+		return nil, l.mgr.SpeakAsButler(execCtx, tenantID, c.SayText)
+	default:
+		// A future verb this binary does not know: fail it honestly rather than
+		// leave it pending forever (the requester surfaces the message verbatim).
+		return nil, fmt.Errorf("unknown control kind %q", c.Kind)
 	}
 }
 
