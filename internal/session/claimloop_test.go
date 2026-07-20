@@ -14,6 +14,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 // fakeIntentStore is an in-memory session.IntentStore: it models the claim-plane
@@ -904,6 +905,195 @@ func TestClaimLoop_DrainBeatsEndBeforeFinish(t *testing.T) {
 		if e.kind == "hb" {
 			t.Fatal("a heartbeat was ordered AFTER the finish — drain beats must end before the terminal write")
 		}
+	}
+}
+
+// markLiveFailStore scripts MarkVoiceSessionIntentLive to fail with a
+// non-NotFound error (a DB blip), leaving the row 'claimed' with its
+// heartbeat_at from claim time — the #509-review residual 1 setup.
+type markLiveFailStore struct {
+	*fakeIntentStore
+	err error
+}
+
+func (s *markLiveFailStore) MarkVoiceSessionIntentLive(context.Context, uuid.UUID, string, uuid.UUID) (storage.VoiceSessionIntent, error) {
+	return storage.VoiceSessionIntent{}, s.err
+}
+
+// TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure covers #509-review residual
+// 1: a mark-live failure stops the just-started session, and that Stop blocks
+// through the finalizers with the row still 'claimed' and heartbeat_at from
+// claim time. Un-heartbeated, a slow wind-down crosses Expiry and the reaper
+// records the TRUE mark-live failure as "worker heartbeat expired" ('dead').
+// The path must drain-beat like endSession does: under a live reaper and a
+// wind-down held open for ~5x Expiry, the row stays 'claimed' the whole time
+// and then finishes 'failed' carrying the mark-live error — never 'dead'.
+func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // parks CloseVoiceSession → the slow wind-down
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := &markLiveFailStore{fakeIntentStore: newFakeIntentStore(), err: errors.New("db blip")}
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: 20 * time.Millisecond})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+
+	// The tick blocks inside startClaimed (Stop parked on the gate) — run it in a
+	// goroutine, like the reaper ticks below run concurrently against it.
+	tickDone := make(chan struct{})
+	go func() { loop.TickForTest(context.Background()); close(tickDone) }()
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+
+	// Beats must land while Stop is parked (the row is 'claimed', which the store
+	// heartbeat fence accepts).
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+
+	// Keep reap ticks running while the wind-down is held open for ~5x Expiry:
+	// the row must stay 'claimed' throughout — never reaped 'dead'.
+	reapStop := make(chan struct{})
+	reapDone := make(chan struct{})
+	go func() {
+		defer close(reapDone)
+		for {
+			select {
+			case <-reapStop:
+				return
+			default:
+				loop.TickForTest(context.Background())
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentClaimed {
+			t.Fatalf("intent status = %q mid-stop under a live reaper, want claimed", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Release the finalizer: the true failure lands on the row.
+	close(closeGate)
+	select {
+	case <-tickDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tick did not return after the finalizer released")
+	}
+	close(reapStop)
+	<-reapDone
+	got := istore.get(intent.ID)
+	if got.Status != storage.VoiceIntentFailed {
+		t.Fatalf("intent status = %q, want failed carrying the mark-live error", got.Status)
+	}
+	if !strings.Contains(got.LastError, "mark-live failed") || !strings.Contains(got.LastError, "db blip") {
+		t.Fatalf("intent last_error = %q, want the true mark-live failure", got.LastError)
+	}
+
+	// Same ordering contract as endSession: no beat after the terminal write.
+	events := istore.timelineCopy()
+	finishAt := -1
+	for i, e := range events {
+		if e.kind == "finish" {
+			finishAt = i
+			break
+		}
+	}
+	if finishAt < 0 {
+		t.Fatal("no finish recorded in the call timeline")
+	}
+	for _, e := range events[finishAt+1:] {
+		if e.kind == "hb" {
+			t.Fatal("a heartbeat was ordered AFTER the finish — drain beats must end before the terminal write")
+		}
+	}
+}
+
+// stuckRunner models a session run loop wedged past ctx cancel — the ONLY
+// unbounded step in Manager.Stop (the finalizers and end-write are all
+// endTimeout-bounded). It ignores cancellation and unblocks only on release.
+type stuckRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func newStuckRunner() *stuckRunner {
+	return &stuckRunner{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *stuckRunner) run(context.Context, wirenpc.Config) error {
+	close(r.started)
+	<-r.release // NOT ctx.Done() — a wedged loop never observes the cancel
+	return nil
+}
+
+// TestClaimLoop_DrainBeatCapLetsReaperReclaim covers #509-review residual 2
+// (the risk #505 introduced): on a stop_requested wind-down whose run loop is
+// wedged past ctx cancel, uncapped drain beats keep the intent 'live' FOREVER —
+// the Tenant's voice plane is pinned permanently, where pre-#505 the reaper
+// freed it within Expiry. The drain beats must stop after DrainBeatCap, letting
+// the heartbeat go stale so the reaper reclaims the row ('dead'), and the
+// eventually-unwedged finish is fenced NotFound — never a resurrection.
+func TestClaimLoop_DrainBeatCapLetsReaperReclaim(t *testing.T) {
+	mstore := newFakeStore()
+	runner := newStuckRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond,
+			Expiry: 20 * time.Millisecond, DrainBeatCap: 40 * time.Millisecond})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// stop_requested → endSession → Manager.Stop blocks forever on the wedged
+	// loop. Drain beats run, then MUST cease once the cap elapses.
+	istore.requestStop(intent.ID)
+	waitFor(t, 2*time.Second, func() bool {
+		before := istore.heartbeatCount()
+		time.Sleep(10 * time.Millisecond)
+		return istore.heartbeatCount() == before
+	})
+
+	// With beats ceased the heartbeat goes stale and the reaper reclaims: the
+	// Tenant's voice plane is freed even though this worker is still wedged.
+	waitFor(t, time.Second, func() bool {
+		loop.TickForTest(context.Background())
+		return istore.get(intent.ID).Status == storage.VoiceIntentDead
+	})
+
+	// Unwedge: the wind-down completes, the finish NotFounds on the dead row
+	// (swallowed), every goroutine exits, and the row is never resurrected.
+	close(runner.release)
+	loop.DrainForTest()
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDead {
+		t.Fatalf("intent status = %q after the wedged drain unblocked, want dead (no resurrection)", got)
+	}
+}
+
+// TestClaimLoop_DrainBeatCapDefaults pins the cap's defaulting: unset derives
+// 10x Expiry (300s at the 30s default — matching the deploy's
+// terminationGracePeriodSeconds and far above every finalizer budget, so no
+// legitimate slow wind-down is ever cut off); an explicit value is respected.
+func TestClaimLoop_DrainBeatCapDefaults(t *testing.T) {
+	mstore := newFakeStore()
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	derived := session.NewClaimLoop(newFakeIntentStore(), mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Expiry: 7 * time.Second})
+	if got := derived.DrainBeatCapForTest(); got != 70*time.Second {
+		t.Fatalf("derived DrainBeatCap = %v, want 10x Expiry (70s)", got)
+	}
+	explicit := session.NewClaimLoop(newFakeIntentStore(), mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Expiry: 7 * time.Second, DrainBeatCap: time.Minute})
+	if got := explicit.DrainBeatCapForTest(); got != time.Minute {
+		t.Fatalf("explicit DrainBeatCap = %v, want 1m", got)
 	}
 }
 

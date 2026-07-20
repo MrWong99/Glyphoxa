@@ -17,6 +17,10 @@ func (l *ClaimLoop) TickForTest(ctx context.Context) { l.tick(ctx) }
 // wait Run does on ctx cancellation (the graceful drain, #491). Test-only.
 func (l *ClaimLoop) DrainForTest() { l.wg.Wait() }
 
+// DrainBeatCapForTest returns the resolved drain-beat cap so a test can pin
+// NewClaimLoop's defaulting (#509 review residual 2). Test-only.
+func (l *ClaimLoop) DrainBeatCapForTest() time.Duration { return l.cfg.DrainBeatCap }
+
 // SetClockForTest swaps the clock the per-tick control-drain budget reads (#503
 // FIX2), so a test drives the aggregate-budget cutoff deterministically without
 // wall-clock sleeps. Test-only.
