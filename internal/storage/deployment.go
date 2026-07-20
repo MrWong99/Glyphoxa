@@ -163,7 +163,7 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 // ReleaseDiscordGuild frees a Tenant's bound guild (#504): an atomic
 // compare-and-clear — the caller echoes the guild_id it believes is bound, and
 // the row is cleared only when tenant AND guild match (no read-then-write race).
-// guild_id = '' is the unconfigured state (migration 00037), so release needs no
+// guild_id = ” is the unconfigured state (migration 00037), so release needs no
 // schema change and frees the first-registrar-wins index slot for the next
 // binder (legit transfer: A releases, B saves with proof). The Bot token is
 // untouched. No matching bound row — wrong echo, already released, or no config
