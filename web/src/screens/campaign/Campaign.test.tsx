@@ -22,6 +22,7 @@ import {
   ListCharactersResponseSchema,
   ListDiscordVoiceMembersResponseSchema,
   ListKnowledgeProposalsResponseSchema,
+  GeneratePersonaResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -518,6 +519,52 @@ describe("Campaign", () => {
     fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
     fireEvent.click(screen.getByRole("button", { name: /save scope/i }));
     await waitFor(() => expect(configs).toContain('{"scope":"campaign"}'));
+  });
+
+  it("Generate persona sends the live (unsaved) name/title, not the stored cast entry (#480)", async () => {
+    // The stored NPC still carries the "New NPC" placeholder; the GM types a
+    // real name WITHOUT saving, then generates. The RPC must carry the live
+    // form values — the repro drafted "Du bist New NPC" otherwise.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, {
+      id: "n1",
+      campaignId: "c1",
+      role: "character",
+      name: "New NPC",
+      title: "Stored Title",
+      voice: "rachel",
+    });
+    const seen: { name?: string; title?: string }[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        generatePersona: (req) => {
+          seen.push({ name: req.name, title: req.title });
+          return create(GeneratePersonaResponseSchema, { persona: "**Du bist Jule Brandt**" });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("New NPC"));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Jule Brandt" } });
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Draft with your LLM"), { target: { value: "a stern harbourmaster" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate persona/i }));
+
+    // The RPC carried the live form values — including the cleared title, whose
+    // presence tells the server NOT to fall back to the stored one.
+    await waitFor(() => expect(seen).toHaveLength(1));
+    expect(seen[0]).toEqual({ name: "Jule Brandt", title: "" });
+    // The draft landed in the persona field for review (still unsaved).
+    await waitFor(() =>
+      expect((screen.getByLabelText("Persona") as HTMLTextAreaElement).value).toBe("**Du bist Jule Brandt**"),
+    );
   });
 
   it("the grant Switch never persists an unsaved scope edit; only Save scope does (#215)", async () => {
