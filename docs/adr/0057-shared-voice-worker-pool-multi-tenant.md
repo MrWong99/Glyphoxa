@@ -130,13 +130,27 @@ instance — the Tenant restarts the session.
   a shared token; only the elected presence owner dispatches them.
 - A voice pod split from the web tier still has no live SSE transcript relay
   (ADR-0014's Hop-A remains deferred) and no mute/say RPCs — those gaps are
-  pre-existing and unchanged by this ADR.
+  pre-existing and unchanged by this ADR. *(The mute/say half of this
+  consequence is superseded by #503 — see Amendments.)*
 - The secret blast radius is deliberately widened: the voice role now reads
   `GLYPHOXA_SECRET`, a posture change from today's chart (superseded below).
 - Running K concurrent DAVE sessions in one process is soak-unverified; #493
   tracks the load test that must precede committing to a K value.
 
 ## Amendments
+
+**Cross-pod live controls (2026-07-20, #503)** — the consequence above that a
+split deployment has "no mute/say" is SUPERSEDED per the SaaS directive on
+#503: mute / muteall / say / voiced-recap now RELAY through a
+`voice_session_controls` queue hanging off `voice_session_intents`
+(`internal/storage/voicecontrol.go`, `internal/session/intentcontrol.go`). The
+mechanism stays inside this ADR's own rules: DB-write-then-poll only, no
+LISTEN/NOTIFY (decision (b)); the control row never re-targets another
+instance and only the OWNING worker's own claim loop dispatches it against its
+local Manager (decision (e), ADR-0006); a confirmation is posted only after
+the worker's terminal row — a requester timeout is an error, never a claimed
+success (ADR-0012). Highlight replay and the web panel's muted-set read remain
+degraded in split mode (out of #503's scope).
 
 **ADR-0039** — its claim that "the `voice.v1 VoiceControlService` proto
 (`claim_session` / `release_session` / `push_event`) is authored now" is

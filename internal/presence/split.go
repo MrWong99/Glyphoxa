@@ -28,6 +28,9 @@ type PoolControl interface {
 	SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error
 }
 
+// compile-time proof the claim-plane control satisfies the seam.
+var _ PoolControl = (*session.IntentControl)(nil)
+
 // poolActive resolves the Tenant's session from the pool when the LOCAL Manager
 // has none: the cross-pod branch's entry read. A nil pool (-mode all) or a pool
 // read error reports not-live — the caller then gives the plain no-session

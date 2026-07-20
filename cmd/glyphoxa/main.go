@@ -436,15 +436,14 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// row). Route them through IntentControl so /glyphoxa start writes an intent this
 	// same worker's loop claims (typically within one poll) and /glyphoxa end
 	// requests the stop the loop honors — exactly the plane the web tier uses. The
-	// live controls (mute/say) still drive the LOCAL Manager, which holds a live
-	// session only when THIS worker is running it: at replicas > 1 the presence
-	// owner dispatching the interaction may not be the session's host, so those
-	// commands take intentControl as their PoolSession and reply the split-mode
-	// limitation (#483) when the session is live on another worker — the cross-pod
-	// control plane is #503. search and recap resolve their Active Campaign through
-	// intentControl (the pool-wide Active), so they work regardless of which worker
-	// hosts the session; a `voiced` recap still degrades to public text when the
-	// Butler isn't in THIS worker's session (decision 6a).
+	// live controls (mute/say) drive the LOCAL Manager when THIS worker hosts the
+	// session, and otherwise RELAY through intentControl's voice_session_controls
+	// queue (#503) to the hosting worker — so at replicas > 1 the presence owner
+	// dispatching the interaction controls a session it does not host. search and
+	// recap resolve their Active Campaign through intentControl (the pool-wide
+	// Active), so they work regardless of which worker hosts the session; a
+	// `voiced` recap speaks locally when this worker hosts the session and relays
+	// via the ButlerControl otherwise.
 	intentControl := session.NewIntentControl(store, log, voiceIntentControlConfig(os.Getenv))
 
 	// Register the full tenant command surface (start/end/search/mute/say/recap),
@@ -454,7 +453,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.StartCommand(store, intentControl),
 		presence.EndCommand(intentControl),
 		presence.SearchCommand(store, intentControl),
-		presence.RecapCommand(store, intentControl, recapEngine, mgr),
+		presence.RecapCommand(store, intentControl, recapEngine, session.NewButlerControl(mgr, intentControl)),
 		presence.MuteCommand(mgr, store, intentControl),
 		presence.MuteAllCommand(mgr, store, intentControl),
 		presence.SayCommand(mgr, store, intentControl),
