@@ -584,6 +584,49 @@ func TestClaimLoop_DrainHeartbeatDuringStopRequested(t *testing.T) {
 	loop.DrainForTest()
 }
 
+// TestClaimLoop_DrainHeartbeatSupersededStopsBeating covers #505's reaped-anyway
+// arm (ADR-0006 superseded-mid-drain): if the claim is reaped DURING the drain
+// (a multi-beat DB outage crossed Expiry), the drain-beat goroutine stops
+// stamping — it never re-claims and never calls mgr.Stop again — while the
+// wind-down itself completes; the finish is fenced NotFound and swallowed, the
+// row stays 'dead', and the goroutine exits (DrainForTest returns — no leak).
+func TestClaimLoop_DrainHeartbeatSupersededStopsBeating(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// Enter the drain (stop_requested) and let it park on the close gate.
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+
+	// The reaper wins mid-drain: the next drain beat NotFounds and stops beating.
+	istore.markDead(intent.ID)
+	waitFor(t, time.Second, func() bool {
+		before := istore.heartbeatCount()
+		time.Sleep(10 * time.Millisecond)
+		return istore.heartbeatCount() == before
+	})
+
+	// The wind-down still completes; the finish is swallowed (row stays 'dead')
+	// and every goroutine exits.
+	close(closeGate)
+	loop.DrainForTest()
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDead {
+		t.Fatalf("intent status = %q, want dead (superseded-mid-drain never resurrected)", got)
+	}
+}
+
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
 // Manager is at capacity (single-session default): a second pending intent is
 // left pending while the first runs.
