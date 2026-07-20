@@ -548,6 +548,42 @@ func TestClaimLoop_DrainHeartbeatDuringSigterm(t *testing.T) {
 	}
 }
 
+// TestClaimLoop_DrainHeartbeatDuringStopRequested covers #505's second call
+// site: a stop_requested wind-down has the SAME unheartbeated window as the
+// SIGTERM drain (endSession blocks in Manager.Stop through the finalizers), so
+// beats must keep landing there too, and the intent finishes 'done' only after
+// the slow finalizer releases.
+func TestClaimLoop_DrainHeartbeatDuringStopRequested(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// stop_requested → runSession's ticker branch enters endSession →
+	// Manager.Stop parks on the close gate. Beats must continue.
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent status = %q during the stop wind-down, want still live (heartbeating)", got)
+	}
+
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	loop.DrainForTest()
+}
+
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
 // Manager is at capacity (single-session default): a second pending intent is
 // left pending while the first runs.
