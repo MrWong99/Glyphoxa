@@ -85,6 +85,10 @@ type RecapEngine interface {
 // CodeFailedPrecondition rather than lie (ADR-0057 consequence).
 var errSplitMode = errors.New("not available in a split deployment (the voice worker holds the live session)")
 
+// errControlPending is the static client message for a relayed live control
+// (#503) the hosting worker did not confirm within the control budget.
+var errControlPending = errors.New("the voice worker has not confirmed the control yet; try again shortly")
+
 // searchTranscriptLimit caps a transcript search result set (#120). It is a fixed
 // server policy for the single-operator web tier (ADR-0039), mirroring
 // searchNodesLimit; the client sends no limit.
@@ -361,6 +365,10 @@ func (s *SessionServer) SetAgentMute(
 	switch {
 	case errors.Is(err, session.ErrSplitMode):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errSplitMode)
+	case errors.Is(err, session.ErrControlPending):
+		// #503: split-mode mutes relay through the claim plane; an unconfirmed
+		// relay is retryable, never a false success (ADR-0012).
+		return nil, connect.NewError(connect.CodeUnavailable, errControlPending)
 	case errors.Is(err, session.ErrNoActiveSession):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
 	case errors.Is(err, session.ErrAgentNotInCampaign):
@@ -386,6 +394,10 @@ func (s *SessionServer) SetAllMute(
 	ids, err := s.mgr.SetAllMute(ctx, tenantID, req.Msg.GetMuted())
 	if errors.Is(err, session.ErrSplitMode) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errSplitMode)
+	}
+	if errors.Is(err, session.ErrControlPending) {
+		// #503: see SetAgentMute — relayed control unconfirmed, retry.
+		return nil, connect.NewError(connect.CodeUnavailable, errControlPending)
 	}
 	if errors.Is(err, session.ErrNoActiveSession) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
