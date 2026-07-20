@@ -122,6 +122,52 @@ func TestGeneratePersona_HappyPath(t *testing.T) {
 	}
 }
 
+// TestGeneratePersona_LiveFormOverride is the #480 regression: the editor's
+// live (possibly unsaved) name/title must reach the engine instead of the
+// stored placeholder — otherwise a draft for a freshly typed "Jule Brandt"
+// opens with "Du bist New NPC". Unset fields keep the stored fallback;
+// set-but-empty means the GM cleared the field.
+func TestGeneratePersona_LiveFormOverride(t *testing.T) {
+	t.Parallel()
+	store := newFakeAssistStore()
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID}
+	agentID := uuid.New()
+	store.agents[agentID] = storage.Agent{ID: agentID, CampaignID: campID, Role: storage.AgentRoleCharacter, Name: "New NPC", Title: "Stored Title"}
+	eng := &fakeAssistEngine{persona: "p"}
+	client := assistClient(t, store, eng)
+
+	strp := func(s string) *string { return &s }
+	generate := func(name, title *string) {
+		t.Helper()
+		_, err := client.GeneratePersona(context.Background(),
+			connect.NewRequest(&managementv1.GeneratePersonaRequest{
+				AgentId: agentID.String(), Prompt: "ok", Name: name, Title: title,
+			}))
+		if err != nil {
+			t.Fatalf("GeneratePersona: %v", err)
+		}
+	}
+
+	// Live values win over the stored agent fields.
+	generate(strp("Jule Brandt"), strp("Harbourmaster"))
+	if eng.gotPersona.AgentName != "Jule Brandt" || eng.gotPersona.AgentTitle != "Harbourmaster" {
+		t.Errorf("agent fields = %+v, want the live form values Jule Brandt/Harbourmaster", eng.gotPersona)
+	}
+
+	// Set-but-empty is a cleared field — the stored value must not resurrect.
+	generate(strp("Jule Brandt"), strp(""))
+	if eng.gotPersona.AgentTitle != "" {
+		t.Errorf("cleared title = %q, want empty (no stored fallback)", eng.gotPersona.AgentTitle)
+	}
+
+	// Unset fields (an older client) fall back to the stored agent.
+	generate(nil, nil)
+	if eng.gotPersona.AgentName != "New NPC" || eng.gotPersona.AgentTitle != "Stored Title" {
+		t.Errorf("agent fields = %+v, want the stored fallback New NPC/Stored Title", eng.gotPersona)
+	}
+}
+
 func TestGeneratePersona_Validation(t *testing.T) {
 	t.Parallel()
 	store := newFakeAssistStore()

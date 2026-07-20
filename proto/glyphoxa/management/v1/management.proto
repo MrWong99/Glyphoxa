@@ -552,12 +552,18 @@ message SearchNodesResponse {
 // (#479). The campaign is resolved server-side; its name, System, and Language
 // season the draft.
 message GeneratePersonaRequest {
-  // agent_id is the Agent whose Persona to draft; its current name/title season
-  // the prompt. Must belong to the active campaign.
+  // agent_id is the Agent whose Persona to draft. Must belong to the active
+  // campaign.
   string agent_id = 1;
   // prompt is the GM's short description of the wanted character; empty is
   // rejected.
   string prompt = 2;
+  // name/title are the editor's live (possibly unsaved) form values, which
+  // season the prompt (#480) — without them the draft addresses the last-saved
+  // name (e.g. the "New NPC" placeholder). Unset falls back to the stored Agent
+  // field; set-but-empty means the GM cleared the field.
+  optional string name = 3;
+  optional string title = 4;
 }
 
 // GeneratePersonaResponse carries the drafted Persona markdown — a proposal for

@@ -278,7 +278,10 @@ function AgentEditor({
   const draftPersona = async () => {
     setDraftError(null);
     try {
-      const res = await generate.mutateAsync({ agentId: agent.id, prompt: draftPrompt });
+      // The live form name/title ride along so the draft addresses what the GM
+      // has typed, not the stored cast entry — which may still be the "New NPC"
+      // placeholder when the GM hasn't saved yet (#480).
+      const res = await generate.mutateAsync({ agentId: agent.id, prompt: draftPrompt, name, title });
       setPersona(res.persona);
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : String(err));

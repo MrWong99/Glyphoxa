@@ -78,7 +78,9 @@ func assistEngineErr(op string, err error) *connect.Error {
 }
 
 // GeneratePersona drafts a Persona for one Agent from the GM's short prompt
-// (#479). The draft is returned for review in the editor — never persisted. An
+// (#479). The request's live editor name/title season the draft, falling back
+// to the stored Agent fields when unset (#480). The draft is returned for
+// review in the editor — never persisted. An
 // empty/oversized prompt or unparsable agent_id is CodeInvalidArgument; a
 // missing or cross-campaign agent is CodeNotFound; drafting failures map via
 // assistEngineErr. State-changing (spends provider quota): auth + CSRF guard it.
@@ -120,9 +122,20 @@ func (s *campaignAssist) GeneratePersona(
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 
+	// The editor's live (possibly unsaved) name/title win over the stored Agent
+	// fields (#480). Unset falls back to the stored value; set-but-empty means
+	// the GM cleared the field, so nothing must resurrect the stored one.
+	name, title := agent.Name, agent.Title
+	if req.Msg.Name != nil {
+		name = req.Msg.GetName()
+	}
+	if req.Msg.Title != nil {
+		title = req.Msg.GetTitle()
+	}
+
 	persona, err := s.engine.GeneratePersona(ctx, c, assist.PersonaInput{
-		AgentName:  agent.Name,
-		AgentTitle: agent.Title,
+		AgentName:  name,
+		AgentTitle: title,
 		Prompt:     prompt,
 	})
 	if err != nil {
