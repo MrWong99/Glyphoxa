@@ -436,8 +436,15 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// row). Route them through IntentControl so /glyphoxa start writes an intent this
 	// same worker's loop claims (typically within one poll) and /glyphoxa end
 	// requests the stop the loop honors — exactly the plane the web tier uses. The
-	// live controls (search/recap/mute/say) still drive the Manager, which holds the
-	// live session this worker is running.
+	// live controls (mute/say) still drive the LOCAL Manager, which holds a live
+	// session only when THIS worker is running it: at replicas > 1 the presence
+	// owner dispatching the interaction may not be the session's host, so those
+	// commands take intentControl as their PoolSession and reply the split-mode
+	// limitation (#483) when the session is live on another worker — the cross-pod
+	// control plane is #503. search and recap resolve their Active Campaign through
+	// intentControl (the pool-wide Active), so they work regardless of which worker
+	// hosts the session; a `voiced` recap still degrades to public text when the
+	// Butler isn't in THIS worker's session (decision 6a).
 	intentControl := session.NewIntentControl(store, log, voiceIntentControlConfig(os.Getenv))
 
 	// Register the full tenant command surface (start/end/search/mute/say/recap),
@@ -446,11 +453,11 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.UseCommand(store),
 		presence.StartCommand(store, intentControl),
 		presence.EndCommand(intentControl),
-		presence.SearchCommand(store, mgr),
-		presence.RecapCommand(store, mgr, recapEngine, mgr),
-		presence.MuteCommand(mgr, store),
-		presence.MuteAllCommand(mgr, store),
-		presence.SayCommand(mgr, store),
+		presence.SearchCommand(store, intentControl),
+		presence.RecapCommand(store, intentControl, recapEngine, mgr),
+		presence.MuteCommand(mgr, store, intentControl),
+		presence.MuteAllCommand(mgr, store, intentControl),
+		presence.SayCommand(mgr, store, intentControl),
 	)
 	if err := clients.EnsureAll(ctx); err != nil {
 		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
@@ -1151,13 +1158,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			presence.RecapCommand(store, mgr, recapEngine, mgr),
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
-			presence.MuteCommand(mgr, store),
-			presence.MuteAllCommand(mgr, store),
+			// The nil PoolSession is deliberate: -mode all hosts every session in this
+			// one process, so the local Manager read is already the whole truth (#483).
+			presence.MuteCommand(mgr, store, nil),
+			presence.MuteAllCommand(mgr, store, nil),
 			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
 			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
 			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
 			// voiced roster for the resolver + autocomplete.
-			presence.SayCommand(mgr, store),
+			presence.SayCommand(mgr, store, nil),
 		)
 		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
 		// Session), one standing client per distinct Bot token (#489, ADR-0039

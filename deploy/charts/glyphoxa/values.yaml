@@ -175,6 +175,13 @@ voice:
   # double-handling a slash command. Default 1 (a self-host install needs no
   # fleet); set > 1 for the SaaS deploy, which also arms the PodDisruptionBudget
   # below.
+  #
+  # KNOWN GAP at replicas > 1 (#503): the live slash controls (/glyphoxa mute,
+  # /glyphoxa muteall, /say) work only when the elected presence owner also hosts
+  # the Tenant's session — when another worker hosts it, the command replies a
+  # clear "hosted by another worker" limitation (never a false "no session") and
+  # the web panel is the fallback. /glyphoxa start/end/search/recap are pool-wide
+  # and unaffected.
   replicas: 1
 
   # Termination grace period (#492, ADR-0006/0057): SIGTERM stops the worker

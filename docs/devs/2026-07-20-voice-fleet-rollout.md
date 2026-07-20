@@ -61,6 +61,26 @@ never running two owners at once (ADR-0057 (c) prefers a brief gap over a
 double-dispatch); it is the same order as the failover window and does not affect
 live voice (P6).
 
+## Live slash controls at replicas > 1 (#483 → #503)
+
+Interactions are dispatched by the elected presence OWNER, but a Tenant's live
+session may be hosted by a DIFFERENT worker in the pool — and the live-control
+state (the mute set, the say/replay outbound pump) lives in the hosting worker's
+Manager, unreachable from the owner. So at `replicas > 1`:
+
+- `/glyphoxa mute`, `/glyphoxa muteall` and `/say` work only when the presence
+  owner happens to also host the session. When it does not, the handler consults
+  the claim plane and replies honestly — "hosted by another worker; live controls
+  aren't available from here yet" — instead of the false "No Voice Session is
+  active." The cross-pod control plane that would make them work from any pod is
+  tracked in **#503**.
+- `/glyphoxa search` and `/glyphoxa recap` resolve the Active Campaign through
+  the claim plane (pool-wide), so they work regardless of which worker hosts the
+  session; a `voiced` recap degrades to public text when the Butler is not in the
+  owner's own session (decision 6a).
+- The web panel's mute/say already degrade with `CodeFailedPrecondition` in a
+  split deployment (ADR-0057 consequence) — unchanged.
+
 ## Voice itself needs no election
 
 A pod holding no voice connection for a guild simply receives and ignores that

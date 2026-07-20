@@ -89,9 +89,12 @@ deployments**; never mix them on one database.
 web tier: start writes an intent this same Voice Instance's loop claims (typically within
 one poll), end requests the stop the loop honors. They never drive the Manager
 directly, so a slash-started session always has an intent row (heartbeat,
-reconcilable, visible to `GetSession` and the archive guard). The live controls
-(`/glyphoxa search`/`recap`/`mute`/`say`) still drive the Manager — this Voice
-Instance holds that live session.
+reconcilable, visible to `GetSession` and the archive guard). `/glyphoxa search`
+and `/glyphoxa recap` resolve their Active Campaign through the claim plane
+(pool-wide); the live controls (`/glyphoxa mute`/`muteall`/`/say`) drive the
+LOCAL Manager and, when the session is hosted by a different Voice Instance
+(`replicas > 1`, #492), reply a clear "hosted by another worker" limitation —
+the cross-pod control plane is #503 (see the fleet rollout note).
 
 ## Scaling note
 
