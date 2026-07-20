@@ -110,29 +110,51 @@ func (e *OwnerElector) Run(ctx context.Context) {
 //
 // On success it stamps lastRenew and signals ownership. On error it SELF-DEMOTES —
 // SetActive(false) via set — once the monotonic elapsed since the last successful
-// renew reaches Expiry: a partitioned owner that can no longer reach Postgres must
-// stop dispatching before another node's lease-expiry claim promotes a second owner
-// (else both dispatch the same interaction). It does NOT Release on demotion — the
-// DB is unreachable by assumption, so a local deactivation is all that is possible
-// and the row's own lease expiry hands ownership over. Re-promotion happens ONLY via
-// the next SUCCESSFUL acquire in the normal loop (which re-stamps lastRenew and
-// re-signals true). Before the elapsed reaches Expiry a transient blip keeps
-// ownership: the same blip fails a challenger's acquire too, so relinquishing early
-// would only risk a needless gap.
+// renew reaches demoteAfter (Expiry - Interval - opTimeout): a partitioned owner
+// that can no longer reach Postgres must stop dispatching STRICTLY BEFORE another
+// node's lease-expiry claim (the DB steal horizon, heartbeat_at + Expiry) promotes
+// a second owner — else both dispatch the same interaction for several seconds
+// (#483). The threshold is padded below Expiry because the demotion check itself
+// runs only on ticks: after the elapsed crosses it, up to one more Interval passes
+// before the next tick and that tick's failing acquire can burn its whole opTimeout
+// before this check runs, so a bare Expiry threshold would demote as late as
+// Expiry + Interval + opTimeout — well inside the challenger's ownership. It does
+// NOT Release on demotion — the DB is unreachable by assumption, so a local
+// deactivation is all that is possible and the row's own lease expiry hands
+// ownership over. Re-promotion happens ONLY via the next SUCCESSFUL acquire in the
+// normal loop (which re-stamps lastRenew and re-signals true). Before the elapsed
+// reaches the threshold a transient blip keeps ownership: the same blip fails a
+// challenger's acquire too, so relinquishing early would only risk a needless gap.
 func (e *OwnerElector) reconcile(ctx context.Context) {
 	opCtx, cancel := context.WithTimeout(ctx, e.opTimeout())
 	owner, err := e.store.AcquireOrRenewPresenceOwner(opCtx, e.instanceID, e.cfg.Expiry)
 	cancel()
 	if err != nil {
 		e.log.Warn("presence: owner election acquire/renew failed", "instance", e.instanceID, "owner", e.current, "err", err)
-		if e.current && e.now().Sub(e.lastRenew) >= e.cfg.Expiry {
-			e.log.Warn("presence: owner lease unrenewed past expiry; self-demoting (no Release — DB unreachable)", "instance", e.instanceID, "expiry", e.cfg.Expiry)
+		if e.current && e.now().Sub(e.lastRenew) >= e.demoteAfter() {
+			e.log.Warn("presence: owner lease unrenewed past the demotion threshold; self-demoting (no Release — DB unreachable)",
+				"instance", e.instanceID, "threshold", e.demoteAfter(), "expiry", e.cfg.Expiry)
 			e.set(false)
 		}
 		return
 	}
 	e.lastRenew = e.now()
 	e.set(owner)
+}
+
+// demoteAfter is the self-demotion threshold: Expiry - Interval - opTimeout, so
+// the LOCAL deactivate deadline (threshold + one tick Interval + that tick's
+// opTimeout, the worst-case detection lag) lands strictly before the DB steal
+// horizon (Expiry) where a challenger can be promoted (#483). A degenerate cadence
+// (Interval + opTimeout >= Expiry) clamps to 0 — demote on the first failed renew,
+// the only safe posture when the window leaves no slack; warnElectorCadence in
+// cmd/glyphoxa flags such configs at boot.
+func (e *OwnerElector) demoteAfter() time.Duration {
+	d := e.cfg.Expiry - e.cfg.Interval - e.opTimeout()
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // opTimeout bounds a single acquire/renew DB call: min(Interval, 3s), so a stuck

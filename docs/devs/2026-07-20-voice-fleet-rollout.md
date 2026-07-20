@@ -35,11 +35,17 @@ failover lands within roughly expiry + one interval (~20s worst case).
 ### Self-demotion when partitioned
 
 An owner that can no longer reach Postgres self-demotes: once the MONOTONIC elapsed
-since its last successful renew reaches `Expiry`, the elector calls `SetActive(false)`
-locally. This is judged on the process's own monotonic clock — never the DB
-`heartbeat_at` or a wall clock — so a partitioned owner stops dispatching before
-another node's lease-expiry claim could promote a second owner (else both would
-dispatch the same interaction). The acquire/renew call is bounded by a per-op DB
+since its last successful renew reaches `Expiry - Interval - opTimeout` (7s at
+defaults), the elector calls `SetActive(false)` locally. The threshold sits BELOW
+`Expiry` deliberately (#483): the demotion check runs only on ticks, so after the
+elapsed crosses it up to one more `Interval` passes before the next tick and that
+tick's failing acquire can burn its whole per-op timeout before the check runs — a
+bare-`Expiry` threshold would therefore demote as late as
+`Expiry + Interval + opTimeout`, several seconds INSIDE a challenger's ownership
+(both dispatching the same `/roll`). With the padded threshold the local
+deactivation always lands strictly before the DB steal horizon (`heartbeat_at +
+Expiry`). It is judged on the process's own monotonic clock — never the DB
+`heartbeat_at` or a wall clock. The acquire/renew call is bounded by a per-op DB
 timeout of `min(Interval, 3s)` so a stuck connection cannot pin the loop and starve
 the demotion check. The elector does NOT `Release` on demotion — the DB is
 unreachable by assumption, so a local deactivation is all that is possible and the
