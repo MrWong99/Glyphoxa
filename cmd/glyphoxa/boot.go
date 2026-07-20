@@ -671,3 +671,49 @@ func enableDevMode(ctx context.Context, store auth.OAuthStore, authn auth.Authen
 	}
 	return loopbackAddr, wrap, nil
 }
+
+// mixedModeGuardStore is the read surface the -mode all mixed-deployment guard
+// needs (#483 M3). *storage.Store satisfies it.
+type mixedModeGuardStore interface {
+	// AnyLiveVoiceSessionIntent reports whether any NON-TERMINAL
+	// (pending/claimed/live) claim-plane intent exists.
+	AnyLiveVoiceSessionIntent(ctx context.Context) (bool, error)
+	// HasPresenceOwner reports whether any presence_owner claim row exists.
+	HasPresenceOwner(ctx context.Context) (bool, error)
+}
+
+// guardAllModeMixedDeployment enforces the mixed-mode prohibition at -mode all
+// boot (#483 M3; previously doc-only in the claim-plane rollout note): an
+// all-mode process pointed at a database a split (-mode web + -mode voice)
+// deployment is driving would (a) run the BROAD boot reconcile, closing live
+// Voice Instances' 'running' rows, and (b) start intent-less sessions that break
+// the one-live-per-tenant claim invariant. Signals checked (READ-ONLY, no
+// write): any non-terminal voice_session_intents row, or any presence_owner row
+// (even a stale one — proof a claim-plane fleet has driven this DB). Either →
+// refuse the boot with an actionable message. Terminal-only intent history does
+// NOT block: a deployment properly converted from split to all keeps its old
+// done/dead/failed rows.
+func guardAllModeMixedDeployment(ctx context.Context, s mixedModeGuardStore) error {
+	live, err := s.AnyLiveVoiceSessionIntent(ctx)
+	if err != nil {
+		return fmt.Errorf("all mode: mixed-deployment guard (voice_session_intents): %w", err)
+	}
+	if live {
+		return errors.New("all mode: refusing to start — non-terminal voice_session_intents rows exist, " +
+			"so a split (-mode web + -mode voice) deployment is driving this database; -mode all must never " +
+			"share a claim-plane database (its broad reconcile closes live workers' sessions and its " +
+			"intent-less sessions break the one-live-per-tenant invariant). Stop the split deployment first, " +
+			"or point this process at its own database (see docs/devs/2026-07-19-voice-claim-plane-rollout.md)")
+	}
+	owner, err := s.HasPresenceOwner(ctx)
+	if err != nil {
+		return fmt.Errorf("all mode: mixed-deployment guard (presence_owner): %w", err)
+	}
+	if owner {
+		return errors.New("all mode: refusing to start — a presence_owner row exists, so a claim-plane voice " +
+			"fleet has been driving this database; -mode all must never share it. Stop the -mode voice workers " +
+			"and clear the presence_owner row (DELETE FROM presence_owner) if the fleet is truly retired " +
+			"(see docs/devs/2026-07-19-voice-claim-plane-rollout.md)")
+	}
+	return nil
+}

@@ -1038,6 +1038,16 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 
 	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice, deps)
+	// Mixed-deployment guard (#483 M3): -mode all must never share a database a
+	// split (-mode web + -mode voice) deployment is driving — the broad reconcile
+	// below would close live workers' rows and intent-less sessions would break
+	// the one-live-per-tenant claim invariant. Read-only check, fatal on a hit;
+	// BEFORE ReconcileOrphans so no live worker's row is ever touched.
+	if withVoice {
+		if err := guardAllModeMixedDeployment(ctx, store); err != nil {
+			return err
+		}
+	}
 	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
 	// left 'running' (crash / failed end-write). No loop is live yet, so every
 	// such row is an orphan; done before the web tier serves so GetSession never
