@@ -97,6 +97,22 @@ interactions only after its sessions are wound down. Sessions are ENDED on drain
 never migrated (ADR-0006), so `voice.terminationGracePeriodSeconds` (default 300)
 is sized to cover a DAVE/MLS wind-down before SIGKILL.
 
+### Known windows (documented, accepted)
+
+- **Heartbeat during drain (#505).** A draining worker stops heartbeating while it
+  winds its sessions down; a drain longer than `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY`
+  (30s default) lets another worker's reaper mark the still-draining intent
+  `dead` mid-drain (its final finish then lands superseded, harmless but the
+  history reads `dead` instead of `done`). Tracked in #505; keep the expiry above
+  the realistic wind-down or accept the mislabel.
+- **Reaped-but-alive overlap.** A worker that is merely SLOW (not dead) can be
+  reaped: it learns of the supersede only on its next heartbeat (ErrNotFound) and
+  then kills its local session — until that beat, its gateway/voice connection
+  briefly coexists with whatever the Tenant restarted elsewhere. Bounded by one
+  heartbeat interval + the wind-down; ADR-0006's "no takeover" already implies
+  the old session is ENDED, never adopted, so the overlap is transient and
+  side-effect-free (two gateway sessions on one token are permitted, P5/P6).
+
 ## IDENTIFY budget under fleet cold-start (#486)
 
 No new code guards this — disgo serializes IDENTIFYs per client (`max_concurrency`

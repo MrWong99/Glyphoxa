@@ -61,6 +61,12 @@ a new Voice Instance boots.
   cancelled"), distinct from the still-queued Unavailable.
 - **Stop unconfirmed within its budget** — `CodeUnavailable` (retry), never a
   false success carrying a still-`running` row.
+- **Web pod hard-crash mid-Start poll** — a graceful abort cancels the pending
+  intent, but a kill -9 cannot: the orphan pending row stays claimable, so the
+  next Voice Instance poll claims and starts a session nobody is watching. It is
+  fully visible (`GetSession` shows it live) and stops normally via the web Stop
+  or `/glyphoxa end`; a stale NEVER-claimed pending row is additionally cancelled
+  by the next Start's own budget sweep.
 
 ## Known gaps in split mode (pre-existing, unchanged by this slice)
 

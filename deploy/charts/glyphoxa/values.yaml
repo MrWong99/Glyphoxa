@@ -12,8 +12,9 @@ image:
 # The single app secret (ADR-0004): a base64-encoded 32-byte credential-cipher
 # key. The seed Job reads it as GLYPHOXA_SECRET to seal the placeholder provider
 # credentials it writes to the DB (the real provider keys live in env/the OS
-# keyring, NOT the DB). The voice Deployment does NOT read it — it never decrypts
-# those placeholders. There is no default: an unset value fails the render so a
+# keyring, NOT the DB). The voice Deployment mounts it too (ADR-0057 (d), #492):
+# a Voice Instance holding a BYOK Tenant's Discord client decrypts that Tenant's
+# bot token itself. There is no default: an unset value fails the render so a
 # deploy can never silently run on a weak or shared key. Generate one with
 # `openssl rand -base64 32`. For real deploys, prefer templating it from an
 # external Secret over committing it to values.
