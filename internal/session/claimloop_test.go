@@ -34,6 +34,10 @@ type fakeIntentStore struct {
 	// onControlCreate scripts the hosting worker's reaction to a fresh control row
 	// (#503 requester-side tests): run under the lock right after the insert.
 	onControlCreate func(*storage.VoiceSessionControl)
+	// finishControlErrs is a queue of errors FinishVoiceSessionControl returns on
+	// successive calls (a nil entry, or an exhausted queue, is a normal finish) —
+	// models a transient terminal-write blip (#503 FIX1).
+	finishControlErrs []error
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -121,11 +125,31 @@ func (f *fakeIntentStore) ListPendingVoiceSessionControls(_ context.Context, int
 	return out, nil
 }
 
-func (f *fakeIntentStore) FinishVoiceSessionControl(_ context.Context, id uuid.UUID, status storage.VoiceSessionControlStatus, resultIDs []string, lastError string) (storage.VoiceSessionControl, error) {
+func (f *fakeIntentStore) StartVoiceSessionControl(_ context.Context, id uuid.UUID) (storage.VoiceSessionControl, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c, ok := f.controls[id]
 	if !ok || c.Status != storage.VoiceControlPending {
+		return storage.VoiceSessionControl{}, storage.ErrNotFound
+	}
+	now := time.Now()
+	c.Status = storage.VoiceControlExecuting
+	c.StartedAt = &now
+	return *c, nil
+}
+
+func (f *fakeIntentStore) FinishVoiceSessionControl(_ context.Context, id uuid.UUID, status storage.VoiceSessionControlStatus, resultIDs []string, lastError string) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.finishControlErrs) > 0 {
+		err := f.finishControlErrs[0]
+		f.finishControlErrs = f.finishControlErrs[1:]
+		if err != nil {
+			return storage.VoiceSessionControl{}, err // transient blip: row stays executing
+		}
+	}
+	c, ok := f.controls[id]
+	if !ok || c.Status != storage.VoiceControlExecuting {
 		return storage.VoiceSessionControl{}, storage.ErrNotFound
 	}
 	now := time.Now()
@@ -136,26 +160,35 @@ func (f *fakeIntentStore) FinishVoiceSessionControl(_ context.Context, id uuid.U
 	return *c, nil
 }
 
-func (f *fakeIntentStore) SweepOrphanedVoiceSessionControls(_ context.Context) (int64, error) {
+func (f *fakeIntentStore) SweepOrphanedVoiceSessionControls(_ context.Context, executingStale time.Duration) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var n int64
 	for _, c := range f.controls {
-		if c.Status != storage.VoiceControlPending {
+		if c.Status != storage.VoiceControlPending && c.Status != storage.VoiceControlExecuting {
 			continue
 		}
-		i, ok := f.intents[c.IntentID]
-		if !ok {
+		terminal := false
+		if i, ok := f.intents[c.IntentID]; ok {
+			switch i.Status {
+			case storage.VoiceIntentDone, storage.VoiceIntentDead, storage.VoiceIntentFailed:
+				terminal = true
+			}
+		}
+		staleExec := c.Status == storage.VoiceControlExecuting && c.StartedAt != nil &&
+			time.Since(*c.StartedAt) >= executingStale
+		if !terminal && !staleExec {
 			continue
 		}
-		switch i.Status {
-		case storage.VoiceIntentDone, storage.VoiceIntentDead, storage.VoiceIntentFailed:
-			now := time.Now()
-			c.Status = storage.VoiceControlFailed
-			c.LastError = "session ended"
-			c.EndedAt = &now
-			n++
+		now := time.Now()
+		c.Status = storage.VoiceControlFailed
+		if terminal {
+			c.LastError = session.EncodeControlFailure(session.ErrNoActiveSession)
+		} else {
+			c.LastError = "control execution stalled on the hosting worker"
 		}
+		c.EndedAt = &now
+		n++
 	}
 	return n, nil
 }

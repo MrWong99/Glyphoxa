@@ -19,7 +19,10 @@ CREATE TABLE voice_session_controls (
     agent_id    text NOT NULL DEFAULT '',
     say_text    text NOT NULL DEFAULT '',
     muted       boolean NOT NULL DEFAULT false,
-    -- pending | done | failed. Terminal writes are fenced WHERE status='pending'
+    -- pending | executing | done | failed. The hosting worker fences a
+    -- pending→executing CLAIM before it runs the verb, so a transient finish-write
+    -- failure can never re-dispatch it (say is not idempotent; #503 at-least-once
+    -- fix). Terminal writes are then fenced WHERE status='executing'
     -- (ErrNotFound = lost race), the intent-row idiom.
     status      text NOT NULL DEFAULT 'pending',
     -- The muted-agent id set a mute control returns (Manager.SetAgentMute /
@@ -27,13 +30,24 @@ CREATE TABLE voice_session_controls (
     result_ids  text[] NOT NULL DEFAULT '{}',
     last_error  text NOT NULL DEFAULT '',
     created_at  timestamptz NOT NULL DEFAULT now(),
+    -- When the worker claimed the row for execution (pending→executing). The sweep
+    -- fails an 'executing' row stranded past a stale cutoff (a finish-write blip
+    -- with the requester already gone) so it never sits forever.
+    started_at  timestamptz,
     ended_at    timestamptz
 );
 
 -- The worker's per-heartbeat drain scan (pending rows of one intent, oldest
--- first) and the orphan sweep both ride this.
+-- first) rides the intent-leading index.
 CREATE INDEX voice_session_controls_dispatch_idx
     ON voice_session_controls (intent_id, status, created_at);
+
+-- The orphan sweep scans by STATUS (not intent), so it needs a status-leading
+-- partial index over the only two statuses it touches — the dispatch index leads
+-- on intent_id and would seq-scan the sweep otherwise.
+CREATE INDEX voice_session_controls_sweep_idx
+    ON voice_session_controls (status)
+    WHERE status IN ('pending', 'executing');
 
 -- +goose Down
 

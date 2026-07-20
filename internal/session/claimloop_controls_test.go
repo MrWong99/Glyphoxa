@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +124,118 @@ func TestClaimLoop_DispatchesSaysInOrderAndEncodesFailure(t *testing.T) {
 	h.loop.DrainForTest()
 }
 
+// TestClaimLoop_TransientFinishDoesNotDoubleSay covers #503 FIX1: the row is
+// CLAIMED pending→executing before the verb runs, so when the terminal write
+// fails transiently the row stays 'executing' (never re-listed) and the say
+// publishes EXACTLY ONCE — no double utterance from at-least-once dispatch.
+func TestClaimLoop_TransientFinishDoesNotDoubleSay(t *testing.T) {
+	h := newControlLoopHarness(t)
+	agents := seedAgents(h.mstore, 1)
+
+	var mu sync.Mutex
+	var says int
+	unsub := h.bus.Subscribe(func(e voiceevent.Event) {
+		if _, ok := e.(voiceevent.SpeakRequested); ok {
+			mu.Lock()
+			says++
+			mu.Unlock()
+		}
+	})
+	defer unsub()
+
+	// The FIRST FinishVoiceSessionControl fails transiently; the row is already
+	// 'executing' (say published), so subsequent ticks never re-run it.
+	h.istore.mu.Lock()
+	h.istore.finishControlErrs = []error{errors.New("db blip")}
+	h.istore.mu.Unlock()
+
+	row := h.istore.addControl(storage.VoiceSessionControl{
+		IntentID: h.intent.ID, TenantID: h.tenant,
+		Kind: storage.VoiceControlSay, AgentID: agents[0].ID.String(), SayText: "once",
+	})
+	// Wait for the say to have published and the finish to have been attempted.
+	waitFor(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return says >= 1
+	})
+	// Give several more heartbeat ticks a chance to (wrongly) re-dispatch.
+	before := h.istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return h.istore.heartbeatCount() > before+5 })
+
+	mu.Lock()
+	got := says
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("say published %d times, want exactly 1 (executing fence blocks re-dispatch)", got)
+	}
+	if st := h.istore.getControl(row.ID).Status; st != storage.VoiceControlExecuting {
+		t.Fatalf("control status after transient finish = %q, want executing (stranded for the sweep)", st)
+	}
+	h.istore.requestStop(h.intent.ID)
+	h.loop.DrainForTest()
+}
+
+// TestClaimLoop_DrainBatchBudget covers #503 FIX2: one drain of many controls
+// stops once the aggregate heartbeat budget is spent (so the heartbeat goroutine
+// is never starved past Expiry), and the leftovers drain on the NEXT pass. A
+// deterministic clock drives the cutoff — no wall-clock sleeps, and dispatch is
+// driven directly (no live runSession goroutine racing the clock).
+func TestClaimLoop_DrainBatchBudget(t *testing.T) {
+	mstore := newFakeStore()
+	seedAgents(mstore, 1)
+	mgr, _ := muteManager(t, mstore)
+	t.Cleanup(mgr.Shutdown)
+	tenantID, _ := startMuteSession(t, mgr)
+
+	istore := newFakeIntentStore()
+	const heartbeat = 100 * time.Millisecond
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: heartbeat, Expiry: 30 * time.Second})
+
+	// Each clock read advances by half the heartbeat: start(0), after control 1
+	// now=hb/2 (< hb, continue), after control 2 now=hb (>= hb, stop) → 2 per pass.
+	var clk int64
+	loop.SetClockForTest(func() time.Time {
+		n := atomic.AddInt64(&clk, 1)
+		return time.Unix(0, 0).Add(time.Duration(n-1) * (heartbeat / 2))
+	})
+
+	intent := istore.add(tenantID, uuid.New())
+	intentRow := istore.get(intent.ID)
+	rows := make([]uuid.UUID, 5)
+	for i := range rows {
+		rows[i] = istore.addControl(storage.VoiceSessionControl{
+			IntentID: intent.ID, TenantID: tenantID, Kind: storage.VoiceControlMuteAll, Muted: true,
+		}).ID
+	}
+
+	// Pass 1: budget = 2 clock steps → exactly 2 done, 3 still pending.
+	loop.DispatchControlsForTest(context.Background(), intentRow)
+	if done, pending := countStatus(istore, rows, storage.VoiceControlDone), countStatus(istore, rows, storage.VoiceControlPending); done != 2 || pending != 3 {
+		t.Fatalf("pass 1: done=%d pending=%d, want done=2 pending=3", done, pending)
+	}
+
+	// Reset the clock and drain the leftovers across two more passes.
+	atomic.StoreInt64(&clk, 0)
+	loop.DispatchControlsForTest(context.Background(), intentRow)
+	atomic.StoreInt64(&clk, 0)
+	loop.DispatchControlsForTest(context.Background(), intentRow)
+	if done := countStatus(istore, rows, storage.VoiceControlDone); done != 5 {
+		t.Fatalf("after three passes: done=%d, want all 5", done)
+	}
+}
+
+func countStatus(istore *fakeIntentStore, ids []uuid.UUID, want storage.VoiceSessionControlStatus) int {
+	n := 0
+	for _, id := range ids {
+		if istore.getControl(id).Status == want {
+			n++
+		}
+	}
+	return n
+}
+
 // TestClaimLoop_NoDispatchWhileNotLive covers sequence (7): during the Manager's
 // end window (self-exit finalizing — Active false) queued controls are NOT
 // dispatched; the rows stay pending for the sweep or the requester's budget.
@@ -188,7 +301,10 @@ func TestClaimLoop_TickSweepsOrphanedControls(t *testing.T) {
 
 	loop.TickForTest(context.Background())
 	got := istore.getControl(orphan.ID)
-	if got.Status != storage.VoiceControlFailed || got.LastError != "session ended" {
-		t.Fatalf("orphaned control after tick = %+v, want failed 'session ended'", got)
+	if got.Status != storage.VoiceControlFailed {
+		t.Fatalf("orphaned control after tick = %+v, want failed", got)
+	}
+	if sentinel, ok := session.DecodeControlFailure(got.LastError); !ok || !errors.Is(sentinel, session.ErrNoActiveSession) {
+		t.Fatalf("orphaned control last_error = %q, want encoded no_active_session (#503 FIX3)", got.LastError)
 	}
 }

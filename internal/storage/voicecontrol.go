@@ -40,12 +40,18 @@ const (
 type VoiceSessionControlStatus string
 
 const (
-	// VoiceControlPending: written by the requester, not yet executed.
+	// VoiceControlPending: written by the requester, not yet claimed.
 	VoiceControlPending VoiceSessionControlStatus = "pending"
+	// VoiceControlExecuting: the hosting worker fenced a pending→executing claim
+	// and is running the verb. A transient finish-write failure leaves the row
+	// here (never back to pending), so it can never re-dispatch (#503 FIX1 — say
+	// is not idempotent); the requester treats it as non-terminal and keeps
+	// polling, and the sweep retires a row stranded here.
+	VoiceControlExecuting VoiceSessionControlStatus = "executing"
 	// VoiceControlDone: the hosting worker executed it successfully.
 	VoiceControlDone VoiceSessionControlStatus = "done"
 	// VoiceControlFailed: execution failed (LastError carries the encoded cause),
-	// the requester timed out, or the session ended with the row still pending.
+	// the requester timed out, or the session ended with the row unfinished.
 	VoiceControlFailed VoiceSessionControlStatus = "failed"
 )
 
@@ -62,21 +68,32 @@ type VoiceSessionControl struct {
 	ResultIDs []string
 	LastError string
 	CreatedAt time.Time
+	StartedAt *time.Time
 	EndedAt   *time.Time
 }
 
 const voiceControlColumns = `
 	id, intent_id, tenant_id, kind, agent_id, say_text, muted,
-	status, result_ids, last_error, created_at, ended_at`
+	status, result_ids, last_error, created_at, started_at, ended_at`
 
 func scanVoiceSessionControl(row pgx.Row) (VoiceSessionControl, error) {
 	var c VoiceSessionControl
 	err := row.Scan(
 		&c.ID, &c.IntentID, &c.TenantID, &c.Kind, &c.AgentID, &c.SayText, &c.Muted,
-		&c.Status, &c.ResultIDs, &c.LastError, &c.CreatedAt, &c.EndedAt,
+		&c.Status, &c.ResultIDs, &c.LastError, &c.CreatedAt, &c.StartedAt, &c.EndedAt,
 	)
 	return c, err
 }
+
+// voiceControlNoSessionCause is the ENCODED last_error the sweep stamps on a
+// control orphaned by a terminal intent (#503 FIX3): it mirrors
+// session.EncodeControlFailure(ErrNoActiveSession)'s "code=<code>: <msg>" wire
+// form (session.failCodePrefix + "no_active_session") so the requester's
+// session.DecodeControlFailure re-maps it to ErrNoActiveSession and the GM sees
+// the plain "No Voice Session is active." guard, not a raw error chain. Kept in
+// sync with session's failcode vocabulary (a storage-layer sweep cannot import
+// the session package); a round-trip test guards the drift.
+const voiceControlNoSessionCause = "code=no_active_session: session ended"
 
 // CreateVoiceSessionControl writes a pending control row for an intent and
 // returns it. The requester then polls GetVoiceSessionControl until the hosting
@@ -122,10 +139,36 @@ func (s *Store) ListPendingVoiceSessionControls(ctx context.Context, intentID uu
 	return out, nil
 }
 
+// StartVoiceSessionControl fences the hosting worker's pending→executing CLAIM
+// before it runs the verb (#503 FIX1): a transient finish-write failure then
+// leaves the row 'executing' (never back to 'pending'), so it can never be
+// re-listed and re-dispatched — say publishes exactly once. Fenced WHERE
+// status='pending': a second claim, a cancelled row, or a swept row matches
+// nothing and yields ErrNotFound (the worker skips it). Stamps started_at for
+// the stale-executing sweep.
+func (s *Store) StartVoiceSessionControl(ctx context.Context, id uuid.UUID) (VoiceSessionControl, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE voice_session_controls
+		    SET status = 'executing', started_at = now()
+		  WHERE id = $1 AND status = 'pending'
+		 RETURNING `+voiceControlColumns,
+		id)
+	c, err := scanVoiceSessionControl(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return VoiceSessionControl{}, ErrNotFound
+	}
+	if err != nil {
+		return VoiceSessionControl{}, fmt.Errorf("storage: start voice session control %s: %w", id, err)
+	}
+	return c, nil
+}
+
 // FinishVoiceSessionControl writes a control's terminal state (done/failed) with
-// its result ids / last_error and ended_at = now(). Fenced WHERE status='pending'
-// so a lost race (the requester's timeout cancel, or the sweep, won) yields
-// ErrNotFound and the caller does not overwrite a settled row.
+// its result ids / last_error and ended_at = now(). Fenced WHERE
+// status='executing' (the worker must have claimed it via
+// StartVoiceSessionControl first) so a lost race (the sweep won a stale
+// executing row) yields ErrNotFound and the caller does not overwrite a settled
+// row.
 func (s *Store) FinishVoiceSessionControl(ctx context.Context, id uuid.UUID, status VoiceSessionControlStatus, resultIDs []string, lastError string) (VoiceSessionControl, error) {
 	if resultIDs == nil {
 		resultIDs = []string{}
@@ -133,7 +176,7 @@ func (s *Store) FinishVoiceSessionControl(ctx context.Context, id uuid.UUID, sta
 	row := s.db.QueryRow(ctx,
 		`UPDATE voice_session_controls
 		    SET status = $2, result_ids = $3, last_error = $4, ended_at = now()
-		  WHERE id = $1 AND status = 'pending'
+		  WHERE id = $1 AND status = 'executing'
 		 RETURNING `+voiceControlColumns,
 		id, status, resultIDs, lastError)
 	c, err := scanVoiceSessionControl(row)
@@ -177,21 +220,46 @@ func (s *Store) CancelPendingVoiceSessionControl(ctx context.Context, id uuid.UU
 	return tag.RowsAffected() > 0, nil
 }
 
-// SweepOrphanedVoiceSessionControls fails every pending control whose intent is
-// already terminal (done/dead/failed) with 'session ended' — controls are never
-// dispatched during a wind-down (dispatch is gated on the session being live),
-// so a stopping session's stragglers die here (or via the requester's own
-// budget cancel) instead of sitting pending forever. Run each claim-loop tick.
-func (s *Store) SweepOrphanedVoiceSessionControls(ctx context.Context) (int64, error) {
+// SweepOrphanedVoiceSessionControls retires unfinished (pending/executing)
+// control rows the worker will never complete (#503), run each claim-loop tick.
+// Two arms:
+//
+//  1. Rows whose intent is already TERMINAL (done/dead/failed) — controls are
+//     never dispatched during a wind-down (dispatch is gated on the session
+//     being live), so a stopping session's stragglers die here with the ENCODED
+//     no_active_session cause (FIX3) so the requester decodes it to
+//     ErrNoActiveSession and the GM sees the plain guard.
+//  2. 'executing' rows of a still-live intent stranded past executingStale (a
+//     finish-write blip with the requester already gone) — the bounded recovery
+//     that keeps such a row from sitting forever (FIX1). Its cause is a plain
+//     stall message (uncoded, surfaced verbatim to any late poller).
+//
+// Returns how many rows were failed.
+func (s *Store) SweepOrphanedVoiceSessionControls(ctx context.Context, executingStale time.Duration) (int64, error) {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE voice_session_controls c
-		    SET status = 'failed', last_error = 'session ended', ended_at = now()
-		  WHERE c.status = 'pending'
-		    AND EXISTS (
-		          SELECT 1 FROM voice_session_intents i
-		           WHERE i.id = c.intent_id
-		             AND i.status IN ('done', 'dead', 'failed')
-		    )`)
+		    SET status = 'failed',
+		        last_error = CASE
+		            WHEN EXISTS (
+		                  SELECT 1 FROM voice_session_intents i
+		                   WHERE i.id = c.intent_id
+		                     AND i.status IN ('done', 'dead', 'failed')
+		            ) THEN $1
+		            ELSE 'control execution stalled on the hosting worker'
+		        END,
+		        ended_at = now()
+		  WHERE c.status IN ('pending', 'executing')
+		    AND (
+		         EXISTS (
+		               SELECT 1 FROM voice_session_intents i
+		                WHERE i.id = c.intent_id
+		                  AND i.status IN ('done', 'dead', 'failed')
+		         )
+		         OR (c.status = 'executing'
+		             AND c.started_at IS NOT NULL
+		             AND c.started_at < now() - make_interval(secs => $2))
+		    )`,
+		voiceControlNoSessionCause, executingStale.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("storage: sweep orphaned voice session controls: %w", err)
 	}
