@@ -54,6 +54,11 @@ type TapeConsentReader interface {
 // GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL is unset or non-positive (#492).
 const defaultTapeConsentReconcileInterval = 5 * time.Second
 
+// tapeConsentOpTimeout caps one reconcile read's DB time: min(interval, this),
+// mirroring the presence elector's per-op bound (#483) so a stuck connection
+// cannot pin the consent poller for the life of the cycle.
+const tapeConsentOpTimeout = 3 * time.Second
+
 // tapeConsentReconcileInterval reads the cross-pod consent poller cadence from
 // GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL (#492), falling back to 5s on a blank,
 // unparsable, or non-positive value. Parsed in the composition root (RunFromDB) so
@@ -105,8 +110,17 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 	if interval <= 0 {
 		interval = defaultTapeConsentReconcileInterval
 	}
+	// Per-op DB bound (#483, the elector's opTimeout discipline): each reconcile
+	// read runs under min(interval, 3s) so a hung connection cannot pin the poller
+	// past its tick — the raw cycle ctx has no deadline of its own.
+	opTimeout := interval
+	if opTimeout > tapeConsentOpTimeout {
+		opTimeout = tapeConsentOpTimeout
+	}
 	reconcile := func() {
-		consented, err := store.ListTapeConsent(ctx, campaignID)
+		octx, cancel := context.WithTimeout(ctx, opTimeout)
+		consented, err := store.ListTapeConsent(octx, campaignID)
+		cancel()
 		if err != nil {
 			log.Warn("tape: reconcile consent from store", "campaign", campaignID, "err", err)
 			return
