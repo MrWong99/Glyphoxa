@@ -214,24 +214,43 @@ func (s *Store) ReapDeadVoiceSessionIntents(ctx context.Context, expiry time.Dur
 }
 
 // ReconcileWorkerOrphanedVoiceSessions closes 'running' voice_sessions rows that
-// a -mode voice worker left behind on a crash — but ONLY those whose owning intent
-// has gone terminal (dead/done/failed), NEVER a row an intent still holds
-// live/claimed (#491, the reviewer-flagged process-blindness): a plain
+// a -mode voice worker left behind on a crash — NEVER a row a live worker still
+// owns (#491, the reviewer-flagged process-blindness): a plain
 // ReconcileOrphanedVoiceSessions is process-blind, so two workers booting would
-// close each other's live 'running' rows. Scoping the sweep to rows behind a
-// terminal intent makes it safe for a pool: a live worker's row (its intent still
-// live) is untouched, while a crashed worker's row (its intent reaped dead, or
-// finished done/failed) is closed. Returns how many rows were closed. The -mode
-// all path keeps the broad [ReconcileOrphanedVoiceSessions] (it writes no intents).
+// close each other's live 'running' rows. Two worker-safe arms:
+//
+//  1. Rows BOUND to a now-terminal intent (dead/done/failed) — the ordinary
+//     crashed-worker leftovers.
+//  2. Rows whose Campaign has NO non-terminal intent at all (#483 M2): a worker
+//     dying between CreateVoiceSession and MarkVoiceSessionIntentLive leaves a
+//     'running' row its intent never bound (voice_session_id NULL), so the reaped
+//     'dead' intent can never match arm 1 and the row would sit 'running'
+//     forever. No non-terminal intent for the Campaign means no worker can be
+//     mid-Start or live on it (the gap itself holds a 'claimed' intent, and a
+//     live session holds a 'live' one), so closing is safe. An unbound orphan
+//     whose Tenant has ALREADY restarted (a fresh non-terminal intent on the same
+//     Campaign) is deferred until that intent goes terminal — eventual, never
+//     wrong.
+//
+// Returns how many rows were closed. The -mode all path keeps the broad
+// [ReconcileOrphanedVoiceSessions] (it writes no intents; mixing the two shapes
+// on one DB is refused at boot, see cmd/glyphoxa's mixed-mode guard).
 func (s *Store) ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error) {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE voice_sessions vs
 		    SET ended_at = now(), status = $1, end_reason = $2
 		  WHERE vs.status = $3
-		    AND EXISTS (
-		          SELECT 1 FROM voice_session_intents i
-		           WHERE i.voice_session_id = vs.id
-		             AND i.status IN ('dead', 'done', 'failed')
+		    AND (
+		         EXISTS (
+		               SELECT 1 FROM voice_session_intents i
+		                WHERE i.voice_session_id = vs.id
+		                  AND i.status IN ('dead', 'done', 'failed')
+		         )
+		         OR NOT EXISTS (
+		               SELECT 1 FROM voice_session_intents i
+		                WHERE i.campaign_id = vs.campaign_id
+		                  AND i.status IN ('pending', 'claimed', 'live')
+		         )
 		    )`,
 		VoiceSessionEnded, VoiceSessionReasonOrphaned, VoiceSessionRunning)
 	if err != nil {

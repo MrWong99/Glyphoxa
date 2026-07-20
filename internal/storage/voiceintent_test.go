@@ -404,3 +404,69 @@ func TestFinishVoiceSessionIntent(t *testing.T) {
 		t.Fatalf("re-finish terminal err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestReconcileWorkerOrphanedUnboundGap covers #483 M2: a worker dying BETWEEN
+// CreateVoiceSession ('running' row written) and MarkVoiceSessionIntentLive (the
+// row never bound onto the intent) leaves a reaped 'dead' intent with a NULL
+// voice_session_id — the bound-row arm of the reconcile can never match it, so
+// the row sat 'running' forever. The no-non-terminal-intent arm must close it —
+// and must NOT close it while the claim (the gap itself) is still non-terminal.
+func TestReconcileWorkerOrphanedUnboundGap(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// The worker claims the intent and creates the session row, then crashes
+	// BEFORE MarkVoiceSessionIntentLive: intent 'claimed', row unbound.
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID); err != nil {
+		t.Fatalf("create intent: %v", err)
+	}
+	claim, err := st.ClaimVoiceSessionIntent(ctx, "gap-worker")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("create voice session: %v", err)
+	}
+
+	// While the claim is non-terminal (the live gap), the reconcile must keep the
+	// fresh row — another worker's tick racing the gap must not kill a mid-Start.
+	if n, err := st.ReconcileWorkerOrphanedVoiceSessions(ctx); err != nil || n != 0 {
+		t.Fatalf("reconcile during the gap = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// The crash: the heartbeat ages out and the reaper marks the claim dead. Its
+	// voice_session_id is NULL — the bound arm can never close the row.
+	if _, err := pool.Exec(ctx,
+		`UPDATE voice_session_intents SET heartbeat_at = now() - interval '10 minutes' WHERE id=$1`, claim.ID); err != nil {
+		t.Fatalf("age claim: %v", err)
+	}
+	if _, err := st.ReapDeadVoiceSessionIntents(ctx, 30*time.Second); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	dead, err := st.GetVoiceSessionIntent(ctx, claim.ID)
+	if err != nil {
+		t.Fatalf("get intent: %v", err)
+	}
+	if dead.Status != storage.VoiceIntentDead || dead.VoiceSessionID.Valid {
+		t.Fatalf("gap intent = %+v, want dead with a NULL voice_session_id", dead)
+	}
+
+	// The next reconcile closes the unbound orphan via the no-intent arm.
+	n, err := st.ReconcileWorkerOrphanedVoiceSessions(ctx)
+	if err != nil {
+		t.Fatalf("reconcile after reap: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reconciled %d rows, want 1 (the unbound orphan)", n)
+	}
+	got, err := st.GetVoiceSession(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("get vs: %v", err)
+	}
+	if got.Status != storage.VoiceSessionEnded {
+		t.Fatalf("orphan row status = %q, want ended", got.Status)
+	}
+}
