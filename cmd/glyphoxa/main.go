@@ -408,38 +408,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// plan-allowance gate, and the per-Campaign speaker resolver. The relay is
 	// headless here — no SSE mounts (ADR-0014 Hop-A stays deferred on the voice
 	// tier); it exists only to persist transcript lines and finalize them at Stop.
-	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
-	speakerResolver := speaker.NewResolver(store, clients, gmID, log)
-	relay := transcript.NewRelay(eventBus, sessions, store, log)
-	relay.SetResolver(speakerResolver)
-	chunker := transcript.NewChunker(eventBus, sessions, store, metrics, log, transcript.ChunkerConfig{})
-	chunker.SetResolver(speakerResolver)
-	highlightSaver := highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log)
-	knowledgeAdapter := knowledge.New(store, store.PromptKG())
-
-	deps := session.Deps{
-		Registry:   sessions,
-		Transcript: relay,
-		Chunker:    chunker,
-		Highlights: highlightSaver,
-		Clients:    clients,
-		SpeakerNameForCampaign: func(campaignID uuid.UUID, speakerID string) string {
-			return speakerResolver.Lookup(campaignID, speakerID).Name
-		},
-		GMSpeakerForTenant: func(tenantID uuid.UUID, discordUserID string) bool {
-			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
-		},
-		MaxSessions: maxVoiceSessions(os.Getenv),
-		Usage:       store,
-		Allowance:   allowanceForMode(admission, store),
-		Facts:       kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
-		Tools: tool.Deps{
-			Transcripts: knowledgeAdapter,
-			KG:          knowledgeAdapter,
-			KGW:         knowledgeAdapter,
-			Recap:       knowledge.NewRecap(recapEngine, store),
-		},
-	}
+	// The set is built by the SAME helper the web/all boot uses (#483) so the two
+	// paths cannot drift; the worker has no dev mode, so dev is false.
+	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, false)
+	recapEngine, deps := vd.recapEngine, vd.deps
 
 	// NPC memory recall (#122): resolved once over the shared embeddings provider.
 	// An unavailable provider leaves recall off (loud-but-non-fatal), exactly as in
@@ -515,6 +487,121 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		clients.Close,
 	)
 	return nil
+}
+
+// voiceDeps is the buildVoiceDeps set (#491): the session Manager's
+// construction-time Deps plus the collaborators the caller still wires
+// individually — the recap engine (slash command + RPC consumers), the speaker
+// resolver (Character CRUD invalidation hook), and the relay (SSE mounts +
+// shutdown hook on the web tier).
+type voiceDeps struct {
+	recapEngine     *recap.Engine
+	speakerResolver *speaker.Resolver
+	relay           *transcript.Relay
+	deps            session.Deps
+}
+
+// buildVoiceDeps assembles the Manager's shared persistence collaborators — the
+// recap engine, the per-Campaign speaker resolver (#281/#488), the headless
+// transcript relay + chunk writer (#487), the Highlight saver (#308), KG-facts
+// recall (#126), the knowledge Tools (#296), the Usage ledger (ADR-0054) and
+// the plan-allowance gate (ADR-0055) — IDENTICALLY for the -mode voice worker
+// and the web/all boot (#483), so the two paths cannot drift.
+//
+// Mode-specific seams stay with the caller: the web tier adds the relay's
+// tenant scope + SSE mounts and the boot gauge seed, and each caller resolves
+// Deps.Memory against its own embeddings-provider posture. clients may be nil
+// (web-only mode): then no guild-name fallback, and Deps.Clients /
+// Deps.GMSpeakerForTenant stay true nils — a typed-nil *presence.Clients would
+// make the Manager panic at Start (#489), and web-only starts no sessions
+// anyway. dev admits every speaker in the per-Tenant Butler GM overlay (#490,
+// mirrors dev auto-auth); the worker has no dev mode and passes false.
+func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observe.PrometheusRecorder, log *slog.Logger, keyEnt llmbuild.PlatformKeyEntitlement, admission auth.AdmissionMode, eventBus *voiceevent.Bus, sessions *session.Registry, blobStore blob.Store, clients *presence.Clients, gmID *auth.GMIdentity, dev bool) voiceDeps {
+	// The one-shot recap Engine (#272), constructed ONCE so its consumers share
+	// it: the /glyphoxa recap slash command (#273), the GenerateRecap RPC (#274,
+	// web tier), and the recap knowledge Tool (Deps.Tools below). It reads
+	// transcripts via the store, decrypts a BYOK LLM key with cipher, meters
+	// usage into the process metrics — but never persists a recap (ADR-0040).
+	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
+
+	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
+	// Character/GM display name for the relay + chunk prefix, falling back to the
+	// Discord guild display name via the standing presence for an unmapped
+	// speaker (web-only replicas have no presence: a true nil namer, generic
+	// label). GM is the shared GM-identity checker (ADR-0055).
+	var namer speaker.MemberNamer
+	if clients != nil {
+		namer = clients
+	}
+	speakerResolver := speaker.NewResolver(store, namer, gmID, log)
+
+	// The transcript relay (issue #73, ADR-0040) subscribes to the process bus
+	// once and reads each event's session from the session Registry (#487); the
+	// Manager finalizes its writer queue on Stop (Deps.Transcript).
+	relay := transcript.NewRelay(eventBus, sessions, store, log)
+	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
+
+	// The Transcript Chunk writer (#104, ADR-0011) folds utterances into
+	// 3–6-utterance chunks written with embedding NULL (the async pipeline #116
+	// fills them later). This CHUNK grain is independent of the relay's line
+	// grain (ADR-0040).
+	chunker := transcript.NewChunker(eventBus, sessions, store, metrics, log, transcript.ChunkerConfig{})
+	chunker.SetResolver(speakerResolver) // #281: resolved name as each human line's chunk prefix
+
+	// Knowledge Tools' read sources (#296, S1): storage-backed, UNCONDITIONAL —
+	// no embeddings provider needed, so a keyless deployment still lets a granted
+	// NPC recall the transcript and its own Node neighbourhood. SearchFacts drops
+	// gm_private (ADR-0008).
+	knowledgeAdapter := knowledge.New(store, store.PromptKG())
+
+	deps := session.Deps{
+		Registry:   sessions,
+		Transcript: relay,
+		Chunker:    chunker,
+		// Session Highlights persistence (#308, ADR-0051): #307's detector Sink,
+		// Begun/Finalized per session by the Manager.
+		Highlights: highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log),
+		// Per-Campaign Speaker-Lane attribution (#488): the Manager rebinds
+		// cfg.SpeakerName per Start with the session's Campaign so N concurrent
+		// sessions each attribute user lines against their own roster.
+		SpeakerNameForCampaign: func(campaignID uuid.UUID, speakerID string) string {
+			return speakerResolver.Lookup(campaignID, speakerID).Name
+		},
+		// Process-wide cap on concurrent Voice Sessions (#488, ADR-0057 K).
+		// Default 1; raising it >1 is soak-gated (#493, DAVE).
+		MaxSessions: maxVoiceSessions(os.Getenv),
+		// Durable Usage Ledger (ADR-0054): attribution only; gating stays with the
+		// spend meter (ADR-0046).
+		Usage: store,
+		// Monthly plan-allowance gate (ADR-0055 gate (b)): store-backed only in
+		// `open` Admission Mode; nil (a no-op) in allowlist mode.
+		Allowance: allowanceForMode(admission, store),
+		// NPC KG-facts recall (#126, ADR-0008): UNCONDITIONAL — needs only the
+		// process store, never the embeddings provider.
+		Facts: kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
+		Tools: tool.Deps{
+			Transcripts: knowledgeAdapter,
+			KG:          knowledgeAdapter,
+			KGW:         knowledgeAdapter,
+			Recap:       knowledge.NewRecap(recapEngine, store),
+		},
+	}
+	if clients != nil {
+		// Per-tenant Discord client registry (#489): every manager-started Voice
+		// Session borrows the standing client keyed by its own Tenant's resolved
+		// Bot token.
+		deps.Clients = clients
+		// Per-Tenant Butler GM-address gate (#490, ADR-0055): the Manager overlays
+		// cfg.GMSpeaker per Start with the session's Tenant, so a Tenant A operator
+		// is not GM in a Tenant B session.
+		deps.GMSpeakerForTenant = func(tenantID uuid.UUID, discordUserID string) bool {
+			if dev {
+				return true
+			}
+			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
+		}
+	}
+	return voiceDeps{recapEngine: recapEngine, speakerResolver: speakerResolver, relay: relay, deps: deps}
 }
 
 // drainVoiceWorker runs the -mode voice worker to SIGTERM and then tears it down in
@@ -873,13 +960,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// registers itself in it at construction (Deps.Registry). A Manager cannot exist
 	// without its deps already wired.
 
-	// The one-shot recap Engine (#272) is constructed ONCE here so its consumers
-	// can share it: the /glyphoxa recap slash command (#273, registered below),
-	// the GenerateRecap RPC (#274, wired through managementMounts), and the recap
-	// knowledge Tool (Deps.Tools below). It reads transcripts via the store,
-	// decrypts a BYOK LLM key with cipher, meters usage into the process
-	// metrics, and logs attribution — but never persists a recap (ADR-0040).
-	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
+	// The Manager's construction-time deps (#448) and their shared collaborators
+	// (the buildVoiceDeps set, #491) are assembled by the SAME helper the -mode
+	// voice worker uses (#483) so the two boot paths cannot drift. Web-only seams
+	// land right below: the relay's tenant scope (its SSE mounts are web-only),
+	// the boot gauge seed, and the assist engine.
+	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, dev)
+	recapEngine, speakerResolver, relay, deps := vd.recapEngine, vd.speakerResolver, vd.relay, vd.deps
 
 	// The on-demand campaign-creation assist Engine (#479) drafts NPC Personas
 	// and linked Knowledge Graph entries from a GM prompt — strictly on button
@@ -887,65 +974,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// cipher, env fallback gated by keyEnt, usage metered but never cap-gated.
 	assistEngine := assist.NewEngine(store, cipher, metrics, log, assist.WithKeyEntitlement(keyEnt))
 
-	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
-	// Character/GM display name for the relay + chunk prefix. It reads Characters
-	// from the store and, for an unmapped speaker, falls back to the Discord guild
-	// display name via the standing presence (web-only replicas have no presence, so
-	// the namer stays a true nil interface — no guild fallback, generic label). GM
-	// is the shared GM-identity checker (ADR-0055). Shared by the relay, chunker,
-	// and the Character CRUD invalidation hook.
-	var speakerNamer speaker.MemberNamer
-	if clients != nil {
-		speakerNamer = clients
-	}
-	speakerResolver := speaker.NewResolver(store, speakerNamer, gmID, log)
-
-	// Agent-facing transcript attribution (the transcript-names seam): every
-	// NPC's Agent loop prefixes its user lines "<Name>: <text>" via the SAME
-	// resolver the relay/chunker use (#281), scoped to the session's Campaign.
-	// Lookup is cache-only and never blocks (the relay Warms it on VADSpeechStart,
-	// ~1.7s before the reply path reads it); a miss degrades to the loop's generic
-	// "Player / DM" label, matching the relay/chunker. Wired PER SESSION via
-	// Deps.SpeakerNameForCampaign (#488): the Manager rebinds cfg.SpeakerName in
-	// Start with THIS session's Campaign, so N concurrent sessions each attribute
-	// against their own roster instead of a single-active global read.
-	speakerNameForCampaign := func(campaignID uuid.UUID, speakerID string) string {
-		return speakerResolver.Lookup(campaignID, speakerID).Name
-	}
-
-	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
-	// process bus once and reads each event's session from the session Registry (#487).
-	// The store backs incremental line persistence + replay-on-reload (#74,
-	// ADR-0040); the manager finalizes the relay's writer queue on Stop
-	// (Deps.Transcript below).
-	relay := transcript.NewRelay(eventBus, sessions, store, log)
-	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
 	// SSE stream opens. The guarded mount table below declares TenantRequired
-	// to inject the tenant this check reads.
+	// to inject the tenant this check reads. Web-only: the worker mounts no SSE.
 	relay.SetTenantScope(store.VoiceSessionInTenant)
 
-	// The Transcript Chunk writer (#104, ADR-0011) subscribes to the SAME process
-	// bus and folds utterances into 3–6-utterance chunks written with embedding
-	// NULL (the async embedding pipeline, #116, fills them later); it refreshes the
-	// embedding-backlog gauge from the DB after each write. The manager closes its
-	// open chunk on Stop / loop exit (Deps.Chunker below). This CHUNK grain is
-	// independent of the relay's line grain (ADR-0040). Voice-standalone mode does
-	// not chunk (same posture as line persistence).
-	chunker := transcript.NewChunker(eventBus, sessions, store, metrics, log, transcript.ChunkerConfig{})
-	chunker.SetResolver(speakerResolver) // #281: resolved name as each human line's chunk prefix
-
-	// Session Highlights persistence (#308, Epic 8, ADR-0051): the Saver is #307's
-	// detector Sink — it encodes each Trigger's tape snapshot to a clip (behind the
-	// blob seam), writes a 'candidate' highlight row, and on session end schedules
-	// the 7-day candidate purge job. It rides the SAME base voice config the manager
-	// copies per session (cfg.Highlights = the Saver), and the manager Begins/
-	// Finalizes it per session (beside transcript.Finalize) — both via
-	// Deps.Highlights below. In web-only mode the manager starts no sessions, so it
-	// stays dormant; the RPC read side + clip serve (below) reach the same rows
-	// through Postgres regardless.
-	highlightSaver := highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log)
 	// Seed the backlog gauge from the DB at boot so it reads the true count before
 	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
 	// failure logs and leaves the gauge at 0 rather than failing the boot.
@@ -953,86 +987,6 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("seed embedding-backlog gauge", "err", err)
 	} else {
 		metrics.SetEmbeddingBacklog(n)
-	}
-
-	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
-	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
-	// KG-facts recall it needs only the process store + the session Registry (for the
-	// active Campaign), no embeddings provider — so a keyless deployment still lets a
-	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
-	// the base voice config every session copies; in web-only mode the Manager starts
-	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
-	knowledgeAdapter := knowledge.New(store, store.PromptKG())
-
-	// Monthly plan-allowance gate (ADR-0055 gate (b)): store-backed only in
-	// `open` Admission Mode; nil in allowlist mode, where the gate is a no-op
-	// for self-hosts — the exact posture split as the key entitlement above.
-	allowanceGate := allowanceForMode(admission, store)
-
-	// The Manager's construction-time deps (#448): the finalizers/pipelines it
-	// drives per session and the collaborators riding its base voice config — one
-	// immutable struct instead of six back-wired setters. Everything here is
-	// registered in the Registry NewManager registers the Manager into below (#487).
-	deps := session.Deps{
-		Registry:   sessions,
-		Transcript: relay,
-		Chunker:    chunker,
-		Highlights: highlightSaver,
-		// Per-Campaign Speaker-Lane attribution (#488): the Manager rebinds
-		// cfg.SpeakerName per Start with the session's Campaign so N concurrent
-		// sessions each attribute user lines against their own roster.
-		SpeakerNameForCampaign: speakerNameForCampaign,
-		// Process-wide cap on concurrent Voice Sessions (#488, ADR-0057 K), from
-		// GLYPHOXA_MAX_VOICE_SESSIONS. Default 1 keeps today's single-session
-		// behaviour byte-identical; raising it >1 is soak-gated (#493, DAVE) and safe
-		// only now that per-tenant clients (#489) + GM scoping (#490) are merged.
-		MaxSessions: maxVoiceSessions(os.Getenv),
-		// Durable Usage Ledger (ADR-0054): every manager-started session's metered
-		// usage lands in the usage_ledger table at loop exit, attributed to its
-		// Tenant — the cost side of the SaaS billing report. Attribution only;
-		// gating stays with the spend meter (ADR-0046).
-		Usage: store,
-		// Monthly plan-allowance gate (ADR-0055 gate (b)), wired below only in
-		// `open` Admission Mode: session starts are refused / hard-capped
-		// against the plan's included_usage_usd. The gate READS the ledger; the
-		// ledger itself never gates (ADR-0054).
-		Allowance: allowanceGate,
-		// NPC KG-facts recall (#126, ADR-0008): the reserved Hot Context KG-facts
-		// slot, filled per turn from the active Campaign's gm-public Nodes.
-		// UNCONDITIONAL — unlike Memory below — because it needs no embeddings
-		// provider, only the process store (an indexed OLTP read) and the session
-		// Registry (the active Campaign). Gating it on the provider would silently lose
-		// the feature on keyless deployments. It owns no goroutine/subscription, so
-		// there is nothing to Close.
-		Facts: kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
-		Tools: tool.Deps{
-			Transcripts: knowledgeAdapter,
-			KG:          knowledgeAdapter,
-			KGW:         knowledgeAdapter,
-			Recap:       knowledge.NewRecap(recapEngine, store),
-		},
-	}
-	// Per-tenant Discord client registry (#489): every manager-started Voice
-	// Session borrows the standing client keyed by its own Tenant's resolved Bot
-	// token, so a start touches only that Tenant's client (never the global-latest
-	// singleton). Set only when a standing presence exists (`all` mode) so a
-	// web-only Manager leaves Clients a true nil interface. A typed-nil
-	// *presence.Clients would make m.clients != nil and panic at Start.
-	if clients != nil {
-		deps.Clients = clients
-	}
-	// Per-Tenant Butler GM-address gate (#490, ADR-0055): the Manager overlays
-	// cfg.GMSpeaker per Start with the session's Tenant, so GM standing in the voice
-	// channel is scoped to the session's Tenant (a Tenant A operator is not GM in a
-	// Tenant B session). Dev mode admits every speaker (mirrors dev auto-auth and the
-	// base gate); only the voice-driving `all` mode wires it.
-	if withVoice {
-		deps.GMSpeakerForTenant = func(tenantID uuid.UUID, discordUserID string) bool {
-			if dev {
-				return true
-			}
-			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
-		}
 	}
 
 	// Resolve the process embeddings provider ONCE and share it across the two
