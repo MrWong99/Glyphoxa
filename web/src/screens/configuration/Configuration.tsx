@@ -84,6 +84,23 @@ export function Configuration() {
   // Separate mutation instance for the IDs form so its error/pending state is
   // its own — a bot-token failure paints the SecretRow, not this form (#142).
   const saveDiscordIds = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
+  // Unlink (#504): frees this tenant's guild binding so another tenant can
+  // claim it (legit transfer: we release, they save with proof). The request
+  // echoes the bound guild_id — the server compare-and-clears atomically.
+  const releaseGuild = useMutation(ProviderService.method.releaseDiscordGuild, {
+    onSuccess: () => {
+      // The binding is gone server-side: clear the local fields and drop the
+      // dirty guard so the refetch reseeds the (now empty) stored state.
+      idsDirty.current = false;
+      setGuildId("");
+      setVoiceChannelId("");
+      setConfirmUnlink(false);
+      invalidateList();
+    },
+  });
+  // Two-step unlink: the first click only arms the confirm — releasing a guild
+  // hands it to whoever binds next, so it must never ride a single misclick.
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
 
   // Guild / Voice channel IDs are controlled, seeded from the RPC. A `dirty` ref
   // guards the seed so a slow first load (or a post-save refetch) can never
@@ -245,6 +262,42 @@ export function Configuration() {
               </span>
             )}
           </div>
+          {/* Unlink (#504): offered only while a guild is actually bound
+              (stored state, not the form fields). Releasing frees the guild for
+              another tenant — the supported transfer path — so it takes an
+              explicit confirm, and a failed release stays visible. */}
+          {config.isSuccess && config.data.guildId !== "" && (
+            <div className="gx-discord__unlink">
+              {confirmUnlink ? (
+                <>
+                  <span className="gx-discord__unlink-note">
+                    Unlink this Discord server? Sessions stop working until a server is linked
+                    again, and another tenant can then link it.
+                  </span>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={releaseGuild.isPending}
+                    onClick={() => releaseGuild.mutate({ guildId: config.data.guildId })}
+                  >
+                    Confirm unlink
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button variant="secondary" size="sm" onClick={() => setConfirmUnlink(true)}>
+                  Unlink server
+                </Button>
+              )}
+              {releaseGuild.isError && (
+                <span className="gx-discord__error" role="alert">
+                  Couldn&apos;t unlink: {releaseGuild.error.message}
+                </span>
+              )}
+            </div>
+          )}
           {/* Authorizing the Bot into the Guild is a separate, prerequisite step
               from saving the IDs — neither pasted-link format joins the Bot (#110).
               Gated on a resolved read so the "no application id" note can't flash

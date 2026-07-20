@@ -87,6 +87,23 @@
   gap: var(--spacing-md);
 }
 
+/* Unlink control (#504): a right-aligned row under the IDs form. The confirm
+ * step swaps in a consequence note + danger button, so a release never rides a
+ * single misclick. */
+.gx-discord__unlink {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+}
+
+.gx-discord__unlink-note {
+  font-size: var(--body-sm);
+  color: var(--text-secondary);
+  max-width: 46ch;
+}
+
 /* Inline save-failure cue for the IDs form, mirroring the SecretRow error
  * treatment (#142 / #154). */
 .gx-discord__error {
