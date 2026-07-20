@@ -99,19 +99,31 @@ is sized to cover a DAVE/MLS wind-down before SIGKILL.
 
 ### Known windows (documented, accepted)
 
-- **Heartbeat during drain — CLOSED by #505.** A draining worker now keeps
-  heartbeating while it winds its sessions down: `endSession` runs a drain-beat
-  goroutine (every `GLYPHOXA_VOICE_HEARTBEAT_INTERVAL`, on detached bounded
-  ctxs) for the whole `Manager.Stop` window, on BOTH the SIGTERM drain and the
-  stop_requested wind-down, so a clean drain within budget is never reaped
-  `dead` and reconcile cannot race an in-flight CloseVoiceSession (the intent
-  stays non-terminal until the close landed). Residual: a sustained DB outage
-  spanning multiple missed beats past `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY` still
-  reaps mid-drain — the drain-beat goroutine then stops stamping (ADR-0006:
-  never re-claim), the wind-down completes, the superseded finish is swallowed,
-  and the history reads `dead`. Accepted: that now requires an outage, not
-  merely a slow finalizer. `voice.terminationGracePeriodSeconds` (300) still
-  bounds the worst-case wind-down and stays above every finalizer budget.
+- **Heartbeat during drain — CLOSED by #505, hardened by the #509 review.** A
+  draining worker now keeps heartbeating while it winds its sessions down: a
+  drain-beat goroutine (every `GLYPHOXA_VOICE_HEARTBEAT_INTERVAL`, on detached
+  bounded ctxs) covers the whole `Manager.Stop` window on the SIGTERM drain,
+  the stop_requested wind-down, AND the mark-live-failure stop (the row still
+  `claimed` there — the heartbeat fence accepts both states), so a clean
+  wind-down within budget is never reaped `dead`, reconcile cannot race an
+  in-flight CloseVoiceSession (the intent stays non-terminal until the close
+  landed), and a true mark-live failure lands on the row as itself instead of
+  as "worker heartbeat expired". Residual: a sustained DB outage spanning
+  multiple missed beats past `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY` still reaps
+  mid-drain — the drain-beat goroutine then stops stamping (ADR-0006: never
+  re-claim), the wind-down completes, the superseded finish is swallowed, and
+  the history reads `dead`. Accepted: that now requires an outage, not merely a
+  slow finalizer.
+- **Wedged wind-down — bounded by the drain-beat cap (#509 review).** Drain
+  beats cease after `GLYPHOXA_VOICE_DRAIN_BEAT_CAP` (default 10× heartbeat
+  expiry, 300s): a run loop wedged past ctx cancel is the only unbounded step
+  in `Manager.Stop`, and uncapped beats would keep its intent `live` forever —
+  pinning the Tenant's voice plane, where pre-#505 the reaper freed it within
+  30s. Past the cap the heartbeat goes stale and the reaper reclaims within one
+  expiry; the wedged worker's eventual finish is fenced NotFound and swallowed.
+  Note `voice.terminationGracePeriodSeconds` (300) bounds only the SIGTERM /
+  pod-delete wind-down (the kubelet SIGKILLs at the deadline) — an in-place
+  stop_requested wind-down on a healthy pod is bounded by this cap instead.
 - **Reaped-but-alive overlap.** A worker that is merely SLOW (not dead) can be
   reaped: it learns of the supersede only on its next heartbeat (ErrNotFound) and
   then kills its local session — until that beat, its gateway/voice connection

@@ -413,14 +413,18 @@ func envDuration(getenv func(string) string, key string, def time.Duration) time
 }
 
 // voiceClaimLoopConfig reads the -mode voice worker's claim-loop cadence from the
-// GLYPHOXA_VOICE_CLAIM_POLL / _HEARTBEAT_INTERVAL / _HEARTBEAT_EXPIRY env vars
-// (#491). Parsed HERE in the composition root, never in internal/session, so the
-// cadence stays a deployment knob.
+// GLYPHOXA_VOICE_CLAIM_POLL / _HEARTBEAT_INTERVAL / _HEARTBEAT_EXPIRY /
+// _DRAIN_BEAT_CAP env vars (#491, #509 review). Parsed HERE in the composition
+// root, never in internal/session, so the cadence stays a deployment knob. The
+// drain-beat cap's zero fallback is deliberate: NewClaimLoop derives 10x Expiry
+// from it, so the default scales with an overridden Expiry instead of pinning a
+// fixed duration here.
 func voiceClaimLoopConfig(getenv func(string) string) session.ClaimLoopConfig {
 	return session.ClaimLoopConfig{
-		Poll:      envDuration(getenv, "GLYPHOXA_VOICE_CLAIM_POLL", defaultVoiceClaimPoll),
-		Heartbeat: envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_INTERVAL", defaultVoiceHeartbeatInterval),
-		Expiry:    envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+		Poll:         envDuration(getenv, "GLYPHOXA_VOICE_CLAIM_POLL", defaultVoiceClaimPoll),
+		Heartbeat:    envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_INTERVAL", defaultVoiceHeartbeatInterval),
+		Expiry:       envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+		DrainBeatCap: envDuration(getenv, "GLYPHOXA_VOICE_DRAIN_BEAT_CAP", 0),
 	}
 }
 

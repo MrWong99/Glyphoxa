@@ -28,6 +28,7 @@ gaps a split deployment inherits.
 | `GLYPHOXA_VOICE_CLAIM_POLL` | `2s` | Voice Instance claim tick / web poll cadence |
 | `GLYPHOXA_VOICE_HEARTBEAT_INTERVAL` | `5s` | live-session heartbeat stamp interval |
 | `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY` | `30s` | staleness before a claim is reaped dead |
+| `GLYPHOXA_VOICE_DRAIN_BEAT_CAP` | 10× expiry (`300s`) | wind-down drain-beat budget; past it beats cease and the reaper may reclaim a wedged wind-down |
 
 ## Voice Instance death
 

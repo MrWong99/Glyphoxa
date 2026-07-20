@@ -1020,20 +1020,29 @@ func TestEnvDuration(t *testing.T) {
 	}
 }
 
-// TestVoiceClaimLoopConfig pins the three claim-loop cadence knobs (#491): unset
-// yields the 2s/5s/30s defaults, and each env var overrides its field.
+// TestVoiceClaimLoopConfig pins the claim-loop cadence knobs (#491): unset
+// yields the 2s/5s/30s defaults, and each env var overrides its field. The
+// drain-beat cap (#509 review) is left 0 when unset so NewClaimLoop derives
+// 10x Expiry — a fixed boot default would not scale with an overridden Expiry.
 func TestVoiceClaimLoopConfig(t *testing.T) {
 	def := voiceClaimLoopConfig(envMap(nil))
 	if def.Poll != defaultVoiceClaimPoll || def.Heartbeat != defaultVoiceHeartbeatInterval || def.Expiry != defaultVoiceHeartbeatExpiry {
 		t.Fatalf("defaults = %+v, want 2s/5s/30s", def)
 	}
+	if def.DrainBeatCap != 0 {
+		t.Fatalf("default DrainBeatCap = %v, want 0 (derived from Expiry in NewClaimLoop)", def.DrainBeatCap)
+	}
 	got := voiceClaimLoopConfig(envMap(map[string]string{
 		"GLYPHOXA_VOICE_CLAIM_POLL":         "1s",
 		"GLYPHOXA_VOICE_HEARTBEAT_INTERVAL": "3s",
 		"GLYPHOXA_VOICE_HEARTBEAT_EXPIRY":   "20s",
+		"GLYPHOXA_VOICE_DRAIN_BEAT_CAP":     "2m",
 	}))
 	if got.Poll != time.Second || got.Heartbeat != 3*time.Second || got.Expiry != 20*time.Second {
 		t.Fatalf("overridden = %+v, want 1s/3s/20s", got)
+	}
+	if got.DrainBeatCap != 2*time.Minute {
+		t.Fatalf("overridden DrainBeatCap = %v, want 2m", got.DrainBeatCap)
 	}
 }
 

@@ -83,6 +83,13 @@ type ClaimLoopConfig struct {
 	// Expiry is how stale a heartbeat may get before the reaper marks the claim
 	// dead (the owning worker is presumed crashed). Default 30s.
 	Expiry time.Duration
+	// DrainBeatCap bounds how long a wind-down's drain heartbeat keeps beating
+	// (#509 review): past it the beats cease and the reaper reclaims the row
+	// within Expiry, so a run loop wedged past ctx cancel (the only unbounded
+	// step in Manager.Stop) can never pin a Tenant's voice plane forever.
+	// Default 10x Expiry (300s at defaults) — far above every finalizer budget,
+	// so no legitimate slow wind-down is ever cut off.
+	DrainBeatCap time.Duration
 }
 
 // ClaimLoop drives the -mode voice worker's DB-driven session assignment (#491).
@@ -116,6 +123,9 @@ func NewClaimLoop(store IntentStore, mgr *Manager, instanceID string, log *slog.
 	}
 	if cfg.Expiry <= 0 {
 		cfg.Expiry = 30 * time.Second
+	}
+	if cfg.DrainBeatCap <= 0 {
+		cfg.DrainBeatCap = 10 * cfg.Expiry
 	}
 	return &ClaimLoop{store: store, mgr: mgr, instanceID: instanceID, log: log, cfg: cfg, now: time.Now}
 }
@@ -236,10 +246,17 @@ func (l *ClaimLoop) startClaimed(ctx context.Context, intent storage.VoiceSessio
 		// Claim and MarkLive) left the row 'claimed' with no heartbeat goroutine, so
 		// finish it 'failed' on a detached ctx (mirroring the Start-refusal path) —
 		// otherwise it lingers 'claimed' until the reaper marks it the wrong state
-		// (review item 5, AC5's claimed-not-yet-live SIGTERM case).
+		// (review item 5, AC5's claimed-not-yet-live SIGTERM case). The Stop blocks
+		// through the finalizers with the row still 'claimed' and heartbeat_at from
+		// claim time, so drain-beat it like endSession (#509 review; the store's
+		// heartbeat fence accepts 'claimed') — un-heartbeated, a slow wind-down
+		// crosses Expiry and the reaper records the TRUE failure below as a worker
+		// death. On the NotFound arm the first beat NotFounds too and stops itself.
+		stopBeat := l.startDrainHeartbeat(intent.ID)
 		if _, serr := l.mgr.Stop(l.detached(), intent.TenantID); serr != nil && !errors.Is(serr, ErrNoActiveSession) {
 			l.log.Warn("claim loop: stop after failed mark-live", "intent", intent.ID, "err", serr)
 		}
+		stopBeat()
 		if errors.Is(err, storage.ErrNotFound) {
 			l.log.Warn("claim loop: claim superseded before live (reaped); stopped the started session",
 				"intent", intent.ID)
@@ -457,16 +474,22 @@ func (l *ClaimLoop) endSession(tenant uuid.UUID, intentID uuid.UUID, status stor
 	l.finish(intentID, status, lastError)
 }
 
-// startDrainHeartbeat keeps intentID's heartbeat fresh while endSession blocks
-// in Manager.Stop (#505): it beats every cfg.Heartbeat on detached bounded ctxs
-// (the run ctx may already be cancelled — SIGTERM — and one beat may never eat
-// more than dbOpTimeout(Heartbeat)). ErrNotFound means the claim was reaped
-// anyway (a multi-beat DB outage crossed Expiry): log and stop beating — the
-// wind-down itself continues, and this goroutine NEVER calls mgr.Stop (the
-// session is already stopping; ADR-0006: superseded-mid-drain means stop
-// stamping and let the wind-down finish, never re-claim). stop_requested is
-// ignored — the session is already ending. The returned func cancels the
-// goroutine and waits for it to exit.
+// startDrainHeartbeat keeps the intent's heartbeat fresh while a wind-down
+// blocks in Manager.Stop (#505: endSession; #509 review: the mark-live-failure
+// stop, where the row is still 'claimed'): it beats every cfg.Heartbeat on
+// detached bounded ctxs (the run ctx may already be cancelled — SIGTERM — and
+// one beat may never eat more than dbOpTimeout(Heartbeat)). ErrNotFound means
+// the claim was reaped anyway (a multi-beat DB outage crossed Expiry): log and
+// stop beating — the wind-down itself continues, and this goroutine NEVER calls
+// mgr.Stop (the session is already stopping; ADR-0006: superseded-mid-drain
+// means stop stamping and let the wind-down finish, never re-claim).
+// stop_requested is ignored — the session is already ending. Beats also cease
+// after cfg.DrainBeatCap (#509 review residual 2): a run loop wedged past ctx
+// cancel is the ONLY unbounded step in Manager.Stop, and uncapped beats would
+// keep its intent 'live' forever — pinning the Tenant's voice plane, which
+// pre-#505 the reaper freed within Expiry. Past the cap the heartbeat goes
+// stale and the reaper reclaims. The returned func cancels the goroutine and
+// waits for it to exit.
 func (l *ClaimLoop) startDrainHeartbeat(intentID uuid.UUID) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -474,9 +497,15 @@ func (l *ClaimLoop) startDrainHeartbeat(intentID uuid.UUID) (stop func()) {
 		defer close(done)
 		ticker := time.NewTicker(l.cfg.Heartbeat)
 		defer ticker.Stop()
+		capTimer := time.NewTimer(l.cfg.DrainBeatCap)
+		defer capTimer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-capTimer.C:
+				l.log.Warn("claim loop: drain heartbeat cap reached (wind-down wedged?); ceasing beats so the reaper can reclaim",
+					"intent", intentID, "cap", l.cfg.DrainBeatCap)
 				return
 			case <-ticker.C:
 				hbCtx, cancelHB := context.WithTimeout(context.Background(), dbOpTimeout(l.cfg.Heartbeat))
