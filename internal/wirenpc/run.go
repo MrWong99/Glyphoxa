@@ -71,14 +71,17 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// A decryption failure (e.g. a real saved key with the wrong/absent cipher)
 	// is fatal here, before any Discord connection — the operator sees a clear
 	// error instead of an NPC that silently ran on the wrong (env) key.
-	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher, cfg.KeyEntitlement)
+	keys, llmCfg, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher, cfg.KeyEntitlement)
 	if err != nil {
 		return err
 	}
 
 	cfg.npcs = npcs
 	cfg.keys = keys
-	cfg.llmProviderID = llmProviderID(primary.LLMConfig)
+	// The EFFECTIVE LLM config (Agent-bound, else the tenant's 'llm' row) —
+	// the same config the key above was resolved against, so the adapter
+	// selection, round spans and spend pricing follow the key's provider.
+	cfg.llmProviderID = llmProviderID(llmCfg)
 	cfg.language = campaign.Language
 
 	// The campaign's bound player-character names (#276's `character` table) feed

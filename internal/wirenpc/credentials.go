@@ -91,23 +91,60 @@ func resolveProviderKeys(ctx context.Context, ent llmbuild.PlatformKeyEntitlemen
 	return providerKeys{llm: llm, tts: tts, stt: stt}, nil
 }
 
-// resolveSessionKeys is the DB-side seam [RunFromDB] drives: it reads the
-// Tenant's STT Provider Config by Component (STT is not Agent-joined, unlike the
-// LLM/TTS configs the primary agent's LoadedAgent already carries) and resolves
-// all three keys against cipher, behind the tenant's platform-key entitlement
-// (Config.KeyEntitlement; nil = the allowlist posture). A missing STT config is
-// treated as an env fallback, not an error. ElevenLabs STT shares the TTS key
-// in the demo seed, but the bind is read per-Component for correctness.
-func resolveSessionKeys(ctx context.Context, st *storage.Store, tenantID uuid.UUID, primary storage.LoadedAgent, cipher *crypto.Cipher, ent llmbuild.PlatformKeyEntitlement) (providerKeys, error) {
-	var sttCfg *storage.ProviderConfig
-	pc, err := st.GetProviderConfigByComponent(ctx, tenantID, storage.ComponentSTT)
+// effectiveComponentConfig resolves ONE component's Provider Config the way
+// every other tenant-scoped path already does (assist/recap resolveLLMConfig,
+// gate #271): the Agent-bound config when present, else the Tenant's
+// per-Component provider_config row, else nil (the env fallback, ADR-0039).
+// The tenant fallback is what makes WEB-created Agents work: campaign_crud
+// never sets llm/voice_provider_config_id — only the demo seed binds them —
+// so without it a BYOK tenant's saved key was invisible to the voice session
+// and the ADR-0054/0055 entitlement gate refused the session even though the
+// key was saved right there in Configuration.
+func effectiveComponentConfig(ctx context.Context, st *storage.Store, tenantID uuid.UUID, bound *storage.ProviderConfig, component storage.Component) (*storage.ProviderConfig, error) {
+	if bound != nil {
+		return bound, nil
+	}
+	pc, err := st.GetProviderConfigByComponent(ctx, tenantID, component)
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
-		// No STT config bound -> the adapter reads ELEVENLABS_API_KEY (env).
+		// No config for this component -> the adapter reads its own env var.
+		return nil, nil
 	case err != nil:
-		return providerKeys{}, fmt.Errorf("wirenpc: load STT provider config: %w", err)
+		return nil, fmt.Errorf("wirenpc: load %s provider config: %w", component, err)
 	default:
-		sttCfg = &pc
+		return &pc, nil
 	}
-	return resolveProviderKeys(ctx, ent, tenantID, cipher, primary.LLMConfig, primary.TTSConfig, sttCfg)
+}
+
+// resolveSessionKeys is the DB-side seam [RunFromDB] drives: it resolves each
+// component's effective Provider Config (Agent-bound, else the Tenant's
+// per-Component row — see [effectiveComponentConfig]) and resolves all three
+// keys against cipher, behind the tenant's platform-key entitlement
+// (Config.KeyEntitlement; nil = the allowlist posture). A missing config is
+// treated as an env fallback, not an error. ElevenLabs STT shares the TTS key
+// in the demo seed, but the bind is read per-Component for correctness.
+//
+// It also surfaces the effective LLM config so [RunFromDB] derives
+// llmProviderID from the SAME config the key was resolved against — an
+// Agent with no binding must not label its rounds (and price its spend) as
+// the env default while speaking with the tenant's saved key.
+func resolveSessionKeys(ctx context.Context, st *storage.Store, tenantID uuid.UUID, primary storage.LoadedAgent, cipher *crypto.Cipher, ent llmbuild.PlatformKeyEntitlement) (providerKeys, *storage.ProviderConfig, error) {
+	llmCfg, err := effectiveComponentConfig(ctx, st, tenantID, primary.LLMConfig, storage.ComponentLLM)
+	if err != nil {
+		return providerKeys{}, nil, err
+	}
+	ttsCfg, err := effectiveComponentConfig(ctx, st, tenantID, primary.TTSConfig, storage.ComponentTTS)
+	if err != nil {
+		return providerKeys{}, nil, err
+	}
+	// STT is never Agent-joined; it always resolves from the Tenant row.
+	sttCfg, err := effectiveComponentConfig(ctx, st, tenantID, nil, storage.ComponentSTT)
+	if err != nil {
+		return providerKeys{}, nil, err
+	}
+	keys, err := resolveProviderKeys(ctx, ent, tenantID, cipher, llmCfg, ttsCfg, sttCfg)
+	if err != nil {
+		return providerKeys{}, nil, err
+	}
+	return keys, llmCfg, nil
 }
