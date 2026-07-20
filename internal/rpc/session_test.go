@@ -1539,3 +1539,22 @@ func TestSplitModeMuteDegrades(t *testing.T) {
 		t.Errorf("SetAllMute ErrSplitMode code = %v, want FailedPrecondition", got)
 	}
 }
+
+// TestSplitModeMuteControlPending covers sequence (18) of #503: the split
+// web-panel mutes now RELAY through the claim plane, so an unconfirmed relay
+// (ErrControlPending) maps to CodeUnavailable (retry) — never a false success
+// and no more blanket FailedPrecondition/ErrSplitMode for split-mode mutes.
+func TestSplitModeMuteControlPending(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeSessionManager{muteErr: session.ErrControlPending}
+	client := newSessionClient(t, mgr, activeStore())
+
+	_, err := client.SetAgentMute(context.Background(), connect.NewRequest(&managementv1.SetAgentMuteRequest{AgentId: uuid.NewString(), Muted: true}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("SetAgentMute ErrControlPending code = %v, want Unavailable", got)
+	}
+	_, err = client.SetAllMute(context.Background(), connect.NewRequest(&managementv1.SetAllMuteRequest{Muted: true}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("SetAllMute ErrControlPending code = %v, want Unavailable", got)
+	}
+}

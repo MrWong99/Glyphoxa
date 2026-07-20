@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -27,10 +28,169 @@ type fakeIntentStore struct {
 	heartbeats  int   // HeartbeatVoiceSessionIntent call count (#506 finalize-heartbeat test)
 	// sessionOutcome scripts GetVoiceSession — the self-exit outcome read (#483 L4).
 	sessionOutcome func(uuid.UUID) (storage.VoiceSession, error)
+	// controls is the requested-control queue (#503), keyed by control id.
+	controls map[uuid.UUID]*storage.VoiceSessionControl
+	seq      int // creation tiebreak so list order is deterministic
+	// onControlCreate scripts the hosting worker's reaction to a fresh control row
+	// (#503 requester-side tests): run under the lock right after the insert.
+	onControlCreate func(*storage.VoiceSessionControl)
+	// finishControlErrs is a queue of errors FinishVoiceSessionControl returns on
+	// successive calls (a nil entry, or an exhausted queue, is a normal finish) —
+	// models a transient terminal-write blip (#503 FIX1).
+	finishControlErrs []error
 }
 
 func newFakeIntentStore() *fakeIntentStore {
-	return &fakeIntentStore{intents: map[uuid.UUID]*storage.VoiceSessionIntent{}}
+	return &fakeIntentStore{
+		intents:  map[uuid.UUID]*storage.VoiceSessionIntent{},
+		controls: map[uuid.UUID]*storage.VoiceSessionControl{},
+	}
+}
+
+// addControl enqueues a pending control row (#503), stamping CreatedAt with a
+// strictly-increasing sequence so (created_at, id) list order is deterministic.
+func (f *fakeIntentStore) addControl(c storage.VoiceSessionControl) *storage.VoiceSessionControl {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	row := c
+	row.ID = uuid.New()
+	row.Status = storage.VoiceControlPending
+	row.CreatedAt = time.Now().Add(time.Duration(f.seq) * time.Microsecond)
+	f.controls[row.ID] = &row
+	return &row
+}
+
+// CreateVoiceSessionControl is the requester-side write (#503, IntentControlStore).
+func (f *fakeIntentStore) CreateVoiceSessionControl(_ context.Context, c storage.VoiceSessionControl) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	row := c
+	row.ID = uuid.New()
+	row.Status = storage.VoiceControlPending
+	row.CreatedAt = time.Now().Add(time.Duration(f.seq) * time.Microsecond)
+	f.controls[row.ID] = &row
+	if f.onControlCreate != nil {
+		f.onControlCreate(&row)
+	}
+	return row, nil
+}
+
+func (f *fakeIntentStore) GetVoiceSessionControl(_ context.Context, id uuid.UUID) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.controls[id]
+	if !ok {
+		return storage.VoiceSessionControl{}, storage.ErrNotFound
+	}
+	return *c, nil
+}
+
+func (f *fakeIntentStore) CancelPendingVoiceSessionControl(_ context.Context, id uuid.UUID) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.controls[id]
+	if !ok || c.Status != storage.VoiceControlPending {
+		return false, nil
+	}
+	now := time.Now()
+	c.Status = storage.VoiceControlFailed
+	c.LastError = "requester timed out"
+	c.EndedAt = &now
+	return true, nil
+}
+
+func (f *fakeIntentStore) getControl(id uuid.UUID) storage.VoiceSessionControl {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return *f.controls[id]
+}
+
+func (f *fakeIntentStore) ListPendingVoiceSessionControls(_ context.Context, intentID uuid.UUID) ([]storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []storage.VoiceSessionControl
+	for _, c := range f.controls {
+		if c.IntentID == intentID && c.Status == storage.VoiceControlPending {
+			out = append(out, *c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
+}
+
+func (f *fakeIntentStore) StartVoiceSessionControl(_ context.Context, id uuid.UUID) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.controls[id]
+	if !ok || c.Status != storage.VoiceControlPending {
+		return storage.VoiceSessionControl{}, storage.ErrNotFound
+	}
+	now := time.Now()
+	c.Status = storage.VoiceControlExecuting
+	c.StartedAt = &now
+	return *c, nil
+}
+
+func (f *fakeIntentStore) FinishVoiceSessionControl(_ context.Context, id uuid.UUID, status storage.VoiceSessionControlStatus, resultIDs []string, lastError string) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.finishControlErrs) > 0 {
+		err := f.finishControlErrs[0]
+		f.finishControlErrs = f.finishControlErrs[1:]
+		if err != nil {
+			return storage.VoiceSessionControl{}, err // transient blip: row stays executing
+		}
+	}
+	c, ok := f.controls[id]
+	if !ok || c.Status != storage.VoiceControlExecuting {
+		return storage.VoiceSessionControl{}, storage.ErrNotFound
+	}
+	now := time.Now()
+	c.Status = status
+	c.ResultIDs = resultIDs
+	c.LastError = lastError
+	c.EndedAt = &now
+	return *c, nil
+}
+
+func (f *fakeIntentStore) SweepOrphanedVoiceSessionControls(_ context.Context, executingStale time.Duration) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for _, c := range f.controls {
+		if c.Status != storage.VoiceControlPending && c.Status != storage.VoiceControlExecuting {
+			continue
+		}
+		terminal := false
+		if i, ok := f.intents[c.IntentID]; ok {
+			switch i.Status {
+			case storage.VoiceIntentDone, storage.VoiceIntentDead, storage.VoiceIntentFailed:
+				terminal = true
+			}
+		}
+		staleExec := c.Status == storage.VoiceControlExecuting && c.StartedAt != nil &&
+			time.Since(*c.StartedAt) >= executingStale
+		if !terminal && !staleExec {
+			continue
+		}
+		now := time.Now()
+		c.Status = storage.VoiceControlFailed
+		if terminal {
+			c.LastError = session.EncodeControlFailure(session.ErrNoActiveSession)
+		} else {
+			c.LastError = "control execution stalled on the hosting worker"
+		}
+		c.EndedAt = &now
+		n++
+	}
+	return n, nil
 }
 
 func (f *fakeIntentStore) add(tenantID, campaignID uuid.UUID) *storage.VoiceSessionIntent {

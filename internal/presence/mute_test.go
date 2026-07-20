@@ -3,12 +3,14 @@ package presence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -117,51 +119,161 @@ func TestMuteCommand_IdleEphemeral(t *testing.T) {
 	}
 }
 
-// fakePool is a PoolSession for the split-mode guard tests (#483): it scripts the
-// claim plane's pool-wide Active answer.
-type fakePool struct{ live bool }
+// fakePool is a PoolControl for the cross-pod control tests (#503): it scripts
+// the claim plane's pool-wide Active answer and records the relayed controls.
+type fakePool struct {
+	live       bool
+	campaignID uuid.UUID
+	mutedIDs   []string
+	muteErr    error
+	sayErr     error
+	agentCalls []muteCall
+	allCalls   []bool
+	sayCalls   []poolSayCall
+}
+
+type poolSayCall struct {
+	id   string
+	text string
+}
 
 func (f *fakePool) Active(context.Context, uuid.UUID) (storage.VoiceSession, bool, error) {
-	return storage.VoiceSession{}, f.live, nil
+	if !f.live {
+		return storage.VoiceSession{}, false, nil
+	}
+	return storage.VoiceSession{CampaignID: f.campaignID}, true, nil
 }
 
-// TestMuteCommand_SessionOnAnotherWorker pins the #483 replicas>1 fix: the local
-// Manager holds no session but the claim plane says the Tenant's session is live
-// (hosted by ANOTHER worker in the pool) — the handler must reply the honest
-// split-mode limitation (#503), never the false "No Voice Session is active.",
-// and must mute nothing.
-func TestMuteCommand_SessionOnAnotherWorker(t *testing.T) {
-	mgr := &fakeMuter{active: false}
-	cmd := MuteCommand(mgr, &fakeLister{}, &fakePool{live: true})
+func (f *fakePool) SetAgentMute(_ context.Context, _ uuid.UUID, id string, muted bool) ([]string, error) {
+	f.agentCalls = append(f.agentCalls, muteCall{id, muted})
+	return f.mutedIDs, f.muteErr
+}
+
+func (f *fakePool) SetAllMute(_ context.Context, _ uuid.UUID, muted bool) ([]string, error) {
+	f.allCalls = append(f.allCalls, muted)
+	return f.mutedIDs, f.muteErr
+}
+
+func (f *fakePool) SayAs(_ context.Context, _ uuid.UUID, id, text string) error {
+	f.sayCalls = append(f.sayCalls, poolSayCall{id, text})
+	return f.sayErr
+}
+
+// TestMuteCommand_LocalPathNoDefer covers sequence (12)/AC3: with the session
+// live on THIS worker the old path runs byte-identically — an immediate
+// ephemeral reply, NO Defer, the pool never consulted.
+func TestMuteCommand_LocalPathNoDefer(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	pool := &fakePool{live: true}
+	cmd := MuteCommand(mgr, &fakeLister{agents: []storage.Agent{bart}}, pool)
 	resp := &fakeResponder{}
-	if err := cmd.Handle(context.Background(), muteIC(resp, "Bart")); err != nil {
+	if err := cmd.Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
-		t.Fatalf("split reply = %+v, want one ephemeral", resp.replies)
+	if resp.deferred != nil {
+		t.Fatal("local path Deferred, want the pre-#503 immediate reply (AC3)")
 	}
-	if !strings.Contains(resp.replies[0].content, "another worker") {
-		t.Errorf("split reply = %q, want the hosted-by-another-worker message, not the false no-session guard", resp.replies[0].content)
+	if len(resp.replies) != 1 || resp.replies[0].content != "Bart is muted." || !resp.replies[0].ephemeral {
+		t.Fatalf("local reply = %+v, want the ephemeral 'Bart is muted.'", resp.replies)
 	}
-	if len(mgr.agentCalls) != 0 {
-		t.Fatalf("split handler muted %v, want nothing", mgr.agentCalls)
+	if len(pool.agentCalls) != 0 {
+		t.Fatalf("local path relayed %v, want the local Manager only", pool.agentCalls)
 	}
 }
 
-// TestMuteAllCommand_SessionOnAnotherWorker is the muteall sibling of the #483
-// split-mode guard.
+// TestMuteCommand_SessionOnAnotherWorker covers sequence (13)/#503: the local
+// Manager holds no session but the pool does — the handler Defers ephemerally,
+// relays the mute through the claim plane, and confirms with "X is muted."
+func TestMuteCommand_SessionOnAnotherWorker(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	mgr := &fakeMuter{active: false}
+	pool := &fakePool{live: true, campaignID: uuid.New()}
+	cmd := MuteCommand(mgr, &fakeLister{agents: []storage.Agent{bart}}, pool)
+	resp := &fakeResponder{}
+	if err := cmd.Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatal("cross-pod mute did not Defer(true) — the relay can outlive Discord's 3s deadline")
+	}
+	if len(pool.agentCalls) != 1 || pool.agentCalls[0].id != bart.ID.String() || !pool.agentCalls[0].muted {
+		t.Fatalf("pool relay calls = %+v, want one {%s true}", pool.agentCalls, bart.ID)
+	}
+	if len(mgr.agentCalls) != 0 {
+		t.Fatalf("cross-pod path drove the LOCAL manager: %+v", mgr.agentCalls)
+	}
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Bart is muted.") || !resp.followups[0].ephemeral {
+		t.Fatalf("confirming followup = %+v, want ephemeral 'Bart is muted.'", resp.followups)
+	}
+}
+
+// TestMuteCommand_RelayFailureSurfaces covers sequence (14): a relay failure
+// posts the REAL error text — never a silent no-op — and an unconfirmed relay
+// (ErrControlPending) posts the honest not-confirmed wording, no phantom success.
+func TestMuteCommand_RelayFailureSurfaces(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	lister := &fakeLister{agents: []storage.Agent{bart}}
+
+	pool := &fakePool{live: true, muteErr: errors.New("worker could not apply control: tts exploded")}
+	resp := &fakeResponder{}
+	if err := MuteCommand(&fakeMuter{}, lister, pool).Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "tts exploded") {
+		t.Fatalf("failure followup = %+v, want the real error text", resp.followups)
+	}
+
+	pool = &fakePool{live: true, muteErr: session.ErrControlPending}
+	resp = &fakeResponder{}
+	if err := MuteCommand(&fakeMuter{}, lister, pool).Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "not confirmed") {
+		t.Fatalf("pending followup = %+v, want the honest not-confirmed wording", resp.followups)
+	}
+	if strings.Contains(resp.followups[0].content, "is muted.") {
+		t.Fatalf("pending followup %q claims success", resp.followups[0].content)
+	}
+}
+
+// TestMuteAllCommand_SessionOnAnotherWorker covers the muteall arm of sequence
+// (15): Defer + relay + confirming count followup.
 func TestMuteAllCommand_SessionOnAnotherWorker(t *testing.T) {
 	mgr := &fakeMuter{active: false}
+	pool := &fakePool{live: true, mutedIDs: []string{"a", "b"}}
 	resp := &fakeResponder{}
-	if err := MuteAllCommand(mgr, &fakeLister{}, &fakePool{live: true}).Handle(context.Background(),
+	if err := MuteAllCommand(mgr, &fakeLister{}, pool).Handle(context.Background(),
 		&Interaction{guildID: testGuild, userID: operatorID, resp: resp}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.replies) != 1 || !strings.Contains(resp.replies[0].content, "another worker") {
-		t.Fatalf("split reply = %+v, want the hosted-by-another-worker message", resp.replies)
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatal("cross-pod muteall did not Defer(true)")
+	}
+	if len(pool.allCalls) != 1 || !pool.allCalls[0] {
+		t.Fatalf("pool muteall calls = %v, want one true", pool.allCalls)
 	}
 	if len(mgr.allCalls) != 0 {
-		t.Fatalf("split handler muted-all %v, want nothing", mgr.allCalls)
+		t.Fatalf("cross-pod muteall drove the LOCAL manager: %v", mgr.allCalls)
+	}
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Muted all 2 Agent voices.") {
+		t.Fatalf("confirming followup = %+v, want 'Muted all 2 Agent voices.'", resp.followups)
+	}
+}
+
+// TestMuteAutocomplete_PoolFallback: with no LOCAL session the mute autocomplete
+// falls back to the pool's Active for the roster campaign (#503), so a GM on the
+// presence owner still gets choices for a session hosted elsewhere.
+func TestMuteAutocomplete_PoolFallback(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	cmd := MuteCommand(&fakeMuter{active: false}, &fakeLister{agents: []storage.Agent{bart}},
+		&fakePool{live: true, campaignID: uuid.New()})
+	choices, err := cmd.Autocomplete(context.Background(), muteAC(""))
+	if err != nil {
+		t.Fatalf("Autocomplete: %v", err)
+	}
+	if len(choices) != 1 {
+		t.Fatalf("choices = %+v, want Bart via the pool fallback", choices)
 	}
 }
 

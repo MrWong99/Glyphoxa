@@ -46,9 +46,11 @@ type SayControl interface {
 // (ADR-0009/0024), so puppeteering it needs the Butler voicer on-ramp — the
 // #299-blocked follow-up (ButlerVoicer = SayAs(GetButler id)).
 //
-// pool is the claim-plane read for the replicas>1 fleet (#483/#503, nil in
-// -mode all) — see MuteCommand.
-func SayCommand(mgr SayControl, agents AgentLister, pool PoolSession) Command {
+// pool is the claim-plane control relay for the replicas>1 fleet (#503, nil in
+// -mode all) — see MuteCommand. The no-Defer note above holds for the LOCAL
+// path only: the cross-pod branch DOES Defer, since the relay polls the hosting
+// worker past Discord's 3s deadline.
+func SayCommand(mgr SayControl, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "say",
 		Description: "Make an NPC speak the given text in the active Voice Session.",
@@ -69,7 +71,11 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolSession) Command {
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			vs, active, err := mgr.Active(ctx, ac.TenantID())
 			if err != nil || !active {
-				return nil, nil // no session for this Tenant: nothing to puppet, offer nothing
+				// No LOCAL session: fall back to the pool's Active (#503) so the roster
+				// still resolves for a session hosted by another worker.
+				if vs, active = poolActive(ctx, pool, ac.TenantID()); !active {
+					return nil, nil // no session anywhere: nothing to puppet, offer nothing
+				}
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
 			if err != nil {
@@ -94,9 +100,9 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolSession) Command {
 			if err != nil || !active {
 				// No session for THIS Tenant (#488): a session live for another Tenant is
 				// invisible here, so a GM can never puppet a foreign Tenant's session. When
-				// the pool shows it live on ANOTHER worker the reply names the split-mode
-				// limitation instead (#483/#503).
-				return replyNoLocalSession(ctx, ic, pool)
+				// the pool shows it live on ANOTHER worker, relay the say through the
+				// claim plane (#503); else the plain no-session guard.
+				return handleCrossPodSay(ctx, ic, agents, pool)
 			}
 			text, _ := ic.String("text")
 			input, _ := ic.String("as")
@@ -121,4 +127,32 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolSession) Command {
 			return ic.ReplyEphemeral(fmt.Sprintf("Speaking as %s.", agent.Name))
 		},
 	}
+}
+
+// handleCrossPodSay is /say's cross-pod branch (#503) — the say sibling of
+// handleCrossPodMute: Defer FIRST, resolve the puppet target against the POOL
+// session's Campaign roster, relay through the claim plane, confirm/err.
+func handleCrossPodSay(ctx context.Context, ic *Interaction, agents AgentLister, pool PoolControl) error {
+	vs, live := poolActive(ctx, pool, ic.TenantID())
+	if !live {
+		return ic.ReplyEphemeral("No Voice Session is active.")
+	}
+	if err := ic.Defer(true); err != nil {
+		return fmt.Errorf("presence: defer cross-pod say: %w", err)
+	}
+	text, _ := ic.String("text")
+	input, _ := ic.String("as")
+	roster, err := agents.ListAgents(ctx, vs.CampaignID)
+	if err != nil {
+		return fmt.Errorf("presence: list agents for cross-pod say: %w", err) // generic reply via the registry
+	}
+	agent, found, ambiguous := resolveAgent(voiced(roster), input)
+	if ambiguous {
+		return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
+	}
+	if !found {
+		return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+	}
+	err = pool.SayAs(ctx, ic.TenantID(), agent.ID.String(), text)
+	return replyControlOutcome(ic, err, fmt.Sprintf("Speaking as %s.", agent.Name))
 }

@@ -506,17 +506,19 @@ func TestIntentControl_StopBudgetError(t *testing.T) {
 	}
 }
 
-// TestIntentControl_MgrOnlyDegrade covers review item 6: the Manager-only live
-// controls degrade with ErrSplitMode on the web tier of a split deployment.
+// TestIntentControl_MgrOnlyDegrade covers review item 6, narrowed by #503: the
+// mutes now RELAY through the claim plane (no live intent → ErrNoActiveSession,
+// exactly the -mode all Manager's answer — no more ErrSplitMode, sequence 18);
+// only replay + the muted-set/spend reads stay degraded (out of #503 AC scope).
 func TestIntentControl_MgrOnlyDegrade(t *testing.T) {
 	ctl := session.NewIntentControl(newFakeControlStore(), slog.New(slog.DiscardHandler), session.IntentControlConfig{})
 	tenantID := uuid.New()
 
-	if _, err := ctl.SetAgentMute(context.Background(), tenantID, uuid.NewString(), true); !errors.Is(err, session.ErrSplitMode) {
-		t.Errorf("SetAgentMute err = %v, want ErrSplitMode", err)
+	if _, err := ctl.SetAgentMute(context.Background(), tenantID, uuid.NewString(), true); !errors.Is(err, session.ErrNoActiveSession) {
+		t.Errorf("SetAgentMute err = %v, want ErrNoActiveSession (relay, not ErrSplitMode)", err)
 	}
-	if _, err := ctl.SetAllMute(context.Background(), tenantID, true); !errors.Is(err, session.ErrSplitMode) {
-		t.Errorf("SetAllMute err = %v, want ErrSplitMode", err)
+	if _, err := ctl.SetAllMute(context.Background(), tenantID, true); !errors.Is(err, session.ErrNoActiveSession) {
+		t.Errorf("SetAllMute err = %v, want ErrNoActiveSession (relay, not ErrSplitMode)", err)
 	}
 	if err := ctl.ReplayHighlight(context.Background(), tenantID, "clip-key"); !errors.Is(err, session.ErrSplitMode) {
 		t.Errorf("ReplayHighlight err = %v, want ErrSplitMode", err)

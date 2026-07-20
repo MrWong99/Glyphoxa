@@ -435,8 +435,17 @@ func voiceIntentControlConfig(getenv func(string) string) session.IntentControlC
 		// Matches the worker's reaper horizon so Start's zero-worker escape (review
 		// item 4) judges a blocking claim stale on the same clock the worker would.
 		Expiry: envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+		// How long a relayed live control (mute/say/butler-say, #503) waits for the
+		// hosting worker's confirmation. Dispatch rides the worker's heartbeat tick
+		// (default 5s), so this knob must stay comfortably above heartbeat + one
+		// control execute + margin — the 15s default gives ~3 beats of headroom.
+		ControlBudget: envDuration(getenv, "GLYPHOXA_VOICE_CONTROL_BUDGET", defaultVoiceControlBudget),
 	}
 }
+
+// defaultVoiceControlBudget is the relayed-control confirmation budget (#503):
+// 15s = worker heartbeat (5s) + execute + generous margin.
+const defaultVoiceControlBudget = 15 * time.Second
 
 // Presence-owner election defaults (#492, ADR-0057 (c)): the -mode voice worker
 // renews the singleton presence_owner claim every 5s and an owner's silence past

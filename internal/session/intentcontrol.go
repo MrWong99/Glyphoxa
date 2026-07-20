@@ -42,7 +42,19 @@ type IntentControlStore interface {
 	// zero-worker reap (#483): the reap marks the intent dead but the bound row
 	// would otherwise stay 'running' until some Voice Instance's own reap or boot.
 	ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error)
+	// The requested-control queue (#503): the requester writes a pending control
+	// row, polls it to terminal, and best-effort cancels it on budget expiry.
+	CreateVoiceSessionControl(ctx context.Context, c storage.VoiceSessionControl) (storage.VoiceSessionControl, error)
+	GetVoiceSessionControl(ctx context.Context, id uuid.UUID) (storage.VoiceSessionControl, error)
+	CancelPendingVoiceSessionControl(ctx context.Context, id uuid.UUID) (bool, error)
 }
+
+// ErrControlPending is returned when the hosting worker has not confirmed a
+// relayed live control within the control budget (→ CodeUnavailable): the
+// control MAY still execute (a worker mid-execute cannot be recalled), but a
+// confirmation is never claimed for it (ADR-0012 — timeout is an error, never a
+// claimed success). The requester best-effort cancels the pending row first.
+var ErrControlPending = errors.New("session: the voice worker has not confirmed the control yet")
 
 // IntentControlConfig carries IntentControl's poll cadence and budgets (#491). A
 // non-positive value takes its default.
@@ -60,6 +72,12 @@ type IntentControlConfig struct {
 	// whose heartbeat is older than this before failing ErrSessionActive — the
 	// zero-worker escape (review item 4). Default 30s.
 	Expiry time.Duration
+	// ControlBudget bounds how long a relayed live control (mute/say/butler-say,
+	// #503) waits for the hosting worker's confirmation before ErrControlPending.
+	// Default 15s (env GLYPHOXA_VOICE_CONTROL_BUDGET); it must stay comfortably
+	// above the worker heartbeat (default 5s) plus one control execute, since
+	// dispatch rides the heartbeat tick.
+	ControlBudget time.Duration
 }
 
 // IntentControl drives voice sessions through the Postgres claim plane (#491).
@@ -86,6 +104,9 @@ func NewIntentControl(store IntentControlStore, log *slog.Logger, cfg IntentCont
 	}
 	if cfg.Expiry <= 0 {
 		cfg.Expiry = 30 * time.Second
+	}
+	if cfg.ControlBudget <= 0 {
+		cfg.ControlBudget = 15 * time.Second
 	}
 	return &IntentControl{store: store, log: log, cfg: cfg}
 }
@@ -331,31 +352,127 @@ func (c *IntentControl) AnyLive() bool {
 	return live
 }
 
-// The live-session controls below are Manager-only: their state (the mute set,
-// the spend meter, the outbound pump for say/replay) lives in the -mode voice
-// worker, unreachable from the web tier. In a split deployment they degrade with
-// ErrSplitMode (→ CodeFailedPrecondition) rather than lie (ADR-0057 consequence:
-// no mute/say RPCs on the web tier of a split deployment).
+// The live-session controls below relay through the claim plane (#503): the
+// requester writes a voice_session_controls row the HOSTING worker drains on its
+// heartbeat tick, and polls it to a terminal status — the stop_requested
+// handshake's shape, ADR-0051's write-then-poll precedent. NOTE: ADR-0057's
+// consequence "a voice pod split from the web tier … has no mute/say RPCs" is
+// SUPERSEDED by this relay per the SaaS directive on #503 (see the ADR's
+// Amendments); the dispatch itself still never moves the session (ADR-0006/0057
+// (e)) — only the owning worker's own loop executes the row.
 
-// SetAgentMute is Manager-only (#491): ErrSplitMode in a split deployment.
-func (c *IntentControl) SetAgentMute(context.Context, uuid.UUID, string, bool) ([]string, error) {
-	return nil, ErrSplitMode
+// SetAgentMute relays a per-Agent mute to the hosting worker (#503).
+func (c *IntentControl) SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error) {
+	return c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
+		Kind: storage.VoiceControlMuteAgent, AgentID: agentID, Muted: muted,
+	})
 }
 
-// SetAllMute is Manager-only (#491): ErrSplitMode in a split deployment.
-func (c *IntentControl) SetAllMute(context.Context, uuid.UUID, bool) ([]string, error) {
-	return nil, ErrSplitMode
+// SetAllMute relays an all-Agents mute to the hosting worker (#503).
+func (c *IntentControl) SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error) {
+	return c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
+		Kind: storage.VoiceControlMuteAll, Muted: muted,
+	})
 }
 
-// MutedAgentIDs is Manager-only (#491): nil on the web tier of a split deployment.
+// SayAs relays GM puppeteering to the hosting worker (#503): the queue drains in
+// (created_at, id) order, so two says land in request order.
+func (c *IntentControl) SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error {
+	_, err := c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
+		Kind: storage.VoiceControlSay, AgentID: agentID, SayText: text,
+	})
+	return err
+}
+
+// SpeakAsButler relays a Butler utterance (the voiced-recap on-ramp, #503).
+func (c *IntentControl) SpeakAsButler(ctx context.Context, tenantID uuid.UUID, text string) error {
+	_, err := c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
+		Kind: storage.VoiceControlButlerSay, SayText: text,
+	})
+	return err
+}
+
+// relayControl runs one control through the claim plane: find the Tenant's LIVE
+// intent (anything else is ErrNoActiveSession — a control never targets a
+// pending/claimed row whose session does not exist yet), write the pending row,
+// and poll it to terminal within the control budget. A worker 'failed' with an
+// encoded fail code re-maps to the same sentinel the -mode all path returns;
+// an uncoded failure surfaces verbatim. Budget expiry best-effort cancels the
+// pending row and returns ErrControlPending — never a claimed success
+// (ADR-0012); a worker already mid-execute may still apply the control, which
+// the honest "not confirmed" wording covers.
+func (c *IntentControl) relayControl(ctx context.Context, tenantID uuid.UUID, ctrl storage.VoiceSessionControl) ([]string, error) {
+	intent, err := c.store.GetLiveVoiceSessionIntentForTenant(ctx, tenantID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, ErrNoActiveSession
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session: load live intent for control: %w", err)
+	}
+	if intent.Status != storage.VoiceIntentLive {
+		return nil, ErrNoActiveSession
+	}
+
+	ctrl.IntentID = intent.ID
+	ctrl.TenantID = tenantID
+	row, err := c.store.CreateVoiceSessionControl(ctx, ctrl)
+	if err != nil {
+		return nil, fmt.Errorf("session: create voice session control: %w", err)
+	}
+
+	deadline := time.Now().Add(c.cfg.ControlBudget)
+	ticker := time.NewTicker(c.cfg.Poll)
+	defer ticker.Stop()
+	for {
+		cur, err := c.store.GetVoiceSessionControl(ctx, row.ID)
+		if err != nil {
+			c.cancelPendingControl(row.ID)
+			return nil, fmt.Errorf("session: poll voice session control: %w", err)
+		}
+		switch cur.Status {
+		case storage.VoiceControlDone:
+			return cur.ResultIDs, nil
+		case storage.VoiceControlFailed:
+			if sentinel, ok := DecodeControlFailure(cur.LastError); ok {
+				return nil, sentinel
+			}
+			return nil, fmt.Errorf("session: worker could not apply control: %s", cur.LastError)
+		}
+		if time.Now().After(deadline) {
+			c.cancelPendingControl(row.ID)
+			return nil, ErrControlPending
+		}
+		select {
+		case <-ctx.Done():
+			c.cancelPendingControl(row.ID)
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// cancelPendingControl best-effort fails a pending control the requester stopped
+// watching, on a detached short ctx (the fenced write loses cleanly when the
+// worker finished first — the row is settled either way).
+func (c *IntentControl) cancelPendingControl(id uuid.UUID) {
+	dctx, cancel := context.WithTimeout(context.Background(), cancelAbandonedIntentTimeout)
+	defer cancel()
+	if _, err := c.store.CancelPendingVoiceSessionControl(dctx, id); err != nil {
+		c.log.Warn("intent control: cancel pending control", "control", id, "err", err)
+	}
+}
+
+// MutedAgentIDs stays Manager-only (#491/#503 known gap): the web panel's muted
+// set reads degrade to nil in a split deployment (out of #503's AC scope).
 func (c *IntentControl) MutedAgentIDs(uuid.UUID) []string { return nil }
 
 // Spend is Manager-only (#491): the zero Status on the web tier of a split
 // deployment (the live meter rides the worker; the durable ledger is the truth).
 func (c *IntentControl) Spend(uuid.UUID) spend.Status { return spend.Status{} }
 
-// ReplayHighlight is Manager-only (#491): a live-channel replay needs the worker's
-// outbound pump, so it is ErrSplitMode on the web tier of a split deployment.
+// ReplayHighlight is Manager-only (#491; #503 known gap — the highlight-replay
+// relay is out of AC scope): a live-channel replay needs the worker's outbound
+// pump, so it is ErrSplitMode on the web tier of a split deployment.
 func (c *IntentControl) ReplayHighlight(context.Context, uuid.UUID, string) error {
 	return ErrSplitMode
 }

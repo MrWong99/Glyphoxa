@@ -16,6 +16,10 @@
 #   3. failover — kill the owner pod and a survivor wins the presence_owner
 #      election within ~20s (default expiry 15s + one renew interval), so the
 #      fleet keeps dispatching interactions with no operator action;
+#   5. cross-pod live controls (#503): with the session HOSTED by one pod and the
+#      presence OWNER being the other, /glyphoxa mute lands a
+#      voice_session_controls row the HOSTING worker's loop executes (row goes
+#      'done' within the control budget) and the GM sees one "is muted." followup;
 #   4. the IDENTIFY budget guard (#486) holds under fleet cold-start: disgo
 #      serializes IDENTIFYs per client (max_concurrency 1, one per 5s), so two
 #      replicas booting on the shared token must NOT blow the 1000/24h budget —
@@ -203,6 +207,58 @@ step_failover() {
   fail "step 3: no new owner elected within ${FAILOVER_TIMEOUT}s (still $new_owner)"
 }
 
+# --- Step 5: cross-pod mute via the control queue (#503, human in the loop) --
+# Exercises the requested-controls relay: the presence OWNER pod dispatches
+# /glyphoxa mute while the session is HOSTED by the OTHER pod. The human drives
+# Discord (start a session, split host from owner, run the mute); the script
+# verifies the plane — the voice_session_controls row landing status='done'
+# within the control budget proves the hosting worker's loop executed it.
+CONTROL_BUDGET="${CONTROL_BUDGET:-15}"
+step_cross_pod_mute() {
+  note "step 5: cross-pod mute via voice_session_controls (#503 — MANUAL steps + psql checks)"
+  cat <<EOF
+  With BOTH replicas up and an owner elected:
+    1. In Discord, run  /glyphoxa start  (your Tenant needs a saved guild/channel
+       and an Active Campaign with at least one voiced NPC).
+EOF
+  note "step 5: waiting for a live intent row"
+  local host_instance="" owner_instance="" deadline
+  deadline=$(( SECONDS + FAILOVER_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    host_instance=$(psql_query "SELECT instance_id FROM voice_session_intents WHERE status='live' ORDER BY created_at DESC LIMIT 1;" || true)
+    [[ -n "$host_instance" ]] && break
+    sleep 2
+  done
+  [[ -n "$host_instance" ]] || fail "step 5: no live voice_session_intents row appeared — did /glyphoxa start succeed?"
+  owner_instance=$(current_owner_instance || true)
+  note "step 5: session host=$host_instance, presence owner=$owner_instance"
+  if [[ "${host_instance%-*}" == "${owner_instance%-*}" ]]; then
+    warn "step 5: host and owner are the SAME pod — the mute would take the local path."
+    cat <<EOF
+    Run  /glyphoxa end  then  /glyphoxa start  again until the claiming pod
+    differs from the presence owner (with 2 replicas the claim is a race; a few
+    tries suffice), then re-run this script step.
+EOF
+    fail "step 5: host == owner; split them and re-run"
+  fi
+  cat <<EOF
+    2. Host and owner are DIFFERENT pods — now run  /glyphoxa mute npc:<name>
+       in Discord. You must see the deferred "thinking…" then EXACTLY ONE
+       ephemeral "<name> is muted." followup. An error message = the relay
+       surfaced a real failure (also a #503 behavior, but the mute did not land).
+EOF
+  note "step 5: polling voice_session_controls for a done mute_agent row (${CONTROL_BUDGET}s + slack)"
+  local status="" ; deadline=$(( SECONDS + CONTROL_BUDGET + 30 ))
+  while (( SECONDS < deadline )); do
+    status=$(psql_query "SELECT status FROM voice_session_controls WHERE kind='mute_agent' ORDER BY created_at DESC LIMIT 1;" || true)
+    [[ "$status" == "done" ]] && break
+    sleep 2
+  done
+  [[ "$status" == "done" ]] || fail "step 5: newest mute_agent control status='${status:-<none>}', want done within the control budget — did the hosting worker's loop dispatch it?"
+  note "step 5 OK: cross-pod mute executed by the hosting worker (control row done); confirm the single 'is muted.' followup in Discord"
+  note "step 5 cleanup: run /glyphoxa end when finished"
+}
+
 # --- Step 2: /roll handled exactly once (human in the loop) ------------------
 step_roll_once() {
   note "step 2: exactly-once /roll (MANUAL — needs you at a Discord client)"
@@ -225,9 +281,10 @@ step_replicas_available
 step_identify_budget
 if [[ -n "$DISCORD_BOT_TOKEN" ]]; then
   step_roll_once
+  step_cross_pod_mute
   step_failover
 else
-  warn "DISCORD_BOT_TOKEN unset: skipping step 2 (/roll) and step 3 (failover) — set it to run them (guild/channel MUST stay unset for worker mode)"
+  warn "DISCORD_BOT_TOKEN unset: skipping step 2 (/roll), step 5 (cross-pod mute) and step 3 (failover) — set it to run them (guild/channel MUST stay unset for worker mode)"
 fi
 
 note "done. Tear the release down with: helm -n $NAMESPACE uninstall $RELEASE"

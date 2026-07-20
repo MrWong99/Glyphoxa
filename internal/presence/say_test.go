@@ -103,21 +103,29 @@ func TestSayCommand_IsFlatGMOnlyWithAutocomplete(t *testing.T) {
 	}
 }
 
-// TestSayCommand_SessionOnAnotherWorker pins the #483 replicas>1 fix: the local
-// Manager holds no session but the claim plane says the Tenant's session is live
-// on ANOTHER worker — /say must reply the honest split-mode limitation (#503),
-// never the false "No Voice Session is active.", and never call SayAs.
+// TestSayCommand_SessionOnAnotherWorker covers the say arm of sequence (15)/#503:
+// the local Manager holds no session but the pool does — /say Defers, relays
+// through the claim plane (the LOCAL SayAs is never called), and confirms.
 func TestSayCommand_SessionOnAnotherWorker(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
 	sayer := &fakeSayer{active: false}
+	pool := &fakePool{live: true, campaignID: uuid.New()}
 	resp := &fakeResponder{}
-	if err := SayCommand(sayer, &fakeLister{}, &fakePool{live: true}).Handle(context.Background(), sayIC(resp, "hi", "Bart")); err != nil {
+	if err := SayCommand(sayer, &fakeLister{agents: []storage.Agent{bart}}, pool).Handle(context.Background(),
+		sayIC(resp, "hi", bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(sayer.calls) != 0 {
-		t.Fatalf("SayAs called %d times for a remote-hosted session, want 0", len(sayer.calls))
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatal("cross-pod say did not Defer(true)")
 	}
-	if len(resp.replies) != 1 || !strings.Contains(resp.replies[0].content, "another worker") {
-		t.Fatalf("split reply = %+v, want the hosted-by-another-worker message", resp.replies)
+	if len(sayer.calls) != 0 {
+		t.Fatalf("LOCAL SayAs called %d times for a remote-hosted session, want 0", len(sayer.calls))
+	}
+	if len(pool.sayCalls) != 1 || pool.sayCalls[0].id != bart.ID.String() || pool.sayCalls[0].text != "hi" {
+		t.Fatalf("pool say calls = %+v, want one {%s hi}", pool.sayCalls, bart.ID)
+	}
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Speaking as Bart.") || !resp.followups[0].ephemeral {
+		t.Fatalf("confirming followup = %+v, want ephemeral 'Speaking as Bart.'", resp.followups)
 	}
 }
 
