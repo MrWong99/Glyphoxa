@@ -31,6 +31,9 @@ type fakeIntentStore struct {
 	// controls is the requested-control queue (#503), keyed by control id.
 	controls map[uuid.UUID]*storage.VoiceSessionControl
 	seq      int // creation tiebreak so list order is deterministic
+	// onControlCreate scripts the hosting worker's reaction to a fresh control row
+	// (#503 requester-side tests): run under the lock right after the insert.
+	onControlCreate func(*storage.VoiceSessionControl)
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -52,6 +55,46 @@ func (f *fakeIntentStore) addControl(c storage.VoiceSessionControl) *storage.Voi
 	row.CreatedAt = time.Now().Add(time.Duration(f.seq) * time.Microsecond)
 	f.controls[row.ID] = &row
 	return &row
+}
+
+// CreateVoiceSessionControl is the requester-side write (#503, IntentControlStore).
+func (f *fakeIntentStore) CreateVoiceSessionControl(_ context.Context, c storage.VoiceSessionControl) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	row := c
+	row.ID = uuid.New()
+	row.Status = storage.VoiceControlPending
+	row.CreatedAt = time.Now().Add(time.Duration(f.seq) * time.Microsecond)
+	f.controls[row.ID] = &row
+	if f.onControlCreate != nil {
+		f.onControlCreate(&row)
+	}
+	return row, nil
+}
+
+func (f *fakeIntentStore) GetVoiceSessionControl(_ context.Context, id uuid.UUID) (storage.VoiceSessionControl, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.controls[id]
+	if !ok {
+		return storage.VoiceSessionControl{}, storage.ErrNotFound
+	}
+	return *c, nil
+}
+
+func (f *fakeIntentStore) CancelPendingVoiceSessionControl(_ context.Context, id uuid.UUID) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.controls[id]
+	if !ok || c.Status != storage.VoiceControlPending {
+		return false, nil
+	}
+	now := time.Now()
+	c.Status = storage.VoiceControlFailed
+	c.LastError = "requester timed out"
+	c.EndedAt = &now
+	return true, nil
 }
 
 func (f *fakeIntentStore) getControl(id uuid.UUID) storage.VoiceSessionControl {
