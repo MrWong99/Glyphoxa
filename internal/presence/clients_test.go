@@ -597,3 +597,30 @@ func TestConcurrentEnsureInvalidateBorrow(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestCloseBlocksLateEnsure covers #483 L7: an EnsureTenant landing AFTER Close
+// must not re-open a gateway into the torn-down registry — Close swept the maps,
+// so a late build would be a leaked standing client nothing ever closes.
+func TestCloseBlocksLateEnsure(t *testing.T) {
+	rig := newClientsRig(t, "")
+	ctx := context.Background()
+	tenant := uuid.New()
+	rig.store.set(tenant, rig.savedDep(t, "g-close", "token-close"))
+
+	mustEnsure(t, rig.c, tenant)
+	if rig.numBuilds() != 1 {
+		t.Fatalf("builds = %d, want 1", rig.numBuilds())
+	}
+	rig.c.Close()
+	if rig.numClosed() != 1 {
+		t.Fatalf("closed = %d after Close, want 1", rig.numClosed())
+	}
+
+	// A racing reconcile/refresher after Close: no new build, no error.
+	if err := rig.c.EnsureTenant(ctx, tenant); err != nil {
+		t.Fatalf("late EnsureTenant: %v", err)
+	}
+	if rig.numBuilds() != 1 {
+		t.Fatalf("builds after post-Close ensure = %d, want still 1 (no leaked gateway)", rig.numBuilds())
+	}
+}

@@ -159,6 +159,12 @@ type Clients struct {
 	mu       sync.Mutex
 	entries  map[string]*clientEntry
 	tenants  map[uuid.UUID]*tenantState
+	// closed marks the registry torn down (#483 L7). Written by Close under BOTH
+	// ensureMu and mu; read by EnsureTenant under ensureMu. Close takes ensureMu
+	// first so an in-flight ensure finishes (or fails) BEFORE the teardown — an
+	// ensure that overlapped Close could otherwise re-insert a fresh gateway into
+	// a registry every other path believes closed, leaking it forever.
+	closed bool
 }
 
 // NewClients builds a registry. envToken is the DISCORD_BOT_TOKEN fallback (the
@@ -224,6 +230,15 @@ func reconcileInterval() time.Duration {
 func (c *Clients) EnsureTenant(ctx context.Context, tenantID uuid.UUID) error {
 	c.ensureMu.Lock()
 	defer c.ensureMu.Unlock()
+
+	// A closed registry ensures nothing (#483 L7): a late reconcile/refresher
+	// racing shutdown must not re-open a gateway Close can never reap.
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil
+	}
 
 	dep, err := c.store.GetDeploymentConfig(ctx, tenantID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -605,9 +620,17 @@ func (c *Clients) invalidate(dead *bot.Client, cause error) {
 }
 
 // Close tears down every standing client. Called after the voice Manager's
-// shutdown so a live session releases its borrowed client first.
+// shutdown so a live session releases its borrowed client first. It takes
+// ensureMu FIRST (#483 L7): an in-flight EnsureTenant could otherwise Store a
+// freshly-opened gateway into an entry AFTER Close swept the maps — a leaked
+// gateway no path would ever close. Waiting out the in-flight ensure is bounded:
+// its network I/O rides the process ctx, already cancelled by shutdown. The
+// closed flag then keeps any later ensure a no-op.
 func (c *Clients) Close() {
+	c.ensureMu.Lock()
+	defer c.ensureMu.Unlock()
 	c.mu.Lock()
+	c.closed = true
 	var toClose []*bot.Client
 	for _, e := range c.entries {
 		if cl := e.client.Load(); cl != nil {
