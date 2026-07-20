@@ -107,7 +107,7 @@ func TestRunFromDB_DecryptsSavedKeys(t *testing.T) {
 		t.Fatalf("loadSeededNPCs tenant = %s, want %s", gotCampaign.TenantID, tenantID)
 	}
 
-	keys, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher, nil)
+	keys, _, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher, nil)
 	if err != nil {
 		t.Fatalf("resolveSessionKeys: %v", err)
 	}
@@ -141,12 +141,99 @@ func TestRunFromDB_EnvPlaceholderFallsBack(t *testing.T) {
 	}
 
 	// A nil cipher is deliberate: the env-placeholder path must not need one.
-	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, nil, nil)
+	keys, _, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveSessionKeys on env placeholders: %v (must fall back to ENV, not error)", err)
 	}
 	if keys != (providerKeys{}) {
 		t.Errorf("env-placeholder keys = %+v, want all empty (adapter ENV fallback)", keys)
+	}
+}
+
+// TestResolveSessionKeys_WebCreatedAgentUsesTenantKeys reproduces the live
+// #513-era failure: a WEB-created Character Agent carries NO
+// llm_provider_config_id / voice_provider_config_id (campaign_crud never binds
+// them — only the demo seed does), while the Configuration screen saved the
+// tenant's real BYOK keys as per-Component provider_config rows. The session
+// bridge must fall back to those tenant-Component rows — exactly like assist's
+// and recap's resolveLLMConfig — instead of resolving a nil config to "" and
+// tripping the ADR-0054/0055 platform-key entitlement gate ("tenant has no
+// platform-key entitlement (BYOK plan)") on a tenant whose key is sitting right
+// there. The refusingEntitlement stub plays the plan-less tenant's gate: with
+// the fallback in place it is never consulted, because a resolved real key
+// short-circuits the gate.
+func TestResolveSessionKeys_WebCreatedAgentUsesTenantKeys(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+	cipher := testCipher(t)
+
+	want := providerKeys{
+		llm: "sk-llm-TENANTsecret-0001",
+		tts: "sk-tts-TENANTsecret-0002",
+		stt: "sk-stt-TENANTsecret-0003",
+	}
+
+	tenantID, err := st.CreateTenant(ctx, "Web Tenant")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campaignID, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID,
+		Name:     "Schachteln",
+		System:   "dnd5e",
+		Language: "de",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	sealCfg := func(component storage.Component, provider, model, key string) {
+		ct, err := cipher.Seal([]byte(key))
+		if err != nil {
+			t.Fatalf("seal %s: %v", component, err)
+		}
+		if _, err := st.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             component,
+			Provider:              provider,
+			Model:                 model,
+			CredentialsCiphertext: ct,
+			CredentialsLast4:      crypto.Last4(key),
+		}); err != nil {
+			t.Fatalf("CreateProviderConfig %s: %v", component, err)
+		}
+	}
+	sealCfg(storage.ComponentLLM, llmProvider, llmModel, want.llm)
+	sealCfg(storage.ComponentTTS, "elevenlabs", ttsModel, want.tts)
+	sealCfg(storage.ComponentSTT, "elevenlabs", sttModel, want.stt)
+
+	// The web path: CreateAgent with NO provider-config bindings (both NullUUIDs
+	// stay invalid), exactly like rpc/campaign_crud's CreateAgent.
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID:  campaignID,
+		Role:        storage.AgentRoleCharacter,
+		Name:        "Jule Brandt",
+		Persona:     "Leitende Systemadministratorin.",
+		AddressOnly: false,
+	}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	_, primary, campaign, err := loadCampaignNPCs(ctx, st, campaignID)
+	if err != nil {
+		t.Fatalf("loadCampaignNPCs: %v", err)
+	}
+
+	keys, llmCfg, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher, refusingEntitlement{})
+	if err != nil {
+		t.Fatalf("resolveSessionKeys with unbound web Agent = %v; must fall back to the tenant's saved per-Component keys, not the entitlement gate", err)
+	}
+	if keys != want {
+		t.Errorf("resolveSessionKeys keys = %+v, want the tenant's decrypted keys %+v", keys, want)
+	}
+	if llmCfg == nil || llmCfg.Provider != llmProvider {
+		t.Errorf("resolveSessionKeys effective LLM config = %+v, want the tenant's %q row (drives llmProviderID / adapter selection)", llmCfg, llmProvider)
 	}
 }
 
