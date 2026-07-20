@@ -116,6 +116,9 @@ func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUI
 	for {
 		cur, err := c.store.GetVoiceSessionIntent(ctx, intent.ID)
 		if err != nil {
+			// Abandoning the poll: best-effort cancel the intent (mirrors the deadline
+			// path) so a worker booting later never claims a row nobody is watching.
+			c.cancelAbandonedIntent(intent.ID)
 			return storage.VoiceSession{}, fmt.Errorf("session: poll voice session intent: %w", err)
 		}
 		switch cur.Status {
@@ -149,9 +152,31 @@ func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUI
 		}
 		select {
 		case <-ctx.Done():
+			// The caller abandoned the Start (RPC ctx cancelled): best-effort cancel
+			// the intent on a detached ctx — the pending row would otherwise sit for a
+			// worker to claim with nobody watching (or linger until the Start budget of
+			// a retry sweeps it). A concurrent claim turns this into a stop_requested
+			// the claiming worker honors — also correct (same as the deadline path).
+			c.cancelAbandonedIntent(intent.ID)
 			return storage.VoiceSession{}, ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// cancelAbandonedIntentTimeout bounds the detached best-effort cancel write when
+// Start abandons its poll (ctx cancelled, or a poll error).
+const cancelAbandonedIntentTimeout = 3 * time.Second
+
+// cancelAbandonedIntent best-effort cancels an intent Start stopped watching, on
+// a detached short ctx (the caller's ctx may already be cancelled). A pending row
+// resolves straight to 'done'; a claimed/live one becomes a stop_requested the
+// owning worker honors. ErrNotFound (already terminal) is expected and silent.
+func (c *IntentControl) cancelAbandonedIntent(intentID uuid.UUID) {
+	dctx, cancel := context.WithTimeout(context.Background(), cancelAbandonedIntentTimeout)
+	defer cancel()
+	if _, err := c.store.RequestVoiceSessionStop(dctx, intentID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		c.log.Warn("intent control: cancel abandoned intent", "intent", intentID, "err", err)
 	}
 }
 

@@ -319,6 +319,61 @@ func TestIntentControl_StartCancelsPendingOnTimeout(t *testing.T) {
 	}
 }
 
+// TestIntentControl_StartCtxCancelCancelsIntent covers the epic-#483 hardening
+// (residual d): a Start abandoned by its caller (ctx cancelled mid-poll) must
+// best-effort cancel the pending intent — mirroring the deadline path — so a
+// Voice Instance booting later never claims a row nobody is watching.
+func TestIntentControl_StartCtxCancelCancelsIntent(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Minute, StopBudget: time.Second, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := ctl.Start(ctx, tenantID, campaignID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start err = %v, want context.Canceled", err)
+	}
+
+	live, err := store.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("intent left non-terminal after ctx cancel: %+v (err %v), want cancelled", live, err)
+	}
+}
+
+// erroringGetStore makes GetVoiceSessionIntent fail after the intent exists, so
+// Start's poll-error return path is exercised.
+type erroringGetStore struct {
+	*fakeControlStore
+	getErr error
+}
+
+func (e *erroringGetStore) GetVoiceSessionIntent(context.Context, uuid.UUID) (storage.VoiceSessionIntent, error) {
+	return storage.VoiceSessionIntent{}, e.getErr
+}
+
+// TestIntentControl_StartPollErrorCancelsIntent covers the epic-#483 hardening
+// (residual d): a Start that aborts on a poll error must best-effort cancel the
+// pending intent, exactly like the ctx-cancel and deadline exits.
+func TestIntentControl_StartPollErrorCancelsIntent(t *testing.T) {
+	inner := newFakeControlStore()
+	store := &erroringGetStore{fakeControlStore: inner, getErr: errors.New("db blip")}
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Minute, StopBudget: time.Second, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID); err == nil {
+		t.Fatal("Start err = nil, want poll error")
+	}
+
+	if live, err := inner.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("intent left non-terminal after poll error: %+v (err %v), want cancelled", live, err)
+	}
+}
+
 // TestIntentControl_StartCancelledOutcome covers review item 7: an external stop
 // landing on the still-pending row is a distinct ErrIntentCancelled, not
 // ErrIntentPending.
