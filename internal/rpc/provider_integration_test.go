@@ -61,11 +61,18 @@ func providerClient(t *testing.T, store *storage.Store, cipher *crypto.Cipher, t
 	t.Helper()
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			return next(auth.WithTenant(ctx, tenantID), req)
+			// The #504 guild-admin proof needs an authenticated saver identity.
+			ctx = auth.WithUser(auth.WithTenant(ctx, tenantID),
+				storage.User{ID: uuid.New(), DiscordUserID: testSaverDiscordID})
+			return next(ctx, req)
 		}
 	})
+	srvImpl := rpc.NewProviderServer(store, cipher, nil)
+	// Always-pass proof stub: this suite exercises the STORAGE boundary; the
+	// live Discord proof stays behind its seam (ADR-0033).
+	srvImpl.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewProviderServer(store, cipher, nil).Handler(connect.WithInterceptors(inject)))
+	mux.Handle(srvImpl.Handler(connect.WithInterceptors(inject)))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())

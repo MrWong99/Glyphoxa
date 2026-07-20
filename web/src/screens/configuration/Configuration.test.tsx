@@ -16,6 +16,7 @@ import {
   ProviderCredentialSchema,
   SaveProviderConfigResponseSchema,
   SaveDiscordSettingsResponseSchema,
+  ReleaseDiscordGuildResponseSchema,
   GetProviderHealthResponseSchema,
   ProviderHealthSchema,
   ListModelsResponseSchema,
@@ -71,7 +72,16 @@ function mockBackend(
     discordSaves?: SaveDiscordSettingsRequest[];
     // discordSaveError makes SaveDiscordSettings fail (simulates a server-side
     // failure) so tests can pin that the screen surfaces the rejection.
+    // discordSaveCode overrides its Connect code (default Internal) — #504 pins
+    // that the server's PermissionDenied proof message reaches the operator.
     discordSaveError?: string;
+    discordSaveCode?: Code;
+    // boundGuild seeds an already-linked guild + voice channel, the state the
+    // #504 unlink control acts on. releaseCalls captures every
+    // ReleaseDiscordGuild request's guild_id; releaseError fails the release.
+    boundGuild?: { guildId: string; voiceChannelId: string };
+    releaseCalls?: string[];
+    releaseError?: string;
     // providerSaves captures every SaveProviderConfig request so tests can pin
     // the model-only wire shape (#227: secret "" + model).
     providerSaves?: Array<{ provider: string; secret: string; model: string }>;
@@ -111,8 +121,8 @@ function mockBackend(
     elevenlabs: opts.saved?.elevenlabs,
     gemini: opts.saved?.gemini,
     discord: opts.saved?.discord,
-    guildId: "",
-    voiceChannelId: "",
+    guildId: opts.boundGuild?.guildId ?? "",
+    voiceChannelId: opts.boundGuild?.voiceChannelId ?? "",
     spendSoft: opts.spendCaps?.softUsd,
     spendHard: opts.spendCaps?.hardUsd,
   };
@@ -172,7 +182,8 @@ function mockBackend(
       },
       saveDiscordSettings: (req) => {
         opts.discordSaves?.push(req);
-        if (opts.discordSaveError) throw new ConnectError(opts.discordSaveError, Code.Internal);
+        if (opts.discordSaveError)
+          throw new ConnectError(opts.discordSaveError, opts.discordSaveCode ?? Code.Internal);
         // Presence semantics mirror the real server (#142): omitted IDs leave
         // the stored ones untouched, and present-but-empty is REJECTED exactly
         // like internal/rpc/provider.go — so a client that regresses into
@@ -192,6 +203,20 @@ function mockBackend(
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
         });
+      },
+      releaseDiscordGuild: (req) => {
+        opts.releaseCalls?.push(req.guildId);
+        if (opts.releaseError) throw new ConnectError(opts.releaseError, Code.FailedPrecondition);
+        // Mirror the server (#504): the echo must match the bound guild.
+        if (!req.guildId || req.guildId !== state.guildId) {
+          throw new ConnectError(
+            "that Discord server is not the one currently linked; reload and try again",
+            Code.FailedPrecondition,
+          );
+        }
+        state.guildId = "";
+        state.voiceChannelId = "";
+        return create(ReleaseDiscordGuildResponseSchema, { guildId: "", voiceChannelId: "" });
       },
       resolveGuildInvite: async (req) => {
         opts.inviteCodes?.push(req.inviteCode);
@@ -987,5 +1012,69 @@ describe("Configuration first-run (#267)", () => {
 
     expect(await screen.findByText(/could not load the active campaign/i)).toBeInTheDocument();
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the server's PermissionDenied guild-proof message on a rejected save (#504)", async () => {
+    renderScreen(
+      mockBackend({
+        discordSaveError: "you need the Manage Server permission in that Discord server to link it",
+        discordSaveCode: Code.PermissionDenied,
+      }),
+    );
+
+    fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
+    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
+    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+
+    // The operator must see the server's actionable proof message, not a
+    // generic failure toast.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/manage server permission/i);
+  });
+
+  it("unlinks the bound guild only after an explicit confirm (#504)", async () => {
+    const releaseCalls: string[] = [];
+    renderScreen(
+      mockBackend({
+        boundGuild: { guildId: "472093001100", voiceChannelId: "472093774421" },
+        releaseCalls,
+      }),
+    );
+
+    // A bound guild offers the unlink control; first click only arms it.
+    fireEvent.click(await screen.findByRole("button", { name: /unlink server/i }));
+    expect(releaseCalls).toHaveLength(0);
+
+    // The confirm step names the consequence and needs its own click.
+    fireEvent.click(screen.getByRole("button", { name: /confirm unlink/i }));
+    await waitFor(() => expect(releaseCalls).toEqual(["472093001100"]));
+
+    // The refetched config comes back unbound: fields empty, control gone.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(""),
+    );
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+    expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
+  });
+
+  it("offers no unlink control while no guild is bound (#504)", async () => {
+    renderScreen();
+    await screen.findByLabelText("Guild ID");
+    expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed release as a visible alert (#504)", async () => {
+    renderScreen(
+      mockBackend({
+        boundGuild: { guildId: "472093001100", voiceChannelId: "472093774421" },
+        releaseError: "that Discord server is not the one currently linked; reload and try again",
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /unlink server/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm unlink/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/not the one currently linked/i);
   });
 });

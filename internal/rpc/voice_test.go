@@ -774,8 +774,12 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 
 	providerSrv := NewProviderServer(&stubProviderStore{}, cipher, nil)
 	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
+	// The #504 guild-admin proof is out of scope here: stub it to pass, give the
+	// check-token ladder an env token, and put a saver identity in the context.
+	providerSrv.checkGuildAdmin = func(context.Context, string, string, string) error { return nil }
+	providerSrv.SetEnvBotToken("env-bot-token")
 
-	ctx := tenantCtx() // same tenant drives saves and health calls
+	ctx := auth.WithUser(tenantCtx(), storage.User{ID: uuid.New(), DiscordUserID: "555000000000000000"})
 	health := func(label string) {
 		t.Helper()
 		if _, err := voiceSrv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{})); err != nil {
@@ -845,6 +849,10 @@ func (stubProviderStore) SaveDiscordBotToken(context.Context, uuid.UUID, []byte,
 
 func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
 	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
+}
+
+func (stubProviderStore) ReleaseDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
 }
 
 func (stubProviderStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {

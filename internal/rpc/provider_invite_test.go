@@ -54,6 +54,10 @@ func (f *fakeInviteStore) SaveDiscordChannels(context.Context, uuid.UUID, string
 	return storage.DeploymentConfig{}, nil
 }
 
+func (f *fakeInviteStore) ReleaseDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
+}
+
 func (f *fakeInviteStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {
 	return storage.SpendCaps{}, nil
 }

@@ -1487,6 +1487,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// (#110). Empty when DISCORD_OAUTH_CLIENT_ID is unset — the screen's disabled
 	// fallback.
 	providerSrv.SetDiscordApplicationID(clientID)
+	// The central DISCORD_BOT_TOKEN is the last rung of the #504 guild-admin
+	// proof's check-token ladder (request plaintext > stored BYOK > this), so
+	// central-token tenants without a saved BYOK bot token can still prove they
+	// administer a guild before binding it. Empty when unset (BYOK-only web
+	// deployments): the proof then requires a saved/request token.
+	providerSrv.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
 	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
 	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
 	// The recap engine regenerates Butler-flavoured Session recaps on demand

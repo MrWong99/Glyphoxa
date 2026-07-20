@@ -96,6 +96,105 @@ func TestSaveDiscordChannelsGuildCollision(t *testing.T) {
 	}
 }
 
+// TestReleaseDiscordGuild pins the #504 release path: the owning Tenant frees
+// its bound guild via an atomic compare-and-clear (WHERE tenant_id AND guild_id
+// match), so a stale/mismatched echo mutates nothing (ErrNotFound), and the
+// cleared row keeps the Bot token.
+func TestReleaseDiscordGuild(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	a, err := st.CreateTenant(ctx, "A")
+	if err != nil {
+		t.Fatalf("CreateTenant A: %v", err)
+	}
+
+	const guild = "555000000000000000"
+	if _, err := st.SaveDiscordBotToken(ctx, a, []byte("sealed"), "3333"); err != nil {
+		t.Fatalf("SaveDiscordBotToken A: %v", err)
+	}
+	if _, err := st.SaveDiscordChannels(ctx, a, guild, "chanA"); err != nil {
+		t.Fatalf("SaveDiscordChannels A: %v", err)
+	}
+
+	// Mismatched guild echo → ErrNotFound, row untouched.
+	if _, err := st.ReleaseDiscordGuild(ctx, a, "999000000000000000"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("ReleaseDiscordGuild(mismatch) err = %v, want ErrNotFound", err)
+	}
+	dep, err := st.GetDeploymentConfig(ctx, a)
+	if err != nil {
+		t.Fatalf("GetDeploymentConfig after mismatch: %v", err)
+	}
+	if dep.GuildID != guild || dep.VoiceChannelID != "chanA" {
+		t.Errorf("mismatched release mutated row: guild=%q voice=%q", dep.GuildID, dep.VoiceChannelID)
+	}
+
+	// Matching guild → cleared row returned; Bot token untouched.
+	cleared, err := st.ReleaseDiscordGuild(ctx, a, guild)
+	if err != nil {
+		t.Fatalf("ReleaseDiscordGuild: %v", err)
+	}
+	if cleared.GuildID != "" || cleared.VoiceChannelID != "" {
+		t.Errorf("released row = guild %q voice %q, want both empty", cleared.GuildID, cleared.VoiceChannelID)
+	}
+	if cleared.DiscordBotTokenLast4 != "3333" {
+		t.Errorf("release wiped the bot token: last4 = %q", cleared.DiscordBotTokenLast4)
+	}
+
+	// Already-released (guild_id = '') → ErrNotFound (nothing bound to release).
+	if _, err := st.ReleaseDiscordGuild(ctx, a, guild); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("ReleaseDiscordGuild(twice) err = %v, want ErrNotFound", err)
+	}
+	// No row at all → ErrNotFound.
+	b, err := st.CreateTenant(ctx, "B")
+	if err != nil {
+		t.Fatalf("CreateTenant B: %v", err)
+	}
+	if _, err := st.ReleaseDiscordGuild(ctx, b, guild); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("ReleaseDiscordGuild(no row) err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestReleaseDiscordGuildTransfer pins the #504 legit-transfer regression: A
+// binds, A releases, B claims the freed guild — while a bind-during-hold still
+// fails ErrGuildTaken (the squat window never opens).
+func TestReleaseDiscordGuildTransfer(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	a, err := st.CreateTenant(ctx, "A")
+	if err != nil {
+		t.Fatalf("CreateTenant A: %v", err)
+	}
+	b, err := st.CreateTenant(ctx, "B")
+	if err != nil {
+		t.Fatalf("CreateTenant B: %v", err)
+	}
+
+	const guild = "666000000000000000"
+	if _, err := st.SaveDiscordChannels(ctx, a, guild, "chanA"); err != nil {
+		t.Fatalf("SaveDiscordChannels A: %v", err)
+	}
+	// While A holds it, B still cannot bind.
+	if _, err := st.SaveDiscordChannels(ctx, b, guild, "chanB"); !errors.Is(err, storage.ErrGuildTaken) {
+		t.Fatalf("SaveDiscordChannels B while A holds err = %v, want ErrGuildTaken", err)
+	}
+	// A releases, B claims.
+	if _, err := st.ReleaseDiscordGuild(ctx, a, guild); err != nil {
+		t.Fatalf("ReleaseDiscordGuild A: %v", err)
+	}
+	if _, err := st.SaveDiscordChannels(ctx, b, guild, "chanB"); err != nil {
+		t.Fatalf("SaveDiscordChannels B after release: %v", err)
+	}
+	got, err := st.GetTenantIDByGuildID(ctx, guild)
+	if err != nil {
+		t.Fatalf("GetTenantIDByGuildID after transfer: %v", err)
+	}
+	if got != b {
+		t.Errorf("guild owner after transfer = %s, want B %s", got, b)
+	}
+}
+
 // TestListTenantOperatorBindings is the per-Tenant GM-identity source (#490): each
 // binding pairs a Tenant with its operator's Discord snowflake, so GMIdentity can
 // scope GM standing to the owning Tenant instead of deployment-wide. The synthetic

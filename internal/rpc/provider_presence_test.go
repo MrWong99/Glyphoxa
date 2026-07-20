@@ -2,8 +2,6 @@ package rpc_test
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -11,8 +9,6 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
-	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 )
 
@@ -23,20 +19,9 @@ func TestProviderPresenceRefresher(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	srv := rpc.NewProviderServer(store, testCipher(t), nil)
-	tenantID := uuid.New()
 	fired := make(chan uuid.UUID, 4)
 	srv.SetPresenceRefresher(func(id uuid.UUID) { fired <- id })
-
-	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			return next(auth.WithTenant(ctx, tenantID), req)
-		}
-	})
-	mux := http.NewServeMux()
-	mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-	client := managementv1connect.NewProviderServiceClient(http.DefaultClient, ts.URL, connect.WithProtoJSON())
+	client, tenantID := clientForServer(t, srv)
 	ctx := context.Background()
 
 	// Successful save (token + channels) → refresher fires.
