@@ -49,11 +49,12 @@ const maxAutocompleteChoices = 25
 // no/ambiguous match. A mute with no active Voice Session is refused ephemerally.
 // There is deliberately NO unmute command — the web panel owns un-muting.
 //
-// pool is the claim-plane read for the replicas>1 fleet (#483, nil in -mode all):
-// when the LOCAL Manager holds no session but the Tenant's session is live on
-// ANOTHER worker, the handler replies the split-mode limitation (#503) instead of
-// the false "No Voice Session is active."
-func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command {
+// pool is the claim-plane control relay for the replicas>1 fleet (#503, nil in
+// -mode all): when the LOCAL Manager holds no session but the Tenant's session
+// is live on ANOTHER worker, the handler Defers and relays the mute through the
+// voice_session_controls queue, confirming only on the hosting worker's
+// terminal row (ADR-0012).
+func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "glyphoxa mute",
 		Description: "Mute one NPC voice in the active Voice Session.",
@@ -69,7 +70,11 @@ func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			vs, active, err := mgr.Active(ctx, ac.TenantID())
 			if err != nil || !active {
-				return nil, nil // no session for this Tenant: nothing to mute, offer nothing
+				// No LOCAL session: fall back to the pool's Active (#503) so the roster
+				// still resolves for a session hosted by another worker.
+				if vs, active = poolActive(ctx, pool, ac.TenantID()); !active {
+					return nil, nil // no session anywhere: nothing to mute, offer nothing
+				}
 			}
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
 			if err != nil {
@@ -94,9 +99,9 @@ func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command
 			if err != nil || !active {
 				// No session for THIS Tenant (#488): a session live for another Tenant is
 				// invisible here, so a GM can never mute a foreign Tenant's session. When
-				// the pool shows it live on ANOTHER worker the reply names the split-mode
-				// limitation instead (#483/#503).
-				return replyNoLocalSession(ctx, ic, pool)
+				// the pool shows it live on ANOTHER worker, relay the mute through the
+				// claim plane (#503); else the plain no-session guard.
+				return handleCrossPodMute(ctx, ic, agents, pool)
 			}
 			input, _ := ic.String("npc")
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
@@ -126,16 +131,26 @@ func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command
 // voiced Agent of the Active Campaign (the Character NPCs; the Address-Only Butler
 // is excluded) in the live Voice Session, refused ephemerally when no Voice
 // Session is active. Un-muting everyone is the web panel's job. pool is the
-// claim-plane read for the replicas>1 fleet (#483/#503, nil in -mode all) —
+// claim-plane control relay for the replicas>1 fleet (#503, nil in -mode all) —
 // see MuteCommand.
-func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command {
+func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "glyphoxa muteall",
 		Description: "Mute every NPC voice in the active Voice Session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			if _, active, err := mgr.Active(ctx, ic.TenantID()); err != nil || !active {
-				return replyNoLocalSession(ctx, ic, pool)
+				// Cross-pod branch (#503): the session may be hosted by another worker.
+				if _, poolLive := poolActive(ctx, pool, ic.TenantID()); !poolLive {
+					return ic.ReplyEphemeral("No Voice Session is active.")
+				}
+				// Defer FIRST: the relay polls the hosting worker past Discord's 3s
+				// deadline. The confirmation lands only on the worker's terminal row.
+				if err := ic.Defer(true); err != nil {
+					return fmt.Errorf("presence: defer cross-pod muteall: %w", err)
+				}
+				ids, err := pool.SetAllMute(ctx, ic.TenantID(), true)
+				return replyControlOutcome(ic, err, fmt.Sprintf("Muted all %d Agent voices.", len(ids)))
 			}
 			ids, err := mgr.SetAllMute(ctx, ic.TenantID(), true)
 			if err != nil {
@@ -144,6 +159,36 @@ func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Comm
 			return ic.ReplyEphemeral(fmt.Sprintf("Muted all %d Agent voices.", len(ids)))
 		},
 	}
+}
+
+// handleCrossPodMute is /glyphoxa mute's cross-pod branch (#503): the LOCAL
+// Manager holds no session, so when the pool shows the Tenant live on another
+// worker the mute is relayed through the voice_session_controls queue — Defer
+// FIRST (the relay polls past Discord's 3s deadline), resolve the target against
+// the POOL session's Campaign roster, relay, then confirm/err ephemerally. No
+// pool session anywhere keeps the plain pre-#483 guard.
+func handleCrossPodMute(ctx context.Context, ic *Interaction, agents AgentLister, pool PoolControl) error {
+	vs, live := poolActive(ctx, pool, ic.TenantID())
+	if !live {
+		return ic.ReplyEphemeral("No Voice Session is active.")
+	}
+	if err := ic.Defer(true); err != nil {
+		return fmt.Errorf("presence: defer cross-pod mute: %w", err)
+	}
+	input, _ := ic.String("npc")
+	roster, err := agents.ListAgents(ctx, vs.CampaignID)
+	if err != nil {
+		return fmt.Errorf("presence: list agents for cross-pod mute: %w", err) // generic reply via the registry
+	}
+	agent, found, ambiguous := resolveAgent(voiced(roster), input)
+	if ambiguous {
+		return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
+	}
+	if !found {
+		return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+	}
+	_, err = pool.SetAgentMute(ctx, ic.TenantID(), agent.ID.String(), true)
+	return replyControlOutcome(ic, err, fmt.Sprintf("%s is muted.", agent.Name))
 }
 
 // resolveAgent resolves a /glyphoxa mute npc value to a roster Agent (#211):

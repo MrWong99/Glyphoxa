@@ -2,41 +2,62 @@ package presence
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// PoolSession is the CLAIM-PLANE read the live-control commands consult when the
-// LOCAL Manager holds no session for the Tenant (#483): at replicas > 1 the
-// interactions are dispatched by the elected presence owner, but the Tenant's
-// session may be hosted by ANOTHER worker in the pool — the local Manager then
-// reports inactive and the handler would falsely reply "No Voice Session is
-// active." while the session is very much live. *session.IntentControl satisfies
-// it (its Active is the pool-wide intent read). nil in -mode all, where the one
-// process hosts every session and the local read is already the whole truth.
-type PoolSession interface {
+// PoolControl is the CLAIM-PLANE surface the live-control commands consult when
+// the LOCAL Manager holds no session for the Tenant (#483/#503): at replicas > 1
+// the interactions are dispatched by the elected presence owner, but the
+// Tenant's session may be hosted by ANOTHER worker in the pool. Active is the
+// pool-wide intent read; the control verbs RELAY through the
+// voice_session_controls queue the hosting worker drains on its heartbeat tick
+// (write-then-poll, ADR-0057 (b)/ADR-0051 — the dispatch never moves the
+// session, ADR-0006/0057 (e)). *session.IntentControl satisfies it. nil in
+// -mode all, where the one process hosts every session and the local read is
+// already the whole truth (AC3: single-worker behavior unchanged).
+type PoolControl interface {
 	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
+	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
+	SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error)
+	SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error
 }
 
-// splitLiveControlMsg is the reply for a live control (mute/muteall/say) whose
-// session is live on ANOTHER worker: honest about the limitation instead of the
-// false "No Voice Session is active." The cross-pod control plane that would make
-// these work from the presence owner is tracked in #503 — this PR ships only the
-// truthful degrade.
-const splitLiveControlMsg = "This session is hosted by another worker; live controls aren't available from here yet. Use the web panel instead."
-
-// replyNoLocalSession answers a live-control command whose local Manager holds no
-// session for the Tenant (#483): when the claim plane shows the Tenant's session
-// live on another worker it replies the split-mode limitation (see #503), else
-// the plain no-session guard. A nil pool (single-process -mode all) or a pool
-// read error degrades to the plain guard — the pre-#483 behavior.
-func replyNoLocalSession(ctx context.Context, ic *Interaction, pool PoolSession) error {
-	if pool != nil {
-		if _, live, err := pool.Active(ctx, ic.TenantID()); err == nil && live {
-			return ic.ReplyEphemeral(splitLiveControlMsg)
-		}
+// poolActive resolves the Tenant's session from the pool when the LOCAL Manager
+// has none: the cross-pod branch's entry read. A nil pool (-mode all) or a pool
+// read error reports not-live — the caller then gives the plain no-session
+// guard, the pre-#483 behavior.
+func poolActive(ctx context.Context, pool PoolControl, tenantID uuid.UUID) (storage.VoiceSession, bool) {
+	if pool == nil {
+		return storage.VoiceSession{}, false
 	}
-	return ic.ReplyEphemeral("No Voice Session is active.")
+	vs, live, err := pool.Active(ctx, tenantID)
+	if err != nil || !live {
+		return storage.VoiceSession{}, false
+	}
+	return vs, true
+}
+
+// replyControlOutcome answers a relayed cross-pod control (#503). Success posts
+// the confirming text ONLY on the worker's confirmed terminal row (the relay
+// polled it 'done' — ADR-0012: never claim what was not confirmed). An
+// unconfirmed relay (ErrControlPending) posts the honest not-confirmed wording;
+// a session that ended mid-relay posts the plain guard; anything else surfaces
+// the REAL error text — a failure is never a silent no-op.
+func replyControlOutcome(ic *Interaction, err error, success string) error {
+	switch {
+	case err == nil:
+		return ic.ReplyEphemeral(success)
+	case errors.Is(err, session.ErrControlPending):
+		return ic.ReplyEphemeral("The worker hosting the session has not confirmed the control yet — it may still land; check the session and retry if needed.")
+	case errors.Is(err, session.ErrNoActiveSession):
+		return ic.ReplyEphemeral("No Voice Session is active.")
+	default:
+		return ic.ReplyEphemeral(fmt.Sprintf("The worker hosting the session could not apply that: %v", err))
+	}
 }
