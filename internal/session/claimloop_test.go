@@ -700,6 +700,53 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 	loop.DrainForTest()
 }
 
+// TestClaimLoop_DrainBeatsEndBeforeFinish covers #505's ordering contract:
+// endSession waits the drain-beat goroutine out (stopBeat) BEFORE writing the
+// terminal state, so the recorded call timeline never shows a heartbeat ordered
+// after the finish — a late stray beat would be fenced NotFound on a real
+// store, but the loop must not rely on that fence.
+func TestClaimLoop_DrainBeatsEndBeforeFinish(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	loop.DrainForTest()
+
+	events := istore.timelineCopy()
+	finishAt := -1
+	for i, e := range events {
+		if e.kind == "finish" {
+			finishAt = i
+			break
+		}
+	}
+	if finishAt < 0 {
+		t.Fatal("no finish recorded in the call timeline")
+	}
+	for _, e := range events[finishAt+1:] {
+		if e.kind == "hb" {
+			t.Fatal("a heartbeat was ordered AFTER the finish — drain beats must end before the terminal write")
+		}
+	}
+}
+
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
 // Manager is at capacity (single-session default): a second pending intent is
 // left pending while the first runs.
