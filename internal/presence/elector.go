@@ -126,6 +126,15 @@ func (e *OwnerElector) Run(ctx context.Context) {
 // reaches the threshold a transient blip keeps ownership: the same blip fails a
 // challenger's acquire too, so relinquishing early would only risk a needless gap.
 func (e *OwnerElector) reconcile(ctx context.Context) {
+	// Stamp the renew instant BEFORE issuing the acquire (#506 re-review): the DB
+	// heartbeat_at is written server-side DURING the call, so a lastRenew stamped
+	// AFTER it returns would sit up to opTimeout LATER than the server stamp —
+	// leaving a residual dual-owner window of that acquire leg (the demotion is
+	// then judged against a too-recent local instant while the challenger's steal
+	// horizon runs off the earlier server stamp). Stamping before makes lastRenew
+	// never later than the server heartbeat_at, so the single-opTimeout demoteAfter
+	// margin below holds strictly.
+	started := e.now()
 	opCtx, cancel := context.WithTimeout(ctx, e.opTimeout())
 	owner, err := e.store.AcquireOrRenewPresenceOwner(opCtx, e.instanceID, e.cfg.Expiry)
 	cancel()
@@ -138,14 +147,17 @@ func (e *OwnerElector) reconcile(ctx context.Context) {
 		}
 		return
 	}
-	e.lastRenew = e.now()
+	e.lastRenew = started
 	e.set(owner)
 }
 
 // demoteAfter is the self-demotion threshold: Expiry - Interval - opTimeout, so
 // the LOCAL deactivate deadline (threshold + one tick Interval + that tick's
 // opTimeout, the worst-case detection lag) lands strictly before the DB steal
-// horizon (Expiry) where a challenger can be promoted (#483). A degenerate cadence
+// horizon (Expiry) where a challenger can be promoted (#483). This SINGLE-opTimeout
+// margin holds only because lastRenew is stamped BEFORE the acquire (never later
+// than the server heartbeat_at, see reconcile, #506); a lastRenew stamped after the
+// call would need a 2×opTimeout margin. A degenerate cadence
 // (Interval + opTimeout >= Expiry) clamps to 0 — demote on the first failed renew,
 // the only safe posture when the window leaves no slack; warnElectorCadence in
 // cmd/glyphoxa flags such configs at boot.

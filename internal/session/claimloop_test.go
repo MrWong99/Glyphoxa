@@ -24,6 +24,7 @@ type fakeIntentStore struct {
 	reaped      int
 	reapReturns int64 // how many rows ReapDead reports this tick (drives reconcile-after-reap)
 	reconciled  int   // ReconcileWorkerOrphanedVoiceSessions call count
+	heartbeats  int   // HeartbeatVoiceSessionIntent call count (#506 finalize-heartbeat test)
 	// sessionOutcome scripts GetVoiceSession — the self-exit outcome read (#483 L4).
 	sessionOutcome func(uuid.UUID) (storage.VoiceSession, error)
 }
@@ -102,6 +103,7 @@ func (f *fakeIntentStore) MarkVoiceSessionIntentLive(_ context.Context, id uuid.
 func (f *fakeIntentStore) HeartbeatVoiceSessionIntent(_ context.Context, id uuid.UUID, instanceID string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.heartbeats++
 	i, ok := f.intents[id]
 	if !ok || i.InstanceID != instanceID ||
 		(i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
@@ -110,6 +112,12 @@ func (f *fakeIntentStore) HeartbeatVoiceSessionIntent(_ context.Context, id uuid
 	now := time.Now()
 	i.HeartbeatAt = &now
 	return i.StopRequested, nil
+}
+
+func (f *fakeIntentStore) heartbeatCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.heartbeats
 }
 
 func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UUID, instanceID string, status storage.VoiceSessionIntentStatus, lastError string) (storage.VoiceSessionIntent, error) {
@@ -422,6 +430,53 @@ func TestClaimLoop_SelfExitWaitsOutEndWindowAndCarriesFailure(t *testing.T) {
 	if got := istore.get(intent.ID).LastError; !strings.Contains(got, "gateway exploded") {
 		t.Fatalf("intent last_error = %q, want the session's failure reason carried over (L4)", got)
 	}
+	loop.DrainForTest()
+}
+
+// TestClaimLoop_HeartbeatsThroughSlowFinalize covers the #506 re-review of the
+// #483 L3 fix: a self-exited session whose finalizers run slowly must keep
+// heartbeating through the Manager end window — the first cut `continue`d past
+// the heartbeat, so a slow finalize crossed Expiry and another worker's reaper
+// mislabeled a clean self-exit 'dead'. Assert the heartbeat keeps landing while
+// the session finalizes (its claim stays fresh) and the intent stays live until
+// the window clears, only THEN finishing 'done'.
+func TestClaimLoop_HeartbeatsThroughSlowFinalize(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // hold the end window open
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	istore.sessionOutcome = func(id uuid.UUID) (storage.VoiceSession, error) {
+		return mstore.session(id), nil
+	}
+	// Fast heartbeat so several beats fall inside the finalize window.
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// The session self-exits (Stop cancels the runner) but CloseVoiceSession parks
+	// on the gate, so the Manager sits in its end window: Active false, Finalizing
+	// true, active entry not yet cleared.
+	go func() { _, _ = mgr.Stop(context.Background(), tenantID) }()
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+
+	// While finalizing, the heartbeat must keep landing (the claim stays fresh so
+	// no reaper mislabels it) and the intent must stay live (not finished yet).
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent finished %q during the finalize window, want still live (heartbeating)", got)
+	}
+
+	// Release the end write: the window clears and the intent finishes 'done'.
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
 	loop.DrainForTest()
 }
 

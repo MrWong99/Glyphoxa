@@ -242,28 +242,36 @@ func (l *ClaimLoop) runSession(ctx context.Context, intent storage.VoiceSessionI
 			l.endSession(tenant, intent.ID, storage.VoiceIntentDone, "")
 			return
 		case <-ticker.C:
-			if _, live, _ := l.mgr.Active(ctx, tenant); !live {
-				// The loop self-exited (or was stopped elsewhere). Wait out the Manager's
-				// end window first (#483 L3): between as.ended (Active reporting false)
-				// and the active-entry clear, Manager.Start still collides
-				// ErrSessionActive — finishing the intent here would let an instant
-				// Tenant restart land exactly in that window and misreport 'failed'.
-				// The window is bounded by the Manager's endTimeout budgets, so this
-				// waits a few ticks at most (and even a stuck end-write clears the
-				// entry — runLoop always deletes it).
-				if l.mgr.Finalizing(tenant) {
-					continue
-				}
+			_, live, _ := l.mgr.Active(ctx, tenant)
+			// A self-exited session (Active false) that has ALSO cleared the Manager's
+			// end window (Finalizing false) is fully wound down: finish the intent with
+			// the session's own outcome (#483 L3/L4). Between as.ended (Active false)
+			// and the active-entry clear, Manager.Start still collides ErrSessionActive,
+			// so finishing here would let an instant Tenant restart misreport 'failed' —
+			// hence the Finalizing gate.
+			if !live && !l.mgr.Finalizing(tenant) {
 				l.finishSelfExit(intent)
 				return
 			}
+			// Otherwise the session is still live OR self-exited but still inside the
+			// Manager's end window (finalizers + CloseVoiceSession running). EITHER WAY
+			// keep heartbeating (#506 re-review of the #483 L3 fix): a finalizing session
+			// is winding DOWN, not dead. The first cut `continue`d straight past the
+			// heartbeat during that window, so a slow finalize (up to the endTimeout
+			// budgets, several seconds) went unheartbeated — one transient heartbeat
+			// error before it plus that gap could cross Expiry and let ANOTHER worker's
+			// reaper mark a CLEAN self-exit 'dead' (finishSelfExit then NotFounds,
+			// swallowed). Stamping the heartbeat keeps the plane's claim fresh until the
+			// entry actually clears, when the branch above finishes it.
 			hbCtx, cancelHB := context.WithTimeout(ctx, dbOpTimeout(l.cfg.Heartbeat))
 			stop, err := l.store.HeartbeatVoiceSessionIntent(hbCtx, intent.ID, l.instanceID)
 			cancelHB()
 			if errors.Is(err, storage.ErrNotFound) {
 				// Superseded — the reaper marked this claim dead (this worker was judged
-				// stale). Kill the local session; the row is already terminal, so no
-				// finish (ADR-0006: never keep running a session the plane calls dead).
+				// stale). Kill the local session if one is still running; a finalizing
+				// session already ended, so Stop is a no-op. The row is terminal either
+				// way, so no finish (ADR-0006: never keep running a session the plane
+				// calls dead).
 				l.log.Warn("claim loop: heartbeat superseded (claim reaped dead); stopping local session",
 					"intent", intent.ID)
 				if _, serr := l.mgr.Stop(l.detached(), tenant); serr != nil && !errors.Is(serr, ErrNoActiveSession) {
@@ -275,8 +283,11 @@ func (l *ClaimLoop) runSession(ctx context.Context, intent storage.VoiceSessionI
 				l.log.Warn("claim loop: heartbeat", "intent", intent.ID, "err", err)
 				continue // a transient DB hiccup: retry next tick, don't kill a live session
 			}
-			if stop {
-				// The web tier flagged a stop: wind the session down and finish 'done'.
+			// A stop_requested only winds down a LIVE session; a self-exited one is
+			// already ending, so let the finalize complete and the finish-branch above
+			// carry its outcome (an endSession here would be a redundant Stop and would
+			// mislabel a failed self-exit 'done').
+			if stop && live {
 				l.endSession(tenant, intent.ID, storage.VoiceIntentDone, "")
 				return
 			}

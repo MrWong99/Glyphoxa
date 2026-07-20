@@ -181,7 +181,13 @@ func TestOwnerElectorSelfDemotesBeforeStealHorizon(t *testing.T) {
 
 // TestOwnerElectorErrorKeepsState covers sequence (3): a transient acquire error
 // does not flip a live owner inactive — it logs and retains the last state, since a
-// DB blip that fails our renew also fails a challenger's acquire.
+// DB blip that fails our renew also fails a challenger's acquire. The cadence must
+// leave real headroom (Interval < Expiry - opTimeout so demoteAfter > 0, #506
+// re-review): the earlier Interval=1h clamped demoteAfter to 0, so the error tick
+// self-demoted immediately and the test's final read mistook that demotion for the
+// shutdown false — green for the wrong reason. With Interval 2s / Expiry 15s the
+// demotion threshold is 11s, far above the sub-second real elapsed between the
+// boot renew and the error tick, so the keeps-state branch is exercised for real.
 func TestOwnerElectorErrorKeepsState(t *testing.T) {
 	store := &fakeOwnerStore{
 		outcomes: []bool{true, false, true},
@@ -191,7 +197,7 @@ func TestOwnerElectorErrorKeepsState(t *testing.T) {
 	changes := make(chan bool, 8)
 
 	e := NewOwnerElector(store, "instance-a", func(owner bool) { changes <- owner }, nil,
-		OwnerElectorConfig{Interval: time.Hour, Expiry: 15 * time.Second})
+		OwnerElectorConfig{Interval: 2 * time.Second, Expiry: 15 * time.Second})
 	e.ticks = ticks
 
 	ctx, cancel := context.WithCancel(context.Background())
