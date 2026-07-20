@@ -159,3 +159,28 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 	}
 	return d, nil
 }
+
+// ReleaseDiscordGuild frees a Tenant's bound guild (#504): an atomic
+// compare-and-clear — the caller echoes the guild_id it believes is bound, and
+// the row is cleared only when tenant AND guild match (no read-then-write race).
+// guild_id = '' is the unconfigured state (migration 00037), so release needs no
+// schema change and frees the first-registrar-wins index slot for the next
+// binder (legit transfer: A releases, B saves with proof). The Bot token is
+// untouched. No matching bound row — wrong echo, already released, or no config
+// at all — returns ErrNotFound.
+func (s *Store) ReleaseDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (DeploymentConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE deployment_config
+		    SET guild_id = '', voice_channel_id = '', updated_at = now()
+		  WHERE tenant_id = $1 AND guild_id = $2 AND guild_id <> ''
+		 RETURNING `+deploymentConfigColumns,
+		tenantID, guildID)
+	d, err := scanDeploymentConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeploymentConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentConfig{}, fmt.Errorf("storage: release discord guild for tenant %s: %w", tenantID, err)
+	}
+	return d, nil
+}
