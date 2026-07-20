@@ -5,78 +5,64 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 )
 
-// ErrNoGuild is returned by MemberDisplayName when no standing client has a known
-// Guild to fetch a member from (the wait-state) — so the speaker resolver (#281)
-// falls back to its generic label.
+// ErrNoGuild is returned by MemberDisplayName when the Campaign's owning Tenant
+// has no known Guild or standing client to fetch a member from (the wait-state) —
+// so the speaker resolver (#281) falls back to its generic label.
 var ErrNoGuild = errors.New("presence: no configured guild for member lookup")
 
 // MemberDisplayName resolves a Discord User snowflake to its display name, using
 // nick > global name > username precedence (disgo's Member.EffectiveName). It is
 // the unmapped-speaker fallback the transcript resolver consults (#281, recorded
 // decision 2): a speaker with no mapped Character renders as their guild display
-// name. A wait-state (no known Guild) or a REST failure returns an error, and the
-// resolver negative-caches it as unresolved.
-//
-// Interim, label-only (#489/#490): the ONLY caller — the transcript resolver
-// (speaker.Resolver) — is campaign-keyed and carries no Tenant, so per #490's
-// carried review item (b) there is no tenant-carrying label path to narrow. This
-// stays the all-entries scan across the standing clients and their registered
-// Guilds, returning the first that resolves the member (the documented interim
-// fallback for a label path WITHOUT a Tenant). When a tenant-carrying label path
-// appears, narrow it to that Tenant's Guild via GuildForTenant + clientFor. This
-// satisfies speaker.MemberNamer; the fetch is off-bus (a Warm goroutine, never a
-// synchronous bus callback), so the REST round-trip never stalls the voice pipeline.
-func (c *Clients) MemberDisplayName(ctx context.Context, discordUserID string) (string, error) {
+// name. The lookup is narrowed to the Campaign's OWNING Tenant's configured
+// Guild and standing client (#483 — GuildForTenant + clientFor): on a shared
+// central token the same Discord user may carry different nicknames in other
+// Tenants' Guilds, and those must never bleed into this Campaign's labels. A
+// wait-state (no Guild / no client yet), an unresolvable Campaign, or a REST
+// failure returns an error, and the resolver negative-caches it as unresolved.
+// This satisfies speaker.MemberNamer; the fetch is off-bus (a Warm goroutine,
+// never a synchronous bus callback), so the REST round-trip never stalls the
+// voice pipeline.
+func (c *Clients) MemberDisplayName(ctx context.Context, campaignID uuid.UUID, discordUserID string) (string, error) {
 	userID, err := snowflake.Parse(discordUserID)
 	if err != nil {
 		return "", fmt.Errorf("presence: parse user id %q: %w", discordUserID, err)
 	}
 
-	type attempt struct {
-		client *bot.Client
-		guild  snowflake.ID
-	}
-	var attempts []attempt
-	c.mu.Lock()
-	for _, e := range c.entries {
-		client := e.client.Load()
-		if client == nil {
-			continue
-		}
-		for g := range e.registeredGuilds {
-			gid, perr := snowflake.Parse(g)
-			if perr != nil {
-				continue
-			}
-			attempts = append(attempts, attempt{client: client, guild: gid})
-		}
-	}
-	c.mu.Unlock()
-	if len(attempts) == 0 {
-		return "", ErrNoGuild
+	camp, err := c.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return "", fmt.Errorf("presence: resolve campaign %s owning tenant: %w", campaignID, err)
 	}
 
-	var lastErr error
-	for _, a := range attempts {
-		m, err := c.fetchMember(ctx, a.client.Rest, a.guild, userID)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if m != nil {
-			return m.EffectiveName(), nil
-		}
+	guild := c.GuildForTenant(camp.TenantID)
+	if guild == "" {
+		return "", ErrNoGuild
 	}
-	if lastErr != nil {
-		return "", fmt.Errorf("presence: fetch guild member %s: %w", discordUserID, lastErr)
+	gid, err := snowflake.Parse(guild)
+	if err != nil {
+		return "", fmt.Errorf("presence: parse guild id %q: %w", guild, err)
 	}
-	return "", fmt.Errorf("presence: guild member %s: %w", discordUserID, ErrNoGuild)
+	client := c.clientFor(camp.TenantID)
+	if client == nil {
+		// The Tenant's standing client is down/rebuilding: fail soft, the resolver
+		// negative-caches for 30s and retries.
+		return "", fmt.Errorf("presence: member lookup for tenant %s: %w", camp.TenantID, ErrNoClient)
+	}
+
+	m, err := c.fetchMember(ctx, client.Rest, gid, userID)
+	if err != nil {
+		return "", fmt.Errorf("presence: fetch guild member %s: %w", discordUserID, err)
+	}
+	if m == nil {
+		return "", fmt.Errorf("presence: guild member %s: %w", discordUserID, ErrNoGuild)
+	}
+	return m.EffectiveName(), nil
 }
 
 // restGetMember is the production member fetch: it calls GetMember on a REST

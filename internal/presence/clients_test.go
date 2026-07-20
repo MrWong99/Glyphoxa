@@ -63,6 +63,10 @@ func (f *fakeTenantStore) ListDeploymentConfigs(context.Context) ([]storage.Depl
 
 // GetTenantIDByGuildID resolves a Guild to its newest-updated owning Tenant, the
 // storage newest-wins semantics (#490) modelled over the in-memory map.
+func (f *fakeTenantStore) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{}, storage.ErrNotFound
+}
+
 func (f *fakeTenantStore) GetTenantIDByGuildID(_ context.Context, guildID string) (uuid.UUID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

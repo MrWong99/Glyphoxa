@@ -62,8 +62,9 @@ type IntegrationStatus struct {
 }
 
 // TenantStore is the deployment-config read surface the registry needs:
-// per-Tenant for a scoped ensure, a full list for the boot seed, and the
-// Guild→Tenant read the member picker uses to confirm ownership (#490).
+// per-Tenant for a scoped ensure, a full list for the boot seed, the
+// Guild→Tenant read the member picker uses to confirm ownership (#490), and the
+// Campaign→Tenant read the display-name lookup narrows with (#483).
 // *storage.Store satisfies it.
 type TenantStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
@@ -72,6 +73,9 @@ type TenantStore interface {
 	// duplicated guild_id — the SAME authority the interaction router uses, so the
 	// member picker and interaction routing agree (#490).
 	GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error)
+	// GetCampaign resolves a Campaign (hence its owning Tenant) so
+	// MemberDisplayName narrows its member fetch to that Tenant's own Guild (#483).
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 }
 
 // ClientBuilder constructs a standing disgo client for a Bot token. The prod

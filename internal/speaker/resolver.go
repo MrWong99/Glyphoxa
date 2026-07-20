@@ -43,10 +43,13 @@ type CharacterLookup interface {
 }
 
 // MemberNamer resolves a Discord snowflake to its guild display name — the
-// unmapped-speaker fallback (recorded decision 2). *presence.Clients satisfies
-// it; a nil namer means web-only mode with no guild fallback.
+// unmapped-speaker fallback (recorded decision 2). The campaignID scopes the
+// lookup to the Campaign's owning Tenant's Guild (#483), so a shared central
+// token never bleeds another Tenant's nickname into this Campaign's labels.
+// *presence.Clients satisfies it; a nil namer means web-only mode with no
+// guild fallback.
 type MemberNamer interface {
-	MemberDisplayName(ctx context.Context, discordUserID string) (string, error)
+	MemberDisplayName(ctx context.Context, campaignID uuid.UUID, discordUserID string) (string, error)
 }
 
 // GMChecker reports whether a Discord snowflake is a GM. It must never block —
@@ -187,7 +190,7 @@ func (r *Resolver) resolve(k key) (string, time.Duration) {
 	if r.members == nil {
 		return "", ttlNegative
 	}
-	name, err := r.members.MemberDisplayName(ctx, k.speaker)
+	name, err := r.members.MemberDisplayName(ctx, k.campaign, k.speaker)
 	if err != nil {
 		r.log.Warn("speaker: guild member fetch failed", "err", err, "speaker", k.speaker)
 		return "", ttlNegative
