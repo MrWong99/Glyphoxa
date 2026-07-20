@@ -20,7 +20,7 @@ func newControlIntentControl(t *testing.T, budget time.Duration) (*session.Inten
 	t.Helper()
 	store := newFakeControlStore()
 	tenantID := uuid.New()
-	intent := store.fakeIntentStore.add(tenantID, uuid.New())
+	intent := store.add(tenantID, uuid.New())
 	store.fakeIntentStore.mu.Lock()
 	store.fakeIntentStore.intents[intent.ID].Status = storage.VoiceIntentLive
 	store.fakeIntentStore.mu.Unlock()
@@ -35,7 +35,7 @@ func newControlIntentControl(t *testing.T, budget time.Duration) (*session.Inten
 func TestIntentControlSetAgentMute_RelaysToWorker(t *testing.T) {
 	ic, store, tenantID := newControlIntentControl(t, time.Second)
 	var written storage.VoiceSessionControl
-	store.fakeIntentStore.onControlCreate = func(c *storage.VoiceSessionControl) {
+	store.onControlCreate = func(c *storage.VoiceSessionControl) {
 		written = *c
 		now := time.Now()
 		c.Status = storage.VoiceControlDone
@@ -60,7 +60,7 @@ func TestIntentControlSetAgentMute_RelaysToWorker(t *testing.T) {
 // -mode all path returns; an uncoded failure surfaces verbatim.
 func TestIntentControlControl_WorkerFailureDecodes(t *testing.T) {
 	ic, store, tenantID := newControlIntentControl(t, time.Second)
-	store.fakeIntentStore.onControlCreate = func(c *storage.VoiceSessionControl) {
+	store.onControlCreate = func(c *storage.VoiceSessionControl) {
 		now := time.Now()
 		c.Status = storage.VoiceControlFailed
 		c.LastError = session.EncodeControlFailure(session.ErrButlerVoiceless)
@@ -70,7 +70,7 @@ func TestIntentControlControl_WorkerFailureDecodes(t *testing.T) {
 		t.Fatalf("SpeakAsButler err = %v, want ErrButlerVoiceless decoded", err)
 	}
 
-	store.fakeIntentStore.onControlCreate = func(c *storage.VoiceSessionControl) {
+	store.onControlCreate = func(c *storage.VoiceSessionControl) {
 		now := time.Now()
 		c.Status = storage.VoiceControlFailed
 		c.LastError = "tts provider exploded"
@@ -89,22 +89,22 @@ func TestIntentControlControl_BudgetAndNoSession(t *testing.T) {
 	ic, store, tenantID := newControlIntentControl(t, 20*time.Millisecond)
 
 	var rowID uuid.UUID
-	store.fakeIntentStore.onControlCreate = func(c *storage.VoiceSessionControl) { rowID = c.ID }
+	store.onControlCreate = func(c *storage.VoiceSessionControl) { rowID = c.ID }
 	_, err := ic.SetAllMute(context.Background(), tenantID, true)
 	if !errors.Is(err, session.ErrControlPending) {
 		t.Fatalf("SetAllMute with a silent worker = %v, want ErrControlPending", err)
 	}
-	got := store.fakeIntentStore.getControl(rowID)
+	got := store.getControl(rowID)
 	if got.Status != storage.VoiceControlFailed || got.LastError != "requester timed out" {
 		t.Fatalf("row after budget expiry = %+v, want cancelled 'requester timed out'", got)
 	}
 
 	// No live intent for an unknown tenant → ErrNoActiveSession, no row written.
-	before := len(store.fakeIntentStore.controls)
+	before := len(store.controls)
 	if _, err := ic.SetAgentMute(context.Background(), uuid.New(), "agent-1", true); !errors.Is(err, session.ErrNoActiveSession) {
 		t.Fatalf("SetAgentMute with no live intent = %v, want ErrNoActiveSession", err)
 	}
-	if len(store.fakeIntentStore.controls) != before {
+	if len(store.controls) != before {
 		t.Fatal("a control row was written despite no live intent")
 	}
 }
@@ -118,7 +118,7 @@ func TestButlerControl_LocalFirstRemoteFallback(t *testing.T) {
 	idleMgr, _ := muteManager(t, newFakeStore())
 	remote, store, tenantID := newControlIntentControl(t, time.Second)
 	var relayed *storage.VoiceSessionControl
-	store.fakeIntentStore.onControlCreate = func(c *storage.VoiceSessionControl) {
+	store.onControlCreate = func(c *storage.VoiceSessionControl) {
 		relayed = c
 		now := time.Now()
 		c.Status = storage.VoiceControlDone
