@@ -16,6 +16,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/discordguild"
 	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -43,6 +44,9 @@ type providerStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error)
 	SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error)
+	// ReleaseDiscordGuild frees the Tenant's bound guild via an atomic
+	// compare-and-clear (#504): the echoed guild_id must match the binding.
+	ReleaseDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (storage.DeploymentConfig, error)
 	// GetTenantSpendCaps / SetTenantSpendCaps back the per-Tenant spend caps
 	// Configuration surface (#130, ADR-0046).
 	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
@@ -117,6 +121,19 @@ type ProviderServer struct {
 	// defaults it to the live discordinvite.Resolve, and unit tests override it
 	// with a fake so ResolveGuildInvite never touches the network.
 	resolveInvite func(ctx context.Context, token, code string) (discordinvite.Resolved, error)
+
+	// checkGuildAdmin proves the saver administers the guild being bound (#504,
+	// ADR-0058): guild owner or a role with ADMINISTRATOR/MANAGE_GUILD. It is a
+	// seam mirroring resolveInvite: NewProviderServer defaults it to the live
+	// discordguild.CheckAdmin, and unit tests override it so SaveDiscordSettings
+	// never touches the network (ADR-0033 keyless suite).
+	checkGuildAdmin func(ctx context.Context, token, guildID, userID string) error
+
+	// envBotToken is the deployment's central DISCORD_BOT_TOKEN (SetEnvBotToken),
+	// the last rung of the proof's check-token ladder: request plaintext > stored
+	// BYOK token > this. Used ONLY to authenticate the guild-admin REST reads —
+	// it is never persisted or returned (ADR-0004 posture).
+	envBotToken string
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -132,7 +149,18 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 	s.resolveInvite = func(ctx context.Context, token, code string) (discordinvite.Resolved, error) {
 		return discordinvite.Resolve(ctx, token, code, log)
 	}
+	s.checkGuildAdmin = func(ctx context.Context, token, guildID, userID string) error {
+		return discordguild.CheckAdmin(ctx, token, guildID, userID, log)
+	}
 	return s
+}
+
+// SetEnvBotToken wires the deployment's central DISCORD_BOT_TOKEN as the final
+// fallback for the guild-admin proof's check token (#504), so central-token
+// tenants (no BYOK bot token saved) can still prove guild administration.
+// Called once at boot, before the server serves, so no lock is needed.
+func (s *ProviderServer) SetEnvBotToken(token string) {
+	s.envBotToken = token
 }
 
 // SetHealthInvalidator wires the health-cache buster called after a successful
@@ -381,21 +409,35 @@ func (s *ProviderServer) SaveDiscordSettings(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("guild_id and voice_channel_id must both be non-empty when provided"))
 	}
+	if req.Msg.BotToken != nil {
+		if s.cipher == nil {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
+		}
+		if req.Msg.GetBotToken() == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("bot_token must not be empty when provided"))
+		}
+	}
+
+	// Guild-ownership proof (#504, ADR-0058): binding a guild_id requires the
+	// saver to prove they administer that guild, enforced in BOTH admission
+	// modes with no self-host bypass. The proof runs BEFORE any write (the token
+	// save included), so a rejected request mutates nothing — and the
+	// ErrGuildTaken message below is only ever reachable by proven guild admins,
+	// closing the cross-tenant existence oracle.
+	if hasIDs {
+		if err := s.proveGuildAdmin(ctx, tenantID, req.Msg.GetBotToken(), req.Msg.GetGuildId()); err != nil {
+			return nil, err
+		}
+	}
 
 	var dep storage.DeploymentConfig
 
 	// Bot token first (when the client sent one), so the IDs upsert below returns
 	// the row with the freshly-saved token last4.
 	if req.Msg.BotToken != nil {
-		if s.cipher == nil {
-			return nil, connect.NewError(connect.CodeFailedPrecondition,
-				errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
-		}
 		token := req.Msg.GetBotToken()
-		if token == "" {
-			return nil, connect.NewError(connect.CodeInvalidArgument,
-				errors.New("bot_token must not be empty when provided"))
-		}
 		sealed, last4, err := s.seal(token)
 		if err != nil {
 			s.log.Error("SaveDiscordSettings: seal failed", "err", err)
@@ -413,11 +455,11 @@ func (s *ProviderServer) SaveDiscordSettings(
 	if hasIDs {
 		dep, err = s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
 		if errors.Is(err, storage.ErrGuildTaken) {
-			// First-registrar-wins guild binding (#483; the full guild-permission
-			// proof — verifying the saver actually administers the guild — is #504).
-			// A deliberate precondition refusal, never a silent rebind: the old
-			// newest-wins read let a second Tenant hijack the first's guild and with
-			// it the victim's voice-channel member reads + command routing.
+			// First-registrar-wins guild binding (#483) + the #504 proof above:
+			// only a PROVEN admin of the guild can even reach this message, so it
+			// leaks no cross-tenant existence to strangers. A deliberate
+			// precondition refusal, never a silent rebind; the release path for a
+			// legitimate transfer is ReleaseDiscordGuild.
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
 				errors.New("this Discord server is already linked by another tenant; it must unlink there first"))
 		}
@@ -444,6 +486,105 @@ func (s *ProviderServer) SaveDiscordSettings(
 
 	return connect.NewResponse(&managementv1.SaveDiscordSettingsResponse{
 		Credential:     discordCredential(dep),
+		GuildId:        dep.GuildID,
+		VoiceChannelId: dep.VoiceChannelID,
+	}), nil
+}
+
+// proveGuildAdmin runs the #504 guild-ownership proof for a SaveDiscordSettings
+// that binds guildID: the authenticated saver (auth.CurrentUser — the session
+// principal, ADR-0055, never an env allowlist) must administer the guild per
+// the checkGuildAdmin seam. reqToken is the request's plaintext Bot token when
+// one rode along (pre-seal), else the check-token ladder falls back to the
+// stored BYOK token and finally the central env token — the same token that
+// will serve the guild (BYOK + central-token tenants both covered). Error
+// granularity (no membership oracle): Bot-cannot-see-guild is FailedPrecondition
+// "not a member"; user-not-in-guild and member-without-perms collapse to ONE
+// PermissionDenied message.
+func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID, reqToken, guildID string) error {
+	user, ok := auth.CurrentUser(ctx)
+	if !ok || user.DiscordUserID == "" {
+		return connect.NewError(connect.CodeUnauthenticated,
+			errors.New("no authenticated Discord user to verify guild permissions for"))
+	}
+
+	token := reqToken
+	if token == "" {
+		stored, err := s.resolveBotToken(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		token = stored
+	}
+	if token == "" {
+		token = s.envBotToken
+	}
+	if token == "" {
+		return connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("save the Discord bot token first"))
+	}
+
+	switch err := s.checkGuildAdmin(ctx, token, guildID, user.DiscordUserID); {
+	case err == nil:
+		return nil
+	case errors.Is(err, discordguild.ErrBotNotInGuild):
+		return connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("the Bot is not a member of that server"))
+	case errors.Is(err, discordguild.ErrUserNotInGuild), errors.Is(err, discordguild.ErrNoPermission):
+		return connect.NewError(connect.CodePermissionDenied,
+			errors.New("you need the Manage Server permission in that Discord server to link it"))
+	default:
+		s.log.Error("SaveDiscordSettings: guild-admin proof failed", "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+}
+
+// ReleaseDiscordGuild frees this Tenant's bound Guild (#504, ADR-0058) — the
+// supported path for a legitimate guild transfer (A releases, B saves with
+// proof). The request must echo the currently-bound guild_id; storage does an
+// atomic compare-and-clear, so a stale echo mutates nothing. NO Discord proof is
+// required here: the operator may have lost guild access, and release is
+// tenant-local cleanup of the caller's OWN binding. On success the health cache
+// is busted and the standing presence reconciled (tears down the freed guild's
+// presence — required before the next tenant claims it).
+func (s *ProviderServer) ReleaseDiscordGuild(
+	ctx context.Context,
+	req *connect.Request[managementv1.ReleaseDiscordGuildRequest],
+) (*connect.Response[managementv1.ReleaseDiscordGuildResponse], error) {
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	guildID := req.Msg.GetGuildId()
+	if guildID == "" {
+		// Present-but-empty is an accident (mirrors #142's posture), never a
+		// wildcard release.
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("guild_id must be the currently linked Discord server"))
+	}
+
+	dep, err := s.store.ReleaseDiscordGuild(ctx, tenantID, guildID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("that Discord server is not the one currently linked; reload and try again"))
+	}
+	if err != nil {
+		s.log.Error("ReleaseDiscordGuild: store release failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// The binding changed: bust the cached health verdict and reconcile the
+	// standing presence so the freed guild's client tears down (#489 semantics —
+	// critical for a transfer, or the old presence squats the guild).
+	if s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
+	}
+	if s.refreshPresence != nil {
+		go s.refreshPresence(tenantID)
+	}
+
+	return connect.NewResponse(&managementv1.ReleaseDiscordGuildResponse{
 		GuildId:        dep.GuildID,
 		VoiceChannelId: dep.VoiceChannelID,
 	}), nil

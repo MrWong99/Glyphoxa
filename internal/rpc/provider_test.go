@@ -29,6 +29,10 @@ type fakeProviderStore struct {
 	caps        storage.SpendCaps // per-Tenant spend caps (#130)
 	capsSet     bool
 	channelsErr error // scripted SaveDiscordChannels failure (#483 guild collision)
+
+	// channelsCalls counts SaveDiscordChannels invocations so #504 tests assert
+	// a failed guild-admin proof never reaches the binding write.
+	channelsCalls int
 }
 
 func newFakeProviderStore() *fakeProviderStore {
@@ -94,6 +98,7 @@ func (f *fakeProviderStore) SaveDiscordBotToken(_ context.Context, tenantID uuid
 }
 
 func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	f.channelsCalls++
 	if f.channelsErr != nil {
 		return storage.DeploymentConfig{}, f.channelsErr
 	}
@@ -102,6 +107,18 @@ func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid
 	}
 	f.dep.GuildID = guildID
 	f.dep.VoiceChannelID = voiceChannelID
+	f.dep.UpdatedAt = f.now()
+	return *f.dep, nil
+}
+
+// ReleaseDiscordGuild mirrors the storage compare-and-clear (#504): only a
+// matching tenant-held binding clears; anything else is ErrNotFound.
+func (f *fakeProviderStore) ReleaseDiscordGuild(_ context.Context, _ uuid.UUID, guildID string) (storage.DeploymentConfig, error) {
+	if f.dep == nil || f.dep.GuildID == "" || f.dep.GuildID != guildID {
+		return storage.DeploymentConfig{}, storage.ErrNotFound
+	}
+	f.dep.GuildID = ""
+	f.dep.VoiceChannelID = ""
 	f.dep.UpdatedAt = f.now()
 	return *f.dep, nil
 }
@@ -136,17 +153,43 @@ func newProviderClient(t *testing.T, store *fakeProviderStore, cipher *crypto.Ci
 	return clientForServer(t, rpc.NewProviderServer(store, cipher, nil))
 }
 
-// clientForServer mounts a PRE-BUILT ProviderServer behind the fixed-tenant
-// interceptor and returns a Connect-JSON client + the injected tenant. Callers
-// that must configure the server before it serves (e.g. SetDiscordApplicationID,
-// #110) build it and pass it in; newProviderClient is the common store+cipher
-// shortcut over this.
+// testSaverDiscordID is the Discord snowflake of the fixed operator the test
+// interceptor injects — the saver identity the #504 guild-admin proof checks.
+const testSaverDiscordID = "555000000000000000"
+
+// clientForServer mounts a PRE-BUILT ProviderServer behind the fixed-tenant +
+// fixed-user interceptor and returns a Connect-JSON client + the injected
+// tenant. Callers that must configure the server before it serves (e.g.
+// SetDiscordApplicationID, #110) build it and pass it in; newProviderClient is
+// the common store+cipher shortcut over this.
+//
+// The guild-admin proof (#504) is stubbed to always-pass so pre-#504 ID-save
+// tests stay green and never dial Discord; tests exercising the proof override
+// it via SetGuildProofForTest AFTER this call (requests only start later).
 func clientForServer(t *testing.T, server *rpc.ProviderServer) (managementv1connect.ProviderServiceClient, uuid.UUID) {
+	t.Helper()
+	server.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
+	return mountProviderServer(t, server, true)
+}
+
+// clientForServerNoUser mounts a server whose interceptor injects a tenant but
+// NO authenticated user — the #504 missing-principal path.
+func clientForServerNoUser(t *testing.T, server *rpc.ProviderServer) (managementv1connect.ProviderServiceClient, uuid.UUID) {
+	t.Helper()
+	server.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
+	return mountProviderServer(t, server, false)
+}
+
+func mountProviderServer(t *testing.T, server *rpc.ProviderServer, withUser bool) (managementv1connect.ProviderServiceClient, uuid.UUID) {
 	t.Helper()
 	tenantID := uuid.New()
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			return next(auth.WithTenant(ctx, tenantID), req)
+			ctx = auth.WithTenant(ctx, tenantID)
+			if withUser {
+				ctx = auth.WithUser(ctx, storage.User{ID: uuid.New(), DiscordUserID: testSaverDiscordID})
+			}
+			return next(ctx, req)
 		}
 	})
 	mux := http.NewServeMux()
@@ -473,8 +516,12 @@ func TestProviderDiscordSettings_GuildOwnedByOtherTenant(t *testing.T) {
 	store.channelsErr = storage.ErrGuildTaken
 	client, _ := newProviderClient(t, store, testCipher(t))
 
+	// Since #504 the guild-admin proof runs first; the always-pass test stub
+	// stands in for a proven admin, and the request token feeds the check —
+	// ErrGuildTaken must still surface for a PROVEN admin of a taken guild.
 	_, err := client.SaveDiscordSettings(context.Background(), connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+		BotToken: strPtr("test-discord-bot-token-3333"),
+		GuildId:  strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
 	}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("save owned guild code = %v (err %v), want CodeFailedPrecondition", connect.CodeOf(err), err)
@@ -494,9 +541,11 @@ func TestProviderDiscordSettings_TokenOnlySaveKeepsIDs(t *testing.T) {
 	client, _ := newProviderClient(t, store, testCipher(t))
 	ctx := context.Background()
 
-	// Operator has IDs saved.
+	// Operator has a token + IDs saved (the token also feeds the #504 proof's
+	// check-token ladder).
 	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+		BotToken: strPtr("test-discord-bot-token-0000"),
+		GuildId:  strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
 	})); err != nil {
 		t.Fatalf("save ids: %v", err)
 	}
@@ -530,7 +579,8 @@ func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+		BotToken: strPtr("test-discord-bot-token-0000"),
+		GuildId:  strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
 	})); err != nil {
 		t.Fatalf("save ids: %v", err)
 	}

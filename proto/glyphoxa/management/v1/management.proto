@@ -1111,6 +1111,14 @@ service ProviderService {
   // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
   // IDs can be saved without re-entering the secret. State-changing.
   rpc SaveDiscordSettings(SaveDiscordSettingsRequest) returns (SaveDiscordSettingsResponse);
+  // ReleaseDiscordGuild frees this Tenant's bound Guild (#504, ADR-0058) — the
+  // supported path for a legitimate guild transfer: A releases, B saves with
+  // proof. The request must echo the currently-bound guild_id (an atomic
+  // compare-and-clear; a mismatch or no binding is FailedPrecondition, an empty
+  // guild_id InvalidArgument). No Discord proof is required to release — the
+  // operator may have lost guild access; release is tenant-local cleanup. The
+  // Bot token is untouched. State-changing: auth + CSRF guard it.
+  rpc ReleaseDiscordGuild(ReleaseDiscordGuildRequest) returns (ReleaseDiscordGuildResponse);
   // ResolveGuildInvite resolves a pasted Discord invite code to its Guild and
   // that Guild's voice channels, using the decrypted saved deployment Bot token
   // server-side (#105, ADR-0047). The SPA extracts the bare code from the pasted
@@ -1266,6 +1274,22 @@ message SaveDiscordSettingsResponse {
   ProviderCredential credential = 1;
   string guild_id = 2;
   string voice_channel_id = 3;
+}
+
+// ReleaseDiscordGuildRequest frees the Tenant's bound Guild (#504). guild_id
+// must equal the currently-bound Guild — a confirmation echo, so a stale form
+// cannot release a binding the operator was not looking at. Empty is rejected
+// (InvalidArgument): present-but-empty is an accident, never a clear.
+message ReleaseDiscordGuildRequest {
+  // guild_id is the bound Guild snowflake being released.
+  string guild_id = 1;
+}
+
+// ReleaseDiscordGuildResponse returns the cleared binding — both fields empty
+// after a successful release (mirrors SaveDiscordSettingsResponse's ID echo).
+message ReleaseDiscordGuildResponse {
+  string guild_id = 1;
+  string voice_channel_id = 2;
 }
 
 // ResolveGuildInviteRequest carries the bare Discord invite code the SPA

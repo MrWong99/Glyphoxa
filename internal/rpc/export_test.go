@@ -16,3 +16,10 @@ func (d *DeploymentSharer) SetShareSeamsForTest(
 	d.listFn = list
 	d.postFn = post
 }
+
+// SetGuildProofForTest overrides the #504 guild-admin proof seam so unit tests
+// drive SaveDiscordSettings without dialing Discord, mirroring the resolveInvite
+// seam pattern.
+func (s *ProviderServer) SetGuildProofForTest(fn func(ctx context.Context, token, guildID, userID string) error) {
+	s.checkGuildAdmin = fn
+}
