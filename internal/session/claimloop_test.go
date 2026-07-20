@@ -26,6 +26,10 @@ type fakeIntentStore struct {
 	reapReturns int64 // how many rows ReapDead reports this tick (drives reconcile-after-reap)
 	reconciled  int   // ReconcileWorkerOrphanedVoiceSessions call count
 	heartbeats  int   // HeartbeatVoiceSessionIntent call count (#506 finalize-heartbeat test)
+	// timeline records the order of claim-plane calls ("hb" / "finish") with
+	// timestamps — the #505 drain-heartbeat tests assert beats keep landing
+	// through a slow wind-down and that no beat is ordered after the finish.
+	timeline []timelineEvent
 	// sessionOutcome scripts GetVoiceSession — the self-exit outcome read (#483 L4).
 	sessionOutcome func(uuid.UUID) (storage.VoiceSession, error)
 	// controls is the requested-control queue (#503), keyed by control id.
@@ -38,6 +42,13 @@ type fakeIntentStore struct {
 	// successive calls (a nil entry, or an exhausted queue, is a normal finish) —
 	// models a transient terminal-write blip (#503 FIX1).
 	finishControlErrs []error
+}
+
+// timelineEvent is one recorded claim-plane call: kind "hb" (heartbeat) or
+// "finish", stamped when the call landed.
+type timelineEvent struct {
+	kind string
+	at   time.Time
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -264,6 +275,7 @@ func (f *fakeIntentStore) HeartbeatVoiceSessionIntent(_ context.Context, id uuid
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heartbeats++
+	f.timeline = append(f.timeline, timelineEvent{kind: "hb", at: time.Now()})
 	i, ok := f.intents[id]
 	if !ok || i.InstanceID != instanceID ||
 		(i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
@@ -283,6 +295,7 @@ func (f *fakeIntentStore) heartbeatCount() int {
 func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UUID, instanceID string, status storage.VoiceSessionIntentStatus, lastError string) (storage.VoiceSessionIntent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.timeline = append(f.timeline, timelineEvent{kind: "finish", at: time.Now()})
 	i, ok := f.intents[id]
 	if !ok || i.InstanceID != instanceID ||
 		(i.Status != storage.VoiceIntentClaimed && i.Status != storage.VoiceIntentLive) {
@@ -295,11 +308,23 @@ func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UU
 	return *i, nil
 }
 
-func (f *fakeIntentStore) ReapDeadVoiceSessionIntents(_ context.Context, _ time.Duration) (int64, error) {
+// ReapDeadVoiceSessionIntents models the real reaper (#505): a claimed/live row
+// whose heartbeat is staler than expiry flips 'dead'. reapReturns is added to
+// the reported count (drives the reconcile-after-reap logging path).
+func (f *fakeIntentStore) ReapDeadVoiceSessionIntents(_ context.Context, expiry time.Duration) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reaped++
-	return f.reapReturns, nil
+	var n int64
+	now := time.Now()
+	for _, i := range f.intents {
+		if (i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) &&
+			i.HeartbeatAt != nil && now.Sub(*i.HeartbeatAt) > expiry {
+			i.Status = storage.VoiceIntentDead
+			n++
+		}
+	}
+	return n + f.reapReturns, nil
 }
 
 func (f *fakeIntentStore) ReconcileWorkerOrphanedVoiceSessions(_ context.Context) (int64, error) {
@@ -319,6 +344,12 @@ func (f *fakeIntentStore) GetVoiceSession(_ context.Context, id uuid.UUID) (stor
 		return storage.VoiceSession{}, storage.ErrNotFound
 	}
 	return hook(id)
+}
+
+func (f *fakeIntentStore) timelineCopy() []timelineEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]timelineEvent(nil), f.timeline...)
 }
 
 func (f *fakeIntentStore) reconcileCount() int {
@@ -638,6 +669,242 @@ func TestClaimLoop_HeartbeatsThroughSlowFinalize(t *testing.T) {
 	close(closeGate)
 	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
 	loop.DrainForTest()
+}
+
+// TestClaimLoop_DrainHeartbeatDuringSigterm covers #505 AC1/AC3: a SIGTERM drain
+// whose CloseVoiceSession runs slowly (the slow-finalizer window, parked on the
+// gate) must KEEP heartbeating while endSession blocks in Manager.Stop — before
+// #505 the drain window (up to the Manager's end budgets) went unheartbeated, so
+// a clean wind-down could cross Expiry and be reaped 'dead' mid-drain. Assert
+// beats keep landing during the Stop window, the intent stays live (not
+// terminal) until the finalizer releases, and only THEN finishes 'done'.
+func TestClaimLoop_DrainHeartbeatDuringSigterm(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // parks CloseVoiceSession → the slow wind-down
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { loop.Run(ctx); close(done) }()
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// SIGTERM: runSession's ctx.Done branch enters endSession → Manager.Stop
+	// parks on the close gate. Beats must continue through that window.
+	cancel()
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent status = %q during the drain window, want still live (heartbeating)", got)
+	}
+
+	// Release the slow finalizer: the wind-down completes and the intent
+	// finishes 'done' — a clean drain within budget is never 'dead'.
+	close(closeGate)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not drain after the finalizer released")
+	}
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDone {
+		t.Fatalf("intent status after drain = %q, want done", got)
+	}
+}
+
+// TestClaimLoop_DrainHeartbeatDuringStopRequested covers #505's second call
+// site: a stop_requested wind-down has the SAME unheartbeated window as the
+// SIGTERM drain (endSession blocks in Manager.Stop through the finalizers), so
+// beats must keep landing there too, and the intent finishes 'done' only after
+// the slow finalizer releases.
+func TestClaimLoop_DrainHeartbeatDuringStopRequested(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// stop_requested → runSession's ticker branch enters endSession →
+	// Manager.Stop parks on the close gate. Beats must continue.
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent status = %q during the stop wind-down, want still live (heartbeating)", got)
+	}
+
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	loop.DrainForTest()
+}
+
+// TestClaimLoop_DrainHeartbeatSupersededStopsBeating covers #505's reaped-anyway
+// arm (ADR-0006 superseded-mid-drain): if the claim is reaped DURING the drain
+// (a multi-beat DB outage crossed Expiry), the drain-beat goroutine stops
+// stamping — it never re-claims and never calls mgr.Stop again — while the
+// wind-down itself completes; the finish is fenced NotFound and swallowed, the
+// row stays 'dead', and the goroutine exits (DrainForTest returns — no leak).
+func TestClaimLoop_DrainHeartbeatSupersededStopsBeating(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// Enter the drain (stop_requested) and let it park on the close gate.
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+
+	// The reaper wins mid-drain: the next drain beat NotFounds and stops beating.
+	istore.markDead(intent.ID)
+	waitFor(t, time.Second, func() bool {
+		before := istore.heartbeatCount()
+		time.Sleep(10 * time.Millisecond)
+		return istore.heartbeatCount() == before
+	})
+
+	// The wind-down still completes; the finish is swallowed (row stays 'dead')
+	// and every goroutine exits.
+	close(closeGate)
+	loop.DrainForTest()
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDead {
+		t.Fatalf("intent status = %q, want dead (superseded-mid-drain never resurrected)", got)
+	}
+}
+
+// TestClaimLoop_ReaperNeverKillsCleanDrain covers #505 AC1+AC2 against the REAL
+// reaper semantics (the fake reaps rows with heartbeats staler than Expiry): a
+// clean wind-down that is SLOWER than Expiry (gate held >> Expiry) but keeps
+// drain-beating is never marked 'dead' by concurrent reap/reconcile ticks — the
+// intent stays live (non-terminal) the whole time CloseVoiceSession is
+// in-flight, so neither ReconcileWorkerOrphanedVoiceSessions arm (both require
+// a terminal/absent intent) can race the Close; then it finishes 'done'.
+func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	// Scaled intervals: drain beats every 2ms, Expiry 20ms, gate held ~100ms —
+	// several Expiry windows pass while the wind-down is in-flight.
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: 20 * time.Millisecond})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// Enter the drain and park on the gate; meanwhile keep reap+reconcile ticks
+	// running concurrently (another worker's reaper never sleeps).
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	reapStop := make(chan struct{})
+	reapDone := make(chan struct{})
+	go func() {
+		defer close(reapDone)
+		for {
+			select {
+			case <-reapStop:
+				return
+			default:
+				loop.TickForTest(context.Background())
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Hold the drain open for ~5x Expiry: the intent must stay live throughout —
+	// never 'dead' (AC1), never terminal while Close is in-flight (AC2).
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+			t.Fatalf("intent status = %q mid-drain under a live reaper, want live", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	close(reapStop)
+	<-reapDone
+	loop.DrainForTest()
+}
+
+// TestClaimLoop_DrainBeatsEndBeforeFinish covers #505's ordering contract:
+// endSession waits the drain-beat goroutine out (stopBeat) BEFORE writing the
+// terminal state, so the recorded call timeline never shows a heartbeat ordered
+// after the finish — a late stray beat would be fenced NotFound on a real
+// store, but the loop must not rely on that fence.
+func TestClaimLoop_DrainBeatsEndBeforeFinish(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: time.Millisecond, Expiry: 30 * time.Second})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	before := istore.heartbeatCount()
+	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	loop.DrainForTest()
+
+	events := istore.timelineCopy()
+	finishAt := -1
+	for i, e := range events {
+		if e.kind == "finish" {
+			finishAt = i
+			break
+		}
+	}
+	if finishAt < 0 {
+		t.Fatal("no finish recorded in the call timeline")
+	}
+	for _, e := range events[finishAt+1:] {
+		if e.kind == "hb" {
+			t.Fatal("a heartbeat was ordered AFTER the finish — drain beats must end before the terminal write")
+		}
+	}
 }
 
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
