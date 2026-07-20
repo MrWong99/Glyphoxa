@@ -49,7 +49,8 @@ client must decrypt that Tenant's bot token itself, so the voice role reads the
 platform secret cipher — deliberately widening its blast radius from today's
 posture. Whether decryption happens in the voice role directly or credentials
 are forwarded pre-decrypted from the web role is an open implementation knob,
-tracked on #492.
+tracked on #492. *Resolved on #492: voice pods mount `app-secret` and decrypt
+directly (see `docs/devs/2026-07-20-voice-fleet-rollout.md` § Secret posture).*
 
 **(e) No mid-session takeover.** ADR-0006 stands unchanged: the Voice Instance
 that claims a session runs its own DAVE/MLS handshake; live migration to

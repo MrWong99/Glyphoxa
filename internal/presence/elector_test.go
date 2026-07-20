@@ -114,18 +114,24 @@ func TestOwnerElectorReleasesOnCancel(t *testing.T) {
 	}
 }
 
-// TestOwnerElectorSelfDemotesAfterExpiry covers the review item: a partitioned
-// owner that can no longer reach Postgres self-demotes (SetActive(false)) once the
-// MONOTONIC elapsed since its last successful renew reaches Expiry — before that it
-// keeps ownership — and it does NOT Release on demotion (DB unreachable). Re-promotion
-// comes only via the next successful acquire. Drives reconcile directly against a
-// fake clock for determinism.
-func TestOwnerElectorSelfDemotesAfterExpiry(t *testing.T) {
+// TestOwnerElectorSelfDemotesBeforeStealHorizon covers the #483 dual-owner window:
+// a partitioned owner must have LOCALLY demoted (SetActive(false)) strictly before a
+// challenger's steal horizon — heartbeat_at + Expiry in the DB — can promote a second
+// owner, else both dispatch the same interaction for several seconds. The demotion
+// check runs only on ticks (Interval apart) and a tick's acquire can itself burn
+// opTimeout, so the threshold must be Expiry - Interval - opTimeout: the LAST tick
+// before the threshold plus its op time still lands the demotion before Expiry.
+// Models the challenger's clock by stepping ticks at Interval cadence and asserting
+// the owner is demoted at a tick that completes before elapsed reaches Expiry — not
+// merely "eventually". No Release on demotion (DB unreachable); re-promotion comes
+// only via the next successful acquire.
+func TestOwnerElectorSelfDemotesBeforeStealHorizon(t *testing.T) {
 	store := &fakeOwnerStore{
 		outcomes: []bool{true, true, true, true},
 		errs:     []error{nil, errors.New("partition"), errors.New("partition"), nil},
 	}
 	changes := make(chan bool, 8)
+	// Defaults: Interval 5s, Expiry 15s → opTimeout 3s → demotion threshold 7s.
 	cfg := OwnerElectorConfig{Interval: 5 * time.Second, Expiry: 15 * time.Second}
 	e := NewOwnerElector(store, "instance-a", func(owner bool) { changes <- owner }, nil, cfg)
 
@@ -134,24 +140,32 @@ func TestOwnerElectorSelfDemotesAfterExpiry(t *testing.T) {
 	e.now = func() time.Time { return clk }
 	ctx := context.Background()
 
-	// Boot: successful acquire → own, lastRenew stamped.
+	// Boot: successful acquire → own, lastRenew stamped. The challenger's steal
+	// horizon is base + Expiry (heartbeat_at was stamped at/before this renew).
 	e.reconcile(ctx)
 	if got := <-changes; got != true {
 		t.Fatalf("boot onChange = %v, want true", got)
 	}
 
-	// A blip BEFORE expiry: keep ownership, no demotion, no onChange.
-	clk = base.Add(cfg.Expiry - time.Millisecond)
+	// First failing tick at Interval (elapsed 5s < 7s threshold): keep ownership —
+	// a transient blip that also fails a challenger's acquire must not demote.
+	clk = base.Add(cfg.Interval)
 	e.reconcile(ctx)
 	if len(changes) != 0 {
-		t.Fatalf("demoted before expiry: %d changes queued", len(changes))
+		t.Fatalf("demoted on the first failing tick: %d changes queued", len(changes))
 	}
 
-	// Still failing, now AT expiry: self-demote to inactive, WITHOUT Release.
-	clk = base.Add(cfg.Expiry)
+	// Second failing tick at 2×Interval (elapsed 10s ≥ 7s threshold): self-demote
+	// NOW. Even if this tick's acquire burned its full opTimeout (3s), the local
+	// deactivation lands at 13s — strictly before the 15s steal horizon.
+	clk = base.Add(2 * cfg.Interval)
 	e.reconcile(ctx)
 	if got := <-changes; got != false {
-		t.Fatalf("expiry onChange = %v, want false (self-demote)", got)
+		t.Fatalf("onChange at 2×Interval = %v, want false (self-demote)", got)
+	}
+	if worst := clk.Add(e.opTimeout()); !worst.Before(base.Add(cfg.Expiry)) {
+		t.Fatalf("demotion tick + opTimeout = %v is not before the steal horizon %v",
+			worst.Sub(base), cfg.Expiry)
 	}
 	if store.wasReleased() {
 		t.Error("self-demotion must NOT Release the claim (DB unreachable; lease expiry hands over)")
@@ -167,7 +181,13 @@ func TestOwnerElectorSelfDemotesAfterExpiry(t *testing.T) {
 
 // TestOwnerElectorErrorKeepsState covers sequence (3): a transient acquire error
 // does not flip a live owner inactive — it logs and retains the last state, since a
-// DB blip that fails our renew also fails a challenger's acquire.
+// DB blip that fails our renew also fails a challenger's acquire. The cadence must
+// leave real headroom (Interval < Expiry - opTimeout so demoteAfter > 0, #506
+// re-review): the earlier Interval=1h clamped demoteAfter to 0, so the error tick
+// self-demoted immediately and the test's final read mistook that demotion for the
+// shutdown false — green for the wrong reason. With Interval 2s / Expiry 15s the
+// demotion threshold is 11s, far above the sub-second real elapsed between the
+// boot renew and the error tick, so the keeps-state branch is exercised for real.
 func TestOwnerElectorErrorKeepsState(t *testing.T) {
 	store := &fakeOwnerStore{
 		outcomes: []bool{true, false, true},
@@ -177,7 +197,7 @@ func TestOwnerElectorErrorKeepsState(t *testing.T) {
 	changes := make(chan bool, 8)
 
 	e := NewOwnerElector(store, "instance-a", func(owner bool) { changes <- owner }, nil,
-		OwnerElectorConfig{Interval: time.Hour, Expiry: 15 * time.Second})
+		OwnerElectorConfig{Interval: 2 * time.Second, Expiry: 15 * time.Second})
 	e.ticks = ticks
 
 	ctx, cancel := context.WithCancel(context.Background())

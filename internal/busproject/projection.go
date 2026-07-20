@@ -100,14 +100,24 @@ type Projection[T any] struct {
 	log      *slog.Logger
 
 	entries map[string]*entry[T] // keyed by session id string
-	// closed tombstones every session id ever Closed (#487): a straggler event for
+	// closed tombstones recently Closed session ids (#487): a straggler event for
 	// a Closed session — arriving in the window before the Manager cuts the bridge —
 	// is dropped here WITHOUT re-Resolving, so it can never re-create a fresh entry
 	// (a live frame after the terminal idle, #144) even if the registry still
 	// resolves it. Session ids are unique uuids and never reused, so a tombstone is
-	// never a false drop of a genuinely new session.
-	closed map[string]struct{}
+	// never a false drop of a genuinely new session. The set is bounded (#483):
+	// closedOrder evicts the OLDEST tombstone once maxClosedTombstones is exceeded —
+	// the straggler window is the seconds-scale bridge-cut delay, so a tombstone
+	// evicted maxClosedTombstones closes later is far past any straggler.
+	closed      map[string]struct{}
+	closedOrder []string // FIFO eviction order for the tombstone bound
 }
+
+// maxClosedTombstones bounds the closed set (#483): without it the map grows one
+// uuid string per Closed session for the process lifetime (two Projection hosts —
+// relay + chunker — each carry one). 1024 is orders of magnitude more closes than
+// any straggler window (the bridge-cut delay, seconds) could span.
+const maxClosedTombstones = 1024
 
 // New returns a Projection guarding its state with the host's mu and calling
 // back through hooks. A nil log discards. It does not subscribe; the host calls
@@ -191,8 +201,17 @@ func (p *Projection[T]) Close(sessionID string) {
 	defer p.mu.Unlock()
 	// Tombstone the session so any straggler racing this Close is dropped, whether
 	// or not the session folded events (a Close for a zero-event session still
-	// arms the guard) — #487/#144.
-	p.closed[sessionID] = struct{}{}
+	// arms the guard) — #487/#144. Bounded FIFO (#483): a repeat Close re-arms
+	// nothing (already tombstoned), and past the cap the oldest tombstone —
+	// long outside any straggler window — is evicted.
+	if _, ok := p.closed[sessionID]; !ok {
+		p.closed[sessionID] = struct{}{}
+		p.closedOrder = append(p.closedOrder, sessionID)
+		if len(p.closedOrder) > maxClosedTombstones {
+			delete(p.closed, p.closedOrder[0])
+			p.closedOrder = p.closedOrder[1:]
+		}
+	}
 	if _, ok := p.entries[sessionID]; !ok {
 		return
 	}

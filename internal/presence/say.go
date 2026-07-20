@@ -45,7 +45,10 @@ type SayControl interface {
 // The Address-Only Butler is excluded from the puppet targets: it is never voiced
 // (ADR-0009/0024), so puppeteering it needs the Butler voicer on-ramp — the
 // #299-blocked follow-up (ButlerVoicer = SayAs(GetButler id)).
-func SayCommand(mgr SayControl, agents AgentLister) Command {
+//
+// pool is the claim-plane read for the replicas>1 fleet (#483/#503, nil in
+// -mode all) — see MuteCommand.
+func SayCommand(mgr SayControl, agents AgentLister, pool PoolSession) Command {
 	return Command{
 		Path:        "say",
 		Description: "Make an NPC speak the given text in the active Voice Session.",
@@ -90,8 +93,10 @@ func SayCommand(mgr SayControl, agents AgentLister) Command {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
 				// No session for THIS Tenant (#488): a session live for another Tenant is
-				// invisible here, so a GM can never puppet a foreign Tenant's session.
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				// invisible here, so a GM can never puppet a foreign Tenant's session. When
+				// the pool shows it live on ANOTHER worker the reply names the split-mode
+				// limitation instead (#483/#503).
+				return replyNoLocalSession(ctx, ic, pool)
 			}
 			text, _ := ic.String("text")
 			input, _ := ic.String("as")

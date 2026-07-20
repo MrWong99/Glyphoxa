@@ -3,6 +3,7 @@ package presence
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/disgoorg/disgo/discord"
@@ -56,7 +57,7 @@ func TestSayCommand_ForeignTenantSessionRefused(t *testing.T) {
 	// Tenant-keyed (#488), so the tenantA query sees no session.
 	mgr := &fakeSayer{active: true, tenantID: tenantB, campaignID: uuid.New()}
 	agents := &fakeLister{agents: []storage.Agent{bart}}
-	cmd := SayCommand(mgr, agents)
+	cmd := SayCommand(mgr, agents, nil)
 	resp := &fakeResponder{}
 	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"text": "hi", "as": bart.ID.String()}}, resp: resp}
 
@@ -93,7 +94,7 @@ func sayAC(as string) *Autocomplete {
 // a FLAT /say (not grouped), GM-only, a required "text" and a required
 // autocompleting "as" option.
 func TestSayCommand_IsFlatGMOnlyWithAutocomplete(t *testing.T) {
-	cmd := SayCommand(&fakeSayer{}, &fakeLister{})
+	cmd := SayCommand(&fakeSayer{}, &fakeLister{}, nil)
 	if cmd.Path != "say" || !cmd.GMOnly || cmd.Autocomplete == nil {
 		t.Fatalf("SayCommand shape = {path %q GMOnly %v autocomplete %v}, want GM-only flat /say with autocomplete", cmd.Path, cmd.GMOnly, cmd.Autocomplete != nil)
 	}
@@ -102,12 +103,30 @@ func TestSayCommand_IsFlatGMOnlyWithAutocomplete(t *testing.T) {
 	}
 }
 
+// TestSayCommand_SessionOnAnotherWorker pins the #483 replicas>1 fix: the local
+// Manager holds no session but the claim plane says the Tenant's session is live
+// on ANOTHER worker — /say must reply the honest split-mode limitation (#503),
+// never the false "No Voice Session is active.", and never call SayAs.
+func TestSayCommand_SessionOnAnotherWorker(t *testing.T) {
+	sayer := &fakeSayer{active: false}
+	resp := &fakeResponder{}
+	if err := SayCommand(sayer, &fakeLister{}, &fakePool{live: true}).Handle(context.Background(), sayIC(resp, "hi", "Bart")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(sayer.calls) != 0 {
+		t.Fatalf("SayAs called %d times for a remote-hosted session, want 0", len(sayer.calls))
+	}
+	if len(resp.replies) != 1 || !strings.Contains(resp.replies[0].content, "another worker") {
+		t.Fatalf("split reply = %+v, want the hosted-by-another-worker message", resp.replies)
+	}
+}
+
 // TestSayCommand_NoSessionRefused pins the active-session requirement (ADR-0010):
 // with no live Voice Session /say is refused ephemerally and SayAs is never called.
 func TestSayCommand_NoSessionRefused(t *testing.T) {
 	sayer := &fakeSayer{active: false}
 	resp := &fakeResponder{}
-	if err := SayCommand(sayer, &fakeLister{}).Handle(context.Background(), sayIC(resp, "hi", "Bart")); err != nil {
+	if err := SayCommand(sayer, &fakeLister{}, nil).Handle(context.Background(), sayIC(resp, "hi", "Bart")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(sayer.calls) != 0 {
@@ -125,7 +144,7 @@ func TestSayCommand_UnknownAgentRefused(t *testing.T) {
 	sayer := &fakeSayer{active: true, campaignID: campaign}
 	lister := &fakeLister{agents: []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}}}
 	resp := &fakeResponder{}
-	if err := SayCommand(sayer, lister).Handle(context.Background(), sayIC(resp, "hi", "Nobody")); err != nil {
+	if err := SayCommand(sayer, lister, nil).Handle(context.Background(), sayIC(resp, "hi", "Nobody")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(sayer.calls) != 0 {
@@ -151,7 +170,7 @@ func TestSayCommand_ButlerRefusedOnHandle(t *testing.T) {
 		sayer := &fakeSayer{active: true, campaignID: campaign}
 		lister := &fakeLister{agents: []storage.Agent{butler, bart}}
 		resp := &fakeResponder{}
-		if err := SayCommand(sayer, lister).Handle(context.Background(), sayIC(resp, "hi", as)); err != nil {
+		if err := SayCommand(sayer, lister, nil).Handle(context.Background(), sayIC(resp, "hi", as)); err != nil {
 			t.Fatalf("Handle(as=%q): %v", as, err)
 		}
 		if len(sayer.calls) != 0 {
@@ -171,7 +190,7 @@ func TestSayCommand_HappyCallsSayAs(t *testing.T) {
 	sayer := &fakeSayer{active: true, campaignID: campaign}
 	lister := &fakeLister{agents: []storage.Agent{bart}}
 	resp := &fakeResponder{}
-	if err := SayCommand(sayer, lister).Handle(context.Background(), sayIC(resp, "Welcome!", bart.ID.String())); err != nil {
+	if err := SayCommand(sayer, lister, nil).Handle(context.Background(), sayIC(resp, "Welcome!", bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(sayer.calls) != 1 || sayer.calls[0].agentID != bart.ID.String() || sayer.calls[0].text != "Welcome!" {
@@ -190,7 +209,7 @@ func TestSayCommand_SayAsRaceRefused(t *testing.T) {
 	sayer := &fakeSayer{active: true, sayErr: context.Canceled}
 	lister := &fakeLister{agents: []storage.Agent{bart}}
 	resp := &fakeResponder{}
-	if err := SayCommand(sayer, lister).Handle(context.Background(), sayIC(resp, "hi", bart.ID.String())); err != nil {
+	if err := SayCommand(sayer, lister, nil).Handle(context.Background(), sayIC(resp, "hi", bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
@@ -208,7 +227,7 @@ func TestSayCommand_AutocompleteOffersVoicedNPCs(t *testing.T) {
 	sayer := &fakeSayer{active: true, campaignID: campaign}
 	lister := &fakeLister{agents: []storage.Agent{butler, bart}}
 
-	choices, err := SayCommand(sayer, lister).Autocomplete(context.Background(), sayAC(""))
+	choices, err := SayCommand(sayer, lister, nil).Autocomplete(context.Background(), sayAC(""))
 	if err != nil {
 		t.Fatalf("Autocomplete: %v", err)
 	}
@@ -224,7 +243,7 @@ func TestSayCommand_AutocompleteOffersVoicedNPCs(t *testing.T) {
 // TestSayCommand_AutocompleteIdleOffersNothing pins that with no live session the
 // autocomplete offers nothing (nothing to puppet).
 func TestSayCommand_AutocompleteIdleOffersNothing(t *testing.T) {
-	choices, err := SayCommand(&fakeSayer{active: false}, &fakeLister{}).Autocomplete(context.Background(), sayAC(""))
+	choices, err := SayCommand(&fakeSayer{active: false}, &fakeLister{}, nil).Autocomplete(context.Background(), sayAC(""))
 	if err != nil {
 		t.Fatalf("Autocomplete: %v", err)
 	}

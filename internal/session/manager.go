@@ -531,21 +531,27 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	m.reservations[tenantID] = struct{}{}
 	m.mu.Unlock()
 
-	// releaseReservation drops this Tenant's slot; called on EVERY early return in
-	// the unlocked I/O phase (and at commit, replaced by the active entry).
-	releaseReservation := func() {
-		m.mu.Lock()
-		delete(m.reservations, tenantID)
-		m.mu.Unlock()
-	}
+	// Release the reservation on EVERY exit that has not committed it into an
+	// active entry — DEFERRED, not hand-called on each early return (#483 M5): a
+	// PANIC in the unlocked I/O phase below (recovered upstream by net/http's
+	// handler recovery) would otherwise strand m.reservations[tenantID] forever —
+	// this Tenant permanently ErrSessionActive and, at K=1, the whole worker
+	// reporting HasCapacity false. committed flips at the commit point, where the
+	// slot is swapped for the active entry under mu.
+	committed := false
+	defer func() {
+		if !committed {
+			m.mu.Lock()
+			delete(m.reservations, tenantID)
+			m.mu.Unlock()
+		}
+	}()
 
 	dep, err := m.store.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: load deployment config: %w", err)
 	}
 	if dep.GuildID == "" || dep.VoiceChannelID == "" {
-		releaseReservation()
 		return storage.VoiceSession{}, ErrDiscordNotConfigured
 	}
 
@@ -557,11 +563,9 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if err != nil {
 		// A real saved token that won't decrypt: surface ErrDiscordTokenUndecryptable
 		// (errors.Is at the RPC layer) while keeping the actionable detail in the chain.
-		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("%w: %w", ErrDiscordTokenUndecryptable, err)
 	}
 	if token == "" {
-		releaseReservation()
 		return storage.VoiceSession{}, ErrDiscordTokenMissing
 	}
 
@@ -573,7 +577,6 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// can never strand a 'running' row (#433).
 	storeCaps, err := m.store.GetTenantSpendCaps(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: load spend caps: %w", err)
 	}
 
@@ -599,11 +602,9 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if m.allowance != nil {
 		state, err := m.allowance.AllowanceState(ctx, tenantID)
 		if err != nil {
-			releaseReservation()
 			return storage.VoiceSession{}, fmt.Errorf("session: load plan allowance: %w", err)
 		}
 		if state.Exhausted() {
-			releaseReservation()
 			return storage.VoiceSession{}, ErrAllowanceExhausted
 		}
 		allowanceRemaining = state.RemainingUSD()
@@ -611,7 +612,6 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 
 	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
 	if err != nil {
-		releaseReservation()
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
 	}
 
@@ -746,6 +746,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// can have raced in, which the closed check catches.
 	m.mu.Lock()
 	delete(m.reservations, tenantID)
+	committed = true // the deferred release must not double-delete under a re-taken slot
 	if m.closed {
 		m.mu.Unlock()
 		// A Shutdown landed during our I/O phase: never launch a loop nothing will
@@ -1013,6 +1014,21 @@ func (m *Manager) Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSe
 	case <-ctx.Done():
 		return storage.VoiceSession{}, ctx.Err()
 	}
+}
+
+// Finalizing reports whether tenantID's session has ended its loop but is still
+// inside the Manager's end window — as.ended set (Active already reports false)
+// while the finalizers + CloseVoiceSession run and the active entry has not yet
+// cleared (#483 L3). During that window Start still collides ErrSessionActive,
+// so the claim loop defers finishing a self-exited intent until this clears —
+// otherwise an instant Tenant restart lands exactly in the window and its fresh
+// intent misreports 'failed'. runLoop ALWAYS deletes the entry (even on a failed
+// end-write), so the window is bounded by the endTimeout budgets.
+func (m *Manager) Finalizing(tenantID uuid.UUID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	as := m.active[tenantID]
+	return as != nil && as.ended
 }
 
 // Active returns tenantID's live Voice Session and true, or the zero value and

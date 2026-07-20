@@ -53,7 +53,7 @@ type fakeNamer struct {
 	calls  int
 }
 
-func (f *fakeNamer) MemberDisplayName(_ context.Context, discordUserID string) (string, error) {
+func (f *fakeNamer) MemberDisplayName(_ context.Context, _ uuid.UUID, discordUserID string) (string, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()

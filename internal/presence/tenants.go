@@ -12,8 +12,8 @@ import (
 )
 
 // tenantResolveTTL bounds how long a Guild→Tenant HIT is cached before a fresh
-// interaction re-reads it. Short so a Configuration change (a Tenant saving its
-// guild_id, which flips the newest-wins owner of a duplicated Guild) propagates
+// interaction re-reads it. Short so a Configuration change (a Tenant moving off
+// its guild_id, freeing it for another Tenant to register, #483) propagates
 // within seconds, while keeping the interaction dispatch off a per-call DB read.
 //
 // Accepted tradeoff (#490 review): after a Guild is remapped to a new owner, this
@@ -30,8 +30,8 @@ const tenantResolveTTL = 30 * time.Second
 const tenantResolveNegTTL = 5 * time.Second
 
 // GuildTenantReader is the storage read the prod TenantResolver wraps —
-// *storage.Store satisfies it via GetTenantIDByGuildID (newest-wins on a duplicated
-// guild_id).
+// *storage.Store satisfies it via GetTenantIDByGuildID (single-owner since #483's
+// first-registrar-wins index).
 type GuildTenantReader interface {
 	GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error)
 }
@@ -40,8 +40,8 @@ type GuildTenantReader interface {
 // storage GetTenantIDByGuildID read with a small TTL cache. The cache holds only
 // successful hits (an unknown Guild is not cached, so a Tenant configuring that
 // Guild resolves on its very next interaction). It shares GetTenantIDByGuildID's
-// newest-wins determinism with the member-picker path, so a stale losing row can
-// never route an interaction to the wrong Tenant.
+// single-owner authority (first-registrar-wins, #483) with the member-picker
+// path, so an interaction can never route to the wrong Tenant.
 type storageTenantResolver struct {
 	reader GuildTenantReader
 	ttl    time.Duration

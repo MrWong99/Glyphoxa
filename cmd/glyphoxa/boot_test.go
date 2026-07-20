@@ -1108,3 +1108,42 @@ func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+
+// fakeMixedGuardStore scripts the two mixed-deployment signals (#483 M3).
+type fakeMixedGuardStore struct {
+	liveIntent bool
+	owner      bool
+	err        error
+}
+
+func (f fakeMixedGuardStore) AnyLiveVoiceSessionIntent(context.Context) (bool, error) {
+	return f.liveIntent, f.err
+}
+func (f fakeMixedGuardStore) HasPresenceOwner(context.Context) (bool, error) {
+	return f.owner, f.err
+}
+
+// TestGuardAllModeMixedDeployment covers #483 M3: -mode all boot must refuse a
+// database a claim-plane deployment is driving (a live intent OR a
+// presence_owner row) — the prohibition was doc-only, so an operator pointing
+// -mode all at the fleet's DB silently closed live workers' sessions on boot.
+// A clean DB (or one with only terminal intent history) boots.
+func TestGuardAllModeMixedDeployment(t *testing.T) {
+	ctx := context.Background()
+
+	if err := guardAllModeMixedDeployment(ctx, fakeMixedGuardStore{}); err != nil {
+		t.Fatalf("clean DB refused: %v", err)
+	}
+	if err := guardAllModeMixedDeployment(ctx, fakeMixedGuardStore{liveIntent: true}); err == nil ||
+		!strings.Contains(err.Error(), "voice_session_intents") {
+		t.Fatalf("live intent err = %v, want a refusal naming voice_session_intents", err)
+	}
+	if err := guardAllModeMixedDeployment(ctx, fakeMixedGuardStore{owner: true}); err == nil ||
+		!strings.Contains(err.Error(), "presence_owner") {
+		t.Fatalf("presence owner err = %v, want a refusal naming presence_owner", err)
+	}
+	// A broken read fails the boot loudly, never silently proceeds.
+	if err := guardAllModeMixedDeployment(ctx, fakeMixedGuardStore{err: errors.New("db down")}); err == nil {
+		t.Fatal("guard swallowed a read error")
+	}
+}

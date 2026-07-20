@@ -301,6 +301,58 @@ func TestTapeWiring_PollerContinuesAfterError(t *testing.T) {
 	}
 }
 
+// deadlineCapturingStore records whether each ListTapeConsent ctx carried a
+// deadline and how far away it was, so a test can pin the per-op DB bound.
+type deadlineCapturingStore struct {
+	*fakeConsentStore
+	mu        sync.Mutex
+	remaining []time.Duration // -1 = no deadline on that read
+}
+
+func (d *deadlineCapturingStore) ListTapeConsent(ctx context.Context, cid uuid.UUID) ([]string, error) {
+	rem := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		rem = time.Until(dl)
+	}
+	d.mu.Lock()
+	d.remaining = append(d.remaining, rem)
+	d.mu.Unlock()
+	return d.fakeConsentStore.ListTapeConsent(ctx, cid)
+}
+
+// TestTapeWiring_ReconcileReadsAreBounded covers the epic-#483 hardening
+// (residual f): every consent reconcile read runs under a per-op DB timeout of
+// min(interval, 3s) — like the elector's opTimeout — so a hung connection cannot
+// pin the poller (or a bus-event reconcile) for the life of the cycle ctx.
+func TestTapeWiring_ReconcileReadsAreBounded(t *testing.T) {
+	cid := uuid.New()
+	store := &deadlineCapturingStore{fakeConsentStore: newFakeConsentStore()}
+
+	tp := tape.New(tape.Window, nil, nil)
+	defer tp.Close()
+	bus := voiceevent.NewBus()
+	ctx, cancel := context.WithCancel(context.Background()) // cycle ctx: NO deadline of its own
+	defer cancel()
+	unsub := wireTapeConsent(ctx, bus, tp, cid, store, time.Hour, discardLog())
+	defer unsub()
+
+	// The seed reconcile plus one bus-event reconcile must both be bounded.
+	bus.Publish(voiceevent.TapeConsentChanged{CampaignID: cid.String(), SpeakerID: "111", Granted: true})
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.remaining) < 2 {
+		t.Fatalf("got %d reconcile reads, want the seed + the bus-event read", len(store.remaining))
+	}
+	for i, rem := range store.remaining {
+		if rem < 0 {
+			t.Errorf("reconcile read %d ran with NO deadline; want min(interval, 3s)", i)
+		} else if rem > 3*time.Second {
+			t.Errorf("reconcile read %d deadline %s away, want <= 3s (interval is 1h)", i, rem)
+		}
+	}
+}
+
 // TestTapeConsentReconcileInterval covers the env knob (#492): a valid duration is
 // honored; blank/unparsable/non-positive falls back to the 5s default.
 func TestTapeConsentReconcileInterval(t *testing.T) {

@@ -140,6 +140,36 @@ func (f *fakeControlStore) ReapVoiceSessionIntentIfExpired(_ context.Context, id
 	return true, nil
 }
 
+// ReconcileWorkerOrphanedVoiceSessions mirrors the storage sweep: close every
+// 'running' voice_sessions row whose owning intent has gone terminal.
+func (f *fakeControlStore) ReconcileWorkerOrphanedVoiceSessions(context.Context) (int64, error) {
+	f.intents_mu().Lock()
+	terminalSessions := map[uuid.UUID]bool{}
+	for _, i := range f.intents {
+		if i.VoiceSessionID.Valid {
+			switch i.Status {
+			case storage.VoiceIntentDead, storage.VoiceIntentDone, storage.VoiceIntentFailed:
+				terminalSessions[i.VoiceSessionID.UUID] = true
+			}
+		}
+	}
+	f.intents_mu().Unlock()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, vs := range f.sessions {
+		if vs.Status == storage.VoiceSessionRunning && terminalSessions[id] {
+			now := time.Now()
+			vs.Status = storage.VoiceSessionEnded
+			vs.EndedAt = &now
+			f.sessions[id] = vs
+			n++
+		}
+	}
+	return n, nil
+}
+
 // markStaleHeartbeat ages an intent's heartbeat so ReapVoiceSessionIntentIfExpired
 // treats it as a dead worker's row.
 func (f *fakeControlStore) markStaleHeartbeat(id uuid.UUID) {
@@ -319,6 +349,61 @@ func TestIntentControl_StartCancelsPendingOnTimeout(t *testing.T) {
 	}
 }
 
+// TestIntentControl_StartCtxCancelCancelsIntent covers the epic-#483 hardening
+// (residual d): a Start abandoned by its caller (ctx cancelled mid-poll) must
+// best-effort cancel the pending intent — mirroring the deadline path — so a
+// Voice Instance booting later never claims a row nobody is watching.
+func TestIntentControl_StartCtxCancelCancelsIntent(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Minute, StopBudget: time.Second, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := ctl.Start(ctx, tenantID, campaignID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start err = %v, want context.Canceled", err)
+	}
+
+	live, err := store.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("intent left non-terminal after ctx cancel: %+v (err %v), want cancelled", live, err)
+	}
+}
+
+// erroringGetStore makes GetVoiceSessionIntent fail after the intent exists, so
+// Start's poll-error return path is exercised.
+type erroringGetStore struct {
+	*fakeControlStore
+	getErr error
+}
+
+func (e *erroringGetStore) GetVoiceSessionIntent(context.Context, uuid.UUID) (storage.VoiceSessionIntent, error) {
+	return storage.VoiceSessionIntent{}, e.getErr
+}
+
+// TestIntentControl_StartPollErrorCancelsIntent covers the epic-#483 hardening
+// (residual d): a Start that aborts on a poll error must best-effort cancel the
+// pending intent, exactly like the ctx-cancel and deadline exits.
+func TestIntentControl_StartPollErrorCancelsIntent(t *testing.T) {
+	inner := newFakeControlStore()
+	store := &erroringGetStore{fakeControlStore: inner, getErr: errors.New("db blip")}
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Minute, StopBudget: time.Second, Expiry: 30 * time.Second})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID); err == nil {
+		t.Fatal("Start err = nil, want poll error")
+	}
+
+	if live, err := inner.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("intent left non-terminal after poll error: %+v (err %v), want cancelled", live, err)
+	}
+}
+
 // TestIntentControl_StartCancelledOutcome covers review item 7: an external stop
 // landing on the still-pending row is a distinct ErrIntentCancelled, not
 // ErrIntentPending.
@@ -367,6 +452,37 @@ func TestIntentControl_ZeroWorkerReapsStaleBlocker(t *testing.T) {
 	}
 }
 
+// TestIntentControl_ZeroWorkerReapReconcilesOrphanedRow covers the epic-#483
+// hardening (residual e): when IntentControl's zero-worker escape reaps a dead
+// worker's intent, the bound 'running' voice_sessions row must be closed too —
+// not left stranded until some Voice Instance's next boot.
+func TestIntentControl_ZeroWorkerReapReconcilesOrphanedRow(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 20 * time.Millisecond, StopBudget: time.Second, Expiry: time.Millisecond})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	store.add(tenantID, campaignID)
+	claimed, _ := store.ClaimVoiceSessionIntent(context.Background(), "dead-worker")
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning}
+	store.putSession(vs)
+	if _, err := store.MarkVoiceSessionIntentLive(context.Background(), claimed.ID, "dead-worker", vs.ID); err != nil {
+		t.Fatalf("mark live: %v", err)
+	}
+	store.markStaleHeartbeat(claimed.ID)
+
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID); !errors.Is(err, session.ErrIntentPending) {
+		t.Fatalf("Start err = %v, want ErrIntentPending (reaped then queued)", err)
+	}
+	got, err := store.GetVoiceSession(context.Background(), vs.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Status != storage.VoiceSessionEnded {
+		t.Fatalf("orphaned row status = %q, want ended (reconciled after reap)", got.Status)
+	}
+}
+
 // TestIntentControl_StopBudgetError covers review item 7: a Stop whose worker
 // never confirms within the budget returns ErrStopPending, not a false success.
 func TestIntentControl_StopBudgetError(t *testing.T) {
@@ -410,5 +526,65 @@ func TestIntentControl_MgrOnlyDegrade(t *testing.T) {
 	}
 	if sp := ctl.Spend(tenantID); sp != (spend.Status{}) {
 		t.Errorf("Spend = %+v, want zero", sp)
+	}
+}
+
+// TestIntentControl_StartMapsWorkerFailCode covers #483 M4: a worker's typed
+// Start refusal crosses the claim plane as a fail code in last_error; the web
+// tier's Start must re-map it to the SAME sentinel (here ErrDiscordNotConfigured)
+// so the RPC layer answers CodeFailedPrecondition with the actionable message the
+// -mode all path gives — never a flattened CodeInternal "internal error".
+func TestIntentControl_StartMapsWorkerFailCode(t *testing.T) {
+	store := newFakeControlStore()
+	// Simulate the worker: the intent fails with the encoded typed refusal the
+	// ClaimLoop records (EncodeStartFailure) as soon as the poll first reads it.
+	store.onGet = func(i *storage.VoiceSessionIntent) {
+		if i.Status == storage.VoiceIntentPending {
+			now := time.Now()
+			i.Status = storage.VoiceIntentFailed
+			i.LastError = session.EncodeStartFailure(session.ErrDiscordNotConfigured)
+			i.EndedAt = &now
+		}
+	}
+	ctl := newIntentControl(t, store)
+
+	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrDiscordNotConfigured) {
+		t.Fatalf("Start err = %v, want the re-mapped session.ErrDiscordNotConfigured sentinel", err)
+	}
+}
+
+// TestIntentControl_StopReapsDeadWorker covers #483 L1 (the Stop sibling of the
+// zero-worker Start escape): a Stop against a dead worker's claimed/live intent —
+// stale heartbeat, no tick will ever sweep it — must reap the row, close its
+// orphaned 'running' voice_sessions row, and RESOLVE instead of polling out its
+// budget into ErrStopPending forever.
+func TestIntentControl_StopReapsDeadWorker(t *testing.T) {
+	store := newFakeControlStore()
+	tenantID := uuid.New()
+	intent := store.add(tenantID, uuid.New())
+
+	// A worker claimed the intent, drove it live with a bound running row, then
+	// died: its heartbeat goes stale.
+	if _, err := store.ClaimVoiceSessionIntent(context.Background(), "dead-worker"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	vsID := uuid.New()
+	store.putSession(storage.VoiceSession{ID: vsID, Status: storage.VoiceSessionRunning})
+	if _, err := store.MarkVoiceSessionIntentLive(context.Background(), intent.ID, "dead-worker", vsID); err != nil {
+		t.Fatalf("mark live: %v", err)
+	}
+	store.markStaleHeartbeat(intent.ID)
+
+	ctl := newIntentControl(t, store)
+	vs, err := ctl.Stop(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("Stop against a dead worker's intent = %v, want a resolved stop (reap escape)", err)
+	}
+	if got := store.get(intent.ID).Status; got != storage.VoiceIntentDead {
+		t.Fatalf("intent status after Stop = %q, want dead (reaped)", got)
+	}
+	if vs.ID != vsID || vs.Status == storage.VoiceSessionRunning {
+		t.Fatalf("Stop returned row %+v, want the closed voice_sessions row (orphan reconciled)", vs)
 	}
 }

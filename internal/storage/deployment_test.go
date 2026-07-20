@@ -12,9 +12,8 @@ import (
 
 // TestGetTenantIDByGuildID is the interaction→Tenant routing read (#490): a Guild
 // snowflake resolves to the Tenant that configured it, ErrNotFound for an unknown
-// Guild, and — when two Tenants saved the SAME guild_id — the NEWEST-updated row
-// wins (the deterministic authority both the interaction router and the member
-// picker agree on).
+// Guild. Since the first-registrar-wins unique index (#483), a guild_id can be
+// bound by at most ONE Tenant, so the read is unambiguous by construction.
 func TestGetTenantIDByGuildID(t *testing.T) {
 	st := migrated(t)
 	ctx := context.Background()
@@ -28,10 +27,6 @@ func TestGetTenantIDByGuildID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTenant A: %v", err)
 	}
-	b, err := st.CreateTenant(ctx, "B")
-	if err != nil {
-		t.Fatalf("CreateTenant B: %v", err)
-	}
 
 	// Tenant A configures guild G1 — a clean hit.
 	if _, err := st.SaveDiscordChannels(ctx, a, "111000000000000000", "chanA"); err != nil {
@@ -44,21 +39,60 @@ func TestGetTenantIDByGuildID(t *testing.T) {
 	if got != a {
 		t.Errorf("GetTenantIDByGuildID(G1) = %s, want tenant A %s", got, a)
 	}
+}
 
-	// Both Tenants now claim the SAME guild G-dup. B saves LAST, so B is the
-	// newest-wins owner; A's stale losing row must NOT resolve.
-	if _, err := st.SaveDiscordChannels(ctx, a, "222000000000000000", "chanA"); err != nil {
-		t.Fatalf("SaveDiscordChannels A dup: %v", err)
-	}
-	if _, err := st.SaveDiscordChannels(ctx, b, "222000000000000000", "chanB"); err != nil {
-		t.Fatalf("SaveDiscordChannels B dup: %v", err)
-	}
-	got, err = st.GetTenantIDByGuildID(ctx, "222000000000000000")
+// TestSaveDiscordChannelsGuildCollision pins the #483 first-registrar-wins guild
+// binding (full guild-permission proof is #504): under the old newest-wins read,
+// Tenant B saving victim A's guild_id silently rebound the guild — B then read A's
+// voice-channel members and hijacked A's command routing (a cross-tenant PII
+// leak). Now a save of a guild_id already owned by a DIFFERENT Tenant is rejected
+// with ErrGuildTaken (backed by the partial UNIQUE index), while the same Tenant
+// re-saving its own guild — and moving to a new, unclaimed guild — stays fine.
+func TestSaveDiscordChannelsGuildCollision(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	a, err := st.CreateTenant(ctx, "A")
 	if err != nil {
-		t.Fatalf("GetTenantIDByGuildID(dup): %v", err)
+		t.Fatalf("CreateTenant A: %v", err)
 	}
-	if got != b {
-		t.Errorf("GetTenantIDByGuildID(dup) = %s, want newest-wins tenant B %s", got, b)
+	b, err := st.CreateTenant(ctx, "B")
+	if err != nil {
+		t.Fatalf("CreateTenant B: %v", err)
+	}
+
+	const guild = "222000000000000000"
+	if _, err := st.SaveDiscordChannels(ctx, a, guild, "chanA"); err != nil {
+		t.Fatalf("SaveDiscordChannels A (first registrar): %v", err)
+	}
+
+	// The victim's guild cannot be rebound by another Tenant.
+	if _, err := st.SaveDiscordChannels(ctx, b, guild, "chanB"); !errors.Is(err, storage.ErrGuildTaken) {
+		t.Fatalf("SaveDiscordChannels B on A's guild err = %v, want ErrGuildTaken", err)
+	}
+	got, err := st.GetTenantIDByGuildID(ctx, guild)
+	if err != nil {
+		t.Fatalf("GetTenantIDByGuildID after rejected steal: %v", err)
+	}
+	if got != a {
+		t.Errorf("guild owner after rejected steal = %s, want first registrar A %s", got, a)
+	}
+
+	// The owning Tenant re-saving its own guild (e.g. changing the channel) is fine.
+	if _, err := st.SaveDiscordChannels(ctx, a, guild, "chanA2"); err != nil {
+		t.Fatalf("SaveDiscordChannels A re-save own guild: %v", err)
+	}
+
+	// B binding a DIFFERENT, unclaimed guild is fine; and once A moves off its
+	// guild, the freed guild_id becomes claimable again.
+	if _, err := st.SaveDiscordChannels(ctx, b, "333000000000000000", "chanB"); err != nil {
+		t.Fatalf("SaveDiscordChannels B fresh guild: %v", err)
+	}
+	if _, err := st.SaveDiscordChannels(ctx, a, "444000000000000000", "chanA3"); err != nil {
+		t.Fatalf("SaveDiscordChannels A move guilds: %v", err)
+	}
+	if _, err := st.SaveDiscordChannels(ctx, b, guild, "chanB2"); err != nil {
+		t.Fatalf("SaveDiscordChannels B claim freed guild: %v", err)
 	}
 }
 

@@ -1,7 +1,7 @@
 # Multi-replica voice fleet rollout (#492, ADR-0057)
 
 Builds on the claim plane (#491, `2026-07-19-voice-claim-plane-rollout.md`). That
-note made `-mode voice` a claim worker; this one lets the chart run **more than
+note made `-mode voice` a claim-plane Voice Instance; this one lets the chart run **more than
 one** of them on the shared central token. The two mechanisms that make N replicas
 safe are the Postgres claim plane (session assignment) and the presence-owner
 election (interaction dispatch).
@@ -15,7 +15,7 @@ the same `/roll`. A singleton `presence_owner` claim row elects exactly ONE
 Instance to register command listeners and dispatch interactions; every non-owner
 Registry is `SetActive(false)` and drops the duplicate events it still receives.
 
-- The `-mode voice` worker boots its Registry **inactive**; an `OwnerElector`
+- A `-mode voice` Voice Instance boots its Registry **inactive**; an `OwnerElector`
   runs beside the claim loop on the same `instanceID` and flips it active only
   while this Instance holds the `presence_owner` row.
 - `-mode all` and the legacy standalone node are always their own single owner —
@@ -35,11 +35,17 @@ failover lands within roughly expiry + one interval (~20s worst case).
 ### Self-demotion when partitioned
 
 An owner that can no longer reach Postgres self-demotes: once the MONOTONIC elapsed
-since its last successful renew reaches `Expiry`, the elector calls `SetActive(false)`
-locally. This is judged on the process's own monotonic clock — never the DB
-`heartbeat_at` or a wall clock — so a partitioned owner stops dispatching before
-another node's lease-expiry claim could promote a second owner (else both would
-dispatch the same interaction). The acquire/renew call is bounded by a per-op DB
+since its last successful renew reaches `Expiry - Interval - opTimeout` (7s at
+defaults), the elector calls `SetActive(false)` locally. The threshold sits BELOW
+`Expiry` deliberately (#483): the demotion check runs only on ticks, so after the
+elapsed crosses it up to one more `Interval` passes before the next tick and that
+tick's failing acquire can burn its whole per-op timeout before the check runs — a
+bare-`Expiry` threshold would therefore demote as late as
+`Expiry + Interval + opTimeout`, several seconds INSIDE a challenger's ownership
+(both dispatching the same `/roll`). With the padded threshold the local
+deactivation always lands strictly before the DB steal horizon (`heartbeat_at +
+Expiry`). It is judged on the process's own monotonic clock — never the DB
+`heartbeat_at` or a wall clock. The acquire/renew call is bounded by a per-op DB
 timeout of `min(Interval, 3s)` so a stuck connection cannot pin the loop and starve
 the demotion check. The elector does NOT `Release` on demotion — the DB is
 unreachable by assumption, so a local deactivation is all that is possible and the
@@ -55,11 +61,31 @@ never running two owners at once (ADR-0057 (c) prefers a brief gap over a
 double-dispatch); it is the same order as the failover window and does not affect
 live voice (P6).
 
+## Live slash controls at replicas > 1 (#483 → #503)
+
+Interactions are dispatched by the elected presence OWNER, but a Tenant's live
+session may be hosted by a DIFFERENT worker in the pool — and the live-control
+state (the mute set, the say/replay outbound pump) lives in the hosting worker's
+Manager, unreachable from the owner. So at `replicas > 1`:
+
+- `/glyphoxa mute`, `/glyphoxa muteall` and `/say` work only when the presence
+  owner happens to also host the session. When it does not, the handler consults
+  the claim plane and replies honestly — "hosted by another worker; live controls
+  aren't available from here yet" — instead of the false "No Voice Session is
+  active." The cross-pod control plane that would make them work from any pod is
+  tracked in **#503**.
+- `/glyphoxa search` and `/glyphoxa recap` resolve the Active Campaign through
+  the claim plane (pool-wide), so they work regardless of which worker hosts the
+  session; a `voiced` recap degrades to public text when the Butler is not in the
+  owner's own session (decision 6a).
+- The web panel's mute/say already degrade with `CodeFailedPrecondition` in a
+  split deployment (ADR-0057 consequence) — unchanged.
+
 ## Voice itself needs no election
 
 A pod holding no voice connection for a guild simply receives and ignores that
 guild's voice gateway events (ADR-0057 P6). The claim plane already guarantees one
-worker per live session (one live intent per Tenant), so duplicate voice events on
+Voice Instance per live session (one live intent per Tenant), so duplicate voice events on
 the shared token are inert — only interaction dispatch needed the owner gate.
 
 ## Drain order (SIGTERM)
@@ -70,6 +96,22 @@ the LAST coordination write, so a survivor begins dispatching this instance's
 interactions only after its sessions are wound down. Sessions are ENDED on drain,
 never migrated (ADR-0006), so `voice.terminationGracePeriodSeconds` (default 300)
 is sized to cover a DAVE/MLS wind-down before SIGKILL.
+
+### Known windows (documented, accepted)
+
+- **Heartbeat during drain (#505).** A draining worker stops heartbeating while it
+  winds its sessions down; a drain longer than `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY`
+  (30s default) lets another worker's reaper mark the still-draining intent
+  `dead` mid-drain (its final finish then lands superseded, harmless but the
+  history reads `dead` instead of `done`). Tracked in #505; keep the expiry above
+  the realistic wind-down or accept the mislabel.
+- **Reaped-but-alive overlap.** A worker that is merely SLOW (not dead) can be
+  reaped: it learns of the supersede only on its next heartbeat (ErrNotFound) and
+  then kills its local session — until that beat, its gateway/voice connection
+  briefly coexists with whatever the Tenant restarted elsewhere. Bounded by one
+  heartbeat interval + the wind-down; ADR-0006's "no takeover" already implies
+  the old session is ENDED, never adopted, so the overlap is transient and
+  side-effect-free (two gateway sessions on one token are permitted, P5/P6).
 
 ## IDENTIFY budget under fleet cold-start (#486)
 
@@ -84,7 +126,7 @@ catching a serialization regression even without live traffic.
 
 Voice pods **mount** `GLYPHOXA_SECRET` (the `app-secret` key) — the "mounted
 secret" arm of the knob ADR-0057 (d) left open, chosen over forwarding short-lived
-credentials from the web tier. A worker in the pool holds BYOK Tenants' Discord
+credentials from the web tier. A Voice Instance in the pool holds BYOK Tenants' Discord
 clients and must decrypt their bot tokens itself, so the voice role reads the
 platform cipher; this deliberately widens the voice blast radius from ADR-0034's
 old "does NOT read GLYPHOXA_SECRET" posture (which ADR-0057 already amends).
@@ -93,7 +135,7 @@ old "does NOT read GLYPHOXA_SECRET" posture (which ADR-0057 already amends).
 
 A tape-consent button (`/…grant`/`revoke`) is dispatched by the elected presence
 OWNER, which publishes `TapeConsentChanged` on ITS OWN process bus. But in the fleet
-the live tape may be running on a DIFFERENT pod (a claim-plane worker), whose bus
+the live tape may be running on a DIFFERENT pod (a claim-plane Voice Instance), whose bus
 never sees that event — so the same-pod bus fast path alone would strand a cross-pod
 grant/revoke. `wireTapeConsent` therefore also runs a poller goroutine on the cycle
 ctx that re-reads the durable `tape_consent` rows every

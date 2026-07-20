@@ -62,16 +62,20 @@ type IntegrationStatus struct {
 }
 
 // TenantStore is the deployment-config read surface the registry needs:
-// per-Tenant for a scoped ensure, a full list for the boot seed, and the
-// Guild→Tenant read the member picker uses to confirm ownership (#490).
+// per-Tenant for a scoped ensure, a full list for the boot seed, the
+// Guild→Tenant read the member picker uses to confirm ownership (#490), and the
+// Campaign→Tenant read the display-name lookup narrows with (#483).
 // *storage.Store satisfies it.
 type TenantStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	ListDeploymentConfigs(ctx context.Context) ([]storage.DeploymentConfig, error)
-	// GetTenantIDByGuildID resolves a Guild to its OWNING Tenant, newest-wins on a
-	// duplicated guild_id — the SAME authority the interaction router uses, so the
-	// member picker and interaction routing agree (#490).
+	// GetTenantIDByGuildID resolves a Guild to its OWNING Tenant (single owner
+	// since #483's first-registrar-wins index) — the SAME authority the interaction
+	// router uses, so the member picker and interaction routing agree (#490).
 	GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error)
+	// GetCampaign resolves a Campaign (hence its owning Tenant) so
+	// MemberDisplayName narrows its member fetch to that Tenant's own Guild (#483).
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 }
 
 // ClientBuilder constructs a standing disgo client for a Bot token. The prod
@@ -155,6 +159,12 @@ type Clients struct {
 	mu       sync.Mutex
 	entries  map[string]*clientEntry
 	tenants  map[uuid.UUID]*tenantState
+	// closed marks the registry torn down (#483 L7). Written by Close under BOTH
+	// ensureMu and mu; read by EnsureTenant under ensureMu. Close takes ensureMu
+	// first so an in-flight ensure finishes (or fails) BEFORE the teardown — an
+	// ensure that overlapped Close could otherwise re-insert a fresh gateway into
+	// a registry every other path believes closed, leaking it forever.
+	closed bool
 }
 
 // NewClients builds a registry. envToken is the DISCORD_BOT_TOKEN fallback (the
@@ -220,6 +230,15 @@ func reconcileInterval() time.Duration {
 func (c *Clients) EnsureTenant(ctx context.Context, tenantID uuid.UUID) error {
 	c.ensureMu.Lock()
 	defer c.ensureMu.Unlock()
+
+	// A closed registry ensures nothing (#483 L7): a late reconcile/refresher
+	// racing shutdown must not re-open a gateway Close can never reap.
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil
+	}
 
 	dep, err := c.store.GetDeploymentConfig(ctx, tenantID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -529,7 +548,7 @@ func (c *Clients) GuildForTenant(tenantID uuid.UUID) string {
 
 // KnownGuild reports whether guildID is the configured Guild of ANY resolved
 // Tenant. It was #489's interim Gate check; #490 superseded that with the storage
-// TenantResolver (which maps a Guild to its OWNING Tenant, newest-wins), so the
+// TenantResolver (which maps a Guild to its OWNING Tenant), so the
 // Gate no longer calls this. Retained as an in-memory Guild-membership probe for
 // the reconcile tests. A DM ("") is never known.
 func (c *Clients) KnownGuild(guildID string) bool {
@@ -601,9 +620,17 @@ func (c *Clients) invalidate(dead *bot.Client, cause error) {
 }
 
 // Close tears down every standing client. Called after the voice Manager's
-// shutdown so a live session releases its borrowed client first.
+// shutdown so a live session releases its borrowed client first. It takes
+// ensureMu FIRST (#483 L7): an in-flight EnsureTenant could otherwise Store a
+// freshly-opened gateway into an entry AFTER Close swept the maps — a leaked
+// gateway no path would ever close. Waiting out the in-flight ensure is bounded:
+// its network I/O rides the process ctx, already cancelled by shutdown. The
+// closed flag then keeps any later ensure a no-op.
 func (c *Clients) Close() {
+	c.ensureMu.Lock()
+	defer c.ensureMu.Unlock()
 	c.mu.Lock()
+	c.closed = true
 	var toClose []*bot.Client
 	for _, e := range c.entries {
 		if cl := e.client.Load(); cl != nil {

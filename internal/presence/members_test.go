@@ -46,6 +46,9 @@ func (s *memberOwnerStore) GetTenantIDByGuildID(_ context.Context, guildID strin
 	}
 	return uuid.Nil, storage.ErrNotFound
 }
+func (s *memberOwnerStore) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{}, storage.ErrNotFound
+}
 
 func newMembersTestPresence(fetch func(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error)) *membersRig {
 	tid := uuid.New()

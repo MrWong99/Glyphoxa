@@ -236,6 +236,58 @@ func TestProjection_CloseOnlyThatEntry(t *testing.T) {
 	}
 }
 
+// TestProjection_ClosedTombstonesBounded covers the epic-#483 hardening
+// (residual b): the closed-tombstone set must not grow one entry per Closed
+// session for the process lifetime. It is bounded FIFO: closing more than
+// maxClosedTombstones sessions evicts the oldest tombstones, while the newest
+// (the ones still inside any plausible straggler window) keep dropping
+// stragglers.
+func TestProjection_ClosedTombstonesBounded(t *testing.T) {
+	ss := newMapSessions()
+	var mu sync.Mutex
+	p := New[testTurn](ss, &mu, nil, Hooks{Fold: func(voiceevent.Event) {}})
+
+	for i := 0; i < maxClosedTombstones+10; i++ {
+		p.Close(uuid.New().String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := len(p.closed); got > maxClosedTombstones {
+		t.Fatalf("closed tombstones = %d, want <= %d (bounded, not process-lifetime growth)", got, maxClosedTombstones)
+	}
+}
+
+// TestProjection_TombstoneSurvivesWithinBound pins that a recently Closed
+// session's tombstone still drops stragglers after other sessions close (the
+// bound must evict OLDEST first, not the guard we still need).
+func TestProjection_TombstoneSurvivesWithinBound(t *testing.T) {
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	ss := newMapSessions(vs)
+	var mu sync.Mutex
+	var p *Projection[testTurn]
+	p = New[testTurn](ss, &mu, nil, Hooks{
+		Fold: func(e voiceevent.Event) { p.Turn(voiceevent.SessionIDOf(e), "t").text += "." },
+	})
+	bus := voiceevent.NewBus()
+	p.Subscribe(bus)
+
+	sid := vs.ID.String()
+	bus.Publish(stampedFinal(sid, 1))
+	p.Close(sid)
+	// A few other sessions close after ours — well within the bound.
+	for i := 0; i < 16; i++ {
+		p.Close(uuid.New().String())
+	}
+	// The straggler must still be dropped (vs is still Resolvable).
+	bus.Publish(stampedFinal(sid, 2))
+	mu.Lock()
+	defer mu.Unlock()
+	if p.Has(sid) {
+		t.Fatal("a straggler resurrected a recently Closed session inside the tombstone bound")
+	}
+}
+
 // TestProjection_CloseUnknownNoop: Closing a session that folded no events (or is
 // already closed) is a no-op — no FinishSession, no panic.
 func TestProjection_CloseUnknownNoop(t *testing.T) {

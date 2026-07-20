@@ -48,7 +48,12 @@ const maxAutocompleteChoices = 25
 // (then aliases, case-insensitive), and replies with a clear ephemeral error on
 // no/ambiguous match. A mute with no active Voice Session is refused ephemerally.
 // There is deliberately NO unmute command — the web panel owns un-muting.
-func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
+//
+// pool is the claim-plane read for the replicas>1 fleet (#483, nil in -mode all):
+// when the LOCAL Manager holds no session but the Tenant's session is live on
+// ANOTHER worker, the handler replies the split-mode limitation (#503) instead of
+// the false "No Voice Session is active."
+func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command {
 	return Command{
 		Path:        "glyphoxa mute",
 		Description: "Mute one NPC voice in the active Voice Session.",
@@ -88,8 +93,10 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
 				// No session for THIS Tenant (#488): a session live for another Tenant is
-				// invisible here, so a GM can never mute a foreign Tenant's session.
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				// invisible here, so a GM can never mute a foreign Tenant's session. When
+				// the pool shows it live on ANOTHER worker the reply names the split-mode
+				// limitation instead (#483/#503).
+				return replyNoLocalSession(ctx, ic, pool)
 			}
 			input, _ := ic.String("npc")
 			roster, err := agents.ListAgents(ctx, vs.CampaignID)
@@ -118,15 +125,17 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 // MuteAllCommand builds /glyphoxa muteall (#211, ADR-0010 GM-only): it mutes every
 // voiced Agent of the Active Campaign (the Character NPCs; the Address-Only Butler
 // is excluded) in the live Voice Session, refused ephemerally when no Voice
-// Session is active. Un-muting everyone is the web panel's job.
-func MuteAllCommand(mgr SessionMuter, agents AgentLister) Command {
+// Session is active. Un-muting everyone is the web panel's job. pool is the
+// claim-plane read for the replicas>1 fleet (#483/#503, nil in -mode all) —
+// see MuteCommand.
+func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolSession) Command {
 	return Command{
 		Path:        "glyphoxa muteall",
 		Description: "Mute every NPC voice in the active Voice Session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			if _, active, err := mgr.Active(ctx, ic.TenantID()); err != nil || !active {
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return replyNoLocalSession(ctx, ic, pool)
 			}
 			ids, err := mgr.SetAllMute(ctx, ic.TenantID(), true)
 			if err != nil {

@@ -49,6 +49,24 @@ func (s *Store) AcquireOrRenewPresenceOwner(ctx context.Context, instanceID stri
 	return true, nil
 }
 
+// HasPresenceOwner reports whether ANY presence-owner claim row exists — live or
+// stale. It backs the -mode all mixed-deployment boot guard (#483 M3): an owner
+// row (even an expired one) is proof a claim-plane voice fleet has been driving
+// this database, and an all-mode process must refuse to join it (its broad boot
+// reconcile would close live workers' rows, and its intent-less sessions break
+// the one-live-per-tenant invariant).
+func (s *Store) HasPresenceOwner(ctx context.Context) (bool, error) {
+	var one int
+	err := s.db.QueryRow(ctx, `SELECT 1 FROM presence_owner LIMIT 1`).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage: presence-owner existence check: %w", err)
+	}
+	return true, nil
+}
+
 // ReleasePresenceOwner drops instanceID's presence-owner claim so a challenger's
 // very next AcquireOrRenewPresenceOwner wins immediately (a clean drain handover,
 // not an expiry wait). Fenced by instance_id: a superseded former owner that

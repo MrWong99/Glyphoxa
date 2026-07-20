@@ -32,7 +32,7 @@ type GMChecker interface {
 // TenantResolver maps an interaction's Guild to its owning Tenant — the first thing
 // dispatch does, before any storage read touches campaigns (#490). An unknown Guild
 // returns a non-nil error, which the Gate turns into a clean ephemeral rejection.
-// The prod impl is a thin storage adapter over GetTenantIDByGuildID (newest-wins on
+// The prod impl is a thin storage adapter over GetTenantIDByGuildID (single-owner since #483's first-registrar-wins index on
 // a duplicate guild_id); see [NewStorageTenantResolver].
 type TenantResolver interface {
 	TenantForGuild(ctx context.Context, guildID string) (uuid.UUID, error)
