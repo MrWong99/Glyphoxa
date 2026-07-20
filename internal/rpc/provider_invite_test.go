@@ -122,8 +122,9 @@ func TestResolveGuildInvite_HappyPath_DecryptedTokenAndMapping(t *testing.T) {
 }
 
 // TestResolveGuildInvite_NoToken_FailedPrecondition_SeamNotCalled: with no saved
-// token (no dep row, or the ENV placeholder), the RPC fails FailedPrecondition
-// BEFORE touching the resolver — no live call fires without a real token.
+// token (no dep row, or the ENV placeholder) and no central env token wired, the
+// RPC fails FailedPrecondition BEFORE touching the resolver — no live call fires
+// without a real token.
 func TestResolveGuildInvite_NoToken_FailedPrecondition_SeamNotCalled(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -153,9 +154,69 @@ func TestResolveGuildInvite_NoToken_FailedPrecondition_SeamNotCalled(t *testing.
 	}
 }
 
+// TestResolveGuildInvite_EnvTokenFallback pins the ADR-0058 ladder for the
+// invite picker: with no stored BYOK token (no dep row, or the ENV placeholder),
+// the central env token (SetEnvBotToken) authenticates the resolve, so
+// central-token tenants can use the picker.
+func TestResolveGuildInvite_EnvTokenFallback(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		store *fakeInviteStore
+	}{
+		{"no dep row", &fakeInviteStore{}},
+		{"env placeholder", &fakeInviteStore{depSet: true, dep: storage.DeploymentConfig{DiscordBotTokenLast4: "env"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewProviderServer(tc.store, voiceTestCipher(t), nil)
+			srv.SetEnvBotToken("central-env-token")
+			var gotToken string
+			srv.resolveInvite = func(_ context.Context, token, _ string) (discordinvite.Resolved, error) {
+				gotToken = token
+				return discordinvite.Resolved{Guild: discordinvite.Guild{ID: "111", Name: "The Keep"}}, nil
+			}
+			resp, err := srv.ResolveGuildInvite(tenantCtx(),
+				connect.NewRequest(&managementv1.ResolveGuildInviteRequest{InviteCode: "abc123"}))
+			if err != nil {
+				t.Fatalf("ResolveGuildInvite: %v", err)
+			}
+			if gotToken != "central-env-token" {
+				t.Errorf("seam token = %q, want the central env token", gotToken)
+			}
+			if resp.Msg.GetGuildId() != "111" {
+				t.Errorf("guild = %q, want 111", resp.Msg.GetGuildId())
+			}
+		})
+	}
+}
+
+// TestResolveGuildInvite_StoredTokenBeatsEnv: a saved BYOK token outranks the
+// central env token (the ADR-0058 ladder order) — the resolve authenticates as
+// the token that will serve the guild.
+func TestResolveGuildInvite_StoredTokenBeatsEnv(t *testing.T) {
+	t.Parallel()
+	store, cipher := savedInviteStore(t)
+	srv := NewProviderServer(store, cipher, nil)
+	srv.SetEnvBotToken("central-env-token")
+	var gotToken string
+	srv.resolveInvite = func(_ context.Context, token, _ string) (discordinvite.Resolved, error) {
+		gotToken = token
+		return discordinvite.Resolved{}, nil
+	}
+	if _, err := srv.ResolveGuildInvite(tenantCtx(),
+		connect.NewRequest(&managementv1.ResolveGuildInviteRequest{InviteCode: "abc123"})); err != nil {
+		t.Fatalf("ResolveGuildInvite: %v", err)
+	}
+	if gotToken != "bot-secret-token" {
+		t.Errorf("seam token = %q, want the decrypted stored token to outrank the env token", gotToken)
+	}
+}
+
 // TestResolveGuildInvite_SavedTokenNilCipher_FailedPrecondition: a saved token
 // with no cipher configured cannot be decrypted → FailedPrecondition, seam not
-// called.
+// called. The central env token does NOT paper over the decrypt-blocked state:
+// a saved-but-undecryptable token is a config error, not a fall-through rung.
 func TestResolveGuildInvite_SavedTokenNilCipher_FailedPrecondition(t *testing.T) {
 	t.Parallel()
 	store := &fakeInviteStore{depSet: true, dep: storage.DeploymentConfig{
@@ -163,6 +224,7 @@ func TestResolveGuildInvite_SavedTokenNilCipher_FailedPrecondition(t *testing.T)
 		DiscordBotTokenCiphertext: []byte("x"),
 	}}
 	srv := NewProviderServer(store, nil, nil) // nil cipher
+	srv.SetEnvBotToken("central-env-token")
 	called := false
 	srv.resolveInvite = func(context.Context, string, string) (discordinvite.Resolved, error) {
 		called = true

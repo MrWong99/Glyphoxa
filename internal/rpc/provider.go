@@ -130,9 +130,10 @@ type ProviderServer struct {
 	checkGuildAdmin func(ctx context.Context, token, guildID, userID string) error
 
 	// envBotToken is the deployment's central DISCORD_BOT_TOKEN (SetEnvBotToken),
-	// the last rung of the proof's check-token ladder: request plaintext > stored
-	// BYOK token > this. Used ONLY to authenticate the guild-admin REST reads —
-	// it is never persisted or returned (ADR-0004 posture).
+	// the last rung of the check-token ladder (ADR-0058): request plaintext >
+	// stored BYOK token > this. Used ONLY to authenticate read-only Discord REST
+	// calls — the guild-admin proof (#504) and invite resolution — and never
+	// persisted or returned (ADR-0004 posture).
 	envBotToken string
 }
 
@@ -156,9 +157,10 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 }
 
 // SetEnvBotToken wires the deployment's central DISCORD_BOT_TOKEN as the final
-// fallback for the guild-admin proof's check token (#504), so central-token
-// tenants (no BYOK bot token saved) can still prove guild administration.
-// Called once at boot, before the server serves, so no lock is needed.
+// fallback for the guild-admin proof's check token (#504) and for
+// ResolveGuildInvite, so central-token tenants (no BYOK bot token saved) can
+// still prove guild administration and use the invite picker. Called once at
+// boot, before the server serves, so no lock is needed.
 func (s *ProviderServer) SetEnvBotToken(token string) {
 	s.envBotToken = token
 }
@@ -591,11 +593,14 @@ func (s *ProviderServer) ReleaseDiscordGuild(
 }
 
 // ResolveGuildInvite resolves a pasted Discord invite code to its Guild and that
-// Guild's voice channels, using the decrypted saved Bot token server-side (#105,
-// ADR-0047). It is a no-side-effects read: the resolver makes only Discord REST
-// GETs, and no state is written. The code is validated + path-escaped before the
-// call; ErrNotFound → NotFound, ErrNoAccess → FailedPrecondition ("not a member"),
-// and a missing saved token → FailedPrecondition ("save the token first").
+// Guild's voice channels server-side (#105, ADR-0047). It is a no-side-effects
+// read: the resolver makes only Discord REST GETs, and no state is written. The
+// Bot token follows the ADR-0058 ladder minus the request rung (the request
+// carries only the code): decrypted stored BYOK token > central env token — so
+// central-token tenants can use the picker. The code is validated + path-escaped
+// before the call; ErrNotFound → NotFound, ErrNoAccess → FailedPrecondition
+// ("not a member"), and no token on any rung → FailedPrecondition ("save the
+// token first").
 func (s *ProviderServer) ResolveGuildInvite(
 	ctx context.Context,
 	req *connect.Request[managementv1.ResolveGuildInviteRequest],
@@ -615,7 +620,10 @@ func (s *ProviderServer) ResolveGuildInvite(
 		return nil, err
 	}
 	if token == "" {
-		// No saved Bot token (nor the ENV placeholder): the resolver cannot
+		token = s.envBotToken
+	}
+	if token == "" {
+		// No token on any rung (stored BYOK or central env): the resolver cannot
 		// authenticate. Same code as "not a member" — the screen renders whichever
 		// message it gets, so they must differ (ADR-0047).
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
@@ -725,10 +733,11 @@ func toProtoSpendCaps(c storage.SpendCaps) *managementv1.SpendCaps {
 	return &managementv1.SpendCaps{SoftUsd: c.SoftUSD, HardUsd: c.HardUSD}
 }
 
-// resolveBotToken resolves the deployment Bot token for ResolveGuildInvite,
-// mirroring VoiceServer.resolveDiscordToken: no row / ENV placeholder -> "" (the
-// caller maps that to a FailedPrecondition), a real saved token -> decrypted
-// plaintext, a saved token with no cipher -> FailedPrecondition.
+// resolveBotToken resolves the stored BYOK Bot token — the stored rung of the
+// ADR-0058 ladder (proveGuildAdmin, ResolveGuildInvite) — mirroring
+// VoiceServer.resolveDiscordToken: no row / ENV placeholder -> "" (callers fall
+// back to the central env token, then FailedPrecondition), a real saved token ->
+// decrypted plaintext, a saved token with no cipher -> FailedPrecondition.
 func (s *ProviderServer) resolveBotToken(ctx context.Context, tenantID uuid.UUID) (string, error) {
 	dep, err := s.store.GetDeploymentConfig(ctx, tenantID)
 	if errors.Is(err, storage.ErrNotFound) {
