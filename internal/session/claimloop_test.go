@@ -435,7 +435,15 @@ func TestClaimLoop_HeartbeatSupersededStopsSession(t *testing.T) {
 
 	// Simulate the reaper marking this claim dead: the next heartbeat is superseded.
 	istore.markDead(intent.ID)
-	waitFor(t, 2*time.Second, func() bool { return runner.wasCancelled() })
+	// Drain BEFORE asserting: runner.cancelled flips inside Manager.Stop before
+	// runLoop marks the session ended, so gating the Active check on wasCancelled
+	// races the teardown (a real flake under full-suite CPU contention). The
+	// superseded arm of runSession returns only after mgr.Stop waits out the full
+	// teardown, so the drain IS the state transition the assertions need.
+	loop.DrainForTest()
+	if !runner.wasCancelled() {
+		t.Fatal("local session was not cancelled after superseded heartbeat")
+	}
 	if _, live, _ := mgr.Active(context.Background(), tenantID); live {
 		t.Fatal("session still live after superseded heartbeat")
 	}
@@ -443,7 +451,6 @@ func TestClaimLoop_HeartbeatSupersededStopsSession(t *testing.T) {
 	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDead {
 		t.Fatalf("intent status = %q, want dead (no takeover / resurrection)", got)
 	}
-	loop.DrainForTest()
 }
 
 // TestClaimLoop_GracefulDrain covers sequence (5)/AC5: ctx cancellation stops
