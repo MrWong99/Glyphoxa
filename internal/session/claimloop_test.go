@@ -148,11 +148,23 @@ func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UU
 	return *i, nil
 }
 
-func (f *fakeIntentStore) ReapDeadVoiceSessionIntents(_ context.Context, _ time.Duration) (int64, error) {
+// ReapDeadVoiceSessionIntents models the real reaper (#505): a claimed/live row
+// whose heartbeat is staler than expiry flips 'dead'. reapReturns is added to
+// the reported count (drives the reconcile-after-reap logging path).
+func (f *fakeIntentStore) ReapDeadVoiceSessionIntents(_ context.Context, expiry time.Duration) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reaped++
-	return f.reapReturns, nil
+	var n int64
+	now := time.Now()
+	for _, i := range f.intents {
+		if (i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) &&
+			i.HeartbeatAt != nil && now.Sub(*i.HeartbeatAt) > expiry {
+			i.Status = storage.VoiceIntentDead
+			n++
+		}
+	}
+	return n + f.reapReturns, nil
 }
 
 func (f *fakeIntentStore) ReconcileWorkerOrphanedVoiceSessions(_ context.Context) (int64, error) {
@@ -625,6 +637,67 @@ func TestClaimLoop_DrainHeartbeatSupersededStopsBeating(t *testing.T) {
 	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentDead {
 		t.Fatalf("intent status = %q, want dead (superseded-mid-drain never resurrected)", got)
 	}
+}
+
+// TestClaimLoop_ReaperNeverKillsCleanDrain covers #505 AC1+AC2 against the REAL
+// reaper semantics (the fake reaps rows with heartbeats staler than Expiry): a
+// clean wind-down that is SLOWER than Expiry (gate held >> Expiry) but keeps
+// drain-beating is never marked 'dead' by concurrent reap/reconcile ticks — the
+// intent stays live (non-terminal) the whole time CloseVoiceSession is
+// in-flight, so neither ReconcileWorkerOrphanedVoiceSessions arm (both require
+// a terminal/absent intent) can race the Close; then it finishes 'done'.
+func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate
+	runner := newBlockingRunner()
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	// Scaled intervals: drain beats every 2ms, Expiry 20ms, gate held ~100ms —
+	// several Expiry windows pass while the wind-down is in-flight.
+	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: 20 * time.Millisecond})
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	<-runner.started
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// Enter the drain and park on the gate; meanwhile keep reap+reconcile ticks
+	// running concurrently (another worker's reaper never sleeps).
+	istore.requestStop(intent.ID)
+	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
+	reapStop := make(chan struct{})
+	reapDone := make(chan struct{})
+	go func() {
+		defer close(reapDone)
+		for {
+			select {
+			case <-reapStop:
+				return
+			default:
+				loop.TickForTest(context.Background())
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Hold the drain open for ~5x Expiry: the intent must stay live throughout —
+	// never 'dead' (AC1), never terminal while Close is in-flight (AC2).
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+			t.Fatalf("intent status = %q mid-drain under a live reaper, want live", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	close(reapStop)
+	<-reapDone
+	loop.DrainForTest()
 }
 
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the
