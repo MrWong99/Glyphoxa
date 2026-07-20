@@ -140,6 +140,36 @@ func (f *fakeControlStore) ReapVoiceSessionIntentIfExpired(_ context.Context, id
 	return true, nil
 }
 
+// ReconcileWorkerOrphanedVoiceSessions mirrors the storage sweep: close every
+// 'running' voice_sessions row whose owning intent has gone terminal.
+func (f *fakeControlStore) ReconcileWorkerOrphanedVoiceSessions(context.Context) (int64, error) {
+	f.intents_mu().Lock()
+	terminalSessions := map[uuid.UUID]bool{}
+	for _, i := range f.intents {
+		if i.VoiceSessionID.Valid {
+			switch i.Status {
+			case storage.VoiceIntentDead, storage.VoiceIntentDone, storage.VoiceIntentFailed:
+				terminalSessions[i.VoiceSessionID.UUID] = true
+			}
+		}
+	}
+	f.intents_mu().Unlock()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, vs := range f.sessions {
+		if vs.Status == storage.VoiceSessionRunning && terminalSessions[id] {
+			now := time.Now()
+			vs.Status = storage.VoiceSessionEnded
+			vs.EndedAt = &now
+			f.sessions[id] = vs
+			n++
+		}
+	}
+	return n, nil
+}
+
 // markStaleHeartbeat ages an intent's heartbeat so ReapVoiceSessionIntentIfExpired
 // treats it as a dead worker's row.
 func (f *fakeControlStore) markStaleHeartbeat(id uuid.UUID) {
@@ -419,6 +449,37 @@ func TestIntentControl_ZeroWorkerReapsStaleBlocker(t *testing.T) {
 	}
 	if got := store.get(old.ID).Status; got != storage.VoiceIntentDead {
 		t.Fatalf("stale blocker status = %q, want dead (reaped)", got)
+	}
+}
+
+// TestIntentControl_ZeroWorkerReapReconcilesOrphanedRow covers the epic-#483
+// hardening (residual e): when IntentControl's zero-worker escape reaps a dead
+// worker's intent, the bound 'running' voice_sessions row must be closed too —
+// not left stranded until some Voice Instance's next boot.
+func TestIntentControl_ZeroWorkerReapReconcilesOrphanedRow(t *testing.T) {
+	store := newFakeControlStore()
+	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
+		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 20 * time.Millisecond, StopBudget: time.Second, Expiry: time.Millisecond})
+	tenantID, campaignID := uuid.New(), uuid.New()
+
+	store.add(tenantID, campaignID)
+	claimed, _ := store.ClaimVoiceSessionIntent(context.Background(), "dead-worker")
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning}
+	store.putSession(vs)
+	if _, err := store.MarkVoiceSessionIntentLive(context.Background(), claimed.ID, "dead-worker", vs.ID); err != nil {
+		t.Fatalf("mark live: %v", err)
+	}
+	store.markStaleHeartbeat(claimed.ID)
+
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID); !errors.Is(err, session.ErrIntentPending) {
+		t.Fatalf("Start err = %v, want ErrIntentPending (reaped then queued)", err)
+	}
+	got, err := store.GetVoiceSession(context.Background(), vs.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Status != storage.VoiceSessionEnded {
+		t.Fatalf("orphaned row status = %q, want ended (reconciled after reap)", got.Status)
 	}
 }
 

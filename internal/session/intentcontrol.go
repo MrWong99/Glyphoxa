@@ -37,6 +37,11 @@ type IntentControlStore interface {
 	// unblocks a Tenant whose prior worker died and left a claimed/live row no tick
 	// will ever sweep. Returns whether it reaped.
 	ReapVoiceSessionIntentIfExpired(ctx context.Context, id uuid.UUID, expiry time.Duration) (bool, error)
+	// ReconcileWorkerOrphanedVoiceSessions closes 'running' voice_sessions rows
+	// behind a now-terminal intent. IntentControl runs it right after a successful
+	// zero-worker reap (#483): the reap marks the intent dead but the bound row
+	// would otherwise stay 'running' until some Voice Instance's own reap or boot.
+	ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error)
 }
 
 // IntentControlConfig carries IntentControl's poll cadence and budgets (#491). A
@@ -196,7 +201,19 @@ func (c *IntentControl) reapBlockingIfExpired(ctx context.Context, tenantID uuid
 	if blocking.Status != storage.VoiceIntentClaimed && blocking.Status != storage.VoiceIntentLive {
 		return false, nil // pending: an in-flight Start owns it, not a dead worker
 	}
-	return c.store.ReapVoiceSessionIntentIfExpired(ctx, blocking.ID, c.cfg.Expiry)
+	reaped, err := c.store.ReapVoiceSessionIntentIfExpired(ctx, blocking.ID, c.cfg.Expiry)
+	if err != nil || !reaped {
+		return reaped, err
+	}
+	// The reap just made the intent terminal: close the 'running' voice_sessions
+	// row it bound NOW (#483, mirroring the claim loop's after-reap reconcile) —
+	// with zero healthy workers no claim tick would sweep it, so it would sit
+	// 'running' until some Voice Instance's next boot. Best-effort: the reap
+	// already unblocked the Tenant, and any worker's boot reconcile is the backstop.
+	if _, rerr := c.store.ReconcileWorkerOrphanedVoiceSessions(ctx); rerr != nil {
+		c.log.Warn("intent control: reconcile orphaned sessions after reap", "err", rerr)
+	}
+	return true, nil
 }
 
 // Stop flags the Tenant's live intent for the owning worker to wind down and
