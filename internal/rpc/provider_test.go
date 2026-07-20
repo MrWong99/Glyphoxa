@@ -23,11 +23,12 @@ import (
 // component, provider) upsert and the column-isolated deployment_config saves so
 // the handler can be unit-tested keyless.
 type fakeProviderStore struct {
-	configs map[string]storage.ProviderConfig // key: component|provider
-	dep     *storage.DeploymentConfig
-	tick    int
-	caps    storage.SpendCaps // per-Tenant spend caps (#130)
-	capsSet bool
+	configs     map[string]storage.ProviderConfig // key: component|provider
+	dep         *storage.DeploymentConfig
+	tick        int
+	caps        storage.SpendCaps // per-Tenant spend caps (#130)
+	capsSet     bool
+	channelsErr error // scripted SaveDiscordChannels failure (#483 guild collision)
 }
 
 func newFakeProviderStore() *fakeProviderStore {
@@ -93,6 +94,9 @@ func (f *fakeProviderStore) SaveDiscordBotToken(_ context.Context, tenantID uuid
 }
 
 func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	if f.channelsErr != nil {
+		return storage.DeploymentConfig{}, f.channelsErr
+	}
 	if f.dep == nil {
 		f.dep = &storage.DeploymentConfig{TenantID: tenantID, CreatedAt: f.now()}
 	}
@@ -454,6 +458,29 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 	}
 	if resp.Msg.GetGuildId() != "999" || resp.Msg.GetVoiceChannelId() != "888" {
 		t.Errorf("ids not updated: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+// TestProviderDiscordSettings_GuildOwnedByOtherTenant pins the #483 guild-collision
+// fix (full guild-permission proof is #504): saving a guild_id already bound by a
+// DIFFERENT Tenant (storage.ErrGuildTaken from the first-registrar-wins unique
+// index) must surface as CodeFailedPrecondition with an actionable message — never
+// silently rebind the victim's guild (a cross-tenant PII leak: the newest-wins read
+// would hand the attacker the victim's voice-channel members + command routing).
+func TestProviderDiscordSettings_GuildOwnedByOtherTenant(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	store.channelsErr = storage.ErrGuildTaken
+	client, _ := newProviderClient(t, store, testCipher(t))
+
+	_, err := client.SaveDiscordSettings(context.Background(), connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("save owned guild code = %v (err %v), want CodeFailedPrecondition", connect.CodeOf(err), err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "another tenant") {
+		t.Errorf("save owned guild err = %v, want a message naming the other-tenant binding", err)
 	}
 }
 

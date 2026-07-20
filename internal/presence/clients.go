@@ -69,9 +69,9 @@ type IntegrationStatus struct {
 type TenantStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	ListDeploymentConfigs(ctx context.Context) ([]storage.DeploymentConfig, error)
-	// GetTenantIDByGuildID resolves a Guild to its OWNING Tenant, newest-wins on a
-	// duplicated guild_id — the SAME authority the interaction router uses, so the
-	// member picker and interaction routing agree (#490).
+	// GetTenantIDByGuildID resolves a Guild to its OWNING Tenant (single owner
+	// since #483's first-registrar-wins index) — the SAME authority the interaction
+	// router uses, so the member picker and interaction routing agree (#490).
 	GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error)
 	// GetCampaign resolves a Campaign (hence its owning Tenant) so
 	// MemberDisplayName narrows its member fetch to that Tenant's own Guild (#483).
@@ -533,7 +533,7 @@ func (c *Clients) GuildForTenant(tenantID uuid.UUID) string {
 
 // KnownGuild reports whether guildID is the configured Guild of ANY resolved
 // Tenant. It was #489's interim Gate check; #490 superseded that with the storage
-// TenantResolver (which maps a Guild to its OWNING Tenant, newest-wins), so the
+// TenantResolver (which maps a Guild to its OWNING Tenant), so the
 // Gate no longer calls this. Retained as an in-memory Guild-membership probe for
 // the reconcile tests. A DM ("") is never known.
 func (c *Clients) KnownGuild(guildID string) bool {

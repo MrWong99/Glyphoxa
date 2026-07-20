@@ -917,8 +917,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			log.Warn("butler voice-address gate armed with no GM identity source (no tenant-operator binding, empty allowlist); Butler unaddressable by voice")
 		}
 		// Server-side interaction Gate (#490, ADR-0010): it resolves each interaction's
-		// owning Tenant from its Guild (storage GetTenantIDByGuildID, newest-wins on a
-		// duplicated guild_id — the SAME determinism the member picker uses) and then
+		// owning Tenant from its Guild (storage GetTenantIDByGuildID; since #483 a
+		// guild_id has a single first-registrar-wins owner, the SAME authority the
+		// member picker uses) and then
 		// applies the per-Tenant GM rule, replacing #489's interim "any known Guild"
 		// seam. A DM or an unknown Guild is cleanly rejected.
 		gate := presence.NewGate(gmID, presence.NewStorageTenantResolver(store))

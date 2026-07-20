@@ -412,6 +412,15 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// a token-only save must never touch the stored IDs (#142).
 	if hasIDs {
 		dep, err = s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
+		if errors.Is(err, storage.ErrGuildTaken) {
+			// First-registrar-wins guild binding (#483; the full guild-permission
+			// proof — verifying the saver actually administers the guild — is #504).
+			// A deliberate precondition refusal, never a silent rebind: the old
+			// newest-wins read let a second Tenant hijack the first's guild and with
+			// it the victim's voice-channel member reads + command routing.
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("this Discord server is already linked by another tenant; it must unlink there first"))
+		}
 		if err != nil {
 			s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))

@@ -16,6 +16,14 @@ import (
 // is sealed by the caller (the RPC layer) before it reaches here, so this layer
 // only persists ciphertext + last4 and never interprets the secret.
 
+// ErrGuildTaken is returned by SaveDiscordChannels when the guild_id is already
+// bound by a DIFFERENT Tenant — the first-registrar-wins unique index (#483;
+// full guild-permission proof is #504). The RPC layer maps it to
+// CodeFailedPrecondition so the save is refused instead of silently rebinding
+// another Tenant's guild (the old newest-wins read let the rebinder read the
+// victim's voice-channel members and hijack its command routing).
+var ErrGuildTaken = errors.New("storage: this guild is already bound by another tenant")
+
 const deploymentConfigColumns = `
 	tenant_id, discord_bot_token_ciphertext, discord_bot_token_last4,
 	guild_id, voice_channel_id, created_at, updated_at`
@@ -82,12 +90,12 @@ func (s *Store) ListDeploymentConfigs(ctx context.Context) ([]DeploymentConfig, 
 // data. An unknown Guild returns ErrNotFound, which the Gate maps to a clean
 // ephemeral rejection.
 //
-// Two Tenants CAN persist the same guild_id (guild_id is tenant-controlled
-// Configuration, not a unique key): the NEWEST-updated row wins
-// (`ORDER BY updated_at DESC LIMIT 1`). That determinism is the authority every
-// Guild→Tenant consumer shares — the interaction router here AND the member-picker
-// path (presence.Clients.VoiceChannelMembers) — so a stale losing row can never
-// see the winner's data.
+// Since #483 a guild_id is bound by at most ONE Tenant (the first-registrar-wins
+// partial UNIQUE index deployment_config_guild_owner; SaveDiscordChannels rejects
+// a second Tenant's bind with ErrGuildTaken), so this read is unambiguous by
+// construction for every Guild→Tenant consumer — the interaction router here AND
+// the member-picker path (presence.Clients.VoiceChannelMembers). The ORDER BY is
+// kept as harmless belt-and-braces against a pre-index legacy duplicate.
 func (s *Store) GetTenantIDByGuildID(ctx context.Context, guildID string) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.db.QueryRow(ctx,
@@ -125,7 +133,11 @@ func (s *Store) SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, cip
 }
 
 // SaveDiscordChannels upserts only the non-secret Guild / Voice channel IDs,
-// leaving the Bot token untouched, and returns the resulting row.
+// leaving the Bot token untouched, and returns the resulting row. A guild_id
+// already bound by a DIFFERENT Tenant trips the first-registrar-wins partial
+// UNIQUE index (23505 on deployment_config_guild_owner) and yields ErrGuildTaken
+// (#483/#504) — the same Tenant re-saving its own guild upserts its own row and
+// never conflicts.
 func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (DeploymentConfig, error) {
 	row := s.db.QueryRow(ctx,
 		`INSERT INTO deployment_config (tenant_id, guild_id, voice_channel_id)
@@ -138,6 +150,11 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 		tenantID, guildID, voiceChannelID)
 	d, err := scanDeploymentConfig(row)
 	if err != nil {
+		// The tenant_id conflict is absorbed by the upsert, so the only unique
+		// violation that can escape here is the guild-owner index.
+		if code, ok := pgErrCode(err); ok && code == "23505" {
+			return DeploymentConfig{}, ErrGuildTaken
+		}
 		return DeploymentConfig{}, fmt.Errorf("storage: save discord channels for tenant %s: %w", tenantID, err)
 	}
 	return d, nil
