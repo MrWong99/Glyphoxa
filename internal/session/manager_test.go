@@ -38,8 +38,10 @@ type fakeStore struct {
 	onListAgents func()          // mid-op hook: runs during ListAgents, no store lock held (#448)
 	caps         storage.SpendCaps
 	capsErr      error         // injected GetTenantSpendCaps failure (#130)
+	capsPanic    bool          // one-shot GetTenantSpendCaps panic (#483 M5 reservation-leak test)
 	depGate      chan struct{} // when non-nil, the first GetDeploymentConfig blocks on it (#488 item 3)
 	depEntered   chan struct{} // the gated GetDeploymentConfig signals here before it parks
+	closeGate    chan struct{} // when non-nil, CloseVoiceSession parks on it (#483 L3 end-window test)
 }
 
 func newFakeStore() *fakeStore {
@@ -102,6 +104,15 @@ func (f *fakeStore) CloseVoiceSession(ctx context.Context, id uuid.UUID, status 
 	// exactly that), so the fake honours ctx like pgx would.
 	if err := ctx.Err(); err != nil {
 		return storage.VoiceSession{}, err
+	}
+	// closeGate holds the Manager's end window open (#483 L3): the loop has
+	// exited (Active false) but the terminal write has not landed, so the active
+	// entry is still in place.
+	f.mu.Lock()
+	gate := f.closeGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -168,6 +179,10 @@ func (f *fakeStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent,
 func (f *fakeStore) GetTenantSpendCaps(_ context.Context, _ uuid.UUID) (storage.SpendCaps, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.capsPanic {
+		f.capsPanic = false
+		panic("fakeStore: injected GetTenantSpendCaps panic")
+	}
 	if f.capsErr != nil {
 		return storage.SpendCaps{}, f.capsErr
 	}
@@ -225,6 +240,32 @@ func (r *blockingRunner) wasCancelled() bool {
 	defer r.mu.Unlock()
 	return r.cancelled
 }
+
+// failingRunner is a loop runner that executes until told to fail, then returns
+// its error with the run ctx still live — modelling a session that dies on its
+// own (a fatal gateway rejection) rather than being stopped (#483 L3/L4).
+type failingRunner struct {
+	started chan struct{}
+	failCh  chan struct{}
+	err     error
+}
+
+func newFailingRunner(err error) *failingRunner {
+	return &failingRunner{started: make(chan struct{}), failCh: make(chan struct{}), err: err}
+}
+
+func (r *failingRunner) run(ctx context.Context, _ wirenpc.Config) error {
+	close(r.started)
+	select {
+	case <-r.failCh:
+		return r.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// fail makes the runner return its error now — the self-exit.
+func (r *failingRunner) fail() { close(r.failCh) }
 
 func newManager(t *testing.T, store session.Store, run session.LoopRunner, enabled bool) *session.Manager {
 	t.Helper()
@@ -1106,5 +1147,38 @@ func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
 	}
 	if ended.Status != storage.VoiceSessionEnded {
 		t.Errorf("stopped session status = %q, want ended despite the flush error", ended.Status)
+	}
+}
+
+// TestStartReleasesReservationOnPanic covers #483 M5: the Tenant's reservation
+// used to be released by hand on each early return, so a PANIC in the unlocked
+// I/O phase (recovered upstream by net/http's handler recovery) stranded
+// m.reservations[tenantID] forever — the Tenant permanently ErrSessionActive and,
+// at K=1, the worker reporting HasCapacity false for good. The release is
+// deferred now: after the recovered panic the very next Start must proceed.
+func TestStartReleasesReservationOnPanic(t *testing.T) {
+	store := newFakeStore()
+	store.capsPanic = true
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the injected store panic must propagate out of Start")
+			}
+		}()
+		_, _ = mgr.Start(context.Background(), tenantID, campaignID)
+	}()
+
+	if !mgr.HasCapacity() {
+		t.Fatal("HasCapacity false after a recovered Start panic: the reservation leaked")
+	}
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+		t.Fatalf("Start after the recovered panic = %v, want success (reservation released)", err)
+	}
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }

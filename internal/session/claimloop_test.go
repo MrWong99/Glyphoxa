@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +24,8 @@ type fakeIntentStore struct {
 	reaped      int
 	reapReturns int64 // how many rows ReapDead reports this tick (drives reconcile-after-reap)
 	reconciled  int   // ReconcileWorkerOrphanedVoiceSessions call count
+	// sessionOutcome scripts GetVoiceSession — the self-exit outcome read (#483 L4).
+	sessionOutcome func(uuid.UUID) (storage.VoiceSession, error)
 }
 
 func newFakeIntentStore() *fakeIntentStore {
@@ -135,6 +139,18 @@ func (f *fakeIntentStore) ReconcileWorkerOrphanedVoiceSessions(_ context.Context
 	defer f.mu.Unlock()
 	f.reconciled++
 	return 0, nil
+}
+
+// GetVoiceSession answers the self-exit outcome read (#483 L4) via the scripted
+// sessionOutcome hook; unset → ErrNotFound (the loop then finishes 'done').
+func (f *fakeIntentStore) GetVoiceSession(_ context.Context, id uuid.UUID) (storage.VoiceSession, error) {
+	f.mu.Lock()
+	hook := f.sessionOutcome
+	f.mu.Unlock()
+	if hook == nil {
+		return storage.VoiceSession{}, storage.ErrNotFound
+	}
+	return hook(id)
 }
 
 func (f *fakeIntentStore) reconcileCount() int {
@@ -263,29 +279,150 @@ func TestClaimLoop_GracefulDrain(t *testing.T) {
 	}
 }
 
-// TestClaimLoop_ReconcileAfterReap covers review item 2: a tick that reaps stale
-// intents (reap > 0) also runs the worker-orphan reconcile, so a fast restart's
-// leftover 'running' rows are closed the moment their intent expires — not only
-// at the next boot. A tick with no reap does NOT reconcile (cheap).
-func TestClaimLoop_ReconcileAfterReap(t *testing.T) {
+// TestClaimLoop_ReconcileEveryTick covers review item 2 as hardened by #483 L2:
+// the worker-orphan reconcile runs on EVERY tick (it is idempotent and cheap),
+// not only after a reap — gating it on reap > 0 stranded a 'running' row whose
+// intent finished 'done'/'failed' normally but whose CloseVoiceSession write
+// failed: no reap would ever fire for that Tenant again.
+func TestClaimLoop_ReconcileEveryTick(t *testing.T) {
 	mstore := newFakeStore()
 	mgr := newManager(t, mstore, newBlockingRunner().run, true)
 	istore := newFakeIntentStore()
 	loop := newClaimLoop(t, istore, mgr)
 
-	// No reap this tick → no reconcile.
+	// Even a tick with no reap reconciles.
 	istore.reapReturns = 0
 	loop.TickForTest(context.Background())
-	if got := istore.reconcileCount(); got != 0 {
-		t.Fatalf("reconcile ran %d times with no reap, want 0", got)
+	if got := istore.reconcileCount(); got != 1 {
+		t.Fatalf("reconcile ran %d times on a no-reap tick, want 1", got)
 	}
 
-	// A reap → reconcile runs.
+	// A reaping tick reconciles too (once).
 	istore.reapReturns = 2
 	loop.TickForTest(context.Background())
-	if got := istore.reconcileCount(); got != 1 {
-		t.Fatalf("reconcile ran %d times after a reap, want 1", got)
+	if got := istore.reconcileCount(); got != 2 {
+		t.Fatalf("reconcile count after a reaping tick = %d, want 2", got)
 	}
+}
+
+// blackholeIntentStore models a black-holed DB connection (#483 M1): every
+// claim-plane call parks until its ctx is cancelled. Without a per-op timeout a
+// tick would block for the kernel TCP timeout (minutes) — the zombie window where
+// a live session outlives its reaped intent.
+type blackholeIntentStore struct{ *fakeIntentStore }
+
+func (b blackholeIntentStore) ReapDeadVoiceSessionIntents(ctx context.Context, _ time.Duration) (int64, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (b blackholeIntentStore) ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (b blackholeIntentStore) ClaimVoiceSessionIntent(ctx context.Context, _ string) (storage.VoiceSessionIntent, error) {
+	<-ctx.Done()
+	return storage.VoiceSessionIntent{}, ctx.Err()
+}
+
+// TestClaimLoop_BlackholedStoreDoesNotPinTick covers #483 M1: with every DB call
+// parked on its ctx, a tick must still return within the per-op timeouts
+// (min(poll, 3s) each) instead of hanging until the caller's ctx dies.
+func TestClaimLoop_BlackholedStoreDoesNotPinTick(t *testing.T) {
+	mstore := newFakeStore()
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	istore := blackholeIntentStore{newFakeIntentStore()}
+	loop := newClaimLoop(t, istore, mgr) // Poll 1ms → per-op timeout 1ms
+
+	done := make(chan struct{})
+	go func() {
+		loop.TickForTest(context.Background()) // NO deadline on the outer ctx
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a black-holed store pinned the claim tick past its per-op timeouts")
+	}
+}
+
+// TestClaimLoop_StartRefusalCarriesFailCode covers #483 M4: a typed Manager Start
+// refusal (here ErrDiscordNotConfigured — the deployment config has no
+// guild/channel) must land in the intent's last_error as a machine-parseable fail
+// code the web tier's IntentControl can re-map to the SAME sentinel, so the RPC
+// answers CodeFailedPrecondition with actionable text instead of a flattened
+// CodeInternal "internal error".
+func TestClaimLoop_StartRefusalCarriesFailCode(t *testing.T) {
+	mstore := newFakeStore()
+	mstore.dep = storage.DeploymentConfig{} // no guild/channel → ErrDiscordNotConfigured
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	istore := newFakeIntentStore()
+	loop := newClaimLoop(t, istore, mgr)
+
+	intent := istore.add(uuid.New(), uuid.New())
+	loop.TickForTest(context.Background())
+
+	got := istore.get(intent.ID)
+	if got.Status != storage.VoiceIntentFailed {
+		t.Fatalf("intent status = %q, want failed", got.Status)
+	}
+	sentinel, ok := session.DecodeStartFailure(got.LastError)
+	if !ok {
+		t.Fatalf("last_error = %q carries no decodable fail code", got.LastError)
+	}
+	if !errors.Is(sentinel, session.ErrDiscordNotConfigured) {
+		t.Fatalf("decoded sentinel = %v, want ErrDiscordNotConfigured", sentinel)
+	}
+}
+
+// TestClaimLoop_SelfExitWaitsOutEndWindowAndCarriesFailure covers #483 L3+L4: a
+// session that ends on its own has a window where Manager.Active is already false
+// (as.ended) but the active entry has not cleared (finalizers + CloseVoiceSession
+// still running) — finishing the intent there lets an instant restart collide
+// ErrSessionActive and misreport 'failed'. The loop must wait out that window
+// (Finalizing) before finishing. And a session whose row closed 'failed' must
+// finish its intent 'failed' with the row's end_reason (L4), not a clean-looking
+// 'done' with an empty last_error.
+func TestClaimLoop_SelfExitWaitsOutEndWindowAndCarriesFailure(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // parks CloseVoiceSession → holds the end window open
+	runner := newFailingRunner(errors.New("gateway exploded"))
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	istore.sessionOutcome = func(id uuid.UUID) (storage.VoiceSession, error) {
+		return mstore.session(id), nil
+	}
+	loop := newClaimLoop(t, istore, mgr)
+
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(context.Background())
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// Let the loop fail NOW; CloseVoiceSession parks on the gate, so the Manager
+	// sits in its end window: Active false, entry not yet cleared.
+	runner.fail()
+	waitFor(t, time.Second, func() bool {
+		_, live, _ := mgr.Active(context.Background(), tenantID)
+		return !live
+	})
+	// Give the heartbeat goroutine a few ticks INSIDE the window: it must NOT
+	// finish the intent while the Manager is still finalizing (L3).
+	time.Sleep(20 * time.Millisecond)
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
+		t.Fatalf("intent finished %q inside the Manager end window, want still live (L3)", got)
+	}
+
+	// Release the end write: the entry clears, and the intent must finish 'failed'
+	// carrying the session row's end_reason (L4).
+	close(closeGate)
+	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentFailed })
+	if got := istore.get(intent.ID).LastError; !strings.Contains(got, "gateway exploded") {
+		t.Fatalf("intent last_error = %q, want the session's failure reason carried over (L4)", got)
+	}
+	loop.DrainForTest()
 }
 
 // TestClaimLoop_NoCapacityNoClaim asserts the loop does not claim when the

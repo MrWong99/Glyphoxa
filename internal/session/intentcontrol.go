@@ -137,6 +137,13 @@ func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUI
 			}
 			// live but the id has not landed yet — keep polling.
 		case storage.VoiceIntentFailed, storage.VoiceIntentDead:
+			// A typed worker Start refusal crosses the plane as a fail code stamped
+			// into last_error (#483 M4): re-map it to the same sentinel — and so the
+			// same connect code + actionable message — the -mode all path produces,
+			// instead of flattening every refusal into CodeInternal.
+			if sentinel, ok := DecodeStartFailure(cur.LastError); ok {
+				return storage.VoiceSession{}, fmt.Errorf("session: voice worker could not start the session: %w", sentinel)
+			}
 			return storage.VoiceSession{}, fmt.Errorf("session: voice worker could not start the session: %s", intentReason(cur))
 		case storage.VoiceIntentDone:
 			// Stopped before it ever went live (an external stop hit the pending row):
@@ -227,6 +234,26 @@ func (c *IntentControl) Stop(ctx context.Context, tenantID uuid.UUID) (storage.V
 	}
 	if err != nil {
 		return storage.VoiceSession{}, fmt.Errorf("session: load live intent: %w", err)
+	}
+
+	// Zero-worker escape for Stop (#483 L1, mirroring Start's review-item-4 reap):
+	// the "live" intent may be a dead worker's claimed/live row whose heartbeat no
+	// tick will ever sweep — a Stop against it would poll out its budget and return
+	// ErrStopPending forever. Reap it if its heartbeat is already stale: the intent
+	// is then terminal, its orphaned 'running' row is closed, and the Stop resolves
+	// instead of dead-ending. A fresh heartbeat (a live worker) skips this and the
+	// normal stop_requested handshake below proceeds.
+	if live.Status == storage.VoiceIntentClaimed || live.Status == storage.VoiceIntentLive {
+		if reaped, rerr := c.store.ReapVoiceSessionIntentIfExpired(ctx, live.ID, c.cfg.Expiry); rerr == nil && reaped {
+			if _, rerr := c.store.ReconcileWorkerOrphanedVoiceSessions(ctx); rerr != nil {
+				c.log.Warn("intent control: reconcile orphaned sessions after stop reap", "err", rerr)
+			}
+			cur, gerr := c.store.GetVoiceSessionIntent(ctx, live.ID)
+			if gerr != nil {
+				return storage.VoiceSession{}, fmt.Errorf("session: reload reaped intent on stop: %w", gerr)
+			}
+			return c.loadRow(ctx, cur)
+		}
 	}
 
 	if _, err := c.store.RequestVoiceSessionStop(ctx, live.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
