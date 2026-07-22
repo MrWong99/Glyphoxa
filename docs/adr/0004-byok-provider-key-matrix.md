@@ -47,3 +47,18 @@ The matrix's second-provider slots (STT: whisper.cpp, TTS: Coqui XTTS — also
 never implemented) are accordingly **vacant by policy**, not TODO: Deepgram and
 ElevenLabs remain the implemented reference providers, alongside the
 OpenAI-compatible surfaces already in the codebase.
+
+---
+
+**Amendment (2026-07-22, #312 — sound generation rides the `tts` Provider
+Config, deliberately NOT a Component):** Highlight sound enrichment (ElevenLabs
+sound-effects "sting" and Music endpoints) resolves the Tenant's existing `tts`
+Provider Config and uses its key **iff the configured provider is ElevenLabs**;
+any other tts provider (or none) makes sound generation cleanly not-configured
+(no-op, no retry, no spend — the `ErrImageNotConfigured` pattern from #311).
+Unlike `image` (a new vendor, hence a new Component), sound generation is the
+same vendor and the same key as tts — a `sound` Component would force Tenants
+to paste one key twice for pure attribution's sake. Attribution is preserved in
+the Usage Ledger instead: sound calls meter under their own model ids (SFX and
+Music separately) with their own ADR-0046 price-map entries. Revisit the
+Component question only if a non-ElevenLabs sound provider is ever adopted.

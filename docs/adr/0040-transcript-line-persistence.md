@@ -81,3 +81,20 @@ Hop-B REST endpoint (ADR-0014) rather than adding a new history API.
   anonymous human lane, and the `kind ∈ {gm,player,npc,butler}` taxonomy the
   persisted line mirrors; the in-proc `SessionManager` finalizes the relay on
   Stop.
+
+---
+
+**Amendment (2026-07-22, #437 — the LINE grain conforms to ADR-0012's
+delivered-only invariant):** a `transcript_line` row may only outlive its
+Voice Session if its speech was actually delivered. The Relay persists
+optimistically at `TTSInvoked` (unchanged — the live feed's latency contract
+stays), but reconciles on TTS start-error and turn-end: a line whose turn
+delivered **zero** sentences is deleted from `transcript_line` through the
+same single-writer queue, so replay never shows text the room never heard.
+The live SSE feed may therefore transiently show a line that a later reload
+drops — accepted, and correct: it was never speech. Failure evidence belongs
+to the Turn's terminal reason and logs, not the Transcript. This closes the
+undocumented divergence with the Chunker (which already purged undelivered
+sentences) and keeps the Transcript doctrine singular across both grains:
+**the Transcript records delivered speech, at sentence grain** (sentence-grain
+rounding on barge per #401 stays accepted).

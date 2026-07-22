@@ -70,7 +70,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Guild** | A Discord server, identified by `guild_id`; a Tenant may have many Guilds linked. | Server, Discord server |
 | **Voice Session** | The Tenant's resolved Bot's presence in one Discord voice channel, bound to a (Guild, Campaign, GM) tuple at start and hosted by exactly one Voice Instance. | Session (alone), Call, Live session |
 | **DAVE** | Discord's Audio & Video End-to-end Encryption protocol, mandatory since 2026-03-01; built on MLS. | E2EE, Encryption |
-| **Transcript** | The persisted text record of a Voice Session, with speaker attribution by Discord User. | Log, Recording (recording is audio) |
+| **Transcript** | The persisted text record of a Voice Session, with speaker attribution by Discord User. Records **delivered speech only, at sentence grain** — a turn that delivered zero sentences is never persisted, in either grain (ADR-0012, ADR-0040 amendment, #437). | Log, Recording (recording is audio) |
 | **Partial Transcript** | The mutable interim text of an in-progress utterance streamed by STT; may change until the utterance is committed. Only the committed text becomes an STT final that Address Detection and the Transcript consume. | Interim result, Draft, Live transcript |
 | **Transcript Line** | One rendered line of a Transcript — a single human utterance or a coalesced Agent reply — persisted per Voice Session at the LINE grain (`transcript_line`, ADR-0040) for the Session screen's live feed and replay-on-reload. Distinct from a Transcript Chunk (the 3–6-utterance retrieval/embedding grain, ADR-0011): they are separate records of the same speech. A Voice Session's `line_count` is the count of its Transcript Lines. | Transcript Chunk (the retrieval grain), Utterance (a Line may coalesce several) |
 | **Slash Command** | A Discord interaction registered by the Bot; handled by the Butler when reasoning is required, otherwise directly by the Bot binary. | Command, Interaction |
@@ -88,7 +88,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | Term | Definition | Aliases to avoid |
 |------|------------|------------------|
 | **Provider** | An external service implementing one Component (e.g. Anthropic for LLM, Deepgram for STT). | Vendor, Backend, Service |
-| **Component** | A Provider category: `llm`, `stt`, `tts`, `embeddings`, `s2s`. | Capability, Type |
+| **Component** | A Provider category: `llm`, `stt`, `tts`, `embeddings`, `s2s`, `image` (the last added by #311, ADR-0004 amendment). | Capability, Type |
 | **Provider Config** | A Tenant-scoped, encrypted record binding a Component to a Provider with credentials and model/voice selection. | Credentials, Key, API key |
 | **BYOK** | Bring-Your-Own-Keys — the v1.0 Provider Config source where the Tenant supplies their own credentials. | Self-supplied, Customer keys |
 | **Tool** | A named callable function invoked by an Agent via a Tool Grant. Its backing is either **built-in** (runs in-process, lowest latency) or an **MCP Server** (out-of-process). The Agent only ever sees the uniform Tool interface; the backing is an implementation detail. | MCP Tool (the protocol is one backing, not the category), Function, Action, Plugin |

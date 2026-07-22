@@ -5,3 +5,9 @@ NPC speech is committed at sentence granularity: a sentence counts as **delivere
 If zero sentences were delivered (interrupted before the first sentence completes), the utterance is **not logged at all**.
 
 **Why:** Transcripts must reflect what listeners actually heard. Word-level mid-sentence truncation would need word-timestamps from the TTS provider, which is deferred to v1.5+. Logging zero-delivered utterances would pollute Address Detection and NPC retrieval with content the room never heard.
+
+---
+
+**Note (2026-07-22, #437):** the LINE grain (ADR-0040) conforms to this
+invariant too — never-delivered lines are reconciled out of `transcript_line`,
+so "not logged at all" holds for both persisted grains.
