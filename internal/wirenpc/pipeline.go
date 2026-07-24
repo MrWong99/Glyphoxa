@@ -147,10 +147,12 @@ type conversationDeps struct {
 	// the byte-for-byte batch default. See [Config.STTStreaming].
 	sttStreaming bool
 
-	// memory / facts fill the per-turn Hot Context slots on every NPC's Agent
-	// loop (#122/#126); nil disables the slot (the prompt is byte-identical).
-	memory agent.MemoryRecaller
-	facts  agent.FactsRecaller
+	// memory / facts / directives fill the per-turn Hot Context slots on every
+	// NPC's Agent loop (#122/#126/ADR-0059); nil disables the slot (the prompt
+	// is byte-identical).
+	memory     agent.MemoryRecaller
+	facts      agent.FactsRecaller
+	directives agent.DirectiveRecaller
 
 	// speakerName resolves a route's SpeakerID to the human speaker's display
 	// name for the agent-facing transcript (the transcript-names seam); it is

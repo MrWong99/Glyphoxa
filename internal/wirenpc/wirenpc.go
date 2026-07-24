@@ -268,6 +268,16 @@ type Config struct {
 	// byte-identical to the pre-facts behavior (#126).
 	Facts agent.FactsRecaller
 
+	// Directives is the GM-directive recaller injected into every NPC's Agent loop
+	// (ADR-0059): it fills the GM-directive slot of the volatile Hot Context tail
+	// each turn with the /direct steering note active for the addressed Agent. The
+	// session Manager satisfies it (its volatile, session-local directive set —
+	// the MuteView pattern) and sets it on the base voice config; it flows through
+	// connectAndServe → buildConversation → the Roster like Memory/Facts. nil
+	// (voice/bench standalone) disables directives entirely, so the prompt is
+	// byte-identical to the pre-directive behavior.
+	Directives agent.DirectiveRecaller
+
 	// SpeakerName resolves a route's SpeakerID (ADR-0050) to the human speaker's
 	// display name for the agent-facing transcript: every NPC's Agent loop
 	// prefixes its user lines "<Name>: <text>" (the transcript-names seam,

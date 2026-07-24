@@ -34,6 +34,10 @@ const (
 	// VoiceControlButlerSay makes the Butler speak SayText (Manager.SpeakAsButler)
 	// — the voiced-recap relay.
 	VoiceControlButlerSay VoiceSessionControlKind = "butler_say"
+	// VoiceControlDirect sets/clears one Agent's GM directive (Manager.DirectAs,
+	// ADR-0059): SayText carries the directive text ('' clears), DirectTurns the
+	// committed-turn bound (0 = sticky until cleared/replaced/session end).
+	VoiceControlDirect VoiceSessionControlKind = "direct"
 )
 
 // VoiceSessionControlStatus is a control row's lifecycle state.
@@ -57,29 +61,32 @@ const (
 
 // VoiceSessionControl is one row of the requested-control queue (#503).
 type VoiceSessionControl struct {
-	ID        uuid.UUID
-	IntentID  uuid.UUID
-	TenantID  uuid.UUID
-	Kind      VoiceSessionControlKind
-	AgentID   string
-	SayText   string
-	Muted     bool
-	Status    VoiceSessionControlStatus
-	ResultIDs []string
-	LastError string
-	CreatedAt time.Time
-	StartedAt *time.Time
-	EndedAt   *time.Time
+	ID       uuid.UUID
+	IntentID uuid.UUID
+	TenantID uuid.UUID
+	Kind     VoiceSessionControlKind
+	AgentID  string
+	SayText  string
+	Muted    bool
+	// DirectTurns is the 'direct' verb's committed-turn bound (ADR-0059): how
+	// many of the Agent's committed turns the directive rides; 0 = sticky.
+	DirectTurns int
+	Status      VoiceSessionControlStatus
+	ResultIDs   []string
+	LastError   string
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	EndedAt     *time.Time
 }
 
 const voiceControlColumns = `
-	id, intent_id, tenant_id, kind, agent_id, say_text, muted,
+	id, intent_id, tenant_id, kind, agent_id, say_text, muted, direct_turns,
 	status, result_ids, last_error, created_at, started_at, ended_at`
 
 func scanVoiceSessionControl(row pgx.Row) (VoiceSessionControl, error) {
 	var c VoiceSessionControl
 	err := row.Scan(
-		&c.ID, &c.IntentID, &c.TenantID, &c.Kind, &c.AgentID, &c.SayText, &c.Muted,
+		&c.ID, &c.IntentID, &c.TenantID, &c.Kind, &c.AgentID, &c.SayText, &c.Muted, &c.DirectTurns,
 		&c.Status, &c.ResultIDs, &c.LastError, &c.CreatedAt, &c.StartedAt, &c.EndedAt,
 	)
 	return c, err
@@ -100,10 +107,10 @@ const voiceControlNoSessionCause = "code=no_active_session: session ended"
 // worker writes a terminal status.
 func (s *Store) CreateVoiceSessionControl(ctx context.Context, c VoiceSessionControl) (VoiceSessionControl, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO voice_session_controls (intent_id, tenant_id, kind, agent_id, say_text, muted)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO voice_session_controls (intent_id, tenant_id, kind, agent_id, say_text, muted, direct_turns)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING `+voiceControlColumns,
-		c.IntentID, c.TenantID, c.Kind, c.AgentID, c.SayText, c.Muted)
+		c.IntentID, c.TenantID, c.Kind, c.AgentID, c.SayText, c.Muted, c.DirectTurns)
 	out, err := scanVoiceSessionControl(row)
 	if err != nil {
 		return VoiceSessionControl{}, fmt.Errorf("storage: create voice session control for intent %s: %w", c.IntentID, err)

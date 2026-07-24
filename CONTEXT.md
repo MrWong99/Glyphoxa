@@ -55,6 +55,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Vocative Flag** | A ranking signal in Address Detection: a matched name is *flagged* when it is punctuation-bracketed as a direct address (a marker rune on each side, none inside — the two-sided rule), distinguishing an addressee ("**Gesa,** …") from a same-scoring topic mention ("was hat **Bart** …"). When one utterance names two Agents, a flagged name outranks an unflagged one before name similarity decides (ADR-0024, #400/#413). | Vocative, Addressee bracket |
 | **Ensemble Turn** | The turn taken when one utterance addresses two or more Agents: they generate in parallel, the fastest (the Lead) speaks, and at most one other Agent reacts to it. | Group response, Multi-response |
 | **Lead** | In an Ensemble Turn, the Agent whose response text is ready first; it takes the floor and speaks before the Reaction. | Primary speaker, Winner |
+| **GM Directive** | A private, session-local steering note the GM sets on one Character NPC via `/direct` ("Bart lies about the key"): injected into that Agent's volatile Hot Context tail for its next N committed turns (or until cleared), never heard by the table, never persisted, never in the Transcript (ADR-0059). Steering — distinct from `/say`, which puppets verbatim. | Whisper, Stage note (prose ok), Instruction (unqualified) |
 | **Cross-talk** | The Lead's delivered text fed to another addressed Agent so it can react. Distinct from Barge-in: the receiving Agent has not spoken yet, so nothing is interrupted. | Barge-in (reserved), Interruption |
 | **Reaction** | A follow-up turn an Agent generates in response to the Lead's Cross-talk in an Ensemble Turn; may be a short affirmation, a longer disagreement, or silence. | Follow-up, Reply |
 
@@ -93,7 +94,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **BYOK** | Bring-Your-Own-Keys — the v1.0 Provider Config source where the Tenant supplies their own credentials. | Self-supplied, Customer keys |
 | **Tool** | A named callable function invoked by an Agent via a Tool Grant. Its backing is either **built-in** (runs in-process, lowest latency) or an **MCP Server** (out-of-process). The Agent only ever sees the uniform Tool interface; the backing is an implementation detail. | MCP Tool (the protocol is one backing, not the category), Function, Action, Plugin |
 | **MCP Server** | An out-of-process backing that exposes one or more Tools over the Model Context Protocol (stdio or streamable-HTTP). A Tool source differentiated from built-ins by running in a separate process; pays serialization/IPC cost in exchange for isolation and third-party extensibility. | External tool, Plugin, MCP Tool |
-| **Hot Context** | The recent-Transcript + KG-facts + Persona bundle assembled per-utterance to prime an Agent's LLM call (target <50ms). | Context, Prompt context |
+| **Hot Context** | The recent-Transcript + KG-facts + Persona bundle assembled per-utterance to prime an Agent's LLM call (target <50ms). Laid out cache-stable since ADR-0059: a stable system prompt (Persona + roster + markup), the append-only history, then the **volatile tail** — one trailing system message carrying the per-turn facts/memory/GM-Directive blocks. | Context, Prompt context |
 
 ## Billing & SaaS
 

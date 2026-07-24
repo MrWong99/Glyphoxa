@@ -425,6 +425,8 @@ func (l *ClaimLoop) executeControl(ctx context.Context, tenantID uuid.UUID, c st
 		return nil, l.mgr.SayAs(execCtx, tenantID, c.AgentID, c.SayText)
 	case storage.VoiceControlButlerSay:
 		return nil, l.mgr.SpeakAsButler(execCtx, tenantID, c.SayText)
+	case storage.VoiceControlDirect:
+		return nil, l.mgr.DirectAs(execCtx, tenantID, c.AgentID, c.SayText, c.DirectTurns)
 	default:
 		// A future verb this binary does not know: fail it honestly rather than
 		// leave it pending forever (the requester surfaces the message verbatim).

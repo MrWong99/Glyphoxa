@@ -70,10 +70,13 @@ func TestSystemPrompt_EmptyFacts_ByteIdenticalToToday(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_Facts_BlockInSlotOrder pins #126 AC2: public Node facts inject
-// a "## What you know about the world" block between the Persona and the memory
-// block (slot order Persona → facts → memory → markup), joined by blank lines.
-func TestSystemPrompt_Facts_BlockInSlotOrder(t *testing.T) {
+// TestVolatileTail_Facts_BlockInSlotOrder pins #126 AC2 under the ADR-0059
+// volatile-tail layout: public Node facts inject a "## What you know about the
+// world" block into the TRAILING system message (never the stable system
+// prompt, whose cached prefix they would fork every turn), joined by blank
+// lines, with the memory block after the facts block (tail slot order facts →
+// memory → directive).
+func TestVolatileTail_Facts_BlockInSlotOrder(t *testing.T) {
 	prov := &fakeProvider{reply: "Aye."}
 	facts := &fakeFacts{facts: []string{
 		"### The Sealed Vault (Location)\nNobody has opened it in a century.",
@@ -90,26 +93,34 @@ func TestSystemPrompt_Facts_BlockInSlotOrder(t *testing.T) {
 
 	r.Reply()(t.Context(), routed("bart", "Tell me about the town."))
 
-	sys := prov.lastRequest(t).Messages[0].Text
-	if !strings.Contains(sys, "## What you know about the world") {
-		t.Errorf("facts block header missing: %q", sys)
+	msgs := prov.lastRequest(t).Messages
+	// The STABLE system prompt stays free of per-turn content (ADR-0059): the
+	// provider's prefix cache survives only if facts never touch it.
+	sys := msgs[0].Text
+	if strings.Contains(sys, "The Sealed Vault") || strings.Contains(sys, "I served him ale.") {
+		t.Errorf("per-turn content leaked into the stable system prompt: %q", sys)
 	}
-	if !strings.Contains(sys, "The Sealed Vault") || !strings.Contains(sys, "Guild of Ash") {
-		t.Errorf("facts content missing: %q", sys)
+	tail := volatileTail(t, msgs)
+	if !strings.Contains(tail, "## What you know about the world") {
+		t.Errorf("facts block header missing from the volatile tail: %q", tail)
+	}
+	if !strings.Contains(tail, "The Sealed Vault") || !strings.Contains(tail, "Guild of Ash") {
+		t.Errorf("facts content missing from the volatile tail: %q", tail)
 	}
 	// Both facts joined by a blank line.
-	if !strings.Contains(sys, "Nobody has opened it in a century.\n\n### Guild of Ash") {
-		t.Errorf("facts not joined by a blank line: %q", sys)
+	if !strings.Contains(tail, "Nobody has opened it in a century.\n\n### Guild of Ash") {
+		t.Errorf("facts not joined by a blank line: %q", tail)
 	}
-	// Slot order: Persona < facts header < memory block < markup.
-	iPersona := strings.Index(sys, "You are Bart.")
-	iFacts := strings.Index(sys, "## What you know about the world")
-	iMemory := strings.Index(sys, "I served him ale.")
-	iMarkup := strings.Index(sys, sentinelMarkup)
-	ordered := iPersona < iFacts && iFacts < iMemory && iMemory < iMarkup
-	if !ordered {
-		t.Errorf("slot order wrong (want persona<facts<memory<markup): persona=%d facts=%d memory=%d markup=%d\n%q",
-			iPersona, iFacts, iMemory, iMarkup, sys)
+	// Tail slot order: facts block precedes the memory block.
+	iFacts := strings.Index(tail, "## What you know about the world")
+	iMemory := strings.Index(tail, "I served him ale.")
+	if iFacts < 0 || iMemory < 0 || iFacts >= iMemory {
+		t.Errorf("tail slot order wrong (want facts<memory): facts=%d memory=%d\n%q", iFacts, iMemory, tail)
+	}
+	// The tail trails the user line: the conversation stays an append-only,
+	// cache-stable prefix up to the previous turn.
+	if last := msgs[len(msgs)-1]; last.Role != llm.RoleSystem {
+		t.Errorf("volatile tail must be the final message, got role %q", last.Role)
 	}
 }
 
@@ -159,8 +170,8 @@ func TestStreamTurn_InjectsFacts(t *testing.T) {
 	if len(eng.captured) == 0 {
 		t.Fatal("streaming engine captured no messages")
 	}
-	sys := eng.captured[0].Text
-	if !strings.Contains(sys, "## What you know about the world") || !strings.Contains(sys, "The Sealed Vault") {
-		t.Errorf("streaming system prompt missing facts block: %q", sys)
+	tail := volatileTail(t, eng.captured)
+	if !strings.Contains(tail, "## What you know about the world") || !strings.Contains(tail, "The Sealed Vault") {
+		t.Errorf("streaming volatile tail missing facts block: %q", tail)
 	}
 }

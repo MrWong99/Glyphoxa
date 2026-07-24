@@ -29,12 +29,17 @@ func TestReplier_React_CompositePrompt(t *testing.T) {
 	}
 
 	last := prov.lastRequest(t)
-	userMsg := last.Messages[len(last.Messages)-1].Text
+	userMsg := lastUserText(t, last.Messages)
 	if !strings.Contains(userMsg, "Bart, Mira — thoughts?") {
 		t.Fatalf("composite user msg = %q, want the original utterance", userMsg)
 	}
 	if !strings.Contains(userMsg, `Bart says: "The bridge is out."`) {
 		t.Fatalf("composite user msg = %q, want the Lead's cross-talk line", userMsg)
+	}
+	// The cross-talk instruction rides the volatile tail, not the stable system
+	// prompt (ADR-0059), so the reaction framing reaches the model per-turn.
+	if tail := volatileTail(t, last.Messages); !strings.Contains(tail, "Another character has just spoken") {
+		t.Fatalf("volatile tail = %q, want the cross-talk instruction", tail)
 	}
 	// Purity: a speculative Reaction mutates no history (ADR-0012).
 	if len(r.HistorySnapshot()) != 0 {
@@ -106,7 +111,7 @@ func TestReplier_React_SpeakerName_CompositePrefixed(t *testing.T) {
 	}
 
 	last := prov.lastRequest(t)
-	userMsg := last.Messages[len(last.Messages)-1].Text
+	userMsg := lastUserText(t, last.Messages)
 	want := "Artusas: Bart, Mira — thoughts?\n\nBart says: \"The bridge is out.\""
 	if userMsg != want {
 		t.Fatalf("composite user msg = %q, want %q", userMsg, want)

@@ -72,8 +72,9 @@ type IntentControlConfig struct {
 	// whose heartbeat is older than this before failing ErrSessionActive — the
 	// zero-worker escape (review item 4). Default 30s.
 	Expiry time.Duration
-	// ControlBudget bounds how long a relayed live control (mute/say/butler-say,
-	// #503) waits for the hosting worker's confirmation before ErrControlPending.
+	// ControlBudget bounds how long a relayed live control (mute/say/butler-say/
+	// direct, #503/ADR-0059) waits for the hosting worker's confirmation before
+	// ErrControlPending.
 	// Default 15s (env GLYPHOXA_VOICE_CONTROL_BUDGET); it must stay comfortably
 	// above the worker heartbeat (default 5s) plus one control execute, since
 	// dispatch rides the heartbeat tick.
@@ -388,6 +389,17 @@ func (c *IntentControl) SayAs(ctx context.Context, tenantID uuid.UUID, agentID, 
 func (c *IntentControl) SpeakAsButler(ctx context.Context, tenantID uuid.UUID, text string) error {
 	_, err := c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
 		Kind: storage.VoiceControlButlerSay, SayText: text,
+	})
+	return err
+}
+
+// DirectAs relays a GM directive set/clear to the hosting worker (ADR-0059):
+// text carries the directive (” clears), turns the committed-turn bound (0 =
+// sticky). Like say, the (created_at, id) drain order keeps a replace issued
+// after a clear landing in request order.
+func (c *IntentControl) DirectAs(ctx context.Context, tenantID uuid.UUID, agentID, text string, turns int) error {
+	_, err := c.relayControl(ctx, tenantID, storage.VoiceSessionControl{
+		Kind: storage.VoiceControlDirect, AgentID: agentID, SayText: text, DirectTurns: turns,
 	})
 	return err
 }

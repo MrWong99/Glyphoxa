@@ -26,6 +26,7 @@ type PoolControl interface {
 	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
 	SetAllMute(ctx context.Context, tenantID uuid.UUID, muted bool) ([]string, error)
 	SayAs(ctx context.Context, tenantID uuid.UUID, agentID, text string) error
+	DirectAs(ctx context.Context, tenantID uuid.UUID, agentID, text string, turns int) error
 }
 
 // compile-time proof the claim-plane control satisfies the seam.

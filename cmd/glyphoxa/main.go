@@ -457,6 +457,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.MuteCommand(mgr, store, intentControl),
 		presence.MuteAllCommand(mgr, store, intentControl),
 		presence.SayCommand(mgr, store, intentControl),
+		presence.DirectCommand(mgr, store, intentControl),
 	)
 	if err := clients.EnsureAll(ctx); err != nil {
 		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
@@ -1176,6 +1177,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
 			// voiced roster for the resolver + autocomplete.
 			presence.SayCommand(mgr, store, nil),
+			// /direct as:<agent> [note] [turns] (ADR-0059): the Regie track. The Manager
+			// is the DirectControl AND the directive recaller the Repliers pull from
+			// (NewManager wired cfg.Directives = mgr), so the note reaches exactly one
+			// Agent's Hot Context tail — steering, not the /say puppet takeover.
+			presence.DirectCommand(mgr, store, nil),
 		)
 		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
 		// Session), one standing client per distinct Bot token (#489, ADR-0039

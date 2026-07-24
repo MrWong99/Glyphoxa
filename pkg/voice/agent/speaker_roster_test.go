@@ -17,11 +17,12 @@ func artusasNamer(speakerID string) string {
 }
 
 // TestSystemPrompt_SpeakerRoster_Section pins the speaker-attribution section:
-// with a SpeakerName resolver wired AND a table roster configured, the system
-// prompt carries a "## Who is speaking" section that (a) explains the "Name: text"
-// user-line prefix as THE speaker identity, (b) lists the player characters as
-// humans at the table, (c) lists the fellow NPCs by name, and (d) explains the
-// generic "Player / DM" label — placed after the memory slot, before the markup.
+// with a SpeakerName resolver wired AND a table roster configured, the STABLE
+// system prompt carries a "## Who is speaking" section that (a) explains the
+// "Name: text" user-line prefix as THE speaker identity, (b) lists the player
+// characters as humans at the table, (c) lists the fellow NPCs by name, and (d)
+// explains the generic "Player / DM" label — placed after the Persona, before
+// the markup (the per-turn memory rides the ADR-0059 volatile tail instead).
 func TestSystemPrompt_SpeakerRoster_Section(t *testing.T) {
 	prov := &fakeProvider{reply: "Aye."}
 	mem := &fakeRecaller{mem: agent.Memory{Personal: []string{"I served him ale."}}}
@@ -49,14 +50,20 @@ func TestSystemPrompt_SpeakerRoster_Section(t *testing.T) {
 			t.Errorf("system prompt missing %q:\n%q", want, sys)
 		}
 	}
-	// Slot order: persona < memory < speaker section < markup.
+	// Slot order: persona < speaker section < markup. The memory chunk must NOT
+	// appear in the stable prompt — it rides the volatile tail (ADR-0059).
+	if strings.Contains(sys, "I served him ale.") {
+		t.Errorf("recalled memory leaked into the stable system prompt: %q", sys)
+	}
 	iPersona := strings.Index(sys, "You are Lukas.")
-	iMemory := strings.Index(sys, "I served him ale.")
 	iSpeaker := strings.Index(sys, "## Who is speaking")
 	iMarkup := strings.Index(sys, sentinelMarkup)
-	if iPersona >= iMemory || iMemory >= iSpeaker || iSpeaker >= iMarkup {
-		t.Errorf("slot order wrong (want persona<memory<speaker<markup): persona=%d memory=%d speaker=%d markup=%d\n%q",
-			iPersona, iMemory, iSpeaker, iMarkup, sys)
+	if iPersona >= iSpeaker || iSpeaker >= iMarkup {
+		t.Errorf("slot order wrong (want persona<speaker<markup): persona=%d speaker=%d markup=%d\n%q",
+			iPersona, iSpeaker, iMarkup, sys)
+	}
+	if tail := volatileTail(t, prov.lastRequest(t).Messages); !strings.Contains(tail, "I served him ale.") {
+		t.Errorf("volatile tail missing the recalled memory chunk: %q", tail)
 	}
 }
 

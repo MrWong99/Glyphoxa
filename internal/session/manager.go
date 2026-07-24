@@ -240,6 +240,14 @@ type activeSession struct {
 	// with the session. Guarded by Manager.mu.
 	muted map[string]struct{}
 
+	// directives is the volatile, session-local GM-directive set (ADR-0059),
+	// keyed by AgentID: the private /direct steering notes the Replier folds into
+	// one Agent's volatile Hot Context tail. Like muted it is fresh-empty per
+	// Start and dies with the session — no DB column, no migration; a directive
+	// never outlives the Voice Session it was whispered into. Guarded by
+	// Manager.mu.
+	directives map[string]*directiveState
+
 	// meter is the session's spend meter (#130, ADR-0046), non-nil only when the
 	// Tenant configured at least one cap at Start. It is the cfg.Gate and rides the
 	// teed StageMetrics, and backs Manager.Spend(). Dies with the session.
@@ -457,6 +465,10 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	// so wire it as the base voice config's MuteView. Every session Start copies
 	// base, so each session's Conversation reads this Manager's set.
 	m.base.Mutes = m
+	// The Manager IS the live directive recaller too (ADR-0059, the same
+	// structural pattern): it owns the session-local /direct state, so every
+	// session's Repliers pull the active GM directive from here per turn.
+	m.base.Directives = m
 	m.base.Memory = deps.Memory
 	m.base.Facts = deps.Facts
 	m.base.ToolDeps = deps.Tools
@@ -683,7 +695,8 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		done:        make(chan struct{}),
 		bus:         sessionBus,
 		stopForward: stopForward,
-		muted:       map[string]struct{}{}, // fresh: every new session starts all-unmuted (AC5)
+		muted:       map[string]struct{}{},        // fresh: every new session starts all-unmuted (AC5)
+		directives:  map[string]*directiveState{}, // fresh: no directive survives a session boundary (ADR-0059)
 	}
 
 	// Spend meter (#130, ADR-0046): only when the Tenant configured at least one
