@@ -122,14 +122,16 @@ func TestMuteCommand_IdleEphemeral(t *testing.T) {
 // fakePool is a PoolControl for the cross-pod control tests (#503): it scripts
 // the claim plane's pool-wide Active answer and records the relayed controls.
 type fakePool struct {
-	live       bool
-	campaignID uuid.UUID
-	mutedIDs   []string
-	muteErr    error
-	sayErr     error
-	agentCalls []muteCall
-	allCalls   []bool
-	sayCalls   []poolSayCall
+	live        bool
+	campaignID  uuid.UUID
+	mutedIDs    []string
+	muteErr     error
+	sayErr      error
+	agentCalls  []muteCall
+	allCalls    []bool
+	sayCalls    []poolSayCall
+	directCalls []poolDirectCall
+	directErr   error
 }
 
 type poolSayCall struct {
@@ -157,6 +159,17 @@ func (f *fakePool) SetAllMute(_ context.Context, _ uuid.UUID, muted bool) ([]str
 func (f *fakePool) SayAs(_ context.Context, _ uuid.UUID, id, text string) error {
 	f.sayCalls = append(f.sayCalls, poolSayCall{id, text})
 	return f.sayErr
+}
+
+type poolDirectCall struct {
+	id    string
+	text  string
+	turns int
+}
+
+func (f *fakePool) DirectAs(_ context.Context, _ uuid.UUID, id, text string, turns int) error {
+	f.directCalls = append(f.directCalls, poolDirectCall{id, text, turns})
+	return f.directErr
 }
 
 // TestMuteCommand_LocalPathNoDefer covers sequence (12)/AC3: with the session

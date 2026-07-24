@@ -103,6 +103,10 @@ func (e *captureEngine) Generate(_ context.Context, messages []llm.Message) (str
 	return e.reply, nil
 }
 
+// systemPrompt returns the joined text of every system-role message the loop
+// assembled: the stable system prompt plus — since ADR-0059 — the trailing
+// volatile Hot Context tail that carries the recalled memory block. Joining
+// both keeps the content assertions layout-agnostic.
 func (e *captureEngine) systemPrompt(t *testing.T) string {
 	t.Helper()
 	if len(e.msgs) == 0 {
@@ -111,7 +115,13 @@ func (e *captureEngine) systemPrompt(t *testing.T) string {
 	if e.msgs[0].Role != llm.RoleSystem {
 		t.Fatalf("first message role = %q, want system", e.msgs[0].Role)
 	}
-	return e.msgs[0].Text
+	var parts []string
+	for _, m := range e.msgs {
+		if m.Role == llm.RoleSystem {
+			parts = append(parts, m.Text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // silentSynth returns an empty audio-markup instruction, so the system prompt is

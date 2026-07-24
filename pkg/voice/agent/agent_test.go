@@ -180,6 +180,36 @@ func deliver(replies []orchestrator.Reply) []orchestrator.Reply {
 	return replies
 }
 
+// lastUserMessage returns the text of the LAST user-role message in msgs — the
+// current utterance. Since ADR-0059 the volatile Hot Context tail (facts,
+// memory, GM directive, cross-talk instruction) trails the conversation as a
+// system-role message, so "the last message" is no longer necessarily the user
+// line.
+func lastUserText(t *testing.T, msgs []llm.Message) string {
+	t.Helper()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser {
+			return msgs[i].Text
+		}
+	}
+	t.Fatal("no user message in the assembled conversation")
+	return ""
+}
+
+// volatileTail returns the text of the trailing volatile Hot Context message
+// (ADR-0059) — a system-role message AFTER the first — or "" when the turn
+// appended none (no facts, no memory, no directive).
+func volatileTail(t *testing.T, msgs []llm.Message) string {
+	t.Helper()
+	if len(msgs) < 2 {
+		return ""
+	}
+	if last := msgs[len(msgs)-1]; last.Role == llm.RoleSystem {
+		return last.Text
+	}
+	return ""
+}
+
 func routed(agentID, text string) voiceevent.AddressRouted {
 	return voiceevent.AddressRouted{
 		At:     time.Now(),

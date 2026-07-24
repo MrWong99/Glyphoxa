@@ -101,7 +101,7 @@ type Memory struct {
 }
 
 // IsZero reports whether the Memory carries no chunks in either mode — the
-// signal to omit the whole memory block from the system prompt.
+// signal to omit the whole memory block from the volatile Hot Context tail.
 func (m Memory) IsZero() bool { return len(m.Personal) == 0 && len(m.World) == 0 }
 
 // MemoryRecaller retrieves the Hot Context [Memory] for one turn: the chunks the
@@ -115,13 +115,30 @@ type MemoryRecaller interface {
 
 // FactsRecaller fills the KG-facts slot of Hot Context (ADR-0008 v1.5 / #126): the
 // gm-public Knowledge Graph Node facts the Agent's Campaign wants injected into its
-// system prompt, each element an already-rendered fact string. It shares the
+// prompt, each element an already-rendered fact string. It shares the
 // [MemoryRecaller] contract: it NEVER errors, respects ctx (a barge-in yields nil),
 // and degrades to nil rather than stalling the turn. A nil FactsRecaller (the
 // unconfigured default) leaves the slot empty, so the prompt is byte-identical to
 // the pre-facts path.
 type FactsRecaller interface {
 	Facts(ctx context.Context, agentID string) []string
+}
+
+// DirectiveRecaller fills the GM-directive slot of the volatile Hot Context tail
+// (ADR-0059): the private steering note a GM issued for one Agent (the /direct
+// Regie-track — "Bart lies about the key"), injected into that Agent's prompt
+// without the table ever hearing it. It shares the [MemoryRecaller] contract:
+// it NEVER errors, respects ctx, and degrades to "" rather than stalling the
+// turn. A nil DirectiveRecaller (the unconfigured default) leaves the slot
+// empty, so the prompt is byte-identical to the pre-directive path.
+type DirectiveRecaller interface {
+	// Directive returns the active directive text for agentID, or "" when none.
+	// consume reports whether this consult belongs to a COMMITTED turn (the
+	// single-target batch/streaming reply paths): a turn-bounded directive's
+	// remaining-turns budget is decremented only then. The speculative Ensemble
+	// consults ([Replier.Draft] / [Replier.React]) peek with consume=false so a
+	// losing candidate never burns a turn of the budget.
+	Directive(ctx context.Context, agentID string, consume bool) string
 }
 
 // Config configures a [Replier].
@@ -176,19 +193,29 @@ type Config struct {
 	// still cancellable via the caller's ctx, e.g. barge-in).
 	TurnTimeout time.Duration
 
-	// Memory recalls the Hot Context memory chunks injected into the system prompt
+	// Memory recalls the Hot Context memory chunks injected into the volatile tail
 	// each turn (ADR-0011/0042). It is consulted under the turn ctx, OUTSIDE the
 	// history lock (it is network-adjacent), and never blocks the turn: a slow or
 	// unavailable path degrades to a zero Memory. nil disables recall entirely —
 	// the prompt is then byte-identical to the pre-memory behavior (AC6).
 	Memory MemoryRecaller
 
-	// Facts fills the reserved KG-facts slot of the system prompt each turn (#126,
-	// ADR-0008): the Campaign's gm-public Knowledge Graph Node facts. Consulted
-	// under the turn ctx alongside Memory, OUTSIDE the history lock, never blocking
-	// the turn: a slow/unavailable path degrades to nil. nil disables facts — the
-	// slot stays empty and the prompt is byte-identical to the pre-facts behavior.
+	// Facts fills the reserved KG-facts slot of the volatile Hot Context tail each
+	// turn (#126, ADR-0008): the Campaign's gm-public Knowledge Graph Node facts.
+	// Consulted under the turn ctx alongside Memory, OUTSIDE the history lock,
+	// never blocking the turn: a slow/unavailable path degrades to nil. nil
+	// disables facts — the slot stays empty and the prompt is byte-identical to
+	// the pre-facts behavior.
 	Facts FactsRecaller
+
+	// Directive fills the GM-directive slot of the volatile Hot Context tail each
+	// turn (ADR-0059): the private /direct steering note for this Agent, rendered
+	// LAST in the tail so the freshest instruction carries the strongest recency
+	// signal. Consulted under the turn ctx alongside Memory/Facts, OUTSIDE the
+	// history lock; the committed reply paths consume a turn of a turn-bounded
+	// directive's budget, the speculative Draft/React paths only peek. nil
+	// disables the slot — the prompt is byte-identical to the pre-directive path.
+	Directive DirectiveRecaller
 
 	// SpeakerName resolves a route's SpeakerID (the ADR-0050 Speaker Lane
 	// attribution) to the human speaker's display name, so the utterance enters
@@ -454,15 +481,18 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
-	// Recall + facts run BETWEEN the two lock sections, never under r.mu: they are
-	// network-/DB-adjacent and must not hold the loop's lock across the call
-	// (ADR-0042). Both respect ctx, so a barge cancels them. Recall keys on the
-	// RAW utterance, never the attributed line (the speculative-recall match).
+	// Recall + facts + directive run BETWEEN the two lock sections, never under
+	// r.mu: they are network-/DB-adjacent and must not hold the loop's lock across
+	// the call (ADR-0042). All respect ctx, so a barge cancels them. Recall keys on
+	// the RAW utterance, never the attributed line (the speculative-recall match).
+	// The directive consult CONSUMES a turn of its budget — this is a committed
+	// reply path (ADR-0059).
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
+	directive := r.directive(ctx, true)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts)
+	messages := r.hotContextLocked(mem, facts, directive)
 	r.mu.Unlock()
 
 	reply, err := r.engine.Generate(ctx, messages)
@@ -531,14 +561,18 @@ func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (str
 	history = append(history, llm.Message{Role: llm.RoleUser, Text: userLine})
 	history = trimHistory(history, r.cfg.HistoryTurns)
 
-	// Recall + facts run under ctx, never mutating loop state (they never did).
-	// Recall keys on the RAW utterance (ADR-0042), not the attributed line.
+	// Recall + facts + directive run under ctx, never mutating loop state (they
+	// never did). Recall keys on the RAW utterance (ADR-0042), not the attributed
+	// line. The directive consult only PEEKS (consume=false): a draft that loses
+	// the Lead race must not burn a turn of the budget (ADR-0059).
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
+	directive := r.directive(ctx, false)
 
-	msgs := make([]llm.Message, 0, len(history)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts)})
+	msgs := make([]llm.Message, 0, len(history)+2)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
+	msgs = appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), directiveBlock(directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -712,10 +746,11 @@ func (d *deliveredText) text() string { return d.spoken.String() }
 // Agent reacts with nothing — no event, no dispatch, no commit (ADR-0012).
 const crossTalkSilence = "[SILENCE]"
 
-// crossTalkInstruction is the system-prompt addendum for a Cross-talk Reaction turn
+// crossTalkInstruction is the prompt addendum for a Cross-talk Reaction turn
 // (ADR-0025): it frames the just-heard Lead line as cross-talk this Agent may react
-// to, and permits the [crossTalkSilence] decline. It is appended to the Agent's own
-// system prompt ONLY on the React path, so a normal turn's prompt is unchanged.
+// to, and permits the [crossTalkSilence] decline. It rides the volatile Hot Context
+// tail ONLY on the React path (ADR-0059 — never the stable system prompt, whose
+// cached prefix it would fork), so a normal turn's prompt is unchanged.
 const crossTalkInstruction = "Another character has just spoken in the conversation, quoted below. " +
 	"React briefly in your own voice — a short agreement, a pointed disagreement, or an aside — " +
 	"but only if you have something worth adding. If you would just echo them or have nothing to add, " +
@@ -734,8 +769,9 @@ func crossTalkUserText(userText, leadName, leadText string) string {
 // line WITHOUT mutating any state — the speculative half of the Reaction phase of an
 // Ensemble Turn (ADR-0025, #302). Like [Replier.Draft] it reads Hot Context on a
 // history SNAPSHOT (so a reaction that is never spoken commits nothing, ADR-0012),
-// but its user message is the composite [crossTalkUserText] and its system prompt
-// carries the [crossTalkInstruction] permitting the decline sentinel. An empty
+// but its user message is the composite [crossTalkUserText] and its volatile
+// Hot Context tail carries the [crossTalkInstruction] permitting the decline
+// sentinel. An empty
 // completion OR the [crossTalkSilence] sentinel returns "", nil — the Agent declines
 // to react. It honors ctx (bounded by [Config.TurnTimeout]) so a barge tearing the
 // whole ensemble down unwinds an in-flight reaction generation.
@@ -763,13 +799,22 @@ func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadNam
 	history = trimHistory(history, r.cfg.HistoryTurns)
 
 	// Recall keys on the raw utterance (the memory the Agent brings to the moment),
-	// not the composite — the cross-talk line is context, not a new topic.
+	// not the composite — the cross-talk line is context, not a new topic. The
+	// directive consult only PEEKS (a reaction that stays silent must not burn a
+	// turn of the budget, ADR-0059).
 	mem := r.recall(ctx, userText)
 	facts := r.facts(ctx)
+	directive := r.directive(ctx, false)
 
-	msgs := make([]llm.Message, 0, len(history)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts) + "\n\n" + crossTalkInstruction})
+	// The crossTalkInstruction rides the volatile tail, NOT the stable system
+	// prompt (ADR-0059): appended there it would fork the cached prefix right
+	// after the Persona, invalidating the whole history for the provider's
+	// prefix cache. In the tail it sits with the other per-turn content —
+	// before the directive, which keeps the strongest recency slot.
+	msgs := make([]llm.Message, 0, len(history)+2)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
+	msgs = appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), crossTalkInstruction, directiveBlock(directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -854,14 +899,17 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
-	// Recall + facts between the lock sections (see [Replier.turn]): outside r.mu,
-	// under ctx, each degrading to nothing rather than stalling the streaming turn.
-	// Recall keys on the RAW utterance, never the attributed line (ADR-0042).
+	// Recall + facts + directive between the lock sections (see [Replier.turn]):
+	// outside r.mu, under ctx, each degrading to nothing rather than stalling the
+	// streaming turn. Recall keys on the RAW utterance, never the attributed line
+	// (ADR-0042). The directive consult CONSUMES a turn of its budget — this is
+	// the committed reply path production wires (ADR-0059).
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
+	directive := r.directive(ctx, true)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts)
+	messages := r.hotContextLocked(mem, facts, directive)
 	r.mu.Unlock()
 
 	// TextSink installed (the Butler, #299): decide modality on the WHOLE answer, so
@@ -1169,44 +1217,80 @@ func (r *Replier) facts(ctx context.Context) []string {
 	return r.cfg.Facts.Facts(ctx, r.cfg.Persona.AgentID)
 }
 
-// hotContextLocked assembles the Hot Context message list for one call: the
-// system prompt (Persona + KG facts + recalled memory + audio-markup instruction)
-// followed by the recent Transcript (the bounded history). mem is the memory
-// recalled for this turn and facts are the KG-facts (each nil/zero when
-// unconfigured or degraded). Caller holds r.mu.
-func (r *Replier) hotContextLocked(mem Memory, facts []string) []llm.Message {
-	msgs := make([]llm.Message, 0, len(r.history)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts)})
-	msgs = append(msgs, r.history...)
-	return msgs
+// directive consults the configured [DirectiveRecaller] for this turn's GM
+// directive, keyed by the Agent's id. consume marks a committed reply path
+// (see [DirectiveRecaller.Directive]). A nil recaller (the unconfigured
+// default) returns "", so the slot stays empty and the prompt is byte-identical
+// to the pre-directive path (ADR-0059). The recaller never errors and respects
+// ctx.
+func (r *Replier) directive(ctx context.Context, consume bool) string {
+	if r.cfg.Directive == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.cfg.Directive.Directive(ctx, r.cfg.Persona.AgentID, consume))
 }
 
-// systemPrompt builds the system prompt from the Hot Context inputs in slot order:
-// the Persona, the KG-facts block (the reserved facts slot, ADR-0008/#126), the
-// recalled memory block (ADR-0011/0042/0012 — both touch the SYSTEM prompt only),
-// the speaker-attribution section (the table roster — see [Config.PlayerCharacters];
+// hotContextLocked assembles the Hot Context message list for one call: the
+// STABLE system prompt (Persona + roster + audio-markup instruction), the recent
+// Transcript (the bounded history), and — LAST — the volatile tail message
+// carrying this turn's KG facts, recalled memory, and GM directive (each
+// nil/zero when unconfigured or degraded; an all-empty tail appends no message).
+// Caller holds r.mu.
+//
+// The stable-prefix / volatile-tail split is deliberate (ADR-0059): the default
+// provider's prefix cache (Groq, automatic — no cache_control API) matches
+// request tokens from the start and stops at the first difference. With facts
+// and memory inside the system prompt (the pre-0059 order) every turn's fresh
+// facts forked the prefix right after the Persona, so the roster, markup, and
+// the ENTIRE history missed the cache each turn. With the volatile content
+// trailing the append-only history, the whole conversation up to the previous
+// turn stays cache-hittable — lower TTFT, half-priced cached tokens.
+func (r *Replier) hotContextLocked(mem Memory, facts []string, directive string) []llm.Message {
+	msgs := make([]llm.Message, 0, len(r.history)+2)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
+	msgs = append(msgs, r.history...)
+	return appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), directiveBlock(directive))
+}
+
+// appendVolatileTail appends the volatile Hot Context tail — the given blocks
+// joined by blank lines — as ONE trailing system-role message (ADR-0059). All
+// blocks empty appends nothing, so a turn with no facts, no memory, and no
+// directive stays byte-identical to the plain system+history prompt. A trailing
+// system message is safe across every provider: the OpenAI-compatible adapters
+// (Groq, Gemini) keep it positionally last, and the anthropic adapter folds it
+// into the system field — semantically the pre-0059 placement.
+func appendVolatileTail(msgs []llm.Message, blocks ...string) []llm.Message {
+	var b strings.Builder
+	for _, block := range blocks {
+		if block == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(block)
+	}
+	if b.Len() == 0 {
+		return msgs
+	}
+	return append(msgs, llm.Message{Role: llm.RoleSystem, Text: b.String()})
+}
+
+// systemPrompt builds the STABLE system prompt — the per-session-constant prefix
+// of every request (ADR-0059) — in slot order: the Persona, the
+// speaker-attribution section (the table roster — see [Config.PlayerCharacters];
 // rendered ONLY when a SpeakerName resolver is wired, since it describes the
 // "Name: text" prefix that resolver produces), and the Voice's provider-specific
 // audio-markup instruction from [tts.Synthesizer.AudioMarkupPrompt] (required by
-// ADR-0022). Empty facts AND a zero mem AND an unset roster omit their blocks
-// entirely, leaving the prompt byte-identical to the
-// pre-facts/pre-memory/pre-roster path (#126 / AC6).
-func (r *Replier) systemPrompt(mem Memory, facts []string) string {
+// ADR-0022). Everything here is fixed at session start; the per-turn content
+// (KG facts, recalled memory, GM directive) rides the volatile tail message
+// instead ([appendVolatileTail]) so the provider's prefix cache survives across
+// turns. An unset roster omits its block entirely, leaving the prompt
+// byte-identical to the pre-roster path.
+func (r *Replier) systemPrompt() string {
 	var b strings.Builder
 	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
 		b.WriteString(p)
-	}
-	if block := factsBlock(facts); block != "" {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(block)
-	}
-	if block := memoryBlock(mem); block != "" {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(block)
 	}
 	if r.cfg.SpeakerName != nil {
 		if block := speakerRosterBlock(r.cfg.PlayerCharacters, r.cfg.FellowNPCs); block != "" {
@@ -1225,11 +1309,11 @@ func (r *Replier) systemPrompt(mem Memory, facts []string) string {
 	return b.String()
 }
 
-// factsBlock renders the KG-facts slot as a flat-text prompt section: a fixed
-// header followed by the already-rendered fact strings joined by blank lines. The
-// agent is a dumb joiner — the fact strings arrive fully formatted from the
-// FactsRecaller (#126). No facts yields "" so the block is dropped entirely
-// (the byte-identical guarantee).
+// factsBlock renders the KG-facts slot of the volatile tail as a flat-text
+// prompt section: a fixed header followed by the already-rendered fact strings
+// joined by blank lines. The agent is a dumb joiner — the fact strings arrive
+// fully formatted from the FactsRecaller (#126). No facts yields "" so the
+// block is dropped entirely (the byte-identical guarantee).
 func factsBlock(facts []string) string {
 	if len(facts) == 0 {
 		return ""
@@ -1269,6 +1353,21 @@ func memoryBlock(mem Memory) string {
 		}
 	}
 	return b.String()
+}
+
+// directiveBlock renders the GM-directive slot of the volatile tail (ADR-0059):
+// the private steering note plus the secrecy contract — the direction shapes the
+// Agent's next replies but must never surface to the table, in speech or in
+// paraphrase. An empty directive yields "" so the block is dropped entirely
+// (the byte-identical guarantee).
+func directiveBlock(directive string) string {
+	if directive == "" {
+		return ""
+	}
+	return "## Private direction from your GM\n\n" + directive + "\n\n" +
+		"Let this direction shape your next replies while staying fully in character. " +
+		"It is a secret stage note: never quote it, mention it, or hint that it exists — " +
+		"the players must not be able to tell you were directed."
 }
 
 // speakerRosterBlock renders the speaker-attribution section: the "Name: text"

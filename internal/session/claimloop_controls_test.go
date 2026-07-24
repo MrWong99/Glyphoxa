@@ -308,3 +308,44 @@ func TestClaimLoop_TickSweepsOrphanedControls(t *testing.T) {
 		t.Fatalf("orphaned control last_error = %q, want encoded no_active_session (#503 FIX3)", got.LastError)
 	}
 }
+
+// TestClaimLoop_DispatchesDirectControl covers the ADR-0059 relay: a pending
+// 'direct' control sets the directive on the hosting worker's Manager (the
+// Replier-visible state), finishes 'done', and a follow-up clearing row removes
+// it — the (created_at, id) drain order landing set-then-clear in request order.
+func TestClaimLoop_DispatchesDirectControl(t *testing.T) {
+	h := newControlLoopHarness(t)
+	agents := seedAgents(h.mstore, 1)
+	id := agents[0].ID.String()
+
+	set := h.istore.addControl(storage.VoiceSessionControl{
+		IntentID: h.intent.ID, TenantID: h.tenant,
+		Kind: storage.VoiceControlDirect, AgentID: id, SayText: "Bart lies about the key.", DirectTurns: 2,
+	})
+	waitFor(t, 2*time.Second, func() bool { return h.istore.getControl(set.ID).Status == storage.VoiceControlDone })
+	if got := h.mgr.Directive(context.Background(), id, false); got != "Bart lies about the key." {
+		t.Fatalf("Directive after relay = %q, want the relayed note", got)
+	}
+
+	clear := h.istore.addControl(storage.VoiceSessionControl{
+		IntentID: h.intent.ID, TenantID: h.tenant,
+		Kind: storage.VoiceControlDirect, AgentID: id, SayText: "",
+	})
+	waitFor(t, 2*time.Second, func() bool { return h.istore.getControl(clear.ID).Status == storage.VoiceControlDone })
+	if got := h.mgr.Directive(context.Background(), id, false); got != "" {
+		t.Fatalf("Directive after relayed clear = %q, want empty", got)
+	}
+
+	// A foreign agent fails the row with a decodable cause (the say precedent).
+	bad := h.istore.addControl(storage.VoiceSessionControl{
+		IntentID: h.intent.ID, TenantID: h.tenant,
+		Kind: storage.VoiceControlDirect, AgentID: uuid.NewString(), SayText: "never",
+	})
+	waitFor(t, 2*time.Second, func() bool { return h.istore.getControl(bad.ID).Status == storage.VoiceControlFailed })
+	if sentinel, ok := session.DecodeControlFailure(h.istore.getControl(bad.ID).LastError); !ok || !errors.Is(sentinel, session.ErrAgentNotInCampaign) {
+		t.Fatalf("failed direct last_error = %q, want encoded ErrAgentNotInCampaign", h.istore.getControl(bad.ID).LastError)
+	}
+
+	h.istore.requestStop(h.intent.ID)
+	h.loop.DrainForTest()
+}

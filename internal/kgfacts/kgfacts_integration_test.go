@@ -201,8 +201,11 @@ func TestKGFacts_EndToEnd_Integration(t *testing.T) {
 
 	rec := kgfacts.New(st, &fakeMetrics{}, nil, kgfacts.Config{})
 
-	// runTurn drives one batch turn for the given Agent id and returns the assembled
-	// system prompt.
+	// runTurn drives one batch turn for the given Agent id and returns the joined
+	// text of every system-role message the loop assembled — the stable system
+	// prompt plus, since ADR-0059, the trailing volatile tail carrying the facts
+	// block. Joining both keeps the content and byte-identity assertions
+	// layout-agnostic.
 	runTurn := func(agentID string, facts agent.FactsRecaller) string {
 		eng := &captureEngine{reply: "Aye."}
 		r := agent.NewReplier(agent.Config{
@@ -215,7 +218,13 @@ func TestKGFacts_EndToEnd_Integration(t *testing.T) {
 		if len(eng.captured) == 0 {
 			t.Fatal("engine captured no messages")
 		}
-		return eng.captured[0].Text
+		var parts []string
+		for _, m := range eng.captured {
+			if m.Role == llm.RoleSystem {
+				parts = append(parts, m.Text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
 	}
 
 	// An unlinked Agent has an empty neighbourhood: its prompt must be byte-identical
