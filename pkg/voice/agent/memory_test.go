@@ -105,7 +105,7 @@ func TestVolatileTail_Memory_LabeledSections(t *testing.T) {
 	// Personal (witnessed) precedes World (second-hand) within the block.
 	iPersonal := strings.Index(tail, "The ruby dagger was stolen from the vault.")
 	iWorld := strings.Index(tail, "A dragon was seen near the northern pass.")
-	if !(iPersonal >= 0 && iWorld >= 0 && iPersonal < iWorld) {
+	if iPersonal < 0 || iWorld < 0 || iPersonal >= iWorld {
 		t.Errorf("memory section order wrong (want personal<world): personal=%d world=%d\n%q",
 			iPersonal, iWorld, tail)
 	}

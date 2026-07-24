@@ -114,7 +114,7 @@ func TestVolatileTail_Facts_BlockInSlotOrder(t *testing.T) {
 	// Tail slot order: facts block precedes the memory block.
 	iFacts := strings.Index(tail, "## What you know about the world")
 	iMemory := strings.Index(tail, "I served him ale.")
-	if !(iFacts >= 0 && iMemory >= 0 && iFacts < iMemory) {
+	if iFacts < 0 || iMemory < 0 || iFacts >= iMemory {
 		t.Errorf("tail slot order wrong (want facts<memory): facts=%d memory=%d\n%q", iFacts, iMemory, tail)
 	}
 	// The tail trails the user line: the conversation stays an append-only,

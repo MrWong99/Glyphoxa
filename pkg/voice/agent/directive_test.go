@@ -141,7 +141,7 @@ func TestDirective_DraftAndReactPeek(t *testing.T) {
 	// The directive keeps the LAST slot of the tail — after the cross-talk
 	// instruction — so the GM steering carries the strongest recency signal.
 	if iCross, iDir := strings.Index(tail, "Another character has just spoken"),
-		strings.Index(tail, "## Private direction from your GM"); !(iCross >= 0 && iDir > iCross) {
+		strings.Index(tail, "## Private direction from your GM"); iCross < 0 || iDir <= iCross {
 		t.Errorf("tail order wrong (want cross-talk < directive): cross=%d directive=%d\n%q", iCross, iDir, tail)
 	}
 
