@@ -1,0 +1,194 @@
+suite: Postgres backup CronJob
+# The beta's restore story (#520): a nightly pg_dump into its own PVC with
+# rotation, and an optional off-site push to an S3-compatible bucket. The
+# in-chart Postgres is one StatefulSet on one node's disk, so these are the only
+# thing standing between a bad day and a lost campaign.
+templates:
+  - templates/backup-cronjob.yaml
+values:
+  - ../ci/ci-values.yaml
+tests:
+  - it: renders nothing by default
+    # Opt-in: an install pointed at a managed external Postgres usually has
+    # provider backups already.
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a CronJob and its own PVC when enabled
+    set:
+      backup:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: runs nightly, never concurrently
+    # A dump that outruns its schedule must not pile a second one onto the same
+    # volume and database.
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: CronJob
+      - equal:
+          path: spec.schedule
+          value: 15 4 * * *
+      - equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+
+  - it: dumps custom-format with the same Postgres image the chart runs
+    # pg_dump's version must match the server it dumps; pinning them together
+    # makes the classic "server version mismatch" failure unrepresentable.
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: pgvector/pgvector:pg17
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: pg_dump "\$GLYPHOXA_DATABASE_URL" -Fc
+
+  - it: takes the DSN from the app Secret so it can never dump another database
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+
+  - it: rotates on the configured retention, after the dump succeeded
+    # `set -eu` above the find means a failed dump never reaches the delete —
+    # the last good backup survives a broken night.
+    set:
+      backup:
+        enabled: true
+        retentionDays: 30
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: find /backup -name 'glyphoxa-\*\.dump' -mtime \+30 -delete
+
+  - it: writes to its OWN volume, never the database's
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: RELEASE-NAME-glyphoxa-backup
+
+  - it: keeps the dump PVC on uninstall
+    set:
+      backup:
+        enabled: true
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: does not push off-site unless asked
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: spec.jobTemplate.spec.template.spec.initContainers
+
+  - it: fails the render when the off-site push has no bucket
+    set:
+      backup:
+        enabled: true
+        offsite:
+          enabled: true
+          existingSecret:
+            name: creds
+    asserts:
+      - failedTemplate:
+          errorPattern: backup.offsite.enabled needs backup.offsite.bucket
+
+  - it: fails the render when the off-site push has no credentials Secret
+    # The chart never templates object-store credentials into its own Secret.
+    set:
+      backup:
+        enabled: true
+        offsite:
+          enabled: true
+          bucket: glyphoxa-backups
+    asserts:
+      - failedTemplate:
+          errorPattern: backup.offsite.enabled needs backup.offsite.existingSecret.name
+
+  - it: pushes off-site only after a complete dump
+    # The dump moves to an initContainer so the upload cannot start against a
+    # half-written file — Kubernetes orders initContainers, not siblings.
+    set:
+      backup:
+        enabled: true
+        offsite:
+          enabled: true
+          bucket: glyphoxa-backups
+          prefix: nightly/
+          endpoint: https://s3.example.com
+          existingSecret:
+            name: glyphoxa-backup-offsite
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.initContainers[0].name
+          value: pg-dump
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].name
+          value: offsite-push
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: s3://glyphoxa-backups/nightly/.*--endpoint-url "https://s3.example.com"
+
+  - it: reads the bucket credentials from the operator's Secret
+    set:
+      backup:
+        enabled: true
+        offsite:
+          enabled: true
+          bucket: glyphoxa-backups
+          existingSecret:
+            name: glyphoxa-backup-offsite
+            accessKeyIdKey: id
+            secretAccessKeyKey: secret
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: glyphoxa-backup-offsite
+                key: id
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: glyphoxa-backup-offsite
+                key: secret

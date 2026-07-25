@@ -195,7 +195,8 @@ schema change.
 - [ ] Provider dashboards (Groq/ElevenLabs) checked against the ledger's
       estimates for the first month — calibrate expectations; the price map is
       an estimate by design.
-- [ ] Backups running and restore-tested ([k3s-proxmox.md §8](k3s-proxmox.md);
+- [ ] Backups running and restore-tested ([backup-restore.md](backup-restore.md) —
+      the chart's `backup.enabled` CronJob, ideally with `backup.offsite.*`;
       on a scripted cloud install, `deploy/saas/install.sh`'s backup option +
       the pre-upgrade dump `deploy/saas/update.sh` takes) — the ledger and
       subscription history are now business records.

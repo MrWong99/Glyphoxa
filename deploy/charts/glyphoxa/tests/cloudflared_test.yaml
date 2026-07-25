@@ -16,9 +16,12 @@ tests:
 
   - it: fails the render when enabled without a token
     # Better a loud render failure than a pod crash-looping on an empty token.
+    # (ci-values supplies a placeholder token for the render gate — blank it here
+    # so this is the no-token path.)
     set:
       cloudflared:
         enabled: true
+        token: ""
     asserts:
       - failedTemplate:
           errorPattern: cloudflared.enabled needs a tunnel token

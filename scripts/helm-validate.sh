@@ -175,6 +175,17 @@ validate_path beta-home-vm \
   --set cloudflared.enabled=true \
   --set ingress.enabled=false
 
+# The backup render paths (#520): the nightly CronJob + its PVC on their own,
+# and the off-site variant (dump-as-initContainer + S3 push) which additionally
+# requires a bucket and a credentials Secret name.
+validate_path backup-local --set backup.enabled=true
+validate_path backup-offsite \
+  --set backup.enabled=true \
+  --set backup.offsite.enabled=true \
+  --set backup.offsite.bucket=glyphoxa-backups \
+  --set backup.offsite.endpoint=https://s3.example.com \
+  --set backup.offsite.existingSecret.name=glyphoxa-backup-offsite
+
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the

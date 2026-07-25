@@ -80,6 +80,28 @@ What this release stands up (ADR-0034):
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.cloudflared.fullname" . }}
 {{- end }}
 
+{{- if .Values.backup.enabled }}
+  - A nightly Postgres backup CronJob ({{ .Values.backup.schedule }}) writing
+    pg_dump custom-format archives to its own PVC, kept {{ .Values.backup.retentionDays }} days
+{{- if .Values.backup.offsite.enabled }}
+    and pushed to s3://{{ .Values.backup.offsite.bucket }}/{{ .Values.backup.offsite.prefix }}.
+{{- else }}
+    (no off-site copy — backup.offsite.enabled is false, so these dumps live on
+    the same node as the database they protect).
+{{- end }}
+
+    Rehearse the restore BEFORE you need it — docs/deploy/backup-restore.md.
+    Trigger a run now to confirm it works:
+
+      kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "glyphoxa.backup.fullname" . }} backup-manual-1
+      kubectl -n {{ .Release.Namespace }} logs job/backup-manual-1
+{{- else if .Values.postgres.enabled }}
+  - NO backups are configured. The in-cluster Postgres is a single StatefulSet on
+    one node's disk — set backup.enabled=true (and ideally backup.offsite.*)
+    before this deployment holds anything you would miss. See
+    docs/deploy/backup-restore.md.
+{{- end }}
+
 Verify the schema is current:
 
   kubectl -n {{ .Release.Namespace }} run glyphoxa-migrate-check --rm -it --restart=Never \

@@ -81,6 +81,56 @@ ollama:
     # storageClassName: ""  # use the cluster default when unset
   resources: {}
 
+# Nightly Postgres backups (#520). The in-chart Postgres is a single StatefulSet
+# on one node's disk, so a deployment that serves real tables needs a restore
+# story: a CronJob runs `pg_dump -Fc` into its OWN PVC (never the database's
+# volume), rotates dumps older than retentionDays, and can optionally push each
+# dump to an S3-compatible bucket. Off by default — an install pointed at a
+# managed external Postgres usually has provider backups already — but ON is the
+# right posture for the in-cluster database. Restore runbook:
+# docs/deploy/backup-restore.md.
+backup:
+  enabled: false
+  # Nightly, off-peak. Standard cron syntax, in the cluster's timezone.
+  schedule: "15 4 * * *"
+  # Dumps older than this many days are deleted after each successful run.
+  # Rotation happens only AFTER the new dump succeeds, so a failing backup never
+  # eats the last good one.
+  retentionDays: 14
+  # The local dump volume. `helm.sh/resource-policy: keep` protects it from
+  # `helm uninstall`. Size it for retentionDays × dump size.
+  persistence:
+    size: 10Gi
+    # storageClassName: ""  # use the cluster default when unset
+  # How many finished Jobs the CronJob keeps around for inspection.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  resources: {}
+
+  # Optional off-site copy. A dump on the same VM survives a bad migration but
+  # not a dead disk — point this at any S3-compatible bucket (Backblaze B2,
+  # Wasabi, MinIO, S3 itself). The chart does NOT template object-store
+  # credentials into its own Secret: create one and name it here.
+  #
+  #   kubectl create secret generic glyphoxa-backup-offsite \
+  #     --from-literal=access-key-id=... --from-literal=secret-access-key=...
+  offsite:
+    enabled: false
+    # S3-compatible endpoint. Leave empty for AWS S3 itself.
+    endpoint: ""
+    bucket: ""
+    # Optional key prefix, e.g. "glyphoxa/" (include the trailing slash).
+    prefix: ""
+    region: us-east-1
+    existingSecret:
+      name: ""
+      accessKeyIdKey: "" # defaults to "access-key-id"
+      secretAccessKeyKey: "" # defaults to "secret-access-key"
+    image:
+      repository: amazon/aws-cli
+      tag: latest
+      pullPolicy: IfNotPresent
+
 # cloudflared Tunnel (#517) — outbound-only public exposure for a deployment
 # with no static IP and no inbound ports (the beta's home VM). When enabled,
 # cloudflared dials out to Cloudflare and forwards to the web Service from
