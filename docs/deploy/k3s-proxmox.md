@@ -107,6 +107,41 @@ router's port forward terminates at the VM with nothing else to install.
 > through a cheap VPS/Cloudflare Tunnel. This is the single most common
 > home-lab blocker — check it before anything else.
 
+### 3b. Alternative: Cloudflare Tunnel (no port forwarding, no static IP)
+
+If inbound ports are not an option — CG-NAT, DS-Lite, a landlord's router, or
+simply not wanting to open 80/443 — skip DynDNS, port forwarding **and**
+cert-manager entirely and let the chart run a `cloudflared` tunnel instead: it
+dials **out** to Cloudflare and forwards requests to the web Service from
+inside the cluster (Cloudflare terminates TLS at its edge).
+
+1. In the Cloudflare Zero Trust dashboard: **Networks → Tunnels → Create a
+   tunnel** (Cloudflared), copy the tunnel **token**.
+2. Values:
+
+   ```yaml
+   ingress:
+     enabled: false           # nothing inbound to route
+
+   cloudflared:
+     enabled: true
+     token: "<tunnel token>"  # or existingSecret.name/key for a Secret you manage
+
+   web:
+     oauth:
+       # NOT derived without an Ingress — set the public origin explicitly
+       redirectUrl: "https://glyphoxa.example.com/auth/discord/callback"
+
+   privacyPolicyUrl: "https://glyphoxa.example.com/privacy"
+   ```
+
+3. Back in the dashboard, add a **Public Hostname** on the tunnel pointing at
+   `http://glyphoxa-web.glyphoxa.svc.cluster.local:8080` (the Service name the
+   install notes print), and register the same redirect URL on the Discord
+   application.
+
+The voice tier is unaffected either way — Discord voice is outbound-only.
+
 ## 4. cert-manager + Let's Encrypt
 
 The chart has an opt-in cert-manager path (`ingress.certManager.*`); install
@@ -173,6 +208,12 @@ groqApiKey: ""
 # nomic-embed-text — otherwise L2 stalls with a WARN loop (everything else
 # keeps working). See docs/configuration.md, "Environment variable reference".
 ollamaUrl: "http://<ollama-host>:11434"
+# ...or drop ollamaUrl and let the chart run one in-cluster instead:
+#   ollama:
+#     enabled: true          # Deployment + Service; ollamaUrl derives from it
+#     persistence:
+#       size: 20Gi           # the model cache — nomic-embed-text is pulled on
+#                            # first start, so the PVC saves a re-download
 
 database:
   password: "<generate a real one; URL-safe characters>"

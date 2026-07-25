@@ -171,7 +171,7 @@ spec:
             - name: GLYPHOXA_PRIVACY_POLICY_URL
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.ollamaUrl }}
+            {{- with (include "glyphoxa.ollamaURL" .) }}
             # Embeddings endpoint (ADR-0011), the same shared value the web pod
             # renders — split-mode parity, one endpoint of record. The pod has
             # no local Ollama, so the binary's loopback default can never work

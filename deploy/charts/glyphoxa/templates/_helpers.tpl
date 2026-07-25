@@ -72,6 +72,33 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-web" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.ollama.fullname" -}}
+{{- printf "%s-ollama" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "glyphoxa.cloudflared.fullname" -}}
+{{- printf "%s-cloudflared" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+The embeddings endpoint the web/voice pods dial (GLYPHOXA_OLLAMA_URL, ADR-0011).
+
+An explicit ollamaUrl always wins (an external server, a host-network Ollama).
+Otherwise, when the chart deploys its OWN Ollama (#517), it derives the
+in-cluster Service URL — same helper the Service name comes from, so the two can
+never drift. With neither, this renders EMPTY and the callers omit the env var:
+the binary keeps its loopback default, which cannot work in a pod, so semantic
+memory (L2) stalls loudly while everything else keeps working — the documented
+pre-#517 behaviour.
+*/}}
+{{- define "glyphoxa.ollamaURL" -}}
+{{- if .Values.ollamaUrl -}}
+{{- .Values.ollamaUrl -}}
+{{- else if .Values.ollama.enabled -}}
+{{- printf "http://%s:%d" (include "glyphoxa.ollama.fullname" .) (int .Values.ollama.port) -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Validate the Web Instance Mode (ADR-0005). `web` serves the operator console +
 Connect API only; `all` additionally drives the voice loop in-process for

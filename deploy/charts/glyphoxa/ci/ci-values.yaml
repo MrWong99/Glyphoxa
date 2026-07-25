@@ -14,6 +14,11 @@ voice:
   # glyphoxa.voice.snowflake helper rejects non-string values.
   guild: "111111111111111111"
   channel: "222222222222222222"
+cloudflared:
+  # A syntactically valid placeholder so the #517 tunnel render path has a token
+  # (enabling the tunnel without one fails the render by design). Not a real
+  # Cloudflare token and never deployed.
+  token: "ci-dummy-cloudflare-tunnel-token"
 web:
   # The Web Instance (#118) is on by default, so a render needs its required
   # OAuth credentials + a non-empty operator allowlist (ADR-0041) or it fails.

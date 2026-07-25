@@ -1,0 +1,127 @@
+suite: cloudflared Tunnel
+# The beta's inbound path (#517): a cloudflared Deployment that dials OUT to
+# Cloudflare and forwards to the web Service from inside the cluster — no
+# hostPort, NodePort, LoadBalancer or Ingress required, which is the whole point
+# on a home VM with no static IP. The tunnel token is a credential and must come
+# from a Secret, never from argv.
+templates:
+  - templates/cloudflared-deployment.yaml
+values:
+  - ../ci/ci-values.yaml
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: fails the render when enabled without a token
+    # Better a loud render failure than a pod crash-looping on an empty token.
+    set:
+      cloudflared:
+        enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: cloudflared.enabled needs a tunnel token
+
+  - it: renders the Deployment and its token Secret when given a token
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: passes the token via TUNNEL_TOKEN from the Secret, never on the command line
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: Deployment
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TUNNEL_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-cloudflared
+                key: tunnel-token
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: ci-dummy-tunnel-token
+
+  - it: runs the tunnel with autoupdate off and its metrics listener armed
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - tunnel
+            - --no-autoupdate
+            - --metrics
+            - 0.0.0.0:2000
+            - run
+
+  - it: gates readiness on established edge connections
+    # /ready reports the tunnel's edge connections, so a pod that cannot reach
+    # Cloudflare never reports Ready.
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /ready
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: metrics
+
+  - it: exposes no host ports — the tunnel is outbound-only
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].ports[0].hostPort
+
+  - it: rolls the pod when a chart-rendered token changes
+    set:
+      cloudflared:
+        enabled: true
+        token: ci-dummy-tunnel-token
+    documentIndex: 0
+    asserts:
+      - exists:
+          path: spec.template.metadata.annotations["checksum/token"]
+
+  - it: references an externally managed Secret and renders none of its own
+    set:
+      cloudflared:
+        enabled: true
+        existingSecret:
+          name: my-tunnel
+          key: token
+    asserts:
+      - hasDocuments:
+          count: 1 # the Deployment only — the operator owns the Secret
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TUNNEL_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: my-tunnel
+                key: token
+      - notExists:
+          path: spec.template.metadata.annotations["checksum/token"]

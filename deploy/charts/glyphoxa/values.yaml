@@ -48,7 +48,72 @@ groqApiKey: ""
 # on the web and voice pods (one shared value, so split-mode deployments keep
 # a single endpoint of record).
 # k3d example (Ollama on the host): http://host.k3d.internal:11434
+# Leave it empty with `ollama.enabled` (below) to have the chart deploy an
+# in-cluster Ollama and point the pods at ITS Service instead.
 ollamaUrl: ""
+
+# In-cluster Ollama for the embeddings Component (#517). Off by default — the
+# chart's historical posture is "bring your own endpoint" (`ollamaUrl`) — but a
+# self-contained install (the public beta's home-VM k3s) can have the chart run
+# one: a Deployment + ClusterIP Service, with `ollamaUrl` DERIVED from that
+# Service when left empty above. An explicit `ollamaUrl` always wins, so
+# enabling both points the app at the external server (the in-cluster one then
+# just sits there — disable it).
+ollama:
+  enabled: false
+  image:
+    repository: ollama/ollama
+    # Pin this for a reproducible install: `latest` is a moving target and the
+    # model cache below outlives the pod, so an unexpected engine bump is the
+    # one upgrade that can surprise a running deployment.
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 11434
+  # The embedding model pulled on first start (ADR-0011: v1.0 embeds through
+  # nomic-embed-text). Empty skips the pull entirely — for an image that already
+  # bakes the model in, or an operator who pulls by hand.
+  model: nomic-embed-text
+  # The model cache. A PVC by default so a restart does not re-download the
+  # model; set enabled=false for an ephemeral emptyDir (every restart re-pulls).
+  persistence:
+    enabled: true
+    size: 20Gi
+    # storageClassName: ""  # use the cluster default when unset
+  resources: {}
+
+# cloudflared Tunnel (#517) — outbound-only public exposure for a deployment
+# with no static IP and no inbound ports (the beta's home VM). When enabled,
+# cloudflared dials out to Cloudflare and forwards to the web Service from
+# inside the cluster, so NO Ingress, NodePort or LoadBalancer is needed. The
+# tunnel's public hostname → service mapping is configured in the Cloudflare
+# Zero Trust dashboard (a token-managed remote tunnel); point it at the web
+# Service DNS name the install notes print.
+cloudflared:
+  enabled: false
+  # The tunnel token from the Cloudflare Zero Trust dashboard (Networks →
+  # Tunnels). The chart renders it into its OWN Secret (separate from the app
+  # Secret, so rotating a tunnel token does not roll the DB credentials) and the
+  # pod reads it via TUNNEL_TOKEN — never argv. Enabling the tunnel with neither
+  # this nor existingSecret.name fails the render.
+  token: ""
+  # Reference a Secret you manage instead of letting the chart render one. When
+  # `name` is set it wins outright and `token` is ignored.
+  existingSecret:
+    name: ""
+    key: "" # defaults to "tunnel-token"
+  image:
+    repository: cloudflare/cloudflared
+    # Pin this for a reproducible install (cloudflared releases roughly monthly).
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Two replicas give the tunnel redundant edge connections; one is fine for a
+  # single-node home cluster (the default — nothing else here is HA).
+  replicas: 1
+  # cloudflared's own metrics/health listener. /ready reports the number of
+  # established edge connections and backs both probes; it is never exposed by a
+  # Service.
+  metricsPort: 2000
+  resources: {}
 
 # The deployment's published privacy-policy page (#519). The Bot links it from
 # the transcription disclosure it posts in the voice channel at Voice Session

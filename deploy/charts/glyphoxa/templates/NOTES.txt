@@ -39,6 +39,47 @@ What this release stands up (ADR-0034):
     v1.0 (replicas are not a tunable).
 {{- end }}
 
+{{- if .Values.ollama.enabled }}
+  - An Ollama Deployment + Service for the embeddings Component (#517, ADR-0011),
+    reachable in-cluster at:
+      {{ include "glyphoxa.ollama.fullname" . }}:{{ .Values.ollama.port }}
+    The web/voice pods dial it via GLYPHOXA_OLLAMA_URL = {{ include "glyphoxa.ollamaURL" . }}.
+{{- if .Values.ollama.model }}
+    It pulls {{ .Values.ollama.model }} on first start; until that download
+    finishes, semantic memory (L2) stalls loudly while everything else works.
+    Watch it with:
+      kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "glyphoxa.ollama.fullname" . }} -f
+{{- else }}
+    No model is pre-pulled (ollama.model is empty) — pull one yourself before
+    semantic memory (L2) can work:
+      kubectl -n {{ .Release.Namespace }} exec deployment/{{ include "glyphoxa.ollama.fullname" . }} -- ollama pull nomic-embed-text
+{{- end }}
+{{- end }}
+{{- if .Values.cloudflared.enabled }}
+  - A cloudflared Deployment ({{ .Values.cloudflared.replicas }} replica(s)) holding an
+    OUTBOUND tunnel to Cloudflare — no inbound port, Ingress or LoadBalancer is
+    needed for the console to be reachable from the internet.
+
+    Finish the wiring in the Cloudflare Zero Trust dashboard (Networks →
+    Tunnels → your tunnel → Public Hostname): route your hostname to
+{{- if .Values.web.enabled }}
+
+      http://{{ include "glyphoxa.web.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.web.service.port }}
+{{- else }}
+
+      the Service you want published (web.enabled is false in this release).
+{{- end }}
+
+    Then make the app advertise the SAME public origin, or the Discord login
+    dead-ends on a redirect_uri mismatch: set web.oauth.redirectUrl to
+    https://<your-hostname>/auth/discord/callback and register it on the Discord
+    application (ADR-0016), and set privacyPolicyUrl to
+    https://<your-hostname>/privacy so the Bot's transcription disclosure links
+    a reachable page (#519).
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.cloudflared.fullname" . }}
+{{- end }}
+
 Verify the schema is current:
 
   kubectl -n {{ .Release.Namespace }} run glyphoxa-migrate-check --rm -it --restart=Never \

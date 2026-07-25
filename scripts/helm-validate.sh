@@ -163,6 +163,18 @@ validate_path open-admission \
   --set-string 'plans.catalog.plans[0].display_name=BYOK Free' \
   --set plans.catalog.plans[0].monthly_price_usd=0
 
+# The self-contained beta topology (#517): the in-cluster Ollama (Deployment +
+# Service + model-cache PVC) and the cloudflared Tunnel (Deployment + token
+# Secret) must each render schema-valid, and together with the rest of the
+# chart — that combination IS the home-VM install. The token is a throwaway
+# placeholder from ci-values; nothing here is deployed.
+validate_path ollama-in-cluster --set ollama.enabled=true
+validate_path cloudflared-tunnel --set cloudflared.enabled=true
+validate_path beta-home-vm \
+  --set ollama.enabled=true \
+  --set cloudflared.enabled=true \
+  --set ingress.enabled=false
+
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the

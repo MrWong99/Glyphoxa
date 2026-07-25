@@ -1,0 +1,130 @@
+suite: in-cluster Ollama
+# The optional embeddings server (#517): OFF by default (the chart's historical
+# "bring your own endpoint" posture), and when enabled a Deployment + ClusterIP
+# Service + model-cache PVC that `ollamaUrl` defaults to. v1.0 embeds through
+# Ollama only (ADR-0011), so this is what makes a self-contained install (the
+# beta's home-VM k3s) able to do semantic memory at all.
+templates:
+  - templates/ollama-deployment.yaml
+  - templates/ollama-service.yaml
+values:
+  - ../ci/ci-values.yaml
+tests:
+  - it: renders nothing by default
+    # Off unless asked for: an install that already points ollamaUrl at an
+    # external server must not also grow a second, idle Ollama.
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a Deployment plus its model-cache PVC when enabled
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: names the workload and Service identically so the derived URL resolves
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-ollama
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0].port
+          value: 11434
+
+  - it: binds Ollama to all interfaces so the Service can reach it
+    # The image's default is loopback; a Service in front of that never answers.
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OLLAMA_HOST
+            value: 0.0.0.0:11434
+
+  - it: pulls the default embedding model on first start
+    # nomic-embed-text is the model v1.0 embeds with (ADR-0011). The pull runs
+    # postStart (it needs the server up, which an initContainer cannot assume).
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].lifecycle.postStart.exec.command[2]
+          pattern: ollama pull "nomic-embed-text"
+
+  - it: skips the pull hook entirely when no model is configured
+    # An image that bakes the model in (or an operator pulling by hand) gets a
+    # plain container with no lifecycle hook.
+    set:
+      ollama:
+        enabled: true
+        model: ""
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].lifecycle
+
+  - it: uses Recreate so the ReadWriteOnce model cache is never contended
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: keeps the model cache PVC on uninstall
+    # Re-downloading gigabytes because someone ran `helm uninstall` is not a
+    # cost this chart imposes.
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: spec.resources.requests.storage
+          value: 20Gi
+
+  - it: falls back to an emptyDir when persistence is disabled
+    set:
+      ollama:
+        enabled: true
+        persistence:
+          enabled: false
+    template: templates/ollama-deployment.yaml
+    asserts:
+      - hasDocuments:
+          count: 1 # no PVC
+      - exists:
+          path: spec.template.spec.volumes[0].emptyDir
