@@ -29,13 +29,23 @@ const (
 	writeTimeout = 5 * time.Second
 )
 
+// lineOp is one item on the relay's writer queue: an UPSERT of a projected Line,
+// or the DELETE that reconciles a never-delivered line back out (#437, ADR-0040
+// amendment). Both ride the SAME queue so FIFO ordering guarantees a retraction
+// can never overtake the UPSERT it undoes — and so the flush barrier at Finalize
+// still drains everything before the authoritative COUNT(*).
+type lineOp struct {
+	line   storage.TranscriptLine
+	delete bool
+}
+
 // persist tees one emitted Line onto the writer queue, keyed for the coalescing
 // UPSERT and carrying seq as the ordering key. Caller holds r.mu; the send is
 // non-blocking (the bus must not block) so an overflow drops + logs. No-op when
 // persistence is disabled (nil queue).
 func (r *Relay) persist(sid string, l Line, seq uint64) {
 	sess := r.proj.Session(sid)
-	line := &storage.TranscriptLine{
+	line := storage.TranscriptLine{
 		VoiceSessionID:       sess.ID,
 		CampaignID:           sess.CampaignID,
 		LineID:               l.ID,
@@ -47,20 +57,43 @@ func (r *Relay) persist(sid string, l Line, seq uint64) {
 		Text:                 l.Text,
 		SpeakerDiscordUserID: l.SpeakerID, // #278: "" (unattributed / Agent) → NULLIF → NULL in storage
 	}
-	if !r.queue.Enqueue(line) {
+	if !r.queue.Enqueue(&lineOp{line: line}) {
 		r.log.Warn("transcript: persist queue full, dropping line", "line_id", l.ID)
 	}
 }
 
+// unpersist tees the retraction of one never-delivered line onto the writer
+// queue (#437): the turn ended (or the session finalized) without a single
+// delivered sentence, so the optimistically-written row must not outlive the
+// session. Same non-blocking discipline as persist — a dropped retraction leaves
+// a stale row rather than blocking the bus, and is logged. Caller holds r.mu.
+func (r *Relay) unpersist(sid, lineID string) {
+	sess := r.proj.Session(sid)
+	op := &lineOp{
+		delete: true,
+		line:   storage.TranscriptLine{VoiceSessionID: sess.ID, LineID: lineID},
+	}
+	if !r.queue.Enqueue(op) {
+		r.log.Warn("transcript: persist queue full, dropping line retraction", "line_id", lineID)
+	}
+}
+
 // writeLine is the Relay's flush sink — the write half of the single writer
-// goroutine (#74): one serial, bounded UPSERT per queued line. A write failure
-// is logged but does not stop the loop — durability is best-effort and the next
-// Stop's COUNT(*) is still authoritative over whatever landed.
-func (r *Relay) writeLine(l *storage.TranscriptLine) {
+// goroutine (#74): one serial, bounded UPSERT (or #437 retraction DELETE) per
+// queued op. A write failure is logged but does not stop the loop — durability
+// is best-effort and the next Stop's COUNT(*) is still authoritative over
+// whatever landed.
+func (r *Relay) writeLine(op *lineOp) {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	if err := r.store.UpsertTranscriptLine(ctx, *l); err != nil {
-		r.log.Warn("transcript: persist line", "err", err, "line_id", l.LineID)
+	if op.delete {
+		if err := r.store.DeleteTranscriptLine(ctx, op.line.VoiceSessionID, op.line.LineID); err != nil {
+			r.log.Warn("transcript: retract undelivered line", "err", err, "line_id", op.line.LineID)
+		}
+		return
+	}
+	if err := r.store.UpsertTranscriptLine(ctx, op.line); err != nil {
+		r.log.Warn("transcript: persist line", "err", err, "line_id", op.line.LineID)
 	}
 }
 
