@@ -14,6 +14,7 @@ import { Configuration } from "@/screens/configuration/Configuration";
 import { Campaign } from "@/screens/campaign/Campaign";
 import { Session } from "@/screens/session/Session";
 import { Placeholder } from "@/screens/Placeholder";
+import { RootEntry } from "@/screens/landing/RootEntry";
 import { Imprint } from "@/screens/legal/Imprint";
 import { Privacy } from "@/screens/legal/Privacy";
 import { Terms } from "@/screens/legal/Terms";
@@ -23,8 +24,6 @@ import { Terms } from "@/screens/legal/Terms";
 // (ADR-0039) the slug is a thin pass-through. The shell is wrapped in the
 // AuthGate (ADR-0016): it probes GetCurrentUser at boot and redirects to /login
 // on a 401, then hands the real operator identity to the shell.
-
-const DEFAULT_TENANT = "default";
 
 const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -82,16 +81,14 @@ const nutzungsbedingungenRoute = createRoute({
   component: Terms,
 });
 
-// "/" → the default tenant's Configuration (boot flow stand-in for this stage).
+// "/" → the public landing page for a visitor with no session, and a straight
+// redirect into the app for one who has (#521). The decision needs the session
+// probe's answer, so it lives in the component rather than a beforeLoad
+// redirect — a redirect here could only ever guess.
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  beforeLoad: () => {
-    throw redirect({
-      to: "/t/$tenantSlug/$screen",
-      params: { tenantSlug: DEFAULT_TENANT, screen: "configuration" },
-    });
-  },
+  component: RootEntry,
 });
 
 // /t/:tenantSlug — the persistent shell hosting the screen Outlet, gated by the

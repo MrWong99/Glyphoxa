@@ -265,8 +265,39 @@ plans:
   #         included_usage_usd: 15
   #         limits:
   #           max_campaigns: 10
+  #
+  # The two plans below are the PUBLIC-BETA LAUNCH DEFAULTS (#521): a
+  # platform-keyed trial that spends the deployment's own provider keys up to a
+  # small monthly allowance, and a free BYOK tier for sustained use once the
+  # trial runs out. They only reach the database when plans.enabled is true —
+  # a self-host install that never syncs a catalog is unaffected. Adjust the
+  # allowance to what you are willing to fund; the landing-page copy speaks of
+  # "a small monthly allowance" rather than a number, so changing it here does
+  # not make the marketing copy a lie.
+  #
+  # Point web.signupPlanSlug at whichever of these an open-mode signup should
+  # land on (ADR-0055) — `beta-trial` for the launch posture.
   catalog:
-    plans: []
+    plans:
+      - slug: beta-trial
+        display_name: Beta Trial
+        description: >-
+          Try Glyphoxa on the platform's provider keys, up to a small monthly
+          usage allowance. No card, no charge — when the allowance is spent,
+          switch to your own keys.
+        monthly_price_usd: 0
+        key_source: platform
+        # The monthly estimated-USD provider-usage allowance (ADR-0046 price
+        # map). Operator-adjustable: this is money you spend on behalf of trial
+        # Tenants, so size it to your budget.
+        included_usage_usd: 5
+      - slug: byok-free
+        display_name: BYOK Free
+        description: >-
+          Bring your own provider keys (ElevenLabs, Groq, Gemini …). Unlimited
+          by us, billed to you by the providers you configure.
+        monthly_price_usd: 0
+        key_source: byok
 
 # Voice-mode Deployment (#36): the single image run as `glyphoxa -mode voice`,
 # joining one Discord guild+channel and giving the seeded NPC a live voice loop.

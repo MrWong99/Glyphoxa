@@ -147,6 +147,16 @@ validate_path plans-sync \
   --set plans.catalog.plans[0].monthly_price_usd=20 \
   --set-string plans.catalog.plans[0].key_source=platform
 
+# The public-beta launch posture (#521): plans.enabled with NO catalog overrides
+# — i.e. the shipped default catalog (beta-trial + byok-free) — bound to an
+# open-admission signup. This is the render an operator gets by following the
+# launch docs, so it must be schema-valid as-is.
+validate_path beta-launch \
+  --set plans.enabled=true \
+  --set web.admissionMode=open \
+  --set-string web.signupPlanSlug=beta-trial \
+  --set-string web.operatorIds=""
+
 # The open-admission render path (ADR-0055): web.admissionMode=open relaxes the
 # operator-allowlist requirement — the list becomes the platform-admin roster
 # and may be empty (rendered as an empty operator-ids key) — and requires a
