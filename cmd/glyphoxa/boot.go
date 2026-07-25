@@ -349,6 +349,16 @@ func sttStreaming(getenv func(string) string) bool {
 	return true
 }
 
+// privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published
+// privacy-policy page, which the Bot links from the transcription disclosure it
+// posts at Voice Session start (#519). Trimmed; blank means "not published", and
+// the disclosure then carries no link rather than a broken one. It is deliberately
+// NOT validated as a URL: an operator's reverse-proxied path is theirs to get
+// right, and a typo must never keep the disclosure itself off the channel.
+func privacyPolicyURL(getenv func(string) string) string {
+	return strings.TrimSpace(getenv("GLYPHOXA_PRIVACY_POLICY_URL"))
+}
+
 // defaultGatewayIdentifyWarn is the per-application 24h IDENTIFY count above which
 // the gateway-budget observer warns (#486). It sits well below Discord's
 // 1000/token/24h hard limit — exhausting that budget resets the token and drops

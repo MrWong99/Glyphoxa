@@ -254,6 +254,46 @@ tests:
             name: GLYPHOXA_OLLAMA_URL
             value: http://host.k3d.internal:11434
 
+
+  - it: omits GLYPHOXA_PRIVACY_POLICY_URL when neither privacyPolicyUrl nor an Ingress host exists
+    # #519: with nothing trustworthy to advertise the env var is absent and the
+    # Bot posts its transcription disclosure WITHOUT a link — never a broken one.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_PRIVACY_POLICY_URL
+          any: true
+
+  - it: derives GLYPHOXA_PRIVACY_POLICY_URL from the Ingress host and scheme
+    # Same host + scheme the console is served on, plus the SPA's /privacy route
+    # (#518), so the link the players get can never drift from the deployment.
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        certManager:
+          enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_PRIVACY_POLICY_URL
+            value: https://glyphoxa.example.com/privacy
+
+  - it: lets an explicit privacyPolicyUrl win over the Ingress-derived one
+    # The policy may live on a company site; an operator override is authoritative.
+    set:
+      privacyPolicyUrl: https://legal.example.org/glyphoxa-privacy
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_PRIVACY_POLICY_URL
+            value: https://legal.example.org/glyphoxa-privacy
   - it: carries GLYPHOXA_SECRET to decrypt BYOK tenant tokens
     # ADR-0057 (d): a worker in the shared pool holds BYOK Tenants' Discord clients
     # and must decrypt their bot tokens itself, so the voice role now reads the

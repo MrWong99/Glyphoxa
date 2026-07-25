@@ -2,15 +2,12 @@ package wirenpc
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
-	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -82,25 +79,10 @@ const tapeDisclosureContent = "**Session Highlights are enabled.** With your con
 	"Only players who press **Consent** are recorded — press it to opt in, or **Revoke** to opt out at any time. " +
 	"Nothing leaves this server without an explicit GM action."
 
-// postTapeDisclosure posts the consent-disclosure message with Consent/Revoke
-// buttons to the voice channel after the Bot joins (#306). It is a package var so
-// tests substitute a spy and connectAndServe stays free of a live Discord REST. The
-// production implementation sends via the standing client's REST.
-var postTapeDisclosure = func(ctx context.Context, client *bot.Client, channel snowflake.ID, campaignID uuid.UUID) error {
-	msg := discord.MessageCreate{
-		Content: tapeDisclosureContent,
-		Components: []discord.LayoutComponent{
-			discord.NewActionRow(
-				discord.NewPrimaryButton("Consent", tapeGrantCustomID(campaignID)),
-				discord.NewDangerButton("Revoke", tapeRevokeCustomID(campaignID)),
-			),
-		},
-	}
-	if _, err := client.Rest.CreateMessage(channel, msg); err != nil {
-		return fmt.Errorf("wirenpc: post tape disclosure: %w", err)
-	}
-	return nil
-}
+// The tape disclosure is no longer posted on its own: since #519 it rides the
+// single session-start disclosure message (sessiondisclosure.go), which carries
+// the always-on transcription notice and — for a tape-armed Campaign — this text
+// plus the Consent/Revoke buttons.
 
 // Consent reply text (#306). Centralised here so both the all-mode presence
 // handler and the voice-mode listener reply identically.

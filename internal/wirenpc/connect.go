@@ -39,6 +39,12 @@ func publishConnectionState(bus *voiceevent.Bus, state voiceevent.ConnectionStat
 // join-then-immediate-fail cycle keeps backing off. Any error — or a clean return (a dropped
 // gateway often reports none) — flows back to runWithReconnect, which decides
 // whether to retry; only a cancelled ctx ends the loop.
+//
+// disclosed carries the once-per-Voice-Session guard for the session-start
+// disclosure (#519) across the cycles of one Run — the message must not repeat
+// on every reconnect. A nil pointer posts nothing (the paths that build a cycle
+// outside Run).
+
 // newDiscordClient is the disgo constructor seam (mirrors newLLM/newSTT/newTTS):
 // a test swaps it to assert the owned path calls it and the shared-client path
 // does NOT. Production always uses disgo.New.
@@ -113,7 +119,7 @@ func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *sl
 	return c, true, nil
 }
 
-func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
+func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func(), disclosed *sessionOnce) error {
 	// Per-cycle context: everything this cycle spawns — the stage subscriber's
 	// TTL-sweep goroutine (stageSub.Start), the Discord gateway, and the audio
 	// loop — is bound to cycleCtx, so the deferred cancel reaps it at cycle end.
@@ -271,14 +277,17 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// grant/revoke buttons. A nil Tape (campaign not armed) makes both inert, so the
 	// loop is unchanged.
 	defer wireTapeConsent(cycleCtx, bus, cfg.Tape, cfg.CampaignID, cfg.TapeConsent, cfg.TapeConsentReconcileInterval, log)()
-	if cfg.Tape != nil {
-		if err := postTapeDisclosure(cycleCtx, client, channel, cfg.CampaignID); err != nil {
-			// A failed disclosure post must not tear down the session — capture is
-			// still consent-gated (only prior consenters are taped), and the operator
-			// can re-post. Log and continue.
-			log.Warn("post tape consent disclosure", "err", err)
-		}
-	}
+
+	// Session-start disclosure (#519, and #306's consent flow folded into it): the
+	// voice channel is the only surface that reaches the players, and transcription
+	// is always on — so the Bot posts the transcription notice (plus the tape's
+	// disclosure + Consent/Revoke buttons when the Campaign is armed) to the bound
+	// text chat as ONE message. Guarded by disclosed so it lands once per Voice
+	// Session, not once per reconnect cycle. Best-effort: a failed post must not
+	// tear the session down — capture stays consent-gated (only prior consenters
+	// are taped) and the operator can re-post — so it is logged and the loop
+	// continues.
+	discloseSession(cycleCtx, client, channel, cfg, disclosed, log)
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
 	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with

@@ -270,6 +270,27 @@ render fails fast (required). Keeping the resolution here means the app Secret
 {{- end }}
 
 {{/*
+The privacy-policy URL the Bot links from its Voice Session transcription
+disclosure (GLYPHOXA_PRIVACY_POLICY_URL, #519).
+
+An explicit privacyPolicyUrl always wins (the policy may live on another host).
+Otherwise it is DERIVED from the Ingress — same host and scheme the console is
+served on, plus the SPA's /privacy route — so the link can never drift from the
+deployment the players are actually using. With no explicit value and no
+Ingress there is nothing trustworthy to advertise, so this renders EMPTY and the
+callers omit the env var entirely: the disclosure still posts, just without a
+link. Deliberately not `required` — a missing policy link must never keep a
+Voice Session from starting.
+*/}}
+{{- define "glyphoxa.privacyPolicyURL" -}}
+{{- if .Values.privacyPolicyUrl -}}
+{{- .Values.privacyPolicyUrl -}}
+{{- else if and .Values.ingress.enabled .Values.ingress.host -}}
+{{- printf "%s://%s/privacy" (include "glyphoxa.web.ingressScheme" .) .Values.ingress.host -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
 first, then the migrate Job, then the seed Job, then the serving workloads. All
 are pre-install/pre-upgrade hooks EXCEPT the voice + web Deployments, which are

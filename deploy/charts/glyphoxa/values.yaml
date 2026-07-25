@@ -50,6 +50,16 @@ groqApiKey: ""
 # k3d example (Ollama on the host): http://host.k3d.internal:11434
 ollamaUrl: ""
 
+# The deployment's published privacy-policy page (#519). The Bot links it from
+# the transcription disclosure it posts in the voice channel at Voice Session
+# start — the players at the table are data subjects who may never open the web
+# app, so that message is the only surface that reaches them. Left empty it is
+# DERIVED from ingress.host (+ the SPA's /privacy route) when the Ingress is
+# enabled, and otherwise omitted entirely: the disclosure then posts without a
+# link rather than with a broken one. An explicit value always wins — set it
+# when the policy lives on another host (a company site, a static page).
+privacyPolicyUrl: ""
+
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point
 # the migrate Job (and later the serving workloads) at an external Postgres
