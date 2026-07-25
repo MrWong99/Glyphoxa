@@ -1,8 +1,10 @@
+import { useId, useState } from "react";
 import { Dices } from "lucide-react";
 import { useQuery } from "@connectrpc/connect-query";
 
 import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
+import { LegalFooter } from "@/components/LegalFooter";
 
 import "./login.css";
 
@@ -19,6 +21,14 @@ import "./login.css";
 // is non-leaky, never echoing the rejected account's id or WHY it was denied,
 // so the copy must stay mode-neutral. A normal first visit renders unchanged.
 //
+// In `open` mode this screen IS the signup screen, so it carries the AUP/ToS
+// acknowledgment (#518): the Discord OAuth start is disabled until the visitor
+// ticks the box that links the Nutzungsbedingungen and the Datenschutzerklärung.
+// In `allowlist` mode nothing changes — those operators agreed to their own
+// deployment's terms by running it — and the fail-safe default (probe loading or
+// errored) is allowlist framing, so a flaky probe never blocks a legitimate
+// operator login behind a checkbox they cannot see the point of.
+//
 // The lede frames signup per the deployment's Admission Mode (ADR-0055):
 // GetAdmissionMode is public (there is no session yet on this screen), and only
 // an explicit `open` answer switches the copy to self-signup framing — while
@@ -28,6 +38,10 @@ import "./login.css";
 export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
   const { data } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
+  const [accepted, setAccepted] = useState(false);
+  const aupId = useId();
+  // Open mode = signing up: the acknowledgment gates the OAuth start.
+  const blocked = open && !accepted;
 
   return (
     <div className="gx-login">
@@ -48,9 +62,34 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
           </p>
         )}
 
-        <a className="gx-btn gx-btn--primary gx-btn--lg gx-btn--block" href="/auth/discord/login">
-          Continue with Discord
-        </a>
+        {open && (
+          <label className="gx-login__consent" htmlFor={aupId}>
+            <input
+              id={aupId}
+              type="checkbox"
+              checked={accepted}
+              onChange={(e) => setAccepted(e.target.checked)}
+            />
+            <span>
+              I agree to the <a href="/terms">Nutzungsbedingungen</a> and have read the{" "}
+              <a href="/privacy">Datenschutzerklärung</a>.
+            </span>
+          </label>
+        )}
+
+        {/* An anchor cannot be `disabled`, so the blocked state is rendered as a
+            real disabled button — aria-disabled alone would still navigate on
+            click, and a signup that slips past the acknowledgment is the one
+            thing this gate exists to prevent. */}
+        {blocked ? (
+          <Button variant="primary" size="lg" block disabled>
+            Continue with Discord
+          </Button>
+        ) : (
+          <a className="gx-btn gx-btn--primary gx-btn--lg gx-btn--block" href="/auth/discord/login">
+            Continue with Discord
+          </a>
+        )}
 
         <div className="gx-login__soon">
           <Button variant="secondary" block disabled>
@@ -61,6 +100,8 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
           </Button>
         </div>
       </div>
+
+      <LegalFooter />
     </div>
   );
 }

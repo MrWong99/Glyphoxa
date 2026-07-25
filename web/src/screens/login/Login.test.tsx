@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -84,9 +84,66 @@ describe("Login", () => {
   it("frames self-signup when the deployment admission mode is open", async () => {
     await renderLogin(<Login />, backend({ mode: AdmissionMode.OPEN }));
     expect(await screen.findByText(/creates your own table/i)).toBeInTheDocument();
-    // ADR-0055: only the copy changes — the OAuth start anchor stays exactly as is.
+    // ADR-0055 changes the copy; #518 additionally gates the OAuth start behind
+    // the AUP acknowledgment — once ticked, the anchor is exactly as it was.
+    fireEvent.click(screen.getByRole("checkbox"));
     const link = screen.getByRole("link", { name: /continue with discord/i });
     expect(link).toHaveAttribute("href", "/auth/discord/login");
+  });
+
+  it("requires the AUP acknowledgment before an open-mode signup can start", async () => {
+    // #518: in open admission mode this screen IS the signup screen, so a
+    // stranger cannot reach Discord OAuth without accepting the terms. The
+    // blocked state is a real disabled button — an aria-disabled anchor would
+    // still navigate on click.
+    await renderLogin(<Login />, backend({ mode: AdmissionMode.OPEN }));
+    await screen.findByText(/creates your own table/i);
+
+    expect(screen.queryByRole("link", { name: /continue with discord/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /continue with discord/i })).toBeDisabled();
+
+    const box = screen.getByRole("checkbox");
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+
+    expect(screen.getByRole("link", { name: /continue with discord/i })).toHaveAttribute(
+      "href",
+      "/auth/discord/login",
+    );
+    expect(screen.queryByRole("button", { name: /continue with discord/i })).not.toBeInTheDocument();
+  });
+
+  it("links the terms and the privacy policy from the acknowledgment", async () => {
+    await renderLogin(<Login />, backend({ mode: AdmissionMode.OPEN }));
+    await screen.findByText(/creates your own table/i);
+    // Both documents are unauthenticated routes, so a visitor can read them
+    // before deciding — that is the point of asking here. Scoped to the
+    // acknowledgment: the always-present legal footer links them too.
+    const label = screen.getByRole("checkbox").closest("label");
+    expect(label).not.toBeNull();
+    const consent = within(label as HTMLElement);
+    expect(consent.getByRole("link", { name: "Nutzungsbedingungen" })).toHaveAttribute(
+      "href",
+      "/terms",
+    );
+    expect(consent.getByRole("link", { name: "Datenschutzerklärung" })).toHaveAttribute(
+      "href",
+      "/privacy",
+    );
+  });
+
+  it("asks for no acknowledgment in allowlist mode", async () => {
+    // An allowlisted operator agreed to their own deployment's terms by running
+    // it; the pre-#518 flow is unchanged for them.
+    await renderLogin(<Login />, backend({ mode: AdmissionMode.ALLOWLIST }));
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /continue with discord/i })).toBeInTheDocument();
+  });
+
+  it("shows the legal footer to a visitor with no session", async () => {
+    await renderLogin(<Login />);
+    expect(screen.getByRole("link", { name: "Impressum" })).toHaveAttribute("href", "/imprint");
+    expect(screen.getByRole("link", { name: "Datenschutz" })).toHaveAttribute("href", "/privacy");
   });
 
   it("falls back to the allowlist framing when the admission probe errors", async () => {

@@ -14,6 +14,9 @@ import { Configuration } from "@/screens/configuration/Configuration";
 import { Campaign } from "@/screens/campaign/Campaign";
 import { Session } from "@/screens/session/Session";
 import { Placeholder } from "@/screens/Placeholder";
+import { Imprint } from "@/screens/legal/Imprint";
+import { Privacy } from "@/screens/legal/Privacy";
+import { Terms } from "@/screens/legal/Terms";
 
 // Code-based route tree (ADR-0018). The Tenant lives in the path
 // (/t/:tenantSlug/...) so URLs are bookmarkable; for the single-operator MVP
@@ -54,6 +57,29 @@ const onboardingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/onboarding/create-tenant",
   component: CreateTenant,
+});
+
+// The legal documents (#518): Impressum, Datenschutzerklärung and
+// Nutzungsbedingungen. Top-level siblings of /login — OUTSIDE the tenant shell
+// and the AuthGate — because they must be readable with no session at all: by a
+// visitor deciding whether to sign up, and by a player at a transcribed table
+// who will never open the app. /privacy is additionally a Go↔ops contract: the
+// chart derives GLYPHOXA_PRIVACY_POLICY_URL as <host>/privacy for the Bot's
+// in-channel transcription disclosure (#519), so the path must not drift.
+// The German aliases are there because that is what people type.
+// Each route is declared individually rather than mapped from a list: TanStack
+// Router infers the typed route registry from the literal `addChildren` tree, so
+// a spread of mapped routes would compile but leave <Link to="/privacy"> a type
+// error (and unnavigable).
+const imprintRoute = createRoute({ getParentRoute: () => rootRoute, path: "/imprint", component: Imprint });
+const impressumRoute = createRoute({ getParentRoute: () => rootRoute, path: "/impressum", component: Imprint });
+const privacyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/privacy", component: Privacy });
+const datenschutzRoute = createRoute({ getParentRoute: () => rootRoute, path: "/datenschutz", component: Privacy });
+const termsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/terms", component: Terms });
+const nutzungsbedingungenRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/nutzungsbedingungen",
+  component: Terms,
 });
 
 // "/" → the default tenant's Configuration (boot flow stand-in for this stage).
@@ -118,6 +144,12 @@ export const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
   onboardingRoute,
+  imprintRoute,
+  impressumRoute,
+  privacyRoute,
+  datenschutzRoute,
+  termsRoute,
+  nutzungsbedingungenRoute,
   tenantRoute.addChildren([tenantIndexRoute, screenRoute]),
 ]);
 

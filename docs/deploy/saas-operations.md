@@ -195,6 +195,9 @@ schema change.
 - [ ] Provider dashboards (Groq/ElevenLabs) checked against the ledger's
       estimates for the first month — calibrate expectations; the price map is
       an estimate by design.
+- [ ] Legal pages filled in and served ([legal-pages.md](legal-pages.md)) —
+      the Impressum placeholders MUST be replaced before DNS points at you, and
+      the Datenschutzerklärung must match the providers you actually use.
 - [ ] Backups running and restore-tested ([backup-restore.md](backup-restore.md) —
       the chart's `backup.enabled` CronJob, ideally with `backup.offsite.*`;
       on a scripted cloud install, `deploy/saas/install.sh`'s backup option +

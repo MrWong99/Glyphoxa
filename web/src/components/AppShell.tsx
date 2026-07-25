@@ -7,6 +7,7 @@ import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
 import { SidebarUser } from "./SidebarUser";
+import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
 
 // The persistent app shell — sidebar + topbar — ported from the handoff
@@ -98,6 +99,11 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
         <main className="gx-content">
           <Outlet />
         </main>
+
+        {/* Impressum / Datenschutz / Nutzungsbedingungen on every app screen
+            (#518) — German law wants them reachable from anywhere, not buried
+            in a settings page. */}
+        <LegalFooter />
       </div>
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not

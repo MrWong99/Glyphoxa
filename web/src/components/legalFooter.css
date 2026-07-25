@@ -1,0 +1,28 @@
+/* The always-present legal footer (#518). Deliberately quiet: small, subdued,
+   and out of the way on the app screens, but present on every one of them —
+   including login/signup, where it is the only place a visitor can reach the
+   Impressum and the privacy policy before creating anything. */
+.gx-legalfooter {
+  padding: 10px 16px;
+  text-align: center;
+}
+
+.gx-legalfooter nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  justify-content: center;
+}
+
+.gx-legalfooter a {
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+  text-decoration: none;
+}
+
+.gx-legalfooter a:hover,
+.gx-legalfooter a:focus-visible {
+  color: var(--text-strong, #efeaf7);
+  text-decoration: underline;
+}

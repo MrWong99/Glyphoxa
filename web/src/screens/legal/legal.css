@@ -1,0 +1,104 @@
+/* The static legal documents (#518): Impressum, Datenschutzerklärung,
+   Nutzungsbedingungen. Long-form reading, so this is a plain measure-limited
+   column on the app surface — no shell chrome, no cards, nothing that competes
+   with the text. */
+.gx-legal {
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 32px 20px 48px;
+}
+
+.gx-legal__doc {
+  width: 100%;
+  max-width: 68ch;
+  line-height: 1.65;
+}
+
+.gx-legal__brand {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 20px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.gx-legal__sigil {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  color: #fff;
+  background: linear-gradient(135deg, #9059ff, #00ddff);
+}
+
+.gx-legal__title {
+  margin: 0 0 4px;
+  font-size: 28px;
+}
+
+.gx-legal__lede {
+  margin: 0 0 12px;
+  color: var(--text-subtle, #9a93a8);
+}
+
+.gx-legal__updated {
+  margin: 0 0 24px;
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+}
+
+/* The operator-TODO banner: an unfilled Impressum must look wrong, not just
+   read wrong. */
+.gx-legal__todo {
+  margin: 0 0 20px;
+  padding: 12px 14px;
+  border: 1px solid var(--status-danger, #ff5c7a);
+  border-radius: var(--radius-sm, 8px);
+  color: var(--status-danger, #ff5c7a);
+  font-size: var(--body-sm, 0.875rem);
+}
+
+.gx-legal__todo code {
+  font-size: 0.9em;
+}
+
+/* One unfilled field inside the running text. */
+.gx-legal__placeholder {
+  color: var(--status-danger, #ff5c7a);
+  font-weight: 600;
+}
+
+.gx-legal__section {
+  margin: 0 0 22px;
+}
+
+.gx-legal__section h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.gx-legal__section p,
+.gx-legal__section ul {
+  margin: 0 0 10px;
+}
+
+.gx-legal__section ul {
+  padding-left: 20px;
+}
+
+.gx-legal__section li {
+  margin-bottom: 6px;
+}
+
+.gx-legal__section a {
+  color: var(--accent, #9059ff);
+}
+
+.gx-legal__footer {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle, #2a2535);
+}
