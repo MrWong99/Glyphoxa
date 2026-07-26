@@ -97,24 +97,27 @@ describe("legal routes", () => {
     expect(screen.getByRole("link", { name: "Datenschutz" })).toHaveAttribute("href", "/privacy");
   });
 
-  it("shows a loud operator TODO while the identity is unfilled", async () => {
+  it("renders the filled operator identity without the TODO banner", async () => {
     renderAt("/imprint");
     await screen.findByRole("heading", { name: "Impressum", level: 1 });
-    // The shipped template is unfilled by design (the operator supplies their
-    // own identity — the project must not invent one), so the banner is present
-    // here. It disappears field by field as operator.ts is filled in.
-    expect(operatorTodos().length).toBeGreaterThan(0);
-    expect(screen.getByRole("alert")).toHaveTextContent(/Hinweis an den Betreiber/i);
+    // This repository ships the identity of the canonical beta deployment,
+    // filled in by its operator on 2026-07-26 — so no banner here. The banner
+    // machinery itself stays covered in todoBanner.test.tsx against a mocked,
+    // unfilled identity.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText(/Lukas Schmidt/)).toBeInTheDocument();
   });
 });
 
-describe("operator identity template", () => {
-  it("ships placeholders, not invented details", () => {
-    // Guard against someone "helpfully" filling these in upstream: a shipped
-    // default identity would be a false Impressum on every deployment.
-    expect(isPlaceholder(OPERATOR.legalName)).toBe(true);
-    expect(isPlaceholder(OPERATOR.street)).toBe(true);
-    expect(isPlaceholder(OPERATOR.email)).toBe(true);
+describe("operator identity", () => {
+  it("is completely filled for this deployment", () => {
+    // The maintainer operates the canonical deployment from this repo and
+    // committed their own identity (2026-07-26). Anyone forking this source
+    // for their OWN instance must replace operator.ts — see the warning there
+    // and docs/deploy/legal-pages.md.
+    expect(operatorTodos()).toEqual([]);
+    expect(isPlaceholder(OPERATOR.legalName)).toBe(false);
+    expect(isPlaceholder(OPERATOR.email)).toBe(false);
   });
 
   it("counts an empty required field as a TODO and ignores optional ones", () => {

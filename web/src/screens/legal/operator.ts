@@ -54,21 +54,27 @@ export type OperatorIdentity = {
 /**
  * OPERATOR is the deployment's own identity. EVERY placeholder below must be
  * replaced before the deployment is reachable from the internet.
+ *
+ * This repository ships the identity of the canonical glyphoxa.net beta
+ * deployment, filled in by its operator (the project maintainer) on
+ * 2026-07-26. If you deploy your OWN instance from this source, you MUST
+ * replace every value below with your own identity — publishing someone
+ * else's name as your Impressum is a false legal notice.
  */
 export const OPERATOR: OperatorIdentity = {
-  legalName: "[BITTE AUSFÜLLEN: vollständiger Name des Betreibers]",
-  street: "[BITTE AUSFÜLLEN: Straße und Hausnummer]",
-  city: "[BITTE AUSFÜLLEN: PLZ und Ort]",
+  legalName: "Lukas Schmidt",
+  street: "Turpinstraße 19",
+  city: "52066 Aachen",
   country: "Deutschland",
-  email: "[BITTE AUSFÜLLEN: Kontakt-E-Mail-Adresse]",
+  email: "lukas.schmidt.web@gmail.com",
   phone: "",
   contentResponsible: "",
   vatId: "",
   dataProtectionOfficer: "",
   supervisoryAuthority:
-    "[BITTE AUSFÜLLEN: zuständige Landesdatenschutzbehörde, z. B. „Der Landesbeauftragte für den Datenschutz und die Informationsfreiheit Baden-Württemberg“]",
-  hostingLocation: "[BITTE AUSFÜLLEN: Standort der Server, z. B. „Deutschland (eigener Server)“]",
-  lastUpdated: "[BITTE AUSFÜLLEN: Datum der letzten Überarbeitung]",
+    "Landesbeauftragte für Datenschutz und Informationsfreiheit Nordrhein-Westfalen (LDI NRW), Kavalleriestraße 2–4, 40213 Düsseldorf",
+  hostingLocation: "Deutschland (eigener Server)",
+  lastUpdated: "26. Juli 2026",
 };
 
 /** isPlaceholder reports whether a field is still an unfilled template value. */
