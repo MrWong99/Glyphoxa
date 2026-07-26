@@ -55,6 +55,26 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
           pattern: pg_dump "\$GLYPHOXA_DATABASE_URL" -Fc
 
+  - it: writes to a .partial name and renames only on success
+    # A pg_dump killed mid-write (DB restart, ENOSPC) must never leave a
+    # truncated file matching the glyphoxa-*.dump glob the restore runbook and
+    # the rotation trust; stale partials are swept so retries cannot wedge the
+    # PVC toward disk-full.
+    set:
+      backup:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: rm -f /backup/\*\.dump\.partial
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: -Fc -f "\$\{dump\}\.partial"
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args[0]
+          pattern: mv "\$\{dump\}\.partial" "\$\{dump\}"
+
   - it: takes the DSN from the app Secret so it can never dump another database
     set:
       backup:

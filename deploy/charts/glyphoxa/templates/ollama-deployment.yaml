@@ -43,6 +43,10 @@ spec:
         {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: ollama
     spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: ollama
           image: {{ printf "%s:%s" .Values.ollama.image.repository .Values.ollama.image.tag | quote }}

@@ -254,6 +254,34 @@ tests:
             name: GLYPHOXA_OLLAMA_URL
             value: http://host.k3d.internal:11434
 
+  - it: derives GLYPHOXA_OLLAMA_URL from the in-cluster Service when ollama.enabled (#517)
+    # The #517 acceptance criterion: ollamaUrl left empty + the chart's own
+    # Ollama enabled → the pods dial the Service the same helper names, so the
+    # two can never drift.
+    set:
+      ollama:
+        enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+            value: http://RELEASE-NAME-glyphoxa-ollama:11434
+
+  - it: lets an explicit ollamaUrl win over the enabled in-cluster Ollama
+    # Precedence half of the #517 derivation: an operator pointing at an
+    # external server keeps that endpoint even with the in-cluster one running.
+    set:
+      ollama:
+        enabled: true
+      ollamaUrl: http://host.k3d.internal:11434
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+            value: http://host.k3d.internal:11434
+
 
   - it: omits GLYPHOXA_PRIVACY_POLICY_URL when neither privacyPolicyUrl nor an Ingress host exists
     # #519: with nothing trustworthy to advertise the env var is absent and the

@@ -57,6 +57,10 @@ spec:
             app.kubernetes.io/component: backup
         spec:
           restartPolicy: OnFailure
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- if .Values.backup.offsite.enabled }}
           initContainers:
             {{- include "glyphoxa.backup.dumpContainer" . | nindent 12 }}

@@ -102,6 +102,12 @@ the app itself uses, so a backup can never target a different database than the
 deployment. `set -eu` plus writing the produced filename into /backup/.latest
 gives the off-site push an unambiguous handle; rotation runs only AFTER a
 successful dump, so a failing dump never deletes the last good one.
+
+The dump is written under a .partial name and renamed only on success: a
+pg_dump killed mid-write (DB restart, OOM, ENOSPC on the PVC) must never leave
+a truncated file matching the glyphoxa-*.dump glob the restore runbook (and the
+next retry's rotation) trusts. Stale partials from crashed runs are swept at
+start so retried Jobs cannot accumulate them toward a disk-full wedge.
 */}}
 {{- define "glyphoxa.backup.dumpContainer" -}}
 - name: pg-dump
@@ -111,8 +117,10 @@ successful dump, so a failing dump never deletes the last good one.
   args:
     - |
       set -eu
+      rm -f /backup/*.dump.partial
       dump="/backup/glyphoxa-$(date -u +%Y%m%dT%H%M%SZ).dump"
-      pg_dump "$GLYPHOXA_DATABASE_URL" -Fc -f "${dump}"
+      pg_dump "$GLYPHOXA_DATABASE_URL" -Fc -f "${dump}.partial"
+      mv "${dump}.partial" "${dump}"
       printf '%s' "${dump}" > /backup/.latest
       find /backup -name 'glyphoxa-*.dump' -mtime +{{ .Values.backup.retentionDays }} -delete
       echo "backup: wrote ${dump} (retention {{ .Values.backup.retentionDays }}d)"
