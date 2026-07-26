@@ -19,8 +19,9 @@ import (
 // records UPSERTs keyed (session, line_id) — so a coalescing reply collapses to
 // one entry — and serves List/Count off that map.
 type fakeLineStore struct {
-	mu    sync.Mutex
-	lines map[string]storage.TranscriptLine
+	mu      sync.Mutex
+	lines   map[string]storage.TranscriptLine
+	deletes int
 }
 
 func newFakeLineStore() *fakeLineStore {
@@ -38,6 +39,23 @@ func (f *fakeLineStore) UpsertTranscriptLine(_ context.Context, l storage.Transc
 	}
 	f.lines[k] = l
 	return nil
+}
+
+// DeleteTranscriptLine drops the row, mirroring the real DELETE's tolerance of a
+// missing key (#437). deletes counts every call so a test can tell "retracted"
+// from "never written".
+func (f *fakeLineStore) DeleteTranscriptLine(_ context.Context, sid uuid.UUID, lid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes++
+	delete(f.lines, f.key(sid, lid))
+	return nil
+}
+
+func (f *fakeLineStore) deleteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deletes
 }
 
 func (f *fakeLineStore) ListTranscriptLines(_ context.Context, sid uuid.UUID) ([]storage.TranscriptLine, error) {
@@ -81,6 +99,7 @@ func TestPersist_CoalescesAndCounts(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"}) // delivered — the row stays (#437)
 	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "What'll it be?", TurnID: "t1"})
 	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
 
@@ -187,6 +206,216 @@ func TestPersist_TwoSessionsAttributedIndependently(t *testing.T) {
 	gotB, _ := store.ListTranscriptLines(ctx, sessB.ID)
 	if len(gotB) != 1 || gotB[0].Text != "hi from B" || gotB[0].CampaignID != sessB.CampaignID {
 		t.Errorf("session B lines = %+v, want its line attributed to B's UUID + campaign", gotB)
+	}
+}
+
+// lineIDs is the persisted line_ids for a session, in seq order — the shape most
+// of the #437 reconcile assertions want.
+func lineIDs(t *testing.T, store *fakeLineStore, sid uuid.UUID) []string {
+	t.Helper()
+	rows, err := store.ListTranscriptLines(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("ListTranscriptLines: %v", err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.LineID)
+	}
+	return out
+}
+
+// TestPersist_ZeroDeliveryTurnRetracted is #437's headline: a turn whose ONLY
+// sentence start-errors (TTSInvoked fired, no FirstAudio ever, terminal reason
+// tts_error) leaves NO transcript_line row — the LINE grain now obeys ADR-0012's
+// delivered-only invariant, exactly as the Chunk grain always did. The human line
+// that prompted the turn is untouched, and the authoritative count follows.
+func TestPersist_ZeroDeliveryTurnRetracted(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello Bart", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
+	// No FirstAudio: synthesis start-errored, the room heard nothing.
+	bus.Publish(voiceevent.TurnEnded{At: at(4), TurnID: "t1", Reason: voiceevent.TurnEndTTSError})
+
+	// The live feed transiently showed the line — accepted by the ADR-0040
+	// amendment (the SSE contract is unchanged; only replay is reconciled).
+	if v := r.View(fs.id.String()); len(v.Lines) != 2 {
+		t.Fatalf("live view = %+v, want the human line AND the transient agent line", v.Lines)
+	}
+
+	n, err := r.Finalize(context.Background(), fs.id)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Finalize count = %d, want 1 (the undelivered reply is not a line)", n)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 1 || got[0] != "u:1" {
+		t.Errorf("persisted lines = %v, want only the human u:1 — a:t1 was never heard", got)
+	}
+	if store.deleteCount() == 0 {
+		t.Error("no retraction reached the store; the row was silently left behind")
+	}
+}
+
+// TestPersist_DeliveredTurnSurvivesBarge is the other half of #437: a turn that
+// delivered at least one sentence KEEPS its line even when a barge cuts the reply
+// mid-flight — the accepted sentence-tail rounding of #401 is untouched, and the
+// reconcile must not over-reach into it.
+func TestPersist_DeliveredTurnSurvivesBarge(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit down.", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 1 || got[0] != "a:t1" {
+		t.Errorf("persisted lines = %v, want the delivered reply a:t1 kept", got)
+	}
+	if store.deleteCount() != 0 {
+		t.Errorf("retracted a delivered line (%d deletes) — #401's tail rounding stays accepted", store.deleteCount())
+	}
+}
+
+// TestPersist_StreamFailedOnlySentenceRetracted: a #436 mid-stream failure of
+// the turn's ONLY sentence — FirstAudio fired, then the stream died — must
+// retract the row, exactly as the Chunker retracts the sentence: the room heard
+// at most a fragment, so per ADR-0012 zero sentences were delivered.
+func TestPersist_StreamFailedOnlySentenceRetracted(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well met, traveller.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndTTSError})
+
+	n, err := r.Finalize(context.Background(), fs.id)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Finalize count = %d, want 0 (the only sentence stream-failed)", n)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 0 {
+		t.Errorf("persisted lines = %v, want none — the room heard at most a fragment", got)
+	}
+	if store.deleteCount() == 0 {
+		t.Error("no retraction reached the store; the stream-failed row was left behind")
+	}
+}
+
+// TestPersist_StreamFailedTailKeepsDeliveredLine: when an EARLIER sentence
+// delivered, a #436 failure of a later one keeps the row — the same tail
+// rounding a barge gets (#401); the reconcile must not over-reach.
+func TestPersist_StreamFailedTailKeepsDeliveredLine(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit down.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(6), TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(7), TurnID: "t1", Reason: voiceevent.TurnEndTTSError})
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 1 || got[0] != "a:t1" {
+		t.Errorf("persisted lines = %v, want the partially-delivered reply a:t1 kept", got)
+	}
+	if store.deleteCount() != 0 {
+		t.Errorf("retracted a line with a delivered sentence (%d deletes)", store.deleteCount())
+	}
+}
+
+// TestPersist_StreamFailedBeforeFirstAudioRetracted: the stream died before its
+// first chunk crossed — no FirstAudio at all. The pending sentence is dropped
+// and the zero-delivery turn retracts at TurnEnded, same as a start-error.
+func TestPersist_StreamFailedBeforeFirstAudioRetracted(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well me—", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(4), TurnID: "t1", Reason: voiceevent.TurnEndTTSError})
+
+	n, err := r.Finalize(context.Background(), fs.id)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Finalize count = %d, want 0", n)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 0 {
+		t.Errorf("persisted lines = %v, want none", got)
+	}
+}
+
+// TestPersist_SessionEndRetractsUndeliveredLine covers #437's second reconcile
+// point: a session that ends mid-turn (Stop / gateway loss / shutdown) never
+// publishes that turn's TurnEnded, so the sweep at Finalize is what keeps the
+// never-delivered row out — and it runs BEFORE the flush barrier, so the
+// authoritative count already excludes it.
+func TestPersist_SessionEndRetractsUndeliveredLine(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well me—", TurnID: "t1"})
+	// Session stops here: no FirstAudio, no TurnEnded.
+
+	n, err := r.Finalize(context.Background(), fs.id)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Finalize count = %d, want 0 (nothing was ever heard)", n)
+	}
+	if got := lineIDs(t, store, fs.id); len(got) != 0 {
+		t.Errorf("persisted lines = %v, want none", got)
 	}
 }
 

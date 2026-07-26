@@ -1,0 +1,151 @@
+{{- if .Values.ollama.enabled }}
+{{/*
+In-cluster Ollama (#517) — the embeddings server the semantic-memory path needs.
+
+v1.0 embeds through Ollama ONLY (ADR-0011) and the Glyphoxa image ships no
+Ollama, so every in-cluster install has so far needed an EXTERNAL endpoint
+(`ollamaUrl`). For the beta the chart can stand one up itself: this Deployment
+plus its Service, with `ollamaUrl` defaulting to that Service
+(glyphoxa.ollamaURL) so the web/voice pods find it without further wiring.
+
+- ONE replica: Ollama holds the model in memory per pod and nothing here shards
+  it. Scaling embeddings out is a deployment change, not a value.
+- The default embedding model is pulled on FIRST START by a postStart hook
+  (`ollama pull`), not baked into an image: the pull needs the server running,
+  which an initContainer cannot assume. It waits for the local API, pulls, and
+  exits; a model already present makes the pull a no-op, so restarts are cheap.
+  A failed pull does NOT kill the pod — Ollama keeps serving and the next
+  restart retries; the embedding worker meanwhile stalls loudly (ADR-0011),
+  which is exactly the pre-existing "no embeddings endpoint" behaviour.
+- The model cache is a PVC by default, so a pod restart does not re-download
+  gigabytes. Set ollama.persistence.enabled=false for an ephemeral emptyDir.
+- Recreate: the PVC is ReadWriteOnce, so a RollingUpdate surge would deadlock
+  the new pod on a volume the old one still holds.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.ollama.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ollama
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ollama
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ollama
+          image: {{ printf "%s:%s" .Values.ollama.image.repository .Values.ollama.image.tag | quote }}
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ollama.port }}
+              protocol: TCP
+          env:
+            # Bind all interfaces: the default is loopback, which the Service
+            # could never reach.
+            - name: OLLAMA_HOST
+              value: {{ printf "0.0.0.0:%d" (int .Values.ollama.port) | quote }}
+          {{- with .Values.ollama.model }}
+          lifecycle:
+            postStart:
+              exec:
+                # Wait for the just-started server, then pull the embedding model.
+                # Best-effort by design (see the header): the `|| true` keeps a
+                # failed pull — an offline node, a rate-limited registry — from
+                # killing a container that is otherwise serving fine.
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    for i in $(seq 1 60); do
+                      ollama list >/dev/null 2>&1 && break
+                      sleep 2
+                    done
+                    ollama pull {{ . | quote }} || true
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+          {{- with .Values.ollama.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: models
+          {{- if .Values.ollama.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "glyphoxa.ollama.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.ollama.persistence.enabled }}
+---
+{{/*
+The model cache. A standalone PVC (not a StatefulSet volumeClaimTemplate) so the
+workload stays a Deployment; helm.sh/resource-policy: keep means a `helm
+uninstall` leaves the downloaded models on disk rather than forcing a
+multi-gigabyte re-pull on the next install.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "glyphoxa.ollama.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.ollama.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.ollama.persistence.size }}
+{{- end }}
+{{- end }}

@@ -107,6 +107,41 @@ router's port forward terminates at the VM with nothing else to install.
 > through a cheap VPS/Cloudflare Tunnel. This is the single most common
 > home-lab blocker — check it before anything else.
 
+### 3b. Alternative: Cloudflare Tunnel (no port forwarding, no static IP)
+
+If inbound ports are not an option — CG-NAT, DS-Lite, a landlord's router, or
+simply not wanting to open 80/443 — skip DynDNS, port forwarding **and**
+cert-manager entirely and let the chart run a `cloudflared` tunnel instead: it
+dials **out** to Cloudflare and forwards requests to the web Service from
+inside the cluster (Cloudflare terminates TLS at its edge).
+
+1. In the Cloudflare Zero Trust dashboard: **Networks → Tunnels → Create a
+   tunnel** (Cloudflared), copy the tunnel **token**.
+2. Values:
+
+   ```yaml
+   ingress:
+     enabled: false           # nothing inbound to route
+
+   cloudflared:
+     enabled: true
+     token: "<tunnel token>"  # or existingSecret.name/key for a Secret you manage
+
+   web:
+     oauth:
+       # NOT derived without an Ingress — set the public origin explicitly
+       redirectUrl: "https://glyphoxa.example.com/auth/discord/callback"
+
+   privacyPolicyUrl: "https://glyphoxa.example.com/privacy"
+   ```
+
+3. Back in the dashboard, add a **Public Hostname** on the tunnel pointing at
+   `http://glyphoxa-web.glyphoxa.svc.cluster.local:80` (the web Service URL the
+   install notes print — the Service listens on 80 and maps to the container's
+   8080), and register the same redirect URL on the Discord application.
+
+The voice tier is unaffected either way — Discord voice is outbound-only.
+
 ## 4. cert-manager + Let's Encrypt
 
 The chart has an opt-in cert-manager path (`ingress.certManager.*`); install
@@ -173,6 +208,12 @@ groqApiKey: ""
 # nomic-embed-text — otherwise L2 stalls with a WARN loop (everything else
 # keeps working). See docs/configuration.md, "Environment variable reference".
 ollamaUrl: "http://<ollama-host>:11434"
+# ...or drop ollamaUrl and let the chart run one in-cluster instead:
+#   ollama:
+#     enabled: true          # Deployment + Service; ollamaUrl derives from it
+#     persistence:
+#       size: 20Gi           # the model cache — nomic-embed-text is pulled on
+#                            # first start, so the PVC saves a re-download
 
 database:
   password: "<generate a real one; URL-safe characters>"
@@ -263,65 +304,47 @@ The in-chart Postgres is a plain StatefulSet on a local-path PV — **one disk,
 one VM**. Two layers, use both:
 
 1. **Proxmox level:** schedule VM backups (vzdump) or ZFS snapshots of the VM
-   disk. Crash-consistent, catches everything.
-2. **Logical dumps** for point-in-time restore and migration off the VM:
+   disk. Crash-consistent, catches everything (certificates, tunnel
+   credentials, the cluster itself).
+2. **Logical dumps** for point-in-time restore and migration off the VM. The
+   chart ships these (#520) — turn them on in your values:
 
 ```yaml
-# pgdump-cronjob.yaml — nightly logical dump into its own PVC
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: glyphoxa-pgdump
-  namespace: glyphoxa
-spec:
-  schedule: "15 4 * * *"
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: OnFailure
-          containers:
-            - name: pgdump
-              image: pgvector/pgvector:pg17
-              command: ["/bin/sh", "-c"]
-              args:
-                - pg_dump "$GLYPHOXA_DATABASE_URL" -Fc
-                  -f "/backup/glyphoxa-$(date +%F).dump"
-                  && find /backup -name '*.dump' -mtime +14 -delete
-              env:
-                - name: GLYPHOXA_DATABASE_URL
-                  valueFrom:
-                    secretKeyRef:
-                      name: glyphoxa-db     # the chart's app Secret: <fullname>-db
-                      key: database-url
-              volumeMounts:
-                - name: backup
-                  mountPath: /backup
-          volumes:
-            - name: backup
-              persistentVolumeClaim:
-                claimName: glyphoxa-pgdump
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: glyphoxa-pgdump
-  namespace: glyphoxa
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 10Gi
+backup:
+  enabled: true
+  schedule: "15 4 * * *"     # nightly, cluster timezone
+  retentionDays: 14
+  persistence:
+    size: 10Gi               # its OWN PVC, never the database's volume
+
+  # A dump on the same disk survives a bad migration, not a dead disk. Point
+  # this at any S3-compatible bucket (B2, Wasabi, MinIO, S3):
+  offsite:
+    enabled: true
+    bucket: glyphoxa-backups
+    endpoint: https://s3.eu-central-003.backblazeb2.com
+    existingSecret:
+      name: glyphoxa-backup-offsite   # you create this one
 ```
 
-Copy the dumps off the VM regularly (rsync to a NAS, restic to any S3) — a
-backup on the same physical disk is not a backup. Restore with
-`pg_restore -d "$DSN" --clean --if-exists <file>.dump`.
+Each run writes `pg_dump -Fc` into the backup PVC, records it in
+`/backup/.latest`, and rotates dumps older than `retentionDays` **after** the
+new one succeeds. With the off-site push enabled the dump runs as an
+initContainer and the upload follows it, so nothing half-written is ever pushed.
 
-[`deploy/saas/install.sh`](../../deploy/saas/install.sh) sets up an
-equivalent CronJob for you (writing to a host path instead of a PVC — on a
-single cloud box that is the disk you have), and
+**Rehearse the restore before you need it** — the full procedure (including
+restoring into a scratch database first) is in
+[backup-restore.md](backup-restore.md). The short version:
+
+```sh
+kubectl -n glyphoxa create job --from=cronjob/glyphoxa-backup backup-manual-1
+kubectl -n glyphoxa logs job/backup-manual-1
+# ...then restore with: pg_restore -d "$DSN" --clean --if-exists <file>.dump
+```
+
+[`deploy/saas/install.sh`](../../deploy/saas/install.sh) sets up an equivalent
+CronJob for the single-cloud-box topology (writing to a host path instead of a
+PVC — on one box that is the disk you have), and
 [`deploy/saas/update.sh`](../../deploy/saas/update.sh) triggers a run of it
 before every upgrade.
 

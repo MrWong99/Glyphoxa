@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,14 +63,21 @@ func (f *fakeSignup) ProvisionSignup(_ context.Context, p storage.SignupParams) 
 }
 
 // signupCallback drives a valid state+code callback through an OAuth built
-// with the given admission policy and returns the recorder.
+// with the given admission policy and returns the recorder. The state cookie
+// carries the AUP acknowledgment suffix a real open-mode Login appends (#518)
+// — the ack-less path has its own test.
 func signupCallback(t *testing.T, adm auth.Admission, store *fakeOAuthStore, du auth.DiscordUser) *httptest.ResponseRecorder {
+	t.Helper()
+	return signupCallbackWithCookie(t, adm, store, du, "st-1.aup")
+}
+
+func signupCallbackWithCookie(t *testing.T, adm auth.Admission, store *fakeOAuthStore, du auth.DiscordUser, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
 	disc := &fakeDiscord{user: du}
 	o := auth.NewOAuth(store, disc, "/", adm, nil)
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
-	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: cookie})
 	rec := httptest.NewRecorder()
 	o.Callback(rec, req)
 	return rec
@@ -109,6 +117,11 @@ func TestOAuthCallback_OpenMode_SignupProvisions(t *testing.T) {
 	}
 	if sp.got.TenantName == "" {
 		t.Error("tenant name must be pre-filled for the onboarding rename")
+	}
+	// #518: the acceptance moment is recorded inside the provisioning
+	// transaction — the operator's §305 BGB inclusion evidence.
+	if sp.got.AUPAcceptedAt.IsZero() {
+		t.Error("AUPAcceptedAt not stamped on the signup params")
 	}
 	// The legacy claim-or-create path must NOT run for a signup.
 	if store.upsertCalls != 0 || store.resolveN != 0 || store.createCalls != 0 {
@@ -240,5 +253,98 @@ func TestOAuthCallback_OpenModeMisconfigured_FailsClosed(t *testing.T) {
 	}
 	if store.upsertCalls != 0 || store.createCalls != 0 {
 		t.Errorf("store written for a fail-closed rejection: %+v", store)
+	}
+}
+
+// The #518 server-side gate, start half: in open mode a hand-typed
+// /auth/discord/login without the acknowledgment never reaches Discord — it
+// bounces back to the login screen, which renders the checkbox.
+func TestOAuthLogin_OpenMode_RequiresAcknowledgment(t *testing.T) {
+	t.Parallel()
+	adm := auth.Admission{Mode: auth.AdmissionOpen, SignupPlanSlug: "beta-trial", Signup: &fakeSignup{}}
+	o := auth.NewOAuth(&fakeOAuthStore{}, &fakeDiscord{}, "/", adm, nil)
+
+	rec := httptest.NewRecorder()
+	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil))
+
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login?error=aup_required" {
+		t.Fatalf("status/Location = %d %q, want 302 aup_required", rec.Code, rec.Header().Get("Location"))
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "glyphoxa_oauth_state" {
+			t.Error("state cookie set for a refused OAuth start")
+		}
+	}
+}
+
+// The acknowledgment rides the state COOKIE to the callback: the state param
+// Discord sees is the bare nonce, the cookie carries the .aup suffix only this
+// server appends.
+func TestOAuthLogin_OpenMode_AcknowledgmentRidesStateCookie(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{authBase: "https://discord/authorize"}
+	adm := auth.Admission{Mode: auth.AdmissionOpen, SignupPlanSlug: "beta-trial", Signup: &fakeSignup{}}
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", adm, nil)
+
+	rec := httptest.NewRecorder()
+	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login?aup=1", nil))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	state := strings.TrimPrefix(rec.Header().Get("Location"), "https://discord/authorize?state=")
+	var cookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "glyphoxa_oauth_state" {
+			cookie = c.Value
+		}
+	}
+	if cookie != state+".aup" {
+		t.Errorf("state cookie = %q, want %q", cookie, state+".aup")
+	}
+}
+
+// The #518 gate, callback half — the account-writing moment: an open-mode
+// signup whose round trip skipped our Login handler (hand-crafted authorize
+// URL, bare nonce cookie) writes NOTHING and bounces. This is the backstop the
+// client-side checkbox cannot be.
+func TestOAuthCallback_OpenMode_SignupWithoutAcknowledgmentRefused(t *testing.T) {
+	t.Parallel()
+	sp := &fakeSignup{}
+	store := &fakeOAuthStore{}
+	adm := auth.Admission{Mode: auth.AdmissionOpen, SignupPlanSlug: "beta-trial", Signup: sp}
+	rec := signupCallbackWithCookie(t, adm, store, auth.DiscordUser{ID: "999", Username: "rin"}, "st-1")
+
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login?error=aup_required" {
+		t.Fatalf("status/Location = %d %q, want 302 aup_required", rec.Code, rec.Header().Get("Location"))
+	}
+	if sp.calls != 0 {
+		t.Errorf("ProvisionSignup ran for an unacknowledged signup")
+	}
+	if store.upsertCalls != 0 || store.createCalls != 0 {
+		t.Errorf("store written for an unacknowledged signup: %+v", store)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "glyphoxa_session" || c.Name == "glyphoxa_csrf" {
+			t.Errorf("issued %s cookie to an unacknowledged signup", c.Name)
+		}
+	}
+}
+
+// An ALLOWLISTED user's round trip is not gated (#518 gates open-mode signup
+// only): a bare-nonce cookie still logs the operator in, in open mode too.
+func TestOAuthCallback_OpenMode_AllowlistedNeedsNoAcknowledgment(t *testing.T) {
+	t.Parallel()
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	adm := auth.Admission{
+		Mode:           auth.AdmissionOpen,
+		Allowlist:      auth.ParseOperatorAllowlist("77"),
+		SignupPlanSlug: "beta-trial",
+		Signup:         &fakeSignup{},
+	}
+	rec := signupCallbackWithCookie(t, adm, store, auth.DiscordUser{ID: "77", Username: "sora"}, "st-1")
+
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+		t.Fatalf("status/Location = %d %q, want 302 /", rec.Code, rec.Header().Get("Location"))
 	}
 }

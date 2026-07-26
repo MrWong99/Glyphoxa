@@ -68,3 +68,32 @@
   width: 100%;
   margin-top: 4px;
 }
+
+/* The open-mode AUP/ToS acknowledgment (#518): signing up here is the moment a
+   stranger accepts this deployment's terms, so the checkbox sits directly above
+   the OAuth start it gates. */
+.gx-login__consent {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gx-login__consent input {
+  margin-top: 3px;
+  accent-color: var(--accent, #9059ff);
+}
+
+.gx-login__consent a {
+  color: var(--accent, #9059ff);
+}
+
+/* The login/signup cards are centered in the viewport; the legal footer sits
+   under the card rather than pinned to the bottom edge. */
+.gx-login .gx-legalfooter {
+  margin-top: 18px;
+}

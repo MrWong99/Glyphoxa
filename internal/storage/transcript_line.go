@@ -81,6 +81,23 @@ func (s *Store) UpsertTranscriptLine(ctx context.Context, l TranscriptLine) erro
 	return nil
 }
 
+// DeleteTranscriptLine removes one transcript Line by its replay key — the
+// reconciliation half of the LINE grain's delivered-only invariant (#437,
+// ADR-0040 amendment 2026-07-22). The Relay persists optimistically at
+// TTSInvoked and calls this through the SAME single-writer queue when the turn
+// ends having delivered zero sentences, so replay never shows text the room
+// never heard. Deleting a row that is not there is NOT an error: the reconcile
+// is best-effort and may race a dropped (queue-full) UPSERT that never landed.
+func (s *Store) DeleteTranscriptLine(ctx context.Context, sessionID uuid.UUID, lineID string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM transcript_line WHERE voice_session_id = $1 AND line_id = $2`,
+		sessionID, lineID)
+	if err != nil {
+		return fmt.Errorf("storage: delete transcript line %s/%s: %w", sessionID, lineID, err)
+	}
+	return nil
+}
+
 // ListTranscriptLines returns a Voice Session's transcript Lines ordered by seq —
 // the replay-on-reload history the Session screen renders for an ended session
 // (#74). An empty result is not an error.

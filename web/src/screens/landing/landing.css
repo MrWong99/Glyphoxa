@@ -1,0 +1,179 @@
+/* The public landing surface (#521) — the first thing an unauthenticated
+   visitor sees at the root. It shares the app's token vocabulary but none of
+   its chrome: no sidebar, no topbar, nothing that implies a session. */
+.gx-landing {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 20px 20px 8px;
+}
+
+.gx-landing__bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 28px;
+}
+
+.gx-landing__brand {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.gx-landing__sigil {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(135deg, #9059ff, #00ddff);
+}
+
+.gx-landing__hero {
+  max-width: 46ch;
+  margin: 24px 0 56px;
+}
+
+.gx-landing__headline {
+  margin: 0 0 14px;
+  font-size: clamp(30px, 5vw, 46px);
+  line-height: 1.12;
+}
+
+.gx-landing__lede {
+  margin: 0 0 24px;
+  color: var(--text-subtle, #9a93a8);
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+
+.gx-landing__cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+}
+
+.gx-landing__cta-note {
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+}
+
+.gx-landing__features {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin-bottom: 56px;
+}
+
+.gx-landing__feature {
+  padding: 18px;
+  background: var(--surface-card, #16131f);
+  border: 1px solid var(--border-subtle, #2a2535);
+  border-radius: 14px;
+}
+
+.gx-landing__feature h2 {
+  margin: 12px 0 6px;
+  font-size: 17px;
+}
+
+.gx-landing__feature p {
+  margin: 0;
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+  line-height: 1.55;
+}
+
+.gx-landing__feature-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  color: #fff;
+  background: linear-gradient(135deg, #9059ff, #00ddff);
+}
+
+.gx-landing__shots {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-bottom: 56px;
+}
+
+.gx-landing__shot {
+  margin: 0;
+}
+
+.gx-landing__shot img,
+.gx-landing__shot-placeholder {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border: 1px solid var(--border-subtle, #2a2535);
+  border-radius: 12px;
+}
+
+/* Until #263's captures land, each slot is a quiet frame rather than a fake
+   image: honest about being a placeholder, and the layout is already final. */
+.gx-landing__shot-placeholder {
+  background:
+    radial-gradient(circle at 30% 25%, rgba(144, 89, 255, 0.18), transparent 55%),
+    radial-gradient(circle at 75% 70%, rgba(0, 221, 255, 0.14), transparent 50%),
+    var(--surface-card, #16131f);
+}
+
+.gx-landing__shot figcaption {
+  margin-top: 8px;
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+}
+
+.gx-landing__beta {
+  padding: 24px;
+  background: var(--surface-card, #16131f);
+  border: 1px solid var(--border-subtle, #2a2535);
+  border-radius: 16px;
+}
+
+.gx-landing__beta h2 {
+  margin: 0 0 16px;
+  font-size: 20px;
+}
+
+.gx-landing__plans {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.gx-landing__plan h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.gx-landing__plan p {
+  margin: 0;
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+  line-height: 1.55;
+}
+
+.gx-landing__beta-note {
+  margin: 20px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle, #2a2535);
+  color: var(--text-subtle, #9a93a8);
+  font-size: var(--body-sm, 0.875rem);
+  line-height: 1.55;
+}
+
+.gx-landing__beta-note a {
+  color: var(--accent, #9059ff);
+}

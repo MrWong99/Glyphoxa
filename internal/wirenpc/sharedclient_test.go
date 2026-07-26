@@ -83,7 +83,7 @@ func TestConnectAndServeSharedClientErrorIsCycleError(t *testing.T) {
 
 	connectedCalls := 0
 	err := connectAndServe(context.Background(), cfg, snowflake.ID(1), snowflake.ID(2), discard(),
-		func() { connectedCalls++ })
+		func() { connectedCalls++ }, &sessionOnce{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("connectAndServe = %v, want it to surface the provider error %v", err, boom)
 	}

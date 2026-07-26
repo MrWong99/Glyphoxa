@@ -72,6 +72,90 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-web" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.ollama.fullname" -}}
+{{- printf "%s-ollama" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "glyphoxa.cloudflared.fullname" -}}
+{{- printf "%s-cloudflared" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "glyphoxa.backup.fullname" -}}
+{{- printf "%s-backup" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+The backup CronJob's dump container (#520), factored out because it runs in a
+different slot depending on the off-site flag: as an initContainer when a push
+follows it (Kubernetes gives no ordering between two regular containers, and a
+partially-written dump must never be pushed), and as the pod's only container
+when it does not.
+
+The image is the SAME Postgres image the chart runs (glyphoxa.postgres.image),
+so pg_dump's version always matches the server it dumps — a newer server than
+client is the classic "server version mismatch" failure, and pinning them
+together makes it unrepresentable.
+
+The dump is custom-format (-Fc): compressed, and the input `pg_restore` takes
+(see docs/deploy/backup-restore.md). The DSN comes from the same app Secret key
+the app itself uses, so a backup can never target a different database than the
+deployment. `set -eu` plus writing the produced filename into /backup/.latest
+gives the off-site push an unambiguous handle; rotation runs only AFTER a
+successful dump, so a failing dump never deletes the last good one.
+
+The dump is written under a .partial name and renamed only on success: a
+pg_dump killed mid-write (DB restart, OOM, ENOSPC on the PVC) must never leave
+a truncated file matching the glyphoxa-*.dump glob the restore runbook (and the
+next retry's rotation) trusts. Stale partials from crashed runs are swept at
+start so retried Jobs cannot accumulate them toward a disk-full wedge.
+*/}}
+{{- define "glyphoxa.backup.dumpContainer" -}}
+- name: pg-dump
+  image: {{ include "glyphoxa.postgres.image" . }}
+  imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+  command: ["/bin/sh", "-c"]
+  args:
+    - |
+      set -eu
+      rm -f /backup/*.dump.partial
+      dump="/backup/glyphoxa-$(date -u +%Y%m%dT%H%M%SZ).dump"
+      pg_dump "$GLYPHOXA_DATABASE_URL" -Fc -f "${dump}.partial"
+      mv "${dump}.partial" "${dump}"
+      printf '%s' "${dump}" > /backup/.latest
+      find /backup -name 'glyphoxa-*.dump' -mtime +{{ .Values.backup.retentionDays }} -delete
+      echo "backup: wrote ${dump} (retention {{ .Values.backup.retentionDays }}d)"
+  env:
+    - name: GLYPHOXA_DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "glyphoxa.secretName" . }}
+          key: database-url
+  volumeMounts:
+    - name: backup
+      mountPath: /backup
+  resources:
+    {{- toYaml .Values.backup.resources | nindent 4 }}
+{{- end }}
+
+{{/*
+The embeddings endpoint the web/voice pods dial (GLYPHOXA_OLLAMA_URL, ADR-0011).
+
+An explicit ollamaUrl always wins (an external server, a host-network Ollama).
+Otherwise, when the chart deploys its OWN Ollama (#517), it derives the
+in-cluster Service URL — same helper the Service name comes from, so the two can
+never drift. With neither, this renders EMPTY and the callers omit the env var:
+the binary keeps its loopback default, which cannot work in a pod, so semantic
+memory (L2) stalls loudly while everything else keeps working — the documented
+pre-#517 behaviour.
+*/}}
+{{- define "glyphoxa.ollamaURL" -}}
+{{- if .Values.ollamaUrl -}}
+{{- .Values.ollamaUrl -}}
+{{- else if .Values.ollama.enabled -}}
+{{- printf "http://%s:%d" (include "glyphoxa.ollama.fullname" .) (int .Values.ollama.port) -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Validate the Web Instance Mode (ADR-0005). `web` serves the operator console +
 Connect API only; `all` additionally drives the voice loop in-process for
@@ -266,6 +350,27 @@ render fails fast (required). Keeping the resolution here means the app Secret
 {{- printf "%s://%s/auth/discord/callback" (include "glyphoxa.web.ingressScheme" .) $host -}}
 {{- else -}}
 {{- required "web.oauth.redirectUrl is required when web.enabled and the Ingress is disabled: the Discord OAuth redirect URL registered on the application. With an Ingress enabled it is derived from ingress.host instead." .Values.web.oauth.redirectUrl -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The privacy-policy URL the Bot links from its Voice Session transcription
+disclosure (GLYPHOXA_PRIVACY_POLICY_URL, #519).
+
+An explicit privacyPolicyUrl always wins (the policy may live on another host).
+Otherwise it is DERIVED from the Ingress — same host and scheme the console is
+served on, plus the SPA's /privacy route — so the link can never drift from the
+deployment the players are actually using. With no explicit value and no
+Ingress there is nothing trustworthy to advertise, so this renders EMPTY and the
+callers omit the env var entirely: the disclosure still posts, just without a
+link. Deliberately not `required` — a missing policy link must never keep a
+Voice Session from starting.
+*/}}
+{{- define "glyphoxa.privacyPolicyURL" -}}
+{{- if .Values.privacyPolicyUrl -}}
+{{- .Values.privacyPolicyUrl -}}
+{{- else if and .Values.ingress.enabled .Values.ingress.host -}}
+{{- printf "%s://%s/privacy" (include "glyphoxa.web.ingressScheme" .) .Values.ingress.host -}}
 {{- end -}}
 {{- end }}
 

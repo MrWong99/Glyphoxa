@@ -17,7 +17,7 @@ import (
 // random secret minted by the auth tier (internal/auth) — this layer only
 // persists and validates it, never interprets it.
 
-const userColumns = `id, discord_user_id, name, avatar, role, created_at, updated_at, suspended_at`
+const userColumns = `id, discord_user_id, name, avatar, role, created_at, updated_at, suspended_at, aup_accepted_at`
 
 // DevOperatorDiscordID is the synthetic Discord identity the GLYPHOXA_DEV_MODE
 // boot upserts as the dev operator (ADR-0041). It is deliberately NOT a real
@@ -31,7 +31,7 @@ func scanUser(row pgx.Row) (User, error) {
 	var u User
 	err := row.Scan(
 		&u.ID, &u.DiscordUserID, &u.Name, &u.Avatar, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt, &u.SuspendedAt,
+		&u.CreatedAt, &u.UpdatedAt, &u.SuspendedAt, &u.AUPAcceptedAt,
 	)
 	return u, err
 }
@@ -272,7 +272,7 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 		      RETURNING user_id
 		 )
 		 SELECT u.id, u.discord_user_id, u.name, u.avatar, u.role,
-		        u.created_at, u.updated_at, u.suspended_at
+		        u.created_at, u.updated_at, u.suspended_at, u.aup_accepted_at
 		   FROM users u JOIN s ON s.user_id = u.id
 		  WHERE u.suspended_at IS NULL`, token)
 	u, err := scanUser(row)

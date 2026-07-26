@@ -28,6 +28,11 @@ Running Glyphoxa **for others**, beyond the single-machine self-host:
   cluster in a Proxmox VM, exposed via DynDNS with Let's Encrypt TLS.
 - **[deploy/cloud-providers.md](deploy/cloud-providers.md)** — moving that
   deployment to a paid cloud: provider suggestions and cost estimates.
+- **[deploy/legal-pages.md](deploy/legal-pages.md)** — the Impressum /
+  Datenschutzerklärung / AUP pages the SPA serves, and the operator identity you
+  must fill in before going live.
+- **[deploy/backup-restore.md](deploy/backup-restore.md)** — the chart's
+  Postgres backup CronJob (local + off-site) and the restore runbook.
 - **[deploy/saas-operations.md](deploy/saas-operations.md)** — subscription
   Plans, platform keys, and the cost/revenue report
   (`glyphoxa billing`).

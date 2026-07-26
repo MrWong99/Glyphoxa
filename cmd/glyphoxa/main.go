@@ -134,6 +134,10 @@ func main() {
 	// Streaming STT (ADR-0042, issue #180) is an env opt-in shared by voice and
 	// all mode; default OFF keeps the batch STT path byte-for-byte.
 	cfg.STTStreaming = sttStreaming(os.Getenv)
+	// The privacy-policy page the Bot links from its Voice Session transcription
+	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
+	// session Config it starts. Unset posts the disclosure without a link.
+	cfg.PrivacyPolicyURL = privacyPolicyURL(os.Getenv)
 	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
 	metricsAddr := flag.String("metrics-addr", ":9090", "address for the /metrics + /healthz + /readyz listener (all Modes; kept off the public web API port, ADR-0032); empty disables it")
 	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode Connect RPC API listener (ADR-0039); observability is on -metrics-addr")

@@ -675,6 +675,23 @@ func TestSTTStreaming(t *testing.T) {
 	}
 }
 
+// TestPrivacyPolicyURL: the #519 disclosure link is whatever the operator
+// published, trimmed — and blank when unset, so the Bot posts the transcription
+// notice without a link instead of a broken one.
+func TestPrivacyPolicyURL(t *testing.T) {
+	cases := []struct{ val, want string }{
+		{"", ""},
+		{"   ", ""},
+		{"https://glyphoxa.example/privacy", "https://glyphoxa.example/privacy"},
+		{"  https://glyphoxa.example/privacy \n", "https://glyphoxa.example/privacy"},
+	}
+	for _, c := range cases {
+		if got := privacyPolicyURL(envMap(map[string]string{"GLYPHOXA_PRIVACY_POLICY_URL": c.val})); got != c.want {
+			t.Errorf("privacyPolicyURL(%q) = %q, want %q", c.val, got, c.want)
+		}
+	}
+}
+
 // TestGatewayIdentifyWarnThreshold: the IDENTIFY-budget warning threshold (#486)
 // defaults to 500 (well below Discord's 1000/token/24h reset limit) and accepts a
 // positive integer override; blank, non-numeric, zero and negative values fall

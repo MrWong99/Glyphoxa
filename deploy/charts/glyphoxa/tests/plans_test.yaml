@@ -12,6 +12,34 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: ships the public-beta launch catalog as the default (#521)
+    # The two launch plans: a platform-keyed trial with a small monthly
+    # allowance, and a free BYOK tier for sustained use. Enabling plans without
+    # authoring a catalog must produce exactly these — the landing page's
+    # promise and the signup plan slug both point at them.
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"slug": "beta-trial"'
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"key_source": "platform"'
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"included_usage_usd": 5'
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"slug": "byok-free"'
+      # Both tiers are free of charge FROM US during the beta; a non-zero price
+      # here would be a promise the signup flow cannot keep (no payments exist).
+      - notMatchRegex:
+          path: data["plans.json"]
+          pattern: '"monthly_price_usd": [1-9]'
+
   - it: renders the Job and ConfigMap when enabled
     set:
       plans:

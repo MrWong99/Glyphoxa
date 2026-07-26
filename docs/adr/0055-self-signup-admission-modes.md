@@ -74,6 +74,24 @@ undecided and gets its own ADR; the design note scopes both shapes.
   ADR-0054's operator-CLI-only binding surface by exactly one automated caller —
   the snapshot semantics of `tenant_subscription` are unchanged, and platform-key
   Plans remain operator-CLI-assigned until a payment processor lands.
+
+  > **Amendment (2026-07, #521 public-beta launch):** the launch posture binds
+  > open-mode signups to `beta-trial` — a **platform-keyed** $0 plan with a
+  > bounded `included_usage_usd` allowance — via `web.signupPlanSlug`, per the
+  > SaaS-first directive. The "free BYOK tier as the default plan" expectation
+  > above is superseded for the free beta; the operator-CLI-only reservation now
+  > applies to **priced** platform plans (nothing self-service assigns a plan
+  > with `monthly_price_usd > 0` until the payment epic lands). The entitlement
+  > seams below are unchanged — the allowance gate is exactly what bounds the
+  > trial.
+
+  > **Amendment (2026-07, #518 AUP gate):** an open-mode signup additionally
+  > requires the AUP/ToS acknowledgment, enforced server-side: the OAuth start
+  > refuses an open-mode `GET /auth/discord/login` without `aup=1`, the
+  > acknowledgment rides the state cookie, the callback's signup path refuses
+  > an unacknowledged round trip before any write, and the provisioning
+  > transaction records `users.aup_accepted_at` (refreshed on returning
+  > open-mode logins). Allowlisted logins are not gated, in either mode.
 - **The ADR-0054 entitlement seams go live in `open` mode.** (a) Provider-key
   resolution fails **closed** for a Tenant without an active
   `key_source='platform'` Subscription — including the no-config-row path:

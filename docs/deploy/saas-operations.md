@@ -96,6 +96,33 @@ deleted, so revenue history always resolves.
 runs the sync on every `helm upgrade` (see `deploy/charts/glyphoxa/values.yaml`
 for the annotated example). Tier edits become values edits.
 
+### Public-beta launch defaults (#521)
+
+The chart ships a two-plan catalog as its `plans.catalog` DEFAULT, matching the
+promise the landing page makes to a visitor:
+
+| Slug | Key source | Price | Included usage |
+|------|-----------|-------|----------------|
+| `beta-trial` | `platform` | $0/month | `included_usage_usd: 5` |
+| `byok-free` | `byok` | $0/month | — (the Tenant's own keys) |
+
+Set `plans.enabled=true` to sync them, and point `web.signupPlanSlug` at
+`beta-trial` so an open-mode signup (ADR-0055) lands on the trial. Binding
+signups to a **platform-keyed** plan deliberately overrides ADR-0055's original
+"the default Plan is a free BYOK tier / platform plans stay operator-CLI-only"
+wording — the SaaS-first launch decision, recorded as an amendment on ADR-0055
+(the reservation now covers *priced* platform plans). Then:
+
+- the trial spends **your** provider keys (§2) up to the allowance, which in
+  `open` mode is a real gate — a session start is refused once the
+  month-to-date estimate spends it;
+- `included_usage_usd` is yours to tune (it is money you are spending on
+  strangers). The landing-page copy deliberately says "a small monthly
+  allowance" rather than a figure, so raising or lowering it does not turn the
+  marketing copy into a lie;
+- neither tier charges money, because the beta has no payment flow. Introduce a
+  priced tier only alongside one.
+
 ## 2. Platform keys ("usage included")
 
 Mechanically, platform keys are the **env-fallback path** that already exists
@@ -195,11 +222,17 @@ schema change.
 - [ ] Provider dashboards (Groq/ElevenLabs) checked against the ledger's
       estimates for the first month — calibrate expectations; the price map is
       an estimate by design.
-- [ ] Backups running and restore-tested ([k3s-proxmox.md §8](k3s-proxmox.md);
+- [ ] Legal pages filled in and served ([legal-pages.md](legal-pages.md)) —
+      the Impressum placeholders MUST be replaced before DNS points at you, and
+      the Datenschutzerklärung must match the providers you actually use.
+- [ ] Backups running and restore-tested ([backup-restore.md](backup-restore.md) —
+      the chart's `backup.enabled` CronJob, ideally with `backup.offsite.*`;
       on a scripted cloud install, `deploy/saas/install.sh`'s backup option +
       the pre-upgrade dump `deploy/saas/update.sh` takes) — the ledger and
       subscription history are now business records.
-- [ ] `plans.json` (or the Helm values catalog) in version control.
+- [ ] `plans.json` (or the Helm values catalog) in version control — the chart's
+      shipped `beta-trial` / `byok-free` defaults are a starting point, not a
+      commitment; review `included_usage_usd` against your budget.
 - [ ] Terms with your users about recording/consent (the Rollover Tape is
       consent-gated by design, ADR-0051 — point users at it).
 

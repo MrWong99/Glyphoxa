@@ -51,6 +51,9 @@ func TestProjection_SayPersistenceTeeFires(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Aye.", Index: 0, TurnID: "s1"})
+	// The sentence reached the room: the delivery signal that keeps the row past the
+	// #437 reconcile (ADR-0040 amendment — a zero-delivery turn is retracted).
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "s1"})
 
 	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
 		t.Fatalf("Finalize: %v", err)
@@ -79,6 +82,8 @@ func TestProjection_ButlerSayLine(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentID: "butler-id", AgentRole: "butler", Name: "Glyphoxa"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "At your service.", Index: 0, TurnID: "s1"})
+	// Delivered (#437): without a FirstAudio the row would be reconciled away.
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "s1"})
 
 	v := r.View(fs.id.String())
 	if len(v.Lines) != 1 {

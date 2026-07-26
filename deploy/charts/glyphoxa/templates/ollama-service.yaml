@@ -1,0 +1,26 @@
+{{- if .Values.ollama.enabled }}
+{{/*
+Ollama Service (#517) — the stable in-cluster name the web/voice pods embed
+against. [glyphoxa.ollamaURL] derives GLYPHOXA_OLLAMA_URL from exactly this
+name and port, so the endpoint the pods dial can never drift from the workload
+the chart deployed. ClusterIP only: embeddings are an internal dependency and
+are never exposed outside the cluster.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "glyphoxa.ollama.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "glyphoxa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+  ports:
+    - name: http
+      port: {{ .Values.ollama.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

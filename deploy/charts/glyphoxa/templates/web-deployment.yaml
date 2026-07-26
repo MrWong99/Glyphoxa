@@ -203,7 +203,15 @@ spec:
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json
-            {{- with .Values.ollamaUrl }}
+            {{- with (include "glyphoxa.privacyPolicyURL" .) }}
+            # The privacy-policy page the Bot links from the Voice Session
+            # transcription disclosure it posts in the voice channel (#519).
+            # Explicit privacyPolicyUrl, else derived from the Ingress host;
+            # omitted entirely when neither is available (no broken link).
+            - name: GLYPHOXA_PRIVACY_POLICY_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with (include "glyphoxa.ollamaURL" .) }}
             # Embeddings endpoint (ADR-0011): the in-cluster pod has no local
             # Ollama, so the binary's loopback default can never work here —
             # point GLYPHOXA_OLLAMA_URL at a reachable server instead

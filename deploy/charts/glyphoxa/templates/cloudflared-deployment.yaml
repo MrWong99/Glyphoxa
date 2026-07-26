@@ -1,0 +1,128 @@
+{{- if .Values.cloudflared.enabled }}
+{{/*
+cloudflared Tunnel (#517) — the public beta's only inbound path.
+
+The beta runs on the operator's home VM (k3s) behind a Cloudflare Tunnel: no
+static IP, no port-forward, no inbound listener. cloudflared dials OUT to
+Cloudflare and forwards requests to the web Service from inside the cluster, so
+NOTHING here needs a hostPort, a NodePort, an Ingress or a LoadBalancer — and
+the voice tier stays outbound-only as it always was.
+
+- The tunnel is TOKEN-managed: its public hostname → service routing lives in
+  the Cloudflare dashboard (a remotely-managed tunnel), not in this chart. Point
+  it at the web Service printed in NOTES.txt.
+- The token is a credential: it comes from a Secret, never from argv (which is
+  world-readable in `ps` / the pod spec). Either the chart renders one from
+  `cloudflared.token`, or `cloudflared.existingSecret` names a Secret you
+  manage yourself; enabling the tunnel with neither fails the render rather than
+  deploying a pod that crash-loops on an empty token.
+- `--no-autoupdate`: in-place self-update inside a container fights the image
+  pin. Upgrade by bumping the tag.
+- Readiness comes from cloudflared's own metrics listener (/ready reports the
+  number of established edge connections), so a pod that cannot reach the edge
+  never reports Ready.
+*/}}
+{{- if and (not .Values.cloudflared.token) (not .Values.cloudflared.existingSecret.name) }}
+{{- fail "cloudflared.enabled needs a tunnel token: set cloudflared.token (the chart renders a Secret for it) or cloudflared.existingSecret.name/key to reference a Secret you manage. Create the token in the Cloudflare Zero Trust dashboard (Networks → Tunnels)." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.cloudflared.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloudflared
+spec:
+  replicas: {{ .Values.cloudflared.replicas }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cloudflared
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cloudflared
+      annotations:
+        # Roll the pod when a chart-rendered token changes; an externally managed
+        # Secret is the operator's to roll.
+        {{- if not .Values.cloudflared.existingSecret.name }}
+        checksum/token: {{ .Values.cloudflared.token | sha256sum }}
+        {{- end }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: cloudflared
+          image: {{ printf "%s:%s" .Values.cloudflared.image.repository .Values.cloudflared.image.tag | quote }}
+          imagePullPolicy: {{ .Values.cloudflared.image.pullPolicy }}
+          args:
+            - tunnel
+            - --no-autoupdate
+            - --metrics
+            - {{ printf "0.0.0.0:%d" (int .Values.cloudflared.metricsPort) | quote }}
+            - run
+          env:
+            # cloudflared reads the tunnel token from TUNNEL_TOKEN, keeping the
+            # credential out of the process's command line.
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudflared.existingSecret.name | default (include "glyphoxa.cloudflared.fullname" .) }}
+                  key: {{ .Values.cloudflared.existingSecret.key | default "tunnel-token" }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.cloudflared.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.cloudflared.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if not .Values.cloudflared.existingSecret.name }}
+---
+{{/*
+The chart-rendered tunnel-token Secret. Kept SEPARATE from the app Secret: it is
+the one credential an operator rotates on its own cadence (revoking a tunnel
+token must not roll the database password's checksum), and referencing an
+external Secret instead is a supported alternative (cloudflared.existingSecret).
+*/}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "glyphoxa.cloudflared.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloudflared
+type: Opaque
+stringData:
+  tunnel-token: {{ .Values.cloudflared.token | quote }}
+{{- end }}
+{{- end }}

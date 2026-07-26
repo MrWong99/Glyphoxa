@@ -336,6 +336,7 @@ server (the Helm chart's `ollamaUrl` value renders it), or semantic memory
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
 | `GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD` | optional | Per-application 24h Discord gateway IDENTIFY count above which a structured warning fires (token-reset early-warning, #486). Positive integer; blank/non-numeric/≤0 ⇒ default `500` (below Discord's 1000/token/24h limit). See [deploy/saas-operations.md §7](deploy/saas-operations.md). |
 | `GLYPHOXA_OLLAMA_URL` | optional | Ollama embeddings endpoint override; default `http://127.0.0.1:11434`. v1.0 embeddings are **Ollama-only** (ADR-0011), so set it wherever the process has no local Ollama — containers and k8s pods (k3d: `http://host.k3d.internal:11434`). The server must serve `nomic-embed-text`. Unreachable ⇒ semantic memory (L2) stalls loudly; nothing else breaks. |
+| `GLYPHOXA_PRIVACY_POLICY_URL` | optional | The deployment's published privacy-policy page. The Bot links it from the transcription disclosure it posts in the voice channel at Voice Session start (#519) — the players at the table are data subjects who may never open the web app. Blank ⇒ the disclosure still posts, without a link. The Helm chart derives it from `ingress.host` + `/privacy` when `privacyPolicyUrl` is unset. |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
 | `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |

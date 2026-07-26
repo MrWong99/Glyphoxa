@@ -192,11 +192,13 @@ type SpeakerResolver interface {
 }
 
 // LineStore is the narrow persistence surface the relay needs (#74, ADR-0040):
-// an incremental UPSERT of each projected Line, a list for replay-on-reload, and
-// the authoritative count for the Stop summary. *storage.Store satisfies it;
-// tests fake it. nil disables persistence (the live-only relay, e.g. unit tests).
+// an incremental UPSERT of each projected Line, the delete that reconciles a
+// never-delivered line back out (#437), a list for replay-on-reload, and the
+// authoritative count for the Stop summary. *storage.Store satisfies it; tests
+// fake it. nil disables persistence (the live-only relay, e.g. unit tests).
 type LineStore interface {
 	UpsertTranscriptLine(ctx context.Context, l storage.TranscriptLine) error
+	DeleteTranscriptLine(ctx context.Context, sessionID uuid.UUID, lineID string) error
 	ListTranscriptLines(ctx context.Context, sessionID uuid.UUID) ([]storage.TranscriptLine, error)
 	CountTranscriptLines(ctx context.Context, sessionID uuid.UUID) (int, error)
 }
@@ -205,11 +207,18 @@ type LineStore interface {
 // reply line whose text accumulates across the turn's TTSInvoked sentences.
 // ended marks a finalized turn (TurnEnded seen) so a late TTSInvoked — which a
 // barge can deliver AFTER the end — does not recreate the entry with a zero
-// target and clobber the completed coalesced reply.
+// target and clobber the completed coalesced reply. pending marks a dispatched
+// sentence still awaiting its FirstAudio (dispatch is serial single-in-flight,
+// so at most one). deliveredN counts sentences that were delivered (FirstAudio)
+// and not retracted by a TTSStreamFailed (#436) — the #437 reconcile predicate
+// at turn end is deliveredN == 0, ADR-0012's delivered definition, mirroring
+// the Chunker's FIFO pairing so the two grains agree on "the room heard it".
 type turn struct {
-	target voiceevent.AddressTarget
-	line   *Line
-	ended  bool
+	target     voiceevent.AddressTarget
+	line       *Line
+	ended      bool
+	pending    bool
+	deliveredN int
 }
 
 // sessionState is one live Voice Session's projection + replay state (#487):
@@ -224,6 +233,12 @@ type sessionState struct {
 	connection string // latest gateway connection state (#123); "" until the first transition
 	nextSeq    uint64
 	humanSeq   uint64
+	// unconfirmed holds the line ids of Agent replies persisted optimistically at
+	// TTSInvoked whose turn has not yet delivered a single sentence (#437): the
+	// reconcile set. A line leaves it on the turn's first FirstAudio (delivered —
+	// it stays persisted) or is RETRACTED from the store when its turn ends, or
+	// when the session finalizes, still having delivered nothing.
+	unconfirmed map[string]struct{}
 }
 
 // Relay projects bus events into transcript lines and serves them over SSE +
@@ -254,7 +269,7 @@ type Relay struct {
 	// goroutine (#74): emitLine tees each Line in here under r.mu, the bus
 	// contract forbids blocking so the send drops on overflow, and Finalize
 	// sends a flush barrier. nil when persistence is disabled (store == nil).
-	queue *busproject.Queue[*storage.TranscriptLine]
+	queue *busproject.Queue[*lineOp]
 
 	// writeTimeout bounds each SSE frame write/flush (#148 Defect B): a client
 	// that stops reading makes the blocked write fail instead of parking the
@@ -437,15 +452,78 @@ func (r *Relay) fold(e voiceevent.Event) {
 			}
 			t.line.Text += ev.Sentence
 		}
+		// The sentence was DISPATCHED, not necessarily spoken (event.go): it now
+		// awaits its FirstAudio (superseding a start-errored sentence still in the
+		// slot, like the Chunker's pending purge), and until the turn has delivered
+		// at least one sentence the row this emit persists is provisional (#437).
+		t.pending = true
+		if t.deliveredN == 0 {
+			st.unconfirmed[t.line.ID] = struct{}{}
+		}
 		// emitLine derives typing from the line's kind (FIX 1), so a clean turn
 		// (which emits NO TurnEnded) still shows "speaking" and a later human line
 		// returns to listening — no standalone setTyping here.
 		r.emitLine(st, sid, *t.line)
+	case voiceevent.FirstAudio:
+		// The pending sentence reached the room (ADR-0012's delivery signal): the
+		// optimistically-persisted line has earned its row, so it leaves the
+		// reconcile set (#437) — for good, unless a TTSStreamFailed retracts the
+		// turn's ONLY delivered sentence below. On the same-goroutine terminals
+		// (natural end, tts_error, provider_error) FirstAudio(sN) is published
+		// inline before Dispatch(sN) returns, so it precedes the turn's TurnEnded;
+		// a CUT turn (barge/superseded/mute) publishes TurnEnded from the floor
+		// reactor's goroutine, so a frame-boundary race can drop the first chunk's
+		// FirstAudio after the retract — accepted (ADR-0012 bias: when in doubt,
+		// the room did not hear it). A FirstAudio with nothing pending (straggler)
+		// is a no-op, mirroring the Chunker's pairing.
+		t := r.proj.Turn(sid, ev.TurnID)
+		if !t.pending {
+			break
+		}
+		t.pending = false
+		t.deliveredN++
+		if t.line != nil {
+			delete(st.unconfirmed, t.line.ID)
+		}
+	case voiceevent.TTSStreamFailed:
+		// The in-flight sentence died mid-delivery (#436): the room heard at most
+		// a fragment, so it must not count as delivered — parity with the Chunker's
+		// abortSentence and with Agent history, which omits it. A sentence that
+		// never got FirstAudio just leaves the pending slot; one that did is
+		// un-counted, and a turn whose ONLY delivered sentence is retracted
+		// re-enters the reconcile set so TurnEnded (or the Finalize sweep) retracts
+		// the row. The line TEXT keeps the failed fragment when EARLIER sentences
+		// delivered — the same #401 tail rounding a barge gets.
+		t := r.proj.Turn(sid, ev.TurnID)
+		if t.ended {
+			break
+		}
+		if t.pending {
+			t.pending = false
+			break
+		}
+		if t.deliveredN > 0 {
+			t.deliveredN--
+		}
+		if t.deliveredN == 0 && t.line != nil {
+			st.unconfirmed[t.line.ID] = struct{}{}
+		}
 	case voiceevent.TurnEnded:
 		// Mark the turn finalized (keep the entry so a late sentence is dropped,
 		// FIX 2) and fall back to listening — correct for a barge that cut the
 		// Agent off mid-reply.
-		r.proj.Turn(sid, ev.TurnID).ended = true
+		t := r.proj.Turn(sid, ev.TurnID)
+		t.ended = true
+		// Reconcile the LINE grain against ADR-0012's delivered-only invariant
+		// (#437, ADR-0040 amendment): a turn that ends having delivered ZERO
+		// sentences — a TTS start-error (terminal reason tts_error) is the
+		// canonical case, a mid-stream #436 failure of the only sentence the other
+		// — leaves a row the room never heard. Retract it. A turn that delivered
+		// at least one sentence keeps its line, sentence-tail rounding on barge
+		// included (#401).
+		if t.deliveredN == 0 && t.line != nil {
+			r.retract(st, sid, t.line.ID)
+		}
 		r.setTyping(st, sid, r.liveTyping())
 	case voiceevent.MuteChanged:
 		// One Agent's mute flipped (#211): forward a "mute" frame so the web Voice
@@ -488,7 +566,7 @@ func (r *Relay) CloseStreams() {
 // live/listening status frame, so a client connecting mid-session replays a
 // coherent state. Runs under r.mu.
 func (r *Relay) startSession(sid string) {
-	st := &sessionState{typing: r.liveTyping()}
+	st := &sessionState{typing: r.liveTyping(), unconfirmed: map[string]struct{}{}}
 	r.states[sid] = st
 	r.emit(st, sid, Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: st.typing})})
 }
@@ -503,6 +581,14 @@ func (r *Relay) finishSession(sid string) {
 	st := r.states[sid]
 	if st == nil {
 		return
+	}
+	// Last reconcile pass (#437): a session can end mid-turn (Stop, gateway loss,
+	// shutdown) with a dispatched-but-never-delivered reply still provisional and
+	// no TurnEnded ever published for it. Retract those rows here — Finalize runs
+	// this Close BEFORE the queue's flush barrier, so the deletes are drained (and
+	// hence excluded from the authoritative line_count) by the time it counts.
+	for lineID := range st.unconfirmed {
+		r.retract(st, sid, lineID)
 	}
 	st.typing = Typing{}
 	r.emit(st, sid, Frame{Event: "status", Data: mustJSON(status{Status: "idle", Typing: Typing{}})})
@@ -544,6 +630,26 @@ func (r *Relay) emitLine(st *sessionState, sid string, l Line) {
 		r.setTyping(st, sid, Typing{Active: true, Label: l.Who + " is speaking…"})
 	default: // KindPlayer / KindGM — a human line means we are back to listening
 		r.setTyping(st, sid, r.liveTyping())
+	}
+}
+
+// retract removes a never-delivered Agent line from the persisted transcript
+// (#437, ADR-0040 amendment): the row is deleted through the SAME single-writer
+// queue the tees ride, so it can never overtake the UPSERT it undoes. The LIVE
+// display state is deliberately left alone — the decision accepts that the SSE
+// feed transiently shows a line a later reload drops; it was never speech, and
+// the failure's evidence is the Turn's terminal reason, not the Transcript.
+// Idempotent: a line not in the reconcile set (already delivered, or already
+// retracted) is a no-op. Caller holds r.mu.
+func (r *Relay) retract(st *sessionState, sid, lineID string) {
+	if _, ok := st.unconfirmed[lineID]; !ok {
+		return
+	}
+	// Leave the id in the reconcile set when the queue is full: the Finalize
+	// sweep retries it after the writer has drained, so a TurnEnded-time drop
+	// under backpressure does not leave a never-delivered row behind for good.
+	if r.unpersist(sid, lineID) {
+		delete(st.unconfirmed, lineID)
 	}
 }
 

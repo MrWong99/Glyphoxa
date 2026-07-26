@@ -1,0 +1,144 @@
+{{- if .Values.backup.enabled }}
+{{/*
+Postgres backup CronJob (#520) — the beta's restore story.
+
+The in-chart Postgres is a single StatefulSet on one node's disk (ADR-0034). A
+public beta cannot run on that without backups, so this ships them in the chart
+rather than as a copy-paste snippet in the docs:
+
+- a nightly `pg_dump -Fc` (custom format — the input `pg_restore` wants) into a
+  dedicated PVC, kept for `backup.retentionDays` days and then rotated out;
+- an OPTIONAL off-site push to any S3-compatible endpoint, behind
+  `backup.offsite.enabled`, using credentials from a Secret the OPERATOR
+  supplies (the chart never invents a bucket or a key);
+- a documented restore procedure (docs/deploy/backup-restore.md, linked from
+  the install notes).
+
+Shape: the dump runs as an initContainer whenever an off-site push follows it,
+so the upload starts only after a COMPLETE dump exists — Kubernetes has no
+ordering between two regular containers of the same pod, and half a dump pushed
+off-site is worse than none. With the push disabled the same script is the
+pod's only container.
+
+`concurrencyPolicy: Forbid` — a dump that outruns its schedule must not have a
+second one pile onto the same volume and the same database.
+
+It is a plain resource (NOT a Helm hook): backups are not part of an
+install/upgrade sequence, and a hook Job would re-run on every `helm upgrade`.
+*/}}
+{{- if and .Values.backup.offsite.enabled (not .Values.backup.offsite.bucket) }}
+{{- fail "backup.offsite.enabled needs backup.offsite.bucket: the S3-compatible bucket the nightly dump is pushed to. Set it (plus backup.offsite.endpoint for a non-AWS endpoint) or disable the off-site push." }}
+{{- end }}
+{{- if and .Values.backup.offsite.enabled (not .Values.backup.offsite.existingSecret.name) }}
+{{- fail "backup.offsite.enabled needs backup.offsite.existingSecret.name: a Secret holding the bucket credentials (keys access-key-id / secret-access-key by default). The chart deliberately does not template object-store credentials into its own Secret — create one and reference it." }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "glyphoxa.backup.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "glyphoxa.labels" . | nindent 8 }}
+        app.kubernetes.io/component: backup
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "glyphoxa.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.backup.offsite.enabled }}
+          initContainers:
+            {{- include "glyphoxa.backup.dumpContainer" . | nindent 12 }}
+          containers:
+            - name: offsite-push
+              image: {{ printf "%s:%s" .Values.backup.offsite.image.repository .Values.backup.offsite.image.tag | quote }}
+              imagePullPolicy: {{ .Values.backup.offsite.image.pullPolicy }}
+              command: ["/bin/sh", "-c"]
+              args:
+                # The dump wrote the file it produced into /backup/.latest, so the
+                # push never has to guess (or race a rotation) about which file
+                # this run made.
+                - |
+                  set -eu
+                  dump="$(cat /backup/.latest)"
+                  aws s3 cp "${dump}" "s3://{{ .Values.backup.offsite.bucket }}/{{ .Values.backup.offsite.prefix }}$(basename "${dump}")"{{ with .Values.backup.offsite.endpoint }} --endpoint-url {{ . | quote }}{{ end }}
+                  echo "backup: pushed $(basename "${dump}") off-site"
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.offsite.existingSecret.name }}
+                      key: {{ .Values.backup.offsite.existingSecret.accessKeyIdKey | default "access-key-id" }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.offsite.existingSecret.name }}
+                      key: {{ .Values.backup.offsite.existingSecret.secretAccessKeyKey | default "secret-access-key" }}
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.backup.offsite.region | quote }}
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          {{- else }}
+          containers:
+            {{- include "glyphoxa.backup.dumpContainer" . | nindent 12 }}
+          {{- end }}
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: {{ include "glyphoxa.backup.fullname" . }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+{{/*
+The backup volume. Separate from the Postgres data PVC on purpose — a dump that
+lives on the disk it is protecting is not a backup — and annotated
+`helm.sh/resource-policy: keep` so `helm uninstall` cannot take the dumps with
+it. Off-site (above) is what protects against losing the NODE.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "glyphoxa.backup.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.backup.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+{{- end }}

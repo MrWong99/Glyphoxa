@@ -173,6 +173,13 @@ type Config struct {
 	// uuid.Nil value is a caller bug: RunFromDB refuses to start loudly rather than
 	// silently voicing the wrong (seed) roster.
 	CampaignID uuid.UUID
+	// PrivacyPolicyURL is the deployment's published privacy-policy page
+	// (GLYPHOXA_PRIVACY_POLICY_URL, #518's SPA route in the reference deployment).
+	// The Bot links it from the transcription disclosure it posts at Voice Session
+	// start (#519) — the players at the table are data subjects who may never open
+	// the web app, so the voice channel is the only place that reaches them. Empty
+	// posts the disclosure WITHOUT a link rather than a broken one.
+	PrivacyPolicyURL string
 	// Client, when non-nil, is the standing shared Discord client the boot-owned
 	// presence owns (ADR-0010 amendment, #102): connectAndServe borrows it per
 	// cycle instead of constructing its own with disgo.New / OpenGateway, and does

@@ -714,10 +714,13 @@ func TestProjection_LookaheadReaction_HappyAttributesReactor(t *testing.T) {
 	// The Lead turn.
 	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
 	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})
+	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "Te"})
 	// The reaction: EnsembleReaction (attribution) STRICTLY precedes the first TTSInvoked
 	// (F1: PublishInvoked fires only after the announce, at release).
 	bus.Publish(voiceevent.EnsembleReaction{At: at(3), TurnID: "rID", LeadTurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"}})
 	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", TurnID: "rID"})
+	// Both turns delivered audio, so both rows survive the #437 reconcile.
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "rID"})
 
 	// The reaction is its own line, attributed to Goblin (never "NPC").
 	v := r.View(fs.id.String())

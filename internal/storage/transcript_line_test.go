@@ -219,3 +219,62 @@ func TestTranscriptLineSpeakerID(t *testing.T) {
 		t.Errorf("line[1].SpeakerDiscordUserID = %q, want \"\" (NULL round-trips to empty)", got[1].SpeakerDiscordUserID)
 	}
 }
+
+// TestTranscriptLineDelete is #437 (ADR-0040 amendment): the Relay's retraction of
+// a never-delivered line removes exactly that row — the session's other lines and
+// another session's same-named line are untouched — and deleting a row that is not
+// there is a no-op, not an error (the reconcile may race a dropped UPSERT).
+func TestTranscriptLineDelete(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	other, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession (other): %v", err)
+	}
+	ts := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
+
+	lines := []storage.TranscriptLine{
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "u:1", Seq: 1, Who: "Player / DM", Kind: "player", TS: ts, Text: "Hello Bart"},
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "a:t1", Seq: 2, Who: "Bart", Tag: "NPC", Kind: "npc", TS: ts, Text: "Well met."},
+		{VoiceSessionID: other.ID, CampaignID: campaignID, LineID: "a:t1", Seq: 1, Who: "Bart", Tag: "NPC", Kind: "npc", TS: ts, Text: "Another session's reply"},
+	}
+	for _, l := range lines {
+		if err := st.UpsertTranscriptLine(ctx, l); err != nil {
+			t.Fatalf("UpsertTranscriptLine %s/%s: %v", l.VoiceSessionID, l.LineID, err)
+		}
+	}
+
+	if err := st.DeleteTranscriptLine(ctx, vs.ID, "a:t1"); err != nil {
+		t.Fatalf("DeleteTranscriptLine: %v", err)
+	}
+
+	got, err := st.ListTranscriptLines(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("ListTranscriptLines: %v", err)
+	}
+	if len(got) != 1 || got[0].LineID != "u:1" {
+		t.Fatalf("lines after retraction = %+v, want only the human u:1", got)
+	}
+	if n, err := st.CountTranscriptLines(ctx, vs.ID); err != nil || n != 1 {
+		t.Errorf("count after retraction = %d, %v; want 1, nil (the line_count follows)", n, err)
+	}
+	// The other session's identically-named line is untouched: the delete is keyed
+	// by the full (voice_session_id, line_id) replay key.
+	if n, err := st.CountTranscriptLines(ctx, other.ID); err != nil || n != 1 {
+		t.Errorf("other session count = %d, %v; want its own a:t1 kept", n, err)
+	}
+	// Idempotent: retracting again (or a line that never landed) is not an error.
+	if err := st.DeleteTranscriptLine(ctx, vs.ID, "a:t1"); err != nil {
+		t.Errorf("second DeleteTranscriptLine: %v, want nil (no-op)", err)
+	}
+	if err := st.DeleteTranscriptLine(ctx, vs.ID, "a:never"); err != nil {
+		t.Errorf("DeleteTranscriptLine of an unknown line: %v, want nil", err)
+	}
+}

@@ -8,6 +8,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { LegalFooter } from "@/components/LegalFooter";
 import { isUnauthenticated } from "@/lib/connectError";
 
 import "@/screens/login/login.css";
@@ -132,6 +133,9 @@ function NameTenantCard({ initialName }: { initialName: string }) {
           Skip for now
         </Button>
       </form>
+
+      {/* The footer follows the visitor through signup too (#518). */}
+      <LegalFooter />
     </div>
   );
 }
