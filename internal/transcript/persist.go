@@ -66,8 +66,11 @@ func (r *Relay) persist(sid string, l Line, seq uint64) {
 // queue (#437): the turn ended (or the session finalized) without a single
 // delivered sentence, so the optimistically-written row must not outlive the
 // session. Same non-blocking discipline as persist — a dropped retraction leaves
-// a stale row rather than blocking the bus, and is logged. Caller holds r.mu.
-func (r *Relay) unpersist(sid, lineID string) {
+// a stale row rather than blocking the bus, and is logged. It reports whether
+// the retraction was accepted (a nil queue counts: nothing to undo), so retract
+// can keep the line in the reconcile set and the Finalize sweep retries a
+// TurnEnded-time drop once the queue has drained. Caller holds r.mu.
+func (r *Relay) unpersist(sid, lineID string) bool {
 	sess := r.proj.Session(sid)
 	op := &lineOp{
 		delete: true,
@@ -75,7 +78,9 @@ func (r *Relay) unpersist(sid, lineID string) {
 	}
 	if !r.queue.Enqueue(op) {
 		r.log.Warn("transcript: persist queue full, dropping line retraction", "line_id", lineID)
+		return false
 	}
+	return true
 }
 
 // writeLine is the Relay's flush sink — the write half of the single writer
