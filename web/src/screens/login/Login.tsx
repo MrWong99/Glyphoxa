@@ -36,12 +36,16 @@ import "./login.css";
 // framing rather than advertising a signup the deployment may not allow. Only
 // the copy changes: the OAuth start anchor stays exactly as is in both modes.
 export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
-  const { data } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
+  const { data, status } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
   const [accepted, setAccepted] = useState(false);
   const aupId = useId();
-  // Open mode = signing up: the acknowledgment gates the OAuth start.
-  const blocked = open && !accepted;
+  // Open mode = signing up: the acknowledgment gates the OAuth start. While the
+  // probe is still IN FLIGHT the start is briefly disabled too — otherwise the
+  // first render on an open deployment shows an ungated anchor and a fast click
+  // slips past the acknowledgment. An ERRORED probe stays fail-open with the
+  // allowlist framing (a flaky probe must not lock a legitimate operator out).
+  const blocked = status === "pending" || (open && !accepted);
 
   return (
     <div className="gx-login">

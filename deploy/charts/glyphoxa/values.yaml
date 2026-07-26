@@ -284,7 +284,7 @@ plans:
         description: >-
           Try Glyphoxa on the platform's provider keys, up to a small monthly
           usage allowance. No card, no charge — when the allowance is spent,
-          switch to your own keys.
+          ask the operator to move you to the free bring-your-own-keys plan.
         monthly_price_usd: 0
         key_source: platform
         # The monthly estimated-USD provider-usage allowance (ADR-0046 price

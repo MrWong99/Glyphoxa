@@ -16,6 +16,15 @@ import "./landing.css";
 // operator-adjustable chart value (#521's plan catalog) — quoting a figure here
 // would make the page lie the moment an operator tunes it.
 //
+// The SPA ships identically to every operator, but the beta-economics copy is
+// only true on the launch posture (open Admission Mode + the beta plan
+// catalog). RootEntry probes the public GetAdmissionMode (the same posture
+// probe Login uses) and passes `open`: only an explicit OPEN answer renders
+// the free-beta section and signup framing; the fail-safe default (allowlist,
+// probe pending or errored) is a neutral product page with a plain sign-in
+// CTA, so a stock self-host install never advertises a signup it rejects or
+// an allowance it does not fund.
+//
 // The screenshots are placeholders until #263's captures land; each frame keeps
 // its caption so the layout (and the honesty of the caption) is already right.
 
@@ -35,12 +44,12 @@ const FEATURES: Feature[] = [
   {
     icon: Sparkles,
     title: "Run by the GM, not by the bot",
-    body: "You write the personas, mute an NPC mid-scene, put words in their mouth with /say, and steer the next reply with a directive. Recording anything is opt-in, per player.",
+    body: "You write the personas, mute an NPC mid-scene, put words in their mouth with /say, and steer the next reply with a directive. Audio recording is opt-in, per player.",
   },
   {
     icon: KeyRound,
     title: "Your keys, your data",
-    body: "Bring your own provider keys and the usage is yours alone. Everything lives in one Postgres database on the operator's own server — exportable, and deletable.",
+    body: "Bring your own provider keys and the usage is yours alone. Everything lives in one Postgres database on the operator's own server, and deleting a campaign removes all of it.",
   },
 ];
 
@@ -55,7 +64,7 @@ const SHOTS: Shot[] = [
   { caption: "Provider keys and spend caps, per tenant.", src: null },
 ];
 
-export function Landing() {
+export function Landing({ open = false }: { open?: boolean }) {
   return (
     <div className="gx-landing">
       <header className="gx-landing__bar">
@@ -81,10 +90,12 @@ export function Landing() {
         </p>
         <div className="gx-landing__cta">
           <a className="gx-btn gx-btn--primary gx-btn--lg" href="/login">
-            Start with Discord
+            {open ? "Start with Discord" : "Sign in with Discord"}
           </a>
           <span className="gx-landing__cta-note">
-            Free while in beta · sign in with the Discord account you play on
+            {open
+              ? "Free while in beta · sign in with the Discord account you play on"
+              : "Sign in with the Discord account you play on"}
           </span>
         </div>
       </section>
@@ -114,34 +125,42 @@ export function Landing() {
         ))}
       </section>
 
-      <section className="gx-landing__beta" aria-labelledby="beta-heading">
-        <h2 id="beta-heading">How the free beta works</h2>
-        <div className="gx-landing__plans">
-          <article className="gx-landing__plan">
-            <h3>Try it on us</h3>
-            <p>
-              New tables start with a small monthly allowance of provider usage paid for by
-              this instance. No card, nothing to cancel. When the allowance is used up, the
-              voice features pause until the next month — or until you add your own keys.
-            </p>
-          </article>
-          <article className="gx-landing__plan">
-            <h3>Then bring your own keys</h3>
-            <p>
-              For real campaigns, add your own provider keys (speech, language model,
-              images) in the settings. Usage is then billed to you by those providers, and
-              this instance charges nothing on top.
-            </p>
-          </article>
-        </div>
-        <p className="gx-landing__beta-note">
-          This is an open beta on a small self-hosted server: expect rough edges and the
-          occasional restart, and keep your own export of anything you would hate to lose.
-          Sessions are transcribed — the bot says so in the channel before it starts, and
-          audio recording is opt-in per player. Details in the{" "}
-          <a href="/privacy">Datenschutzerklärung</a>.
-        </p>
-      </section>
+      {open && (
+        <section className="gx-landing__beta" aria-labelledby="beta-heading">
+          <h2 id="beta-heading">How the free beta works</h2>
+          <div className="gx-landing__plans">
+            <article className="gx-landing__plan">
+              <h3>Try it on us</h3>
+              <p>
+                New tables start with a small monthly allowance of provider usage paid for
+                by this instance. No card, nothing to cancel. When the allowance is used
+                up, the voice features pause until the next month — or ask the operator to
+                move you to the free bring-your-own-keys plan.
+              </p>
+            </article>
+            <article className="gx-landing__plan">
+              <h3>Then bring your own keys</h3>
+              <p>
+                For real campaigns, add your own provider keys (speech, language model,
+                images) in the settings and ask to be moved to the BYOK plan. Usage is
+                then billed to you by those providers, and this instance charges nothing
+                on top.
+              </p>
+            </article>
+          </div>
+          <p className="gx-landing__beta-note">
+            This is an open beta on a small self-hosted server: expect rough edges and the
+            occasional restart, and keep your own notes on anything you would hate to
+            lose.
+          </p>
+        </section>
+      )}
+
+      <p className="gx-landing__beta-note">
+        Sessions are transcribed — the bot says so in the voice channel before it starts —
+        and audio recording is opt-in per player. Details in the{" "}
+        <a href="/privacy">Datenschutzerklärung</a>.
+      </p>
 
       <LegalFooter />
     </div>
