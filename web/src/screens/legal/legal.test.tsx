@@ -80,6 +80,7 @@ describe("legal routes", () => {
       "Session Highlights",
       "ElevenLabs",
       "Groq",
+      "Anthropic",
       "Gemini",
       "Cloudflare",
       "Auftragsverarbeitung",

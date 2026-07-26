@@ -48,18 +48,27 @@ to miss.
    not need one — Art. 37 GDPR). Leave them empty to omit those lines.
 2. Read the Datenschutzerklärung end to end and correct anything that does not
    match YOUR deployment — in particular §5 (which AI providers you actually
-   use) and §6 (where the data lives). The template lists every provider the
-   software *can* use.
+   use) and §6 (where the data lives). The template names the shipped adapters
+   (Discord, ElevenLabs, Groq, Anthropic, Google Gemini, OpenAI-compatible
+   endpoints, Cloudflare) — cross-check against your configured providers, and
+   remember an "OpenAI-compatible endpoint" is whatever vendor you point it at.
 3. Rebuild the SPA (`npm run build` in `web/`, or rebuild the container image —
    the pages are compiled into the bundle) and deploy.
-4. Verify the pages before you publish DNS:
+4. Verify before you publish DNS. The legal pages are client-rendered, so
+   fetching `/imprint` only returns the SPA shell — grep the **built bundle**,
+   not the HTML:
 
    ```sh
-   curl -sf https://<your-host>/imprint  | grep -q "BITTE AUSFÜLLEN" && echo "STILL UNFILLED"
-   curl -sf https://<your-host>/privacy  >/dev/null && echo "privacy page served"
+   # locally, against the build you are about to ship (vite outDir):
+   grep -R "BITTE AUSFÜLLEN" internal/spa/dist/assets/ && echo "STILL UNFILLED"
+
+   # or against the deployed instance (fetches the hashed JS the shell references):
+   host=https://<your-host>
+   curl -sf "$host$(curl -sf "$host/" | grep -o '/assets/[^"]*\.js' | head -1)" \
+     | grep -q "BITTE AUSF" && echo "STILL UNFILLED"
    ```
 
-   The first command must print nothing.
+   Neither command may print `STILL UNFILLED`.
 
 ## Keeping the texts honest
 

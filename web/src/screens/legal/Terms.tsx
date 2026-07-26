@@ -20,8 +20,9 @@ export function Terms() {
           <OperatorValue value={OPERATOR.legalName} /> betrieben und befindet sich in einer{" "}
           <strong>offenen Beta</strong>: Funktionen können sich ändern oder ausfallen, und
           es besteht kein Anspruch auf Verfügbarkeit oder auf den Erhalt gespeicherter
-          Inhalte. Legen Sie von Inhalten, die Ihnen wichtig sind, eigene Sicherungen an
-          (Kampagnen lassen sich exportieren).
+          Inhalte. Legen Sie von Inhalten, die Ihnen wichtig sind, eigene Notizen oder
+          Kopien an; eine Kopie Ihrer gespeicherten Daten können Sie beim Betreiber
+          anfragen (Art. 15 DSGVO).
         </p>
       </Section>
 
@@ -66,8 +67,9 @@ export function Terms() {
           verursacht jedoch Kosten: Je nach Tarif nutzen Sie ein begrenztes
           Testguthaben des Betreibers oder hinterlegen eigene Zugangsschlüssel (BYOK). Für
           Kosten, die über eigene Schlüssel bei den jeweiligen Anbietern entstehen, haften
-          Sie selbst; ein Verbrauchslimit je Kampagne hilft dabei, sie zu begrenzen. Ist
-          das Testguthaben aufgebraucht, ruhen die betroffenen Funktionen.
+          Sie selbst; ein optional einstellbares Verbrauchslimit je Sprachsitzung hilft
+          dabei, sie zu begrenzen. Ist das Testguthaben aufgebraucht, ruhen die
+          betroffenen Funktionen.
         </p>
       </Section>
 
@@ -84,10 +86,11 @@ export function Terms() {
       <Section heading="6. Sperrung und Beendigung">
         <p>
           Bei Verstößen gegen diese Bedingungen kann der Zugang gesperrt werden — bei
-          schwerwiegenden Verstößen ohne Vorankündigung. Sie können Ihr Konto und Ihre
-          Kampagnen jederzeit löschen. Der Betrieb dieser Instanz kann eingestellt werden;
-          wir bemühen uns, dies mit angemessener Vorlaufzeit anzukündigen, damit Sie Ihre
-          Daten exportieren können.
+          schwerwiegenden Verstößen ohne Vorankündigung. Ihre Kampagnen können Sie
+          jederzeit selbst löschen; die Löschung Ihres Kontos können Sie jederzeit beim
+          Betreiber verlangen. Der Betrieb dieser Instanz kann eingestellt werden; wir
+          bemühen uns, dies mit angemessener Vorlaufzeit anzukündigen, damit Sie eine
+          Kopie Ihrer Daten anfragen und Inhalte sichern können.
         </p>
       </Section>
 

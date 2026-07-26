@@ -51,22 +51,18 @@ export function Imprint() {
 
       <Section heading="Streitbeilegung">
         <p>
-          Die Europäische Kommission stellt eine Plattform zur Online-Streitbeilegung
-          bereit:{" "}
-          <a href="https://ec.europa.eu/consumers/odr/" target="_blank" rel="noreferrer noopener">
-            https://ec.europa.eu/consumers/odr/
-          </a>
-          . Wir sind nicht verpflichtet und nicht bereit, an Streitbeilegungsverfahren vor
-          einer Verbraucherschlichtungsstelle teilzunehmen.
+          Wir sind nicht verpflichtet und nicht bereit, an Streitbeilegungsverfahren vor
+          einer Verbraucherschlichtungsstelle teilzunehmen (§ 36 VSBG).
         </p>
       </Section>
 
       <Section heading="Haftung für Inhalte und Links">
         <p>
           Als Diensteanbieter sind wir für eigene Inhalte auf diesen Seiten nach den
-          allgemeinen Gesetzen verantwortlich (§ 7 Abs. 1 DDG). Nach §§ 8 bis 10 DDG sind
-          wir jedoch nicht verpflichtet, übermittelte oder gespeicherte fremde
-          Informationen zu überwachen. Für die Inhalte verlinkter externer Seiten ist
+          allgemeinen Gesetzen verantwortlich. Für übermittelte oder gespeicherte fremde
+          Informationen gelten die Haftungsprivilegien der Art. 4 bis 6 der Verordnung
+          (EU) 2022/2065 (Digital Services Act); eine allgemeine Überwachungspflicht
+          besteht nicht (Art. 8 DSA). Für die Inhalte verlinkter externer Seiten ist
           stets deren Anbieter verantwortlich; zum Zeitpunkt der Verlinkung waren keine
           Rechtsverstöße erkennbar. Bei Bekanntwerden von Rechtsverletzungen entfernen wir
           derartige Links umgehend.

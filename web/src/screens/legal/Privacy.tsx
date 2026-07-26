@@ -50,10 +50,11 @@ export function Privacy() {
         <p>
           Zweck ist die Authentifizierung und die Zuordnung Ihrer Inhalte zu Ihrem Konto;
           Rechtsgrundlage ist Art. 6 Abs. 1 lit. b DSGVO (Durchführung des
-          Nutzungsverhältnisses). Die Sitzung wird über ein technisch notwendiges Cookie
-          gehalten (Art. 6 Abs. 1 lit. f DSGVO; § 25 Abs. 2 Nr. 2 TDDDG — kein
-          Einwilligungsbanner nötig, weil kein Tracking stattfindet). Wir setzen keine
-          Analyse- oder Werbe-Cookies ein.
+          Nutzungsverhältnisses). Die Sitzung wird über technisch notwendige Cookies
+          gehalten: ein Sitzungs-Cookie, ein CSRF-Schutz-Cookie sowie ein kurzlebiges
+          Cookie während des Anmeldevorgangs (Art. 6 Abs. 1 lit. f DSGVO; § 25 Abs. 2
+          Nr. 2 TDDDG — kein Einwilligungsbanner nötig, weil kein Tracking stattfindet).
+          Wir setzen keine Analyse- oder Werbe-Cookies ein.
         </p>
         <p>
           Der Aufruf von Discord selbst unterliegt der Datenschutzerklärung von Discord
@@ -96,7 +97,9 @@ export function Privacy() {
           Protokollierung des gemeinsamen Spiels), über die vor Sitzungsbeginn im
           Textkanal informiert wird. Wer nicht transkribiert werden möchte, sollte der
           Sprachsitzung nicht beitreten und die Spielleitung ansprechen — sie kann die
-          Sitzung jederzeit beenden und Transkripte löschen.
+          Sitzung jederzeit beenden und die Kampagne samt aller Transkripte löschen.
+          Die Löschung einzelner Transkriptpassagen können Sie beim Betreiber verlangen
+          (Ziffer 8).
         </p>
       </Section>
 
@@ -148,9 +151,9 @@ export function Privacy() {
             erhält Audioausschnitte bzw. den zu sprechenden Text.
           </li>
           <li>
-            <strong>Groq</strong> und weitere Sprachmodell-Anbieter (z. B. Google Gemini,
-            OpenAI-kompatible Endpunkte) — erhalten den Gesprächskontext (Transkripttext,
-            Kampagnennotizen), um Antworten zu erzeugen.
+            <strong>Groq</strong> und weitere Sprachmodell-Anbieter (<strong>Anthropic</strong>{" "}
+            (USA), Google Gemini, OpenAI-kompatible Endpunkte) — erhalten den
+            Gesprächskontext (Transkripttext, Kampagnennotizen), um Antworten zu erzeugen.
           </li>
           <li>
             <strong>Google Gemini</strong> — Bilderzeugung für Kampagnenillustrationen:
@@ -183,13 +186,14 @@ export function Privacy() {
       <Section heading="7. Speicherdauer">
         <ul>
           <li>
-            <strong>Konto- und Kampagnendaten:</strong> bis zur Löschung durch Sie bzw.
-            Ihre Spielleitung oder bis zur Löschung des Kontos.
+            <strong>Konto- und Kampagnendaten:</strong> Kampagnen bis zu ihrer Löschung
+            durch die Spielleitung; die Löschung Ihres Kontos können Sie jederzeit beim
+            Betreiber verlangen (Ziffer 8).
           </li>
           <li>
             <strong>Transkripte und Einbettungen:</strong> bis die Spielleitung die
-            Sitzung oder die Kampagne löscht — das Löschen einer Kampagne entfernt ihre
-            Transkripte, Einbettungen und Highlights vollständig.
+            Kampagne löscht — das Löschen einer Kampagne entfernt ihre Transkripte,
+            Einbettungen und Highlights vollständig.
           </li>
           <li>
             <strong>Audio-Ringspeicher:</strong> maximal ca. 120 Sekunden, Verwerfung
