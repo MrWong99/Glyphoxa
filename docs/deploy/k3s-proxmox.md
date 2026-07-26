@@ -136,9 +136,9 @@ inside the cluster (Cloudflare terminates TLS at its edge).
    ```
 
 3. Back in the dashboard, add a **Public Hostname** on the tunnel pointing at
-   `http://glyphoxa-web.glyphoxa.svc.cluster.local:8080` (the Service name the
-   install notes print), and register the same redirect URL on the Discord
-   application.
+   `http://glyphoxa-web.glyphoxa.svc.cluster.local:80` (the web Service URL the
+   install notes print — the Service listens on 80 and maps to the container's
+   8080), and register the same redirect URL on the Discord application.
 
 The voice tier is unaffected either way — Discord voice is outbound-only.
 

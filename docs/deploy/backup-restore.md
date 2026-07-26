@@ -28,7 +28,10 @@ Each run:
    `pg_restore` takes) of the database named by the app Secret's
    `database-url`, into `/backup/glyphoxa-<UTC timestamp>.dump` on a PVC of its
    own — never the database's volume, because a dump on the disk it protects is
-   not a backup;
+   not a backup. The file is written under a `.partial` name and renamed only
+   on success, so anything matching `glyphoxa-*.dump` is a **complete** dump —
+   a job killed mid-write leaves no truncated file for a disaster-night restore
+   to trip over;
 2. records the filename in `/backup/.latest`;
 3. deletes dumps older than `retentionDays` — **after** a successful dump, so a
    failing night never eats the last good one.
@@ -134,6 +137,14 @@ kubectl -n glyphoxa exec -it glyphoxa-restore -- sh -c '
 #    app back. A serving pod refuses to start on a stale schema (EnsureCurrent,
 #    ADR-0031) rather than serving against it — run `migrate up` if the restored
 #    dump predates a migration.
+#
+#    CAVEAT: an in-place `--clean` restore is only safe when the dump matches
+#    the CURRENT migration level. `--clean` drops only objects present in the
+#    dump, so tables created by migrations applied AFTER the dump was taken
+#    survive — and the re-run of those migrations then fails on "relation
+#    already exists". For a dump that predates the running schema, recreate the
+#    database instead (DROP DATABASE / CREATE DATABASE, or `pg_restore --create
+#    --clean` against the maintenance DB), then restore and `migrate up`.
 kubectl -n glyphoxa delete pod glyphoxa-restore
 kubectl -n glyphoxa scale deployment/glyphoxa-web  --replicas=1
 kubectl -n glyphoxa scale deployment/glyphoxa-voice --replicas=1
@@ -155,6 +166,8 @@ throwaway database on the same server, poke at it, and only then decide.
 kubectl -n glyphoxa exec -it glyphoxa-restore -- sh -c '
   psql "$GLYPHOXA_DATABASE_URL" -c "CREATE DATABASE glyphoxa_scratch;" &&
   scratch="$(echo "$GLYPHOXA_DATABASE_URL" | sed "s#/glyphoxa?#/glyphoxa_scratch?#")" &&
+  [ "$scratch" != "$GLYPHOXA_DATABASE_URL" ] ||
+    { echo "DSN rewrite failed - adjust the sed for your database name"; exit 1; } &&
   pg_restore -d "$scratch" --no-owner /backup/glyphoxa-20260722T041500Z.dump &&
   psql "$scratch" -c "SELECT count(*) FROM transcript_line;" \
                   -c "SELECT count(*) FROM campaign;"'

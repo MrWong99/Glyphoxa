@@ -107,7 +107,11 @@ promise the landing page makes to a visitor:
 | `byok-free` | `byok` | $0/month | — (the Tenant's own keys) |
 
 Set `plans.enabled=true` to sync them, and point `web.signupPlanSlug` at
-`beta-trial` so an open-mode signup (ADR-0055) lands on the trial. Then:
+`beta-trial` so an open-mode signup (ADR-0055) lands on the trial. Binding
+signups to a **platform-keyed** plan deliberately overrides ADR-0055's original
+"the default Plan is a free BYOK tier / platform plans stay operator-CLI-only"
+wording — the SaaS-first launch decision, recorded as an amendment on ADR-0055
+(the reservation now covers *priced* platform plans). Then:
 
 - the trial spends **your** provider keys (§2) up to the allowance, which in
   `open` mode is a real gate — a session start is refused once the
