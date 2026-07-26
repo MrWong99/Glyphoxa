@@ -14,7 +14,8 @@ import (
 )
 
 // signupParams returns a valid open-mode signup input for the given snowflake,
-// bound to the billingSpecs BYOK tier (the ADR-0055 default-plan shape).
+// bound to the billingSpecs BYOK tier (the ADR-0055 default-plan shape). The
+// AUP acceptance time is stamped the way the OAuth callback does (#518).
 func signupParams(discordID, token string) storage.SignupParams {
 	return storage.SignupParams{
 		User: storage.UpsertUserParams{
@@ -28,6 +29,7 @@ func signupParams(discordID, token string) storage.SignupParams {
 			IP:        "203.0.113.7",
 			UA:        "test-agent",
 		},
+		AUPAcceptedAt: time.Now(),
 	}
 }
 
@@ -127,6 +129,11 @@ func TestProvisionSignupFoundsTenantOnce(t *testing.T) {
 	}
 	if got, err := st.AuthenticateSession(ctx, "tok-first"); err != nil || got.ID != res.User.ID {
 		t.Fatalf("AuthenticateSession(minted) = %+v, %v, want signup user", got, err)
+	} else if got.AUPAcceptedAt == nil {
+		t.Fatal("aup_accepted_at not persisted on the signup user row (#518)")
+	}
+	if res.User.AUPAcceptedAt == nil {
+		t.Fatal("SignupResult.User.AUPAcceptedAt = nil, want the stamped acceptance")
 	}
 	if tid, err := st.TenantForUser(ctx, res.User.ID); err != nil || tid != res.Tenant.ID {
 		t.Fatalf("TenantForUser = %s, %v, want bound tenant %s", tid, err, res.Tenant.ID)

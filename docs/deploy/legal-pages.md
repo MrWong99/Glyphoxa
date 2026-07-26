@@ -12,7 +12,12 @@ on every screen (including login and signup):
 In the **open** Admission Mode (ADR-0055) the login screen — which is the signup
 screen — additionally requires the visitor to acknowledge the
 Nutzungsbedingungen and the Datenschutzerklärung before the Discord OAuth flow
-can start.
+can start. The gate is enforced **server-side**, not just rendered: an
+open-mode `GET /auth/discord/login` without `aup=1` is bounced back to the
+login screen, the acknowledgment rides the OAuth state cookie to the callback,
+an open-mode signup whose round trip lacks it writes nothing, and the
+acceptance time is recorded on the user row (`users.aup_accepted_at`) — the
+§ 305 BGB inclusion evidence. Allowlist-mode logins are not gated.
 
 `/privacy` is also a deployment contract: the Helm chart derives
 `GLYPHOXA_PRIVACY_POLICY_URL` as `<ingress host>/privacy`, and the Bot links it

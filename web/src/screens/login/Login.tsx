@@ -35,7 +35,14 @@ import "./login.css";
 // the probe is loading or errored the screen fail-safes to today's allowlist
 // framing rather than advertising a signup the deployment may not allow. Only
 // the copy changes: the OAuth start anchor stays exactly as is in both modes.
-export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
+export function Login({
+  notAuthorized = false,
+  aupRequired = false,
+}: {
+  notAuthorized?: boolean;
+  /** The server-side #518 gate bounced an unacknowledged open-mode OAuth start here. */
+  aupRequired?: boolean;
+}) {
   const { data, status } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
   const [accepted, setAccepted] = useState(false);
@@ -66,6 +73,12 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
           </p>
         )}
 
+        {aupRequired && (
+          <p className="gx-login__error" role="alert">
+            Please accept the Nutzungsbedingungen below before signing in.
+          </p>
+        )}
+
         {open && (
           <label className="gx-login__consent" htmlFor={aupId}>
             <input
@@ -84,13 +97,19 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
         {/* An anchor cannot be `disabled`, so the blocked state is rendered as a
             real disabled button — aria-disabled alone would still navigate on
             click, and a signup that slips past the acknowledgment is the one
-            thing this gate exists to prevent. */}
+            thing this gate exists to prevent. In open mode the start link
+            carries ?aup=1 — the server refuses an open-mode start without it
+            and the callback records the acceptance time (#518), so the
+            checkbox is enforced, not just rendered. */}
         {blocked ? (
           <Button variant="primary" size="lg" block disabled>
             Continue with Discord
           </Button>
         ) : (
-          <a className="gx-btn gx-btn--primary gx-btn--lg gx-btn--block" href="/auth/discord/login">
+          <a
+            className="gx-btn gx-btn--primary gx-btn--lg gx-btn--block"
+            href={open ? "/auth/discord/login?aup=1" : "/auth/discord/login"}
+          >
             Continue with Discord
           </a>
         )}

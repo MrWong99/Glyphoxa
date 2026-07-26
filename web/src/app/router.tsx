@@ -32,8 +32,10 @@ const rootRoute = createRootRoute({
 // /login — the Discord-only OAuth entry (ADR-0016). It lives OUTSIDE the tenant
 // shell so it never triggers the AuthGate (which would loop). The OAuth callback
 // bounces an operator-allowlist rejection here with ?error=not_authorized
-// (ADR-0041); validateSearch surfaces it as a typed search param so the screen
-// can render the not-authorized banner.
+// (ADR-0041), and the server-side AUP gate (#518) bounces an unacknowledged
+// open-mode OAuth start/round-trip with ?error=aup_required; validateSearch
+// surfaces both as a typed search param so the screen can render the matching
+// banner.
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
@@ -42,7 +44,7 @@ const loginRoute = createRoute({
   }),
   component: function LoginScreen() {
     const { error } = loginRoute.useSearch();
-    return <Login notAuthorized={error === "not_authorized"} />;
+    return <Login notAuthorized={error === "not_authorized"} aupRequired={error === "aup_required"} />;
   },
 });
 

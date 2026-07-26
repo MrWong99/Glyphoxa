@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -28,6 +29,13 @@ type SignupParams struct {
 	TenantName string
 	PlanSlug   string
 	Session    NewSession
+	// AUPAcceptedAt is when this signup acknowledged the Nutzungsbedingungen +
+	// Datenschutzerklärung (#518): the OAuth start carried the acknowledgment
+	// and the callback stamps its time here, so users.aup_accepted_at always
+	// holds the LATEST acceptance (a returning open-mode login re-acknowledges
+	// — the login screen requires the tick every time). The zero value writes
+	// nothing; the auth tier refuses ack-less open-mode signups before calling.
+	AUPAcceptedAt time.Time
 }
 
 // SignupResult reports what ProvisionSignup did. Created is true when a fresh
@@ -56,6 +64,14 @@ func (s *Store) ProvisionSignup(ctx context.Context, p SignupParams) (SignupResu
 		}
 		if u.SuspendedAt != nil {
 			return ErrUserSuspended
+		}
+		if !p.AUPAcceptedAt.IsZero() {
+			if _, err := tx.db.Exec(ctx,
+				`UPDATE users SET aup_accepted_at = $2, updated_at = now() WHERE id = $1`,
+				u.ID, p.AUPAcceptedAt); err != nil {
+				return fmt.Errorf("storage: record AUP acceptance: %w", err)
+			}
+			u.AUPAcceptedAt = &p.AUPAcceptedAt
 		}
 		res.User = u
 

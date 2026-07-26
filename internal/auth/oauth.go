@@ -45,10 +45,24 @@ type OAuth struct {
 
 // notAuthorizedRedirect is where the callback sends a Discord User it refuses —
 // off the allowlist in allowlist mode (ADR-0041), or suspended in open mode
-// (ADR-0055): the login screen with a non-leaky not_authorized signal. This is
-// the only redirect that carries an ?error= param — bad-state/missing-code
-// still fail with http.Error.
+// (ADR-0055): the login screen with a non-leaky not_authorized signal.
+// Bad-state/missing-code still fail with http.Error.
 const notAuthorizedRedirect = "/login?error=not_authorized"
+
+// aupRequiredRedirect is where an open-mode OAuth start (or an open-mode signup
+// reaching the callback) without the AUP acknowledgment is bounced (#518): back
+// to the login screen, which renders the acknowledgment checkbox and a hint.
+// Unreachable through the SPA (the OAuth anchor only renders once the box is
+// ticked) — this is the server-side backstop for a hand-typed
+// /auth/discord/login or a hand-crafted OAuth round trip.
+const aupRequiredRedirect = "/login?error=aup_required"
+
+// aupStateSuffix marks the state COOKIE of an OAuth round trip whose start
+// carried the AUP acknowledgment (#518). It rides the cookie, not the state
+// param sent to Discord, so the callback reads it from the value this server
+// set. newToken is Raw-URL base64, so "." can never appear in a nonce and the
+// suffix is unambiguous.
+const aupStateSuffix = ".aup"
 
 // onboardingRedirect is where a FRESH signup lands after the callback: the
 // name-your-Tenant onboarding step (ADR-0055). The path is a Go↔SPA contract —
@@ -81,17 +95,33 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Ad
 
 // Login starts the OAuth flow: mint an anti-forgery state nonce, stash it in a
 // short-lived cookie, and 302 to Discord's authorize URL.
+//
+// In open Admission Mode the start additionally requires the AUP
+// acknowledgment (#518, `aup=1` — the login screen appends it once the visitor
+// ticks the box): a hand-typed /auth/discord/login must not slip past the
+// gate the SPA renders. The acknowledgment rides the state COOKIE to the
+// callback, where the signup path records its time on the user row. Allowlist
+// mode is untouched — the #518 decision gates open-mode signup only.
 func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
+	aup := r.URL.Query().Get("aup") == "1"
+	if o.adm.Mode == AdmissionOpen && !aup {
+		http.Redirect(w, r, aupRequiredRedirect, http.StatusFound)
+		return
+	}
 	state, err := newToken()
 	if err != nil {
 		o.log.Error("oauth login: mint state", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	cookieValue := state
+	if aup {
+		cookieValue += aupStateSuffix
+	}
 	secure := requestSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
-		Value:    state,
+		Value:    cookieValue,
 		Path:     "/",
 		Expires:  o.now().Add(stateCookieTTL),
 		HttpOnly: true,
@@ -109,8 +139,14 @@ func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
 func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 	state := r.FormValue("state")
 	stateCookie, err := r.Cookie(stateCookieName)
-	if err != nil || state == "" ||
-		subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(state)) != 1 {
+	if err != nil || state == "" {
+		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
+		return
+	}
+	// The AUP acknowledgment (#518) rides the state cookie as a suffix this
+	// server appended at Login; strip it before the nonce comparison.
+	nonce, aupAccepted := strings.CutSuffix(stateCookie.Value, aupStateSuffix)
+	if subtle.ConstantTimeCompare([]byte(nonce), []byte(state)) != 1 {
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
@@ -139,7 +175,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 	// not_authorized signal.
 	if !o.adm.Allowlist.Contains(du.ID) {
 		if o.adm.open() {
-			o.signup(w, r, du)
+			o.signup(w, r, du, aupAccepted)
 			return
 		}
 		if o.adm.Mode == AdmissionOpen {
@@ -215,7 +251,19 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 // founder lands on the name-your-Tenant onboarding step; a returning signup
 // goes straight to the app. A suspended user gets the same non-leaky
 // not_authorized bounce as an allowlist rejection.
-func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser) {
+//
+// aupAccepted is the #518 gate, enforced HERE — at the account-writing moment —
+// not just at Login: a round trip whose state cookie lacks the acknowledgment
+// suffix (a hand-crafted authorize URL that skipped our Login handler) writes
+// nothing and bounces. The acceptance time is recorded on the user row inside
+// the provisioning transaction (§305 BGB inclusion evidence), refreshed on
+// every returning open-mode login (the login screen re-asks each time).
+func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, aupAccepted bool) {
+	if !aupAccepted {
+		o.log.Warn("oauth signup: refused open-mode signup without AUP acknowledgment", "discord_user_id", du.ID)
+		http.Redirect(w, r, aupRequiredRedirect, http.StatusFound)
+		return
+	}
 	sessionToken, err := newToken()
 	if err != nil {
 		o.log.Error("oauth signup: mint session token", "err", err)
@@ -244,6 +292,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser) {
 			IP:        clientIP(r),
 			UA:        r.UserAgent(),
 		},
+		AUPAcceptedAt: o.now(),
 	})
 	if errors.Is(err, storage.ErrUserSuspended) {
 		o.log.Warn("oauth signup: rejected suspended Discord user", "discord_user_id", du.ID)

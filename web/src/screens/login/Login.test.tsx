@@ -85,10 +85,12 @@ describe("Login", () => {
     await renderLogin(<Login />, backend({ mode: AdmissionMode.OPEN }));
     expect(await screen.findByText(/creates your own table/i)).toBeInTheDocument();
     // ADR-0055 changes the copy; #518 additionally gates the OAuth start behind
-    // the AUP acknowledgment — once ticked, the anchor is exactly as it was.
+    // the AUP acknowledgment — once ticked, the anchor carries the ?aup=1 the
+    // server-side gate requires for an open-mode start (Go↔TS contract with
+    // internal/auth/oauth.go).
     fireEvent.click(screen.getByRole("checkbox"));
     const link = screen.getByRole("link", { name: /continue with discord/i });
-    expect(link).toHaveAttribute("href", "/auth/discord/login");
+    expect(link).toHaveAttribute("href", "/auth/discord/login?aup=1");
   });
 
   it("requires the AUP acknowledgment before an open-mode signup can start", async () => {
@@ -108,9 +110,17 @@ describe("Login", () => {
 
     expect(screen.getByRole("link", { name: /continue with discord/i })).toHaveAttribute(
       "href",
-      "/auth/discord/login",
+      "/auth/discord/login?aup=1",
     );
     expect(screen.queryByRole("button", { name: /continue with discord/i })).not.toBeInTheDocument();
+  });
+
+  it("explains the bounce when the server-side AUP gate refused the start", async () => {
+    // #518's backstop: a hand-typed /auth/discord/login in open mode 302s back
+    // here with ?error=aup_required — the screen says why instead of silently
+    // showing the same form again.
+    await renderLogin(<Login aupRequired />, backend({ mode: AdmissionMode.OPEN }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/accept the Nutzungsbedingungen/i);
   });
 
   it("links the terms and the privacy policy from the acknowledgment", async () => {
