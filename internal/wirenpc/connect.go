@@ -273,9 +273,9 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 
 	// Rollover-tape consent (#306, ADR-0051): reseed the tape from the durable
 	// consent rows at cycle start and reconcile on every (campaign-filtered)
-	// TapeConsentChanged, and post the in-channel consent disclosure with
-	// grant/revoke buttons. A nil Tape (campaign not armed) makes both inert, so the
-	// loop is unchanged.
+	// TapeConsentChanged. A nil Tape (campaign not armed) makes it inert. The
+	// in-channel consent disclosure itself rides the #519 session-start message
+	// posted just below.
 	defer wireTapeConsent(cycleCtx, bus, cfg.Tape, cfg.CampaignID, cfg.TapeConsent, cfg.TapeConsentReconcileInterval, log)()
 
 	// Session-start disclosure (#519, and #306's consent flow folded into it): the

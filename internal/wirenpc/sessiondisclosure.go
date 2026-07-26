@@ -34,12 +34,17 @@ import (
 // Best-effort throughout: a failed post is logged and the session continues.
 // Transcription is disclosed here, but it is not gated on the disclosure
 // landing — the Campaign's GM accepted the terms when they created it.
+//
+// The legacy standalone paths (-mode voice, -hardcoded) post the same notice
+// even though they wire no transcript persistence: an accepted OVER-claim —
+// telling a dev channel it is transcribed when nothing is stored is harmless in
+// the direction that matters, and those paths are not the SaaS topology.
 
 // transcriptionDisclosureContent is the always-on part of the notice: what is
 // captured, why it is kept, and who can read it back.
 const transcriptionDisclosureContent = "**This session is being transcribed.** " +
 	"Everything spoken in this voice channel is transcribed and stored for this campaign, so the GM can " +
-	"search it and get recaps later. Speak up if you would rather not be recorded — the GM can end the session at any time."
+	"search it and get recaps later. Speak up if you would rather not be transcribed — the GM can end the session at any time."
 
 // transcriptionDisclosure renders the notice, appending the deployment's
 // privacy-policy URL when one is configured (GLYPHOXA_PRIVACY_POLICY_URL). A
