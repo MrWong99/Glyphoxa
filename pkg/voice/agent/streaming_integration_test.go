@@ -75,7 +75,10 @@ func TestStreamingIntegration_TurnIDAndFirstAudioChain(t *testing.T) {
 
 	// Real STT stage (mints the TurnID) + real TTS stage wrapping a TeeSynthesizer
 	// that publishes FirstAudio on the same bus.
-	sttStage := orchestrator.NewSTT(bus, recRecognizer{text: "rooms?"})
+	// The utterance names Bart: this test is about the streaming TurnID / first-audio
+	// chain, so it addresses explicitly rather than leaning on the lone-NPC fallback,
+	// which only corroborates since the ADR-0024 2026-07-27 amendment.
+	sttStage := orchestrator.NewSTT(bus, recRecognizer{text: "Bart, rooms?"})
 	tee := wire.NewTeeSynthesizer(chunkSynth{}, wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
 		go func() {
 			for range chunks {

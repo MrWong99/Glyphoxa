@@ -144,11 +144,33 @@ func TestMatcher_ButlerInterjectionDoesNotClobberContinuation(t *testing.T) {
 	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
 }
 
-// TestMatcher_SoleActiveNPCFallback covers the lone-NPC fallback: with exactly
-// one Character NPC active, an unnamed utterance routes to it.
+// TestMatcher_SoleActiveNPCFallback covers the lone-NPC fallback in its
+// post-amendment role (ADR-0024, 2026-07-27): it CORROBORATES rather than
+// decides. A bare unnamed utterance no longer routes to the only Character NPC
+// — that weight alone made it answer everything anyone said — but combined with
+// a second weak signal (its Expertise on a mentioned word) it reaches the
+// threshold and addresses.
 func TestMatcher_SoleActiveNPCFallback(t *testing.T) {
 	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
-	assertIDs(t, m.TargetMatch("so what happens next?"), "npc-bart")
+	assertIDs(t, m.TargetMatch("so what happens next?"))
+	assertIDs(t, m.TargetMatch("pour me an ale would you"), "npc-bart")
+}
+
+// soleDecisiveStack is the shipped stack with the lone-NPC fallback restored to
+// its pre-amendment DECISIVE weight. The mute tests are about the ambient POOL —
+// which Agents may be scored at all — not about the shipped weights, so they pin
+// their behaviour against a stack where the fallback alone still addresses.
+// Without it the 2026-07-27 ADR-0024 amendment (SoleActiveNPC demoted to a
+// corroborating 0.5) would quietly turn them into weight assertions and stop
+// covering the mute semantics they exist for.
+func soleDecisiveStack() []address.Heuristic {
+	stack := address.DefaultHeuristics()
+	for i, h := range stack {
+		if _, ok := h.(address.SoleActiveNPC); ok {
+			stack[i] = address.SoleActiveNPC{Weight: 1.0}
+		}
+	}
+	return stack
 }
 
 // TestDefaultHeuristics_AllSignalsWired pins #442: every heuristic in the
@@ -802,11 +824,11 @@ func TestMatcher_NamedUnmutedWinsOverNamedMuted(t *testing.T) {
 // lastAddressed by the mute transition, so an unnamed follow-up routes to Greta,
 // not the now-muted Bart.
 func TestMatcher_MutedExcludedFromAmbient(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m := address.NewMatcher(address.Config{Language: "de", Heuristics: soleDecisiveStack()}, bart, greta)
 	m.SetMuted("npc-bart", true)
 	assertIDs(t, m.TargetMatch("was passiert als nächstes?"), "npc-greta")
 
-	m2 := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m2 := address.NewMatcher(address.Config{Language: "de", Heuristics: soleDecisiveStack()}, bart, greta)
 	assertIDs(t, m2.TargetMatch("Bart, was denkst du?"), "npc-bart") // lastAddressed = bart
 	m2.SetMuted("npc-bart", true)                                    // transition prunes bart's lastAddressed
 	assertIDs(t, m2.TargetMatch("was passiert als nächstes?"), "npc-greta")
@@ -829,7 +851,7 @@ func TestMatcher_UnmuteRestoresImmediately(t *testing.T) {
 // a removed-then-readded Agent starts UNMUTED — proven by the re-added Bart
 // catching the sole-NPC fallback (a still-muted Agent would be excluded).
 func TestMatcher_SetMuted_UnknownAndRemoved(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m := address.NewMatcher(address.Config{Language: "de", Heuristics: soleDecisiveStack()}, bart, greta)
 	m.SetMuted("ghost", true) // unknown: no-op, no panic, no routing change
 	assertIDs(t, m.TargetMatch("Bart, hörst du mich?"), "npc-bart")
 

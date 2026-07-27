@@ -44,6 +44,14 @@ type Persona struct {
 	// against [voiceevent.AddressTarget.AgentID].
 	AgentID string
 
+	// Name is the Agent's display name — the same string Address Detection
+	// matches on and the Transcript Chunker labels this Agent's lines with. It is
+	// NOT used for routing here; the Replier needs it to recognize its own name in
+	// its OWN output and strip it before speaking (see [stripSelfPrefix]), because
+	// Hot Context teaches the model a "Name: text" grammar the model then imitates.
+	// Empty disables that strip, which is byte-identical to the pre-#528 behaviour.
+	Name string
+
 	// Markdown is the Persona text injected verbatim into the system prompt.
 	Markdown string
 
@@ -505,7 +513,7 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 		// stays silent), spoken when only the turn's own TurnTimeout expired.
 		return r.fallbackReply(parent)
 	}
-	reply = strings.TrimSpace(reply)
+	reply = stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply))
 	if reply == "" {
 		return nil
 	}
@@ -578,7 +586,7 @@ func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (str
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(reply), nil
+	return stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply)), nil
 }
 
 // SpeakDraft speaks an already-generated draft (the winning Lead's, from a prior
@@ -658,6 +666,7 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 	d := &deliveredText{
 		dispatch:         dispatch,
 		voice:            r.cfg.Persona.Voice,
+		selfName:         r.cfg.Persona.Name,
 		onFirstDelivered: func() { r.appendUser(commitText) },
 	}
 
@@ -705,6 +714,19 @@ type deliveredText struct {
 	onFirstDelivered func()
 	spoken           strings.Builder
 
+	// selfName is the Agent's own display name, non-empty only when the Replier
+	// knows it. Every sentence this emitter sees has a leading "<selfName>:"
+	// speaker label stripped off it before dispatch (2026-07-27): on the streaming
+	// path there is no whole-completion string to clean — the model's deltas go
+	// splitter → emit → TTS — so this is the one seam that sits upstream of every
+	// consumer at once (the TTS dispatch, the ADR-0012 history commit that feeds
+	// the next prompt, and the Transcript the Chunker builds from what was
+	// dispatched). Every sentence rather than just the first, because a model that
+	// adopts the transcript grammar tends to label each LINE of a multi-line reply;
+	// the strip needs the Agent's own name plus a colon at a sentence start, which
+	// quoted dialogue ("Greta said: …") never produces.
+	selfName string
+
 	// attempted: some dispatch reached the synthesizer — audio MAY exist even
 	// when nothing committed, because [orchestrator.ErrNotDelivered] covers a
 	// #436 mid-stream TTS failure where a fragment already played, not only a
@@ -717,6 +739,15 @@ type deliveredText struct {
 }
 
 func (d *deliveredText) emit(sentence string) error {
+	if d.selfName != "" {
+		sentence = stripSelfPrefix(d.selfName, sentence)
+		if !hasSpeakable(sentence) {
+			// The whole sentence WAS the label ("Mira:"). There is nothing to
+			// synthesize, and dispatching it would make TTS reject the request; the
+			// turn keeps producing, so the reply arrives intact minus its label.
+			return nil
+		}
+	}
 	err := d.dispatch(orchestrator.Reply{Sentence: sentence, Voice: d.voice})
 	switch orchestrator.OutcomeOf(err) {
 	case orchestrator.SentenceNotDelivered:
@@ -820,7 +851,7 @@ func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadNam
 	if err != nil {
 		return "", err
 	}
-	reply = strings.TrimSpace(reply)
+	reply = stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply))
 	if isSilenceSentinel(reply) {
 		return "", nil // the Reactor declined (ADR-0025 zero-delivered)
 	}
@@ -932,7 +963,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	// turn was cancelled (mute/barge) never reaches the spoken text: the room
 	// never heard it.
 	var split sentenceSplitter
-	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name}
 
 	onText := func(delta string) error {
 		for _, sentence := range split.Push(delta) {
@@ -1001,7 +1032,7 @@ func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Messa
 		}
 		return err
 	}
-	reply = strings.TrimSpace(reply)
+	reply = stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply))
 	if reply == "" {
 		return nil
 	}
@@ -1059,7 +1090,7 @@ func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string
 		}
 		return err
 	}
-	answer = strings.TrimSpace(answer)
+	answer = stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(answer))
 	if answer == "" {
 		return nil
 	}
@@ -1081,7 +1112,7 @@ func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string
 	// Spoken delivery: sentence-split the whole answer and dispatch each through
 	// the shared emitter (ADR-0012, #444), committing only what was delivered.
 	var split sentenceSplitter
-	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name}
 	for _, sentence := range split.Push(answer) {
 		if err := d.emit(sentence); err != nil {
 			r.commitSpoken(d.text())
@@ -1299,6 +1330,16 @@ func (r *Replier) systemPrompt() string {
 			}
 			b.WriteString(block)
 		}
+		// The output-format rule rides the SAME gate as the prefix convention
+		// itself — a wired SpeakerName is exactly when user lines carry a "Name: "
+		// label — but NOT the roster block's gate: that block is empty when no
+		// player characters and no fellow NPCs are configured, while the lines are
+		// still labelled "Player / DM: ". Shown a grammar, models imitate it; this
+		// is the sentence that tells the Agent the grammar is inbound-only.
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(selfPrefixRule)
 	}
 	if markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice); markup != "" {
 		if b.Len() > 0 {
@@ -1308,6 +1349,19 @@ func (r *Replier) systemPrompt() string {
 	}
 	return b.String()
 }
+
+// selfPrefixRule is the output-format half of the speaker-prefix convention: the
+// prompt teaches the Agent to READ "Name: text" labels, and this tells it never
+// to WRITE one. It is session-constant, so it belongs in the stable system
+// prompt rather than the volatile tail (ADR-0059's cache-stable prefix).
+//
+// It is deliberately phrased as "how you answer", not "everything you write is
+// spoken": a Butler with a TextSink may answer in channel text (#299), where the
+// label is just as wrong but the reason is not that it would be read aloud. The
+// deterministic [stripSelfPrefix] backstop stays the guarantee — this only makes
+// the mistake rarer, and a prompt alone can never make it impossible.
+const selfPrefixRule = "Those name labels mark who is speaking TO you. They are never part of how you answer: " +
+	"write only the words you say, with no name and no colon in front of them."
 
 // factsBlock renders the KG-facts slot of the volatile tail as a flat-text
 // prompt section: a fixed header followed by the already-rendered fact strings

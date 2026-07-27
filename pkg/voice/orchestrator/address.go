@@ -41,6 +41,26 @@ type SpeakerAwareMatcher interface {
 	TargetMatchFrom(speakerID, text string) []voiceevent.AddressRouted
 }
 
+// InterruptibleMatcher is the optional Barge-in-aware extension of
+// [TargetMatcher] (ADR-0027 amendment, 2026-07-27): a matcher that implements it
+// is told which Agent a human just cut off, and revokes whatever ambient claim
+// that Agent held on the next unnamed utterance. The scoring [address.Matcher]
+// satisfies it via ClearContinuation.
+//
+// Why the detector wires this and not the barge reactor: routing policy lives
+// behind the [TargetMatcher] seam (the orchestrator holds no matching logic of
+// its own), and Barge-in is floor control, deliberately independent of Address
+// Detection (ADR-0027). The detector is the one place that already owns both the
+// matcher and a bus subscription, so the signal crosses here — as a bare fact
+// ("this Agent was cut"), leaving what it MEANS for routing to the matcher.
+//
+// A matcher that does not implement it keeps the pre-amendment behaviour: an
+// interrupted Agent stays the sticky addressee.
+type InterruptibleMatcher interface {
+	TargetMatcher
+	ClearContinuation(agentID string)
+}
+
 // AddressDetector is a [Reactor] that subscribes to [voiceevent.STTFinal]
 // events, asks its [TargetMatcher] which Agent(s) the utterance addresses, and
 // republishes each choice as [voiceevent.AddressRouted] using the shared event
@@ -130,7 +150,24 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	// matcher keeps the text-only TargetMatch path. The detector-level isGM drop
 	// below is retained belt-and-braces either way.
 	sam, speakerAware := d.matcher.(SpeakerAwareMatcher)
-	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
+
+	// Barge-in feedback (ADR-0027 amendment): a confirmed human interruption
+	// revokes the cut Agent's ambient claim on the next unnamed utterance. Without
+	// it the interrupting speech — itself a routable final moments later — scored
+	// the full continuation weight and landed straight back on the Agent the human
+	// had just cut off, so an interruption produced another turn instead of
+	// stopping one. An unattributed barge (empty AgentID) revokes nothing.
+	var unsubBarge func()
+	if im, interruptible := d.matcher.(InterruptibleMatcher); interruptible {
+		unsubBarge = voiceevent.On(bus, func(barge voiceevent.BargeDetected) {
+			if barge.AgentID == "" {
+				return
+			}
+			im.ClearContinuation(barge.AgentID)
+		})
+	}
+
+	unsubFinal := voiceevent.On(bus, func(final voiceevent.STTFinal) {
 		// An empty or whitespace-only final routes NOWHERE (#434). The STT stage
 		// publishes empties by pinned contract — "downstream consumers, not this
 		// stage, decide" — and this detector is that consumer: the recognizer
@@ -202,4 +239,11 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			})
 		}
 	})
+
+	return func() {
+		unsubFinal()
+		if unsubBarge != nil {
+			unsubBarge()
+		}
+	}
 }

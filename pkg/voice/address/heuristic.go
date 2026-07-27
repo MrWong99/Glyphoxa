@@ -19,12 +19,13 @@ type DecisionContext struct {
 	// interruptions.
 	window time.Duration
 
-	nameScores     map[int]float64      // agent index → fuzzy name similarity
-	anyNameMatched bool                 // did any agent clear the name threshold this turn
-	lastAddressed  map[string]bool      // agentID → addressed on the previous turn
-	interruptions  map[string]time.Time // agentID → most recent interruption
-	recentWords    map[string]struct{}  // distinct words within the window, incl. current
-	nonAddressable int                  // count of active, non-AddressOnly agents
+	nameScores      map[int]float64      // agent index → fuzzy name similarity
+	anyNameMatched  bool                 // did any agent clear the name threshold this turn
+	lastAddressed   map[string]bool      // agentID → addressed on the previous turn
+	lastAddressedAt time.Time            // when that decision was taken (zero: never)
+	interruptions   map[string]time.Time // agentID → most recent interruption
+	recentWords     map[string]struct{}  // distinct words within the window, incl. current
+	nonAddressable  int                  // count of active, non-AddressOnly agents
 }
 
 // AnyNameMatched reports whether some Agent was explicitly named this turn (its
@@ -43,8 +44,28 @@ func (dc *DecisionContext) NameScore(agentIdx int) float64 { return dc.nameScore
 
 // WasLastAddressed reports whether agentID was among the targets addressed on
 // the immediately preceding turn — the continuation signal (ADR-0024
-// "last-speaker continuation").
+// "last-speaker continuation"). It ignores WHEN that happened; see
+// [DecisionContext.AddressedWithin] for the bounded form the shipped
+// [LastAddressed] heuristic uses.
 func (dc *DecisionContext) WasLastAddressed(agentID string) bool { return dc.lastAddressed[agentID] }
+
+// AddressedWithin reports whether agentID was among the targets addressed on the
+// immediately preceding turn AND that turn is no older than d. A non-positive d
+// means "no time bound" and matches [DecisionContext.WasLastAddressed] exactly,
+// which keeps a hand-built stack that predates the continuation window behaving
+// as it always did.
+//
+// The timestamp is per DECISION, not per Agent: the matcher replaces its whole
+// last-addressed set atomically, so every member of a set shares one instant.
+func (dc *DecisionContext) AddressedWithin(agentID string, d time.Duration) bool {
+	if !dc.lastAddressed[agentID] {
+		return false
+	}
+	if d <= 0 {
+		return true
+	}
+	return !dc.lastAddressedAt.IsZero() && dc.Now.Sub(dc.lastAddressedAt) <= d
+}
 
 // InterruptedWithin reports whether agentID was interrupted (barged in on) at
 // some point within d of [DecisionContext.Now]. A non-positive d never matches.
@@ -125,8 +146,17 @@ func (h NameMatch) Score(a Agent, dc *DecisionContext) float64 {
 // LastAddressed rewards the Agent addressed on the previous turn, so a
 // follow-up utterance with no fresh name ("and then what happened?") stays with
 // the same Agent (ADR-0024 "last-speaker continuation").
+//
+// Within bounds how long that claim survives (ADR-0024 amendment, 2026-07-27).
+// Unbounded continuation was the live "the NPC answers everything" defect: with
+// no time bound the Agent named once at the start of a session kept scoring the
+// full decisive weight on EVERY unnamed utterance from EVERY speaker for the
+// rest of the session, so players talking to each other kept waking it. A
+// conversation the table has walked away from is over; a zero or negative
+// Within restores the old unbounded behaviour for callers that want it.
 type LastAddressed struct {
 	Weight float64
+	Within time.Duration
 }
 
 // Name implements [Heuristic].
@@ -137,10 +167,10 @@ func (h LastAddressed) Score(a Agent, dc *DecisionContext) float64 {
 	if dc.AnyNameMatched() {
 		return 0
 	}
-	if dc.WasLastAddressed(a.Target.AgentID) {
-		return h.Weight
+	if !dc.AddressedWithin(a.Target.AgentID, h.Within) {
+		return 0
 	}
-	return 0
+	return h.Weight
 }
 
 // RecentlyInterrupted rewards an Agent that was barged in on within Within of

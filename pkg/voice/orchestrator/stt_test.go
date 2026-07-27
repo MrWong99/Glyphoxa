@@ -561,12 +561,14 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 func TestTurnID_PropagatesThroughStages(t *testing.T) {
 	h := voicetest.New(t)
 
-	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{transcript: stt.Transcript{Text: "roll a d20"}})
+	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{transcript: stt.Transcript{Text: "Bart, roll a d20"}})
 	ttsStage := orchestrator.NewTTS(h.Bus, closedChanSynth{})
 	voice := tts.Voice{ProviderID: "elevenlabs", VoiceID: "george"}
 
-	// Lone-NPC route: every utterance routes to bart (the scoring matcher's
-	// single-NPC fallback catches an unnamed utterance).
+	// Named route: the utterance addresses bart explicitly. This test is about the
+	// TurnID chain, so it must not lean on an ambient heuristic — since the
+	// ADR-0024 2026-07-27 amendment the lone-NPC fallback only corroborates and no
+	// longer routes an unnamed utterance on its own.
 	detector := orchestrator.NewAddressDetector(
 		address.NewMatcher(address.Config{Language: "en"},
 			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),

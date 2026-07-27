@@ -552,6 +552,14 @@ func (TurnEnded) EventName() string { return "turn.ended" }
 type BargeDetected struct {
 	At        time.Time
 	SpeakerID string
+	// AgentID names the Agent that was cut — the holder of the yielded turn
+	// (ADR-0027 amendment, 2026-07-27). Additive per ADR-0020 (wire names
+	// unchanged); "" when the publisher could not attribute the holder, which
+	// every consumer must treat as "no attribution" rather than as an Agent.
+	// Address Detection consumes it to revoke that Agent's last-speaker
+	// continuation claim: being interrupted means the human wants the Agent to
+	// stop, so the interrupting utterance must not continue straight back into it.
+	AgentID string
 	// SessionID is the voice_sessions uuid string of the Voice Session this event
 	// originated in (#487, session-scoped attribution). "" means session-local /
 	// pre-stamp — the single-session default before [Forward] stamps it onto the

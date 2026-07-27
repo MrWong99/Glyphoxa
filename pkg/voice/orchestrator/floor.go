@@ -220,20 +220,27 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 // turn would be exactly the pre-audio self-cancel Gate 1 exists to prevent
 // (`no_audio` turns must not be cancellable). An empty floor is likewise a
 // no-op. Mechanically identical to [Floor.Yield] once the guard passes.
-func (f *Floor) YieldTurn(turnID string) (yielded bool) {
+// It reports the AgentID of the holder it cut, read in the same critical section
+// as the yield itself so the attribution can never be stale — [Floor.SetHolderAgent]
+// may retarget the holder mid-turn (the Ensemble Lead election) under an unchanged
+// turnID, so reading the agent beforehand would name whoever held the floor then,
+// not whoever was actually cut. It is "" on a no-op yield and on a holder taken
+// with no target.
+func (f *Floor) YieldTurn(turnID string) (agentID string, yielded bool) {
 	f.mu.Lock()
 	if f.cancel == nil || f.holderTurn != turnID || !f.speaking {
 		f.mu.Unlock()
-		return false
+		return "", false
 	}
 	c := f.cancel
+	cut := f.holderAgent
 	f.cancel = nil
 	f.holderTurn = ""
 	f.holderAgent = ""
 	f.speaking = false
 	f.mu.Unlock()
 	c()
-	return true
+	return cut, true
 }
 
 // SpeakingTurn reports the TurnID of the floor's current holder when — and

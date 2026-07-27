@@ -67,10 +67,15 @@ func TestSystemPrompt_SpeakerRoster_Section(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_NoRoster_ByteIdentical locks backward compat: with SpeakerName
-// wired but NO roster configured (the pre-feature live config), the prompt is
-// byte-identical to the pre-roster path — the section emits zero bytes.
-func TestSystemPrompt_NoRoster_ByteIdentical(t *testing.T) {
+// TestSystemPrompt_NoRoster_OmitsRosterKeepsOutputRule pins the two halves of
+// the speaker-prefix convention against their DIFFERENT gates. With SpeakerName
+// wired but no roster configured, the "## Who is speaking" block still emits
+// zero bytes (it has nobody to list) — but user lines are labelled "Player / DM:
+// " all the same, so the output-format rule (never label your OWN reply) must
+// still be there. Before the 2026-07-27 amendment this config produced a prompt
+// with no mention of the convention at all, while the model was being shown it
+// on every user line — and copied it into its speech.
+func TestSystemPrompt_NoRoster_OmitsRosterKeepsOutputRule(t *testing.T) {
 	prov := &fakeProvider{reply: "Aye."}
 	r := agent.NewReplier(agent.Config{
 		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper.", Voice: testVoice()},
@@ -83,9 +88,18 @@ func TestSystemPrompt_NoRoster_ByteIdentical(t *testing.T) {
 	r.Reply()(t.Context(), routedFrom("bart", "111", "Hello, innkeeper."))
 
 	sys := prov.lastRequest(t).Messages[0].Text
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
-	if sys != want {
-		t.Errorf("no-roster prompt not byte-identical:\n got %q\nwant %q", sys, want)
+	if strings.Contains(sys, "## Who is speaking") {
+		t.Errorf("no-roster prompt rendered the roster block: %q", sys)
+	}
+	if !strings.Contains(sys, "no name and no colon in front of them") {
+		t.Errorf("no-roster prompt dropped the output-format rule: %q", sys)
+	}
+	iPersona := strings.Index(sys, "You are Bart, the innkeeper.")
+	iRule := strings.Index(sys, "Those name labels")
+	iMarkup := strings.Index(sys, sentinelMarkup)
+	if iPersona >= iRule || iRule >= iMarkup {
+		t.Errorf("slot order wrong (want persona<rule<markup): persona=%d rule=%d markup=%d\n%q",
+			iPersona, iRule, iMarkup, sys)
 	}
 }
 

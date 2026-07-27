@@ -2,7 +2,9 @@ package wirenpc
 
 import (
 	"context"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
@@ -43,6 +45,10 @@ type Roster struct {
 	// speaker (the rollout default when no operator allowlist is configured).
 	butlerGate func(speakerID string) bool
 
+	// heuristics is the Matcher's scoring stack (ADR-0024), set from rosterDeps at
+	// construction. Nil takes address.DefaultHeuristics.
+	heuristics []address.Heuristic
+
 	// replierFor builds the [agent.Replier] for one NPC. Production binds it to a
 	// shared tool-engine (so N NPCs share one Groq client); tests inject scripted
 	// engines through it. Always non-nil after [newRoster].
@@ -79,6 +85,13 @@ type rosterDeps struct {
 	// butlerGate is the Butler GM-address predicate threaded into the Matcher's
 	// Config.ButlerGMGate (#299/#256). Nil = the Butler answers any speaker.
 	butlerGate func(speakerID string) bool
+	// heuristics is the Matcher's scoring stack (ADR-0024). Nil takes
+	// [address.DefaultHeuristics]; the live wiring passes the defaults bound by
+	// the deployment's continuation window ([continuationWindow]), and tests that
+	// are about the ambient POOL rather than the shipped weights pass a stack of
+	// their own. Before this seam existed nothing about address scoring could be
+	// changed without a code change and a release.
+	heuristics []address.Heuristic
 }
 
 // newRoster builds an empty Roster wired to deps. It holds no NPCs yet — the
@@ -93,8 +106,34 @@ func newRoster(deps rosterDeps) *Roster {
 		replierFor: deps.replierFor,
 		language:   matcherLanguage(deps.language),
 		butlerGate: deps.butlerGate,
+		heuristics: deps.heuristics,
 		specs:      map[string]npcSpec{},
 	}
+}
+
+// continuationWindow reads the last-speaker continuation bound (ADR-0024
+// stage-2 amendment) from GLYPHOXA_ADDRESS_CONTINUATION_WINDOW, a Go duration
+// ("45s", "1m"). Absent, empty, or unparseable → [address.DefaultContinuationWindow],
+// so a typo cannot silently change routing. It is the one live-tunable knob on
+// address scoring: a table that finds NPCs too eager shortens it, one that finds
+// them forgetful lengthens it, and "0s" — an explicit zero — is honoured as
+// "never continue", meaning every utterance must name its Agent.
+func continuationWindow() time.Duration {
+	v := os.Getenv("GLYPHOXA_ADDRESS_CONTINUATION_WINDOW")
+	if v == "" {
+		return address.DefaultContinuationWindow
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return address.DefaultContinuationWindow
+	}
+	if d == 0 {
+		// A zero Within means "unbounded" to the heuristic, which is the OPPOSITE
+		// of what an operator typing 0s asks for; express "never continue" as the
+		// smallest positive window instead, which no real utterance can beat.
+		return time.Nanosecond
+	}
+	return d
 }
 
 // matcherLanguage returns lang if the address package ships a phonetic encoder
@@ -144,7 +183,11 @@ func (r *Roster) AddNPC(spec npcSpec) {
 		// First NPC: build the Matcher around it. Single-target by default
 		// (Config.MaxTargets unset ⇒ 1): naming two NPCs fires one turn on the
 		// top-scored, the safe one-floor default (ADR-0025 deferred).
-		r.matcher = address.NewMatcher(address.Config{Language: r.language, ButlerGMGate: r.butlerGate}, matcherAgent(spec))
+		r.matcher = address.NewMatcher(address.Config{
+			Language:     r.language,
+			ButlerGMGate: r.butlerGate,
+			Heuristics:   r.heuristics,
+		}, matcherAgent(spec))
 	} else {
 		r.matcher.Add(matcherAgent(spec))
 	}
@@ -286,6 +329,7 @@ func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine,
 	return rosterDeps{
 		language:   d.language,
 		butlerGate: d.gmSpeaker,
+		heuristics: address.DefaultHeuristicsWithin(continuationWindow()),
 		replierFor: func(spec npcSpec) *agent.Replier {
 			// TextSink is the Butler's text-delivery seam and is wired on butler-role
 			// specs only (#299): a nil TextSink keeps a Character NPC byte-identical to
@@ -296,7 +340,12 @@ func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine,
 			}
 			return agent.NewReplier(agent.Config{
 				Persona: agent.Persona{
-					AgentID:  spec.agentID,
+					AgentID: spec.agentID,
+					// The SAME name Address Detection matches on (matcherAgent) and the
+					// Chunker labels this Agent's transcript lines with, so the Replier
+					// recognizes its own label in its own output and strips it before the
+					// sentence reaches TTS.
+					Name:     spec.name,
 					Markdown: spec.persona,
 					Voice:    spec.voice,
 				},
