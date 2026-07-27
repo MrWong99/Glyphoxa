@@ -90,6 +90,18 @@ type Config struct {
 	// RecencyWindow bounds how long mentioned words and interruptions stay
 	// "recent". Default 30s.
 	RecencyWindow time.Duration
+	// ContinuationWindow bounds how long the last-speaker continuation claim
+	// survives (ADR-0024 stage-2 amendment, 2026-07-27): past it an unnamed
+	// utterance no longer routes to whoever was addressed last, and the
+	// conversation must be reopened by name. Zero uses
+	// [DefaultContinuationWindow]; a NEGATIVE value restores the pre-amendment
+	// unbounded continuation, which is the behaviour that made an NPC answer
+	// every unnamed utterance for the rest of the session.
+	//
+	// It is applied by seeding [LastAddressed.Within] in [DefaultHeuristics]; a
+	// caller supplying its own Heuristics owns its own bound and this field is
+	// then ignored.
+	ContinuationWindow time.Duration
 	// MaxRecentWords caps the rolling mentioned-word buffer. Default 200.
 	MaxRecentWords int
 	// Clock supplies the current time; nil uses time.Now. Tests inject a fake
@@ -97,31 +109,54 @@ type Config struct {
 	Clock func() time.Time
 }
 
+// DefaultContinuationWindow is the shipped bound on the last-speaker
+// continuation claim (ADR-0024 stage-2 amendment, 2026-07-27). It is sized for
+// the gap a real exchange leaves: the Agent's own spoken answer (a handful of
+// sentences of TTS) plus the human's think-and-reply pause still fall inside it,
+// so "und dann?" keeps working, while a conversation the table has genuinely
+// moved on from expires and stops pulling every unnamed utterance.
+const DefaultContinuationWindow = 30 * time.Second
+
 // DefaultHeuristics returns the v1.0 scoring stack: explicit name match
 // (dominant), last-addressed continuation, expert-on-recent-word, and the
-// single-NPC fallback.
+// single-NPC fallback. Continuation is bounded by [DefaultContinuationWindow];
+// use [DefaultHeuristicsWithin] to bound it differently.
+func DefaultHeuristics() []Heuristic {
+	return DefaultHeuristicsWithin(DefaultContinuationWindow)
+}
+
+// DefaultHeuristicsWithin returns [DefaultHeuristics] with the continuation
+// claim bounded by continuation (non-positive: unbounded, the pre-amendment
+// behaviour).
 //
 // The weights encode ADR-0024's ordered chain as additive scores against the
 // default threshold of 1.0. An explicit name match (weight 1.0) addresses on
 // its own and suppresses every ambient heuristic (see
 // [DecisionContext.AnyNameMatched]), so a named Agent is never joined by a
-// fallback. When no name is heard the strong ambient signals — continuation
-// and the lone-NPC fallback — are each individually decisive (weight 1.0),
-// mirroring the chain's stages, while expert-on-word is a weak hint (0.5) that
-// only reinforces or breaks ties. No ambient signal can ever route to an
-// AddressOnly Agent, which stays name-gated regardless.
+// fallback. When no name is heard, continuation is the one decisive ambient
+// signal (weight 1.0) — and only inside its window — while the lone-NPC
+// fallback and expert-on-word are corroborating hints (0.5 each) that reinforce
+// or break ties without addressing anyone on their own. No ambient signal can
+// ever route to an AddressOnly Agent, which stays name-gated regardless.
 //
-// [RecentlyInterrupted] is deliberately NOT a default (#442): its signal
-// source — [Matcher.NoteInterruption], fed from the barge path — is deferred to
-// v1.5+ per ADR-0027, so as a default it could never fire and would only
-// mislead routing tuners. Opt in via Config.Heuristics once the barge wiring
-// exists.
-func DefaultHeuristics() []Heuristic {
+// The 2026-07-27 amendment demoted [SoleActiveNPC] from decisive to
+// corroborating: at weight 1.0 the single Character NPC of an ordinary campaign
+// answered EVERY non-empty utterance anybody made — players talking to each
+// other, thinking aloud, backchannelling — because nothing else was needed to
+// reach the threshold. A lone NPC is now opened by name like any other, after
+// which continuation carries the exchange.
+//
+// [RecentlyInterrupted] is deliberately NOT a default (#442): it REWARDS the
+// interrupted Agent, and live testing showed the opposite is wanted — a human
+// cutting an Agent off means "stop", which the barge path now expresses by
+// clearing the continuation claim ([Matcher.ClearContinuation], ADR-0027
+// amendment) rather than by scoring a bonus.
+func DefaultHeuristicsWithin(continuation time.Duration) []Heuristic {
 	return []Heuristic{
 		NameMatch{Weight: 1.0, Threshold: 0.6},
-		LastAddressed{Weight: 1.0},
+		LastAddressed{Weight: 1.0, Within: continuation},
 		ExpertOnRecentWord{Weight: 0.5},
-		SoleActiveNPC{Weight: 1.0},
+		SoleActiveNPC{Weight: 0.5},
 	}
 }
 
@@ -156,6 +191,11 @@ type Matcher struct {
 	// any speaker (rollout default), so TargetMatchFrom matches TargetMatch.
 	butlerGate func(speakerID string) bool
 
+	// language is Config.Language, retained for the backchannel vocabulary the
+	// substance gate consults (the fuzzy encoder is resolved once at
+	// construction and no longer carries the tag).
+	language string
+
 	mu sync.Mutex
 	// index is rebuilt by Add/Remove in lockstep with agents, and TargetMatch
 	// reads both under the same mutex, so one scoring pass always sees a
@@ -164,8 +204,12 @@ type Matcher struct {
 	index         *fuzzyIndex
 	agents        []Agent
 	lastAddressed map[string]bool
-	interruptions map[string]time.Time
-	recentWords   []timedWord
+	// lastAddressedAt is when lastAddressed was last REPLACED — the anchor the
+	// bounded continuation heuristic ([LastAddressed.Within]) measures against.
+	// One instant covers the whole set because match replaces it atomically.
+	lastAddressedAt time.Time
+	interruptions   map[string]time.Time
+	recentWords     []timedWord
 	// muted holds the AgentIDs currently muted (#225). Mute is MATCHER-INTERNAL
 	// state guarded by m.mu — the SAME critical section as index and agents — so
 	// a scoring pass reads a mutually consistent index/roster/mute triple and
@@ -200,7 +244,11 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 
 	heuristics := cfg.Heuristics
 	if heuristics == nil {
-		heuristics = DefaultHeuristics()
+		continuation := cfg.ContinuationWindow
+		if continuation == 0 {
+			continuation = DefaultContinuationWindow
+		}
+		heuristics = DefaultHeuristicsWithin(continuation)
 	}
 	threshold := cfg.AddressThreshold
 	if threshold <= 0 {
@@ -244,6 +292,7 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		window:        window,
 		maxWords:      maxWords,
 		clock:         clock,
+		language:      cfg.Language,
 		butlerGate:    cfg.ButlerGMGate,
 		agents:        agents,
 		lastAddressed: map[string]bool{},
@@ -283,6 +332,33 @@ func (m *Matcher) buildIndex() *fuzzyIndex {
 func (m *Matcher) NoteInterruption(agentID string) {
 	m.mu.Lock()
 	m.interruptions[agentID] = m.clock()
+	m.mu.Unlock()
+}
+
+// ClearContinuation drops the Agent with agentID from the last-addressed set, so
+// the next utterance with no fresh name no longer continues into it. Naming it
+// still works — this revokes an ambient claim, it does not mute or remove the
+// Agent — and the very next decision that addresses somebody replaces the set as
+// usual.
+//
+// It is the seam the Barge-in path feeds (ADR-0027 amendment, 2026-07-27):
+// ADR-0027 deferred a barge→matcher signal to v1.5+ on the assumption that the
+// signal would be [RecentlyInterrupted]'s reward. Live testing showed the sign
+// is the other way round. A human who cuts an Agent off is telling it to STOP;
+// leaving the interrupted Agent as the sticky addressee made its cut turn
+// immediately followed by a NEW one, because the interrupting speech is itself a
+// routable final and continuation pulled it straight back to the same Agent —
+// exactly the "the NPCs answer far too often" symptom. Revoking the claim makes
+// an interruption end the exchange until somebody reopens it by name.
+//
+// Clearing an Agent that holds no claim (or an unknown agentID) is a harmless
+// no-op, so the caller need not know whether the cut turn was the addressed one.
+func (m *Matcher) ClearContinuation(agentID string) {
+	if agentID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.lastAddressed, agentID)
 	m.mu.Unlock()
 }
 
@@ -470,17 +546,41 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		}
 	}
 
+	// Substance gate (ADR-0024 amendment, 2026-07-27): an utterance made ENTIRELY
+	// of backchannel filler — "mhm", "ja", "okay", the noises a listener makes
+	// while somebody else has the floor — acknowledges, it does not address. It
+	// routes NOWHERE unless it names an Agent, so it can never open an LLM+TTS
+	// turn off the ambient heuristics. Placed AFTER recordWordsLocked so the
+	// words still feed the recency buffer, and BEFORE scoring so no heuristic can
+	// see it: this mirrors the detector's empty-final guard, which likewise drops
+	// the ROUTE while leaving transcription and the Transcript untouched. The
+	// continuation state is left alone — an "mhm" does not end the exchange it
+	// acknowledges.
+	if !anyNameMatched && isBackchannel(words, m.language) {
+		// Refresh the continuation anchor without changing WHO holds it: an "mhm"
+		// acknowledges the exchange it interrupts, so it must not let that exchange
+		// age out of [LastAddressed.Within] while the human is plainly still
+		// listening. Only the timestamp moves; the addressee set is untouched, and a
+		// matcher that has never addressed anybody stays unanchored.
+		if len(m.lastAddressed) > 0 {
+			m.lastAddressedAt = now
+		}
+		m.mu.Unlock()
+		return nil
+	}
+
 	dc := &DecisionContext{
-		Now:            now,
-		Utterance:      text,
-		Words:          words,
-		window:         m.window,
-		nameScores:     nameScores,
-		anyNameMatched: anyNameMatched,
-		lastAddressed:  m.lastAddressed,
-		interruptions:  m.interruptions,
-		recentWords:    m.recentWordSetLocked(),
-		nonAddressable: m.nonAddressableCount(),
+		Now:             now,
+		Utterance:       text,
+		Words:           words,
+		window:          m.window,
+		nameScores:      nameScores,
+		anyNameMatched:  anyNameMatched,
+		lastAddressed:   m.lastAddressed,
+		lastAddressedAt: m.lastAddressedAt,
+		interruptions:   m.interruptions,
+		recentWords:     m.recentWordSetLocked(),
+		nonAddressable:  m.nonAddressableCount(),
 	}
 
 	type scored struct {
@@ -607,11 +707,14 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		}
 		addressed[h.agent.Target.AgentID] = true
 	}
-	// Record this turn's UNMUTED addressees for next turn's continuation heuristic.
+	// Record this turn's UNMUTED addressees for next turn's continuation heuristic,
+	// stamped with the decision time so the claim can expire ([LastAddressed.Within]).
 	// Stay put on a no-target (or all-muted) turn rather than forgetting who held
-	// the floor.
+	// the floor — but do NOT restamp then, or a room full of unaddressed chatter
+	// would keep a dead conversation alive forever.
 	if len(addressed) > 0 {
 		m.lastAddressed = addressed
+		m.lastAddressedAt = now
 	}
 
 	m.mu.Unlock()

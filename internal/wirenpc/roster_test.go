@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -111,12 +112,25 @@ func replierFor(spec npcSpec, line string, synth tts.Synthesizer) *agent.Replier
 // publish helper that drives one utterance through the bus, and a teardown.
 func testRoster(t *testing.T, bus *voiceevent.Bus, synth *recordingSynth, specs []npcSpec, lines map[string]string) (*Roster, func(text string)) {
 	t.Helper()
+	return testRosterWith(t, nil, bus, synth, specs, lines)
+}
+
+// testRosterAmbient is [testRoster] over the pre-amendment decisive lone-NPC
+// fallback (see [newAmbientRosterFor]), for the end-to-end tests that observe
+// the ambient POOL through it.
+func testRosterAmbient(t *testing.T, bus *voiceevent.Bus, synth *recordingSynth, specs []npcSpec, lines map[string]string) (*Roster, func(text string)) {
+	t.Helper()
+	return testRosterWith(t, soleDecisiveStack(), bus, synth, specs, lines)
+}
+
+func testRosterWith(t *testing.T, heuristics []address.Heuristic, bus *voiceevent.Bus, synth *recordingSynth, specs []npcSpec, lines map[string]string) (*Roster, func(text string)) {
+	t.Helper()
 
 	repliers := make([]*agent.Replier, 0, len(specs))
 	for _, s := range specs {
 		repliers = append(repliers, replierFor(s, lines[s.agentID], synth))
 	}
-	roster := newRosterFor(specs, repliers, synth)
+	roster := newRosterWith(heuristics, specs, repliers, synth)
 
 	// Bind just the detector + streaming reply reactors on the bus: we drive the
 	// pipeline by publishing STTFinal directly (no audio), so the VAD/STT segmenter
@@ -140,7 +154,33 @@ func testRoster(t *testing.T, bus *voiceevent.Bus, synth *recordingSynth, specs 
 // Cast assembly the production path uses. It mirrors the production constructor;
 // production builds its repliers from a shared engine.
 func newRosterFor(specs []npcSpec, repliers []*agent.Replier, synth tts.Synthesizer) *Roster {
-	r := newRoster(rosterDeps{replierFor: func(s npcSpec) *agent.Replier {
+	return newRosterWith(nil, specs, repliers, synth)
+}
+
+// newAmbientRosterFor is [newRosterFor] with the lone-NPC fallback restored to
+// its pre-amendment DECISIVE weight. The mute tests below observe the ambient
+// POOL — which Agents a heuristic may score at all — through that fallback, so
+// they pin it against a stack where it still routes on its own. Since the
+// ADR-0024 2026-07-27 amendment the shipped weight only corroborates (an
+// unnamed utterance addresses nobody), which would turn those tests into
+// assertions about weights instead of about mute semantics.
+func newAmbientRosterFor(specs []npcSpec, repliers []*agent.Replier, synth tts.Synthesizer) *Roster {
+	return newRosterWith(soleDecisiveStack(), specs, repliers, synth)
+}
+
+// soleDecisiveStack is the shipped stack with SoleActiveNPC back at weight 1.0.
+func soleDecisiveStack() []address.Heuristic {
+	stack := address.DefaultHeuristics()
+	for i, h := range stack {
+		if _, ok := h.(address.SoleActiveNPC); ok {
+			stack[i] = address.SoleActiveNPC{Weight: 1.0}
+		}
+	}
+	return stack
+}
+
+func newRosterWith(heuristics []address.Heuristic, specs []npcSpec, repliers []*agent.Replier, synth tts.Synthesizer) *Roster {
+	r := newRoster(rosterDeps{heuristics: heuristics, replierFor: func(s npcSpec) *agent.Replier {
 		// Tests pre-build repliers; map agentID -> replier so a later AddNPC also
 		// resolves through the same scripted engines.
 		for i, sp := range specs {
@@ -335,7 +375,7 @@ func TestRoster_SetMuted_KeepsNamedRoutingForDownstreamGate(t *testing.T) {
 		specFor("bram", "Bram", ""),
 	}
 	lines := map[string]string{"aldra": "Aldra here.", "bram": "Bram here."}
-	roster, publish := testRoster(t, bus, synth, specs, lines)
+	roster, publish := testRosterAmbient(t, bus, synth, specs, lines)
 
 	publish("Bram, stay a while.")
 	if got := synth.spokenBy("bram"); len(got) != 1 {
@@ -466,7 +506,7 @@ func TestWireMutes_AppliesBusEvents(t *testing.T) {
 	bus := voiceevent.NewBus()
 	synth := &recordingSynth{}
 	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
-	roster := newRosterFor(specs, []*agent.Replier{
+	roster := newAmbientRosterFor(specs, []*agent.Replier{
 		replierFor(specs[0], "Aldra here.", synth),
 		replierFor(specs[1], "Bram here.", synth),
 	}, synth)
@@ -536,7 +576,7 @@ func TestWireMutes_ReReadsAuthoritativeViewNotPayload(t *testing.T) {
 	bus := voiceevent.NewBus()
 	synth := &recordingSynth{}
 	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
-	roster := newRosterFor(specs, []*agent.Replier{
+	roster := newAmbientRosterFor(specs, []*agent.Replier{
 		replierFor(specs[0], "Aldra here.", synth),
 		replierFor(specs[1], "Bram here.", synth),
 	}, synth)
@@ -570,7 +610,7 @@ func TestWireMutes_SeedsFromView(t *testing.T) {
 	bus := voiceevent.NewBus()
 	synth := &recordingSynth{}
 	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
-	roster := newRosterFor(specs, []*agent.Replier{
+	roster := newAmbientRosterFor(specs, []*agent.Replier{
 		replierFor(specs[0], "Aldra here.", synth),
 		replierFor(specs[1], "Bram here.", synth),
 	}, synth)
@@ -705,6 +745,7 @@ func TestRoster_ButlerVoiceEndToEnd(t *testing.T) {
 func TestRoster_ButlerExcludedFromFallback(t *testing.T) {
 	synth := &recordingSynth{}
 	deps := rosterDeps{
+		heuristics: soleDecisiveStack(),
 		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
 	}
 	r := newRoster(deps)

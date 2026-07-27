@@ -51,6 +51,10 @@ Two defects from the 2026-07-14 review tightened the trigger's mechanics; the de
 
 The per-Agent confirm-window tunable promised above remains unimplemented (no config surface yet); deployments run the wirenpc default.
 
+**Amendment (2026-07-27, live beta): a barge names the Agent it cut, and Address Detection listens.** `BargeDetected` gains an `AgentID` — the floor holder's target, **reported by `Floor.YieldTurn` itself**, read in the critical section that performed the cut. Capturing it when the confirm window arms would be wrong: `Floor.SetHolderAgent` (the Ensemble Lead election) may retarget the holder under an unchanged turn id mid-window, so an armed-time capture can name an Agent that was never cut. `""` means "could not attribute" (a holder taken with no target) and every consumer must treat it as no attribution rather than as an Agent. The `AddressDetector` subscribes to it and, for a matcher implementing `InterruptibleMatcher`, revokes that Agent's last-speaker continuation claim (ADR-0024 amendment).
+
+This is the barge→matcher signal this ADR deferred to v1.5+, but with the sign reversed. The deferred design was `Matcher.NoteInterruption` feeding the `RecentlyInterrupted` heuristic, which *rewards* the interrupted Agent on the theory that the human is still talking to it. Live testing showed the opposite is what a table wants: a human who cuts an Agent off is telling it to stop, and because the interrupting speech is itself a routable final moments later, an unbounded continuation claim turned every interruption into a fresh turn from the same Agent. The barge path itself is unchanged — floor control stays independent of Address Detection, which is why the signal crosses at the detector (the one place that already owns both a bus subscription and the matcher) as a bare fact rather than as a routing decision made inside `BargeIn`.
+
 ## Considered options
 
 - **Fire-fast at the 90ms capture onset** — rejected; every backchannel would kill the Agent mid-sentence. The second (confirm) knob exists precisely to separate capture from floor-yielding.

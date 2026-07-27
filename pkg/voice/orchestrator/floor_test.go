@@ -517,7 +517,7 @@ func TestFloor_YieldTurnCutsMatchingSpeakingHolder(t *testing.T) {
 	defer release()
 	f.MarkSpeaking("T1")
 
-	if !f.YieldTurn("T1") {
+	if _, ok := f.YieldTurn("T1"); !ok {
 		t.Fatal("YieldTurn(T1) must cut the speaking holder T1")
 	}
 	if ctx.Err() == nil {
@@ -526,7 +526,7 @@ func TestFloor_YieldTurnCutsMatchingSpeakingHolder(t *testing.T) {
 	if f.Active() {
 		t.Fatal("YieldTurn must free the floor")
 	}
-	if f.YieldTurn("T1") {
+	if _, ok := f.YieldTurn("T1"); ok {
 		t.Fatal("a second YieldTurn(T1) must report false: the floor is free")
 	}
 }
@@ -546,7 +546,7 @@ func TestFloor_YieldTurnSparesDifferentHolder(t *testing.T) {
 	defer release2()
 	f.MarkSpeaking("T2") // even audible: still not the armed-on turn
 
-	if f.YieldTurn("T1") {
+	if _, ok := f.YieldTurn("T1"); ok {
 		t.Fatal("YieldTurn(T1) must be a no-op once T2 holds the floor")
 	}
 	if ctx2.Err() != nil {
@@ -566,7 +566,7 @@ func TestFloor_YieldTurnSparesSilentHolder(t *testing.T) {
 	ctx, release, _ := f.Take(parent, "bart")
 	defer release()
 
-	if f.YieldTurn("T1") {
+	if _, ok := f.YieldTurn("T1"); ok {
 		t.Fatal("YieldTurn must not cut a held-but-silent (pre-audio) holder")
 	}
 	if ctx.Err() != nil {

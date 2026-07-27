@@ -205,14 +205,19 @@ func (b *BargeIn) disarmAll() {
 // turn took the floor) or an already-free floor makes the expiry a silent
 // no-op: no cancel, no BargeDetected. On a real cut it announces the barge —
 // the BargeDetected observability signal (ADR-0027) carrying the barging
-// speaker (sp, ADR-0050) and a TurnEnded carrying the cut turn's TurnID + the
-// barge reason, so the metrics subscriber attributes this turn's death to the
-// barge rather than the coarse no-first-audio catch-all.
+// speaker (sp, ADR-0050) and the CUT Agent — reported by the yield itself, in the
+// critical section that performed it, so a Lead election retargeting the holder
+// mid-window cannot make the attribution stale — and a TurnEnded carrying the cut
+// turn's TurnID + the barge reason, so the metrics subscriber attributes this
+// turn's death to the barge rather than the coarse no-first-audio catch-all. The
+// AgentID is what lets Address Detection revoke the interrupted Agent's
+// continuation claim (ADR-0027 amendment).
 func (b *BargeIn) fire(bus *voiceevent.Bus, sp, turnID string) {
-	if !b.floor.YieldTurn(turnID) {
+	agentID, yielded := b.floor.YieldTurn(turnID)
+	if !yielded {
 		return
 	}
 	now := time.Now()
-	bus.Publish(voiceevent.BargeDetected{At: now, SpeakerID: sp})
+	bus.Publish(voiceevent.BargeDetected{At: now, SpeakerID: sp, AgentID: agentID})
 	bus.Publish(voiceevent.TurnEnded{At: now, TurnID: turnID, Reason: voiceevent.TurnEndBarge})
 }
