@@ -73,6 +73,13 @@ export const LAYOUT = {
   spiralSpacing: 26,
   /** Padding added around the bounding box so glyphs and labels are not clipped. */
   padding: 60,
+  /**
+   * Minimum view extent. A one- or two-node campaign has a bounding box near zero
+   * area, and a viewBox fitted to it magnifies those few glyphs to fill the canvas
+   * — a circle the size of a dinner plate with its label running off the edge. The
+   * floor keeps a small graph looking like a small graph.
+   */
+  minExtent: 520,
 } as const;
 
 // simNode is the mutable datum d3-force writes x/y/vx/vy onto.
@@ -177,13 +184,28 @@ export function layout(nodes: GraphNode[], edges: GraphEdge[]): Layout {
   return {
     nodes: positioned,
     edges: positionedEdges,
-    bounds: {
-      minX: minX - LAYOUT.padding,
-      minY: minY - LAYOUT.padding,
-      maxX: maxX + LAYOUT.padding,
-      maxY: maxY + LAYOUT.padding,
-    },
+    bounds: padBounds(minX, minY, maxX, maxY),
   };
+}
+
+/**
+ * padBounds adds the glyph/label padding and enforces the minimum extent,
+ * expanding around the centre so the graph stays centred either way.
+ */
+function padBounds(minX: number, minY: number, maxX: number, maxY: number): Layout["bounds"] {
+  const grow = (lo: number, hi: number) => {
+    let a = lo - LAYOUT.padding;
+    let b = hi + LAYOUT.padding;
+    const short = LAYOUT.minExtent - (b - a);
+    if (short > 0) {
+      a -= short / 2;
+      b += short / 2;
+    }
+    return [a, b] as const;
+  };
+  const [x0, x1] = grow(minX, maxX);
+  const [y0, y1] = grow(minY, maxY);
+  return { minX: x0, minY: y0, maxX: x1, maxY: y1 };
 }
 
 /**

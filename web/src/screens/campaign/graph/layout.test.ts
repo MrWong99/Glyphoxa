@@ -7,7 +7,7 @@ import {
   GraphNodeSchema,
   NodeType,
 } from "@gen/glyphoxa/management/v1/management_pb";
-import { egoNetwork, filterGraph, layout, seededRandom } from "./layout";
+import { LAYOUT, egoNetwork, filterGraph, layout, seededRandom } from "./layout";
 
 // A small fixed world: an innkeeper in a town, a faction he belongs to, a secret
 // the GM keeps, and one entry with no relationships at all.
@@ -95,6 +95,20 @@ describe("graph layout", () => {
     const laid = layout(nodes.slice(0, 1), edges);
     expect(laid.nodes).toHaveLength(1);
     expect(laid.edges).toHaveLength(0);
+  });
+
+  // A one-node campaign has a bounding box of near-zero area; without a floor the
+  // viewBox magnifies that single glyph to fill the canvas — a circle the size of
+  // a dinner plate with its label running off the edge.
+  it("keeps a tiny graph from being magnified to fill the canvas", () => {
+    const { nodes } = fixture();
+    const laid = layout(nodes.slice(0, 1), []);
+    const width = laid.bounds.maxX - laid.bounds.minX;
+    const height = laid.bounds.maxY - laid.bounds.minY;
+    expect(width).toBeGreaterThanOrEqual(LAYOUT.minExtent);
+    expect(height).toBeGreaterThanOrEqual(LAYOUT.minExtent);
+    // Still centred on the node it is showing.
+    expect((laid.bounds.minX + laid.bounds.maxX) / 2).toBeCloseTo(laid.nodes[0].x, 0);
   });
 
   it("handles an empty campaign", () => {
