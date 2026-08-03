@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -8,24 +8,18 @@ import {
   ChevronUp,
   Eye,
   EyeOff,
+  Network,
   Plus,
   Pencil,
+  Rows3,
   Search,
   Sparkles,
   Trash2,
-  User,
-  VenetianMask,
-  MapPin,
-  Flag,
-  Gem,
-  GitBranch,
-  StickyNote,
   Link as LinkIcon,
   X,
-  type LucideIcon,
 } from "lucide-react";
 
-import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { DraftEdge, DraftNode, Node } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -35,6 +29,9 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
+import { KnowledgeGraph } from "./graph/KnowledgeGraph";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
+import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "./knowledgeVocab";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
 // on the live CampaignService node RPCs (ADR-0008 v1.0). An "entry" is the
@@ -44,48 +41,32 @@ import { NodeRelations } from "./NodeRelations";
 // entries are injected into NPC prompts; a gm_private entry never reaches the
 // table. Type-filter chips + fulltext search arrive in #131.
 
-type TypeMeta = { label: string; color: string; Icon: LucideIcon };
-
-// Per-type label, design color, and lucide icon (approved #129 design). The Note
-// entry's neutral grey doubles as the defensive fallback for an unknown type.
-const TYPE_META: Record<number, TypeMeta> = {
-  [NodeType.CHARACTER]: { label: "Character", color: "#4fa9ff", Icon: User },
-  [NodeType.NPC]: { label: "NPC", color: "#9059ff", Icon: VenetianMask },
-  [NodeType.LOCATION]: { label: "Location", color: "#35c48d", Icon: MapPin },
-  [NodeType.FACTION]: { label: "Faction", color: "#ffbd4f", Icon: Flag },
-  [NodeType.ITEM]: { label: "Item", color: "#ff7139", Icon: Gem },
-  [NodeType.PLOT_THREAD]: { label: "Plot thread", color: "#ff4f5e", Icon: GitBranch },
-  [NodeType.NOTE]: { label: "Note", color: "#8b93a7", Icon: StickyNote },
-};
-
-// The authorable types in enum order; UNSPECIFIED (0) is never offered, and this
-// order also drives the grouped list and the type-select options.
-const TYPE_ORDER: NodeType[] = [
-  NodeType.CHARACTER,
-  NodeType.NPC,
-  NodeType.LOCATION,
-  NodeType.FACTION,
-  NodeType.ITEM,
-  NodeType.PLOT_THREAD,
-  NodeType.NOTE,
-];
-
 const TYPE_OPTIONS = TYPE_ORDER.map((t) => ({ value: String(t), label: TYPE_META[t].label }));
 const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
 
-function metaOf(t: NodeType): TypeMeta {
-  return TYPE_META[t] ?? TYPE_META[NodeType.NOTE];
-}
-
-// alphaBg tints a type color to the design's 14%-alpha tile background (0x24 ≈ 14%).
-function alphaBg(color: string): string {
-  return `${color}24`;
-}
+// ViewMode is the Knowledge tab's [ List | Graph ] switch (#534). The List mode
+// is unchanged — the graph is an ADDITIONAL way to read the same wiki, not a
+// replacement, and the editor rail is shared by both.
+type ViewMode = "list" | "graph";
 
 export function KnowledgePanel() {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
+  const [mode, setMode] = useState<ViewMode>("list");
+  // The generator's prompt and its unapplied draft live HERE, not inside the card:
+  // switching to Graph unmounts the list column, and a draft is the result of a
+  // paid LLM call the GM has not yet reviewed. Losing it to an idle mode toggle
+  // would be a real cost, silently incurred.
+  const [draftState, setDraftState] = useState<DraftState>({ open: false, prompt: "", draft: null });
+
+  // The whole-graph payload (#534). It is fetched only in graph mode, so a GM who
+  // never opens the graph pays nothing for it.
+  const graphQuery = useQuery(
+    CampaignService.method.getKnowledgeGraph,
+    {},
+    { enabled: mode === "graph" },
+  );
   // The entry a delete has been requested for; drives the confirm dialog. Delete
   // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
   // operator confirms here (#209).
@@ -127,54 +108,25 @@ export function KnowledgePanel() {
   // on the wrong entry. Surface the failure instead.
   const searchFailed = searching && searchQuery.isError;
 
-  // A mutation must refresh BOTH reads: the full ListNodes list AND any active
-  // SearchNodes result. Invalidating only listNodes left a stale search view — a
-  // deleted/renamed entry lingered in the filtered list (second delete then
-  // 404s). The searchNodes key is built without an input so it prefix-matches
-  // every cached query string.
-  const invalidateNodes = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodes,
-        cardinality: "finite",
-      }),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.searchNodes,
-        cardinality: "finite",
-      }),
-    });
-  };
-
-  // A node hard-delete cascades to every edge that touches it (ADR-0008 ON
-  // DELETE CASCADE), so it can silently kill edges belonging to OTHER nodes.
-  // Drop every cached ListNodeEdges result so the next relations view / delete
-  // dialog doesn't count a dead edge (the query's staleTime would otherwise
-  // serve it). No input key = prefix match across all node ids.
-  const invalidateEdges = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodeEdges,
-        cardinality: "finite",
-      }),
-    });
-  };
+  // Every mutation below drops EVERY read of the same data — see
+  // invalidateKnowledgeReads. Per-surface subsets are how the graph view went
+  // stale on an edge created two components away.
+  const invalidate = () => invalidateKnowledgeReads(queryClient);
 
   const createNode = useMutation(CampaignService.method.createNode, {
-    onSuccess: () => void invalidateNodes(),
+    onSuccess: invalidate,
   });
   const updateNode = useMutation(CampaignService.method.updateNode, {
     onSuccess: () => {
       setEditing(null);
-      void invalidateNodes();
+      invalidate();
     },
   });
+  // A node hard-delete cascades to every edge that touches it (ADR-0008 ON DELETE
+  // CASCADE), so it can silently kill edges belonging to OTHER nodes — which is
+  // why the whole read set goes, not just this node's.
   const deleteNode = useMutation(CampaignService.method.deleteNode, {
-    onSuccess: () => {
-      invalidateNodes();
-      invalidateEdges();
-    },
+    onSuccess: invalidate,
   });
 
   if (status === "pending") {
@@ -217,52 +169,93 @@ export function KnowledgePanel() {
       ? `Couldn't delete: ${deleteNode.error.message}`
       : null;
 
+  // Clicking a graph node opens the SAME editor the list opens (#534): the graph
+  // is a navigation surface, not a second editing surface.
+  const editByID = (id: string) => {
+    const node = listQuery.data?.nodes.find((n) => n.id === id);
+    if (node) setEditing(node);
+  };
+
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
-        <KnowledgeDraftCard
-          onApplied={() => {
-            invalidateNodes();
-            invalidateEdges();
-          }}
-        />
-        <Input
-          type="search"
-          aria-label="Search entries"
-          icon={<Search size={15} />}
-          placeholder="Search the wiki — names and content"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="gx-kg-search"
-        />
-        {searchFailed ? (
-          <p className="gx-campaign__error" role="alert">
-            Couldn't search: {searchQuery.error?.message}
-          </p>
+        <div className="gx-kg-modes" role="group" aria-label="View mode">
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={mode === "list"}
+            onClick={() => setMode("list")}
+          >
+            <Rows3 size={13} /> List
+          </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={mode === "graph"}
+            onClick={() => setMode("graph")}
+          >
+            <Network size={13} /> Graph
+          </button>
+        </div>
+
+        {mode === "graph" ? (
+          graphQuery.isPending ? (
+            <div className="gx-skeleton" data-testid="kg-graph-loading" />
+          ) : graphQuery.isError ? (
+            <p className="gx-campaign__error" role="alert">
+              Could not load the graph: {graphQuery.error.message}
+            </p>
+          ) : (
+            <KnowledgeGraph
+              nodes={graphQuery.data.nodes}
+              edges={graphQuery.data.edges}
+              selectedID={editing?.id ?? null}
+              onSelectNode={editByID}
+              onGraphChanged={invalidate}
+            />
+          )
         ) : (
           <>
-            {groups.map((g) => (
-              <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
-                <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
-                {g.items.map((n) => (
-                  <KnowledgeCard
-                    key={n.id}
-                    node={n}
-                    onEdit={() => setEditing(n)}
-                    onDelete={() => setConfirmNode(n)}
-                    deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
-                  />
+            <KnowledgeDraftCard state={draftState} onStateChange={setDraftState} onApplied={invalidate} />
+            <Input
+              type="search"
+              aria-label="Search entries"
+              icon={<Search size={15} />}
+              placeholder="Search the wiki — names and content"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="gx-kg-search"
+            />
+            {searchFailed ? (
+              <p className="gx-campaign__error" role="alert">
+                Couldn't search: {searchQuery.error?.message}
+              </p>
+            ) : (
+              <>
+                {groups.map((g) => (
+                  <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
+                    <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+                    {g.items.map((n) => (
+                      <KnowledgeCard
+                        key={n.id}
+                        node={n}
+                        onEdit={() => setEditing(n)}
+                        onDelete={() => setConfirmNode(n)}
+                        deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
+                      />
+                    ))}
+                  </section>
                 ))}
-              </section>
-            ))}
-            {nodes.length === 0 &&
-              (searching ? (
-                <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
-              ) : (
-                <p className="gx-kg-empty">
-                  No entries yet. Add what the world knows and your NPCs will speak to it.
-                </p>
-              ))}
+                {nodes.length === 0 &&
+                  (searching ? (
+                    <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+                  ) : (
+                    <p className="gx-kg-empty">
+                      No entries yet. Add what the world knows and your NPCs will speak to it.
+                    </p>
+                  ))}
+              </>
+            )}
           </>
         )}
       </div>
@@ -313,19 +306,14 @@ export function KnowledgePanel() {
   );
 }
 
-// EDGE_TYPE_LABEL mirrors NodeRelations' label map for the draft preview's
-// relation rows.
-const EDGE_TYPE_LABEL = new Map<EdgeType, string>([
-  [EdgeType.RESIDES_IN, "resides_in"],
-  [EdgeType.MEMBER_OF, "member_of"],
-  [EdgeType.OWNS, "owns"],
-  [EdgeType.KNOWS, "knows"],
-  [EdgeType.ENEMY_OF, "enemy_of"],
-  [EdgeType.ALLY_OF, "ally_of"],
-  [EdgeType.PARENT_OF, "parent_of"],
-  [EdgeType.PARTICIPATED_IN, "participated_in"],
-  [EdgeType.MENTIONED_IN, "mentioned_in"],
-]);
+// DraftState is the generator's persistent state, owned by the panel so it
+// survives a List/Graph switch (#534): an unapplied draft is the product of a paid
+// LLM call, and a view toggle must not silently discard it.
+type DraftState = {
+  open: boolean;
+  prompt: string;
+  draft: { nodes: DraftNode[]; edges: DraftEdge[] } | null;
+};
 
 // KnowledgeDraftCard is the on-demand "generate entries" flow (#479). Strictly
 // button-driven: collapsed it is a single affordance; expanded, the GM writes a
@@ -333,12 +321,28 @@ const EDGE_TYPE_LABEL = new Map<EdgeType, string>([
 // result is a PREVIEW (nothing written): the GM can drop individual entries or
 // relations, then lands the rest atomically via ApplyGeneratedKnowledge, or
 // discards the whole draft.
-function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [prompt, setPrompt] = useState("");
-  // The reviewable draft. Held locally so remove-buttons can edit it before the
-  // apply; edge indices are remapped on every node removal.
-  const [draft, setDraft] = useState<{ nodes: DraftNode[]; edges: DraftEdge[] } | null>(null);
+function KnowledgeDraftCard({
+  state,
+  onStateChange,
+  onApplied,
+}: {
+  state: DraftState;
+  onStateChange: (s: DraftState) => void;
+  onApplied: () => void;
+}) {
+  const { open, prompt, draft } = state;
+  const setOpen = (v: boolean) => onStateChange({ ...state, open: v });
+  const setPrompt = (v: string) => onStateChange({ ...state, prompt: v });
+  const setDraft = (
+    next:
+      | { nodes: DraftNode[]; edges: DraftEdge[] } | null
+      | ((d: { nodes: DraftNode[]; edges: DraftEdge[] } | null) => {
+          nodes: DraftNode[];
+          edges: DraftEdge[];
+        } | null),
+  ) => onStateChange({ ...state, draft: typeof next === "function" ? next(state.draft) : next });
+  // The error is genuinely transient — it describes the last attempt, not the
+  // draft — so it stays local and dies with the card.
   const [error, setError] = useState<string | null>(null);
 
   const generate = useMutation(CampaignService.method.generateKnowledge);
@@ -374,8 +378,7 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
   };
 
   const reset = () => {
-    setDraft(null);
-    setPrompt("");
+    onStateChange({ open: state.open, prompt: "", draft: null });
     setError(null);
   };
 
@@ -385,8 +388,8 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
     try {
       const res = await apply.mutateAsync({ nodes: draft.nodes, edges: draft.edges });
       onApplied();
-      reset();
-      setOpen(false);
+      onStateChange({ open: false, prompt: "", draft: null });
+      setError(null);
       toast.success(
         `Added ${res.nodes.length} entr${res.nodes.length === 1 ? "y" : "ies"}` +
           (res.edgesCreated > 0
@@ -422,8 +425,8 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
           className="gx-kg-iconbtn"
           aria-label="Close generator"
           onClick={() => {
-            reset();
-            setOpen(false);
+            onStateChange({ open: false, prompt: "", draft: null });
+            setError(null);
           }}
         >
           <X size={15} />

@@ -37,3 +37,17 @@ The v1.0 line above gives a Node ONE `gm_private` flag. In practice every intere
 - **Aspects are part of the Node's embedded text** (private ones included). The vector feeds the GM-facing similarity hints only (ADR-0052), which never reach a prompt, and a secret invisible to the vector would make duplicate detection blind to exactly the facts GMs most want deduped.
 
 Tags remain the *other* axis and are deliberately not this: the seven Node types stay a closed schema carrying edge-validity rules, Aspects carry content, and tags (#543) carry organization.
+
+## Fourth amendment: the graph is rendered (2026-08-03, #534) — supersedes "no graph viz"
+
+The v1.0 line above scoped the KG as a "structured wiki / GM notes. Form-based UI; **no graph viz**." That was a correct v1.0 cut — a picture of an empty wiki is worth nothing — but it has outlived its reason, and it is reversed here explicitly rather than silently.
+
+What changed is that Edges stopped being decoration. `AgentNodeFacts` walks them every turn to fill an NPC's Hot Context (the 2026-07-04 amendment), so edge hygiene is now a *quality* input to every NPC. Meanwhile Edges were authorable only through a dropdown pair inside a per-node card and were then **never displayed anywhere** — so the GM could not see the structure they had built, could not spot an error in it, and got no reward for building it. An invisible input to prompt quality is the worst kind.
+
+- **One new read**, `GetKnowledgeGraph`: every Node and Edge for the Campaign in one call, two indexed reads, no new tables. 300 per-node `ListNodeEdges` round trips is not a plan. The payload deliberately carries **no prose** — `body_len` and `aspect_count` instead of the text — because no node glyph renders a body.
+- **GM-facing, unlike every prompt read.** `gm_private` rows are returned and the client decides how to draw them (dashed, or absent in "table view"). This is the exact opposite of `PromptKGView` (#450) and the difference is the point: the graph is the GM's map of their own world.
+- **The graph is a navigation surface, not a second editor.** Clicking a node opens the existing `EntryEditor`. The one thing authored on the graph — drag one node onto another — goes through the existing `CreateEdge` RPC, validity matrix included.
+- **Layout is a pure deterministic function of (nodes, edges)**, seeded and run for a fixed tick count. Not for testability first: a graph that reshuffles on every open destroys the spatial memory that makes it useful at all.
+- Still **no graph database**. Everything here is one or two hops over a few hundred rows; the original reasoning holds and strengthens.
+
+The v2.x temporal line is untouched by this amendment.

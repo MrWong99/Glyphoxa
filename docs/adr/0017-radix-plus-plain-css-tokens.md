@@ -26,3 +26,13 @@ No Tailwind, no CSS-in-JS, no theme-context plumbing. Density / accent / reduce-
 - **Roll everything** — rejected. Combobox / dialog accessibility eats sprints.
 
 Forms use plain `useState` for v1.0; reach for `react-hook-form + zod` only when a form genuinely needs it (multi-step wizards, shared validation).
+
+## Amendment: `d3-force` as a layout dependency (2026-08-03, #534)
+
+The Knowledge Graph view (ADR-0008 fourth amendment) adds **`d3-force`** — the first frontend dependency that is neither Radix, `cmdk`/`sonner`, nor an icon set. Small (~30 KB, no transitive React), but it is a posture change and deserves the paragraph.
+
+**Why a dependency at all.** Force-directed layout is the one part of the graph view that is genuinely hard. A hand-rolled simulation is ~150 lines and tempting, but collision resolution and link-distance settling are exactly what make a 300-node graph legible rather than a hairball — and getting them wrong is not a bug you notice in review, it is a picture nobody can read.
+
+**What it does NOT change.** `d3-force` computes numbers; it renders nothing. The graph is SVG authored by our own components against the existing token/class vocabulary, so the constraints above hold in full: no Tailwind, no CSS-in-JS, tokens stay in plain CSS, and the 7-type palette is the same one the list view uses (now shared, in `knowledgeVocab.ts`). We deliberately did not take `d3-selection`, `d3-zoom`, or any renderer — pan and zoom are our own arithmetic on the SVG `viewBox`, ~15 lines.
+
+**The bar for the next one.** A frontend dependency is justified when it solves a hard, well-specified, *non-visual* problem and stays out of the DOM. Anything that renders, themes, or owns layout markup remains ours.

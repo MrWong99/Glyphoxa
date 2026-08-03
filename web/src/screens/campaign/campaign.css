@@ -291,6 +291,8 @@
   gap: var(--spacing-xs);
 }
 
+/* Label above, fact text below: the editor rail is narrow, and side-by-side left
+   the FACT — the field that matters — about eight characters wide. */
 .gx-kg-aspect {
   display: flex;
   align-items: flex-start;
@@ -306,35 +308,27 @@
 
 .gx-kg-aspect__fields {
   display: flex;
-  gap: var(--spacing-xs);
+  flex-direction: column;
+  gap: 2px;
   flex: 1;
   min-width: 0;
 }
 
-.gx-kg-aspect__key {
-  flex: 0 0 8rem;
-  min-width: 0;
-}
-
+.gx-kg-aspect__key,
 .gx-kg-aspect__value {
-  flex: 1;
   min-width: 0;
+}
+
+/* The label is a short filing key; the fact is prose. Size them accordingly. */
+.gx-kg-aspect__key input {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
 }
 
 .gx-kg-aspect__actions {
   display: flex;
   align-items: center;
   gap: 2px;
-}
-
-@media (max-width: 640px) {
-  .gx-kg-aspect__fields {
-    flex-direction: column;
-  }
-
-  .gx-kg-aspect__key {
-    flex: 1;
-  }
 }
 
 .gx-kg-editor__switch {
@@ -999,4 +993,121 @@
 
 .gx-proposal-card__similar-btn:hover {
   color: var(--text);
+}
+
+/* ── Knowledge Graph view (#534) ─────────────────────────────────────────── */
+
+.gx-kg-modes,
+.gx-kg-graph__modes {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+.gx-kg-graph {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-kg-graph__filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-graph__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--spacing-xs);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  cursor: pointer;
+}
+
+.gx-kg-chip[aria-pressed="true"] {
+  color: var(--text-strong);
+  border-color: var(--text-muted);
+}
+
+/* An unpressed relation chip is OFF: the graph draws only pressed relations, so
+   the pressed state has to read as "shown", not as "selected". */
+.gx-kg-chip--relation {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+}
+
+.gx-kg-chip[aria-pressed="false"] {
+  opacity: 0.45;
+}
+
+.gx-kg-graph__focus {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-kg-graph__canvas {
+  width: 100%;
+  /* Tall enough to be a map rather than a strip, capped so it never pushes the
+     editor rail off-screen. */
+  height: clamp(320px, 60vh, 720px);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-sunken, #12151c);
+  touch-action: none;
+}
+
+.gx-kg-graph__edge {
+  stroke: var(--text-muted, #8b93a7);
+  stroke-opacity: 0.35;
+  stroke-width: 1;
+}
+
+.gx-kg-graph__node {
+  cursor: pointer;
+}
+
+.gx-kg-graph__node:focus-visible circle {
+  outline: 2px solid var(--accent, #ffcf5a);
+  outline-offset: 2px;
+}
+
+.gx-kg-graph__node[data-selected] circle {
+  stroke-width: 3;
+}
+
+.gx-kg-graph__label {
+  fill: var(--text, #d7dae3);
+  font-size: 11px;
+  paint-order: stroke;
+  stroke: var(--surface-sunken, #12151c);
+  stroke-width: 3px;
+  pointer-events: none;
+}
+
+.gx-kg-graph__picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface, #171b23);
+}
+
+.gx-kg-graph__picker-text {
+  margin: 0;
+  color: var(--text-strong);
 }

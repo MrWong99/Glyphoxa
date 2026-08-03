@@ -127,6 +127,13 @@ service CampaignService {
   // CodeAlreadyExists; a missing OR cross-campaign Node/Agent is CodeNotFound.
   rpc SetNodeAgent(SetNodeAgentRequest) returns (SetNodeAgentResponse);
 
+  // GetKnowledgeGraph returns the active campaign's whole Knowledge Graph —
+  // every Node and Edge — in ONE call, for the Knowledge tab's Graph view
+  // (#534). Two indexed reads; no prose in the payload. Read-only.
+  rpc GetKnowledgeGraph(GetKnowledgeGraphRequest) returns (GetKnowledgeGraphResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
   // body match the query, ranked by relevance (tsvector fts, ADR-0008 v1.0). It
   // backs the Campaign screen's live wiki search; gm_private Nodes ARE included
@@ -448,6 +455,56 @@ enum NodeType {
   NODE_TYPE_ITEM = 5;
   NODE_TYPE_PLOT_THREAD = 6;
   NODE_TYPE_NOTE = 7;
+}
+
+// GraphNode is one Node as the Graph view needs it (#534): identity, type, name
+// and the flags the rendering distinguishes on — deliberately WITHOUT body or
+// aspect text, so a several-hundred-node campaign stays one small payload.
+message GraphNode {
+  // id is the node's UUID.
+  string id = 1;
+  // node_type is the node's type; drives the colour and glyph.
+  NodeType node_type = 2;
+  // name is the node's display name — the graph label.
+  string name = 3;
+  // gm_private marks a node drawn dashed, and hidden entirely in table view.
+  bool gm_private = 4;
+  // agent_id is the "voiced by" Character NPC Agent's UUID, empty when unlinked.
+  string agent_id = 5;
+  // body_len is the node body's length in bytes — the "does this entry actually
+  // say anything" signal, without shipping the prose.
+  int32 body_len = 6;
+  // aspect_count is how many aspects the node carries (#542). Together with
+  // body_len it distinguishes a real entry from an empty auto-created one.
+  int32 aspect_count = 7;
+}
+
+// GraphEdge is one Edge as the Graph view needs it (#534): the two endpoint ids
+// and the relation. Endpoint names are NOT repeated — the client already holds
+// every node in the same payload.
+message GraphEdge {
+  // id is the edge's UUID.
+  string id = 1;
+  // from_node_id is the subject Node's UUID.
+  string from_node_id = 2;
+  // to_node_id is the object Node's UUID.
+  string to_node_id = 3;
+  // edge_type is the relationship type.
+  EdgeType edge_type = 4;
+}
+
+// GetKnowledgeGraphRequest is the (empty) request; the active campaign is
+// resolved server-side for the single operator (ADR-0039).
+message GetKnowledgeGraphRequest {}
+
+// GetKnowledgeGraphResponse carries the campaign's whole Knowledge Graph: every
+// Node and every Edge, in one call. GM-facing — gm_private rows are INCLUDED, and
+// the client decides whether to draw them (#534).
+message GetKnowledgeGraphResponse {
+  // nodes is every Node in the campaign, in the list view's display order.
+  repeated GraphNode nodes = 1;
+  // edges is every Edge in the campaign.
+  repeated GraphEdge edges = 2;
 }
 
 // NodeAspect is one ordered (key, value) fact on a Node, carrying its OWN
