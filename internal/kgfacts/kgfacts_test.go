@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -422,5 +423,106 @@ func TestFacts_NoAspectsRendersUnchanged(t *testing.T) {
 	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != 1 || facts[0] != "### The Bell (Note)\nIt tolls at dusk." {
 		t.Errorf("fact = %q, want the pre-aspect rendering unchanged", facts)
+	}
+}
+
+// TestRenderPreview_MatchesInjectedFacts pins the load-bearing property of the
+// #535 lens: the preview is the SAME render the voice loop injects. If these two
+// could differ, the lens would confidently show a GM something their NPC never
+// receives — worse than showing nothing.
+func TestRenderPreview_MatchesInjectedFacts(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Bart", Body: "An innkeeper.",
+			Aspects: []storage.KGNodeAspect{{Key: "Role", Value: "Runs the Rusty Anchor"}}},
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeLocation, Name: "Saltmarsh", Body: "A damp town."},
+	}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	injected := r.Facts(liveCtx(camp), testAgent.String())
+	preview := kgfacts.RenderPreview(nodes.nodes)
+	if len(preview.Facts) != len(injected) {
+		t.Fatalf("preview has %d facts, injected %d", len(preview.Facts), len(injected))
+	}
+	for i := range injected {
+		if preview.Facts[i] != injected[i] {
+			t.Errorf("fact[%d] preview %q != injected %q", i, preview.Facts[i], injected[i])
+		}
+	}
+	if len(preview.IncludedIDs) != len(nodes.nodes) || preview.Truncated {
+		t.Errorf("preview = %+v, want everything included and untruncated", preview)
+	}
+	if preview.MaxChars != kgfacts.MaxBlockChars || preview.MaxFacts != kgfacts.MaxFacts {
+		t.Errorf("preview budget = %d/%d, want the real caps", preview.MaxChars, preview.MaxFacts)
+	}
+	if preview.Chars <= 0 || preview.Chars > kgfacts.MaxBlockChars {
+		t.Errorf("preview.Chars = %d, want a real consumption inside the budget", preview.Chars)
+	}
+}
+
+// TestRenderPreview_ReportsPrefixStop pins the truncation reporting: the cut is a
+// PREFIX-stop, so once a Node overruns, every later Node is dropped too — a
+// smaller one behind it must never sneak in. The lens exists to make that cut
+// visible, so it must report exactly which Nodes lost.
+func TestRenderPreview_ReportsPrefixStop(t *testing.T) {
+	big := storage.KGNode{
+		ID: uuid.New(), Type: storage.KGNodeNote, Name: "Huge",
+		Body: strings.Repeat("x", kgfacts.MaxFactChars),
+	}
+	nodes := []storage.KGNode{}
+	for range 12 { // 12 × ~500 chars overruns the 4000-char block
+		n := big
+		n.ID = uuid.New()
+		nodes = append(nodes, n)
+	}
+	// A tiny Node placed AFTER the overrun; the prefix-stop must drop it too.
+	tiny := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeNote, Name: "Tiny"}
+	nodes = append(nodes, tiny)
+
+	p := kgfacts.RenderPreview(nodes)
+	if !p.Truncated {
+		t.Fatal("preview did not report truncation on an over-budget node set")
+	}
+	if len(p.DroppedIDs) == 0 {
+		t.Fatal("truncated preview named no dropped nodes")
+	}
+	for _, id := range p.IncludedIDs {
+		if id == tiny.ID {
+			t.Error("a small node AFTER the prefix-stop was included — the cut must be a prefix, not a skip-scan")
+		}
+	}
+	if len(p.IncludedIDs)+len(p.DroppedIDs) != len(nodes) {
+		t.Errorf("preview accounted for %d+%d of %d nodes; every node must be in exactly one bucket",
+			len(p.IncludedIDs), len(p.DroppedIDs), len(nodes))
+	}
+	if p.Chars > kgfacts.MaxBlockChars {
+		t.Errorf("preview.Chars = %d, past the budget %d", p.Chars, kgfacts.MaxBlockChars)
+	}
+}
+
+// TestRenderPreview_MaxFactsCap pins the count cap's reporting half.
+func TestRenderPreview_MaxFactsCap(t *testing.T) {
+	var nodes []storage.KGNode
+	for i := range kgfacts.MaxFacts + 5 {
+		nodes = append(nodes, storage.KGNode{
+			ID: uuid.New(), Type: storage.KGNodeNote, Name: "N" + strconv.Itoa(i),
+		})
+	}
+	p := kgfacts.RenderPreview(nodes)
+	if len(p.Facts) != kgfacts.MaxFacts {
+		t.Errorf("got %d facts, want the cap %d", len(p.Facts), kgfacts.MaxFacts)
+	}
+	if !p.Truncated || len(p.DroppedIDs) != 5 {
+		t.Errorf("preview = truncated %v with %d dropped, want 5 dropped", p.Truncated, len(p.DroppedIDs))
+	}
+}
+
+// TestRenderPreview_Empty pins that an unlinked Agent's empty read is an empty
+// preview, not a truncated one — "nothing to say" and "too much to say" are
+// different problems and the lens must not confuse them.
+func TestRenderPreview_Empty(t *testing.T) {
+	p := kgfacts.RenderPreview(nil)
+	if len(p.Facts) != 0 || p.Truncated || p.Chars != 0 {
+		t.Errorf("empty preview = %+v, want zero facts, untruncated, zero chars", p)
 	}
 }

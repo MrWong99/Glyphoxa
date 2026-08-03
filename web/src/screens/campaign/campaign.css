@@ -1111,3 +1111,53 @@
   margin: 0;
   color: var(--text-strong);
 }
+
+/* ── Agent-knowledge lens (#535) ─────────────────────────────────────────── */
+
+.gx-kg-lens {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-lens__budget {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-kg-lens__meter {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--text-muted);
+}
+
+.gx-kg-lens__truncated,
+.gx-kg-lens__empty {
+  font-size: var(--body-sm);
+  color: var(--accent, #ffcf5a);
+  margin: 0;
+}
+
+/* Lens states. Everything outside the injected subgraph recedes; the two kinds of
+   exclusion stay visually distinct, because "hidden from this NPC" and "did not
+   fit in the budget" call for different fixes. */
+.gx-kg-graph__node[data-lens="dim"] {
+  opacity: 0.15;
+}
+
+.gx-kg-graph__node[data-lens="ghost"] circle,
+.gx-kg-graph__node[data-lens="dropped"] circle {
+  fill: transparent;
+  stroke-dasharray: 2 3;
+}
+
+.gx-kg-graph__node[data-lens="ghost"] .gx-kg-graph__label,
+.gx-kg-graph__node[data-lens="dropped"] .gx-kg-graph__label {
+  text-decoration: line-through;
+  fill: var(--text-muted, #8b93a7);
+}
+
+.gx-kg-graph__node[data-lens="lit"] circle {
+  stroke-width: 2;
+}

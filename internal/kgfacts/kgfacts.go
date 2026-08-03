@@ -185,37 +185,84 @@ func (r *Recaller) degrade(ctx context.Context, cause error) []string {
 	return nil
 }
 
-// renderFacts projects the public Nodes (in storage order) into rendered fact
-// strings, applying the per-fact truncation and the MaxFacts / MaxBlockChars caps.
-// The block-budget accounting reserves the agent's header + joins so the FINAL
-// rendered block (header included) stays within MaxBlockChars. It stops at the
-// first fact that would overrun either cap — a deterministic prefix, never a
-// skip-scan — so a huge Node cannot let a later small one sneak in past the budget.
-func renderFacts(nodes []storage.KGNode) []string {
-	if len(nodes) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(nodes))
+// Preview is exactly what an Agent's Hot Context facts block will contain, plus
+// the budget arithmetic that produced it (#535). It exists so the GM-facing
+// "what does this NPC actually know" lens reads the SAME renderer the voice loop
+// injects, instead of reimplementing the caps in TypeScript where they would
+// silently drift from reality on the next change to either side.
+type Preview struct {
+	// Facts is the rendered block, fact by fact — byte-identical to what the turn
+	// would inject.
+	Facts []string
+	// IncludedIDs are the Nodes that made it into Facts, in order. The lens dims the
+	// graph to exactly these.
+	IncludedIDs []uuid.UUID
+	// DroppedIDs are Nodes the read returned that the caps excluded — the visible
+	// half of the deterministic prefix-stop, which is otherwise a silent quality
+	// cliff.
+	DroppedIDs []uuid.UUID
+	// Chars is the assembled block's length, header and joins included; MaxChars is
+	// the budget it is measured against.
+	Chars    int
+	MaxChars int
+	// MaxFacts is the count cap.
+	MaxFacts int
+	// Truncated reports that the prefix-stop fired: at least one Node the read
+	// returned did not fit.
+	Truncated bool
+}
+
+// RenderPreview is renderFacts with its budget arithmetic exposed (#535). The
+// voice loop keeps calling renderFacts; both share this one implementation, so the
+// preview cannot drift from what is actually injected.
+func RenderPreview(nodes []storage.KGNode) Preview {
+	p := Preview{MaxChars: MaxBlockChars, MaxFacts: MaxFacts}
 	// Every fact in the assembled block is preceded by a blockJoin (the first by the
 	// header's join, the rest by the inter-fact join), so the running total starts at
 	// the header length and each fact adds len(join)+len(fact).
 	total := len(factsHeader)
+	// stopped makes the cut a deterministic PREFIX-stop rather than a skip-scan:
+	// once one Node overruns a cap, every later Node is dropped too, so a huge Node
+	// cannot let a smaller one behind it sneak in past the budget. The loop keeps
+	// running only to RECORD what was dropped — which is the whole point of the
+	// preview, since that cut is otherwise a silent quality cliff.
+	stopped := false
 	for _, n := range nodes {
-		if len(out) >= MaxFacts {
-			break
+		if !stopped {
+			if len(p.Facts) >= MaxFacts {
+				stopped = true
+			} else {
+				fact := renderFact(n)
+				delta := len(blockJoin) + len(fact)
+				if total+delta > MaxBlockChars {
+					stopped = true
+				} else {
+					total += delta
+					p.Facts = append(p.Facts, fact)
+					p.IncludedIDs = append(p.IncludedIDs, n.ID)
+				}
+			}
 		}
-		fact := renderFact(n)
-		delta := len(blockJoin) + len(fact)
-		if total+delta > MaxBlockChars {
-			break
+		if stopped {
+			p.Truncated = true
+			p.DroppedIDs = append(p.DroppedIDs, n.ID)
 		}
-		total += delta
-		out = append(out, fact)
 	}
-	if len(out) == 0 {
+	if len(p.Facts) > 0 {
+		p.Chars = total
+	}
+	return p
+}
+
+// renderFacts projects the public Nodes (in storage order) into rendered fact
+// strings, applying the per-fact truncation and the MaxFacts / MaxBlockChars caps.
+// The block-budget accounting reserves the agent's header + joins so the FINAL
+// rendered block (header included) stays within MaxBlockChars.
+func renderFacts(nodes []storage.KGNode) []string {
+	if len(nodes) == 0 {
 		return nil
 	}
-	return out
+	return RenderPreview(nodes).Facts
 }
 
 // renderFact renders one Node as "### <Name> (<TypeLabel>)" followed by its

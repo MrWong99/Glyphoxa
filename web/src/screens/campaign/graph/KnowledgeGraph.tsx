@@ -6,6 +6,7 @@ import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/managemen
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { EDGE_TYPES, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "../knowledgeVocab";
+import { AgentLensBar, useAgentLens } from "./AgentLens";
 import { LAYOUT, egoNetwork, filterGraph, layout } from "./layout";
 
 // The Graph view (#534, ADR-0008 amendment "no graph viz" reversal). Edges were
@@ -69,6 +70,11 @@ export function KnowledgeGraph({
   const [dragFrom, setDragFrom] = useState<string | null>(null);
   const [pendingLink, setPendingLink] = useState<{ from: string; to: string } | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
+  // The agent-knowledge lens (#535): which NPC's injected subgraph to highlight.
+  const [lensAgentID, setLensAgentID] = useState("");
+
+  const lens = useAgentLens(lensAgentID, nodes, edges);
+  const active = lens.state?.linked ? lens.state.lens : null;
 
   const createEdge = useMutation(CampaignService.method.createEdge, {
     onSuccess: () => {
@@ -88,8 +94,17 @@ export function KnowledgeGraph({
   );
 
   const filtered = useMemo(
-    () => filterGraph(nodes, edges, { types, relations, hidePrivate, focus }),
-    [nodes, edges, types, relations, hidePrivate, focus],
+    () =>
+      filterGraph(nodes, edges, {
+        types,
+        relations,
+        // A lens exists to show what an NPC is DENIED, so table view (which removes
+        // gm_private entries outright) would erase exactly the ghosts it is meant to
+        // surface. The lens wins while it is on.
+        hidePrivate: hidePrivate && !active,
+        focus,
+      }),
+    [nodes, edges, types, relations, hidePrivate, focus, active],
   );
 
   // Layout is a pure function of the filtered payload, so this memo is the whole
@@ -124,6 +139,8 @@ export function KnowledgeGraph({
 
   return (
     <div className="gx-kg-graph">
+      <AgentLensBar agentID={lensAgentID} onAgentChange={setLensAgentID} lens={lens} />
+
       <div className="gx-kg-graph__filters">
         <div className="gx-kg-graph__chips" role="group" aria-label="Filter by type">
           {TYPE_ORDER.map((t) => {
@@ -269,6 +286,13 @@ export function KnowledgeGraph({
           <g className="gx-kg-graph__nodes">
             {laid.nodes.map((p) => {
               const meta = metaOf(p.node.nodeType);
+              // Lens states, in the order they matter: a withheld gm_private
+              // neighbour is a GHOST (adjacent, deliberately hidden), a capped-out
+              // one is DROPPED (adjacent, did not fit — a different problem), the
+              // injected ones are lit, and everything else is dimmed out of the way.
+              const ghosted = active?.ghostIDs.has(p.node.id) ?? false;
+              const dropped = active?.droppedIDs.has(p.node.id) ?? false;
+              const lit = active ? active.includedIDs.has(p.node.id) : true;
               // Past the budget only the nodes the GM is actively looking at keep
               // their name — including the focus root, which is the one node they
               // definitely care about in a focused view.
@@ -284,9 +308,15 @@ export function KnowledgeGraph({
                   data-node-id={p.node.id}
                   data-private={p.node.gmPrivate || undefined}
                   data-selected={selectedID === p.node.id || undefined}
+                  data-lens={active ? (ghosted ? "ghost" : dropped ? "dropped" : lit ? "lit" : "dim") : undefined}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${p.node.name} (${meta.label})${p.node.gmPrivate ? ", GM private" : ""}`}
+                  aria-label={
+                    `${p.node.name} (${meta.label})` +
+                    (p.node.gmPrivate ? ", GM private" : "") +
+                    (ghosted ? `, hidden from ${active?.agentName}` : "") +
+                    (dropped ? `, dropped from ${active?.agentName}'s prompt — over budget` : "")
+                  }
                   transform={`translate(${p.x} ${p.y})`}
                   onMouseDown={() => setDragFrom(p.node.id)}
                   onMouseEnter={() => setHoverID(p.node.id)}
@@ -320,7 +350,7 @@ export function KnowledgeGraph({
                     // absent from the world their NPCs see.
                     strokeDasharray={p.node.gmPrivate ? "3 2" : undefined}
                   />
-                  {labelled && (
+                  {(labelled || ghosted || dropped) && (
                     <text className="gx-kg-graph__label" x={LAYOUT.nodeRadius + 4} y={4}>
                       {p.node.name}
                     </text>
