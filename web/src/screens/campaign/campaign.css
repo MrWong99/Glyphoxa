@@ -1200,3 +1200,136 @@
   border: 1px solid var(--border, #2a2f3a);
   border-radius: var(--radius-sm, 4px);
 }
+
+/* ── World health panel (#536) ───────────────────────────────────────────── */
+
+.gx-kg-health {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-kg-health__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  align-items: flex-start;
+}
+
+.gx-kg-health__title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin: 0;
+  font-size: var(--body-lg);
+  color: var(--text-strong);
+}
+
+.gx-kg-health__count {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--text-muted);
+}
+
+/* The consequence, not just the label: a warning nobody can act on is noise. */
+.gx-kg-health__why {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-kg-health__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-kg-health__link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gx-kg-health__detail {
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+.gx-kg-health__clear {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* ── Roster prep dashboard (#544) ────────────────────────────────────────── */
+
+.gx-prep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.gx-prep__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-prep__title {
+  margin: 0;
+  font-size: var(--body-lg);
+  color: var(--text-strong);
+}
+
+.gx-prep__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  padding: var(--spacing-xs) 0;
+  border-bottom: 1px solid var(--border, #2a2f3a);
+}
+
+.gx-prep__name {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-strong);
+  flex: 0 0 12rem;
+  text-align: left;
+}
+
+.gx-prep__checks {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+/* An unsatisfied mark is a BUTTON to the thing that fixes it; a satisfied one is
+   inert. A checklist you cannot act on from is just a nag. */
+.gx-prep__mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px var(--spacing-xs);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-sm, 4px);
+  background: none;
+  font-size: var(--body-sm);
+  color: var(--accent, #ffcf5a);
+  cursor: pointer;
+}
+
+.gx-prep__mark[data-ok] {
+  color: var(--text-muted);
+  border-color: transparent;
+  cursor: default;
+}

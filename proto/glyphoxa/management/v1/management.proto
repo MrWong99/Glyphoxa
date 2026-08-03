@@ -134,6 +134,22 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // FindDuplicateEntries returns the campaign's closest Node pairs by embedding
+  // similarity — the world health panel's "probable duplicates" check (#536).
+  // GM-INITIATED: it is an exact pairwise scan and must never run on render.
+  // A hint only; nothing here merges anything (ADR-0052).
+  rpc FindDuplicateEntries(FindDuplicateEntriesRequest) returns (FindDuplicateEntriesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetRosterReadiness returns, for every cast Agent at once, the prep signals
+  // the roster dashboard grades on (#544): the SAME fact-preview seam #535 uses,
+  // plus when each last spoke. ONE call for the whole roster — a per-NPC preview
+  // would be an RPC storm on a screen the GM opens before every session.
+  rpc GetRosterReadiness(GetRosterReadinessRequest) returns (GetRosterReadinessResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // GetAgentFactPreview returns exactly what a Character NPC's Hot Context
   // facts block will contain, with the real budget accounting (#535). Read-only.
   rpc GetAgentFactPreview(GetAgentFactPreviewRequest) returns (GetAgentFactPreviewResponse) {
@@ -480,9 +496,14 @@ message GraphNode {
   // body_len is the node body's length in bytes — the "does this entry actually
   // say anything" signal, without shipping the prose.
   int32 body_len = 6;
-  // aspect_count is how many aspects the node carries (#542). Together with
-  // body_len it distinguishes a real entry from an empty auto-created one.
+  // aspect_count is how many aspects the node carries (#542), private ones
+  // included — the GM's own map of their world.
   int32 aspect_count = 7;
+  // public_aspect_count is how many a PROMPT can receive. An entry whose only
+  // fact is a GM secret is authored but says nothing to its NPC, so the health
+  // and readiness derivations read this one; using aspect_count there would
+  // report that exact state as healthy.
+  int32 public_aspect_count = 8;
 }
 
 // GraphEdge is one Edge as the Graph view needs it (#534): the two endpoint ids
@@ -511,6 +532,68 @@ message GetKnowledgeGraphResponse {
   repeated GraphNode nodes = 1;
   // edges is every Edge in the campaign.
   repeated GraphEdge edges = 2;
+}
+
+// GetRosterReadinessRequest is the (empty) request; the active campaign is
+// resolved server-side.
+message GetRosterReadinessRequest {}
+
+// AgentReadiness is one cast Agent's prep signals (#544). The fact figures come
+// from the SAME render the voice loop injects (#535), so the dashboard cannot
+// claim an NPC is ready on arithmetic the turn does not share.
+message AgentReadiness {
+  // agent_id is the Agent these signals describe.
+  string agent_id = 1;
+  // linked reports whether the Agent has a linked wiki entry at all.
+  bool linked = 2;
+  // fact_count is how many facts SAY SOMETHING — a linked NPC's own entry always
+  // renders as a header line whether or not it has content, so counting rendered
+  // facts would be a check that can never fail. chars is what the whole block
+  // consumes of max_chars.
+  int32 fact_count = 3;
+  int32 chars = 4;
+  int32 max_chars = 5;
+  // truncated reports that the caps cut part of its neighbourhood.
+  bool truncated = 6;
+  // last_spoke_at is when this Agent last spoke a committed Transcript Line in
+  // this campaign; unset when it has never spoken (or was renamed since — the
+  // Line grain records the speaker label, not an Agent id).
+  google.protobuf.Timestamp last_spoke_at = 7;
+}
+
+// GetRosterReadinessResponse carries one entry per CAST Agent. The Butler is
+// deliberately absent: it is Address-Only with no linked Node by design
+// (ADR-0009), so these signals do not describe it.
+message GetRosterReadinessResponse {
+  // agents is the readiness of every Character NPC in the campaign.
+  repeated AgentReadiness agents = 1;
+}
+
+// FindDuplicateEntriesRequest is the (empty) request; the active campaign is
+// resolved server-side. The threshold and cap are server policy (ADR-0039).
+message FindDuplicateEntriesRequest {}
+
+// DuplicateEntryPair is two entries whose text embeds close together — a hint,
+// never a merge (ADR-0052: similarity is not a semantic judgment).
+message DuplicateEntryPair {
+  // a_id / b_id are the two Nodes; a_name / b_name their display names.
+  string a_id = 1;
+  string a_name = 2;
+  string b_id = 3;
+  string b_name = 4;
+  // similarity is cosine similarity; 1.0 is identical direction. Only pairs above
+  // a high server-side floor are ever returned.
+  double similarity = 5;
+}
+
+// FindDuplicateEntriesResponse carries the closest pairs, closest first.
+message FindDuplicateEntriesResponse {
+  // pairs is the probable-duplicate hints, closest first. Empty is the healthy
+  // case, not an error.
+  repeated DuplicateEntryPair pairs = 1;
+  // unembedded is how many Nodes have no embedding yet, so the panel can say the
+  // check was partial rather than implying a clean bill of health.
+  int32 unembedded = 2;
 }
 
 // GetAgentFactPreviewRequest names the Agent to preview.

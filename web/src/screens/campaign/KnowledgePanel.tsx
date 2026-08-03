@@ -13,6 +13,7 @@ import {
   Pencil,
   Rows3,
   Search,
+  Stethoscope,
   Sparkles,
   Trash2,
   Link as LinkIcon,
@@ -30,6 +31,7 @@ import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
 import { KnowledgeGraph } from "./graph/KnowledgeGraph";
+import { WorldHealthPanel } from "./graph/WorldHealthPanel";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "./knowledgeVocab";
 
@@ -47,9 +49,23 @@ const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
 // ViewMode is the Knowledge tab's [ List | Graph ] switch (#534). The List mode
 // is unchanged — the graph is an ADDITIONAL way to read the same wiki, not a
 // replacement, and the editor rail is shared by both.
-type ViewMode = "list" | "graph";
+type ViewMode = "list" | "graph" | "health";
 
-export function KnowledgePanel() {
+export function KnowledgePanel({
+  focusNodeID,
+  onFocusHandled,
+  onOpenCast,
+}: {
+  /**
+   * An entry another screen asked to open — the roster's readiness marks and the
+   * health panel both point HERE, and pointing at the list instead would leave the
+   * GM hunting for the entry by hand in a campaign of any size (#544).
+   */
+  focusNodeID?: string | null;
+  onFocusHandled?: () => void;
+  /** Hands a cast Agent back to the Cast tab, where its fix lives. */
+  onOpenCast?: (agentID: string) => void;
+} = {}) {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
@@ -62,15 +78,27 @@ export function KnowledgePanel() {
 
   // The whole-graph payload (#534). It is fetched only in graph mode, so a GM who
   // never opens the graph pays nothing for it.
+  // Both the Graph and Health views read the same payload; the List view pays
+  // nothing for either.
   const graphQuery = useQuery(
     CampaignService.method.getKnowledgeGraph,
     {},
-    { enabled: mode === "graph" },
+    { enabled: mode !== "list" },
   );
   // The entry a delete has been requested for; drives the confirm dialog. Delete
   // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
   // operator confirms here (#209).
   const [confirmNode, setConfirmNode] = useState<Node | null>(null);
+
+  // Honour an entry handed in from another screen, once its row has loaded.
+  useEffect(() => {
+    if (!focusNodeID) return;
+    const node = listQuery.data?.nodes.find((n) => n.id === focusNodeID);
+    if (!node) return;
+    setEditing(node);
+    setMode("list");
+    onFocusHandled?.();
+  }, [focusNodeID, listQuery.data, onFocusHandled]);
 
   // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
   // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
@@ -196,15 +224,30 @@ export function KnowledgePanel() {
           >
             <Network size={13} /> Graph
           </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={mode === "health"}
+            onClick={() => setMode("health")}
+          >
+            <Stethoscope size={13} /> Health
+          </button>
         </div>
 
-        {mode === "graph" ? (
+        {mode !== "list" ? (
           graphQuery.isPending ? (
             <div className="gx-skeleton" data-testid="kg-graph-loading" />
           ) : graphQuery.isError ? (
             <p className="gx-campaign__error" role="alert">
               Could not load the graph: {graphQuery.error.message}
             </p>
+          ) : mode === "health" ? (
+            <WorldHealthPanel
+              nodes={graphQuery.data.nodes}
+              edges={graphQuery.data.edges}
+              onOpenNode={editByID}
+              onOpenCast={onOpenCast}
+            />
           ) : (
             <KnowledgeGraph
               nodes={graphQuery.data.nodes}

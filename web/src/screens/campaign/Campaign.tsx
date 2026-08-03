@@ -14,8 +14,10 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PlayersPanel } from "./PlayersPanel";
+import { RosterPrep } from "./RosterPrep";
 import { ProposalsPanel } from "./ProposalsPanel";
 
 import "./campaign.css";
@@ -62,14 +64,27 @@ export function Campaign() {
   // User bindings, #279) — the design's seg-control beside the title. Cast is the
   // default so the roster is what loads first (#71).
   const [view, setView] = useState<"cast" | "knowledge" | "players" | "proposals">("cast");
+  // Within Cast: the editor (default), or the prep readiness view (#544). The
+  // editor stays the default because adding and shaping NPCs is the common act;
+  // readiness is what you check before a session.
+  const [castMode, setCastMode] = useState<"edit" | "prep">("edit");
+  // The entry a readiness mark asked to open, handed to the Knowledge panel so
+  // "Entry has content" lands ON that entry instead of dumping the GM on the list.
+  const [focusNodeID, setFocusNodeID] = useState<string | null>(null);
 
-  const invalidateRoster = () =>
-    queryClient.invalidateQueries({
+  // Creating a Character NPC auto-creates its wiki entry, and deleting one
+  // unlinks that entry (ADR-0008 second amendment) — both are Knowledge Graph
+  // writes, so a roster mutation must drop the KG reads too. Without this the
+  // Health panel pairs a fresh roster with a stale graph and invents findings.
+  const invalidateRoster = () => {
+    void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
         schema: CampaignService.method.getCampaignRoster,
         cardinality: "finite",
       }),
     });
+    invalidateKnowledgeReads(queryClient);
+  };
 
   const createAgent = useMutation(CampaignService.method.createAgent, {
     onSuccess: (res) => {
@@ -146,7 +161,15 @@ export function Campaign() {
       </header>
 
       {view === "knowledge" ? (
-        <KnowledgePanel />
+        <KnowledgePanel
+          focusNodeID={focusNodeID}
+          onFocusHandled={() => setFocusNodeID(null)}
+          onOpenCast={(agentID) => {
+            setSelectedId(agentID);
+            setCastMode("edit");
+            setView("cast");
+          }}
+        />
       ) : view === "players" ? (
         <PlayersPanel />
       ) : view === "proposals" ? (
@@ -158,6 +181,39 @@ export function Campaign() {
           Could not load the campaign: {error.message}
         </p>
       ) : (
+        <>
+        <div className="gx-kg-modes" role="group" aria-label="Cast view">
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={castMode === "edit"}
+            onClick={() => setCastMode("edit")}
+          >
+            Roster
+          </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={castMode === "prep"}
+            onClick={() => setCastMode("prep")}
+          >
+            Session prep
+          </button>
+        </div>
+        {castMode === "prep" ? (
+          <RosterPrep
+            roster={roster}
+            onSelectAgent={(id) => {
+              setSelectedId(id);
+              setCastMode("edit");
+            }}
+            onOpenNode={(id) => {
+              setFocusNodeID(id);
+              setView("knowledge");
+            }}
+            onOpenKnowledge={() => setView("knowledge")}
+          />
+        ) : (
         <div className="gx-roster-layout">
           {/* Roster list */}
           <div className="gx-roster">
@@ -230,6 +286,8 @@ export function Campaign() {
           />
         )}
         </div>
+        )}
+        </>
       )}
     </div>
   );

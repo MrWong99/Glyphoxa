@@ -5,7 +5,7 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 
 // One invalidation for every read of the Knowledge Graph (#534).
 //
-// The same nodes and edges are now served by FOUR queries — the list, the wiki
+// The same nodes and edges are now served by SIX queries — the list, the wiki
 // search, a node's relations, and the whole-graph payload the Graph view renders —
 // and they are mutated from three different surfaces: the Knowledge panel, the
 // relations editor inside it, and the proposal review queue. Each surface used to
@@ -14,7 +14,9 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 // stale, so an edge created in the relations editor kept drawing on the graph
 // until the 30s staleTime expired.
 //
-// So there is one helper and it drops all four. Over-invalidating costs a handful
+// So there is one helper and it drops all six — including the two derived reads
+// (#535's fact preview and #544's roster readiness), which are pure functions of
+// the same nodes and edges and go stale for exactly the same reasons. Over-invalidating costs a handful
 // of small refetches on a single-operator tier; under-invalidating shows the GM a
 // world that does not match their own last edit, which reads as a bug in the graph
 // rather than a stale cache.
@@ -43,6 +45,20 @@ export function invalidateKnowledgeReads(queryClient: QueryClient): void {
   void queryClient.invalidateQueries({
     queryKey: createConnectQueryKey({
       schema: CampaignService.method.getKnowledgeGraph,
+      cardinality: "finite",
+    }),
+  });
+  // Derived from the same nodes and edges: an edit that changes what an NPC knows
+  // must not leave the lens and the readiness marks describing the old world.
+  void queryClient.invalidateQueries({
+    queryKey: createConnectQueryKey({
+      schema: CampaignService.method.getAgentFactPreview,
+      cardinality: "finite",
+    }),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: createConnectQueryKey({
+      schema: CampaignService.method.getRosterReadiness,
       cardinality: "finite",
     }),
   });

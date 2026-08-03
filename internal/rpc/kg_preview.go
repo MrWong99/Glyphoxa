@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
@@ -38,6 +40,9 @@ type kgPreviewStore interface {
 	AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error)
 	AgentLinkedNode(ctx context.Context, agentID uuid.UUID) (storage.KGNode, bool, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
+	// ListAgents and LastSpokenByAgent back the batch roster readiness read (#544).
+	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
+	LastSpokenByAgent(ctx context.Context, campaignID uuid.UUID) ([]storage.AgentLastSpoke, error)
 }
 
 // GetAgentFactPreview renders the Agent's facts block through the SAME path the
@@ -131,6 +136,82 @@ func (s *kgPreview) GetAgentFactPreview(
 	return connect.NewResponse(out), nil
 }
 
+// GetRosterReadiness grades every cast Agent at once (#544) on the SAME fact
+// preview #535 exposes, plus when each last spoke.
+//
+// One call, not one per NPC: this backs a dashboard the GM opens before every
+// session, and a per-NPC preview would be an RPC storm on exactly that screen.
+// The facts still come from the prompt-facing seam, so the dashboard cannot claim
+// an NPC is ready on arithmetic the voice loop does not share.
+//
+// The Butler is excluded: Address-Only, auto-created, with no linked Node by
+// design (ADR-0009), so these signals do not describe it. The roster view still
+// LISTS it — it is simply not graded.
+func (s *kgPreview) GetRosterReadiness(
+	ctx context.Context,
+	_ *connect.Request[managementv1.GetRosterReadinessRequest],
+) (*connect.Response[managementv1.GetRosterReadinessResponse], error) {
+	c, err := s.active.resolve(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("GetRosterReadiness: get active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	agents, err := s.store.ListAgents(ctx, c.ID)
+	if err != nil {
+		slog.Default().Error("GetRosterReadiness: list agents failed", "campaign_id", c.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	spoke, err := s.store.LastSpokenByAgent(ctx, c.ID)
+	if err != nil {
+		slog.Default().Error("GetRosterReadiness: last-spoken read failed", "campaign_id", c.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	lastSpoke := make(map[string]time.Time, len(spoke))
+	for _, l := range spoke {
+		lastSpoke[l.Who] = l.At
+	}
+
+	out := &managementv1.GetRosterReadinessResponse{}
+	for _, a := range agents {
+		if a.Role != storage.AgentRoleCharacter {
+			continue
+		}
+		r := &managementv1.AgentReadiness{
+			AgentId:  a.ID.String(),
+			MaxChars: kgfacts.MaxBlockChars,
+		}
+		if at, ok := lastSpoke[a.Name]; ok {
+			r.LastSpokeAt = timestamppb.New(at)
+		}
+
+		if _, linked, err := s.store.AgentLinkedNode(ctx, a.ID); err != nil {
+			slog.Default().Error("GetRosterReadiness: linked node lookup failed", "agent_id", a.ID, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		} else if linked {
+			r.Linked = true
+			nodes, err := s.store.AgentNodeFacts(ctx, a.ID)
+			if err != nil {
+				slog.Default().Error("GetRosterReadiness: agent node facts failed", "agent_id", a.ID, "err", err)
+				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			}
+			p := kgfacts.RenderPreview(nodes)
+			// CONTENT-bearing facts, not rendered ones. A linked NPC's own Node is always
+			// returned at hop 0 and always renders at least its header line, so
+			// len(Facts) > 0 is a check that can never fail — precisely for the NPC this
+			// dashboard exists to catch.
+			r.FactCount = int32(p.ContentFacts) //nolint:gosec // bounded by kgfacts.MaxFacts
+			r.Chars = int32(p.Chars)            //nolint:gosec // bounded by kgfacts.MaxBlockChars
+			r.Truncated = p.Truncated
+		}
+		out.Agents = append(out.Agents, r)
+	}
+	return connect.NewResponse(out), nil
+}
+
 // kgPreviewSource composes the ONE prompt-facing KG read with the two plain Agent
 // reads the lens needs for scoping and the linked-entry state. The facts read is
 // taken from [storage.PromptKGView] rather than *Store on purpose: the lens must
@@ -151,6 +232,14 @@ func (v kgPreviewSource) AgentLinkedNode(ctx context.Context, agentID uuid.UUID)
 
 func (v kgPreviewSource) GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error) {
 	return v.store.GetAgent(ctx, id)
+}
+
+func (v kgPreviewSource) ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error) {
+	return v.store.ListAgents(ctx, campaignID)
+}
+
+func (v kgPreviewSource) LastSpokenByAgent(ctx context.Context, campaignID uuid.UUID) ([]storage.AgentLastSpoke, error) {
+	return v.store.LastSpokenByAgent(ctx, campaignID)
 }
 
 // kgPreviewStoreOf builds the lens's read source over a concrete Store.

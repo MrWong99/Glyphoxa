@@ -30,6 +30,12 @@ type KGGraphNode struct {
 	AgentID     uuid.NullUUID
 	BodyLen     int
 	AspectCount int
+	// PublicAspectCount counts only the Aspects a prompt can actually receive.
+	// The distinction matters: an entry whose ONLY fact is a GM secret is authored
+	// (so AspectCount is 1, and the GM's own map should say so) but says nothing to
+	// its NPC (so the health and readiness derivations must read 0, or they report
+	// exactly the state they exist to catch as healthy).
+	PublicAspectCount int
 }
 
 // ListGraphNodes returns every Node in a Campaign in the display order ListNodes
@@ -44,7 +50,8 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 	rows, err := s.db.Query(ctx,
 		`SELECT n.id, n.node_type, n.name, n.gm_private, n.agent_id,
 		        length(n.body),
-		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id)
+		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id),
+		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id AND NOT a.gm_private)
 		   FROM kg_node n
 		  WHERE n.campaign_id = $1
 		  ORDER BY n.node_type, lower(n.name), n.id`, campaignID)
@@ -56,7 +63,8 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 	var out []KGGraphNode
 	for rows.Next() {
 		var n KGGraphNode
-		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.GMPrivate, &n.AgentID, &n.BodyLen, &n.AspectCount); err != nil {
+		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.GMPrivate, &n.AgentID,
+			&n.BodyLen, &n.AspectCount, &n.PublicAspectCount); err != nil {
 			return nil, fmt.Errorf("storage: scan graph node: %w", err)
 		}
 		out = append(out, n)
@@ -65,4 +73,84 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 		return nil, fmt.Errorf("storage: list graph nodes for campaign %s: %w", campaignID, err)
 	}
 	return out, nil
+}
+
+// KGNodePair is two Nodes in one Campaign whose embeddings are close — a
+// PROBABLE-duplicate hint for the world health panel (#536). Similarity is 1
+// minus pgvector's cosine distance (<=>), so it ranges over [-1, 1]: 1.0 is
+// identical direction, 0 orthogonal, negative opposed. Only the high end is ever
+// surfaced, so the sign never reaches a caller in practice.
+type KGNodePair struct {
+	AID, BID     uuid.UUID
+	AName, BName string
+	Similarity   float64
+}
+
+// SimilarNodePairs returns the Campaign's closest Node pairs by embedding cosine
+// similarity, closest first (#536, ADR-0011). It is the "probable duplicates"
+// derivation the health panel offers — a HINT the GM acts on, never an auto-merge:
+// ADR-0052 rejected auto-merging near-duplicates because similarity is not a
+// semantic judgment and a wrong merge corrupts canon invisibly. The same reasoning
+// applies here, so this read exists only to point at pairs.
+//
+// It is an exact pairwise scan rather than an ANN probe: a Campaign is hundreds of
+// Nodes, the read is GM-INITIATED (never on render), and an exact answer beats an
+// approximate one for something a human is about to act on. Rows without an
+// embedding are invisible until the backfill worker reaches them.
+//
+// minSimilarity is the cosine-similarity floor; limit caps the result.
+//
+// Cost: the pairwise join cannot use the HNSW index — it is a nested loop, O(n²)
+// distance evaluations. At campaign scale (hundreds of Nodes) that is tens of
+// milliseconds, which is why an exact answer is affordable here; it would not be
+// at thousands, and the GM-initiated framing is what keeps that bounded.
+func (s *Store) SimilarNodePairs(ctx context.Context, campaignID uuid.UUID, minSimilarity float64, limit int) ([]KGNodePair, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("storage: similar node pairs: limit must be > 0, got %d", limit)
+	}
+	// b.id > a.id yields each unordered pair exactly once and rules out self-pairs.
+	rows, err := s.db.Query(ctx,
+		`SELECT a.id, a.name, b.id, b.name, 1 - (a.embedding <=> b.embedding) AS similarity
+		   FROM kg_node a
+		   JOIN kg_node b
+		     ON b.campaign_id = a.campaign_id AND b.id > a.id AND b.embedding IS NOT NULL
+		  WHERE a.campaign_id = $1
+		    AND a.embedding IS NOT NULL
+		    AND 1 - (a.embedding <=> b.embedding) >= $2
+		  ORDER BY similarity DESC, a.id, b.id
+		  LIMIT $3`, campaignID, minSimilarity, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: similar node pairs for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []KGNodePair
+	for rows.Next() {
+		var p KGNodePair
+		if err := rows.Scan(&p.AID, &p.AName, &p.BID, &p.BName, &p.Similarity); err != nil {
+			return nil, fmt.Errorf("storage: scan similar node pair: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: similar node pairs for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
+
+// CountUnembeddedNodesInCampaign counts a Campaign's Nodes still awaiting an
+// embedding (#536). The probable-duplicate scan cannot see them, so the health
+// panel reports the count rather than letting "no duplicates" imply a clean bill
+// of health the check could not give.
+//
+// Distinct from [Store.CountUnembeddedNodes], which is the process-wide gauge
+// (kept campaign-free to bound metric cardinality, ADR-0032).
+func (s *Store) CountUnembeddedNodesInCampaign(ctx context.Context, campaignID uuid.UUID) (int, error) {
+	var n int
+	if err := s.db.QueryRow(ctx,
+		`SELECT count(*) FROM kg_node WHERE campaign_id = $1 AND embedding IS NULL`,
+		campaignID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("storage: count unembedded kg nodes for campaign %s: %w", campaignID, err)
+	}
+	return n, nil
 }

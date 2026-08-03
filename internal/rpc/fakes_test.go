@@ -931,6 +931,27 @@ type fakeKGGraphStore struct {
 	edgeErr      error
 	edgeCalls    int
 	edgeCampaign uuid.UUID
+
+	// The GM-initiated duplicate scan (#536): pairs/unembedded are returned
+	// verbatim; the recorded floor and limit prove the handler applies a policy
+	// rather than letting the client choose one.
+	pairs        []storage.KGNodePair
+	pairErr      error
+	pairCampaign uuid.UUID
+	pairFloor    float64
+	pairLimit    int
+	unembedded   int
+}
+
+func (f *fakeKGGraphStore) SimilarNodePairs(_ context.Context, campaignID uuid.UUID, minSimilarity float64, limit int) ([]storage.KGNodePair, error) {
+	f.pairCampaign = campaignID
+	f.pairFloor = minSimilarity
+	f.pairLimit = limit
+	return f.pairs, f.pairErr
+}
+
+func (f *fakeKGGraphStore) CountUnembeddedNodesInCampaign(_ context.Context, _ uuid.UUID) (int, error) {
+	return f.unembedded, nil
 }
 
 func newFakeKGGraphStore() *fakeKGGraphStore {
@@ -963,6 +984,20 @@ type fakeKGPreviewStore struct {
 	factCalls int
 	factsErr  error
 	linkedErr error
+
+	// The batch roster readiness read (#544).
+	agentList []storage.Agent
+	agentsErr error
+	lastSpoke []storage.AgentLastSpoke
+	spokeErr  error
+}
+
+func (f *fakeKGPreviewStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent, error) {
+	return f.agentList, f.agentsErr
+}
+
+func (f *fakeKGPreviewStore) LastSpokenByAgent(_ context.Context, _ uuid.UUID) ([]storage.AgentLastSpoke, error) {
+	return f.lastSpoke, f.spokeErr
 }
 
 func newFakeKGPreviewStore() *fakeKGPreviewStore {

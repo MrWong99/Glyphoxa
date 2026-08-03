@@ -28,6 +28,11 @@ type kgGraph struct {
 type kgGraphStore interface {
 	ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGGraphNode, error)
 	ListEdges(ctx context.Context, campaignID uuid.UUID) ([]storage.KGEdge, error)
+	// SimilarNodePairs backs the GM-initiated probable-duplicate check (#536);
+	// CountUnembeddedNodesInCampaign says how much of the wiki that check could not
+	// see yet.
+	SimilarNodePairs(ctx context.Context, campaignID uuid.UUID, minSimilarity float64, limit int) ([]storage.KGNodePair, error)
+	CountUnembeddedNodesInCampaign(ctx context.Context, campaignID uuid.UUID) (int, error)
 }
 
 // GetKnowledgeGraph returns the active campaign's whole Knowledge Graph — every
@@ -70,12 +75,13 @@ func (s *kgGraph) GetKnowledgeGraph(
 	}
 	for _, n := range nodes {
 		gn := &managementv1.GraphNode{
-			Id:          n.ID.String(),
-			NodeType:    toProtoNodeType(n.Type),
-			Name:        n.Name,
-			GmPrivate:   n.GMPrivate,
-			BodyLen:     int32(n.BodyLen),     //nolint:gosec // a body length cannot exceed int32 in practice
-			AspectCount: int32(n.AspectCount), //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+			Id:                n.ID.String(),
+			NodeType:          toProtoNodeType(n.Type),
+			Name:              n.Name,
+			GmPrivate:         n.GMPrivate,
+			BodyLen:           int32(n.BodyLen),           //nolint:gosec // a body length cannot exceed int32 in practice
+			AspectCount:       int32(n.AspectCount),       //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+			PublicAspectCount: int32(n.PublicAspectCount), //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
 		}
 		if n.AgentID.Valid {
 			gn.AgentId = n.AgentID.UUID.String()
@@ -88,6 +94,70 @@ func (s *kgGraph) GetKnowledgeGraph(
 			FromNodeId: e.FromNodeID.String(),
 			ToNodeId:   e.ToNodeID.String(),
 			EdgeType:   toProtoEdgeType(e.Type),
+		})
+	}
+	return connect.NewResponse(out), nil
+}
+
+// Duplicate-check policy for the single-operator web tier (ADR-0039): the client
+// sends no threshold and no limit.
+const (
+	// duplicateSimilarityFloor is deliberately high. A hint the GM must read and act
+	// on is only useful if it is usually right; a low floor turns the panel into a
+	// wall of coincidences and trains the GM to ignore it.
+	duplicateSimilarityFloor = 0.92
+	// duplicatePairLimit caps the list. Past this many, the wiki has a systemic
+	// problem the panel cannot express one row at a time.
+	duplicatePairLimit = 25
+)
+
+// FindDuplicateEntries returns the active campaign's closest Node pairs by
+// embedding similarity — the world health panel's probable-duplicate check (#536).
+//
+// It is GM-INITIATED by design: an exact pairwise scan is cheap at campaign scale
+// but has no business firing on every Knowledge-tab render, and the ADR-0011
+// embedding path is not something to sweep speculatively.
+//
+// Per ADR-0052 this is a HINT and nothing more. Nothing in this path merges,
+// rewrites or deletes anything: similarity is not a semantic judgment, and a wrong
+// merge corrupts canon invisibly.
+func (s *kgGraph) FindDuplicateEntries(
+	ctx context.Context,
+	_ *connect.Request[managementv1.FindDuplicateEntriesRequest],
+) (*connect.Response[managementv1.FindDuplicateEntriesResponse], error) {
+	c, err := s.active.resolve(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("FindDuplicateEntries: get active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	pairs, err := s.store.SimilarNodePairs(ctx, c.ID, duplicateSimilarityFloor, duplicatePairLimit)
+	if err != nil {
+		slog.Default().Error("FindDuplicateEntries: pair scan failed", "campaign_id", c.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// Nodes still awaiting an embedding are invisible to the scan. Reporting the
+	// count keeps "no duplicates found" from implying a clean bill of health the
+	// check could not actually give.
+	unembedded, err := s.store.CountUnembeddedNodesInCampaign(ctx, c.ID)
+	if err != nil {
+		slog.Default().Error("FindDuplicateEntries: unembedded count failed", "campaign_id", c.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	out := &managementv1.FindDuplicateEntriesResponse{
+		Pairs:      make([]*managementv1.DuplicateEntryPair, 0, len(pairs)),
+		Unembedded: int32(unembedded), //nolint:gosec // bounded by campaign size
+	}
+	for _, p := range pairs {
+		out.Pairs = append(out.Pairs, &managementv1.DuplicateEntryPair{
+			AId: p.AID.String(), AName: p.AName,
+			BId: p.BID.String(), BName: p.BName,
+			Similarity: p.Similarity,
 		})
 	}
 	return connect.NewResponse(out), nil

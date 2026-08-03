@@ -179,3 +179,52 @@ func (s *Store) SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID,
 	}
 	return out, nil
 }
+
+// AgentLastSpoke is one Agent's most recent committed Transcript Line (#544).
+// Who is the Line's speaker label, which for an Agent turn is its display NAME —
+// transcript_line carries no agent_id (ADR-0040 persists what was said and by
+// whom-as-shown, not a foreign key), so the roster matches on name. A renamed
+// Agent therefore loses its history here; that is a display nicety on a prep
+// dashboard, not a correctness claim, and inventing a join would mean changing
+// what the Line grain records.
+type AgentLastSpoke struct {
+	Who string
+	At  time.Time
+}
+
+// LastSpokenByAgent returns, per Agent speaker label, the timestamp of its most
+// recent committed Transcript Line in a Campaign (#544) — the "last spoke" prep
+// signal. One grouped read for the whole roster rather than one per NPC.
+//
+// Only Agent turns are considered (kind ∈ npc, butler); player and GM lines are a
+// different question. Only committed Lines exist in this table at all (ADR-0012 /
+// ADR-0040: partials are never persisted), so the answer is always about speech
+// that actually reached the table.
+//
+// It rides transcript_line_campaign_kind_idx (migration 00045). Without it this
+// is a sequential scan of every tenant's transcript — the table had no
+// campaign_id index because, until this read, nothing filtered on it.
+func (s *Store) LastSpokenByAgent(ctx context.Context, campaignID uuid.UUID) ([]AgentLastSpoke, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT who, max(ts)
+		   FROM transcript_line
+		  WHERE campaign_id = $1 AND kind IN ('npc', 'butler')
+		  GROUP BY who`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: last spoken by agent for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []AgentLastSpoke
+	for rows.Next() {
+		var a AgentLastSpoke
+		if err := rows.Scan(&a.Who, &a.At); err != nil {
+			return nil, fmt.Errorf("storage: scan last spoken: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: last spoken by agent for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
