@@ -70,6 +70,8 @@ function renderWithLens(
     truncated: boolean;
     linked: boolean;
     linkedNodeId: string;
+    neighbourhoodClipped: boolean;
+    maxNeighbours: number;
   }> = {},
 ) {
   const { nodes, edges } = fixture();
@@ -93,6 +95,8 @@ function renderWithLens(
           truncated: false,
           linked: true,
           linkedNodeId: "bart",
+          neighbourhoodClipped: false,
+          maxNeighbours: 50,
           ...preview,
         }),
       createEdge: () => create(CreateEdgeResponseSchema, { edge: create(EdgeSchema, {}) }),
@@ -168,6 +172,53 @@ describe("agent-knowledge lens", () => {
 
     expect(await screen.findByText(/Truncated — 1 entry did not fit/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Saltmarsh.*over budget/)).toHaveAttribute("data-lens", "dropped");
+  });
+
+  // The summary line answers "is it too much?"; this answers "but what does it
+  // literally say" — the question the GM actually has when an NPC says the wrong
+  // thing.
+  it("shows the rendered block verbatim", async () => {
+    renderWithLens();
+    await pickBart();
+
+    fireEvent.click(await screen.findByText("What Bart will be told"));
+    const block = await screen.findByText(/### Bart \(NPC\)/);
+    expect(block.textContent).toContain("An innkeeper.");
+    expect(block.textContent).toContain("### Saltmarsh (Location)");
+  });
+
+  // The two exclusions need different FIXES — flip a gm_private flag vs shorten
+  // entries — so they must be distinguishable to a sighted GM, not only in an
+  // aria-label.
+  it("draws withheld and over-budget neighbours differently", async () => {
+    renderWithLens({
+      includedNodeIds: ["bart"],
+      droppedNodeIds: ["town"],
+      truncated: true,
+      facts: ["### Bart (NPC)\nAn innkeeper."],
+    });
+    await pickBart();
+
+    const ghost = await screen.findByLabelText(/The bribe .*hidden from Bart/);
+    const dropped = screen.getByLabelText(/Saltmarsh.*over budget/);
+    expect(ghost.querySelector(".gx-kg-graph__slash")).toBeTruthy();
+    expect(ghost.querySelector(".gx-kg-graph__overflow")).toBeFalsy();
+    expect(dropped.querySelector(".gx-kg-graph__overflow")).toBeTruthy();
+    expect(dropped.querySelector(".gx-kg-graph__slash")).toBeFalsy();
+    // And each carries a tooltip naming its own fix.
+    expect(ghost.querySelector("title")?.textContent).toMatch(/GM private/);
+    expect(dropped.querySelector("title")?.textContent).toMatch(/facts block is full/);
+  });
+
+  // The SQL read has its own row cap, applied before the renderer. Past it, a hub
+  // NPC's extra neighbours would look merely "not adjacent" and the GM would go
+  // hunting for an Edge that is not missing.
+  it("reports when the read cap clipped the neighbourhood", async () => {
+    renderWithLens({ neighbourhoodClipped: true, maxNeighbours: 50 });
+    await pickBart();
+    expect(
+      await screen.findByText(/more relations than the prompt read looks at/),
+    ).toBeInTheDocument();
   });
 
   it("says an unlinked NPC has no entry, rather than showing an empty graph", async () => {

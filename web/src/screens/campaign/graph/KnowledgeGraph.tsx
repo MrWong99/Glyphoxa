@@ -75,6 +75,10 @@ export function KnowledgeGraph({
 
   const lens = useAgentLens(lensAgentID, nodes, edges);
   const active = lens.state?.linked ? lens.state.lens : null;
+  // filterGraph only needs to know WHETHER a lens is on. Depending on the lens
+  // OBJECT would re-run the filter — and therefore the 300-tick layout — on every
+  // preview refetch, for an output that did not change.
+  const lensOn = active !== null;
 
   const createEdge = useMutation(CampaignService.method.createEdge, {
     onSuccess: () => {
@@ -101,10 +105,10 @@ export function KnowledgeGraph({
         // A lens exists to show what an NPC is DENIED, so table view (which removes
         // gm_private entries outright) would erase exactly the ghosts it is meant to
         // surface. The lens wins while it is on.
-        hidePrivate: hidePrivate && !active,
+        hidePrivate: hidePrivate && !lensOn,
         focus,
       }),
-    [nodes, edges, types, relations, hidePrivate, focus, active],
+    [nodes, edges, types, relations, hidePrivate, focus, lensOn],
   );
 
   // Layout is a pure function of the filtered payload, so this memo is the whole
@@ -342,6 +346,16 @@ export function KnowledgeGraph({
                     if (ev.key === "f") setFocusID(p.node.id);
                   }}
                 >
+                  {/* A tooltip, because the lens states were otherwise legible only
+                      to a screen reader — a sighted GM saw two struck nodes and could
+                      not tell which fix each one needed. */}
+                  {(ghosted || dropped) && (
+                    <title>
+                      {ghosted
+                        ? `Hidden from ${active?.agentName} — this entry is GM private`
+                        : `Dropped from ${active?.agentName}'s prompt — the facts block is full`}
+                    </title>
+                  )}
                   <circle
                     r={LAYOUT.nodeRadius}
                     fill={alphaBg(meta.color)}
@@ -350,6 +364,19 @@ export function KnowledgeGraph({
                     // absent from the world their NPCs see.
                     strokeDasharray={p.node.gmPrivate ? "3 2" : undefined}
                   />
+                  {/* A withheld neighbour gets a slash through the glyph; an
+                      over-budget one gets a ring. Two exclusions, two fixes, two
+                      shapes — the aria-label alone was not a visual distinction. */}
+                  {ghosted && (
+                    <line
+                      className="gx-kg-graph__slash"
+                      x1={-LAYOUT.nodeRadius - 3}
+                      y1={LAYOUT.nodeRadius + 3}
+                      x2={LAYOUT.nodeRadius + 3}
+                      y2={-LAYOUT.nodeRadius - 3}
+                    />
+                  )}
+                  {dropped && <circle className="gx-kg-graph__overflow" r={LAYOUT.nodeRadius + 4} />}
                   {(labelled || ghosted || dropped) && (
                     <text className="gx-kg-graph__label" x={LAYOUT.nodeRadius + 4} y={4}>
                       {p.node.name}

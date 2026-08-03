@@ -224,6 +224,13 @@ func (s *Store) ListNodes(ctx context.Context, campaignID uuid.UUID) ([]KGNode, 
 	return out, nil
 }
 
+// MaxAgentFactNodes is [kgFactsCap], exported so the GM-facing preview (#535) can
+// tell the GM that the SQL read itself clipped their NPC's neighbourhood. Without
+// it, a hub NPC with more than this many neighbours would show the extras as
+// "not adjacent" — indistinguishable from a missing Edge, and unfixable because
+// the GM would be looking for the wrong problem.
+const MaxAgentFactNodes = kgFactsCap
+
 // kgFactsCap bounds the prompt-injection read so a large wiki can never blow the
 // Hot Context budget at the SQL layer (#126 AC4); the kgfacts renderer applies
 // the finer per-block/per-fact caps on top.

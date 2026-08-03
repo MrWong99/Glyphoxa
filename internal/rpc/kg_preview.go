@@ -93,9 +93,10 @@ func (s *kgPreview) GetAgentFactPreview(
 	}
 
 	out := &managementv1.GetAgentFactPreviewResponse{
-		MaxChars: kgfacts.MaxBlockChars,
-		MaxFacts: kgfacts.MaxFacts,
-		Linked:   linked,
+		MaxChars:      kgfacts.MaxBlockChars,
+		MaxFacts:      kgfacts.MaxFacts,
+		MaxNeighbours: storage.MaxAgentFactNodes,
+		Linked:        linked,
 	}
 	if !linked {
 		// An explicit "not linked" state, not an empty graph. The GM's fix is to link
@@ -109,6 +110,13 @@ func (s *kgPreview) GetAgentFactPreview(
 		slog.Default().Error("GetAgentFactPreview: agent node facts failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
+
+	// The SQL read has its OWN row cap, applied before the renderer ever sees a
+	// Node. A hub NPC past it would otherwise show its extra neighbours as merely
+	// "not adjacent" — the GM would go looking for a missing Edge that is not
+	// missing. Reported separately from the renderer's truncation because the two
+	// have different fixes.
+	out.NeighbourhoodClipped = len(nodes) >= storage.MaxAgentFactNodes
 
 	p := kgfacts.RenderPreview(nodes)
 	out.Facts = p.Facts

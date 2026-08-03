@@ -548,6 +548,13 @@ message GetAgentFactPreviewResponse {
   bool linked = 8;
   // linked_node_id is the Agent's own Node when linked, empty otherwise.
   string linked_node_id = 9;
+  // neighbourhood_clipped reports that the SQL read hit its own row cap BEFORE
+  // the renderer's caps — the Agent has more neighbours than the prompt read will
+  // ever look at. Distinct from `truncated`: that is the renderer's budget, this
+  // is the read's, and they need different fixes.
+  bool neighbourhood_clipped = 10;
+  // max_neighbours is that row cap, so the readout can name it.
+  int32 max_neighbours = 11;
 }
 
 // NodeAspect is one ordered (key, value) fact on a Node, carrying its OWN
