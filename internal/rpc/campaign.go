@@ -20,6 +20,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -47,6 +48,7 @@ type CampaignServer struct {
 	*kgEdges
 	*kgGraph
 	*kgPreview
+	*campaignMaps
 	*knowledgeProposals
 	*toolGrants
 	*campaignAssist
@@ -79,6 +81,8 @@ type CampaignStores struct {
 	// KGPreview backs the agent-knowledge lens (#535) — the PROMPT-FACING read, so
 	// the preview shows what the turn shows.
 	KGPreview kgPreviewStore
+	// Maps backs the Maps and Pins surface (#538, ADR-0060).
+	Maps campaignMapStore
 	// Proposals backs the Knowledge Proposal review queue + similarity hint
 	// (#300, ADR-0052).
 	Proposals knowledgeProposalStore
@@ -106,6 +110,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		KGEdges:    s,
 		KGGraph:    s,
 		KGPreview:  kgPreviewStoreOf(s),
+		Maps:       s,
 		Proposals:  s,
 		Grants:     s,
 		Assist:     s,
@@ -128,6 +133,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
 		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
 		kgPreview:          &kgPreview{store: stores.KGPreview, active: active},
+		campaignMaps:       &campaignMaps{store: stores.Maps, active: active, tenant: auth.TenantID},
 		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
 		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
 		campaignAssist:     &campaignAssist{store: stores.Assist, active: active},
@@ -136,6 +142,14 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 
 // compile-time assertion that CampaignServer satisfies the generated handler.
 var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
+
+// SetBlobs wires the blob seam Map images ride (ADR-0048, #538). It is a
+// post-construction hook like SetSessions/SetAssist because the seam is built by
+// the composition root alongside the store, and a nil seam simply makes the map
+// WRITE paths report unavailable — the read paths never touch it.
+func (s *CampaignServer) SetBlobs(blobs blob.Store) {
+	s.blobs = blobs
+}
 
 // SetSessions wires the live Voice Session source the Active Campaign resolution
 // consults (#222): while a session is live, EVERY CampaignService surface (header,
@@ -186,11 +200,12 @@ func (s *CampaignServer) SetEmbedder(e Embedder) {
 	s.embedder = e
 }
 
-// SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
-// delete runs (#308). Called once at boot before serving; nil leaves the sweep
-// off (the highlight rows still cascade, only their blobs would linger).
-func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
-	s.clips = sw
+// SetCampaignBlobSweeper wires the blob sweep the campaign hard delete runs
+// (#308/#538): Highlight clips and Map images alike. Called once at boot before
+// serving; nil leaves the sweep off (the rows still cascade, only their blobs
+// would linger).
+func (s *CampaignServer) SetCampaignBlobSweeper(sw CampaignBlobSweeper) {
+	s.campaignBlobs = sw
 }
 
 // campaignManagement is the campaign lifecycle feature module (#264, #222): the

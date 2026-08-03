@@ -22,6 +22,10 @@ func TestPlainMountPolicy(t *testing.T) {
 		"GET /api/v1/sessions/{id}":         auth.TenantRequired,
 		"GET /api/v1/highlights/{id}/clip":  auth.TenantRequired,
 		"GET /api/v1/highlights/{id}/image": auth.TenantRequired,
+		// Campaign Map images (#538, ADR-0060) — the second blob owner's byte route.
+		// TenantRequired like every other byte mount: the handler re-reads the
+		// injected tenant to scope its row load, and a session-only gate would 401.
+		"GET /api/v1/maps/{id}/image":       auth.TenantRequired,
 		"GET /api/v1/campaigns/{id}/export": auth.TenantRequired,
 		"POST /api/v1/campaigns/import":     auth.TenantNone,
 	}

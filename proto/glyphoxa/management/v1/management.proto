@@ -142,6 +142,47 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ── Maps and Pins (#538, ADR-0060) ────────────────────────────────────────
+  // A Map's image rides the blob seam and is fetched over a plain HTTP mount
+  // (GET /api/v1/maps/{id}/image), not through these unary calls; the bytes
+  // travel once, on create or re-upload.
+
+  // ListMaps returns the active campaign's Maps. GM-facing (gm_private Maps
+  // included). Read-only.
+  rpc ListMaps(ListMapsRequest) returns (ListMapsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetMapView returns one Map with its Pins, its ancestor breadcrumb, its
+  // direct children, and the campaign entries not yet pinned on it — everything
+  // the Maps tab draws, in one call.
+  rpc GetMapView(GetMapViewRequest) returns (GetMapViewResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateMap uploads an image and creates the Map. The bytes are written to the
+  // blob seam FIRST, so a row never references missing bytes.
+  rpc CreateMap(CreateMapRequest) returns (CreateMapResponse);
+
+  // UpdateMap saves a Map's editor fields (name, nesting, anchor, privacy).
+  rpc UpdateMap(UpdateMapRequest) returns (UpdateMapResponse);
+
+  // ReplaceMapImage repoints a Map at new bytes. Pins are untouched: coordinates
+  // are normalized, so a re-upload at a different resolution keeps every pin.
+  rpc ReplaceMapImage(ReplaceMapImageRequest) returns (ReplaceMapImageResponse);
+
+  // DeleteMap removes a Map, its Pins, and its image through the blob seam.
+  rpc DeleteMap(DeleteMapRequest) returns (DeleteMapResponse);
+
+  // CreatePin pins a KG Node onto a Map at a normalized position.
+  rpc CreatePin(CreatePinRequest) returns (CreatePinResponse);
+
+  // UpdatePin moves or relabels a Pin.
+  rpc UpdatePin(UpdatePinRequest) returns (UpdatePinResponse);
+
+  // DeletePin unpins a Node from a Map.
+  rpc DeletePin(DeletePinRequest) returns (DeletePinResponse);
+
   // GetRosterReadiness returns, for every cast Agent at once, the prep signals
   // the roster dashboard grades on (#544): the SAME fact-preview seam #535 uses,
   // plus when each last spoke. ONE call for the whole roster — a per-NPC preview
@@ -533,6 +574,176 @@ message GetKnowledgeGraphResponse {
   // edges is every Edge in the campaign.
   repeated GraphEdge edges = 2;
 }
+
+// Map is the wire form of a Campaign Map (#538, ADR-0060). The image is NOT
+// carried here — it is fetched from GET /api/v1/maps/{id}/image.
+message Map {
+  // id is the map's UUID.
+  string id = 1;
+  // name is the map's display name.
+  string name = 2;
+  // width_px / height_px are the source image's dimensions, for aspect-ratio
+  // rendering only. Pin coordinates are normalized and independent of these.
+  int32 width_px = 3;
+  int32 height_px = 4;
+  // parent_map_id is the map this one sits inside; anchor_node_id is the Location
+  // Node this map depicts. Both empty when unset.
+  string parent_map_id = 5;
+  string anchor_node_id = 6;
+  // gm_private keeps this map out of every player-tier response.
+  bool gm_private = 7;
+  // updated_at doubles as the image cache validator.
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// Pin is a normalized position on a Map for one KG Node (#538, ADR-0060).
+message Pin {
+  // id is the pin's UUID.
+  string id = 1;
+  // map_id / node_id are what the pin joins.
+  string map_id = 2;
+  string node_id = 3;
+  // x / y are normalized 0..1, so the pin survives a re-uploaded or rescaled image.
+  double x = 4;
+  double y = 5;
+  // label_override replaces the node's name on THIS map only; empty means use the
+  // node's name.
+  string label_override = 6;
+  // gm_private hides this pin from player-tier responses. A pin whose NODE is
+  // gm_private is hidden regardless.
+  bool gm_private = 7;
+  // node_name / node_type are joined so the map can draw the pin without a second
+  // read; node_gm_private is why a pin may be hidden without its own flag set.
+  string node_name = 8;
+  NodeType node_type = 9;
+  bool node_gm_private = 10;
+}
+
+// ListMapsRequest is the (empty) request; the active campaign resolves server-side.
+message ListMapsRequest {}
+
+// ListMapsResponse carries the campaign's Maps in display order.
+message ListMapsResponse {
+  repeated Map maps = 1;
+}
+
+// GetMapViewRequest names the Map to open.
+message GetMapViewRequest {
+  // id is the map to view.
+  string id = 1;
+}
+
+// GetMapViewResponse is everything the Maps tab draws for one Map, in one call.
+message GetMapViewResponse {
+  // map is the map itself.
+  Map map = 1;
+  // pins are its pins, with their nodes joined.
+  repeated Pin pins = 2;
+  // breadcrumb is the ancestor chain, NEAREST PARENT FIRST, for navigating out.
+  repeated Map breadcrumb = 3;
+  // children are the maps nested directly inside this one, for navigating in.
+  repeated Map children = 4;
+  // unpinned are the campaign's placeable entries not yet on this map — the tray
+  // that makes placing the world a drag rather than a form.
+  repeated Node unpinned = 5;
+}
+
+// CreateMapRequest uploads an image and creates the Map around it.
+message CreateMapRequest {
+  // name is the map's display name; empty is rejected.
+  string name = 1;
+  // image_bytes is the raw image, capped by the blob seam (32 MiB, ADR-0048).
+  bytes image_bytes = 2;
+  // content_type is the image's MIME type; only image/* is accepted.
+  string content_type = 3;
+  // width_px / height_px are the source dimensions, measured client-side.
+  int32 width_px = 4;
+  int32 height_px = 5;
+  // parent_map_id / anchor_node_id set the nesting; both optional.
+  string parent_map_id = 6;
+  string anchor_node_id = 7;
+  // gm_private keeps the map out of every player-tier response.
+  bool gm_private = 8;
+}
+
+// CreateMapResponse carries the created Map.
+message CreateMapResponse {
+  Map map = 1;
+}
+
+// UpdateMapRequest saves a Map's editor fields. The image is replaced separately.
+message UpdateMapRequest {
+  string id = 1;
+  string name = 2;
+  string parent_map_id = 3;
+  string anchor_node_id = 4;
+  bool gm_private = 5;
+}
+
+// UpdateMapResponse carries the updated Map.
+message UpdateMapResponse {
+  Map map = 1;
+}
+
+// ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
+message ReplaceMapImageRequest {
+  string id = 1;
+  bytes image_bytes = 2;
+  string content_type = 3;
+  int32 width_px = 4;
+  int32 height_px = 5;
+}
+
+// ReplaceMapImageResponse carries the updated Map.
+message ReplaceMapImageResponse {
+  Map map = 1;
+}
+
+// DeleteMapRequest names the Map to delete.
+message DeleteMapRequest {
+  string id = 1;
+}
+
+// DeleteMapResponse is empty.
+message DeleteMapResponse {}
+
+// CreatePinRequest pins a Node onto a Map.
+message CreatePinRequest {
+  string map_id = 1;
+  string node_id = 2;
+  // x / y are normalized 0..1; outside that range is rejected.
+  double x = 3;
+  double y = 4;
+  string label_override = 5;
+  bool gm_private = 6;
+}
+
+// CreatePinResponse carries the created Pin.
+message CreatePinResponse {
+  Pin pin = 1;
+}
+
+// UpdatePinRequest moves or relabels a Pin.
+message UpdatePinRequest {
+  string id = 1;
+  double x = 2;
+  double y = 3;
+  string label_override = 4;
+  bool gm_private = 5;
+}
+
+// UpdatePinResponse carries the updated Pin.
+message UpdatePinResponse {
+  Pin pin = 1;
+}
+
+// DeletePinRequest names the Pin to remove.
+message DeletePinRequest {
+  string id = 1;
+}
+
+// DeletePinResponse is empty.
+message DeletePinResponse {}
 
 // GetRosterReadinessRequest is the (empty) request; the active campaign is
 // resolved server-side.
