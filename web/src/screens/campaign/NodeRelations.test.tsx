@@ -11,6 +11,7 @@ import {
   EdgeSchema,
   AgentSchema,
   ListNodeEdgesResponseSchema,
+  UpdateEdgeDetailsResponseSchema,
   ListNodesResponseSchema,
   GetCampaignRosterResponseSchema,
   CreateEdgeResponseSchema,
@@ -102,7 +103,7 @@ function edgeTransport(opts: {
   return { transport, createCalls, deleteCalls, setAgentCalls, detailCalls };
 }
 
-function renderRelations(node: PbNode, extra?: Parameters<typeof edgeTransport>[0]) {
+function renderRelations(node: PbNode, extra?: Partial<Parameters<typeof edgeTransport>[0]>) {
   const ctx = edgeTransport({ node, ...extra });
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
