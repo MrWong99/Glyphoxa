@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,6 +70,46 @@ func TestGetAgentFactPreview_RendersWhatTheTurnInjects(t *testing.T) {
 	}
 	if msg.GetChars() <= 0 || msg.GetChars() > msg.GetMaxChars() {
 		t.Errorf("chars = %d, want a real consumption inside the budget", msg.GetChars())
+	}
+	if msg.GetNeighbourhoodClipped() {
+		t.Error("a two-node neighbourhood reported the read cap clipped it")
+	}
+	if msg.GetMaxNeighbours() != storage.MaxAgentFactNodes {
+		t.Errorf("max_neighbours = %d, want the real read cap %d",
+			msg.GetMaxNeighbours(), storage.MaxAgentFactNodes)
+	}
+}
+
+// TestGetAgentFactPreview_ReportsReadCap pins the OTHER cap. The SQL read stops at
+// its own row limit before the renderer sees anything, so a hub NPC past it would
+// show its extra neighbours as merely "not adjacent" — and the GM would go hunting
+// for an Edge that is not missing. It is reported separately from renderer
+// truncation because the two have different fixes.
+func TestGetAgentFactPreview_ReportsReadCap(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGPreviewStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	agentID := uuid.New()
+	store.agents[agentID] = storage.Agent{ID: agentID, CampaignID: store.campaign.ID}
+	own := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Hub"}
+	store.linked[agentID] = own
+
+	// Exactly the cap's worth of rows — what the read returns when it clipped.
+	nodes := make([]storage.KGNode, 0, storage.MaxAgentFactNodes)
+	for i := range storage.MaxAgentFactNodes {
+		nodes = append(nodes, storage.KGNode{
+			ID: uuid.New(), Type: storage.KGNodeNote, Name: "N" + strconv.Itoa(i),
+		})
+	}
+	store.facts[agentID] = nodes
+
+	resp, err := kgPreviewClient(t, store).GetAgentFactPreview(context.Background(),
+		connect.NewRequest(&managementv1.GetAgentFactPreviewRequest{AgentId: agentID.String()}))
+	if err != nil {
+		t.Fatalf("GetAgentFactPreview: %v", err)
+	}
+	if !resp.Msg.GetNeighbourhoodClipped() {
+		t.Error("a neighbourhood at the read cap did not report being clipped")
 	}
 }
 
@@ -175,6 +216,29 @@ func TestGetAgentFactPreview_ErrorMapping(t *testing.T) {
 			connect.NewRequest(&managementv1.GetAgentFactPreviewRequest{AgentId: uuid.New().String()}))
 		if got := connect.CodeOf(err); got != connect.CodeNotFound {
 			t.Errorf("code = %v, want NotFound", got)
+		}
+	})
+
+	t.Run("no active campaign is NotFound", func(t *testing.T) {
+		store := newFakeKGPreviewStore()
+		store.campErr = storage.ErrNotFound
+		_, err := kgPreviewClient(t, store).GetAgentFactPreview(context.Background(),
+			connect.NewRequest(&managementv1.GetAgentFactPreviewRequest{AgentId: uuid.New().String()}))
+		if got := connect.CodeOf(err); got != connect.CodeNotFound {
+			t.Errorf("code = %v, want NotFound", got)
+		}
+	})
+
+	t.Run("linked-node read failure is Internal", func(t *testing.T) {
+		store := newFakeKGPreviewStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		agentID := uuid.New()
+		store.agents[agentID] = storage.Agent{ID: agentID, CampaignID: store.campaign.ID}
+		store.linkedErr = errAny
+		_, err := kgPreviewClient(t, store).GetAgentFactPreview(context.Background(),
+			connect.NewRequest(&managementv1.GetAgentFactPreviewRequest{AgentId: agentID.String()}))
+		if got := connect.CodeOf(err); got != connect.CodeInternal {
+			t.Errorf("code = %v, want Internal", got)
 		}
 	})
 

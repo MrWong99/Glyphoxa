@@ -43,6 +43,9 @@ export type LensState = {
   factCount: number;
   maxFacts: number;
   truncated: boolean;
+  /** The SQL read's own row cap clipped the neighbourhood before the renderer saw it. */
+  clipped: boolean;
+  maxNeighbours: number;
   /** false ⇒ the NPC has no linked wiki entry at all. */
   linked: boolean;
 };
@@ -99,6 +102,8 @@ export function useAgentLens(agentID: string, nodes: GraphNode[], edges: GraphEd
       factCount: preview.facts.length,
       maxFacts: preview.maxFacts,
       truncated: preview.truncated,
+      clipped: preview.neighbourhoodClipped,
+      maxNeighbours: preview.maxNeighbours,
       linked: preview.linked,
     };
   }, [agentID, preview, nodes, edges, agentName]);
@@ -168,10 +173,26 @@ export function AgentLensBar({
               every prompt. Shorten entries, or narrow this NPC's relations.
             </span>
           )}
+          {state.clipped && (
+            <span className="gx-kg-lens__truncated">
+              This entry has more relations than the prompt read looks at (
+              {state.maxNeighbours}). The rest never reach {agentName} at all — prune its
+              relations rather than its text.
+            </span>
+          )}
           {state.factCount === 0 && (
             <span className="gx-kg-lens__truncated">
               Nothing to say — this entry has no content and no public neighbours.
             </span>
+          )}
+
+          {/* The actual block. Everything above is a summary OF this; without it the
+              GM still cannot read what their NPC will be told. */}
+          {state.facts.length > 0 && (
+            <details className="gx-kg-lens__facts">
+              <summary>What {agentName} will be told</summary>
+              <pre className="gx-kg-lens__block">{state.facts.join("\n\n")}</pre>
+            </details>
           )}
         </div>
       )}
