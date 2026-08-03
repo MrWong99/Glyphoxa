@@ -1509,3 +1509,70 @@
   gap: var(--spacing-xs);
   padding-top: var(--spacing-xs);
 }
+
+/* Free-form tags (#543). Visually distinct from the closed type vocabulary,
+   because they are organization rather than schema. */
+.gx-kg-tags {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-tags__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-chip[data-tag] {
+  border-style: dashed;
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+}
+
+.gx-kg-tags__remove {
+  background: none;
+  border: none;
+  padding: 0 0 0 2px;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+
+/* Prep boards (#543): a session's shortlist, reachable during play. */
+.gx-boards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-boards__new,
+.gx-boards__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.gx-boards__name {
+  margin: 0;
+  font-size: var(--body-lg);
+  color: var(--text-strong);
+  flex: 1;
+}
+
+.gx-boards__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-boards__list li {
+  display: inline-flex;
+  align-items: center;
+}

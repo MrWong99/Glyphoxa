@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
+import { NodeTags } from "./NodeTags";
 import { KnowledgeGraph } from "./graph/KnowledgeGraph";
 import { WorldHealthPanel } from "./graph/WorldHealthPanel";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
@@ -70,6 +71,35 @@ export function KnowledgePanel({
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
   const [mode, setMode] = useState<ViewMode>("list");
+  // Tag filter chips (#543): one selection filters the list AND the graph, since
+  // "show me act two" is the same question in both views.
+  const [activeTags, setActiveTags] = useState<ReadonlySet<string>>(() => new Set());
+  const tagsQuery = useQuery(CampaignService.method.getCampaignTags, {});
+  const tagIndex = useMemo(() => {
+    const byNode = new Map<string, string[]>();
+    const vocabulary = new Map<string, string>();
+    for (const e of tagsQuery.data?.entries ?? []) {
+      const list = byNode.get(e.nodeId);
+      if (list) list.push(e.tag);
+      else byNode.set(e.nodeId, [e.tag]);
+      const key = e.tag.toLowerCase();
+      if (!vocabulary.has(key)) vocabulary.set(key, e.tag);
+    }
+    return { byNode, vocabulary: [...vocabulary.values()].sort((a, b) => a.localeCompare(b)) };
+  }, [tagsQuery.data]);
+
+  // An entry matches when it carries EVERY selected tag: chips narrow, they do
+  // not widen — "seafaring AND act two" is the question a GM is asking.
+  const matchesTags = useMemo(() => {
+    if (activeTags.size === 0) return () => true;
+    return (id: string) => {
+      const has = new Set((tagIndex.byNode.get(id) ?? []).map((t) => t.toLowerCase()));
+      for (const t of activeTags) {
+        if (!has.has(t.toLowerCase())) return false;
+      }
+      return true;
+    };
+  }, [activeTags, tagIndex]);
   // The generator's prompt and its unapplied draft live HERE, not inside the card:
   // switching to Graph unmounts the list column, and a draft is the result of a
   // paid LLM call the GM has not yet reviewed. Losing it to an idle mode toggle
@@ -127,9 +157,11 @@ export function KnowledgePanel({
   // previous data to keep) fall back to the full list so the view never flashes
   // empty. An empty match array is a real "no matches" and is shown as such.
   const nodes = useMemo(() => {
-    if (!searching) return listQuery.data?.nodes ?? [];
-    return searchQuery.data?.nodes ?? listQuery.data?.nodes ?? [];
-  }, [searching, searchQuery.data, listQuery.data]);
+    const base = !searching
+      ? (listQuery.data?.nodes ?? [])
+      : (searchQuery.data?.nodes ?? listQuery.data?.nodes ?? []);
+    return base.filter((n) => matchesTags(n.id));
+  }, [searching, searchQuery.data, listQuery.data, matchesTags]);
 
   // A failed search must NOT silently fall back to the full list — the box still
   // holds a query, so an unfiltered list would look filtered and the GM could act
@@ -234,6 +266,30 @@ export function KnowledgePanel({
           </button>
         </div>
 
+        {tagIndex.vocabulary.length > 0 && (
+          <div className="gx-kg-graph__chips" role="group" aria-label="Filter by tag">
+            {tagIndex.vocabulary.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                className="gx-kg-chip"
+                data-tag
+                aria-pressed={activeTags.has(tag)}
+                onClick={() =>
+                  setActiveTags((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(tag)) next.delete(tag);
+                    else next.add(tag);
+                    return next;
+                  })
+                }
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        )}
+
         {mode !== "list" ? (
           graphQuery.isPending ? (
             <div className="gx-skeleton" data-testid="kg-graph-loading" />
@@ -250,7 +306,7 @@ export function KnowledgePanel({
             />
           ) : (
             <KnowledgeGraph
-              nodes={graphQuery.data.nodes}
+              nodes={graphQuery.data.nodes.filter((n) => matchesTags(n.id))}
               edges={graphQuery.data.edges}
               selectedID={editing?.id ?? null}
               onSelectNode={editByID}
@@ -1004,6 +1060,7 @@ function EntryEditor({
         </span>
       </div>
 
+      {isEdit && node && <NodeTags nodeID={node.id} />}
       {isEdit && node && <NodeRelations node={node} />}
 
       <div className="gx-kg-editor__actions">

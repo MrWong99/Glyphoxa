@@ -139,6 +139,38 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ── Tags and prep boards (#543) ───────────────────────────────────────────
+  // GM organization only: neither enters a prompt, and neither affects an NPC's
+  // Hot Context.
+
+  // GetCampaignTags returns every (entry, tag) pair in the campaign — one read
+  // that yields both the tag vocabulary and the per-entry index. Read-only.
+  rpc GetCampaignTags(GetCampaignTagsRequest) returns (GetCampaignTagsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetNodeTags replaces one entry's tags with exactly this set.
+  rpc SetNodeTags(SetNodeTagsRequest) returns (SetNodeTagsResponse);
+
+  // RenameTag renames a tag across the whole campaign — a tag is one concept,
+  // and renaming it entry-by-entry is how half-renamed vocabularies happen.
+  rpc RenameTag(RenameTagRequest) returns (RenameTagResponse);
+
+  // ListBoards returns the campaign's prep boards with their entries. Read-only.
+  rpc ListBoards(ListBoardsRequest) returns (ListBoardsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateBoard makes an empty prep board.
+  rpc CreateBoard(CreateBoardRequest) returns (CreateBoardResponse);
+
+  // UpdateBoard renames a board and/or replaces its entries in order.
+  rpc UpdateBoard(UpdateBoardRequest) returns (UpdateBoardResponse);
+
+  // DeleteBoard removes a board. Its entries are untouched — a board is a
+  // shortlist, not ownership.
+  rpc DeleteBoard(DeleteBoardRequest) returns (DeleteBoardResponse);
+
   // FindDuplicateEntries returns the campaign's closest Node pairs by embedding
   // similarity — the world health panel's "probable duplicates" check (#536).
   // GM-INITIATED: it is an exact pairwise scan and must never run on render.
@@ -774,6 +806,89 @@ message DeletePinRequest {
 
 // DeletePinResponse is empty.
 message DeletePinResponse {}
+
+// TaggedEntry is one (entry, tag) pair (#543).
+message TaggedEntry {
+  string node_id = 1;
+  string tag = 2;
+}
+
+// GetCampaignTagsRequest is the (empty) request.
+message GetCampaignTagsRequest {}
+
+// GetCampaignTagsResponse carries every pair, tag-ordered.
+message GetCampaignTagsResponse {
+  repeated TaggedEntry entries = 1;
+}
+
+// SetNodeTagsRequest replaces one entry's tags.
+message SetNodeTagsRequest {
+  string node_id = 1;
+  // tags is the complete set; an empty list clears them. Blank tags are dropped
+  // and case-insensitive duplicates collapse.
+  repeated string tags = 2;
+}
+
+// SetNodeTagsResponse carries the saved tags.
+message SetNodeTagsResponse {
+  repeated string tags = 1;
+}
+
+// RenameTagRequest renames a tag campaign-wide.
+message RenameTagRequest {
+  string from = 1;
+  string to = 2;
+}
+
+// RenameTagResponse is empty.
+message RenameTagResponse {}
+
+// Board is a named, ordered set of entries the GM pins for one session (#543).
+message Board {
+  string id = 1;
+  string name = 2;
+  // node_ids is in board order.
+  repeated string node_ids = 3;
+}
+
+// ListBoardsRequest is the (empty) request.
+message ListBoardsRequest {}
+
+// ListBoardsResponse carries the campaign's boards.
+message ListBoardsResponse {
+  repeated Board boards = 1;
+}
+
+// CreateBoardRequest names a new board.
+message CreateBoardRequest {
+  string name = 1;
+}
+
+// CreateBoardResponse carries the created board.
+message CreateBoardResponse {
+  Board board = 1;
+}
+
+// UpdateBoardRequest renames a board and replaces its entries in order.
+message UpdateBoardRequest {
+  string id = 1;
+  string name = 2;
+  // node_ids REPLACES the board's entries, in this order.
+  repeated string node_ids = 3;
+}
+
+// UpdateBoardResponse carries the updated board.
+message UpdateBoardResponse {
+  Board board = 1;
+}
+
+// DeleteBoardRequest names the board to remove.
+message DeleteBoardRequest {
+  string id = 1;
+}
+
+// DeleteBoardResponse is empty.
+message DeleteBoardResponse {}
 
 // GetRosterReadinessRequest is the (empty) request; the active campaign is
 // resolved server-side.
