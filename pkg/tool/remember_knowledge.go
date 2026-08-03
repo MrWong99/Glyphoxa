@@ -58,6 +58,16 @@ var rememberKnowledgeInputSchema = json.RawMessage(`{
       "type": "string",
       "description": "The name of the entity on the other end of the relationship (kind=edge)."
     },
+    "note": {
+      "type": "string",
+      "description": "What the relationship is actually like, in a few words — 'owes me money', 'since the siege' (kind=edge). Optional."
+    },
+    "disposition": {
+      "type": "integer",
+      "description": "How you feel about them, from -2 (hate) through 0 (neutral) to +2 (devoted) (kind=edge). Optional.",
+      "minimum": -2,
+      "maximum": 2
+    },
     "node_type": {
       "type": "string",
       "enum": ` + enumJSON(kgvocab.NodeTypes()...) + `,
@@ -87,15 +97,17 @@ func enumJSON(vals ...string) string {
 
 // rememberArgs is the decoded LLM argument set. Scope is absent by design.
 type rememberArgs struct {
-	Kind     string `json:"kind"`
-	Subject  string `json:"subject"`
-	Fact     string `json:"fact"`
-	Aspect   string `json:"aspect"`
-	Relation string `json:"relation"`
-	Target   string `json:"target"`
-	NodeType string `json:"node_type"`
-	Name     string `json:"name"`
-	Body     string `json:"body"`
+	Kind        string `json:"kind"`
+	Subject     string `json:"subject"`
+	Fact        string `json:"fact"`
+	Aspect      string `json:"aspect"`
+	Relation    string `json:"relation"`
+	Target      string `json:"target"`
+	Note        string `json:"note"`
+	Disposition int    `json:"disposition"`
+	NodeType    string `json:"node_type"`
+	Name        string `json:"name"`
+	Body        string `json:"body"`
 }
 
 // aspectKey resolves the label a kind=fact proposal lands under: the model's
@@ -313,6 +325,14 @@ func validateArgs(a rememberArgs) error {
 		if err := capName("target", a.Target); err != nil {
 			return err
 		}
+		// The note is texture on a relation, not prose, and one clause of it may
+		// reach a prompt (#546).
+		if utf8.RuneCountInString(a.Note) > kgvocab.MaxEdgeNoteRunes {
+			return fmt.Errorf("remember_knowledge: note is too long (max %d characters)", kgvocab.MaxEdgeNoteRunes)
+		}
+		if a.Disposition < -2 || a.Disposition > 2 {
+			return fmt.Errorf("remember_knowledge: disposition must be between -2 and 2, got %d", a.Disposition)
+		}
 	case kgvocab.KindNode:
 		if strings.TrimSpace(a.Name) == "" {
 			return fmt.Errorf("remember_knowledge: a new entry requires a 'name'")
@@ -375,6 +395,8 @@ func (rk *RememberKnowledge) ownNodeWrite(ctx context.Context, a rememberArgs) (
 	case kgvocab.KindEdge:
 		w.Relation = a.Relation
 		w.Target = a.Target
+		w.Note = a.Note
+		w.Disposition = a.Disposition
 	}
 	return w, nil
 }
@@ -399,6 +421,8 @@ func campaignWrite(a rememberArgs) (ProposedWrite, error) {
 		w.Subject = a.Subject
 		w.Relation = a.Relation
 		w.Target = a.Target
+		w.Note = a.Note
+		w.Disposition = a.Disposition
 	case kgvocab.KindNode:
 		w.NodeType = a.NodeType
 		w.Name = a.Name

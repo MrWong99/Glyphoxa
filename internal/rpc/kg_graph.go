@@ -90,10 +90,12 @@ func (s *kgGraph) GetKnowledgeGraph(
 	}
 	for _, e := range edges {
 		out.Edges = append(out.Edges, &managementv1.GraphEdge{
-			Id:         e.ID.String(),
-			FromNodeId: e.FromNodeID.String(),
-			ToNodeId:   e.ToNodeID.String(),
-			EdgeType:   toProtoEdgeType(e.Type),
+			Id:          e.ID.String(),
+			FromNodeId:  e.FromNodeID.String(),
+			ToNodeId:    e.ToNodeID.String(),
+			EdgeType:    toProtoEdgeType(e.Type),
+			Disposition: int32(e.Disposition), //nolint:gosec // CHECK-constrained to -2..+2
+			Note:        e.Note,
 		})
 	}
 	return connect.NewResponse(out), nil

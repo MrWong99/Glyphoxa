@@ -250,12 +250,23 @@ func (tx *Store) applyProposedEdge(ctx context.Context, campaignID uuid.UUID, w 
 	if err != nil {
 		return err
 	}
-	_, err = createEdgeTx(ctx, tx, NewKGEdge{
+	created, err := createEdgeTx(ctx, tx, NewKGEdge{
 		CampaignID: campaignID,
 		FromNodeID: from,
 		ToNodeID:   to,
 		Type:       KGEdgeType(w.Relation),
 	})
+	// The proposal's texture lands with the edge, in the SAME transaction (#546):
+	// an approved "I now distrust her" that lost its disposition would be an
+	// approval that quietly discarded what was approved.
+	if err == nil && (strings.TrimSpace(w.Note) != "" || w.Disposition != 0) {
+		if _, uerr := tx.UpdateEdgeDetails(ctx, campaignID, created.ID, strings.TrimSpace(w.Note), w.Disposition); uerr != nil {
+			if errors.Is(uerr, ErrInvalidDisposition) {
+				return &ProposalBlockedError{Reason: "this suggestion's feeling is out of range — reject it"}
+			}
+			return fmt.Errorf("storage: approve edge: details: %w", uerr)
+		}
+	}
 	switch {
 	case err == nil:
 		return nil

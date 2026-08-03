@@ -960,3 +960,89 @@ func TestDeleteNodeCascadesAspects(t *testing.T) {
 		t.Errorf("%d aspect rows outlived their node", len(got))
 	}
 }
+
+// TestApproveEdgeCarriesTexture pins #546's approval path: an approved
+// "I now distrust her" must land WITH its feeling. An approval that quietly
+// discarded what was approved would be worse than refusing it.
+func TestApproveEdgeCarriesTexture(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	mira := mkNode(t, st, campaignID, storage.KGNodeNPC, "Mira")
+
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "edge",
+		NodeID: bart.ID.String(), Subject: "Bart", Relation: "knows", Target: "Mira",
+		Note: "she cheated him at cards", Disposition: -2,
+	})
+	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
+		t.Fatalf("ApproveKnowledgeProposal: %v", err)
+	}
+
+	edges, err := st.ListEdges(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListEdges: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("got %d edges, want 1", len(edges))
+	}
+	if edges[0].Note != "she cheated him at cards" || edges[0].Disposition != -2 {
+		t.Errorf("edge = %+v, want the proposal's texture carried through", edges[0])
+	}
+	if edges[0].FromNodeID != bart.ID || edges[0].ToNodeID != mira.ID {
+		t.Errorf("edge endpoints = %v→%v, want Bart→Mira", edges[0].FromNodeID, edges[0].ToNodeID)
+	}
+}
+
+// TestAgentNodeFactsCarriesOutgoingRelation pins that only the Agent's OWN
+// outgoing edge contributes a feeling: an Edge is a one-way assertion, so how
+// someone else feels about a Node is not this NPC's feeling.
+func TestAgentNodeFactsCarriesOutgoingRelation(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	own := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	agentID := linkAgent(t, st, campaignID, own.ID, "Bart")
+	mira := mkNode(t, st, campaignID, storage.KGNodeNPC, "Mira")
+	admirer := mkNode(t, st, campaignID, storage.KGNodeNPC, "Admirer")
+
+	newEdge := func(from, to uuid.UUID) storage.KGEdge {
+		t.Helper()
+		e, err := st.CreateEdge(ctx, storage.NewKGEdge{
+			CampaignID: campaignID, FromNodeID: from, ToNodeID: to, Type: storage.KGEdgeKnows,
+		})
+		if err != nil {
+			t.Fatalf("CreateEdge: %v", err)
+		}
+		return e
+	}
+	out := newEdge(own.ID, mira.ID)
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, out.ID, "she cheated him", -2); err != nil {
+		t.Fatalf("UpdateEdgeDetails outgoing: %v", err)
+	}
+	in := newEdge(admirer.ID, own.ID)
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, in.ID, "worships him", 2); err != nil {
+		t.Fatalf("UpdateEdgeDetails incoming: %v", err)
+	}
+
+	facts, err := st.AgentNodeFacts(ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentNodeFacts: %v", err)
+	}
+	byID := map[uuid.UUID]storage.KGNode{}
+	for _, n := range facts {
+		byID[n.ID] = n
+	}
+	if got := byID[mira.ID]; got.RelationDisposition != -2 || got.RelationNote != "she cheated him" {
+		t.Errorf("outgoing neighbour = %+v, want Bart's own feeling carried", got)
+	}
+	if got := byID[admirer.ID]; got.RelationDisposition != 0 || got.RelationNote != "" {
+		t.Errorf("incoming neighbour = %+v, want NO feeling — that is the admirer's, not Bart's", got)
+	}
+}

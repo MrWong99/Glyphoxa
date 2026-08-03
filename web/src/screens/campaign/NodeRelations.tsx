@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ArrowLeft, X, Plus, Link as LinkIcon } from "lucide-react";
+import { ArrowRight, ArrowLeft, Pencil, X, Plus, Link as LinkIcon } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node as PbNode, Edge as PbEdge } from "@gen/glyphoxa/management/v1/management_pb";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EDGE_LABEL, EDGE_OPTIONS, TYPE_META as NODE_TYPE_META } from "./knowledgeVocab";
@@ -86,6 +87,11 @@ export function NodeRelations({ node }: { node: PbNode }) {
     },
   });
   const deleteEdge = useMutation(CampaignService.method.deleteEdge, {
+    onSuccess: () => void invalidateEdges(),
+  });
+  // The relation's texture (#546). It shares the edge invalidation because the
+  // graph colours relations by disposition and shows the note on hover.
+  const updateDetails = useMutation(CampaignService.method.updateEdgeDetails, {
     onSuccess: () => void invalidateEdges(),
   });
   const setNodeAgent = useMutation(CampaignService.method.setNodeAgent, {
@@ -177,7 +183,15 @@ export function NodeRelations({ node }: { node: PbNode }) {
 
       <section className="gx-kg-relations__list" aria-label="Outgoing relations">
         {outgoing.map((e) => (
-          <OutgoingRow key={e.id} edge={e} onDelete={() => setConfirmEdge(e)} />
+          <OutgoingRow
+            key={e.id}
+            edge={e}
+            onDelete={() => setConfirmEdge(e)}
+            onSaveDetails={(note, disposition) =>
+              updateDetails.mutate({ id: e.id, note, disposition })
+            }
+            saving={updateDetails.isPending && updateDetails.variables?.id === e.id}
+          />
         ))}
         {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
         {deleteEdge.isError && (
@@ -225,9 +239,33 @@ export function NodeRelations({ node }: { node: PbNode }) {
   );
 }
 
-function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void }) {
+// DISPOSITION_OPTIONS names the -2..+2 scale in the words the GM chooses by. A
+// small closed scale rather than a free number: a scale nobody can calibrate is
+// worse than none, and this one drives an edge colour and ONE prompt clause.
+const DISPOSITION_OPTIONS = [
+  { value: "-2", label: "hostile" },
+  { value: "-1", label: "wary" },
+  { value: "0", label: "neutral" },
+  { value: "1", label: "warm" },
+  { value: "2", label: "devoted" },
+];
+
+function OutgoingRow({
+  edge,
+  onDelete,
+  onSaveDetails,
+  saving,
+}: {
+  edge: PbEdge;
+  onDelete: () => void;
+  onSaveDetails: (note: string, disposition: number) => void;
+  saving: boolean;
+}) {
   const meta = typeMeta(edge.toNodeType);
   const label = EDGE_LABEL.get(edge.edgeType) ?? "";
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState(edge.note);
+  const [disposition, setDisposition] = useState(String(edge.disposition));
   return (
     <div className="gx-kg-edge">
       <ArrowRight size={13} className="gx-kg-edge__dir" aria-hidden />
@@ -236,6 +274,18 @@ function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void })
       <Badge size="sm" style={{ color: meta.color, background: `${meta.color}24` }}>
         {meta.label}
       </Badge>
+      {/* The relation's texture, collapsed. "Knows and despises" is the
+          difference between a flat NPC and a live one — but most relations are
+          plain, so it stays out of the way until asked for. */}
+      <button
+        type="button"
+        className="gx-kg-iconbtn"
+        aria-label={`Edit what ${label} ${edge.toNodeName} is like`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Pencil size={13} />
+      </button>
       <button
         type="button"
         className="gx-kg-iconbtn gx-kg-iconbtn--danger"
@@ -244,6 +294,34 @@ function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void })
       >
         <X size={13} />
       </button>
+
+      {open && (
+        <div className="gx-kg-edge__details">
+          <Input
+            label="What it's like"
+            placeholder="owes you money since the siege"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <Select
+            label="How you feel"
+            options={DISPOSITION_OPTIONS}
+            value={disposition}
+            onValueChange={setDisposition}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={saving}
+            onClick={() => {
+              onSaveDetails(note.trim(), Number(disposition));
+              setOpen(false);
+            }}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

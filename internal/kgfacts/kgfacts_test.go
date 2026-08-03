@@ -551,3 +551,68 @@ func TestRenderPreview_ContentFacts(t *testing.T) {
 		t.Errorf("Facts = %d, want both rendered (the block is what it is)", len(both.Facts))
 	}
 }
+
+// TestFacts_RendersRelationClause pins #546's prompt half: a relation with
+// texture reaches the block as exactly ONE clause. "Knows and despises" is the
+// difference between a flat NPC and a live one.
+func TestFacts_RendersRelationClause(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{
+		{
+			ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Mira Vance",
+			RelationDisposition: -2,
+		},
+		{
+			ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Gundren",
+			RelationNote: "owes you money since the siege", RelationDisposition: 1,
+		},
+	}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2", len(facts))
+	}
+	if !strings.Contains(facts[0], "You despise Mira Vance.") {
+		t.Errorf("fact[0] = %q, want the generated disposition clause", facts[0])
+	}
+	// The GM's own note wins over the generated sentence — and only ONE of them
+	// appears, because two clauses per neighbour is a second budget nobody agreed
+	// to.
+	if !strings.Contains(facts[1], "owes you money since the siege") {
+		t.Errorf("fact[1] = %q, want the GM's note", facts[1])
+	}
+	if strings.Contains(facts[1], "You are fond of") {
+		t.Errorf("fact[1] = %q, want the note INSTEAD of the generated clause", facts[1])
+	}
+}
+
+// TestFacts_NeutralRelationSaysNothing pins the byte-identical guarantee: an Edge
+// with no note and a neutral disposition renders exactly as before #546.
+func TestFacts_NeutralRelationSaysNothing(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "The Bell", Body: "It tolls at dusk."},
+	}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 1 || facts[0] != "### The Bell (Note)\nIt tolls at dusk." {
+		t.Errorf("fact = %q, want the pre-#546 rendering unchanged", facts)
+	}
+}
+
+// TestFacts_RelationClauseIsBounded pins that a long note cannot become a second
+// prose block competing with the world facts.
+func TestFacts_RelationClauseIsBounded(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Verbose",
+		RelationNote: strings.Repeat("é", 900),
+	}}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	_, content, _ := strings.Cut(facts[0], "\n")
+	if got := len([]rune(content)); got > kgfacts.MaxRelationChars+4 {
+		t.Errorf("relation clause = %d runes, want at most %d", got, kgfacts.MaxRelationChars)
+	}
+}

@@ -280,11 +280,18 @@ export function KnowledgeGraph({
                 key={e.edge.id}
                 className="gx-kg-graph__edge"
                 data-relation={EDGE_LABEL.get(e.edge.edgeType) ?? ""}
+                // Disposition drives the colour (#546): a graph of bare `knows`
+                // lines says nothing about how the world feels about itself.
+                data-disposition={e.edge.disposition !== 0 ? e.edge.disposition : undefined}
                 x1={e.x1}
                 y1={e.y1}
                 x2={e.x2}
                 y2={e.y2}
-              />
+              >
+                {(e.edge.note !== "" || e.edge.disposition !== 0) && (
+                  <title>{edgeTooltip(e.edge)}</title>
+                )}
+              </line>
             ))}
           </g>
           <g className="gx-kg-graph__nodes">
@@ -413,6 +420,23 @@ export function KnowledgeGraph({
 }
 
 const EDGE_LABEL = new Map<EdgeType, string>(EDGE_TYPES.map((e) => [e.value, e.label]));
+
+/** DISPOSITION_LABEL names the -2..+2 scale in words the GM chose it by. */
+export const DISPOSITION_LABEL: Record<number, string> = {
+  [-2]: "hostile",
+  [-1]: "wary",
+  0: "neutral",
+  1: "warm",
+  2: "devoted",
+};
+
+// edgeTooltip is what hovering a relation says: its feeling, and the GM's note.
+function edgeTooltip(edge: GraphEdge): string {
+  const parts: string[] = [];
+  if (edge.disposition !== 0) parts.push(DISPOSITION_LABEL[edge.disposition] ?? "");
+  if (edge.note !== "") parts.push(edge.note);
+  return parts.filter(Boolean).join(" — ");
+}
 
 // RelationPicker is the one authoring affordance on the graph: after dragging one
 // entry onto another, the GM names the relation. It deliberately reuses the closed

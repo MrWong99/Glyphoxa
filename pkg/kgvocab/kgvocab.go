@@ -46,6 +46,11 @@ const (
 	MaxAspectsPerNode = 50
 )
 
+// MaxEdgeNoteRunes bounds an Edge's note (#546). Shared by the Tool create path
+// and the RPC editor path, so neither can admit what the other rejects. It is
+// texture on a relation, not prose — and one clause of it may reach a prompt.
+const MaxEdgeNoteRunes = 280
+
 // DefaultAspectKey is the key stamped on a kind=fact proposal whose author named
 // no aspect. Models routinely omit optional fields, and refusing the call would
 // lose the NPC's memory over a labelling detail — so the payload always carries a
