@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -30,6 +30,7 @@ import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
 import { KnowledgeGraph } from "./graph/KnowledgeGraph";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "./knowledgeVocab";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
@@ -53,6 +54,11 @@ export function KnowledgePanel() {
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
   const [mode, setMode] = useState<ViewMode>("list");
+  // The generator's prompt and its unapplied draft live HERE, not inside the card:
+  // switching to Graph unmounts the list column, and a draft is the result of a
+  // paid LLM call the GM has not yet reviewed. Losing it to an idle mode toggle
+  // would be a real cost, silently incurred.
+  const [draftState, setDraftState] = useState<DraftState>({ open: false, prompt: "", draft: null });
 
   // The whole-graph payload (#534). It is fetched only in graph mode, so a GM who
   // never opens the graph pays nothing for it.
@@ -102,72 +108,25 @@ export function KnowledgePanel() {
   // on the wrong entry. Surface the failure instead.
   const searchFailed = searching && searchQuery.isError;
 
-  // A mutation must refresh BOTH reads: the full ListNodes list AND any active
-  // SearchNodes result. Invalidating only listNodes left a stale search view — a
-  // deleted/renamed entry lingered in the filtered list (second delete then
-  // 404s). The searchNodes key is built without an input so it prefix-matches
-  // every cached query string.
-  const invalidateNodes = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodes,
-        cardinality: "finite",
-      }),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.searchNodes,
-        cardinality: "finite",
-      }),
-    });
-  };
-
-  // A node hard-delete cascades to every edge that touches it (ADR-0008 ON
-  // DELETE CASCADE), so it can silently kill edges belonging to OTHER nodes.
-  // Drop every cached ListNodeEdges result so the next relations view / delete
-  // dialog doesn't count a dead edge (the query's staleTime would otherwise
-  // serve it). No input key = prefix match across all node ids.
-  const invalidateEdges = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodeEdges,
-        cardinality: "finite",
-      }),
-    });
-  };
-
-  // The graph payload is a THIRD read of the same data (#534), so every mutation
-  // that changes nodes or edges has to drop it too — otherwise a node created in
-  // the list is missing from the graph until a reload, which reads as a bug in
-  // the graph rather than a stale cache.
-  const invalidateGraph = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.getKnowledgeGraph,
-        cardinality: "finite",
-      }),
-    });
-  };
+  // Every mutation below drops EVERY read of the same data — see
+  // invalidateKnowledgeReads. Per-surface subsets are how the graph view went
+  // stale on an edge created two components away.
+  const invalidate = () => invalidateKnowledgeReads(queryClient);
 
   const createNode = useMutation(CampaignService.method.createNode, {
-    onSuccess: () => {
-      invalidateNodes();
-      invalidateGraph();
-    },
+    onSuccess: invalidate,
   });
   const updateNode = useMutation(CampaignService.method.updateNode, {
     onSuccess: () => {
       setEditing(null);
-      invalidateNodes();
-      invalidateGraph();
+      invalidate();
     },
   });
+  // A node hard-delete cascades to every edge that touches it (ADR-0008 ON DELETE
+  // CASCADE), so it can silently kill edges belonging to OTHER nodes — which is
+  // why the whole read set goes, not just this node's.
   const deleteNode = useMutation(CampaignService.method.deleteNode, {
-    onSuccess: () => {
-      invalidateNodes();
-      invalidateEdges();
-      invalidateGraph();
-    },
+    onSuccess: invalidate,
   });
 
   if (status === "pending") {
@@ -252,21 +211,12 @@ export function KnowledgePanel() {
               edges={graphQuery.data.edges}
               selectedID={editing?.id ?? null}
               onSelectNode={editByID}
-              onGraphChanged={() => {
-                invalidateGraph();
-                invalidateEdges();
-              }}
+              onGraphChanged={invalidate}
             />
           )
         ) : (
           <>
-            <KnowledgeDraftCard
-              onApplied={() => {
-                invalidateNodes();
-                invalidateEdges();
-                invalidateGraph();
-              }}
-            />
+            <KnowledgeDraftCard state={draftState} onStateChange={setDraftState} onApplied={invalidate} />
             <Input
               type="search"
               aria-label="Search entries"
@@ -356,18 +306,43 @@ export function KnowledgePanel() {
   );
 }
 
+// DraftState is the generator's persistent state, owned by the panel so it
+// survives a List/Graph switch (#534): an unapplied draft is the product of a paid
+// LLM call, and a view toggle must not silently discard it.
+type DraftState = {
+  open: boolean;
+  prompt: string;
+  draft: { nodes: DraftNode[]; edges: DraftEdge[] } | null;
+};
+
 // KnowledgeDraftCard is the on-demand "generate entries" flow (#479). Strictly
 // button-driven: collapsed it is a single affordance; expanded, the GM writes a
 // prompt and presses "Generate draft" — only then does an LLM call run. The
 // result is a PREVIEW (nothing written): the GM can drop individual entries or
 // relations, then lands the rest atomically via ApplyGeneratedKnowledge, or
 // discards the whole draft.
-function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [prompt, setPrompt] = useState("");
-  // The reviewable draft. Held locally so remove-buttons can edit it before the
-  // apply; edge indices are remapped on every node removal.
-  const [draft, setDraft] = useState<{ nodes: DraftNode[]; edges: DraftEdge[] } | null>(null);
+function KnowledgeDraftCard({
+  state,
+  onStateChange,
+  onApplied,
+}: {
+  state: DraftState;
+  onStateChange: (s: DraftState) => void;
+  onApplied: () => void;
+}) {
+  const { open, prompt, draft } = state;
+  const setOpen = (v: boolean) => onStateChange({ ...state, open: v });
+  const setPrompt = (v: string) => onStateChange({ ...state, prompt: v });
+  const setDraft = (
+    next:
+      | { nodes: DraftNode[]; edges: DraftEdge[] } | null
+      | ((d: { nodes: DraftNode[]; edges: DraftEdge[] } | null) => {
+          nodes: DraftNode[];
+          edges: DraftEdge[];
+        } | null),
+  ) => onStateChange({ ...state, draft: typeof next === "function" ? next(state.draft) : next });
+  // The error is genuinely transient — it describes the last attempt, not the
+  // draft — so it stays local and dies with the card.
   const [error, setError] = useState<string | null>(null);
 
   const generate = useMutation(CampaignService.method.generateKnowledge);
@@ -403,8 +378,7 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
   };
 
   const reset = () => {
-    setDraft(null);
-    setPrompt("");
+    onStateChange({ open: state.open, prompt: "", draft: null });
     setError(null);
   };
 
@@ -414,8 +388,8 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
     try {
       const res = await apply.mutateAsync({ nodes: draft.nodes, edges: draft.edges });
       onApplied();
-      reset();
-      setOpen(false);
+      onStateChange({ open: false, prompt: "", draft: null });
+      setError(null);
       toast.success(
         `Added ${res.nodes.length} entr${res.nodes.length === 1 ? "y" : "ies"}` +
           (res.edgesCreated > 0
@@ -451,8 +425,8 @@ function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
           className="gx-kg-iconbtn"
           aria-label="Close generator"
           onClick={() => {
-            reset();
-            setOpen(false);
+            onStateChange({ open: false, prompt: "", draft: null });
+            setError(null);
           }}
         >
           <X size={15} />

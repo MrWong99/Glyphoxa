@@ -125,14 +125,14 @@ service CampaignService {
   // (#132, ADR-0008 amendment). An empty agent_id unlinks. Linking a non-NPC Node
   // is CodeInvalidArgument; an Agent already voicing another Node is
   // CodeAlreadyExists; a missing OR cross-campaign Node/Agent is CodeNotFound.
+  rpc SetNodeAgent(SetNodeAgentRequest) returns (SetNodeAgentResponse);
+
   // GetKnowledgeGraph returns the active campaign's whole Knowledge Graph —
   // every Node and Edge — in ONE call, for the Knowledge tab's Graph view
   // (#534). Two indexed reads; no prose in the payload. Read-only.
   rpc GetKnowledgeGraph(GetKnowledgeGraphRequest) returns (GetKnowledgeGraphResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-
-  rpc SetNodeAgent(SetNodeAgentRequest) returns (SetNodeAgentResponse);
 
   // SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
   // body match the query, ranked by relevance (tsvector fts, ADR-0008 v1.0). It

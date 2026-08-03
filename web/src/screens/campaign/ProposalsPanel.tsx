@@ -4,13 +4,15 @@ import { useQueryClient } from "@tanstack/react-query";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { Check, Sparkles, X } from "lucide-react";
 
-import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { failedPreconditionMessage } from "@/lib/connectError";
+import { EDGE_LABEL, metaOf } from "./knowledgeVocab";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 // The Proposals panel (#300, ADR-0052) backs the Campaign screen's "Proposals"
 // view: the GM review queue an Agent's remember_knowledge call files into. Each
@@ -21,33 +23,11 @@ import { failedPreconditionMessage } from "@/lib/connectError";
 // server's actionable reason inline. Reject drops the suggestion. Similarity is a
 // HINT the GM acts on — never an auto-merge (ADR-0052).
 
-// Per-relation label, mirroring the kg_edge vocabulary (ADR-0008).
-const EDGE_LABEL: Record<number, string> = {
-  [EdgeType.RESIDES_IN]: "resides_in",
-  [EdgeType.MEMBER_OF]: "member_of",
-  [EdgeType.OWNS]: "owns",
-  [EdgeType.KNOWS]: "knows",
-  [EdgeType.ENEMY_OF]: "enemy_of",
-  [EdgeType.ALLY_OF]: "ally_of",
-  [EdgeType.PARENT_OF]: "parent_of",
-  [EdgeType.PARTICIPATED_IN]: "participated_in",
-  [EdgeType.MENTIONED_IN]: "mentioned_in",
-};
-
-// Per-type GM label (mirrors KnowledgePanel's TYPE_META labels). The Note label
-// doubles as the defensive fallback for an unknown/unspecified type.
-const NODE_TYPE_LABEL: Record<number, string> = {
-  [NodeType.CHARACTER]: "Character",
-  [NodeType.NPC]: "NPC",
-  [NodeType.LOCATION]: "Location",
-  [NodeType.FACTION]: "Faction",
-  [NodeType.ITEM]: "Item",
-  [NodeType.PLOT_THREAD]: "Plot thread",
-  [NodeType.NOTE]: "Note",
-};
-
+// The type and relation vocabularies come from the one shared module so a new
+// type cannot colour or label itself differently here than in the list or the
+// graph (#534).
 function nodeTypeLabel(t: NodeType): string {
-  return NODE_TYPE_LABEL[t] ?? "Note";
+  return metaOf(t).label;
 }
 
 function fmtWhen(p: KnowledgeProposal): string {
@@ -74,18 +54,9 @@ export function ProposalsPanel() {
         cardinality: "finite",
       }),
     });
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodes,
-        cardinality: "finite",
-      }),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodeEdges,
-        cardinality: "finite",
-      }),
-    });
+    // An approved write lands a new/edited Node or Edge, so every read of the KG —
+    // the list, the search, a node's relations, and the graph — is now stale.
+    invalidateKnowledgeReads(queryClient);
   };
 
   if (status === "pending") {
@@ -240,7 +211,7 @@ function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
     case "edge":
       return (
         <span>
-          <strong>{w.value.subject}</strong> —{EDGE_LABEL[w.value.relation] ?? ""}→{" "}
+          <strong>{w.value.subject}</strong> —{EDGE_LABEL.get(w.value.relation) ?? ""}→{" "}
           <strong>{w.value.target}</strong>
         </span>
       );

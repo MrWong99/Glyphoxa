@@ -207,4 +207,89 @@ describe("KnowledgeGraph", () => {
     }
     expect(screen.getByText(/every entry is filtered out/i)).toBeInTheDocument();
   });
+
+  // The issue explicitly refused "a smaller test fixture" as the answer to
+  // legibility at 200+ nodes, so this drives a real one: the filters and focus
+  // mode must actually narrow it, labels must thin out, and zoom must exist for
+  // what is left.
+  describe("at 200+ nodes", () => {
+    function bigFixture() {
+      const nodes = [];
+      const edges = [];
+      for (let i = 0; i < 220; i++) {
+        nodes.push(
+          create(GraphNodeSchema, {
+            id: `n${i}`,
+            nodeType: i % 2 === 0 ? NodeType.NPC : NodeType.LOCATION,
+            name: `Entry ${i}`,
+          }),
+        );
+        if (i > 0) {
+          edges.push(
+            create(GraphEdgeSchema, {
+              id: `e${i}`,
+              fromNodeId: `n${i}`,
+              toNodeId: `n${i - 1}`,
+              edgeType: EdgeType.KNOWS,
+            }),
+          );
+        }
+      }
+      return { nodes, edges };
+    }
+
+    function renderBig() {
+      const { nodes, edges } = bigFixture();
+      const transport = createRouterTransport(({ service }) => {
+        service(CampaignService, {
+          createEdge: () => create(CreateEdgeResponseSchema, { edge: create(EdgeSchema, {}) }),
+        });
+      });
+      render(
+        <Providers transport={transport} queryClient={makeQueryClient()}>
+          <KnowledgeGraph
+            nodes={nodes}
+            edges={edges}
+            selectedID={null}
+            onSelectNode={() => {}}
+            onGraphChanged={() => {}}
+          />
+        </Providers>,
+      );
+    }
+
+    it("draws every node but drops the label soup", () => {
+      renderBig();
+      expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(220);
+      // Past the label budget only the actively-looked-at node is named; 220 labels
+      // on one canvas is the actual failure mode at this size.
+      expect(document.querySelectorAll(".gx-kg-graph__label")).toHaveLength(0);
+    });
+
+    it("a type chip halves it and focus mode cuts it to a neighbourhood", () => {
+      renderBig();
+      const chips = screen.getByRole("group", { name: "Filter by type" });
+      fireEvent.click(within(chips).getByRole("button", { name: "Location" }));
+      expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(110);
+
+      fireEvent.click(within(chips).getByRole("button", { name: "Location" })); // back on
+      fireEvent.doubleClick(screen.getByLabelText("Entry 100 (NPC)"));
+      // A chain graph: depth 1 around one node is itself plus two neighbours.
+      expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(3);
+      // The focus root keeps its name even past the label budget.
+      expect(screen.getByText("Entry 100")).toBeInTheDocument();
+    });
+
+    it("offers zoom so the surviving glyphs are readable, and a way back", () => {
+      renderBig();
+      const svg = document.querySelector(".gx-kg-graph__canvas")!;
+      const fitted = svg.getAttribute("viewBox");
+
+      fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+      expect(svg.getAttribute("viewBox")).not.toBe(fitted);
+
+      fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+      expect(svg.getAttribute("viewBox")).toBe(fitted);
+    });
+  });
 });

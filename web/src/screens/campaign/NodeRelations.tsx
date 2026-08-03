@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ArrowLeft, X, Plus, Link as LinkIcon } from "lucide-react";
 
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EDGE_LABEL, EDGE_OPTIONS, TYPE_META as NODE_TYPE_META } from "./knowledgeVocab";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 function typeMeta(t: NodeType) {
   return NODE_TYPE_META[t] ?? NODE_TYPE_META[NodeType.NOTE];
@@ -57,20 +58,10 @@ export function NodeRelations({ node }: { node: PbNode }) {
     ];
   }, [rosterQuery.data]);
 
-  const invalidateEdges = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodeEdges,
-        cardinality: "finite",
-      }),
-    });
-  const invalidateNodes = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listNodes,
-        cardinality: "finite",
-      }),
-    });
+  // Creating or deleting an Edge here changes what the GRAPH draws too (#534), so
+  // this drops every read of the same data rather than just this node's edges.
+  const invalidateEdges = () => invalidateKnowledgeReads(queryClient);
+  const invalidateNodes = () => invalidateKnowledgeReads(queryClient);
 
   const [adding, setAdding] = useState(false);
   const [relType, setRelType] = useState<string>("");

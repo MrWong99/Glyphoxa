@@ -57,6 +57,11 @@ export function KnowledgeGraph({
   const [focusID, setFocusID] = useState<string | null>(null);
   const [focusDepth, setFocusDepth] = useState<FocusDepth>(1);
   const [hoverID, setHoverID] = useState<string | null>(null);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  // panFrom is the pointer position a canvas drag started at, in client pixels.
+  // Dragging a NODE means "link these two", so panning is dragging the empty
+  // canvas — the two gestures never compete for the same pointer-down.
+  const [panFrom, setPanFrom] = useState<{ x: number; y: number } | null>(null);
   // dragFrom is the in-flight drag-to-link gesture's origin; pendingLink is the
   // completed pair the relation picker is asking about. They are separate because
   // the gesture ends (and dragFrom clears) the moment the picker opens — folding
@@ -94,6 +99,19 @@ export function KnowledgeGraph({
   const showAllLabels = laid.nodes.length <= LABEL_BUDGET;
   const width = laid.bounds.maxX - laid.bounds.minX;
   const height = laid.bounds.maxY - laid.bounds.minY;
+
+  // Zoom. A viewBox alone fits the WHOLE graph into a fixed-height canvas, which
+  // at a few hundred nodes shrinks every glyph to a few pixels — "it all fits" is
+  // not the same as legible. Zoom keeps the glyphs readable and turns the canvas
+  // into a window the GM pans, with filters and focus mode narrowing what has to
+  // fit in the first place.
+  const [zoom, setZoom] = useState(1);
+  const view = {
+    w: width / zoom,
+    h: height / zoom,
+    x: laid.bounds.minX + (width - width / zoom) / 2 + pan.x,
+    y: laid.bounds.minY + (height - height / zoom) / 2 + pan.y,
+  };
 
   const toggle = <T,>(set: ReadonlySet<T>, value: T): ReadonlySet<T> => {
     const next = new Set(set);
@@ -147,6 +165,34 @@ export function KnowledgeGraph({
           >
             Table view
           </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-label="Zoom in"
+            onClick={() => setZoom((z) => Math.min(z * 1.5, 12))}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-label="Zoom out"
+            onClick={() => setZoom((z) => Math.max(z / 1.5, 1))}
+          >
+            −
+          </button>
+          {(zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setZoom(1);
+                setPan({ x: 0, y: 0 });
+              }}
+            >
+              Fit
+            </Button>
+          )}
           {focusID && (
             <>
               <span className="gx-kg-graph__focus">Focused on {nodeName(focusID)}</span>
@@ -178,12 +224,32 @@ export function KnowledgeGraph({
           className="gx-kg-graph__canvas"
           role="img"
           aria-label={`Knowledge graph: ${laid.nodes.length} entries, ${laid.edges.length} relationships`}
-          viewBox={`${laid.bounds.minX} ${laid.bounds.minY} ${width} ${height}`}
+          viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+          onMouseDown={(ev) => {
+            // Only a press on the canvas ITSELF starts a pan; a press on a node
+            // bubbles here and must stay a link gesture.
+            if (ev.target === ev.currentTarget) setPanFrom({ x: ev.clientX, y: ev.clientY });
+          }}
+          onMouseMove={(ev) => {
+            if (!panFrom) return;
+            // Client pixels → view units, so a drag moves the graph by the distance
+            // under the pointer regardless of zoom.
+            const scale = view.w / Math.max(ev.currentTarget.clientWidth, 1);
+            setPan((p) => ({
+              x: p.x - (ev.clientX - panFrom.x) * scale,
+              y: p.y - (ev.clientY - panFrom.y) * scale,
+            }));
+            setPanFrom({ x: ev.clientX, y: ev.clientY });
+          }}
           // A release outside any node abandons the gesture rather than leaving a
           // half-started link armed forever.
-          onMouseUp={() => setDragFrom(null)}
+          onMouseUp={() => {
+            setDragFrom(null);
+            setPanFrom(null);
+          }}
           onMouseLeave={() => {
             setDragFrom(null);
+            setPanFrom(null);
             setHoverID(null);
           }}
         >
@@ -203,7 +269,14 @@ export function KnowledgeGraph({
           <g className="gx-kg-graph__nodes">
             {laid.nodes.map((p) => {
               const meta = metaOf(p.node.nodeType);
-              const labelled = showAllLabels || hoverID === p.node.id || selectedID === p.node.id;
+              // Past the budget only the nodes the GM is actively looking at keep
+              // their name — including the focus root, which is the one node they
+              // definitely care about in a focused view.
+              const labelled =
+                showAllLabels ||
+                hoverID === p.node.id ||
+                selectedID === p.node.id ||
+                focusID === p.node.id;
               return (
                 <g
                   key={p.node.id}
@@ -217,6 +290,9 @@ export function KnowledgeGraph({
                   transform={`translate(${p.x} ${p.y})`}
                   onMouseDown={() => setDragFrom(p.node.id)}
                   onMouseEnter={() => setHoverID(p.node.id)}
+                  // Clearing on leave, not only on leaving the whole canvas: otherwise a
+                  // stale label clings to the last node the pointer crossed.
+                  onMouseLeave={() => setHoverID((id) => (id === p.node.id ? null : id))}
                   onMouseUp={() => {
                     // A drag that started on ANOTHER node lands here: offer the relation
                     // picker. A press and release on the same node is a click, not a link.

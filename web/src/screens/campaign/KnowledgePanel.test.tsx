@@ -56,6 +56,7 @@ function mockTransport(
   const updateCalls: UpdateNodeRequest[] = [];
   const deleteCalls: DeleteNodeRequest[] = [];
   const searchCalls: string[] = [];
+  let graphCalls = 0;
 
   const edges = opts.edges ?? [];
 
@@ -63,8 +64,9 @@ function mockTransport(
     service(CampaignService, {
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
       // The graph payload mirrors the list, minus prose (#534).
-      getKnowledgeGraph: () =>
-        create(GetKnowledgeGraphResponseSchema, {
+      getKnowledgeGraph: () => {
+        graphCalls++;
+        return create(GetKnowledgeGraphResponseSchema, {
           nodes: nodes.map((n) => ({
             id: n.id,
             nodeType: n.nodeType,
@@ -80,7 +82,8 @@ function mockTransport(
             toNodeId: e.toNodeId,
             edgeType: e.edgeType,
           })),
-        }),
+        });
+      },
       // The delete-confirm dialog fetches a node's edges to show the cascade
       // count; split the seeded edges by which side touches the asked node.
       listNodeEdges: (req) => {
@@ -145,7 +148,17 @@ function mockTransport(
       },
     });
   });
-  return { transport, nodes, createCalls, updateCalls, deleteCalls, searchCalls };
+  return {
+    transport,
+    nodes,
+    createCalls,
+    updateCalls,
+    deleteCalls,
+    searchCalls,
+    get graphCalls() {
+      return graphCalls;
+    },
+  };
 }
 
 function renderPanel(
@@ -602,4 +615,22 @@ describe("KnowledgePanel", () => {
     expect(await screen.findByText("Edit entry")).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toHaveValue("Bart");
   });
+
+  it("keeps an unapplied generated draft across a List/Graph switch (#534)", async () => {
+    renderPanel([]);
+    fireEvent.click(await screen.findByRole("button", { name: /Generate entries with your LLM/ }));
+    fireEvent.change(screen.getByLabelText("What should be drafted?"), {
+      target: { value: "the harbour heist" },
+    });
+
+    // Toggling views must not discard the prompt — the draft it produces is a paid
+    // LLM call the GM has not reviewed yet.
+    fireEvent.click(screen.getByRole("button", { name: /Graph/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /List/ }));
+
+    expect(await screen.findByLabelText("What should be drafted?")).toHaveValue(
+      "the harbour heist",
+    );
+  });
+
 });
