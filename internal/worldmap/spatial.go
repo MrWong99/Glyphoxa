@@ -25,7 +25,11 @@ import (
 type SpatialStore interface {
 	ListPlayerMaps(ctx context.Context, campaignID uuid.UUID) ([]storage.CampaignMap, error)
 	ListPlayerPins(ctx context.Context, campaignID, mapID uuid.UUID) ([]storage.MapPin, error)
-	NodePins(ctx context.Context, campaignID, nodeID uuid.UUID) ([]storage.MapPin, error)
+	// PlayerNodePins, not NodePins: the prompt-facing variant filters gm_private
+	// Pins, Nodes and Maps in the QUERY. The GM-facing read must never appear on
+	// this seam — that is what keeps a secret out of an NPC's mouth structurally
+	// rather than by every caller remembering.
+	PlayerNodePins(ctx context.Context, campaignID, nodeID uuid.UUID) ([]storage.MapPin, error)
 	PinsNear(ctx context.Context, campaignID, mapID uuid.UUID, x, y, radius float64, publicOnly bool, limit int) ([]storage.MapPin, error)
 	GetPartyMarker(ctx context.Context, campaignID, sessionID uuid.UUID) (storage.PartyMarker, error)
 	SearchPublicNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
@@ -56,10 +60,18 @@ var ErrNoActiveSession = fmt.Errorf("worldmap: no active voice session")
 // Resolving through the public search rather than an exact match is deliberate:
 // an NPC asked about "the anchor" should find "The Rusty Anchor", and the search
 // is already tuned for that. A gm_private entry simply never resolves.
-func (a *SpatialAdapter) Locate(ctx context.Context, _ string, name string) ([]tool.Place, error) {
+func (a *SpatialAdapter) Locate(ctx context.Context, agentID, name string, scope tool.SpatialScope) ([]tool.Place, error) {
 	id, ok := session.FromContext(ctx)
 	if !ok {
 		return nil, ErrNoActiveSession
+	}
+
+	// The ADR-0029 narrowing, applied HERE in the read. own_maps confines the answer
+	// to the Maps the caller's own Node stands on, so a scoped innkeeper cannot
+	// recite the enemy capital's layout even if the model asks for it by name.
+	reachable, err := a.reachableMaps(ctx, id.CampaignID, agentID, scope)
+	if err != nil {
+		return nil, err
 	}
 
 	nodes, err := a.store.SearchPublicNodes(ctx, id.CampaignID, name, 1)
@@ -71,13 +83,14 @@ func (a *SpatialAdapter) Locate(ctx context.Context, _ string, name string) ([]t
 	}
 	node := nodes[0]
 
-	pins, err := a.store.NodePins(ctx, id.CampaignID, node.ID)
+	// PlayerNodePins is the PROMPT-FACING read: the privacy filter is in the query,
+	// not applied by this caller remembering to. The map-name index below is still
+	// checked, because a Map's own privacy is a second gate and naming a secret map
+	// is as much a leak as naming a secret pin.
+	pins, err := a.store.PlayerNodePins(ctx, id.CampaignID, node.ID)
 	if err != nil {
 		return nil, fmt.Errorf("worldmap: locate %q: pins: %w", name, err)
 	}
-	// NodePins is the GM-facing read (it backs the entry editor too), so the
-	// visibility filter is applied here — and the Map's own privacy with it, since
-	// naming a secret map is as much a leak as naming a secret pin.
 	visible, err := a.publicMapNames(ctx, id.CampaignID)
 	if err != nil {
 		return nil, err
@@ -90,6 +103,9 @@ func (a *SpatialAdapter) Locate(ctx context.Context, _ string, name string) ([]t
 		}
 		mapName, ok := visible[p.MapID]
 		if !ok {
+			continue
+		}
+		if reachable != nil && !reachable[p.MapID] {
 			continue
 		}
 		out = append(out, tool.Place{
@@ -106,15 +122,26 @@ func (a *SpatialAdapter) Locate(ctx context.Context, _ string, name string) ([]t
 // where it stands can answer "what is around" even before the party is placed.
 //
 // With neither, there is no origin and the honest answer is nothing.
-func (a *SpatialAdapter) Nearby(ctx context.Context, agentID string, radius float64, limit int) ([]tool.Place, error) {
+func (a *SpatialAdapter) Nearby(ctx context.Context, agentID string, radius float64, limit int, scope tool.SpatialScope) ([]tool.Place, error) {
 	id, ok := session.FromContext(ctx)
 	if !ok {
 		return nil, ErrNoActiveSession
 	}
 
-	mapID, x, y, ok, err := a.origin(ctx, id.CampaignID, id.SessionID, agentID)
+	mapID, x, y, originPin, ok, err := a.origin(ctx, id.CampaignID, id.SessionID, agentID)
 	if err != nil || !ok {
 		return nil, err
+	}
+
+	// A narrowed Agent may only look around a Map it actually stands on. Without
+	// this, a marker the GM placed on the enemy capital would let every scoped NPC
+	// in the campaign describe it.
+	reachable, err := a.reachableMaps(ctx, id.CampaignID, agentID, scope)
+	if err != nil {
+		return nil, err
+	}
+	if reachable != nil && !reachable[mapID] {
+		return nil, nil
 	}
 
 	// publicOnly=true is not optional: what this returns is spoken at the table.
@@ -136,8 +163,11 @@ func (a *SpatialAdapter) Nearby(ctx context.Context, agentID string, radius floa
 	out := make([]tool.Place, 0, limit)
 	for _, p := range pins {
 		d := math.Hypot(p.X-x, p.Y-y)
-		// Skip whatever sits exactly at the origin — "you are near yourself" is noise.
-		if d == 0 {
+		// Skip the pin the origin IS — "you are near yourself" is noise. Matching on
+		// the pin's identity rather than on distance == 0 matters: an innkeeper pinned
+		// on the exact spot of their tavern is a real neighbour at zero distance, and
+		// dropping every co-located pin silently loses them.
+		if originPin != uuid.Nil && p.ID == originPin {
 			continue
 		}
 		if len(out) >= limit {
@@ -153,56 +183,103 @@ func (a *SpatialAdapter) Nearby(ctx context.Context, agentID string, radius floa
 	return out, nil
 }
 
-// origin resolves the point a "what is nearby" query measures from.
-func (a *SpatialAdapter) origin(ctx context.Context, campaignID, sessionID uuid.UUID, agentID string) (mapID uuid.UUID, x, y float64, ok bool, err error) {
+// reachableMaps returns the set of Map ids the scope permits, or nil for "every
+// public Map" (the campaign scope, where no set is needed).
+//
+// An own_maps Agent with no linked Node, or with a linked Node pinned nowhere,
+// reaches an EMPTY set rather than everything: an Agent that does not stand
+// anywhere has no vantage point, and failing open here would make the narrowing
+// meaningless for exactly the Agents most likely to be scoped.
+func (a *SpatialAdapter) reachableMaps(ctx context.Context, campaignID uuid.UUID, agentID string, scope tool.SpatialScope) (map[uuid.UUID]bool, error) {
+	if scope != tool.SpatialScopeOwnMaps {
+		return nil, nil
+	}
+	out := map[uuid.UUID]bool{}
+	aid, perr := uuid.Parse(agentID)
+	if perr != nil || aid == uuid.Nil {
+		return out, nil
+	}
+	own, linked, err := a.store.AgentLinkedNode(ctx, aid)
+	if err != nil {
+		return nil, fmt.Errorf("worldmap: scope: own node: %w", err)
+	}
+	if !linked {
+		return out, nil
+	}
+	pins, err := a.store.PlayerNodePins(ctx, campaignID, own.ID)
+	if err != nil {
+		return nil, fmt.Errorf("worldmap: scope: own pins: %w", err)
+	}
+	for _, p := range pins {
+		if p.Hidden() {
+			continue
+		}
+		out[p.MapID] = true
+	}
+	return out, nil
+}
+
+// origin resolves the point a "what is nearby" query measures from, and the Pin it
+// sits on when it sits on one.
+func (a *SpatialAdapter) origin(ctx context.Context, campaignID, sessionID uuid.UUID, agentID string) (mapID uuid.UUID, x, y float64, originPin uuid.UUID, ok bool, err error) {
 	marker, err := a.store.GetPartyMarker(ctx, campaignID, sessionID)
 	if err != nil {
-		return uuid.Nil, 0, 0, false, fmt.Errorf("worldmap: nearby: marker: %w", err)
+		return uuid.Nil, 0, 0, uuid.Nil, false, fmt.Errorf("worldmap: nearby: marker: %w", err)
 	}
 	if marker.Set() && !marker.MapGMPrivate {
 		mx, my := 0.5, 0.5 // "somewhere on this map" when the GM set no finer position
-		if marker.X != nil && marker.Y != nil {
+		found := marker.X != nil && marker.Y != nil
+		if found {
 			mx, my = *marker.X, *marker.Y
 		}
 		if marker.PinID.Valid {
 			// A pin's own coordinates are the better origin when the marker is at one.
 			pins, perr := a.store.ListPlayerPins(ctx, campaignID, marker.MapID.UUID)
 			if perr != nil {
-				return uuid.Nil, 0, 0, false, fmt.Errorf("worldmap: nearby: pins: %w", perr)
+				return uuid.Nil, 0, 0, uuid.Nil, false, fmt.Errorf("worldmap: nearby: pins: %w", perr)
 			}
 			for _, p := range pins {
 				if p.ID == marker.PinID.UUID {
-					mx, my = p.X, p.Y
+					mx, my, found = p.X, p.Y, true
 					break
 				}
 			}
+			if !found {
+				// The marker is on a pin the table cannot see (hidden pin, or a hidden
+				// Node under it). Answering from the map's CENTRE would be a confidently
+				// wrong list of neighbours — the party is at the secret cache, not in the
+				// middle of the map. Silence matches what the location clause already
+				// does in the same situation.
+				return uuid.Nil, 0, 0, uuid.Nil, false, nil
+			}
+			return marker.MapID.UUID, mx, my, marker.PinID.UUID, true, nil
 		}
-		return marker.MapID.UUID, mx, my, true, nil
+		return marker.MapID.UUID, mx, my, uuid.Nil, true, nil
 	}
 
 	// No marker: fall back to the calling Agent's own pinned Node.
 	aid, perr := uuid.Parse(agentID)
 	if perr != nil || aid == uuid.Nil {
-		return uuid.Nil, 0, 0, false, nil
+		return uuid.Nil, 0, 0, uuid.Nil, false, nil
 	}
 	own, linked, err := a.store.AgentLinkedNode(ctx, aid)
 	if err != nil {
-		return uuid.Nil, 0, 0, false, fmt.Errorf("worldmap: nearby: own node: %w", err)
+		return uuid.Nil, 0, 0, uuid.Nil, false, fmt.Errorf("worldmap: nearby: own node: %w", err)
 	}
 	if !linked {
-		return uuid.Nil, 0, 0, false, nil
+		return uuid.Nil, 0, 0, uuid.Nil, false, nil
 	}
-	pins, err := a.store.NodePins(ctx, campaignID, own.ID)
+	pins, err := a.store.PlayerNodePins(ctx, campaignID, own.ID)
 	if err != nil {
-		return uuid.Nil, 0, 0, false, fmt.Errorf("worldmap: nearby: own pins: %w", err)
+		return uuid.Nil, 0, 0, uuid.Nil, false, fmt.Errorf("worldmap: nearby: own pins: %w", err)
 	}
 	for _, p := range pins {
 		if p.Hidden() {
 			continue
 		}
-		return p.MapID, p.X, p.Y, true, nil
+		return p.MapID, p.X, p.Y, p.ID, true, nil
 	}
-	return uuid.Nil, 0, 0, false, nil
+	return uuid.Nil, 0, 0, uuid.Nil, false, nil
 }
 
 // publicMapNames is the id→name index of the Maps the table may know about.

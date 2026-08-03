@@ -369,6 +369,12 @@ type Deps struct {
 	// filling the reserved Hot Context KG-facts slot per turn. nil leaves facts
 	// off (the prompt stays byte-identical).
 	Facts agent.FactsRecaller
+	// Location is the party-location recaller wired onto the base voice config
+	// (#540, ADR-0060), filling the location slot of the VOLATILE Hot Context tail
+	// per turn. nil leaves the clause off entirely — which is what the prompt looked
+	// like before the Party Marker existed, so a deployment without it is unchanged
+	// rather than broken.
+	Location agent.LocationRecaller
 	// Tools are the built-in knowledge Tools' backing sources wired onto the base
 	// voice config (#296): the adapters behind transcript_search, kg_query, the
 	// remember_knowledge proposal writer and the recap Tool, flowing through
@@ -471,6 +477,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	m.base.Directives = m
 	m.base.Memory = deps.Memory
 	m.base.Facts = deps.Facts
+	m.base.Location = deps.Location
 	m.base.ToolDeps = deps.Tools
 	// cfg.Highlights is NO LONGER wired on the base config (#488): with N concurrent
 	// sessions the detector Sink must be per-session, so Start sets cfg.Highlights to

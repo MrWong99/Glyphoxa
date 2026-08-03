@@ -510,6 +510,23 @@ func (ac *Autocomplete) Focused() (name, value string) {
 	return f.Name, strings.TrimSpace(string(f.Value))
 }
 
+// Option reads a SIBLING option's current value while another one is focused —
+// what a dependent autocomplete needs (/where's pin list depends on the map the
+// GM has already picked). Decoded defensively for the same reason Focused is:
+// half-typed input reaches here, and a panic in an autocomplete kills the
+// gateway goroutine.
+func (ac *Autocomplete) Option(name string) string {
+	opt, ok := ac.data.Option(name)
+	if !ok || len(opt.Value) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(opt.Value, &s); err == nil {
+		return s
+	}
+	return strings.TrimSpace(string(opt.Value))
+}
+
 // UserID is the invoking Discord User's snowflake.
 func (ac *Autocomplete) UserID() string { return ac.userID }
 
