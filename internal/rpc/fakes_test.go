@@ -948,3 +948,52 @@ func (f *fakeKGGraphStore) ListEdges(_ context.Context, campaignID uuid.UUID) ([
 	f.edgeCampaign = campaignID
 	return f.edges, f.edgeErr
 }
+
+// fakeKGPreviewStore fakes the agent-knowledge lens slice (#535): agents backs the
+// campaign-scoping check, linked backs the "has a wiki entry" state, and facts is
+// the prompt-facing neighbourhood returned verbatim so the handler's use of the
+// real renderer is asserted. factCalls proves the facts read does NOT fire for an
+// unlinked or foreign Agent.
+type fakeKGPreviewStore struct {
+	*fakeActive
+
+	agents    map[uuid.UUID]storage.Agent
+	linked    map[uuid.UUID]storage.KGNode
+	facts     map[uuid.UUID][]storage.KGNode
+	factCalls int
+	factsErr  error
+	linkedErr error
+}
+
+func newFakeKGPreviewStore() *fakeKGPreviewStore {
+	return &fakeKGPreviewStore{
+		fakeActive: newFakeActive(),
+		agents:     map[uuid.UUID]storage.Agent{},
+		linked:     map[uuid.UUID]storage.KGNode{},
+		facts:      map[uuid.UUID][]storage.KGNode{},
+	}
+}
+
+func (f *fakeKGPreviewStore) GetAgent(_ context.Context, id uuid.UUID) (storage.Agent, error) {
+	a, ok := f.agents[id]
+	if !ok {
+		return storage.Agent{}, storage.ErrNotFound
+	}
+	return a, nil
+}
+
+func (f *fakeKGPreviewStore) AgentLinkedNode(_ context.Context, agentID uuid.UUID) (storage.KGNode, bool, error) {
+	if f.linkedErr != nil {
+		return storage.KGNode{}, false, f.linkedErr
+	}
+	n, ok := f.linked[agentID]
+	return n, ok, nil
+}
+
+func (f *fakeKGPreviewStore) AgentNodeFacts(_ context.Context, agentID uuid.UUID) ([]storage.KGNode, error) {
+	f.factCalls++
+	if f.factsErr != nil {
+		return nil, f.factsErr
+	}
+	return f.facts[agentID], nil
+}

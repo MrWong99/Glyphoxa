@@ -46,6 +46,7 @@ type CampaignServer struct {
 	*kgNodes
 	*kgEdges
 	*kgGraph
+	*kgPreview
 	*knowledgeProposals
 	*toolGrants
 	*campaignAssist
@@ -75,6 +76,9 @@ type CampaignStores struct {
 	KGEdges kgEdgeStore
 	// KGGraph backs the whole-graph read the Graph view renders (#534).
 	KGGraph kgGraphStore
+	// KGPreview backs the agent-knowledge lens (#535) — the PROMPT-FACING read, so
+	// the preview shows what the turn shows.
+	KGPreview kgPreviewStore
 	// Proposals backs the Knowledge Proposal review queue + similarity hint
 	// (#300, ADR-0052).
 	Proposals knowledgeProposalStore
@@ -101,6 +105,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		KGNodes:    s,
 		KGEdges:    s,
 		KGGraph:    s,
+		KGPreview:  kgPreviewStoreOf(s),
 		Proposals:  s,
 		Grants:     s,
 		Assist:     s,
@@ -122,6 +127,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		kgNodes:            &kgNodes{store: stores.KGNodes, active: active},
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
 		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
+		kgPreview:          &kgPreview{store: stores.KGPreview, active: active},
 		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
 		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
 		campaignAssist:     &campaignAssist{store: stores.Assist, active: active},
