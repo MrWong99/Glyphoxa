@@ -352,6 +352,21 @@ func composeContent(n storage.KGNode) string {
 			b.WriteString(value)
 		}
 	}
+	// ONE clause for how this Agent feels about the Node, when the Edge says so
+	// (#546). Strictly one, because it spends the same MaxBlockChars budget world
+	// facts draw on — and renderFacts stops at the first fact that would overrun,
+	// so a verbose relationship would evict knowledge outright.
+	//
+	// It joins the ASPECT side of the budget split (#555): it is a fact about the
+	// Node, like every other line above it, and the split's whole purpose is that
+	// the GM's authored body cannot be evicted by them.
+	if rel := relationClause(n); rel != "" {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("- ")
+		b.WriteString(rel)
+	}
 	aspects := b.String()
 	body := strings.TrimSpace(n.Body)
 
@@ -406,6 +421,22 @@ func fitRunes(s string, max int) string {
 		return string(r[:1])
 	}
 	return string(r[:max-1]) + "…"
+}
+
+// MaxRelationChars bounds the per-edge relation clause. One clause, and a short
+// one: it competes with the world facts in the same block.
+const MaxRelationChars = 120
+
+// relationClause renders the reading Agent's feeling about this Node as at most
+// one clause: the GM's note when they wrote one, else the generated disposition
+// sentence. Never both — two clauses per neighbour is a second budget nobody
+// agreed to.
+func relationClause(n storage.KGNode) string {
+	if note := strings.TrimSpace(n.RelationNote); note != "" {
+		return truncateRunes(note, MaxRelationChars)
+	}
+	e := storage.KGEdge{Disposition: n.RelationDisposition}
+	return truncateRunes(e.DispositionClause(strings.TrimSpace(n.Name)), MaxRelationChars)
 }
 
 // typeLabel maps a Node type onto its GM-facing label (#126 test contract) via

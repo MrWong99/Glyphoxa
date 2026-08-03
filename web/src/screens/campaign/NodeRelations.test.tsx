@@ -44,6 +44,7 @@ function edgeTransport(opts: {
   const createCalls: CreateEdgeRequest[] = [];
   const deleteCalls: DeleteEdgeRequest[] = [];
   const setAgentCalls: SetNodeAgentRequest[] = [];
+  const detailCalls: { id: string; note: string; disposition: number }[] = [];
 
   const butler = create(AgentSchema, { id: "butler", role: "butler", name: "Glyphoxa" });
   const cast = [
@@ -57,6 +58,12 @@ function edgeTransport(opts: {
       listNodes: () => create(ListNodesResponseSchema, { nodes: [opts.node, ...others] }),
       getCampaignRoster: () =>
         create(GetCampaignRosterResponseSchema, { roster: [butler, ...cast] }),
+      updateEdgeDetails: (req) => {
+        detailCalls.push({ id: req.id, note: req.note, disposition: req.disposition });
+        return create(UpdateEdgeDetailsResponseSchema, {
+          edge: create(EdgeSchema, { id: req.id, note: req.note, disposition: req.disposition }),
+        });
+      },
       createEdge: (req) => {
         createCalls.push(req);
         const target = others.find((n) => n.id === req.toNodeId);
@@ -92,7 +99,7 @@ function edgeTransport(opts: {
       },
     });
   });
-  return { transport, createCalls, deleteCalls, setAgentCalls };
+  return { transport, createCalls, deleteCalls, setAgentCalls, detailCalls };
 }
 
 function renderRelations(node: PbNode, extra?: Parameters<typeof edgeTransport>[0]) {
@@ -304,5 +311,30 @@ describe("NodeRelations", () => {
     await confirmInDialog();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't delete/i);
+  });
+
+  it("authors a relation's texture and sends it (#546)", async () => {
+    const ctx = renderRelations(npcNode, {
+      outgoing: [
+        create(EdgeSchema, {
+          id: "e1",
+          fromNodeId: "n1",
+          toNodeId: "n2",
+          edgeType: EdgeType.KNOWS,
+          toNodeName: "Mira",
+          toNodeType: NodeType.NPC,
+        }),
+      ],
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /Edit what knows/ }));
+
+    fireEvent.change(screen.getByLabelText("What it's like"), {
+      target: { value: "  owes you money since the siege  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(ctx.detailCalls).toHaveLength(1));
+    // Trimmed, because a trailing space is not texture.
+    expect(ctx.detailCalls[0].note).toBe("owes you money since the siege");
   });
 });

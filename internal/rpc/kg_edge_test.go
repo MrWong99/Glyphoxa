@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -11,6 +12,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // edgeClient stands up the CampaignService client with the KG-Edge slice and
@@ -503,4 +505,86 @@ func TestCreateEdgeHonorsLiveSession(t *testing.T) {
 		t.Errorf("edge created in campaign %s, want the LIVE session campaign %s (not durable %s / newer %s)",
 			got, live.ID, durable.ID, newer.ID)
 	}
+}
+
+// TestUpdateEdgeDetails pins #546's editor path: a relation carries texture, the
+// write is campaign-scoped, and an out-of-range feeling is refused with a
+// sentence rather than a constraint violation.
+func TestUpdateEdgeDetails(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGEdgeStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	edgeID := uuid.New()
+	store.edges = []storage.KGEdge{{ID: edgeID, CampaignID: store.campaign.ID, Type: storage.KGEdgeKnows}}
+	client := edgeClient(t, store)
+
+	resp, err := client.UpdateEdgeDetails(context.Background(),
+		connect.NewRequest(&managementv1.UpdateEdgeDetailsRequest{
+			Id: edgeID.String(), Note: "  owes money since the siege  ", Disposition: -2,
+		}))
+	if err != nil {
+		t.Fatalf("UpdateEdgeDetails: %v", err)
+	}
+	got := resp.Msg.GetEdge()
+	if got.GetNote() != "owes money since the siege" {
+		t.Errorf("note = %q, want it trimmed and saved", got.GetNote())
+	}
+	if got.GetDisposition() != -2 {
+		t.Errorf("disposition = %d, want -2", got.GetDisposition())
+	}
+	if store.edgeDetailsCampaign != store.campaign.ID {
+		t.Errorf("write scoped to %s, want the active campaign", store.edgeDetailsCampaign)
+	}
+}
+
+func TestUpdateEdgeDetails_Validation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bad uuid is InvalidArgument", func(t *testing.T) {
+		store := newFakeKGEdgeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		_, err := edgeClient(t, store).UpdateEdgeDetails(context.Background(),
+			connect.NewRequest(&managementv1.UpdateEdgeDetailsRequest{Id: "nope"}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+		}
+	})
+
+	t.Run("an overlong note is refused before the write", func(t *testing.T) {
+		store := newFakeKGEdgeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		_, err := edgeClient(t, store).UpdateEdgeDetails(context.Background(),
+			connect.NewRequest(&managementv1.UpdateEdgeDetailsRequest{
+				Id: uuid.New().String(), Note: strings.Repeat("x", kgvocab.MaxEdgeNoteRunes+1),
+			}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+		}
+		if store.edgeDetailsCampaign != uuid.Nil {
+			t.Error("the store was written despite an invalid note")
+		}
+	})
+
+	t.Run("an out-of-range disposition is refused", func(t *testing.T) {
+		store := newFakeKGEdgeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		store.edgeDetailsErr = storage.ErrInvalidDisposition
+		_, err := edgeClient(t, store).UpdateEdgeDetails(context.Background(),
+			connect.NewRequest(&managementv1.UpdateEdgeDetailsRequest{
+				Id: uuid.New().String(), Disposition: 9,
+			}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+		}
+	})
+
+	t.Run("a missing relation is NotFound", func(t *testing.T) {
+		store := newFakeKGEdgeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		_, err := edgeClient(t, store).UpdateEdgeDetails(context.Background(),
+			connect.NewRequest(&managementv1.UpdateEdgeDetailsRequest{Id: uuid.New().String()}))
+		if connect.CodeOf(err) != connect.CodeNotFound {
+			t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
+		}
+	})
 }

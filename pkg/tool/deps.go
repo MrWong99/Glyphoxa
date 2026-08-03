@@ -75,9 +75,14 @@ type ProposedWrite struct {
 	Fact      string `json:"fact,omitempty"`
 	Relation  string `json:"relation,omitempty"`
 	Target    string `json:"target,omitempty"`
-	NodeType  string `json:"node_type,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Body      string `json:"body,omitempty"`
+	// Note and Disposition are an edge proposal's texture (#546): "I now distrust
+	// her" after a scene. Optional — an edge with neither is exactly what it was
+	// before, so no stored payload changes meaning.
+	Note        string `json:"note,omitempty"`
+	Disposition int    `json:"disposition,omitempty"`
+	NodeType    string `json:"node_type,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Body        string `json:"body,omitempty"`
 }
 
 // Spatial is the read seam the locate_entity / whats_nearby Tools consult
