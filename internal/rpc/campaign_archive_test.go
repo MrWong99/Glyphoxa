@@ -3,6 +3,7 @@ package rpc_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,9 +159,11 @@ func TestDeleteCampaign_HappyPath(t *testing.T) {
 	}
 }
 
-// fakeClipSweeper records the highlight-clip sweep a campaign hard delete runs.
+// fakeClipSweeper records the blob sweep a campaign hard delete runs, per owning
+// kind so a test can tell which lister was consulted.
 type fakeClipSweeper struct {
 	keys    []string
+	mapKeys []string
 	deleted []string
 	listErr error
 }
@@ -172,7 +175,14 @@ func (f *fakeClipSweeper) CampaignClipKeys(context.Context, uuid.UUID) ([]string
 	return f.keys, nil
 }
 
-func (f *fakeClipSweeper) DeleteClip(_ context.Context, key string) error {
+func (f *fakeClipSweeper) CampaignMapImageKeys(context.Context, uuid.UUID) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.mapKeys, nil
+}
+
+func (f *fakeClipSweeper) DeleteBlob(_ context.Context, key string) error {
 	f.deleted = append(f.deleted, key)
 	return nil
 }
@@ -185,7 +195,7 @@ func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 	id := uuid.New()
 	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
-	srv.SetHighlightClipSweeper(sweeper)
+	srv.SetCampaignBlobSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
@@ -199,6 +209,47 @@ func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 	}
 }
 
+// TestDeleteCampaign_SweepsMapImages: a hard delete drops Map images too, not only
+// Highlight clips (#538, ADR-0048).
+//
+// campaign_map cascades with the campaign row, so the instant the delete commits
+// nothing in the database names those keys any more. A sweep that walks only the
+// highlight table therefore does not leave the bytes for later — it loses them
+// permanently, silently, with a successful RPC. This test exists because that is
+// exactly what shipped.
+func TestDeleteCampaign_SweepsMapImages(t *testing.T) {
+	t.Parallel()
+	store := newFakeArchiveStore()
+	id := uuid.New()
+	sweeper := &fakeClipSweeper{keys: []string{"clip-1"}, mapKeys: []string{"map-1", "map-2"}}
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
+	srv.SetCampaignBlobSweeper(sweeper)
+
+	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+	want := map[string]bool{"clip-1": true, "map-1": true, "map-2": true}
+	for _, k := range sweeper.deleted {
+		delete(want, k)
+	}
+	if len(want) != 0 {
+		t.Fatalf("blobs left behind by the sweep: %v (swept %v)", want, sweeper.deleted)
+	}
+	// And the DURABLE backstop must carry them as well — the fast path above is
+	// best-effort, so a map image that only ever reached it is still a leak on any
+	// process that crashes mid-sweep.
+	if store.deleteJobKind == "" {
+		t.Fatal("no durable sweep job enqueued")
+	}
+	payload := string(store.deleteJobPayload)
+	for _, k := range []string{"clip-1", "map-1", "map-2"} {
+		if !strings.Contains(payload, k) {
+			t.Errorf("durable sweep payload omits %q: %s", k, payload)
+		}
+	}
+}
+
 // TestDeleteCampaign_EnqueuesDurableClipSweep: a hard delete enqueues the durable
 // blob-sweep job carrying the listed clip keys, in the delete's own transaction
 // (#308, ADR-0049) — the backstop that survives a crash after the row cascade.
@@ -208,7 +259,7 @@ func TestDeleteCampaign_EnqueuesDurableClipSweep(t *testing.T) {
 	id := uuid.New()
 	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
-	srv.SetHighlightClipSweeper(sweeper)
+	srv.SetCampaignBlobSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
@@ -236,7 +287,7 @@ func TestDeleteCampaign_NoClipsNoJob(t *testing.T) {
 	store := newFakeArchiveStore()
 	sweeper := &fakeClipSweeper{} // no keys
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
-	srv.SetHighlightClipSweeper(sweeper)
+	srv.SetCampaignBlobSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()})); err != nil {
@@ -258,7 +309,7 @@ func TestDeleteCampaign_RefusedKeepsClips(t *testing.T) {
 	store.deleteCampaignErr = storage.ErrNotArchived
 	sweeper := &fakeClipSweeper{keys: []string{"k1"}}
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
-	srv.SetHighlightClipSweeper(sweeper)
+	srv.SetCampaignBlobSweeper(sweeper)
 
 	_, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()}))

@@ -200,11 +200,12 @@ func (s *CampaignServer) SetEmbedder(e Embedder) {
 	s.embedder = e
 }
 
-// SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
-// delete runs (#308). Called once at boot before serving; nil leaves the sweep
-// off (the highlight rows still cascade, only their blobs would linger).
-func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
-	s.clips = sw
+// SetCampaignBlobSweeper wires the blob sweep the campaign hard delete runs
+// (#308/#538): Highlight clips and Map images alike. Called once at boot before
+// serving; nil leaves the sweep off (the rows still cascade, only their blobs
+// would linger).
+func (s *CampaignServer) SetCampaignBlobSweeper(sw CampaignBlobSweeper) {
+	s.campaignBlobs = sw
 }
 
 // campaignManagement is the campaign lifecycle feature module (#264, #222): the

@@ -25,11 +25,11 @@ import (
 type campaignArchive struct {
 	store  campaignArchiveStore
 	active *activeCampaignSource
-	// clips sweeps a campaign's Session Highlight clips out of blob storage on hard
-	// delete (#308, ADR-0048): highlight rows cascade with the campaign, but the
-	// clip blobs have NO FK and must be dropped through the seam. Nil disables the
-	// sweep (web-only / no blob backend); set once at boot before serving.
-	clips HighlightClipSweeper
+	// blobs sweeps every blob a campaign owns out of blob storage on hard delete
+	// (#308/#538, ADR-0048): the rows cascade with the campaign, but the blobs have
+	// NO FK and must be dropped through the seam. Nil disables the sweep (web-only /
+	// no blob backend); set once at boot before serving.
+	campaignBlobs CampaignBlobSweeper
 }
 
 // campaignArchiveStore is the narrow archive-lifecycle surface the module needs
@@ -49,15 +49,20 @@ type campaignArchiveStore interface {
 	DeleteCampaignWithJob(ctx context.Context, tenantID, id uuid.UUID, jobKind string, jobPayload []byte) error
 }
 
-// HighlightClipSweeper drops a campaign's Session Highlight clips through the blob
-// seam on hard delete (#308, ADR-0048). main.go wires it over
-// storage.ListCampaignHighlightClipKeys + blob.Delete. The keys are listed BEFORE
-// the campaign row delete (which cascades the highlight rows away) and the blobs
-// are dropped AFTER the delete succeeds, so a refused delete never orphans a live
-// campaign's clips.
-type HighlightClipSweeper interface {
+// CampaignBlobSweeper drops everything a campaign owns in blob storage through the
+// blob seam on hard delete (#308/#538, ADR-0048). main.go wires it over the
+// storage key listers + blob.Delete. The keys are listed BEFORE the campaign row
+// delete (which cascades every owning row away) and the blobs are dropped AFTER
+// the delete succeeds, so a refused delete never orphans a live campaign's bytes.
+//
+// It enumerates the owning kinds EXPLICITLY, one method each, because the failure
+// mode here is silent: a new blob-owning table that forgets to add its lister
+// leaks every byte it ever stored, with no error anywhere and nothing left in the
+// database that names the keys. Maps (#538) were exactly that omission.
+type CampaignBlobSweeper interface {
 	CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
-	DeleteClip(ctx context.Context, key string) error
+	CampaignMapImageKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
+	DeleteBlob(ctx context.Context, key string) error
 }
 
 // liveGuard refuses an operation on the campaign backing the LIVE Voice Session
@@ -161,27 +166,39 @@ func (s *campaignArchive) DeleteCampaign(
 		return nil, err
 	}
 
-	// Capture the campaign's Highlight clip keys BEFORE the delete — the row cascade
-	// removes the highlight rows, after which they can't be listed (#308, ADR-0048).
-	var clipKeys []string
-	if s.clips != nil {
-		keys, err := s.clips.CampaignClipKeys(ctx, id)
+	// Capture every blob key the campaign owns BEFORE the delete — the row cascade
+	// removes the owning rows, after which nothing can list them (#308/#538,
+	// ADR-0048).
+	var blobKeys []string
+	if s.campaignBlobs != nil {
+		keys, err := s.campaignBlobs.CampaignClipKeys(ctx, id)
 		if err != nil {
 			slog.Default().Error("DeleteCampaign: list highlight clip keys failed", "campaign_id", id, "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
-		clipKeys = keys
+		blobKeys = keys
+		mapKeys, err := s.campaignBlobs.CampaignMapImageKeys(ctx, id)
+		if err != nil {
+			slog.Default().Error("DeleteCampaign: list map image keys failed", "campaign_id", id, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		blobKeys = append(blobKeys, mapKeys...)
 	}
 
 	// The blob sweep is a DURABLE job enqueued in the delete's OWN transaction
 	// (#308, ADR-0049): it exists iff the delete committed, so a refused delete never
-	// schedules a sweep of a surviving campaign's clips, and a crash right after the
-	// delete never loses the sweep. With no clips there is nothing to sweep, so the
+	// schedules a sweep of a surviving campaign's blobs, and a crash right after the
+	// delete never loses the sweep. With no blobs there is nothing to sweep, so the
 	// plain delete runs. The inline best-effort sweep below is a fast-path; the job is
 	// the backstop that guarantees eventual cleanup.
+	//
+	// The job kind still says "clips" because it is a PERSISTED string: renaming it
+	// would strand every row already enqueued under the old name. Its handler only
+	// ever deletes the keys it is handed, so carrying map images in the same payload
+	// needs nothing from it.
 	var deleteErr error
-	if len(clipKeys) > 0 {
-		payload, merr := highlight.MarshalCampaignSweep(clipKeys)
+	if len(blobKeys) > 0 {
+		payload, merr := highlight.MarshalCampaignSweep(blobKeys)
 		if merr != nil {
 			slog.Default().Error("DeleteCampaign: marshal clip sweep payload failed", "campaign_id", id, "err", merr)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -202,12 +219,12 @@ func (s *campaignArchive) DeleteCampaign(
 		}
 	}
 
-	// Fast-path: the rows are gone (cascade); drop their clips through the seam now so
+	// Fast-path: the rows are gone (cascade); drop their blobs through the seam now so
 	// storage reclaims immediately. Best-effort — a failure here logs and leaves the
 	// blob for the durable sweep job (idempotent Delete), never failing the RPC.
-	for _, k := range clipKeys {
-		if err := s.clips.DeleteClip(ctx, k); err != nil {
-			slog.Default().Warn("DeleteCampaign: highlight clip sweep deferred to job", "campaign_id", id, "key", k, "err", err)
+	for _, k := range blobKeys {
+		if err := s.campaignBlobs.DeleteBlob(ctx, k); err != nil {
+			slog.Default().Warn("DeleteCampaign: blob sweep deferred to job", "campaign_id", id, "key", k, "err", err)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteCampaignResponse{}), nil

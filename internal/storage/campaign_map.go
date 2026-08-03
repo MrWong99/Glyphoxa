@@ -112,6 +112,13 @@ func (s *Store) CreateMap(ctx context.Context, m NewCampaignMap) (CampaignMap, e
 		m.CampaignID, m.Name, m.BlobKey, m.WidthPx, m.HeightPx,
 		m.ParentMapID, m.AnchorNodeID, m.GMPrivate)
 	created, err := scanCampaignMap(row)
+	// A parent Map or anchor Node from another Campaign is refused by the composite
+	// FKs (ADR-0060). That is the GM naming something that does not exist HERE — a
+	// NotFound the caller can act on, not a server fault, and reporting it as one
+	// both misleads the operator and logs a false internal error.
+	if code, ok := pgErrCode(err); ok && code == pgForeignKeyViolation {
+		return CampaignMap{}, ErrNotFound
+	}
 	if err != nil {
 		return CampaignMap{}, fmt.Errorf("storage: create campaign map: %w", err)
 	}
@@ -209,6 +216,10 @@ func (s *Store) UpdateMap(ctx context.Context, u CampaignMapUpdate) (CampaignMap
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CampaignMap{}, ErrNotFound
 	}
+	// Same as CreateMap: a cross-campaign parent or anchor is a NotFound, not a 500.
+	if code, ok := pgErrCode(err); ok && code == pgForeignKeyViolation {
+		return CampaignMap{}, ErrNotFound
+	}
 	if err != nil {
 		return CampaignMap{}, fmt.Errorf("storage: update campaign map %s: %w", u.ID, err)
 	}
@@ -238,6 +249,37 @@ func (s *Store) SetMapImage(ctx context.Context, campaignID, id uuid.UUID, blobK
 		return CampaignMap{}, fmt.Errorf("storage: set map image %s: %w", id, err)
 	}
 	return m, nil
+}
+
+// ListCampaignMapBlobKeys returns every Map image key a Campaign owns, for the
+// hard-delete blob sweep (ADR-0048).
+//
+// campaign_map cascades with the campaign row, so the keys are unlistable the
+// instant the delete commits — they MUST be captured first, exactly as the
+// Highlight clip keys are. Without this the images survive the campaign forever
+// with nothing left in the database that names them: a delete that frees the rows
+// and silently keeps the bytes, which is the failure ADR-0048's lifecycle rule
+// exists to prevent.
+func (s *Store) ListCampaignMapBlobKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT blob_key FROM campaign_map WHERE campaign_id = $1 AND blob_key <> '' ORDER BY id`,
+		campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list campaign map blob keys %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("storage: scan campaign map blob key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list campaign map blob keys %s: %w", campaignID, err)
+	}
+	return keys, nil
 }
 
 // DeleteMap removes a Map and returns the blob key the caller must then delete

@@ -1330,19 +1330,23 @@ func (e jobEnqueuer) Enqueue(ctx context.Context, kind string, payload any, runA
 	return err
 }
 
-// highlightClipSweeper adapts *storage.Store + blob.Store to the RPC campaign
-// hard-delete's clip sweep (#308, ADR-0048): list a campaign's highlight clip
-// keys, then drop each blob through the seam.
-type highlightClipSweeper struct {
+// campaignBlobSweeper adapts *storage.Store + blob.Store to the RPC campaign
+// hard-delete's blob sweep (#308/#538, ADR-0048): list every key the campaign
+// owns, then drop each blob through the seam.
+type campaignBlobSweeper struct {
 	store *storage.Store
 	blobs blob.Store
 }
 
-func (s highlightClipSweeper) CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
+func (s campaignBlobSweeper) CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
 	return s.store.ListCampaignHighlightClipKeys(ctx, campaignID)
 }
 
-func (s highlightClipSweeper) DeleteClip(ctx context.Context, key string) error {
+func (s campaignBlobSweeper) CampaignMapImageKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
+	return s.store.ListCampaignMapBlobKeys(ctx, campaignID)
+}
+
+func (s campaignBlobSweeper) DeleteBlob(ctx context.Context, key string) error {
 	return s.blobs.Delete(ctx, key)
 }
 
@@ -1458,10 +1462,10 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// the live relay re-resolves future lines with the new mapping (#281, ADR-0039
 	// in-proc direct-method invalidation).
 	campaignSrv.SetSpeakerInvalidator(speakerResolver)
-	// A campaign hard delete sweeps its Session Highlight clips out of blob storage
-	// (#308, ADR-0048): the highlight rows cascade with the campaign, but their clip
-	// blobs have no FK and must be dropped through the seam.
-	campaignSrv.SetHighlightClipSweeper(highlightClipSweeper{store: store, blobs: blobStore})
+	// A campaign hard delete sweeps every blob it owns — Highlight clips and Map
+	// images — out of blob storage (#308/#538, ADR-0048): the rows cascade with the
+	// campaign, but their blobs have no FK and must be dropped through the seam.
+	campaignSrv.SetCampaignBlobSweeper(campaignBlobSweeper{store: store, blobs: blobStore})
 	// The on-demand campaign-creation assist engine (#479): persona drafting and
 	// knowledge-draft generation, strictly on GM button press.
 	campaignSrv.SetAssist(assistEngine)

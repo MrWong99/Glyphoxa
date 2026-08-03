@@ -22,9 +22,10 @@ import (
 //
 // The image never travels through the read RPCs — it is written once here, to the
 // blob seam, and fetched from the plain HTTP mount. A Map row is only ever created
-// AFTER its bytes land, so a row never references bytes that do not exist; the
-// reverse (a blob with no row) is recoverable by the seam's reconciliation, which
-// is why the ordering is this way round.
+// AFTER its bytes land, so a row never references bytes that do not exist. The
+// reverse — a blob with no row — is merely invisible and finite, and each write
+// path deletes its own orphan inline; there is no background reconciliation for
+// map keys, so the inline delete is the cleanup, not a fast path in front of one.
 type campaignMaps struct {
 	store  campaignMapStore
 	blobs  blob.Store
@@ -210,10 +211,18 @@ func (s *campaignMaps) CreateMap(
 		GMPrivate:    m.GetGmPrivate(),
 	})
 	if err != nil {
-		// Drop the orphaned bytes rather than leaving them for reconciliation; best
-		// effort, because the row failure is what the caller must hear about.
+		// Drop the orphaned bytes here and now. There is no background reconciliation
+		// that would find them later — the campaign sweep walks campaign_map rows, and
+		// this insert produced none — so this best-effort delete IS the cleanup. It is
+		// best-effort because the row failure is what the caller must hear about.
 		if derr := s.blobs.Delete(ctx, key); derr != nil {
 			slog.Default().Warn("CreateMap: could not drop orphaned blob", "key", key, "err", derr)
+		}
+		// A parent Map or anchor Node that is not in THIS campaign is the operator
+		// naming something absent, not a server fault.
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound,
+				errors.New("parent map or anchor entry not found in this campaign"))
 		}
 		slog.Default().Error("CreateMap: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -235,6 +244,12 @@ func (s *campaignMaps) UpdateMap(
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
+	// The same cap CreateMap enforces. A bound applied only on the create path is a
+	// bound the rename path removes.
+	if len([]rune(name)) > maxMapNameRunes {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("name is too long (max %d characters)", maxMapNameRunes))
+	}
 	parent, err := optionalUUID(m.GetParentMapId(), "parent map id")
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -254,7 +269,8 @@ func (s *campaignMaps) UpdateMap(
 	})
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
+		return nil, connect.NewError(connect.CodeNotFound,
+			errors.New("map, parent map or anchor entry not found in this campaign"))
 	case errors.Is(err, storage.ErrInvalidMapParent):
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("a map cannot contain itself"))
 	case err != nil:

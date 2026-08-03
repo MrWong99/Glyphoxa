@@ -24,7 +24,7 @@ CREATE TABLE campaign_map (
     -- Nesting: continent → region → city → building. parent_map_id is the map this
     -- one sits inside; anchor_node_id is the Location Node this map DEPICTS, which
     -- is what lets a pin on the world map open the city map beneath it.
-    parent_map_id  uuid NULL REFERENCES campaign_map (id) ON DELETE SET NULL,
+    parent_map_id  uuid NULL,
     anchor_node_id uuid NULL,
     gm_private  boolean NOT NULL DEFAULT false,
     created_at  timestamptz NOT NULL DEFAULT now(),
@@ -41,6 +41,14 @@ CREATE TABLE campaign_map (
     -- which is the only part that lost its referent.
     CONSTRAINT campaign_map_anchor_fk FOREIGN KEY (anchor_node_id, campaign_id)
         REFERENCES kg_node (id, campaign_id) ON DELETE SET NULL (anchor_node_id),
+    -- The parent Map is bound to the same Campaign by the SAME composite pattern,
+    -- and for the same reason: a single-column REFERENCES campaign_map (id) accepts
+    -- any Map uuid that exists ANYWHERE, which in a multi-tenant deployment is both
+    -- a cross-tenant existence oracle (success vs. error distinguishes "that uuid is
+    -- a map somewhere" from "it is not") and a persisted reference into another
+    -- tenant's row, whose deletion would then reach in and SET NULL here.
+    CONSTRAINT campaign_map_parent_fk FOREIGN KEY (parent_map_id, campaign_id)
+        REFERENCES campaign_map (id, campaign_id) ON DELETE SET NULL (parent_map_id),
     CONSTRAINT campaign_map_dimensions_positive CHECK (width_px > 0 AND height_px > 0)
 );
 

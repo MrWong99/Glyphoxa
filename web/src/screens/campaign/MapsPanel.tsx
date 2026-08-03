@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, EyeOff, Plus, Trash2, Upload } from "lucide-react";
@@ -21,6 +22,13 @@ import { alphaBg, metaOf } from "./knowledgeVocab";
 /** The image byte route (a plain guarded mount — an <img> cannot speak Connect). */
 const mapImageURL = (map: PbMap) =>
   `/api/v1/maps/${map.id}/image?v=${map.updatedAt ? Number(map.updatedAt.seconds) : 0}`;
+
+/**
+ * How far the pointer must travel before a press on a pin counts as a drag rather
+ * than a click, in client pixels. Small enough that a deliberate nudge still
+ * registers; large enough to absorb the hand tremor in an ordinary click.
+ */
+const DRAG_SLOP_PX = 4;
 
 export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => void }) {
   const queryClient = useQueryClient();
@@ -108,7 +116,14 @@ function MapView({
   // The pin being dragged and where the pointer has taken it. Kept in LOCAL state
   // rather than written into the query cache: mutating cached data in place does
   // not re-render, so the pin would only jump on release.
-  const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  // A drag carries where it STARTED, in client pixels, and whether the pointer has
+  // travelled far enough to mean it. Without that, a plain click on a pin — press
+  // and release at the same spot — reached the surface's mouse-up as a completed
+  // drag and wrote the pin to wherever the pointer happened to be. Clicking a pin
+  // to open its entry walked it across the map, one write RPC per click.
+  const [drag, setDrag] = useState<
+    { id: string; x: number; y: number; fromClientX: number; fromClientY: number; moved: boolean } | null
+  >(null);
   const [placing, setPlacing] = useState<PbNode | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -205,16 +220,24 @@ function MapView({
           aria-label={`${map.name} map`}
           onMouseMove={(ev) => {
             if (!drag) return;
+            const far =
+              Math.hypot(ev.clientX - drag.fromClientX, ev.clientY - drag.fromClientY) > DRAG_SLOP_PX;
+            // Below the slop the glyph does not move at all, so a click never nudges
+            // the pin even visually.
+            if (!far && !drag.moved) return;
             const at = normalize(ev.clientX, ev.clientY);
-            if (at) setDrag({ id: drag.id, ...at });
+            if (at) setDrag({ ...drag, ...at, moved: true });
           }}
           onMouseUp={(ev) => {
             const at = normalize(ev.clientX, ev.clientY);
             if (!at) return;
             if (drag) {
               const pin = view.pins.find((p) => p.id === drag.id);
+              const moved = drag.moved;
               setDrag(null);
-              if (pin) {
+              // A press-and-release that never travelled is a CLICK: the pin's own
+              // onClick opens its entry, and no write is issued.
+              if (pin && moved) {
                 updatePin.mutate({
                   id: pin.id, x: at.x, y: at.y,
                   labelOverride: pin.labelOverride, gmPrivate: pin.gmPrivate,
@@ -237,7 +260,16 @@ function MapView({
               key={pin.id}
               pin={pin}
               at={drag?.id === pin.id ? drag : undefined}
-              onGrab={() => setDrag({ id: pin.id, x: pin.x, y: pin.y })}
+              onGrab={(ev) =>
+                setDrag({
+                  id: pin.id,
+                  x: pin.x,
+                  y: pin.y,
+                  fromClientX: ev.clientX,
+                  fromClientY: ev.clientY,
+                  moved: false,
+                })
+              }
               onOpen={() => onOpenNode?.(pin.nodeId)}
               onRemove={() => deletePin.mutate({ id: pin.id })}
             />
@@ -321,7 +353,7 @@ function PinGlyph({
   pin: Pin;
   /** The live drag position, when this pin is the one being dragged. */
   at?: { x: number; y: number };
-  onGrab: () => void;
+  onGrab: (ev: ReactMouseEvent) => void;
   onOpen: () => void;
   onRemove: () => void;
 }) {

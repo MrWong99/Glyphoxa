@@ -224,13 +224,37 @@ func (s *Store) UnpinnedNodes(ctx context.Context, campaignID, mapID uuid.UUID) 
 
 // NodePins returns every Pin for one Node across all Maps in the Campaign — "where
 // is this?", answered from the entry rather than from a Map. It is what makes a
-// Node's position discoverable without opening every Map in turn, and it backs the
-// spatial Tool's locate_entity (#539).
+// Node's position discoverable without opening every Map in turn.
+//
+// GM-facing: gm_private Pins, Pins on gm_private Maps and Pins on gm_private Nodes
+// are ALL included. Anything prompt- or player-facing must use
+// [Store.PlayerNodePins] — the two are separate functions rather than one with a
+// flag the caller might forget, because forgetting here means a Character NPC
+// telling the table where the GM's secret is.
 func (s *Store) NodePins(ctx context.Context, campaignID, nodeID uuid.UUID) ([]MapPin, error) {
+	return s.nodePins(ctx, campaignID, nodeID, false)
+}
+
+// PlayerNodePins is [Store.NodePins] with the privacy filter pushed into SQL: a
+// gm_private Pin, a Pin whose Node is gm_private, and a Pin on a gm_private Map
+// are all invisible. It is the read the prompt-facing spatial Tools consult
+// (#539), so a GM secret cannot reach an NPC's answer even by mistake.
+func (s *Store) PlayerNodePins(ctx context.Context, campaignID, nodeID uuid.UUID) ([]MapPin, error) {
+	return s.nodePins(ctx, campaignID, nodeID, true)
+}
+
+func (s *Store) nodePins(ctx context.Context, campaignID, nodeID uuid.UUID, publicOnly bool) ([]MapPin, error) {
+	privacy := ""
+	if publicOnly {
+		// The Map join is only needed for the filter, so it is added only with it.
+		privacy = ` AND NOT p.gm_private AND NOT n.gm_private
+		            AND EXISTS (SELECT 1 FROM campaign_map m
+		                         WHERE m.id = p.map_id AND NOT m.gm_private)`
+	}
 	rows, err := s.db.Query(ctx,
 		`SELECT `+mapPinJoinColumns+`
 		   FROM map_pin p JOIN kg_node n ON n.id = p.node_id
-		  WHERE p.node_id = $1 AND p.campaign_id = $2
+		  WHERE p.node_id = $1 AND p.campaign_id = $2`+privacy+`
 		  ORDER BY p.map_id, p.id`, nodeID, campaignID)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list pins for node %s: %w", nodeID, err)
