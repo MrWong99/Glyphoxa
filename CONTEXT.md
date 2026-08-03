@@ -38,6 +38,8 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Node** | A typed KG entity within one Campaign: `Character`, `NPC`, `Location`, `Faction`, `Item`, `PlotThread`, `Note`. | Entity, Page, Record |
 | **Edge** | A typed directional relationship between two Nodes in the same Campaign (e.g. `resides_in`, `member_of`, `knows`). | Link, Relationship, Connection |
 | **Aspect** | One ordered `(key, value)` fact on a Node, carrying its OWN `gm_private` flag — so a public NPC keeps its public facts and hides only its secret (ADR-0008 third amendment). The Node's free-form body remains as the remainder. | Field, Attribute, Property, Trait |
+| **Map** | A Campaign image (uploaded or generated) that KG Nodes are positioned on, nestable continent → region → city → building. Not a tactical grid — a Map localizes the world model, it does not run combat (ADR-0060). | Scene, Board, Battlemap |
+| **Pin** | A normalized `(x, y)` position on a Map, always referencing a KG Node — a Pin is a *position for something the wiki already knows*, never a parallel content model (ADR-0060). | Marker (reserved for the Party Marker), Token, Location (reserved for the Node type) |
 | **Knowledge Proposal** | An Agent-authored KG write (fact, Node, or Edge) awaiting GM review; nothing enters the KG without approval (ADR-0052). Character NPCs may propose only on their own linked Node; the Butler campaign-wide. | Suggestion, Pending fact, Draft |
 
 ## Agents

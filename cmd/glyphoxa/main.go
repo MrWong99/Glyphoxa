@@ -52,6 +52,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/transcript"
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	"github.com/MrWong99/Glyphoxa/internal/worldmap"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -1361,6 +1362,7 @@ var plainMountPolicy = map[string]auth.TenantMode{
 	"GET /api/v1/sessions/{id}":         auth.TenantRequired,
 	"GET /api/v1/highlights/{id}/clip":  auth.TenantRequired,
 	"GET /api/v1/highlights/{id}/image": auth.TenantRequired,
+	"GET /api/v1/maps/{id}/image":       auth.TenantRequired,
 	"GET /api/v1/campaigns/{id}/export": auth.TenantRequired,
 	// TenantNone: ServeImport resolves the tenant off the session itself
 	// (#291); the POST method already makes the guard demand the CSRF pair.
@@ -1431,6 +1433,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	)
 
 	campaignSrv := rpc.NewCampaignServer(store)
+	// Map images ride the blob seam (#538, ADR-0048): wired post-construction, like
+	// the other composition-root seams.
+	campaignSrv.SetBlobs(blobStore)
 	// While a session is live, the roster/mute panel scopes to that session's
 	// campaign so the GM mutes the NPCs actually in the channel, not a durable
 	// selection changed mid-session (#222).
@@ -1530,6 +1535,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// SessionServer's read-side resolution so a foreign-campaign clip id is 404 just
 	// like the Highlight RPCs.
 	clipServer := highlight.NewClipServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
+	// Campaign Map images (#538, ADR-0060): the second blob owner after Highlights,
+	// serving bytes over the same guarded plain-mount posture.
+	mapImages := worldmap.NewImageServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
 
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
@@ -1562,6 +1570,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Session Highlight AI image (#311): operator-gated image byte stream, same
 		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
 		"GET /api/v1/highlights/{id}/image": http.HandlerFunc(clipServer.ServeImage),
+		// Campaign Map images (#538, ADR-0060) — the second blob owner's byte route,
+		// same posture as the Highlight clip/image mounts.
+		"GET /api/v1/maps/{id}/image": http.HandlerFunc(mapImages.ServeImage),
 		// Campaign bundle export (#290): streamed gzip download, operator-gated,
 		// session AND tenant (#439) — a foreign-tenant campaign id is 404.
 		"GET /api/v1/campaigns/{id}/export": http.HandlerFunc(bundleHandler.ServeExport),

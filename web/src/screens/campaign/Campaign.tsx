@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { MapsPanel } from "./MapsPanel";
 import { PlayersPanel } from "./PlayersPanel";
 import { RosterPrep } from "./RosterPrep";
 import { ProposalsPanel } from "./ProposalsPanel";
@@ -63,7 +64,7 @@ export function Campaign() {
   // Cast (roster editor), Knowledge (KG entries), or Players (Character ↔ Discord
   // User bindings, #279) — the design's seg-control beside the title. Cast is the
   // default so the roster is what loads first (#71).
-  const [view, setView] = useState<"cast" | "knowledge" | "players" | "proposals">("cast");
+  const [view, setView] = useState<"cast" | "knowledge" | "maps" | "players" | "proposals">("cast");
   // Within Cast: the editor (default), or the prep readiness view (#544). The
   // editor stays the default because adding and shaping NPCs is the common act;
   // readiness is what you check before a session.
@@ -129,6 +130,15 @@ export function Campaign() {
             <button
               type="button"
               role="tab"
+              aria-selected={view === "maps"}
+              data-active={view === "maps" ? "true" : undefined}
+              onClick={() => setView("maps")}
+            >
+              Maps
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={view === "players"}
               data-active={view === "players" ? "true" : undefined}
               onClick={() => setView("players")}
@@ -168,6 +178,13 @@ export function Campaign() {
             setSelectedId(agentID);
             setCastMode("edit");
             setView("cast");
+          }}
+        />
+      ) : view === "maps" ? (
+        <MapsPanel
+          onOpenNode={(id) => {
+            setFocusNodeID(id);
+            setView("knowledge");
           }}
         />
       ) : view === "players" ? (

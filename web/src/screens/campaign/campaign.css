@@ -1333,3 +1333,146 @@
   border-color: transparent;
   cursor: default;
 }
+
+/* ── Maps and Pins (#538) ────────────────────────────────────────────────── */
+
+.gx-maps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-maps__bar,
+.gx-maps__tools,
+.gx-maps__children,
+.gx-maps__crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+.gx-maps__crumb {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gx-maps__crumb--current {
+  color: var(--text-strong);
+  text-decoration: none;
+  cursor: default;
+}
+
+/* The frame clips; the surface scales inside it. Pan/zoom is a CSS transform on
+   this wrapper — no mapping library, no tiles. */
+.gx-maps__frame {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-sunken, #12151c);
+  max-height: clamp(320px, 65vh, 820px);
+}
+
+.gx-maps__surface {
+  position: relative;
+  transform-origin: top left;
+  width: 100%;
+  user-select: none;
+}
+
+.gx-maps__image {
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+}
+
+/* Pins sit at NORMALIZED coordinates, so the whole layer is resolution
+   independent and a re-uploaded image keeps every pin. */
+.gx-maps__pin {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.gx-maps__pin-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  cursor: grab;
+  padding: 0;
+}
+
+.gx-maps__pin-dot:active {
+  cursor: grabbing;
+}
+
+.gx-maps__pin-label {
+  font-size: var(--body-sm);
+  color: var(--text);
+  paint-order: stroke;
+  text-shadow: 0 0 3px var(--surface-sunken, #12151c);
+  pointer-events: none;
+}
+
+/* A pin withheld from players — by its own flag or its entry's — reads as
+   withheld at a glance. */
+.gx-maps__pin[data-hidden] .gx-maps__pin-dot {
+  border-style: dashed;
+}
+
+.gx-maps__pin[data-hidden] .gx-maps__pin-label {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.gx-maps__pin-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.gx-maps__tray {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-maps__tray-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-maps__hint {
+  font-size: var(--body-sm);
+  color: var(--accent, #ffcf5a);
+}
+
+.gx-maps__new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface, #171b23);
+  width: 100%;
+}
