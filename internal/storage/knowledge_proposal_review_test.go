@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -337,14 +338,16 @@ func TestApproveNode(t *testing.T) {
 		t.Errorf("created node wrong: %+v", created)
 	}
 
-	// v≠1 → unreadable, blocked, stays pending.
+	// An UNRECOGNISED write version → unreadable, blocked, stays pending. Pinned
+	// against ProposalWriteVersion rather than a literal so the bump that made
+	// aspects the fact payload (#542) could not silently make this case pass.
 	badID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 2, Kind: "node", NodeType: "note", Name: "Future", Body: "y",
+		V: kgvocab.ProposalWriteVersion + 1, Kind: "node", NodeType: "note", Name: "Future", Body: "y",
 	})
 	err := st.ApproveKnowledgeProposal(ctx, campaignID, badID)
 	var blocked *storage.ProposalBlockedError
 	if !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "unreadable") {
-		t.Errorf("approve v!=1: got %v, want unreadable blocked", err)
+		t.Errorf("approve unknown write version: got %v, want unreadable blocked", err)
 	}
 	if !pendingIDs(t, st, campaignID)[badID] {
 		t.Error("unreadable proposal must stay pending")
@@ -618,9 +621,28 @@ func TestApproveRejectsStaleWriteVersion(t *testing.T) {
 	}
 }
 
-// TestReplaceNodeAspects covers the editor's save path: replace-in-full assigns
-// dense positions from the slice order, a second call rewrites (reorder + edit +
-// delete in one save), an empty list clears, and the write is campaign-scoped.
+// setAspects models one editor save: it loads the Node's current Aspects (what the
+// editor would have on screen), then replaces exactly those with the supplied list.
+func setAspects(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID, rows ...storage.NewKGNodeAspect) {
+	t.Helper()
+	ctx := context.Background()
+	loaded, err := st.ListNodeAspects(ctx, campaignID, nodeID)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	known := make([]uuid.UUID, 0, len(loaded))
+	for _, a := range loaded {
+		known = append(known, a.ID)
+	}
+	if err := st.ReplaceNodeAspects(ctx, campaignID, nodeID,
+		storage.KGNodeAspectWrite{Known: known, Rows: rows}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+}
+
+// TestReplaceNodeAspects covers the editor's save path: the authored order becomes
+// dense positions, a second save rewrites (reorder + edit + delete in one), an
+// empty list clears, and the write is campaign-scoped.
 func TestReplaceNodeAspects(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
@@ -628,13 +650,11 @@ func TestReplaceNodeAspects(t *testing.T) {
 	st := storage.New(pool)
 
 	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
-	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
-		{Key: "Role", Value: "Runs the Rusty Anchor"},
-		{Key: "Manner", Value: "Grumbles"},
-		{Key: "Secret", Value: "Took a bribe", GMPrivate: true},
-	}); err != nil {
-		t.Fatalf("ReplaceNodeAspects: %v", err)
-	}
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+		storage.NewKGNodeAspect{Key: "Manner", Value: "Grumbles"},
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took a bribe", GMPrivate: true},
+	)
 	got := nodeAspects(t, st, campaignID, node.ID)
 	if len(got) != 3 {
 		t.Fatalf("got %d aspects, want 3", len(got))
@@ -649,12 +669,10 @@ func TestReplaceNodeAspects(t *testing.T) {
 	}
 
 	// One save covers reorder, edit and delete together.
-	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
-		{Key: "Secret", Value: "Took a bribe in Eastmonth", GMPrivate: true},
-		{Key: "Role", Value: "Runs the Rusty Anchor"},
-	}); err != nil {
-		t.Fatalf("ReplaceNodeAspects (rewrite): %v", err)
-	}
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took a bribe in Eastmonth", GMPrivate: true},
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+	)
 	got = nodeAspects(t, st, campaignID, node.ID)
 	if len(got) != 2 || got[0].Key != "Secret" || got[0].Value != "Took a bribe in Eastmonth" || got[1].Key != "Role" {
 		t.Fatalf("rewrite = %+v, want the reordered/edited pair with Manner deleted", got)
@@ -662,19 +680,169 @@ func TestReplaceNodeAspects(t *testing.T) {
 
 	// Another campaign cannot clear this Node's aspects.
 	_, _, otherCampaign := seedCampaign(t, dsn)
-	if err := st.ReplaceNodeAspects(ctx, otherCampaign, node.ID, nil); err != nil {
+	if err := st.ReplaceNodeAspects(ctx, otherCampaign, node.ID, storage.KGNodeAspectWrite{}); err != nil {
 		t.Fatalf("cross-campaign ReplaceNodeAspects should be a no-op, got: %v", err)
 	}
 	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 2 {
-		t.Errorf("a cross-campaign write cleared %d aspects; the scope must refuse it", 2-len(got))
+		t.Errorf("a cross-campaign write left %d aspects; the scope must refuse it", len(got))
 	}
 
 	// Empty list clears, and the free-form body survives.
-	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, nil); err != nil {
-		t.Fatalf("ReplaceNodeAspects (clear): %v", err)
-	}
+	setAspects(t, st, campaignID, node.ID)
 	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
 		t.Errorf("clear left %d aspects", len(got))
+	}
+}
+
+// TestReplaceNodeAspectsKeepsUnseenRows is the lost-update pin: an editor save
+// must not destroy an Aspect a Knowledge Proposal approval appended while the
+// editor was open. The GM approves a fact in one panel and saves the entry in the
+// other; before this guard the approved fact vanished with no trace, and the
+// approval had already reported success.
+func TestReplaceNodeAspectsKeepsUnseenRows(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, node.ID, storage.NewKGNodeAspect{Key: "Role", Value: "Innkeeper"})
+
+	// The editor loads what is on screen NOW.
+	loaded, err := st.ListNodeAspects(ctx, campaignID, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	known := []uuid.UUID{loaded[0].ID}
+
+	// Meanwhile, an approval appends a fact the editor never saw.
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Bart", AspectKey: "Rumour", Fact: "Fears the harbourmaster.",
+	})
+	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
+		t.Fatalf("ApproveKnowledgeProposal: %v", err)
+	}
+
+	// The GM now saves the editor, having edited only the row they had.
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, storage.KGNodeAspectWrite{
+		Known: known,
+		Rows:  []storage.NewKGNodeAspect{{Key: "Role", Value: "Runs the Rusty Anchor"}},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 {
+		t.Fatalf("aspects = %+v, want the edited row PLUS the approved one", got)
+	}
+	if got[0].Key != "Role" || got[0].Value != "Runs the Rusty Anchor" {
+		t.Errorf("aspect[0] = %+v, want the GM's edit at the front", got[0])
+	}
+	if got[1].Key != "Rumour" {
+		t.Errorf("aspect[1] = %+v, want the concurrently approved fact preserved at the end", got[1])
+	}
+}
+
+// TestApproveFactRefusesWhenAspectsFull pins the cap symmetry: the approve path
+// refuses at MaxAspectsPerNode rather than pushing the entry past a limit the
+// EDITOR also enforces — which would leave the GM unable to save that entry at all
+// until they deleted facts they never chose to add.
+func TestApproveFactRefusesWhenAspectsFull(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Crowded")
+	full := make([]storage.NewKGNodeAspect, 0, kgvocab.MaxAspectsPerNode)
+	for i := range kgvocab.MaxAspectsPerNode {
+		full = append(full, storage.NewKGNodeAspect{Key: "k", Value: fmt.Sprintf("v%d", i)})
+	}
+	setAspects(t, st, campaignID, node.ID, full...)
+
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Crowded", AspectKey: "One", Fact: "too many",
+	})
+	err := st.ApproveKnowledgeProposal(ctx, campaignID, id)
+	var blocked *storage.ProposalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("approve into a full node: got %v, want ProposalBlockedError", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != kgvocab.MaxAspectsPerNode {
+		t.Errorf("aspect count = %d, want the cap %d held", len(got), kgvocab.MaxAspectsPerNode)
+	}
+	if !pendingIDs(t, st, campaignID)[id] {
+		t.Error("a refused approval must stay pending")
+	}
+}
+
+// TestAspectsAreFulltextSearchable is the regression pin for the biggest hazard in
+// moving facts out of kg_node.body: kg_node.fts is a GENERATED column over
+// name + body, so without the aspect_text sync every fact approved after this
+// slice would be unfindable by both the GM wiki search and the Butler's kg_query.
+//
+// It also pins the privacy half: a prompt-facing search must not MATCH on a
+// gm_private aspect, or returning the entry would leak the secret through the hit
+// itself even though the payload correctly withholds the text.
+func TestAspectsAreFulltextSearchable(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	view := st.PromptKG()
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, bart.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took the smugglers bribe", GMPrivate: true},
+	)
+
+	// A public aspect is findable from BOTH sides — nothing about the entry's name
+	// or body mentions the anchor.
+	gm, err := st.SearchNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	if nodeIDSet(gm)[bart.ID] != 1 {
+		t.Error("GM search cannot find a public aspect's text")
+	}
+	pub, err := view.SearchPublicNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchPublicNodes: %v", err)
+	}
+	if nodeIDSet(pub)[bart.ID] != 1 {
+		t.Error("prompt-facing search cannot find a public aspect's text — approved facts are invisible")
+	}
+
+	// The GM can find their own secret; a prompt-facing search must not, not even
+	// as a hit with the text withheld.
+	gmSecret, err := st.SearchNodes(ctx, campaignID, "smugglers", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes (secret): %v", err)
+	}
+	if nodeIDSet(gmSecret)[bart.ID] != 1 {
+		t.Error("GM search cannot find a private aspect's text")
+	}
+	leaked, err := view.SearchPublicNodes(ctx, campaignID, "smugglers", 10)
+	if err != nil {
+		t.Fatalf("SearchPublicNodes (secret): %v", err)
+	}
+	if nodeIDSet(leaked)[bart.ID] != 0 {
+		t.Error("prompt-facing search MATCHED a gm_private aspect — the hit itself leaks the secret")
+	}
+
+	// Deleting an aspect withdraws it from the index too.
+	setAspects(t, st, campaignID, bart.ID)
+	after, err := st.SearchNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes (after clear): %v", err)
+	}
+	if nodeIDSet(after)[bart.ID] != 0 {
+		t.Error("a deleted aspect is still fulltext-indexed")
 	}
 }
 
@@ -687,11 +855,7 @@ func TestDeleteNodeCascadesAspects(t *testing.T) {
 	st := storage.New(pool)
 
 	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Doomed")
-	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
-		{Key: "Note", Value: "about to vanish"},
-	}); err != nil {
-		t.Fatalf("ReplaceNodeAspects: %v", err)
-	}
+	setAspects(t, st, campaignID, node.ID, storage.NewKGNodeAspect{Key: "Note", Value: "about to vanish"})
 	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}

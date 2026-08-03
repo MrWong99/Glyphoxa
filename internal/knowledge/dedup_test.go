@@ -9,6 +9,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -30,13 +31,13 @@ func TestExistingKnowledge_OwnNodeGathersPendingAndEstablished(t *testing.T) {
 			{ID: ownNodeID, Name: "Gesa", Body: "Gesa liebt Kuchen\nGesa wohnt im Wald"},
 		},
 		pending: []storage.KnowledgeProposal{
-			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
-			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: uuid.New().String(), Subject: "Arturus", Fact: "ist ein Ritter"}), // different target
+			pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
+			pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: uuid.New().String(), Subject: "Arturus", Fact: "ist ein Ritter"}), // different target
 		},
 	}
 	adapter := knowledge.New(store, store)
 
-	w := tool.ProposedWrite{Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "something new"}
+	w := tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "something new"}
 	known, err := adapter.ExistingKnowledge(liveCtx(cid), aid.String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
@@ -62,12 +63,12 @@ func TestExistingKnowledge_CampaignBySubjectName(t *testing.T) {
 			{ID: uuid.New(), Name: "Someone Else", Body: "irrelevant"},
 		},
 		pending: []storage.KnowledgeProposal{
-			pendingRow(cid, tool.ProposedWrite{Kind: "fact", Subject: "the duke", Fact: "is old"}),
+			pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "the duke", Fact: "is old"}),
 		},
 	}
 	adapter := knowledge.New(store, store)
 
-	w := tool.ProposedWrite{Kind: "fact", Subject: "The Duke", Fact: "new fact"}
+	w := tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "The Duke", Fact: "new fact"}
 	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
@@ -91,14 +92,14 @@ func TestExistingKnowledge_UnifiesOwnNodeAndCampaignKeys(t *testing.T) {
 		allNodes: []storage.KGNode{{ID: gesaID, Name: "Gesa"}},
 		pending: []storage.KnowledgeProposal{
 			// An own_node proposal the NPC already made (keyed by node id).
-			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: gesaID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
+			pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: gesaID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
 		},
 	}
 	adapter := knowledge.New(store, store)
 
 	// The Butler now re-proposes the same fact campaign-scoped (no node id, subject
 	// by name) — it must see the NPC's pending row via the unified key.
-	w := tool.ProposedWrite{Kind: "fact", Subject: "Gesa", Fact: "ist die Schwester von Arturus"}
+	w := tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Gesa", Fact: "ist die Schwester von Arturus"}
 	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
@@ -117,7 +118,7 @@ func TestExistingKnowledge_SkipsGMPrivateEstablished(t *testing.T) {
 		allNodes: []storage.KGNode{{ID: secretID, Name: "The Traitor", Body: "is secretly the spy", GMPrivate: true}},
 	}
 	adapter := knowledge.New(store, store)
-	w := tool.ProposedWrite{Kind: "fact", Subject: "The Traitor", Fact: "is secretly the spy"}
+	w := tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "The Traitor", Fact: "is secretly the spy"}
 	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(), w)
 	if err != nil {
 		t.Fatalf("ExistingKnowledge: %v", err)
@@ -130,7 +131,36 @@ func TestExistingKnowledge_SkipsGMPrivateEstablished(t *testing.T) {
 // No active session is a clean error the handler can fail open on.
 func TestExistingKnowledge_NoSessionErrors(t *testing.T) {
 	adapter := knowledge.New(&fakeStore{}, &fakeStore{})
-	if _, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), tool.ProposedWrite{Kind: "fact", Subject: "X", Fact: "y"}); err == nil {
+	if _, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "X", Fact: "y"}); err == nil {
 		t.Error("want error with no active session")
+	}
+}
+
+// TestExistingKnowledge_IgnoresStaleWriteVersion pins the #542 version gate on the
+// dedup read: a pending proposal stamped with an unrecognised write version is
+// UNREADABLE — the approve and review paths both refuse it — so it must not be
+// compared against either. Otherwise a doomed row the GM can only reject would
+// silently suppress a fresh, approvable proposal of the same fact.
+func TestExistingKnowledge_IgnoresStaleWriteVersion(t *testing.T) {
+	cid := uuid.New()
+	ownNodeID := uuid.New()
+	store := &fakeStore{
+		allNodes: []storage.KGNode{{ID: ownNodeID, CampaignID: cid, Name: "Gesa"}},
+		pending: []storage.KnowledgeProposal{
+			pendingRow(cid, tool.ProposedWrite{
+				V: kgvocab.ProposalWriteVersion - 1, Kind: "fact",
+				NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus",
+			}),
+		},
+	}
+	adapter := knowledge.New(store, store)
+
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), uuid.New().String(),
+		tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "x"})
+	if err != nil {
+		t.Fatalf("ExistingKnowledge: %v", err)
+	}
+	if len(known.Pending) != 0 {
+		t.Errorf("pending = %q, want the unreadable row ignored", known.Pending)
 	}
 }

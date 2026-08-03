@@ -282,6 +282,7 @@ export function KnowledgePanel() {
               body: fields.body,
               gmPrivate: fields.gmPrivate,
               aspects: toWireAspects(fields.aspects),
+              knownAspectIds: fields.knownAspectIds,
             });
           } else {
             createNode.mutate(
@@ -699,14 +700,26 @@ function KnowledgeCard({
 // client-only React key: a freshly added row has no server id yet, and reusing the
 // array index as a key made a reorder remount the wrong inputs and lose focus
 // mid-typing.
-type AspectRow = { uid: number; key: string; value: string; gmPrivate: boolean };
+//
+// `id` is the PERSISTED row's id, empty for a row the GM just added. It is sent
+// back on save so the server deletes only the rows this editor actually loaded —
+// which is what stops a save from wiping a fact a proposal approval appended while
+// the editor was open.
+type AspectRow = { uid: number; id: string; key: string; value: string; gmPrivate: boolean };
 
 let nextAspectUid = 0;
-const newAspectRow = (): AspectRow => ({ uid: ++nextAspectUid, key: "", value: "", gmPrivate: false });
+const newAspectRow = (): AspectRow => ({
+  uid: ++nextAspectUid,
+  id: "",
+  key: "",
+  value: "",
+  gmPrivate: false,
+});
 
 function toAspectRows(node: Node | null): AspectRow[] {
   return (node?.aspects ?? []).map((a) => ({
     uid: ++nextAspectUid,
+    id: a.id,
     key: a.key,
     value: a.value,
     gmPrivate: a.gmPrivate,
@@ -825,14 +838,19 @@ type EditorFields = {
   body: string;
   gmPrivate: boolean;
   aspects: AspectRow[];
+  /** The persisted aspect ids this editor loaded — see UpdateNodeRequest.known_aspect_ids. */
+  knownAspectIds: string[];
 };
 
 // toWireAspects drops rows the GM left entirely blank — the editor keeps an empty
 // row around for the next fact, and that convenience must not become a save error.
+// The persisted `id` rides along for display continuity; the authoritative "what
+// this editor had loaded" set is knownAspectIds, sent separately, because a row
+// the GM DELETED is by definition absent from this list.
 function toWireAspects(rows: AspectRow[]) {
   return rows
     .filter((r) => r.key.trim() !== "" || r.value.trim() !== "")
-    .map((r) => ({ id: "", key: r.key.trim(), value: r.value.trim(), gmPrivate: r.gmPrivate }));
+    .map((r) => ({ id: r.id, key: r.key.trim(), value: r.value.trim(), gmPrivate: r.gmPrivate }));
 }
 
 // EntryEditor is the sticky editor card. In create mode it offers the Type select
@@ -860,6 +878,11 @@ function EntryEditor({
   const [body, setBody] = useState(node?.body ?? "");
   const [gmPrivate, setGmPrivate] = useState(node?.gmPrivate ?? false);
   const [aspects, setAspects] = useState<AspectRow[]>(() => toAspectRows(node));
+  // Captured at mount (the editor remounts per entry via its key), NOT at save
+  // time: it must describe what was on screen when the GM started editing.
+  const [knownAspectIds] = useState<string[]>(
+    () => (node?.aspects ?? []).map((a) => a.id).filter((id) => id !== ""),
+  );
 
   const reset = () => {
     setNodeType(NodeType.NOTE);
@@ -870,7 +893,7 @@ function EntryEditor({
   };
   const submit = () => {
     if (name.trim() === "") return;
-    onSubmit({ nodeType, name: name.trim(), body, gmPrivate, aspects }, reset);
+    onSubmit({ nodeType, name: name.trim(), body, gmPrivate, aspects, knownAspectIds }, reset);
   };
 
   return (

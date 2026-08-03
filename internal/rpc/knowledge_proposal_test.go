@@ -338,3 +338,33 @@ func TestListSimilarKnowledge_MissingProposalIsNotFound(t *testing.T) {
 		t.Errorf("code = %v, want NotFound", got)
 	}
 }
+
+// TestListKnowledgeProposals_RejectsOlderWriteVersion pins that a row stored under
+// a PREVIOUS write shape lists as unreadable rather than being reinterpreted under
+// the current one (#542). The `{"garbage":true}` row above reaches the same branch
+// only incidentally (its missing "v" parses as 0), so this covers the real case:
+// a well-formed payload of the wrong vintage.
+func TestListKnowledgeProposals_RejectsOlderWriteVersion(t *testing.T) {
+	t.Parallel()
+	store := newFakeProposalStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	store.pendingProposals = []storage.KnowledgeProposal{{
+		ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Bart", CreatedAt: time.Now(),
+		ProposedWrite: proposalRaw(t, tool.ProposedWrite{
+			V: kgvocab.ProposalWriteVersion - 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark",
+		}),
+	}}
+
+	resp, err := proposalClient(t, store).ListKnowledgeProposals(context.Background(),
+		connect.NewRequest(&managementv1.ListKnowledgeProposalsRequest{}))
+	if err != nil {
+		t.Fatalf("ListKnowledgeProposals: %v", err)
+	}
+	p := resp.Msg.GetProposals()[0]
+	if p.GetFact() != nil || p.GetEdge() != nil || p.GetNode() != nil {
+		t.Errorf("an older-version write was reinterpreted instead of listed unreadable: %+v", p)
+	}
+	if p.GetId() == "" {
+		t.Error("the row must still be listed so the GM can reject it")
+	}
+}

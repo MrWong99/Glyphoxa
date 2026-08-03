@@ -537,11 +537,16 @@ message UpdateNodeRequest {
   string body = 3;
   // gm_private keeps the entry out of every NPC's prompt (#126).
   bool gm_private = 4;
-  // aspects REPLACES the entry's aspects with exactly this list, in this order
-  // (#542) — one save covers add, edit, reorder and delete, and positions stay
-  // dense by construction. An empty list clears them; the body remainder is
-  // unaffected.
+  // aspects REPLACES the entry's aspects with this list, in this order (#542) —
+  // one save covers add, edit, reorder and delete. An empty list clears the ones
+  // this editor knew about; the body remainder is unaffected.
   repeated NodeAspect aspects = 5;
+  // known_aspect_ids are the aspect row ids this editor had LOADED. The server
+  // replaces exactly these; a row that appeared since — a Knowledge Proposal
+  // approval appending a fact while the editor was open — survives the save
+  // instead of being silently wiped. A deleted row is named here and absent from
+  // `aspects`, which is precisely how the server learns it was deleted.
+  repeated string known_aspect_ids = 6;
 }
 
 // UpdateNodeResponse carries the updated Node.

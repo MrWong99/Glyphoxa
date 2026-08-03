@@ -537,5 +537,9 @@ describe("KnowledgePanel", () => {
 
     await waitFor(() => expect(ctx.updateCalls).toHaveLength(1));
     expect(ctx.updateCalls[0].aspects.map((a) => a.key)).toEqual(["Role"]);
+    // Both LOADED ids are named, including the deleted one — that is how the server
+    // learns to remove it while leaving rows it never saw (a proposal approval
+    // landing mid-edit) alone.
+    expect(ctx.updateCalls[0].knownAspectIds.sort()).toEqual(["a1", "a2"]);
   });
 });

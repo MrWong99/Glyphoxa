@@ -756,3 +756,60 @@ func TestNodeAspects_RejectsOversizedRows(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeAspects_KnownIDsScopeTheReplace pins the lost-update guard at the RPC
+// seam (#542): the editor names the rows it LOADED, and the server replaces only
+// those. Deriving the set from the sent rows instead would make deletion
+// impossible, because a deleted row is exactly the one that is absent.
+func TestNodeAspects_KnownIDsScopeTheReplace(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGNodeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Saltmarsh"}
+	client := kgNodeClient(t, store)
+	ctx := context.Background()
+
+	created, err := client.CreateNode(ctx, connect.NewRequest(&managementv1.CreateNodeRequest{
+		NodeType: managementv1.NodeType_NODE_TYPE_NPC,
+		Name:     "Bart",
+		Aspects: []*managementv1.NodeAspect{
+			{Key: "Role", Value: "Innkeeper"},
+			{Key: "Manner", Value: "Grumbles"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	node := created.Msg.GetNode()
+	loaded := node.GetAspects()
+	if len(loaded) != 2 {
+		t.Fatalf("seeded %d aspects, want 2", len(loaded))
+	}
+
+	// A row appears that the editor never saw — as a proposal approval would append.
+	nodeID := uuid.MustParse(node.GetId())
+	store.aspects[nodeID] = append(store.aspects[nodeID], storage.KGNodeAspect{
+		ID: uuid.New(), Position: 2, Key: "Rumour", Value: "Fears the harbourmaster",
+	})
+
+	// The GM deletes "Manner" and saves, naming BOTH loaded ids as known.
+	if _, err := client.UpdateNode(ctx, connect.NewRequest(&managementv1.UpdateNodeRequest{
+		Id:             node.GetId(),
+		Name:           "Bart",
+		Aspects:        []*managementv1.NodeAspect{{Id: loaded[0].GetId(), Key: "Role", Value: "Innkeeper"}},
+		KnownAspectIds: []string{loaded[0].GetId(), loaded[1].GetId()},
+	})); err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+
+	last := store.aspectWrites[len(store.aspectWrites)-1]
+	if len(last.known) != 2 {
+		t.Fatalf("known ids = %v, want both loaded rows so the deleted one is removed", last.known)
+	}
+	keys := []string{}
+	for _, a := range store.aspects[nodeID] {
+		keys = append(keys, a.Key)
+	}
+	if len(keys) != 2 || keys[0] != "Role" || keys[1] != "Rumour" {
+		t.Errorf("aspects = %v, want the deleted Manner gone and the unseen Rumour preserved", keys)
+	}
+}

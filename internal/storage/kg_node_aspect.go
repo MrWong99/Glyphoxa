@@ -3,10 +3,13 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // Knowledge Graph Node Aspect persistence (#542, ADR-0008 third amendment): the
@@ -133,43 +136,107 @@ func (n KGNode) AspectLines(publicOnly bool) []string {
 	return out
 }
 
-// ReplaceNodeAspects rewrites a Node's Aspects to exactly the supplied list, in
-// the supplied order, inside one transaction (#542). Replace-in-full — rather than
-// a per-row diff — is what makes reorder, delete and edit ONE editor save with no
-// client-side identity bookkeeping, and it keeps `position` dense by construction.
+// KGNodeAspectWrite is one editor save of a Node's Aspects (#542). Rows carries
+// the list the GM authored, in their order. Known carries the ids the editor had
+// LOADED — which is what makes the save safe against a concurrent approval.
+//
+// Replace-in-full is the right editor contract (one save covers add, edit, reorder
+// and delete, with no client-side identity bookkeeping), but a naive
+// "delete everything, insert the list" silently destroys an Aspect that a
+// Knowledge Proposal approval appended while the editor was open — the GM approves
+// a fact in one panel, saves the entry in the other, and the approved fact is gone
+// with no trace. Known scopes the delete to rows the editor actually saw, so a row
+// it never knew about survives and lands after the authored list, exactly where an
+// append would have put it.
+type KGNodeAspectWrite struct {
+	Known []uuid.UUID
+	Rows  []NewKGNodeAspect
+}
+
+// ReplaceNodeAspects rewrites a Node's Aspects to the supplied list, preserving
+// rows the caller had not loaded (see [KGNodeAspectWrite]), inside one transaction.
 //
 // The write is scoped to (node_id, campaign_id) like every other KG mutation
 // (#342): a Node in another Campaign matches nothing, so the delete removes
 // nothing and the insert is refused by the composite FK.
 //
-// An empty list clears the Node's Aspects (the Node keeps its free-form body).
-func (s *Store) ReplaceNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID, aspects []NewKGNodeAspect) error {
+// An empty Rows list clears the Aspects the caller knew about (the Node keeps its
+// free-form body).
+func (s *Store) ReplaceNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID, w KGNodeAspectWrite) error {
 	return s.InTx(ctx, func(tx *Store) error {
+		return replaceNodeAspectsTx(ctx, tx, campaignID, nodeID, w)
+	})
+}
+
+// replaceNodeAspectsTx is ReplaceNodeAspects' body, callable from an already-open
+// transaction so a Node save and its Aspect save land atomically.
+func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uuid.UUID, w KGNodeAspectWrite) error {
+	before, err := tx.ListNodeAspects(ctx, campaignID, nodeID)
+	if err != nil {
+		return err
+	}
+
+	// Remove only the rows this caller had loaded. Anything else on the Node arrived
+	// after they read it and is not theirs to delete.
+	if len(w.Known) > 0 {
 		if _, err := tx.db.Exec(ctx,
-			`DELETE FROM kg_node_aspect WHERE node_id = $1 AND campaign_id = $2`,
-			nodeID, campaignID); err != nil {
+			`DELETE FROM kg_node_aspect
+			  WHERE node_id = $1 AND campaign_id = $2 AND id = ANY($3)`,
+			nodeID, campaignID, w.Known); err != nil {
 			return fmt.Errorf("storage: replace node aspects %s: clear: %w", nodeID, err)
 		}
-		for i, a := range aspects {
-			if _, err := tx.db.Exec(ctx,
-				`INSERT INTO kg_node_aspect (node_id, campaign_id, position, key, value, gm_private)
-				 VALUES ($1, $2, $3, $4, $5, $6)`,
-				nodeID, campaignID, i, a.Key, a.Value, a.GMPrivate); err != nil {
-				return fmt.Errorf("storage: replace node aspects %s: insert %d: %w", nodeID, i, err)
-			}
+	}
+
+	// Shift the survivors past the authored list so the new rows keep positions
+	// 0..n-1 and the concurrently-appended ones stay at the end, in their order.
+	if _, err := tx.db.Exec(ctx,
+		`UPDATE kg_node_aspect SET position = position + $3
+		  WHERE node_id = $1 AND campaign_id = $2`,
+		nodeID, campaignID, len(w.Rows)); err != nil {
+		return fmt.Errorf("storage: replace node aspects %s: shift: %w", nodeID, err)
+	}
+
+	for i, a := range w.Rows {
+		if _, err := tx.db.Exec(ctx,
+			`INSERT INTO kg_node_aspect (node_id, campaign_id, position, key, value, gm_private)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			nodeID, campaignID, i, a.Key, a.Value, a.GMPrivate); err != nil {
+			return fmt.Errorf("storage: replace node aspects %s: insert %d: %w", nodeID, i, err)
 		}
-		// A Node's Aspects are part of what the world knows about it, so an Aspect edit
-		// invalidates the row's embedding exactly as a body edit does (#300, ADR-0011):
-		// NULL it so the embedworker re-embeds with the new text and ADR-0052's
-		// similarity hints keep reflecting reality. The updated_at bump also makes the
-		// edit visible to the embedworker's stale-write guard.
+	}
+
+	// A Node's Aspects are part of what the world knows about it, so an Aspect edit
+	// invalidates the row's embedding exactly as a body edit does (#300, ADR-0011):
+	// NULL it so the embedworker re-embeds with the new text and ADR-0052's
+	// similarity hints keep reflecting reality.
+	//
+	// Guarded on an ACTUAL change, mirroring UpdateNode's IS DISTINCT FROM: a save
+	// that touched only the name would otherwise re-embed the whole entry for
+	// nothing, on every keystroke-driven save.
+	if !sameAspects(before, w.Rows) {
 		if _, err := tx.db.Exec(ctx,
 			`UPDATE kg_node SET embedding = NULL, embedding_model = '', updated_at = now()
 			  WHERE id = $1 AND campaign_id = $2`, nodeID, campaignID); err != nil {
 			return fmt.Errorf("storage: replace node aspects %s: invalidate embedding: %w", nodeID, err)
 		}
-		return nil
-	})
+	}
+	return nil
+}
+
+// sameAspects reports whether the authored list is byte-identical to what is
+// already stored — the "nothing to re-embed" test.
+func sameAspects(before []KGNodeAspect, after []NewKGNodeAspect) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for i := range before {
+		if before[i].Key != after[i].Key ||
+			before[i].Value != after[i].Value ||
+			before[i].GMPrivate != after[i].GMPrivate {
+			return false
+		}
+	}
+	return true
 }
 
 // ListNodeAspects returns one Node's Aspects in author order, INCLUDING private
@@ -201,16 +268,39 @@ func (s *Store) ListNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUI
 	return out, nil
 }
 
+// ErrAspectsFull is returned by the approve path when a Node already carries
+// [kgvocab.MaxAspectsPerNode] Aspects. It is a refusal, not a failure: silently
+// exceeding the cap would leave the entry permanently unsaveable in the editor,
+// which validates against the same cap — the GM would be unable to fix even a
+// typo without first deleting rows they never chose to add.
+var ErrAspectsFull = errors.New("storage: node has reached its aspect limit")
+
 // appendNodeAspectTx appends one Aspect to the end of a Node's list inside an open
-// transaction — the Knowledge Proposal approve path (#542, ADR-0052). The position
-// is derived server-side from the current max, so two approvals racing on the same
-// Node cannot collide on a client-chosen index. Returns the number of rows written
-// (0 means the Node vanished mid-transaction; the caller blocks the approval).
+// transaction — the Knowledge Proposal approve path (#542, ADR-0052). Returns the
+// number of rows written; 0 means the Node vanished mid-transaction and the caller
+// blocks the approval.
+//
+// The position is derived server-side from the current max rather than from a
+// client index. Two approvals committing concurrently can still compute the same
+// max and land on equal positions — there is no unique constraint, deliberately,
+// because refusing a GM's approval over a display-order tie would be the worse
+// failure. Ordering stays deterministic regardless: every read sorts by
+// (position, id).
 //
 // The proposed Aspect always lands PUBLIC: an Agent proposes what its character
 // would say out loud, and a secret is a GM authorship act, never an inference from
 // play.
 func appendNodeAspectTx(ctx context.Context, tx *Store, campaignID, nodeID uuid.UUID, key, value string) (int64, error) {
+	var count int
+	if err := tx.db.QueryRow(ctx,
+		`SELECT count(*) FROM kg_node_aspect WHERE node_id = $1 AND campaign_id = $2`,
+		nodeID, campaignID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("storage: append node aspect %s: count: %w", nodeID, err)
+	}
+	if count >= kgvocab.MaxAspectsPerNode {
+		return 0, ErrAspectsFull
+	}
+
 	tag, err := tx.db.Exec(ctx,
 		`INSERT INTO kg_node_aspect (node_id, campaign_id, position, key, value, gm_private)
 		 SELECT $1, $2,
@@ -222,4 +312,62 @@ func appendNodeAspectTx(ctx context.Context, tx *Store, campaignID, nodeID uuid.
 		return 0, fmt.Errorf("storage: append node aspect %s: %w", nodeID, err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// CreateNodeWithAspects creates a Node and its Aspects in ONE transaction (#542).
+// Two statements would leave a created entry with no aspects when the second
+// failed — and the client, seeing only an opaque error, cannot tell whether to
+// retry (duplicating the entry) or not.
+func (s *Store) CreateNodeWithAspects(ctx context.Context, n NewKGNode, aspects []NewKGNodeAspect) (KGNode, error) {
+	var out KGNode
+	err := s.InTx(ctx, func(tx *Store) error {
+		created, err := tx.CreateNode(ctx, n)
+		if err != nil {
+			return err
+		}
+		// A brand-new Node has nothing to preserve, so there is nothing "known".
+		if err := replaceNodeAspectsTx(ctx, tx, n.CampaignID, created.ID,
+			KGNodeAspectWrite{Rows: aspects}); err != nil {
+			return err
+		}
+		saved, err := tx.ListNodeAspects(ctx, n.CampaignID, created.ID)
+		if err != nil {
+			return err
+		}
+		created.Aspects = saved
+		out = created
+		return nil
+	})
+	if err != nil {
+		return KGNode{}, err
+	}
+	return out, nil
+}
+
+// UpdateNodeWithAspects saves a Node's editor fields and its Aspects in ONE
+// transaction (#542), so a save is never half-applied — the editor's name change
+// and its aspect edits are one act to the GM and must be one act to the database.
+// A missing Node yields ErrNotFound with nothing written.
+func (s *Store) UpdateNodeWithAspects(ctx context.Context, u KGNodeUpdate, w KGNodeAspectWrite) (KGNode, error) {
+	var out KGNode
+	err := s.InTx(ctx, func(tx *Store) error {
+		updated, err := tx.UpdateNode(ctx, u)
+		if err != nil {
+			return err
+		}
+		if err := replaceNodeAspectsTx(ctx, tx, u.CampaignID, u.ID, w); err != nil {
+			return err
+		}
+		saved, err := tx.ListNodeAspects(ctx, u.CampaignID, u.ID)
+		if err != nil {
+			return err
+		}
+		updated.Aspects = saved
+		out = updated
+		return nil
+	})
+	if err != nil {
+		return KGNode{}, err
+	}
+	return out, nil
 }

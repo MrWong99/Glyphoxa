@@ -206,6 +206,14 @@ func (tx *Store) applyProposedFact(ctx context.Context, campaignID uuid.UUID, w 
 		key = kgvocab.DefaultAspectKey
 	}
 	rows, err := appendNodeAspectTx(ctx, tx, campaignID, anchor, key, w.Fact)
+	if errors.Is(err, ErrAspectsFull) {
+		// Refuse rather than exceed the cap: an over-full entry would fail EVERY later
+		// editor save (the editor validates the same cap), leaving the GM unable to fix
+		// a typo without first deleting facts they never chose to add.
+		return &ProposalBlockedError{Reason: fmt.Sprintf(
+			"%q already has the maximum number of facts — remove one first, or reject this suggestion",
+			strings.TrimSpace(w.Subject))}
+	}
 	if err != nil {
 		return fmt.Errorf("storage: approve fact: %w", err)
 	}

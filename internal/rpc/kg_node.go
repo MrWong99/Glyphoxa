@@ -35,10 +35,11 @@ type kgNodeStore interface {
 	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
 	// SearchNodes is the ranked fulltext wiki search (#131).
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
-	// ReplaceNodeAspects rewrites a Node's Aspects to exactly the supplied list
-	// (#542); ListNodeAspects reads them back with their assigned ids and positions.
-	ReplaceNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID, aspects []storage.NewKGNodeAspect) error
-	ListNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID) ([]storage.KGNodeAspect, error)
+	// CreateNodeWithAspects and UpdateNodeWithAspects save a Node and its Aspects
+	// ATOMICALLY (#542) — a half-applied save would leave the GM unable to tell
+	// whether a retry duplicates the entry.
+	CreateNodeWithAspects(ctx context.Context, n storage.NewKGNode, aspects []storage.NewKGNodeAspect) (storage.KGNode, error)
+	UpdateNodeWithAspects(ctx context.Context, u storage.KGNodeUpdate, w storage.KGNodeAspectWrite) (storage.KGNode, error)
 }
 
 // toStorageAspects validates and maps the wire Aspect rows onto their storage
@@ -68,19 +69,23 @@ func toStorageAspects(in []*managementv1.NodeAspect) ([]storage.NewKGNodeAspect,
 	return out, nil
 }
 
-// saveAspects replaces a Node's Aspects and reads them back onto the node so the
-// response carries the persisted ids and positions — the editor re-renders from
-// the response, so returning what the client SENT would hide a dropped blank row.
-func (s *kgNodes) saveAspects(ctx context.Context, campaignID uuid.UUID, n *storage.KGNode, aspects []storage.NewKGNodeAspect) error {
-	if err := s.store.ReplaceNodeAspects(ctx, campaignID, n.ID, aspects); err != nil {
-		return err
+// knownAspectIDs parses the aspect ids the CLIENT had loaded. The store deletes
+// only these, so an Aspect appended by a Knowledge Proposal approval while the
+// editor was open survives the save instead of being silently wiped (#542).
+//
+// It is a SEPARATE field from the aspect rows on purpose: a row the GM deleted is
+// absent from the rows and present here, which is exactly how the server learns it
+// was deleted. Deriving the set from the rows would make deletion impossible.
+// Unparsable ids are dropped rather than rejected — a garbage id can only fail to
+// match a row, and refusing the whole save over one would cost the GM their edit.
+func knownAspectIDs(in []string) []uuid.UUID {
+	var out []uuid.UUID
+	for _, raw := range in {
+		if id, err := uuid.Parse(raw); err == nil && id != uuid.Nil {
+			out = append(out, id)
+		}
 	}
-	saved, err := s.store.ListNodeAspects(ctx, campaignID, n.ID)
-	if err != nil {
-		return err
-	}
-	n.Aspects = saved
-	return nil
+	return out
 }
 
 // CreateNode adds a Knowledge Graph Node to the active campaign and returns it. An
@@ -113,25 +118,18 @@ func (s *kgNodes) CreateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	created, err := s.store.CreateNode(ctx, storage.NewKGNode{
+	// The Node and its Aspects land in ONE transaction, so a failure leaves nothing
+	// behind and a retry cannot duplicate the entry.
+	created, err := s.store.CreateNodeWithAspects(ctx, storage.NewKGNode{
 		CampaignID: c.ID,
 		Type:       nodeType,
 		Name:       strings.TrimSpace(m.GetName()),
 		Body:       m.GetBody(),
 		GMPrivate:  m.GetGmPrivate(),
-	})
+	}, aspects)
 	if err != nil {
 		slog.Default().Error("CreateNode: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	// Aspects are written after the Node exists (they reference it). A failure here
-	// leaves a created Node with no aspects rather than rolling back: the entry is
-	// real and the GM re-saves its aspects, which beats losing the entry entirely.
-	if len(aspects) > 0 {
-		if err := s.saveAspects(ctx, c.ID, &created, aspects); err != nil {
-			slog.Default().Error("CreateNode: store aspects failed", "node_id", created.ID, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-		}
 	}
 	return connect.NewResponse(&managementv1.CreateNodeResponse{Node: toProtoNode(created)}), nil
 }
@@ -198,25 +196,21 @@ func (s *kgNodes) UpdateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	updated, err := s.store.UpdateNode(ctx, storage.KGNodeUpdate{
+	// The editor fields and the aspect list are ONE act to the GM, so they are one
+	// transaction here. The aspect write runs on every save — including an empty
+	// list, which is how the GM clears the last aspect.
+	updated, err := s.store.UpdateNodeWithAspects(ctx, storage.KGNodeUpdate{
 		ID:         id,
 		CampaignID: c.ID,
 		Name:       strings.TrimSpace(m.GetName()),
 		Body:       m.GetBody(),
 		GMPrivate:  m.GetGmPrivate(),
-	})
+	}, storage.KGNodeAspectWrite{Known: knownAspectIDs(m.GetKnownAspectIds()), Rows: aspects})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 		}
 		slog.Default().Error("UpdateNode: store update failed", "node_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	// The aspect list is REPLACE-in-full (#542), so it runs on every save — including
-	// an empty list, which is how the GM clears the last aspect. Skipping the call
-	// when the list is empty would make "delete my last aspect" silently impossible.
-	if err := s.saveAspects(ctx, c.ID, &updated, aspects); err != nil {
-		slog.Default().Error("UpdateNode: store aspects failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateNodeResponse{Node: toProtoNode(updated)}), nil

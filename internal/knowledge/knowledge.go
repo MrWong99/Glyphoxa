@@ -323,6 +323,13 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.Propos
 		if err := json.Unmarshal(p.ProposedWrite, &pw); err != nil {
 			continue // a malformed legacy row is not a comparable duplicate
 		}
+		// A row stamped with an unrecognised write version is UNREADABLE, exactly as
+		// the approve and review paths treat it (ADR-0052, #542). Comparing against it
+		// would let a doomed proposal — one the GM can only reject — suppress a fresh,
+		// approvable one.
+		if pw.V != kgvocab.ProposalWriteVersion {
+			continue
+		}
 		if canonicalTargetKey(pw, nameToID) == wantKey {
 			if s := tool.ProposalSalient(pw); s != "" {
 				known.Pending = append(known.Pending, s)

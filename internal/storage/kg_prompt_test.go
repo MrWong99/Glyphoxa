@@ -100,9 +100,11 @@ func TestPromptKG_NeverReturnsPrivateAspects(t *testing.T) {
 	// A PUBLIC innkeeper with a public role and a GM-only secret — the exact case
 	// that used to force the GM to split the character in two.
 	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart the innkeeper")
-	if err := st.ReplaceNodeAspects(ctx, campaignID, bart.ID, []storage.NewKGNodeAspect{
-		{Key: "Role", Value: "Runs the Rusty Anchor"},
-		{Key: "Secret", Value: "Took the smugglers' bribe in Eastmonth", GMPrivate: true},
+	if err := st.ReplaceNodeAspects(ctx, campaignID, bart.ID, storage.KGNodeAspectWrite{
+		Rows: []storage.NewKGNodeAspect{
+			{Key: "Role", Value: "Runs the Rusty Anchor"},
+			{Key: "Secret", Value: "Took the smugglers' bribe in Eastmonth", GMPrivate: true},
+		},
 	}); err != nil {
 		t.Fatalf("ReplaceNodeAspects: %v", err)
 	}

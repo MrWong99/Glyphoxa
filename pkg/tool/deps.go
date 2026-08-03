@@ -49,9 +49,10 @@ type Recapper interface {
 // call proposes to the Knowledge Graph (#300, ADR-0052). It is a tagged union
 // over Kind ("fact", "edge", "node"); the adapter marshals it to the
 // knowledge_proposal.proposed_write jsonb verbatim, so the field set and json
-// tags ARE the on-disk contract. V is the schema version (always 1) so a future
-// shape change is detectable. Fields not part of a Kind stay zero and omitempty
-// keeps them out of the jsonb.
+// tags ARE the on-disk contract. V is the schema version — always
+// [kgvocab.ProposalWriteVersion], currently 2 (#542) — so a shape change is
+// detectable and an older stored row is refused rather than misread. Fields not
+// part of a Kind stay zero and omitempty keeps them out of the jsonb.
 //
 // Per ADR-0052 a proposal is the ONLY effect of the Tool — nothing touches
 // kg_node/kg_edge until the GM approves in PR-b's review surface. A speculative
