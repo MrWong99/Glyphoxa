@@ -1063,6 +1063,8 @@ type fakeOrganizeStore struct {
 	tagErr       error
 	renamedFrom  string
 	renamedTo    string
+	// updateBoardErr forces the atomic board save's failure path.
+	updateBoardErr error
 
 	boards    []storage.KGBoard
 	boardErr  error
@@ -1115,20 +1117,17 @@ func (f *fakeOrganizeStore) CreateBoard(_ context.Context, campaignID uuid.UUID,
 	return b, nil
 }
 
-func (f *fakeOrganizeStore) SetBoardNodes(_ context.Context, _, boardID uuid.UUID, nodeIDs []uuid.UUID) error {
-	for i := range f.boards {
-		if f.boards[i].ID == boardID {
-			f.boards[i].NodeIDs = nodeIDs
-			return nil
-		}
+// UpdateBoard applies the rename and the entry list together, as the real
+// transaction does — the campaignID IS checked here, because a fake that ignores
+// scoping turns every "campaign scoping" assertion into a tautology.
+func (f *fakeOrganizeStore) UpdateBoard(_ context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error {
+	if f.updateBoardErr != nil {
+		return f.updateBoardErr
 	}
-	return storage.ErrNotFound
-}
-
-func (f *fakeOrganizeStore) RenameBoard(_ context.Context, _, id uuid.UUID, name string) error {
 	for i := range f.boards {
-		if f.boards[i].ID == id {
+		if f.boards[i].ID == id && f.boards[i].CampaignID == campaignID {
 			f.boards[i].Name = name
+			f.boards[i].NodeIDs = nodeIDs
 			return nil
 		}
 	}

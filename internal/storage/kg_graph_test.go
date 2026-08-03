@@ -320,6 +320,40 @@ func TestNodeTags(t *testing.T) {
 		t.Errorf("tags after collapsing rename = %v, want 2", after)
 	}
 
+	// A CASE-ONLY rename is the same tag under a tidier name — the commonest
+	// rename a GM makes. It deleted the tag from every entry in the campaign: the
+	// collision sweep's EXISTS was satisfied by each row itself when
+	// lower(from) = lower(to), so every row matched and the UPDATE that followed
+	// found nothing left. Silent, campaign-wide data loss behind a successful call.
+	// The original test only covered from != to, so the suite could not see it.
+	before, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags before case rename: %v", err)
+	}
+	if err := st.RenameTag(ctx, campaignID, "act two", "Act Two"); err != nil {
+		t.Fatalf("RenameTag case-only: %v", err)
+	}
+	afterCase, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags after case rename: %v", err)
+	}
+	if len(afterCase) != len(before) {
+		t.Fatalf("a case-only rename changed the tag count: %d → %d (%v)",
+			len(before), len(afterCase), afterCase)
+	}
+	var casedCount int
+	for _, p := range afterCase {
+		if p.Tag == "Act Two" {
+			casedCount++
+		}
+		if strings.EqualFold(p.Tag, "act two") && p.Tag != "Act Two" {
+			t.Errorf("a tag kept its old casing after the rename: %q", p.Tag)
+		}
+	}
+	if casedCount == 0 {
+		t.Error(`no entry carries "Act Two" after the rename — the tag was deleted`)
+	}
+
 	// An over-long tag is refused before anything is written.
 	if err := st.SetNodeTags(ctx, campaignID, bart.ID,
 		[]string{strings.Repeat("x", storage.MaxTagRunes+1)}); !errors.Is(err, storage.ErrInvalidTag) {

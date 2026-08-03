@@ -31,6 +31,7 @@ import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
 import { NodeTags } from "./NodeTags";
+import { NodeBoards } from "./PrepBoards";
 import { KnowledgeGraph } from "./graph/KnowledgeGraph";
 import { WorldHealthPanel } from "./graph/WorldHealthPanel";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
@@ -1061,6 +1062,7 @@ function EntryEditor({
       </div>
 
       {isEdit && node && <NodeTags nodeID={node.id} />}
+      {isEdit && node && <NodeBoards nodeID={node.id} />}
       {isEdit && node && <NodeRelations node={node} />}
 
       <div className="gx-kg-editor__actions">

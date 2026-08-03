@@ -19,6 +19,82 @@ import { alphaBg, metaOf } from "./knowledgeVocab";
 // Boards never enter a prompt. A board is a shortlist, not ownership: deleting one
 // leaves every entry untouched.
 
+/** invalidateBoards drops the one board read every surface derives from. */
+export function invalidateBoards(queryClient: ReturnType<typeof useQueryClient>): void {
+  void queryClient.invalidateQueries({
+    queryKey: createConnectQueryKey({
+      schema: CampaignService.method.listBoards,
+      cardinality: "finite",
+    }),
+  });
+}
+
+/**
+ * NodeBoards is the "put this on a board" affordance, shown beside an entry's
+ * tags in the editor.
+ *
+ * Without it the board feature is unreachable: PrepBoards can create a board and
+ * remove entries from one, but nothing anywhere could ADD an entry, so every board
+ * was permanently empty and its empty state ("add entries from the Knowledge tab")
+ * described a control that did not exist.
+ *
+ * A board is a shortlist, so membership is a toggle rather than a picker dialog —
+ * the GM is answering "is tonight's session about this?", not filling in a form.
+ */
+export function NodeBoards({ nodeID }: { nodeID: string }) {
+  const queryClient = useQueryClient();
+  const boardsQuery = useQuery(CampaignService.method.listBoards, {});
+  const boards = boardsQuery.data?.boards ?? [];
+
+  const update = useMutation(CampaignService.method.updateBoard, {
+    onSuccess: () => invalidateBoards(queryClient),
+  });
+
+  if (boards.length === 0) return null;
+
+  return (
+    <div className="gx-field gx-kg-tags">
+      <span className="gx-field__label">Boards</span>
+      <span className="gx-field__hint">
+        Shortlists for a session. They never reach an NPC's prompt.
+      </span>
+      <ul className="gx-kg-tags__list">
+        {boards.map((b) => {
+          const on = b.nodeIds.includes(nodeID);
+          return (
+            <li key={b.id}>
+              <button
+                type="button"
+                className="gx-kg-chip"
+                aria-pressed={on}
+                disabled={update.isPending}
+                onClick={() =>
+                  update.mutate({
+                    id: b.id,
+                    name: b.name,
+                    // Built from THIS board's server-provided list, so two entries
+                    // toggled in quick succession cannot drop each other.
+                    nodeIds: on
+                      ? b.nodeIds.filter((x) => x !== nodeID)
+                      : [...b.nodeIds, nodeID],
+                  })
+                }
+              >
+                {b.name}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {update.isError && (
+        <span className="gx-editor__status gx-editor__status--error" role="alert">
+          Couldn't update the board: {update.error.message}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => void }) {
   const queryClient = useQueryClient();
   const boardsQuery = useQuery(CampaignService.method.listBoards, {});
@@ -31,13 +107,7 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
     return m;
   }, [nodesQuery.data]);
 
-  const invalidate = () =>
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listBoards,
-        cardinality: "finite",
-      }),
-    });
+  const invalidate = () => invalidateBoards(queryClient);
 
   const createBoard = useMutation(CampaignService.method.createBoard, { onSuccess: invalidate });
   const updateBoard = useMutation(CampaignService.method.updateBoard, { onSuccess: invalidate });

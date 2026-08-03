@@ -25,6 +25,11 @@ import (
 // MaxTagRunes bounds one tag. A tag is a label, not a sentence.
 const MaxTagRunes = 40
 
+// MaxBoardNameRunes bounds a board name. Tags were capped and board names were
+// not, so a board could carry a megabyte of text that every ListBoards response
+// then had to return.
+const MaxBoardNameRunes = 120
+
 // MaxTagsPerNode bounds how many an entry may carry — enough for real
 // organization, few enough that the chip row stays readable.
 const MaxTagsPerNode = 20
@@ -145,9 +150,30 @@ func (s *Store) RenameTag(ctx context.Context, campaignID uuid.UUID, from, to st
 	if len([]rune(toN)) > MaxTagRunes {
 		return fmt.Errorf("%w: %q is too long (max %d characters)", ErrInvalidTag, toN, MaxTagRunes)
 	}
+	// A CASE-ONLY rename ("act two" → "Act Two") is the same tag, so nothing can
+	// collide with it and the collision sweep below must not run.
+	//
+	// It ran, and it deleted the tag from every entry in the campaign: the DELETE's
+	// EXISTS is satisfied by the row itself when lower(from) = lower(to), so every
+	// row matched, and the UPDATE that followed then found nothing left to rename. A
+	// GM fixing a capitalisation lost the tag campaign-wide, silently, with a
+	// successful response. The original test only covered from ≠ to, so the suite
+	// could not see it.
+	if strings.EqualFold(fromN, toN) {
+		if _, err := s.db.Exec(ctx,
+			`UPDATE kg_node_tag SET tag = $3
+			  WHERE campaign_id = $1 AND lower(tag) = lower($2)`,
+			campaignID, fromN, toN); err != nil {
+			return fmt.Errorf("storage: rename tag: %w", err)
+		}
+		return nil
+	}
+
 	return s.InTx(ctx, func(tx *Store) error {
 		// Drop rows that would collide, then rename the rest — simpler and more
-		// predictable than an upsert dance over a composite primary key.
+		// predictable than an upsert dance over a composite primary key. Safe here
+		// precisely because the case-only branch above already returned: with
+		// lower(from) <> lower(to), a colliding `cur` can never be `old` itself.
 		if _, err := tx.db.Exec(ctx,
 			`DELETE FROM kg_node_tag old
 			  WHERE old.campaign_id = $1 AND lower(old.tag) = lower($2)
@@ -247,6 +273,41 @@ func (s *Store) ListBoards(ctx context.Context, campaignID uuid.UUID) ([]KGBoard
 // remove and reorder are one save, and positions stay dense by construction.
 func (s *Store) SetBoardNodes(ctx context.Context, campaignID, boardID uuid.UUID, nodeIDs []uuid.UUID) error {
 	return s.InTx(ctx, func(tx *Store) error {
+		return tx.setBoardNodesTx(ctx, campaignID, boardID, nodeIDs)
+	})
+}
+
+// UpdateBoard renames a board AND replaces its entries in ONE transaction.
+//
+// The two were separate calls, so a failed entry write (a stale node id, an entry
+// deleted by a concurrent edit) left the board renamed with its old contents and
+// returned an opaque error — a half-applied save the GM has no way to reason
+// about. A board edit is one edit.
+func (s *Store) UpdateBoard(ctx context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("storage: update board: name must not be empty")
+	}
+	if len([]rune(name)) > MaxBoardNameRunes {
+		return fmt.Errorf("%w: a board name is at most %d characters", ErrInvalidTag, MaxBoardNameRunes)
+	}
+	return s.InTx(ctx, func(tx *Store) error {
+		tag, err := tx.db.Exec(ctx,
+			`UPDATE kg_board SET name = $3, updated_at = now() WHERE id = $1 AND campaign_id = $2`,
+			id, campaignID, name)
+		if err != nil {
+			return fmt.Errorf("storage: update board %s: %w", id, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return tx.setBoardNodesTx(ctx, campaignID, id, nodeIDs)
+	})
+}
+
+func (s *Store) setBoardNodesTx(ctx context.Context, campaignID, boardID uuid.UUID, nodeIDs []uuid.UUID) error {
+	tx := s
+	{
 		var exists bool
 		if err := tx.db.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM kg_board WHERE id = $1 AND campaign_id = $2)`,
@@ -261,16 +322,34 @@ func (s *Store) SetBoardNodes(ctx context.Context, campaignID, boardID uuid.UUID
 			boardID, campaignID); err != nil {
 			return fmt.Errorf("storage: set board nodes %s: clear: %w", boardID, err)
 		}
-		if len(nodeIDs) > 0 {
-			pos := make([]int32, len(nodeIDs))
-			for i := range nodeIDs {
+		// Deduped HERE rather than left to ON CONFLICT, so positions stay dense.
+		// Letting the conflict drop a repeat left a gap ([A, A, B] → 0, 2), which
+		// makes the "dense by construction" the ordering relies on merely usually
+		// true.
+		unique := make([]uuid.UUID, 0, len(nodeIDs))
+		seen := make(map[uuid.UUID]struct{}, len(nodeIDs))
+		for _, n := range nodeIDs {
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			unique = append(unique, n)
+		}
+		if len(unique) > 0 {
+			pos := make([]int32, len(unique))
+			for i := range unique {
 				pos[i] = int32(i) //nolint:gosec // a board is a session's shortlist
 			}
 			if _, err := tx.db.Exec(ctx,
 				`INSERT INTO kg_board_node (board_id, node_id, campaign_id, position)
-				 SELECT $1, n, $2, p FROM unnest($3::uuid[], $4::int[]) AS t(n, p)
-				 ON CONFLICT (board_id, node_id) DO NOTHING`,
-				boardID, campaignID, nodeIDs, pos); err != nil {
+				 SELECT $1, n, $2, p FROM unnest($3::uuid[], $4::int[]) AS t(n, p)`,
+				boardID, campaignID, unique, pos); err != nil {
+				// A node id that is not in THIS campaign is refused by the composite FK.
+				// That is the caller naming something absent — a NotFound the client can
+				// act on, not a server fault.
+				if code, ok := pgErrCode(err); ok && code == pgForeignKeyViolation {
+					return ErrNotFound
+				}
 				return fmt.Errorf("storage: set board nodes %s: insert: %w", boardID, err)
 			}
 		}
@@ -280,7 +359,7 @@ func (s *Store) SetBoardNodes(ctx context.Context, campaignID, boardID uuid.UUID
 			return fmt.Errorf("storage: set board nodes %s: touch: %w", boardID, err)
 		}
 		return nil
-	})
+	}
 }
 
 // RenameBoard renames a prep board.

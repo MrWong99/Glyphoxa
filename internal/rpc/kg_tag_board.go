@@ -35,8 +35,10 @@ type kgOrganizeStore interface {
 
 	ListBoards(ctx context.Context, campaignID uuid.UUID) ([]storage.KGBoard, error)
 	CreateBoard(ctx context.Context, campaignID uuid.UUID, name string) (storage.KGBoard, error)
-	SetBoardNodes(ctx context.Context, campaignID, boardID uuid.UUID, nodeIDs []uuid.UUID) error
-	RenameBoard(ctx context.Context, campaignID, id uuid.UUID, name string) error
+	// UpdateBoard is ONE transaction for the rename and the entry list — a board
+	// edit is one edit, and two calls left a failed entry save with the board
+	// already renamed.
+	UpdateBoard(ctx context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error
 	DeleteBoard(ctx context.Context, campaignID, id uuid.UUID) error
 }
 
@@ -190,18 +192,17 @@ func (s *kgOrganize) UpdateBoard(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.RenameBoard(ctx, c.ID, id, name); err != nil {
+	// One call, one transaction. Renaming and re-listing as two writes left a
+	// failed entry save with the board already renamed — a half-applied edit.
+	if err := s.store.UpdateBoard(ctx, c.ID, id, name, nodeIDs); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("board not found"))
+			return nil, connect.NewError(connect.CodeNotFound,
+				errors.New("board or entry not found in this campaign"))
 		}
-		slog.Default().Error("UpdateBoard: rename failed", "board_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	if err := s.store.SetBoardNodes(ctx, c.ID, id, nodeIDs); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("board not found"))
+		if errors.Is(err, storage.ErrInvalidTag) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		slog.Default().Error("UpdateBoard: set entries failed", "board_id", id, "err", err)
+		slog.Default().Error("UpdateBoard: save failed", "board_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 

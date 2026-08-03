@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
@@ -30,12 +30,21 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
   const queryClient = useQueryClient();
   const tagsQuery = useQuery(CampaignService.method.getCampaignTags, {});
   const [draft, setDraft] = useState("");
+  // SetNodeTags is replace-in-full, so the payload is only as good as the list it
+  // was built from. Reading that list straight out of the cache loses tags to the
+  // GM's own typing speed: add A, then add B before A's refetch lands, and B's
+  // payload — built from the pre-A cache — deletes A. `settled` holds the
+  // authoritative list the SERVER last confirmed, so each save builds on the last
+  // one rather than on whatever the cache happens to show.
+  const [settled, setSettled] = useState<string[] | null>(null);
+  useEffect(() => setSettled(null), [nodeID]);
 
   const all = useMemo(() => tagsQuery.data?.entries ?? [], [tagsQuery.data]);
-  const mine = useMemo(
+  const fromServer = useMemo(
     () => all.filter((e) => e.nodeId === nodeID).map((e) => e.tag),
     [all, nodeID],
   );
+  const mine = settled ?? fromServer;
   // The campaign's vocabulary, for autocomplete — deduped case-insensitively so
   // "Act two" and "act two" offer once.
   const vocabulary = useMemo(() => {
@@ -48,10 +57,18 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
   }, [all]);
 
   const save = useMutation(CampaignService.method.setNodeTags, {
-    onSuccess: () => invalidateTags(queryClient),
+    // The response carries what actually landed (normalized, deduped) — that, not
+    // the request, is what the next save must build on.
+    onSuccess: (res) => {
+      setSettled(res.tags);
+      invalidateTags(queryClient);
+    },
   });
 
-  const setTags = (tags: string[]) => save.mutate({ nodeId: nodeID, tags });
+  const setTags = (tags: string[]) => {
+    setSettled(tags);
+    save.mutate({ nodeId: nodeID, tags });
+  };
   const add = () => {
     const t = draft.trim();
     if (t === "") return;
