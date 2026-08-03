@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -98,7 +100,7 @@ func TestRejectKnowledgeProposal(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "note", Name: "Rumor", Body: "x",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "Rumor", Body: "x",
 	})
 
 	if err := st.RejectKnowledgeProposal(ctx, campaignID, id); err != nil {
@@ -144,15 +146,22 @@ func TestApproveFactViaNodeID(t *testing.T) {
 	}
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("ApproveKnowledgeProposal: %v", err)
 	}
 
-	want := "An innkeeper.\n\nHe fears the dark."
-	if got := nodeBody(t, st, campaignID, node.ID); got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	// #542: approval appends an ASPECT row; the free-form body is left untouched.
+	if got := nodeBody(t, st, campaignID, node.ID); got != "An innkeeper." {
+		t.Errorf("body = %q, want the untouched original — a fact lands as an aspect now", got)
+	}
+	aspects := nodeAspects(t, st, campaignID, node.ID)
+	if len(aspects) != 1 || aspects[0].Value != "He fears the dark." {
+		t.Fatalf("aspects = %+v, want one row carrying the approved fact", aspects)
+	}
+	if aspects[0].Key == "" || aspects[0].GMPrivate {
+		t.Errorf("approved aspect = %+v, want a non-empty key and public visibility", aspects[0])
 	}
 	if pendingIDs(t, st, campaignID)[id] {
 		t.Error("approved proposal still pending")
@@ -192,18 +201,18 @@ func TestApproveFactViaSubject(t *testing.T) {
 
 	// Case-insensitive + trimmed subject resolves; blank body → fact alone.
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "  neverWINTER ", Fact: "A cold city.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "  neverWINTER ", Fact: "A cold city.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("Approve (subject): %v", err)
 	}
-	if got := nodeBody(t, st, campaignID, loc.ID); got != "A cold city." {
-		t.Errorf("body = %q, want %q", got, "A cold city.")
+	if got := nodeAspects(t, st, campaignID, loc.ID); len(got) != 1 || got[0].Value != "A cold city." {
+		t.Errorf("aspects = %+v, want the approved fact as one aspect row", got)
 	}
 
 	// Unknown subject → blocked, row stays pending, KG untouched.
 	unknownID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Waterdeep", Fact: "A big city.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Waterdeep", Fact: "A big city.",
 	})
 	err = st.ApproveKnowledgeProposal(ctx, campaignID, unknownID)
 	var blocked *storage.ProposalBlockedError
@@ -225,7 +234,7 @@ func TestApproveFactViaSubject(t *testing.T) {
 		t.Fatalf("CreateNode ring2: %v", err)
 	}
 	ambID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Ring", Fact: "It is gold.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Ring", Fact: "It is gold.",
 	})
 	err = st.ApproveKnowledgeProposal(ctx, campaignID, ambID)
 	if !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "multiple entries named") {
@@ -252,7 +261,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Happy: Bart resides_in Inn (resides_in → Location, valid).
 	okID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, okID); err != nil {
 		t.Fatalf("approve valid edge: %v", err)
@@ -266,7 +275,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Duplicate: same (from,to,type) again → blocked.
 	dupID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, dupID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "already exists") {
 		t.Errorf("approve duplicate: got %v, want already-exists blocked", err)
@@ -277,7 +286,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Matrix violation: resides_in → Faction is invalid.
 	badID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Guild",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Guild",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, badID); !errors.As(err, &blocked) {
 		t.Errorf("approve matrix violation: got %v, want blocked", err)
@@ -285,7 +294,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Missing target: no entry named "Nowhere".
 	missID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "knows", Target: "Nowhere",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "knows", Target: "Nowhere",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, missID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "no wiki entry named") {
 		t.Errorf("approve missing target: got %v, want no-entry blocked", err)
@@ -293,7 +302,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Dangling node_id: a syntactically-valid uuid that no longer exists.
 	danglingID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: uuid.New().String(), Subject: "Ghost", Relation: "knows", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: uuid.New().String(), Subject: "Ghost", Relation: "knows", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, danglingID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "no longer exists") {
 		t.Errorf("approve dangling node_id: got %v, want dangling blocked", err)
@@ -310,7 +319,7 @@ func TestApproveNode(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "faction", Name: "Zhentarim", Body: "A shadowy network.",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "faction", Name: "Zhentarim", Body: "A shadowy network.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("approve node: %v", err)
@@ -329,14 +338,16 @@ func TestApproveNode(t *testing.T) {
 		t.Errorf("created node wrong: %+v", created)
 	}
 
-	// v≠1 → unreadable, blocked, stays pending.
+	// An UNRECOGNISED write version → unreadable, blocked, stays pending. Pinned
+	// against ProposalWriteVersion rather than a literal so the bump that made
+	// aspects the fact payload (#542) could not silently make this case pass.
 	badID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 2, Kind: "node", NodeType: "note", Name: "Future", Body: "y",
+		V: kgvocab.ProposalWriteVersion + 1, Kind: "node", NodeType: "note", Name: "Future", Body: "y",
 	})
 	err := st.ApproveKnowledgeProposal(ctx, campaignID, badID)
 	var blocked *storage.ProposalBlockedError
 	if !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "unreadable") {
-		t.Errorf("approve v!=1: got %v, want unreadable blocked", err)
+		t.Errorf("approve unknown write version: got %v, want unreadable blocked", err)
 	}
 	if !pendingIDs(t, st, campaignID)[badID] {
 		t.Error("unreadable proposal must stay pending")
@@ -353,7 +364,7 @@ func TestApproveDoubleIsNotFound(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "note", Name: "Once", Body: "x",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "Once", Body: "x",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("first approve: %v", err)
@@ -371,7 +382,7 @@ func TestListPendingCarriesAgentName(t *testing.T) {
 	st := storage.New(pool)
 	butler := seedButlerAgent(t, st, campaignID)
 
-	fileProposal(t, st, campaignID, butler, tool.ProposedWrite{V: 1, Kind: "node", NodeType: "note", Name: "n", Body: "b"})
+	fileProposal(t, st, campaignID, butler, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "n", Body: "b"})
 	ps, err := st.ListPendingKnowledgeProposals(ctx, campaignID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -487,7 +498,7 @@ func TestApproveFactSubjectDeletedBeforeApprove(t *testing.T) {
 		t.Fatalf("CreateNode: %v", err)
 	}
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
 	})
 	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
@@ -556,4 +567,396 @@ func unitVec(axis int) []float32 {
 	v := make([]float32, 768)
 	v[axis] = 1
 	return v
+}
+
+// nodeAspects reads one Node's Aspects back through the GM-facing read.
+func nodeAspects(t *testing.T, st *storage.Store, campaignID, id uuid.UUID) []storage.KGNodeAspect {
+	t.Helper()
+	aspects, err := st.ListNodeAspects(context.Background(), campaignID, id)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	return aspects
+}
+
+// TestApproveRejectsStaleWriteVersion pins the #542 version gate: a proposal
+// stored under the OLD write shape is refused as unreadable rather than
+// reinterpreted under the new one. That is the whole reason ProposalWriteVersion
+// exists — a v1 fact was "append this prose to the body", and silently landing it
+// as an aspect row would put words in the GM's wiki under a shape nobody wrote.
+func TestApproveRejectsStaleWriteVersion(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeNPC, Name: "Bart", Body: "An innkeeper.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+
+	stale := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion - 1, Kind: "fact",
+		NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
+	})
+	err = st.ApproveKnowledgeProposal(ctx, campaignID, stale)
+	var blocked *storage.ProposalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("approve stale-version proposal: got %v, want ProposalBlockedError", err)
+	}
+	if !strings.Contains(blocked.Reason, "unreadable") {
+		t.Errorf("reason = %q, want the unreadable-proposal message", blocked.Reason)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("stale proposal wrote %d aspects; it must write nothing", len(got))
+	}
+	if got := nodeBody(t, st, campaignID, node.ID); got != "An innkeeper." {
+		t.Errorf("body = %q, want untouched", got)
+	}
+	if !pendingIDs(t, st, campaignID)[stale] {
+		t.Error("blocked proposal must stay pending so the GM can reject it")
+	}
+}
+
+// setAspects models one editor save from scratch: the GM replaces whatever was on
+// screen with this list, so every supplied row is new and every loaded row is known.
+func setAspects(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID, rows ...storage.NewKGNodeAspect) {
+	t.Helper()
+	if err := st.ReplaceNodeAspects(context.Background(), campaignID, nodeID,
+		storage.KGNodeAspectWrite{Known: loadedAspectIDs(t, st, campaignID, nodeID), Rows: rows}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+}
+
+// loadedAspectIDs is what an open editor would have on screen.
+func loadedAspectIDs(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID) []uuid.UUID {
+	t.Helper()
+	loaded, err := st.ListNodeAspects(context.Background(), campaignID, nodeID)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	known := make([]uuid.UUID, 0, len(loaded))
+	for _, a := range loaded {
+		known = append(known, a.ID)
+	}
+	return known
+}
+
+// TestReplaceNodeAspectsIsIdempotent pins the other half of the concurrency story.
+// Bounding the delete to "rows the editor loaded" fixes the lost update, but if a
+// save also ROTATED every row's id, a second save from a stale client — a second
+// tab, or a save after a background refetch failed — would match nothing, delete
+// nothing, and insert the whole list again. That turns a silent overwrite into
+// silent duplication, which is worse. Rows are updated in place, so re-saving the
+// same state is a no-op.
+func TestReplaceNodeAspectsIsIdempotent(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Innkeeper"},
+		storage.NewKGNodeAspect{Key: "Manner", Value: "Grumbles"},
+	)
+	first := nodeAspects(t, st, campaignID, node.ID)
+	if len(first) != 2 {
+		t.Fatalf("seeded %d aspects, want 2", len(first))
+	}
+
+	// One stale snapshot, replayed twice — a second tab saving the same state.
+	stale := storage.KGNodeAspectWrite{
+		Known: []uuid.UUID{first[0].ID, first[1].ID},
+		Rows: []storage.NewKGNodeAspect{
+			{ID: first[0].ID, Key: "Role", Value: "Runs the Rusty Anchor"},
+			{ID: first[1].ID, Key: "Manner", Value: "Grumbles"},
+		},
+	}
+	for i := range 2 {
+		if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, stale); err != nil {
+			t.Fatalf("ReplaceNodeAspects (save %d): %v", i+1, err)
+		}
+	}
+
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 {
+		t.Fatalf("aspects = %+v, want 2 — a replayed save duplicated the list", got)
+	}
+	if got[0].ID != first[0].ID || got[1].ID != first[1].ID {
+		t.Errorf("row ids rotated across saves (%v → %v); a stale client would then duplicate everything",
+			[]uuid.UUID{first[0].ID, first[1].ID}, []uuid.UUID{got[0].ID, got[1].ID})
+	}
+	if got[0].Value != "Runs the Rusty Anchor" {
+		t.Errorf("aspect[0] = %+v, want the edit applied in place", got[0])
+	}
+}
+
+// TestReplaceNodeAspectsCapCountsSurvivors pins the cap against the path the first
+// fix missed: the authored list fits on its own, but a concurrently approved fact
+// pushes the total over. Silently exceeding it would leave the entry unsaveable
+// forever, since the editor validates the same cap.
+func TestReplaceNodeAspectsCapCountsSurvivors(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Nearly full")
+	rows := make([]storage.NewKGNodeAspect, 0, kgvocab.MaxAspectsPerNode)
+	for i := range kgvocab.MaxAspectsPerNode - 1 {
+		rows = append(rows, storage.NewKGNodeAspect{Key: "k", Value: fmt.Sprintf("v%d", i)})
+	}
+	setAspects(t, st, campaignID, node.ID, rows...)
+	known := loadedAspectIDs(t, st, campaignID, node.ID)
+
+	// An approval lands the last free slot while the editor is open.
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Nearly full", AspectKey: "Rumour", Fact: "one more",
+	})
+	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
+		t.Fatalf("ApproveKnowledgeProposal: %v", err)
+	}
+
+	// The GM adds one row: their list fits, but with the survivor it would not.
+	over := append(append([]storage.NewKGNodeAspect(nil), rows...),
+		storage.NewKGNodeAspect{Key: "k", Value: "mine"})
+	err := st.ReplaceNodeAspects(ctx, campaignID, node.ID,
+		storage.KGNodeAspectWrite{Known: known, Rows: over})
+	if !errors.Is(err, storage.ErrAspectsFull) {
+		t.Fatalf("save past the cap: got %v, want ErrAspectsFull", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != kgvocab.MaxAspectsPerNode {
+		t.Errorf("aspect count = %d, want the cap %d held with nothing written",
+			len(got), kgvocab.MaxAspectsPerNode)
+	}
+}
+
+// TestReplaceNodeAspects covers the editor's save path: the authored order becomes
+// dense positions, a second save rewrites (reorder + edit + delete in one), an
+// empty list clears, and the write is campaign-scoped.
+func TestReplaceNodeAspects(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+		storage.NewKGNodeAspect{Key: "Manner", Value: "Grumbles"},
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took a bribe", GMPrivate: true},
+	)
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 3 {
+		t.Fatalf("got %d aspects, want 3", len(got))
+	}
+	for i, a := range got {
+		if a.Position != i {
+			t.Errorf("aspect %d position = %d, want dense %d", i, a.Position, i)
+		}
+	}
+	if got[0].Key != "Role" || !got[2].GMPrivate {
+		t.Errorf("aspects did not round-trip in order with their privacy: %+v", got)
+	}
+
+	// One save covers reorder, edit and delete together.
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took a bribe in Eastmonth", GMPrivate: true},
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+	)
+	got = nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 || got[0].Key != "Secret" || got[0].Value != "Took a bribe in Eastmonth" || got[1].Key != "Role" {
+		t.Fatalf("rewrite = %+v, want the reordered/edited pair with Manner deleted", got)
+	}
+
+	// Another campaign cannot clear this Node's aspects.
+	_, _, otherCampaign := seedCampaign(t, dsn)
+	if err := st.ReplaceNodeAspects(ctx, otherCampaign, node.ID, storage.KGNodeAspectWrite{}); err != nil {
+		t.Fatalf("cross-campaign ReplaceNodeAspects should be a no-op, got: %v", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 2 {
+		t.Errorf("a cross-campaign write left %d aspects; the scope must refuse it", len(got))
+	}
+
+	// Empty list clears, and the free-form body survives.
+	setAspects(t, st, campaignID, node.ID)
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("clear left %d aspects", len(got))
+	}
+}
+
+// TestReplaceNodeAspectsKeepsUnseenRows is the lost-update pin: an editor save
+// must not destroy an Aspect a Knowledge Proposal approval appended while the
+// editor was open. The GM approves a fact in one panel and saves the entry in the
+// other; before this guard the approved fact vanished with no trace, and the
+// approval had already reported success.
+func TestReplaceNodeAspectsKeepsUnseenRows(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, node.ID, storage.NewKGNodeAspect{Key: "Role", Value: "Innkeeper"})
+
+	// The editor loads what is on screen NOW.
+	loaded, err := st.ListNodeAspects(ctx, campaignID, node.ID)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	known := []uuid.UUID{loaded[0].ID}
+
+	// Meanwhile, an approval appends a fact the editor never saw.
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Bart", AspectKey: "Rumour", Fact: "Fears the harbourmaster.",
+	})
+	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
+		t.Fatalf("ApproveKnowledgeProposal: %v", err)
+	}
+
+	// The GM now saves the editor, having edited only the row they had.
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, storage.KGNodeAspectWrite{
+		Known: known,
+		Rows:  []storage.NewKGNodeAspect{{Key: "Role", Value: "Runs the Rusty Anchor"}},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 {
+		t.Fatalf("aspects = %+v, want the edited row PLUS the approved one", got)
+	}
+	if got[0].Key != "Role" || got[0].Value != "Runs the Rusty Anchor" {
+		t.Errorf("aspect[0] = %+v, want the GM's edit at the front", got[0])
+	}
+	if got[1].Key != "Rumour" {
+		t.Errorf("aspect[1] = %+v, want the concurrently approved fact preserved at the end", got[1])
+	}
+}
+
+// TestApproveFactRefusesWhenAspectsFull pins the cap symmetry: the approve path
+// refuses at MaxAspectsPerNode rather than pushing the entry past a limit the
+// EDITOR also enforces — which would leave the GM unable to save that entry at all
+// until they deleted facts they never chose to add.
+func TestApproveFactRefusesWhenAspectsFull(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Crowded")
+	full := make([]storage.NewKGNodeAspect, 0, kgvocab.MaxAspectsPerNode)
+	for i := range kgvocab.MaxAspectsPerNode {
+		full = append(full, storage.NewKGNodeAspect{Key: "k", Value: fmt.Sprintf("v%d", i)})
+	}
+	setAspects(t, st, campaignID, node.ID, full...)
+
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Crowded", AspectKey: "One", Fact: "too many",
+	})
+	err := st.ApproveKnowledgeProposal(ctx, campaignID, id)
+	var blocked *storage.ProposalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("approve into a full node: got %v, want ProposalBlockedError", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != kgvocab.MaxAspectsPerNode {
+		t.Errorf("aspect count = %d, want the cap %d held", len(got), kgvocab.MaxAspectsPerNode)
+	}
+	if !pendingIDs(t, st, campaignID)[id] {
+		t.Error("a refused approval must stay pending")
+	}
+}
+
+// TestAspectsAreFulltextSearchable is the regression pin for the biggest hazard in
+// moving facts out of kg_node.body: kg_node.fts is a GENERATED column over
+// name + body, so without the aspect_text sync every fact approved after this
+// slice would be unfindable by both the GM wiki search and the Butler's kg_query.
+//
+// It also pins the privacy half: a prompt-facing search must not MATCH on a
+// gm_private aspect, or returning the entry would leak the secret through the hit
+// itself even though the payload correctly withholds the text.
+func TestAspectsAreFulltextSearchable(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	view := st.PromptKG()
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, bart.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Runs the Rusty Anchor"},
+		storage.NewKGNodeAspect{Key: "Secret", Value: "Took the smugglers bribe", GMPrivate: true},
+	)
+
+	// A public aspect is findable from BOTH sides — nothing about the entry's name
+	// or body mentions the anchor.
+	gm, err := st.SearchNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	if nodeIDSet(gm)[bart.ID] != 1 {
+		t.Error("GM search cannot find a public aspect's text")
+	}
+	pub, err := view.SearchPublicNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchPublicNodes: %v", err)
+	}
+	if nodeIDSet(pub)[bart.ID] != 1 {
+		t.Error("prompt-facing search cannot find a public aspect's text — approved facts are invisible")
+	}
+
+	// The GM can find their own secret; a prompt-facing search must not, not even
+	// as a hit with the text withheld.
+	gmSecret, err := st.SearchNodes(ctx, campaignID, "smugglers", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes (secret): %v", err)
+	}
+	if nodeIDSet(gmSecret)[bart.ID] != 1 {
+		t.Error("GM search cannot find a private aspect's text")
+	}
+	leaked, err := view.SearchPublicNodes(ctx, campaignID, "smugglers", 10)
+	if err != nil {
+		t.Fatalf("SearchPublicNodes (secret): %v", err)
+	}
+	if nodeIDSet(leaked)[bart.ID] != 0 {
+		t.Error("prompt-facing search MATCHED a gm_private aspect — the hit itself leaks the secret")
+	}
+
+	// Deleting an aspect withdraws it from the index too.
+	setAspects(t, st, campaignID, bart.ID)
+	after, err := st.SearchNodes(ctx, campaignID, "anchor", 10)
+	if err != nil {
+		t.Fatalf("SearchNodes (after clear): %v", err)
+	}
+	if nodeIDSet(after)[bart.ID] != 0 {
+		t.Error("a deleted aspect is still fulltext-indexed")
+	}
+}
+
+// TestDeleteNodeCascadesAspects pins that a Node delete reaps its Aspects through
+// the composite FK, so no orphan row survives its entry.
+func TestDeleteNodeCascadesAspects(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Doomed")
+	setAspects(t, st, campaignID, node.ID, storage.NewKGNodeAspect{Key: "Note", Value: "about to vanish"})
+	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("%d aspect rows outlived their node", len(got))
+	}
 }

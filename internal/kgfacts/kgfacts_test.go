@@ -326,3 +326,101 @@ func TestFacts_BudgetTimeout_DegradedNil(t *testing.T) {
 		t.Errorf("budget timeout must count one degraded read: %v", m.outcomes)
 	}
 }
+
+// TestFacts_RendersPublicAspects pins the #542 rendering contract: a Node's
+// public Aspects render as "- Key: Value" lines between the header and the
+// free-form body remainder, in their stored order.
+func TestFacts_RendersPublicAspects(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Bart",
+		Body: "Wipes the same glass all evening.",
+		Aspects: []storage.KGNodeAspect{
+			{Position: 0, Key: "Role", Value: "Runs the Rusty Anchor"},
+			{Position: 1, Key: "Manner", Value: "Grumbles about the harbourmaster"},
+		},
+	}}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	want := "### Bart (NPC)\n" +
+		"- Role: Runs the Rusty Anchor\n" +
+		"- Manner: Grumbles about the harbourmaster\n\n" +
+		"Wipes the same glass all evening."
+	if len(facts) != 1 || facts[0] != want {
+		t.Errorf("fact = %q,\nwant %q", facts, want)
+	}
+}
+
+// TestFacts_SkipsPrivateAspects is the renderer half of the per-Aspect privacy
+// guarantee (#542). The storage seam already filters gm_private Aspects in SQL —
+// this pins that the renderer ALSO refuses to emit one, so a future read that
+// forgets the flag cannot quietly ship a GM secret into a prompt.
+func TestFacts_SkipsPrivateAspects(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Bart",
+		Aspects: []storage.KGNodeAspect{
+			{Position: 0, Key: "Role", Value: "Runs the Rusty Anchor"},
+			{Position: 1, Key: "Secret", Value: "Took the smugglers' bribe", GMPrivate: true},
+		},
+	}}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	if strings.Contains(facts[0], "bribe") || strings.Contains(facts[0], "Secret") {
+		t.Errorf("private aspect reached the prompt: %q", facts[0])
+	}
+	if !strings.Contains(facts[0], "Runs the Rusty Anchor") {
+		t.Errorf("public aspect missing — the node lost its public facts with its secret: %q", facts[0])
+	}
+}
+
+// TestFacts_AspectsRespectFactBudget pins #542's budget AC: a Node carrying many
+// long Aspects is truncated to the SAME per-fact bound a long body is, so aspects
+// cannot expand one entry past MaxFactChars and blow the block budget.
+func TestFacts_AspectsRespectFactBudget(t *testing.T) {
+	camp := uuid.New()
+	var aspects []storage.KGNodeAspect
+	for i := range 40 {
+		aspects = append(aspects, storage.KGNodeAspect{
+			Position: i, Key: "Fact", Value: strings.Repeat("é", 200),
+		})
+	}
+	nodes := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Overstuffed",
+		Body: "and a body too", Aspects: aspects,
+	}}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	_, content, _ := strings.Cut(facts[0], "\n")
+	if got := len([]rune(content)); got != kgfacts.MaxFactChars+1 {
+		t.Errorf("composed content = %d runes, want %d + ellipsis", got, kgfacts.MaxFactChars)
+	}
+	if len(facts[0]) > kgfacts.MaxBlockChars {
+		t.Errorf("one fact = %d bytes, past the whole block budget %d", len(facts[0]), kgfacts.MaxBlockChars)
+	}
+}
+
+// TestFacts_NoAspectsRendersUnchanged pins the compatibility half of #542: an
+// entry with no Aspects renders byte-identically to before the slice, so the
+// retained free-form body is genuinely unaffected.
+func TestFacts_NoAspectsRendersUnchanged(t *testing.T) {
+	camp := uuid.New()
+	nodes := &fakeNodes{nodes: []storage.KGNode{
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "The Bell", Body: "It tolls at dusk."},
+	}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 1 || facts[0] != "### The Bell (Note)\nIt tolls at dusk." {
+		t.Errorf("fact = %q, want the pre-aspect rendering unchanged", facts)
+	}
+}

@@ -18,10 +18,39 @@
 package kgvocab
 
 // ProposalWriteVersion is the schema version stamped onto every ProposedWrite
-// ("v":1, ADR-0052), so a later shape change is detectable on the stored jsonb.
-// The create path stamps it; the approve and review paths reject a row whose
-// version differs as unreadable.
-const ProposalWriteVersion = 1
+// (ADR-0052), so a shape change is detectable on the stored jsonb. The create
+// path stamps it; the approve and review paths reject a row whose version differs
+// as UNREADABLE — never reinterpreting it under the current shape.
+//
+// v2 (#542): a kind=fact proposal now names an ASPECT — a (key, value) row on the
+// target Node — instead of a prose blob appended to the Node's body. Approving is
+// therefore "append this row", not "the GM hand-rewrites a paragraph". Pending v1
+// rows do not silently change meaning: they fail the version check and the GM
+// rejects them, which is the behaviour this constant exists to provide.
+const ProposalWriteVersion = 2
+
+// Aspect bounds (#542, ADR-0008 third amendment). An Aspect is one ordered
+// (key, value) row on a Node carrying its own gm_private flag; these caps bound
+// what one Node can contribute to a prompt and what one proposal can carry, and
+// are shared by the Tool create path, the RPC editor path and the renderer so no
+// side can admit a row another side would reject.
+const (
+	// MaxAspectKeyRunes caps an Aspect's key ("Role", "Manner", "Secret").
+	MaxAspectKeyRunes = 60
+	// MaxAspectValueRunes caps an Aspect's value. It matches the proposal prose cap,
+	// so a fact that was proposable as prose stays proposable as an Aspect.
+	MaxAspectValueRunes = 2000
+	// MaxAspectsPerNode caps how many Aspects one Node may carry. The renderer's
+	// per-fact truncation already bounds the PROMPT, so this is a storage-hygiene
+	// bound: it keeps one entry's editor and its bundle section finite.
+	MaxAspectsPerNode = 50
+)
+
+// DefaultAspectKey is the key stamped on a kind=fact proposal whose author named
+// no aspect. Models routinely omit optional fields, and refusing the call would
+// lose the NPC's memory over a labelling detail — so the payload always carries a
+// non-empty key, and the GM relabels it at review time if it deserves better.
+const DefaultAspectKey = "Fact"
 
 // Proposal kinds (ADR-0052): the tagged-union discriminator of a ProposedWrite.
 // fact/edge may be proposed own_node or campaign; node (a brand-new wiki entry)

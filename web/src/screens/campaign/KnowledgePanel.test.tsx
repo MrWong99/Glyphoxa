@@ -100,6 +100,7 @@ function mockTransport(
           name: req.name,
           body: req.body,
           gmPrivate: req.gmPrivate,
+          aspects: req.aspects,
         });
         nodes.push(node);
         return create(CreateNodeResponseSchema, { node });
@@ -110,6 +111,7 @@ function mockTransport(
         node.name = req.name;
         node.body = req.body;
         node.gmPrivate = req.gmPrivate;
+        node.aspects = req.aspects;
         return create(UpdateNodeResponseSchema, { node });
       },
       deleteNode: (req) => {
@@ -447,5 +449,97 @@ describe("KnowledgePanel", () => {
     ]);
     expect(await screen.findByText("Bart")).toBeInTheDocument();
     expect(screen.getByText("Linked agent")).toBeInTheDocument();
+  });
+
+  it("authors, reorders and privately marks aspects, sending them on create (#542)", async () => {
+    const ctx = renderPanel([]);
+    await screen.findByLabelText("Name");
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Bart the innkeeper" },
+    });
+
+    // Two facts, authored in the editor's aspect rows.
+    fireEvent.click(screen.getByRole("button", { name: "Add fact" }));
+    fireEvent.change(screen.getByLabelText("Fact 1 label"), { target: { value: "Role" } });
+    fireEvent.change(screen.getByLabelText("Fact 1 text"), {
+      target: { value: "Runs the Rusty Anchor" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add fact" }));
+    fireEvent.change(screen.getByLabelText("Fact 2 label"), { target: { value: "Secret" } });
+    fireEvent.change(screen.getByLabelText("Fact 2 text"), {
+      target: { value: "Took the smugglers' bribe" },
+    });
+
+    // Only the second fact is GM-only — the entry itself stays public. That split
+    // is the whole point of #542.
+    fireEvent.click(screen.getByRole("button", { name: "Make fact 2 GM private" }));
+    expect(screen.getByRole("button", { name: "Make fact 2 public" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add entry" }));
+
+    await waitFor(() => expect(ctx.createCalls).toHaveLength(1));
+    const sent = ctx.createCalls[0];
+    expect(sent.gmPrivate).toBe(false);
+    expect(sent.aspects.map((a) => [a.key, a.value, a.gmPrivate])).toEqual([
+      ["Role", "Runs the Rusty Anchor", false],
+      ["Secret", "Took the smugglers' bribe", true],
+    ]);
+  });
+
+  it("reorders aspects and drops blank rows before saving (#542)", async () => {
+    const ctx = renderPanel([]);
+    await screen.findByLabelText("Name");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bart" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add fact" }));
+    fireEvent.change(screen.getByLabelText("Fact 1 label"), { target: { value: "Role" } });
+    fireEvent.change(screen.getByLabelText("Fact 1 text"), { target: { value: "Innkeeper" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add fact" }));
+    fireEvent.change(screen.getByLabelText("Fact 2 label"), { target: { value: "Manner" } });
+    fireEvent.change(screen.getByLabelText("Fact 2 text"), { target: { value: "Grumbles" } });
+    // An untouched trailing row: the editor keeps one for convenience and it must
+    // not become a save error.
+    fireEvent.click(screen.getByRole("button", { name: "Add fact" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Move fact 2 up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add entry" }));
+
+    await waitFor(() => expect(ctx.createCalls).toHaveLength(1));
+    expect(ctx.createCalls[0].aspects.map((a) => a.key)).toEqual(["Manner", "Role"]);
+  });
+
+  it("loads an entry's aspects into the editor and replaces them in full on save (#542)", async () => {
+    const ctx = renderPanel([
+      create(NodeSchema, {
+        id: "n1",
+        campaignId: "c1",
+        nodeType: NodeType.NPC,
+        name: "Bart",
+        aspects: [
+          { id: "a1", key: "Role", value: "Innkeeper", gmPrivate: false },
+          { id: "a2", key: "Secret", value: "Bribed", gmPrivate: true },
+        ],
+      }),
+    ]);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Bart" }));
+
+    expect(await screen.findByLabelText("Fact 1 label")).toHaveValue("Role");
+    expect(screen.getByLabelText("Fact 2 text")).toHaveValue("Bribed");
+
+    // Deleting the secret must reach the wire as the replacement list, so a
+    // removed fact is genuinely gone rather than silently retained.
+    fireEvent.click(screen.getByRole("button", { name: "Remove fact 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save entry" }));
+
+    await waitFor(() => expect(ctx.updateCalls).toHaveLength(1));
+    expect(ctx.updateCalls[0].aspects.map((a) => a.key)).toEqual(["Role"]);
+    // Both LOADED ids are named, including the deleted one — that is how the server
+    // learns to remove it while leaving rows it never saw (a proposal approval
+    // landing mid-edit) alone.
+    expect(ctx.updateCalls[0].knownAspectIds.sort()).toEqual(["a1", "a2"]);
   });
 });

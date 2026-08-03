@@ -63,15 +63,24 @@ func (s *Store) searchNodes(ctx context.Context, campaignID uuid.UUID, query str
 	if tsq == "" {
 		return nil, nil
 	}
-	privacy := ""
+	// ONE publicOnly flag drives all three privacy decisions (#542), so they cannot
+	// drift apart: which Nodes may match, which tsvector they match against, and
+	// which Aspects come back.
+	//
+	// The vector matters as much as the payload. fts includes gm_private aspect
+	// text; fts_public does not. A prompt-facing search against the GM vector would
+	// return "Bart" for a query about the bribe he secretly took — leaking the
+	// secret through the HIT itself even though the returned aspects correctly
+	// withhold it.
+	privacy, vector := "", "fts"
 	if publicOnly {
-		privacy = " AND NOT gm_private"
+		privacy, vector = " AND NOT gm_private", "fts_public"
 	}
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
+		`SELECT `+kgNodeColumnsAspects(publicOnly)+`
 		   FROM kg_node, to_tsquery('simple', $2) q
-		  WHERE campaign_id = $1 AND fts @@ q`+privacy+`
-		  ORDER BY ts_rank(fts, q) DESC, updated_at DESC, id
+		  WHERE campaign_id = $1 AND `+vector+` @@ q`+privacy+`
+		  ORDER BY ts_rank(`+vector+`, q) DESC, updated_at DESC, id
 		  LIMIT $3`, campaignID, tsq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("storage: search kg nodes for campaign %s: %w", campaignID, err)
@@ -80,7 +89,7 @@ func (s *Store) searchNodes(ctx context.Context, campaignID uuid.UUID, query str
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan kg node search row: %w", err)
 		}

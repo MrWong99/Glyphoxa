@@ -450,6 +450,21 @@ enum NodeType {
   NODE_TYPE_NOTE = 7;
 }
 
+// NodeAspect is one ordered (key, value) fact on a Node, carrying its OWN
+// gm_private flag (#542, ADR-0008 third amendment) — so an NPC keeps its public
+// facts and loses only its secret, instead of the whole entry being hidden.
+message NodeAspect {
+  // id is the aspect row's UUID; empty on a row the client has not saved yet.
+  string id = 1;
+  // key is the short label the fact is filed under ("Role", "Manner", "Secret").
+  string key = 2;
+  // value is the fact itself.
+  string value = 3;
+  // gm_private keeps THIS fact out of every NPC's prompt, while the rest of the
+  // node stays public.
+  bool gm_private = 4;
+}
+
 // Node is the wire representation of a Knowledge Graph Node — a typed wiki entry
 // in one campaign (ADR-0008 v1.0). gm_private hides it from every NPC's Hot
 // Context (#126).
@@ -473,6 +488,9 @@ message Node {
   // agent_id is the optional NPC-Node ↔ Character NPC Agent link (#132): the
   // "voiced by" cast Agent's UUID, empty when unlinked or the Node is not an NPC.
   string agent_id = 9;
+  // aspects is the node's ordered per-fact visibility layer (#542). On a GM read
+  // it carries private aspects too; a prompt-facing read never returns them.
+  repeated NodeAspect aspects = 10;
 }
 
 // CreateNodeRequest is the Knowledge panel's "Add entry" payload. The campaign is
@@ -486,6 +504,9 @@ message CreateNodeRequest {
   string body = 3;
   // gm_private keeps the entry out of every NPC's prompt (#126).
   bool gm_private = 4;
+  // aspects is the entry's ordered (key, value) facts, each with its own privacy
+  // (#542). The server assigns positions from this list's order.
+  repeated NodeAspect aspects = 5;
 }
 
 // CreateNodeResponse carries the created Node.
@@ -516,6 +537,16 @@ message UpdateNodeRequest {
   string body = 3;
   // gm_private keeps the entry out of every NPC's prompt (#126).
   bool gm_private = 4;
+  // aspects REPLACES the entry's aspects with this list, in this order (#542) —
+  // one save covers add, edit, reorder and delete. An empty list clears the ones
+  // this editor knew about; the body remainder is unaffected.
+  repeated NodeAspect aspects = 5;
+  // known_aspect_ids are the aspect row ids this editor had LOADED. The server
+  // replaces exactly these; a row that appeared since — a Knowledge Proposal
+  // approval appending a fact while the editor was open — survives the save
+  // instead of being silently wiped. A deleted row is named here and absent from
+  // `aspects`, which is precisely how the server learns it was deleted.
+  repeated string known_aspect_ids = 6;
 }
 
 // UpdateNodeResponse carries the updated Node.
@@ -644,8 +675,12 @@ message ProposedFact {
   // subject is the target Node's name (the fallback resolution key when node_id is
   // empty; also the display label).
   string subject = 2;
-  // fact is the sentence to append to the Node's body.
+  // fact is the statement to record — the VALUE of the aspect row approval
+  // appends to the Node (#542).
   string fact = 3;
+  // aspect_key is the short label the fact is filed under ("Role", "Rumour", …).
+  // Always non-empty on a v2 proposal.
+  string aspect_key = 4;
 }
 
 // ProposedEdge is a remember_knowledge proposal to create a typed directional

@@ -181,13 +181,23 @@ func (a *Adapter) SearchFacts(ctx context.Context, query string, limit int) ([]t
 
 // toFacts projects storage Nodes into storage-free [tool.KGFact]s, mapping the
 // Node type onto its GM-facing label here (so pkg/tool needs no storage enum).
+//
+// The Body carries the Node's public Aspects ahead of its free-form remainder
+// (#542). A GM-approved fact now lands as an Aspect row, so reading `body` alone
+// would make the Butler's kg_query blind to everything approved since this slice —
+// the facts it is most likely to be asked about. The Aspects reaching here are
+// already public-only: they came through the [PromptKG] seam.
 func toFacts(nodes []storage.KGNode) []tool.KGFact {
 	out := make([]tool.KGFact, 0, len(nodes))
 	for _, n := range nodes {
+		body := strings.TrimSpace(n.Body)
+		if lines := n.AspectLines(true); len(lines) > 0 {
+			body = strings.TrimSpace(strings.Join(lines, "\n") + "\n\n" + body)
+		}
 		out = append(out, tool.KGFact{
 			Name: n.Name,
 			Type: typeLabel(n.Type),
-			Body: n.Body,
+			Body: body,
 		})
 	}
 	return out
@@ -295,7 +305,12 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.Propos
 	var known tool.KnownForTarget
 	if id, ok := strings.CutPrefix(wantKey, "id:"); ok {
 		if n, ok := idToNode[id]; ok && !n.GMPrivate {
-			known.Established = bodyLines(n.Body)
+			// A GM-approved fact now lands as an Aspect row (#542), so established facts
+			// live in BOTH places: the Aspect values and the free-form body remainder.
+			// publicOnly=true is mandatory here — a matched established fact is quoted
+			// back to the model in the Tool result, so a private Aspect matched here would
+			// leak a GM secret through the dedup echo.
+			known.Established = append(n.AspectValues(true), bodyLines(n.Body)...)
 		}
 	}
 
@@ -307,6 +322,13 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.Propos
 		var pw tool.ProposedWrite
 		if err := json.Unmarshal(p.ProposedWrite, &pw); err != nil {
 			continue // a malformed legacy row is not a comparable duplicate
+		}
+		// A row stamped with an unrecognised write version is UNREADABLE, exactly as
+		// the approve and review paths treat it (ADR-0052, #542). Comparing against it
+		// would let a doomed proposal — one the GM can only reject — suppress a fresh,
+		// approvable one.
+		if pw.V != kgvocab.ProposalWriteVersion {
+			continue
 		}
 		if canonicalTargetKey(pw, nameToID) == wantKey {
 			if s := tool.ProposalSalient(pw); s != "" {

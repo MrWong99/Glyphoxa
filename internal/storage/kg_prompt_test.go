@@ -4,6 +4,7 @@ package storage_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -80,5 +81,79 @@ func TestPromptKG_NeverReturnsGMPrivate(t *testing.T) {
 	}
 	if nodeIDSet(gmHits)[secret.ID] != 1 {
 		t.Errorf("GM-facing SearchNodes no longer sees the gm_private node — the seam must filter, not the table")
+	}
+}
+
+// TestPromptKG_NeverReturnsPrivateAspects is the #542 seam pin, the per-Aspect
+// sibling of TestPromptKG_NeverReturnsGMPrivate. Aspects exist precisely so a
+// PUBLIC Node can hold a private fact — which means the whole-Node filter above
+// cannot protect it, and the guarantee has to be proven separately at the same
+// seam. Both prompt-facing reads are driven against a public Node carrying one
+// public and one private Aspect.
+func TestPromptKG_NeverReturnsPrivateAspects(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	view := st.PromptKG()
+
+	// A PUBLIC innkeeper with a public role and a GM-only secret — the exact case
+	// that used to force the GM to split the character in two.
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart the innkeeper")
+	if err := st.ReplaceNodeAspects(ctx, campaignID, bart.ID, storage.KGNodeAspectWrite{
+		Rows: []storage.NewKGNodeAspect{
+			{Key: "Role", Value: "Runs the Rusty Anchor"},
+			{Key: "Secret", Value: "Took the smugglers' bribe in Eastmonth", GMPrivate: true},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+	agentID := linkAgent(t, st, campaignID, bart.ID, "Bart")
+
+	assertNoPrivateAspect := func(op string, nodes []storage.KGNode, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		var sawPublic bool
+		for _, n := range nodes {
+			for _, a := range n.Aspects {
+				if a.GMPrivate {
+					t.Errorf("%s leaked gm_private aspect %q on node %q through the prompt seam", op, a.Key, n.Name)
+				}
+				if strings.Contains(a.Value, "bribe") {
+					t.Errorf("%s returned the seeded secret aspect through node %q", op, n.Name)
+				}
+				if a.Key == "Role" {
+					sawPublic = true
+				}
+			}
+		}
+		if !sawPublic {
+			t.Errorf("%s dropped the PUBLIC aspect too — the node must keep its public facts", op)
+		}
+	}
+
+	facts, err := view.AgentNodeFacts(ctx, agentID)
+	assertNoPrivateAspect("AgentNodeFacts", facts, err)
+	hits, err := view.SearchPublicNodes(ctx, campaignID, "innkeeper", 10)
+	assertNoPrivateAspect("SearchPublicNodes", hits, err)
+
+	// Contrast: the GM-facing read still carries the private Aspect, so the filter
+	// is proven to live in the seam rather than in the table.
+	gm, err := st.ListNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	var sawSecret bool
+	for _, n := range gm {
+		for _, a := range n.Aspects {
+			if a.GMPrivate && strings.Contains(a.Value, "bribe") {
+				sawSecret = true
+			}
+		}
+	}
+	if !sawSecret {
+		t.Error("GM-facing ListNodes no longer sees the private aspect — the seam must filter, not the table")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -117,9 +118,10 @@ func TestRememberKnowledge_OwnNodeProposal_RealDB(t *testing.T) {
 		t.Fatalf("proposed_write jsonb: %v (%s)", err, p.ProposedWrite)
 	}
 	want := tool.ProposedWrite{
-		V: 1, Kind: "fact", NodeID: nodeID.String(),
-		Subject: "Bartholomew", // handler OVERWROTE the LLM subject with the own Node's name
-		Fact:    "I brew the finest ale in the realm",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: nodeID.String(),
+		Subject:   "Bartholomew", // handler OVERWROTE the LLM subject with the own Node's name
+		AspectKey: kgvocab.DefaultAspectKey,
+		Fact:      "I brew the finest ale in the realm",
 	}
 	if w != want {
 		t.Errorf("proposed_write = %+v, want %+v", w, want)

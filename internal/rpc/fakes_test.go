@@ -473,10 +473,104 @@ type fakeKGNodeStore struct {
 	searchCalls         int
 	searchNodesCampaign uuid.UUID
 	nodeSearchErr       error
+
+	// aspects is the per-Node Aspect store (#542), keyed by node id; aspectWrites
+	// records every ReplaceNodeAspects call so a test can assert the replace-in-full
+	// contract (including the empty list that clears the last row).
+	aspects           map[uuid.UUID][]storage.KGNodeAspect
+	aspectWrites      []replaceAspectsCall
+	aspectsCampaign   uuid.UUID
+	nodeAspectSaveErr error
+}
+
+// replaceAspectsCall is one recorded ReplaceNodeAspects invocation.
+type replaceAspectsCall struct {
+	nodeID  uuid.UUID
+	aspects []storage.NewKGNodeAspect
+	known   []uuid.UUID
 }
 
 func newFakeKGNodeStore() *fakeKGNodeStore {
-	return &fakeKGNodeStore{fakeActive: newFakeActive()}
+	return &fakeKGNodeStore{
+		fakeActive: newFakeActive(),
+		aspects:    map[uuid.UUID][]storage.KGNodeAspect{},
+	}
+}
+
+// saveAspects mirrors the store's semantics: a sent row keeps its id and is
+// updated in place, a row the caller loaded but no longer sends is deleted, and a
+// row the caller never loaded (one a proposal approval appended meanwhile)
+// survives after the authored list.
+func (f *fakeKGNodeStore) saveAspects(nodeID uuid.UUID, w storage.KGNodeAspectWrite) {
+	existing := map[uuid.UUID]bool{}
+	for _, a := range f.aspects[nodeID] {
+		existing[a.ID] = true
+	}
+	sent := map[uuid.UUID]bool{}
+	for _, r := range w.Rows {
+		if r.ID != uuid.Nil && existing[r.ID] {
+			sent[r.ID] = true
+		}
+	}
+	removed := map[uuid.UUID]bool{}
+	for _, id := range w.Known {
+		if existing[id] && !sent[id] {
+			removed[id] = true
+		}
+	}
+
+	saved := make([]storage.KGNodeAspect, 0, len(w.Rows))
+	for i, r := range w.Rows {
+		id := r.ID
+		if id == uuid.Nil || !existing[id] {
+			id = uuid.New()
+		}
+		saved = append(saved, storage.KGNodeAspect{
+			ID: id, Position: i, Key: r.Key, Value: r.Value, GMPrivate: r.GMPrivate,
+		})
+	}
+	for _, a := range f.aspects[nodeID] {
+		if sent[a.ID] || removed[a.ID] {
+			continue
+		}
+		a.Position = len(saved)
+		saved = append(saved, a)
+	}
+	if len(saved) == 0 {
+		delete(f.aspects, nodeID)
+		return
+	}
+	f.aspects[nodeID] = saved
+}
+
+func (f *fakeKGNodeStore) CreateNodeWithAspects(ctx context.Context, n storage.NewKGNode, in []storage.NewKGNodeAspect) (storage.KGNode, error) {
+	created, err := f.CreateNode(ctx, n)
+	if err != nil {
+		return storage.KGNode{}, err
+	}
+	f.aspectsCampaign = n.CampaignID
+	f.aspectWrites = append(f.aspectWrites, replaceAspectsCall{nodeID: created.ID, aspects: in})
+	if f.nodeAspectSaveErr != nil {
+		return storage.KGNode{}, f.nodeAspectSaveErr
+	}
+	f.saveAspects(created.ID, storage.KGNodeAspectWrite{Rows: in})
+	created.Aspects = f.aspects[created.ID]
+	return created, nil
+}
+
+func (f *fakeKGNodeStore) UpdateNodeWithAspects(ctx context.Context, u storage.KGNodeUpdate, w storage.KGNodeAspectWrite) (storage.KGNode, error) {
+	updated, err := f.UpdateNode(ctx, u)
+	if err != nil {
+		return storage.KGNode{}, err
+	}
+	f.aspectsCampaign = u.CampaignID
+	f.aspectWrites = append(f.aspectWrites, replaceAspectsCall{nodeID: u.ID, aspects: w.Rows, known: w.Known})
+	if f.nodeAspectSaveErr != nil {
+		return storage.KGNode{}, f.nodeAspectSaveErr
+	}
+	f.saveAspects(u.ID, w)
+	updated.Aspects = f.aspects[u.ID]
+	return updated, nil
 }
 
 func (f *fakeKGNodeStore) CreateNode(_ context.Context, n storage.NewKGNode) (storage.KGNode, error) {

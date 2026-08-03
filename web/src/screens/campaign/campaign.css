@@ -275,6 +275,68 @@
   margin: 0;
 }
 
+/* Per-aspect editor (#542): one row per fact, each with its own privacy. */
+.gx-kg-aspects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-aspects__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-aspect {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-xs);
+}
+
+/* A GM-only fact is marked on the row itself, so the one line that never reaches
+   the table is obvious while scanning a public entry. */
+.gx-kg-aspect[data-private] {
+  border-left: 2px solid var(--accent, #ffcf5a);
+  padding-left: var(--spacing-xs);
+}
+
+.gx-kg-aspect__fields {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex: 1;
+  min-width: 0;
+}
+
+.gx-kg-aspect__key {
+  flex: 0 0 8rem;
+  min-width: 0;
+}
+
+.gx-kg-aspect__value {
+  flex: 1;
+  min-width: 0;
+}
+
+.gx-kg-aspect__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+@media (max-width: 640px) {
+  .gx-kg-aspect__fields {
+    flex-direction: column;
+  }
+
+  .gx-kg-aspect__key {
+    flex: 1;
+  }
+}
+
 .gx-kg-editor__switch {
   display: flex;
   flex-direction: column;
