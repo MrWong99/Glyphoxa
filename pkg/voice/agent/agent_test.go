@@ -1796,3 +1796,92 @@ func TestReplyStream_BargeDuringGeneration_NoFallback(t *testing.T) {
 		t.Errorf("OnError called %d times on a barge cancel, want 0", onErrCalls)
 	}
 }
+
+// TestLocationBlock_RidesTheVolatileTailOnly is the ADR-0059 pin for the party
+// location (#540): the clause appears in the trailing volatile system message and
+// NEVER in the stable prefix. The party moves; a per-turn-changing line in the
+// cache-stable system prompt would break prefix caching on every move — the exact
+// cost ADR-0059 was written to avoid.
+func TestLocationBlock_RidesTheVolatileTailOnly(t *testing.T) {
+	prov := &fakeProvider{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		Location:    locationFunc(func(context.Context, string) string { return "You are in the Rusty Anchor, in Saltmarsh" }),
+	})
+
+	r.Reply()(t.Context(), routed("bart", "Where are we?"))
+
+	msgs := prov.lastRequest(t).Messages
+	if len(msgs) < 2 {
+		t.Fatalf("got %d messages, want a stable prefix and a volatile tail", len(msgs))
+	}
+	if strings.Contains(msgs[0].Text, "Rusty Anchor") {
+		t.Error("the location leaked into the cache-stable system prompt")
+	}
+	tail := msgs[len(msgs)-1]
+	if !strings.Contains(tail.Text, "Rusty Anchor") {
+		t.Errorf("tail = %q, want the location clause in the trailing message", tail.Text)
+	}
+}
+
+// TestLocationBlock_AbsentWhenUnset pins the byte-identical guarantee: with no
+// marker set the prompt is exactly what it was before this slice.
+func TestLocationBlock_AbsentWhenUnset(t *testing.T) {
+	withProv := &fakeProvider{reply: "Aye."}
+	withR := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    withProv,
+		Synthesizer: stubSynth{},
+		Location:    locationFunc(func(context.Context, string) string { return "" }),
+	})
+	withR.Reply()(t.Context(), routed("bart", "Hello."))
+
+	baseProv := &fakeProvider{reply: "Aye."}
+	baseR := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    baseProv,
+		Synthesizer: stubSynth{},
+	})
+	baseR.Reply()(t.Context(), routed("bart", "Hello."))
+
+	got := withProv.lastRequest(t).Messages
+	want := baseProv.lastRequest(t).Messages
+	if len(got) != len(want) {
+		t.Fatalf("an empty location changed the message count: %d vs %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i].Text != want[i].Text {
+			t.Errorf("message %d differs with an empty location:\n got %q\nwant %q", i, got[i].Text, want[i].Text)
+		}
+	}
+}
+
+// TestLocationBlock_Bounded pins the hard cap. The whole justification for putting
+// location in a prompt at all is that it is ONE short clause; unbounded it would
+// become another block competing with the fact budget.
+func TestLocationBlock_Bounded(t *testing.T) {
+	prov := &fakeProvider{reply: "Aye."}
+	long := strings.Repeat("é", agent.MaxLocationChars+200)
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		Location:    locationFunc(func(context.Context, string) string { return long }),
+	})
+
+	r.Reply()(t.Context(), routed("bart", "Where are we?"))
+
+	tail := prov.lastRequest(t).Messages
+	text := tail[len(tail)-1].Text
+	_, clause, _ := strings.Cut(text, "## Where you are right now\n\n")
+	if got := len([]rune(clause)); got > agent.MaxLocationChars+1 {
+		t.Errorf("location clause = %d runes, want at most %d + ellipsis", got, agent.MaxLocationChars)
+	}
+}
+
+// locationFunc adapts a func to the LocationRecaller seam.
+type locationFunc func(ctx context.Context, agentID string) string
+
+func (f locationFunc) Location(ctx context.Context, agentID string) string { return f(ctx, agentID) }

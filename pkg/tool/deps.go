@@ -32,6 +32,9 @@ type Deps struct {
 	// Execute reports it is unavailable in this mode (the grant-editor RPC and
 	// voice bench build a zero Deps).
 	Recap Recapper
+	// Spatial backs locate_entity / whats_nearby (#539, ADR-0060). nil ⇒ the Tools
+	// are registered but report unavailable.
+	Spatial SpatialReader
 }
 
 // Recapper is the narrow read seam the recap Tool needs (#372, #297 decision 5):
@@ -76,6 +79,15 @@ type ProposedWrite struct {
 	Name      string `json:"name,omitempty"`
 	Body      string `json:"body,omitempty"`
 }
+
+// Spatial is the read seam the locate_entity / whats_nearby Tools consult
+// (#539, ADR-0060). *worldmap.SpatialAdapter satisfies it; a nil Spatial on
+// [Deps] registers the Tools (the grant editor's catalog is mode-independent) but
+// reports them unavailable at Execute.
+//
+// It is deliberately a READ-ONLY seam with no write method anywhere on it: these
+// Tools are structurally incapable of changing the world, which is why they run
+// inline rather than deferring to turn commit (ADR-0030).
 
 // KGNodeRef is a storage-free handle to an Agent's own linked Node (ADR-0008
 // NPC-Node↔Agent link): its id (the anchor a Character NPC's own_node proposals

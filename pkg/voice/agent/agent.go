@@ -132,6 +132,20 @@ type FactsRecaller interface {
 	Facts(ctx context.Context, agentID string) []string
 }
 
+// LocationRecaller fills the party-location slot of the volatile Hot Context tail
+// (#540, ADR-0059 note): one short clause naming where the party is, for Agents
+// whose linked Node is on the current Map.
+//
+// Like the other tail recallers it NEVER errors and never stalls the turn — an
+// unavailable read yields "" and the block is dropped, leaving the prompt
+// byte-identical to the pre-marker path. A nil recaller disables the slot.
+type LocationRecaller interface {
+	// Location returns the location clause for agentID, or "" when no marker is
+	// set, the Agent is not on the current Map, or the marker points at something
+	// the table must not be told about.
+	Location(ctx context.Context, agentID string) string
+}
+
 // DirectiveRecaller fills the GM-directive slot of the volatile Hot Context tail
 // (ADR-0059): the private steering note a GM issued for one Agent (the /direct
 // Regie-track — "Bart lies about the key"), injected into that Agent's prompt
@@ -224,6 +238,13 @@ type Config struct {
 	// directive's budget, the speculative Draft/React paths only peek. nil
 	// disables the slot — the prompt is byte-identical to the pre-directive path.
 	Directive DirectiveRecaller
+
+	// Location fills the party-location slot of the volatile Hot Context tail
+	// (#540, ADR-0059 note): one bounded clause naming where the party is. It sits
+	// in the tail and NEVER in the stable prefix — the party moves, and a
+	// per-turn-changing line in the cache-stable system prompt would break prefix
+	// caching on every move. nil disables the slot.
+	Location LocationRecaller
 
 	// SpeakerName resolves a route's SpeakerID (the ADR-0050 Speaker Lane
 	// attribution) to the human speaker's display name, so the utterance enters
@@ -498,9 +519,10 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 	directive := r.directive(ctx, true)
+	location := r.location(ctx)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts, directive)
+	messages := r.hotContextLocked(mem, facts, directive, location)
 	r.mu.Unlock()
 
 	reply, err := r.engine.Generate(ctx, messages)
@@ -576,11 +598,12 @@ func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (str
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 	directive := r.directive(ctx, false)
+	location := r.location(ctx)
 
 	msgs := make([]llm.Message, 0, len(history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), directiveBlock(directive))
+	msgs = appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), directiveBlock(directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -842,10 +865,11 @@ func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadNam
 	// after the Persona, invalidating the whole history for the provider's
 	// prefix cache. In the tail it sits with the other per-turn content —
 	// before the directive, which keeps the strongest recency slot.
+	location := r.location(ctx)
 	msgs := make([]llm.Message, 0, len(history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), crossTalkInstruction, directiveBlock(directive))
+	msgs = appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), crossTalkInstruction, directiveBlock(directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -938,9 +962,10 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 	directive := r.directive(ctx, true)
+	location := r.location(ctx)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts, directive)
+	messages := r.hotContextLocked(mem, facts, directive, location)
 	r.mu.Unlock()
 
 	// TextSink installed (the Butler, #299): decide modality on the WHOLE answer, so
@@ -1261,6 +1286,16 @@ func (r *Replier) directive(ctx context.Context, consume bool) string {
 	return strings.TrimSpace(r.cfg.Directive.Directive(ctx, r.cfg.Persona.AgentID, consume))
 }
 
+// location resolves this turn's party-location clause (#540). Like the other tail
+// slots it degrades silently to "" — a spatial read is never worth stalling or
+// failing a turn over.
+func (r *Replier) location(ctx context.Context) string {
+	if r.cfg.Location == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.cfg.Location.Location(ctx, r.cfg.Persona.AgentID))
+}
+
 // hotContextLocked assembles the Hot Context message list for one call: the
 // STABLE system prompt (Persona + roster + audio-markup instruction), the recent
 // Transcript (the bounded history), and — LAST — the volatile tail message
@@ -1276,11 +1311,11 @@ func (r *Replier) directive(ctx context.Context, consume bool) string {
 // the ENTIRE history missed the cache each turn. With the volatile content
 // trailing the append-only history, the whole conversation up to the previous
 // turn stays cache-hittable — lower TTFT, half-priced cached tokens.
-func (r *Replier) hotContextLocked(mem Memory, facts []string, directive string) []llm.Message {
+func (r *Replier) hotContextLocked(mem Memory, facts []string, directive, location string) []llm.Message {
 	msgs := make([]llm.Message, 0, len(r.history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, r.history...)
-	return appendVolatileTail(msgs, factsBlock(facts), memoryBlock(mem), directiveBlock(directive))
+	return appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), directiveBlock(directive))
 }
 
 // appendVolatileTail appends the volatile Hot Context tail — the given blocks
@@ -1407,6 +1442,32 @@ func memoryBlock(mem Memory) string {
 		}
 	}
 	return b.String()
+}
+
+// MaxLocationChars bounds the location clause hard. The whole justification for
+// putting location in the prompt at all is that it is ONE short clause; without a
+// bound it would become another uncapped block competing with the fact budget,
+// which is the thing #539 exists to avoid.
+const MaxLocationChars = 160
+
+// locationBlock renders the party-location slot of the volatile tail (#540,
+// ADR-0059 note). It is ONE clause — "You are in the Rusty Anchor, in Saltmarsh's
+// harbour district" — rune-capped and replaced per turn.
+//
+// It rides the VOLATILE tail, never the stable prefix: the party moves, and a
+// per-turn-changing line in the cache-stable system prompt would break prefix
+// caching on every move — the exact cost ADR-0059 was written to avoid. An empty
+// location yields "" so the block is dropped entirely (the byte-identical
+// guarantee).
+func locationBlock(location string) string {
+	if location == "" {
+		return ""
+	}
+	r := []rune(location)
+	if len(r) > MaxLocationChars {
+		location = string(r[:MaxLocationChars]) + "…"
+	}
+	return "## Where you are right now\n\n" + location
 }
 
 // directiveBlock renders the GM-directive slot of the volatile tail (ADR-0059):
