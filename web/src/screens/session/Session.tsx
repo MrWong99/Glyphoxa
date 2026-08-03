@@ -15,6 +15,7 @@ import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
 import { HighlightsStrip } from "./HighlightsStrip";
+import { PrepBoards } from "../campaign/PrepBoards";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
@@ -561,6 +562,17 @@ export function Session() {
           />
         </section>
       )}
+      {/* Session prep boards (#543): the GM's own running order for tonight —
+          the handful of entries this session is actually about, in the order they
+          expect to need them. It belongs HERE rather than only in the Knowledge
+          tab, because at the table the board IS the session, and the alternative
+          is scrolling a wiki mid-scene. */}
+      <section className="gx-session__boards">
+        <h2 className="gx-section-title">Tonight's board</h2>
+        {/* No onOpenNode: at the table the board is a REFERENCE — the names and
+            the order — not a way to start editing the wiki mid-scene. */}
+        <PrepBoards />
+      </section>
       </div>
 
       <VoicePanel active={active} mutedIds={data?.mutedAgentIds ?? []} />
