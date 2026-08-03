@@ -41,8 +41,19 @@ CREATE INDEX kg_node_fts_public_idx ON kg_node USING gin (fts_public);
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION kg_node_sync_aspect_text() RETURNS trigger AS $$
 DECLARE
-    target uuid := COALESCE(NEW.node_id, OLD.node_id);
+    new_id uuid := NULL;
+    old_id uuid := NULL;
 BEGIN
+    -- NEW is unassigned on DELETE and OLD on INSERT, so each is read only where it
+    -- exists; `IN (NULL, x)` then matches exactly x.
+    IF TG_OP <> 'DELETE' THEN new_id := NEW.node_id; END IF;
+    IF TG_OP <> 'INSERT' THEN old_id := OLD.node_id; END IF;
+
+    -- BOTH endpoints are refreshed, not just NEW: an UPDATE that moves a row
+    -- between Nodes would otherwise leave the OLD Node's cached text claiming a
+    -- fact it no longer holds, and that ghost would keep matching searches. No
+    -- current writer moves a row, but the Campaign Bundle importer is the next
+    -- writer of this table and should not have to know that.
     UPDATE kg_node n
        SET aspect_text = COALESCE((
                SELECT string_agg(a.key || ' ' || a.value, ' ' ORDER BY a.position, a.id)
@@ -52,7 +63,7 @@ BEGIN
                SELECT string_agg(a.key || ' ' || a.value, ' ' ORDER BY a.position, a.id)
                  FROM kg_node_aspect a
                 WHERE a.node_id = n.id AND NOT a.gm_private), '')
-     WHERE n.id = target;
+     WHERE n.id IN (new_id, old_id);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
@@ -61,6 +72,19 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER kg_node_aspect_fts_sync
     AFTER INSERT OR UPDATE OR DELETE ON kg_node_aspect
     FOR EACH ROW EXECUTE FUNCTION kg_node_sync_aspect_text();
+
+-- Backfill any rows that already exist. In production 00041 and 00042 ship in the
+-- same release so the table is born empty — but a branch-deployed test env, or a
+-- Down/Up cycle, would otherwise leave existing aspects unindexed until the next
+-- write touched their Node.
+UPDATE kg_node n
+   SET aspect_text = COALESCE((
+           SELECT string_agg(a.key || ' ' || a.value, ' ' ORDER BY a.position, a.id)
+             FROM kg_node_aspect a WHERE a.node_id = n.id), ''),
+       aspect_text_public = COALESCE((
+           SELECT string_agg(a.key || ' ' || a.value, ' ' ORDER BY a.position, a.id)
+             FROM kg_node_aspect a WHERE a.node_id = n.id AND NOT a.gm_private), '')
+ WHERE EXISTS (SELECT 1 FROM kg_node_aspect a WHERE a.node_id = n.id);
 
 -- +goose Down
 

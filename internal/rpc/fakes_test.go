@@ -497,28 +497,43 @@ func newFakeKGNodeStore() *fakeKGNodeStore {
 	}
 }
 
-// saveAspects mirrors the store's semantics: rows the caller KNEW about are
-// replaced by the authored list at positions 0..n-1, and any row the caller never
-// loaded (one a proposal approval appended meanwhile) survives after them.
+// saveAspects mirrors the store's semantics: a sent row keeps its id and is
+// updated in place, a row the caller loaded but no longer sends is deleted, and a
+// row the caller never loaded (one a proposal approval appended meanwhile)
+// survives after the authored list.
 func (f *fakeKGNodeStore) saveAspects(nodeID uuid.UUID, w storage.KGNodeAspectWrite) {
-	known := map[uuid.UUID]bool{}
-	for _, id := range w.Known {
-		known[id] = true
-	}
-	var survivors []storage.KGNodeAspect
+	existing := map[uuid.UUID]bool{}
 	for _, a := range f.aspects[nodeID] {
-		if !known[a.ID] {
-			survivors = append(survivors, a)
+		existing[a.ID] = true
+	}
+	sent := map[uuid.UUID]bool{}
+	for _, r := range w.Rows {
+		if r.ID != uuid.Nil && existing[r.ID] {
+			sent[r.ID] = true
 		}
 	}
-	saved := make([]storage.KGNodeAspect, 0, len(w.Rows)+len(survivors))
-	for i, a := range w.Rows {
+	removed := map[uuid.UUID]bool{}
+	for _, id := range w.Known {
+		if existing[id] && !sent[id] {
+			removed[id] = true
+		}
+	}
+
+	saved := make([]storage.KGNodeAspect, 0, len(w.Rows))
+	for i, r := range w.Rows {
+		id := r.ID
+		if id == uuid.Nil || !existing[id] {
+			id = uuid.New()
+		}
 		saved = append(saved, storage.KGNodeAspect{
-			ID: uuid.New(), Position: i, Key: a.Key, Value: a.Value, GMPrivate: a.GMPrivate,
+			ID: id, Position: i, Key: r.Key, Value: r.Value, GMPrivate: r.GMPrivate,
 		})
 	}
-	for i, a := range survivors {
-		a.Position = len(w.Rows) + i
+	for _, a := range f.aspects[nodeID] {
+		if sent[a.ID] || removed[a.ID] {
+			continue
+		}
+		a.Position = len(saved)
 		saved = append(saved, a)
 	}
 	if len(saved) == 0 {

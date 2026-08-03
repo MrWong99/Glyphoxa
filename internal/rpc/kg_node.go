@@ -61,7 +61,15 @@ func toStorageAspects(in []*managementv1.NodeAspect) ([]storage.NewKGNodeAspect,
 		if utf8.RuneCountInString(value) > kgvocab.MaxAspectValueRunes {
 			return nil, fmt.Errorf("aspect text is too long (max %d characters)", kgvocab.MaxAspectValueRunes)
 		}
-		out = append(out, storage.NewKGNodeAspect{Key: key, Value: value, GMPrivate: a.GetGmPrivate()})
+		// The row's persisted id rides along so the store updates it IN PLACE rather
+		// than deleting and reinserting — which is what keeps a repeated save
+		// idempotent instead of duplicating the list. An unparsable or invented id is
+		// simply treated as a new row by the store.
+		row := storage.NewKGNodeAspect{Key: key, Value: value, GMPrivate: a.GetGmPrivate()}
+		if id, err := uuid.Parse(a.GetId()); err == nil {
+			row.ID = id
+		}
+		out = append(out, row)
 	}
 	if len(out) > kgvocab.MaxAspectsPerNode {
 		return nil, fmt.Errorf("an entry may carry at most %d aspects", kgvocab.MaxAspectsPerNode)
@@ -209,6 +217,14 @@ func (s *kgNodes) UpdateNode(
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
+		}
+		if errors.Is(err, storage.ErrAspectsFull) {
+			// The authored list fits the cap on its own, but a fact approved while the
+			// editor was open pushed the total over. Say so — silently dropping either
+			// side would lose a fact the GM believes is saved.
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+				"this entry now has more than %d facts — a suggestion was approved while you were editing; remove one and save again",
+				kgvocab.MaxAspectsPerNode))
 		}
 		slog.Default().Error("UpdateNode: store update failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))

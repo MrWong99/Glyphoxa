@@ -621,12 +621,20 @@ func TestApproveRejectsStaleWriteVersion(t *testing.T) {
 	}
 }
 
-// setAspects models one editor save: it loads the Node's current Aspects (what the
-// editor would have on screen), then replaces exactly those with the supplied list.
+// setAspects models one editor save from scratch: the GM replaces whatever was on
+// screen with this list, so every supplied row is new and every loaded row is known.
 func setAspects(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID, rows ...storage.NewKGNodeAspect) {
 	t.Helper()
-	ctx := context.Background()
-	loaded, err := st.ListNodeAspects(ctx, campaignID, nodeID)
+	if err := st.ReplaceNodeAspects(context.Background(), campaignID, nodeID,
+		storage.KGNodeAspectWrite{Known: loadedAspectIDs(t, st, campaignID, nodeID), Rows: rows}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+}
+
+// loadedAspectIDs is what an open editor would have on screen.
+func loadedAspectIDs(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID) []uuid.UUID {
+	t.Helper()
+	loaded, err := st.ListNodeAspects(context.Background(), campaignID, nodeID)
 	if err != nil {
 		t.Fatalf("ListNodeAspects: %v", err)
 	}
@@ -634,9 +642,98 @@ func setAspects(t *testing.T, st *storage.Store, campaignID, nodeID uuid.UUID, r
 	for _, a := range loaded {
 		known = append(known, a.ID)
 	}
-	if err := st.ReplaceNodeAspects(ctx, campaignID, nodeID,
-		storage.KGNodeAspectWrite{Known: known, Rows: rows}); err != nil {
-		t.Fatalf("ReplaceNodeAspects: %v", err)
+	return known
+}
+
+// TestReplaceNodeAspectsIsIdempotent pins the other half of the concurrency story.
+// Bounding the delete to "rows the editor loaded" fixes the lost update, but if a
+// save also ROTATED every row's id, a second save from a stale client — a second
+// tab, or a save after a background refetch failed — would match nothing, delete
+// nothing, and insert the whole list again. That turns a silent overwrite into
+// silent duplication, which is worse. Rows are updated in place, so re-saving the
+// same state is a no-op.
+func TestReplaceNodeAspectsIsIdempotent(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	setAspects(t, st, campaignID, node.ID,
+		storage.NewKGNodeAspect{Key: "Role", Value: "Innkeeper"},
+		storage.NewKGNodeAspect{Key: "Manner", Value: "Grumbles"},
+	)
+	first := nodeAspects(t, st, campaignID, node.ID)
+	if len(first) != 2 {
+		t.Fatalf("seeded %d aspects, want 2", len(first))
+	}
+
+	// One stale snapshot, replayed twice — a second tab saving the same state.
+	stale := storage.KGNodeAspectWrite{
+		Known: []uuid.UUID{first[0].ID, first[1].ID},
+		Rows: []storage.NewKGNodeAspect{
+			{ID: first[0].ID, Key: "Role", Value: "Runs the Rusty Anchor"},
+			{ID: first[1].ID, Key: "Manner", Value: "Grumbles"},
+		},
+	}
+	for i := range 2 {
+		if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, stale); err != nil {
+			t.Fatalf("ReplaceNodeAspects (save %d): %v", i+1, err)
+		}
+	}
+
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 {
+		t.Fatalf("aspects = %+v, want 2 — a replayed save duplicated the list", got)
+	}
+	if got[0].ID != first[0].ID || got[1].ID != first[1].ID {
+		t.Errorf("row ids rotated across saves (%v → %v); a stale client would then duplicate everything",
+			[]uuid.UUID{first[0].ID, first[1].ID}, []uuid.UUID{got[0].ID, got[1].ID})
+	}
+	if got[0].Value != "Runs the Rusty Anchor" {
+		t.Errorf("aspect[0] = %+v, want the edit applied in place", got[0])
+	}
+}
+
+// TestReplaceNodeAspectsCapCountsSurvivors pins the cap against the path the first
+// fix missed: the authored list fits on its own, but a concurrently approved fact
+// pushes the total over. Silently exceeding it would leave the entry unsaveable
+// forever, since the editor validates the same cap.
+func TestReplaceNodeAspectsCapCountsSurvivors(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Nearly full")
+	rows := make([]storage.NewKGNodeAspect, 0, kgvocab.MaxAspectsPerNode)
+	for i := range kgvocab.MaxAspectsPerNode - 1 {
+		rows = append(rows, storage.NewKGNodeAspect{Key: "k", Value: fmt.Sprintf("v%d", i)})
+	}
+	setAspects(t, st, campaignID, node.ID, rows...)
+	known := loadedAspectIDs(t, st, campaignID, node.ID)
+
+	// An approval lands the last free slot while the editor is open.
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(),
+		Subject: "Nearly full", AspectKey: "Rumour", Fact: "one more",
+	})
+	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
+		t.Fatalf("ApproveKnowledgeProposal: %v", err)
+	}
+
+	// The GM adds one row: their list fits, but with the survivor it would not.
+	over := append(append([]storage.NewKGNodeAspect(nil), rows...),
+		storage.NewKGNodeAspect{Key: "k", Value: "mine"})
+	err := st.ReplaceNodeAspects(ctx, campaignID, node.ID,
+		storage.KGNodeAspectWrite{Known: known, Rows: over})
+	if !errors.Is(err, storage.ErrAspectsFull) {
+		t.Fatalf("save past the cap: got %v, want ErrAspectsFull", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != kgvocab.MaxAspectsPerNode {
+		t.Errorf("aspect count = %d, want the cap %d held with nothing written",
+			len(got), kgvocab.MaxAspectsPerNode)
 	}
 }
 

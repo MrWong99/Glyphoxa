@@ -844,9 +844,12 @@ type EditorFields = {
 
 // toWireAspects drops rows the GM left entirely blank — the editor keeps an empty
 // row around for the next fact, and that convenience must not become a save error.
-// The persisted `id` rides along for display continuity; the authoritative "what
-// this editor had loaded" set is knownAspectIds, sent separately, because a row
-// the GM DELETED is by definition absent from this list.
+//
+// The persisted `id` rides along so the server updates that row in place and its
+// identity survives the save; a repeated save is then idempotent rather than
+// duplicating the list. The authoritative "what this editor had loaded" set is
+// knownAspectIds, sent separately, because a row the GM DELETED is by definition
+// absent from this list.
 function toWireAspects(rows: AspectRow[]) {
   return rows
     .filter((r) => r.key.trim() !== "" || r.value.trim() !== "")
