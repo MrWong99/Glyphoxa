@@ -36,6 +36,10 @@ The v1.0 line above gives a Node ONE `gm_private` flag. In practice every intere
 - **A proposed Aspect always lands public.** A secret is a GM authorship act, never an inference from play — an Agent proposes what its character would say out loud.
 - **Aspects are part of the Node's embedded text** (private ones included). The vector feeds the GM-facing similarity hints only (ADR-0052), which never reach a prompt, and a secret invisible to the vector would make duplicate detection blind to exactly the facts GMs most want deduped.
 
+**Budget split, not tail truncation.** Aspects compose before the body, so cutting the composed fact from the end deleted the GM's authored prose wholesale once the Aspects reached `MaxFactChars`. Each side is now guaranteed a share of the per-fact budget and donates whatever it does not use, so a one-line body costs the Aspects almost nothing while a long one cannot be evicted outright. A GM who wrote both meant both to reach the table.
+
+**Deployment note.** Migration `00042` adds two generated `tsvector` columns and drops one, which rewrites `kg_node` — rebuilding its indexes, HNSW included. That is a one-time cost, paid once per environment, and it is the price of making Aspects searchable at all; it is called out here so it is not a surprise on a large campaign. Per ADR-0031 the migration is not edited after the fact.
+
 Tags remain the *other* axis and are deliberately not this: the seven Node types stay a closed schema carrying edge-validity rules, Aspects carry content, and tags (#543) carry organization.
 
 ## Fourth amendment: the graph is rendered (2026-08-03, #534) — supersedes "no graph viz"

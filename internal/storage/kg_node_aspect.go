@@ -266,6 +266,12 @@ func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uui
 		return ErrAspectsFull
 	}
 
+	// New rows go in ONE statement. Each write fires the fts-sync trigger, which
+	// re-aggregates the Node's whole aspect list — so a per-row insert loop made a
+	// full save quadratic in its own row count for no reason.
+	var insertPos []int32
+	var insertKeys, insertValues []string
+	var insertPrivate []bool
 	for i, r := range w.Rows {
 		if r.ID != uuid.Nil && existing[r.ID] {
 			// Update IN PLACE: the row keeps its id, so a repeated save is idempotent
@@ -279,11 +285,18 @@ func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uui
 			}
 			continue
 		}
+		insertPos = append(insertPos, int32(i)) //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+		insertKeys = append(insertKeys, r.Key)
+		insertValues = append(insertValues, r.Value)
+		insertPrivate = append(insertPrivate, r.GMPrivate)
+	}
+	if len(insertPos) > 0 {
 		if _, err := tx.db.Exec(ctx,
 			`INSERT INTO kg_node_aspect (node_id, campaign_id, position, key, value, gm_private)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			nodeID, campaignID, i, r.Key, r.Value, r.GMPrivate); err != nil {
-			return fmt.Errorf("storage: replace node aspects %s: insert %d: %w", nodeID, i, err)
+			 SELECT $1, $2, p, k, v, g
+			   FROM unnest($3::int[], $4::text[], $5::text[], $6::boolean[]) AS t(p, k, v, g)`,
+			nodeID, campaignID, insertPos, insertKeys, insertValues, insertPrivate); err != nil {
+			return fmt.Errorf("storage: replace node aspects %s: insert: %w", nodeID, err)
 		}
 	}
 
