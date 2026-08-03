@@ -200,6 +200,10 @@ type AgentLastSpoke struct {
 // different question. Only committed Lines exist in this table at all (ADR-0012 /
 // ADR-0040: partials are never persisted), so the answer is always about speech
 // that actually reached the table.
+//
+// It rides transcript_line_campaign_kind_idx (migration 00045). Without it this
+// is a sequential scan of every tenant's transcript — the table had no
+// campaign_id index because, until this read, nothing filtered on it.
 func (s *Store) LastSpokenByAgent(ctx context.Context, campaignID uuid.UUID) ([]AgentLastSpoke, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT who, max(ts)

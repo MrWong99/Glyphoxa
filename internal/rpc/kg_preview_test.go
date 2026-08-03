@@ -328,6 +328,43 @@ func TestGetRosterReadiness(t *testing.T) {
 	}
 }
 
+// TestGetRosterReadiness_EmptyEntryIsNotReady is the regression pin for the
+// review finding that the readiness check was VACUOUS: the ADR-0008 auto-node is
+// created empty, is always returned at hop 0, and always renders its header line —
+// so a rendered-fact count could never fail for exactly the NPC this dashboard
+// exists to catch. The count must be content-bearing.
+func TestGetRosterReadiness_EmptyEntryIsNotReady(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGPreviewStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	agentID := uuid.New()
+	store.agentList = []storage.Agent{
+		{ID: agentID, CampaignID: store.campaign.ID, Role: storage.AgentRoleCharacter, Name: "Bart"},
+	}
+	// The auto-node exactly as ADR-0008's second amendment creates it: linked,
+	// public, empty body, no aspects.
+	own := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart"}
+	store.linked[agentID] = own
+	store.facts[agentID] = []storage.KGNode{own}
+
+	resp, err := kgPreviewClient(t, store).GetRosterReadiness(context.Background(),
+		connect.NewRequest(&managementv1.GetRosterReadinessRequest{}))
+	if err != nil {
+		t.Fatalf("GetRosterReadiness: %v", err)
+	}
+	got := resp.Msg.GetAgents()
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if !got[0].GetLinked() {
+		t.Error("the agent is linked; the report says otherwise")
+	}
+	if got[0].GetFactCount() != 0 {
+		t.Errorf("fact_count = %d for an empty entry, want 0 — the block renders a header and nothing else",
+			got[0].GetFactCount())
+	}
+}
+
 func TestGetRosterReadiness_ErrorMapping(t *testing.T) {
 	t.Parallel()
 

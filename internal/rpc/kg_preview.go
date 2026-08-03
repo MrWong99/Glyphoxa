@@ -199,8 +199,12 @@ func (s *kgPreview) GetRosterReadiness(
 				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 			}
 			p := kgfacts.RenderPreview(nodes)
-			r.FactCount = int32(len(p.Facts)) //nolint:gosec // bounded by kgfacts.MaxFacts
-			r.Chars = int32(p.Chars)          //nolint:gosec // bounded by kgfacts.MaxBlockChars
+			// CONTENT-bearing facts, not rendered ones. A linked NPC's own Node is always
+			// returned at hop 0 and always renders at least its header line, so
+			// len(Facts) > 0 is a check that can never fail — precisely for the NPC this
+			// dashboard exists to catch.
+			r.FactCount = int32(p.ContentFacts) //nolint:gosec // bounded by kgfacts.MaxFacts
+			r.Chars = int32(p.Chars)            //nolint:gosec // bounded by kgfacts.MaxBlockChars
 			r.Truncated = p.Truncated
 		}
 		out.Agents = append(out.Agents, r)

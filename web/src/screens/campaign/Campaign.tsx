@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
+import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PlayersPanel } from "./PlayersPanel";
 import { RosterPrep } from "./RosterPrep";
@@ -71,13 +72,19 @@ export function Campaign() {
   // "Entry has content" lands ON that entry instead of dumping the GM on the list.
   const [focusNodeID, setFocusNodeID] = useState<string | null>(null);
 
-  const invalidateRoster = () =>
-    queryClient.invalidateQueries({
+  // Creating a Character NPC auto-creates its wiki entry, and deleting one
+  // unlinks that entry (ADR-0008 second amendment) — both are Knowledge Graph
+  // writes, so a roster mutation must drop the KG reads too. Without this the
+  // Health panel pairs a fresh roster with a stale graph and invents findings.
+  const invalidateRoster = () => {
+    void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
         schema: CampaignService.method.getCampaignRoster,
         cardinality: "finite",
       }),
     });
+    invalidateKnowledgeReads(queryClient);
+  };
 
   const createAgent = useMutation(CampaignService.method.createAgent, {
     onSuccess: (res) => {

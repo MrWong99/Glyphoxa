@@ -30,6 +30,12 @@ type KGGraphNode struct {
 	AgentID     uuid.NullUUID
 	BodyLen     int
 	AspectCount int
+	// PublicAspectCount counts only the Aspects a prompt can actually receive.
+	// The distinction matters: an entry whose ONLY fact is a GM secret is authored
+	// (so AspectCount is 1, and the GM's own map should say so) but says nothing to
+	// its NPC (so the health and readiness derivations must read 0, or they report
+	// exactly the state they exist to catch as healthy).
+	PublicAspectCount int
 }
 
 // ListGraphNodes returns every Node in a Campaign in the display order ListNodes
@@ -44,7 +50,8 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 	rows, err := s.db.Query(ctx,
 		`SELECT n.id, n.node_type, n.name, n.gm_private, n.agent_id,
 		        length(n.body),
-		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id)
+		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id),
+		        (SELECT count(*) FROM kg_node_aspect a WHERE a.node_id = n.id AND NOT a.gm_private)
 		   FROM kg_node n
 		  WHERE n.campaign_id = $1
 		  ORDER BY n.node_type, lower(n.name), n.id`, campaignID)
@@ -56,7 +63,8 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 	var out []KGGraphNode
 	for rows.Next() {
 		var n KGGraphNode
-		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.GMPrivate, &n.AgentID, &n.BodyLen, &n.AspectCount); err != nil {
+		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.GMPrivate, &n.AgentID,
+			&n.BodyLen, &n.AspectCount, &n.PublicAspectCount); err != nil {
 			return nil, fmt.Errorf("storage: scan graph node: %w", err)
 		}
 		out = append(out, n)

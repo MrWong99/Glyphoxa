@@ -185,6 +185,16 @@ func (r *Recaller) degrade(ctx context.Context, cause error) []string {
 	return nil
 }
 
+// HasContent reports whether a rendered fact says anything beyond its header
+// line. A Node with no body and no public Aspects still renders as
+// "### Bart (NPC)" — a real fact string, but zero world knowledge — so any check
+// of the form "does this NPC have facts" must count CONTENT-BEARING facts or it
+// can never fail (#544 review finding).
+func HasContent(fact string) bool {
+	_, content, ok := strings.Cut(fact, "\n")
+	return ok && strings.TrimSpace(content) != ""
+}
+
 // Preview is exactly what an Agent's Hot Context facts block will contain, plus
 // the budget arithmetic that produced it (#535). It exists so the GM-facing
 // "what does this NPC actually know" lens reads the SAME renderer the voice loop
@@ -210,6 +220,10 @@ type Preview struct {
 	// Truncated reports that the prefix-stop fired: at least one Node the read
 	// returned did not fit.
 	Truncated bool
+	// ContentFacts is how many of Facts say anything beyond their header line.
+	// It, not len(Facts), is the honest answer to "does this NPC know anything":
+	// a linked NPC's own Node always renders, empty or not.
+	ContentFacts int
 }
 
 // RenderPreview is renderFacts with its budget arithmetic exposed (#535). The
@@ -250,6 +264,11 @@ func RenderPreview(nodes []storage.KGNode) Preview {
 	}
 	if len(p.Facts) > 0 {
 		p.Chars = total
+	}
+	for _, f := range p.Facts {
+		if HasContent(f) {
+			p.ContentFacts++
+		}
 	}
 	return p
 }

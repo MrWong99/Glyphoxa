@@ -75,12 +75,13 @@ func (s *kgGraph) GetKnowledgeGraph(
 	}
 	for _, n := range nodes {
 		gn := &managementv1.GraphNode{
-			Id:          n.ID.String(),
-			NodeType:    toProtoNodeType(n.Type),
-			Name:        n.Name,
-			GmPrivate:   n.GMPrivate,
-			BodyLen:     int32(n.BodyLen),     //nolint:gosec // a body length cannot exceed int32 in practice
-			AspectCount: int32(n.AspectCount), //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+			Id:                n.ID.String(),
+			NodeType:          toProtoNodeType(n.Type),
+			Name:              n.Name,
+			GmPrivate:         n.GMPrivate,
+			BodyLen:           int32(n.BodyLen),           //nolint:gosec // a body length cannot exceed int32 in practice
+			AspectCount:       int32(n.AspectCount),       //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+			PublicAspectCount: int32(n.PublicAspectCount), //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
 		}
 		if n.AgentID.Valid {
 			gn.AgentId = n.AgentID.UUID.String()

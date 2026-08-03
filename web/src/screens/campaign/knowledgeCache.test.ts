@@ -34,6 +34,18 @@ describe("invalidateKnowledgeReads", () => {
       cardinality: "finite",
       input: {},
     }),
+    // Derived reads: pure functions of the same nodes and edges, and stale for
+    // the same reasons.
+    getAgentFactPreview: createConnectQueryKey({
+      schema: CampaignService.method.getAgentFactPreview,
+      cardinality: "finite",
+      input: { agentId: "a1" },
+    }),
+    getRosterReadiness: createConnectQueryKey({
+      schema: CampaignService.method.getRosterReadiness,
+      cardinality: "finite",
+      input: {},
+    }),
   };
 
   it("marks every Knowledge Graph read stale", () => {

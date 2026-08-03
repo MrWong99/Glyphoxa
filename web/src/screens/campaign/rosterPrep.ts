@@ -144,7 +144,7 @@ function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[]
       key: "content",
       label: "Entry has content",
       // The ADR-0008 auto-node starts empty; either facts or prose counts.
-      ok: node !== null && (node.bodyLen > 0 || node.aspectCount > 0),
+      ok: node !== null && (node.bodyLen > 0 || node.publicAspectCount > 0),
       fix: "entry",
     },
     {

@@ -526,3 +526,28 @@ func TestRenderPreview_Empty(t *testing.T) {
 		t.Errorf("empty preview = %+v, want zero facts, untruncated, zero chars", p)
 	}
 }
+
+// TestRenderPreview_ContentFacts pins the distinction the roster dashboard
+// depends on. A linked NPC's own Node is ALWAYS returned at hop 0 and always
+// renders at least its header line, so "does this NPC have facts" measured as
+// len(Facts) can never fail — for exactly the NPC the dashboard exists to catch.
+func TestRenderPreview_ContentFacts(t *testing.T) {
+	empty := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart"}
+	full := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeLocation, Name: "Saltmarsh", Body: "A damp town."}
+
+	only := kgfacts.RenderPreview([]storage.KGNode{empty})
+	if len(only.Facts) != 1 {
+		t.Fatalf("an empty node still renders its header: got %d facts", len(only.Facts))
+	}
+	if only.ContentFacts != 0 {
+		t.Errorf("ContentFacts = %d for a header-only block, want 0", only.ContentFacts)
+	}
+
+	both := kgfacts.RenderPreview([]storage.KGNode{empty, full})
+	if both.ContentFacts != 1 {
+		t.Errorf("ContentFacts = %d, want only the one that says something", both.ContentFacts)
+	}
+	if len(both.Facts) != 2 {
+		t.Errorf("Facts = %d, want both rendered (the block is what it is)", len(both.Facts))
+	}
+}

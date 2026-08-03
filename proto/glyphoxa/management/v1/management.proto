@@ -496,9 +496,14 @@ message GraphNode {
   // body_len is the node body's length in bytes — the "does this entry actually
   // say anything" signal, without shipping the prose.
   int32 body_len = 6;
-  // aspect_count is how many aspects the node carries (#542). Together with
-  // body_len it distinguishes a real entry from an empty auto-created one.
+  // aspect_count is how many aspects the node carries (#542), private ones
+  // included — the GM's own map of their world.
   int32 aspect_count = 7;
+  // public_aspect_count is how many a PROMPT can receive. An entry whose only
+  // fact is a GM secret is authored but says nothing to its NPC, so the health
+  // and readiness derivations read this one; using aspect_count there would
+  // report that exact state as healthy.
+  int32 public_aspect_count = 8;
 }
 
 // GraphEdge is one Edge as the Graph view needs it (#534): the two endpoint ids
@@ -541,8 +546,10 @@ message AgentReadiness {
   string agent_id = 1;
   // linked reports whether the Agent has a linked wiki entry at all.
   bool linked = 2;
-  // fact_count is how many facts its Hot Context block will actually contain;
-  // chars is what they consume of max_chars.
+  // fact_count is how many facts SAY SOMETHING — a linked NPC's own entry always
+  // renders as a header line whether or not it has content, so counting rendered
+  // facts would be a check that can never fail. chars is what the whole block
+  // consumes of max_chars.
   int32 fact_count = 3;
   int32 chars = 4;
   int32 max_chars = 5;

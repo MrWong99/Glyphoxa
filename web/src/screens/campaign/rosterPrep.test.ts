@@ -50,11 +50,25 @@ describe("rosterPrep", () => {
   it("counts aspects as content, not just prose", () => {
     const groups = rosterPrep(
       [agent({ id: "a1", name: "Bart", persona: "Gruff.", voice: "v1" })],
-      [node({ id: "bart", name: "Bart", agentId: "a1", aspectCount: 2 })],
+      [node({ id: "bart", name: "Bart", agentId: "a1", aspectCount: 2, publicAspectCount: 2 })],
       [],
       new Map([["a1", ready()]]),
     );
     expect(groups[0].entries[0].ready).toBe(true);
+  });
+
+  // A secret-only entry is authored but says nothing to its NPC — the readiness
+  // marks answer "can this NPC speak to my world", not "did I type something".
+  it("does not count a GM-only fact as content", () => {
+    const groups = rosterPrep(
+      [agent({ id: "a1", name: "Bart", persona: "Gruff.", voice: "v1" })],
+      [node({ id: "bart", name: "Bart", agentId: "a1", aspectCount: 1, publicAspectCount: 0 })],
+      [],
+      new Map([["a1", ready({ factCount: 0 })]]),
+    );
+    const bart = groups[0].entries[0];
+    expect(bart.ready).toBe(false);
+    expect(bart.checks.filter((c) => !c.ok).map((c) => c.key)).toEqual(["content", "facts"]);
   });
 
   // "The entry has words in it" and "the NPC will actually receive them" are

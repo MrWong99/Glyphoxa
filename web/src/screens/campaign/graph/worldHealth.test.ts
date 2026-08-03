@@ -21,12 +21,24 @@ describe("worldHealth", () => {
   // on Character-NPC create with an EMPTY body and never copies the Persona, so
   // "voiced character with nothing to say" is the DEFAULT state after adding an
   // NPC — currently discovered live, mid-session.
+  // An entry whose ONLY fact is a GM secret is authored — but it says nothing to
+  // its NPC, which is exactly the state this category exists to catch. Counting
+  // private aspects here reported it as healthy.
+  it("flags a voiced NPC whose only fact is a GM secret", () => {
+    const cats = worldHealth(
+      [node({ id: "bart", nodeType: NodeType.NPC, name: "Bart", agentId: "a1", aspectCount: 1, publicAspectCount: 0 })],
+      [],
+      [],
+    );
+    expect(byKey(cats, "empty-voiced")?.findings.map((f) => f.name)).toEqual(["Bart"]);
+  });
+
   it("flags a voiced NPC whose entry is empty", () => {
     const cats = worldHealth(
       [
         node({ id: "bart", nodeType: NodeType.NPC, name: "Bart", agentId: "a1" }),
         node({ id: "ilva", nodeType: NodeType.NPC, name: "Ilva", agentId: "a2", bodyLen: 20 }),
-        node({ id: "zed", nodeType: NodeType.NPC, name: "Zed", agentId: "a3", aspectCount: 2 }),
+        node({ id: "zed", nodeType: NodeType.NPC, name: "Zed", agentId: "a3", aspectCount: 2, publicAspectCount: 2 }),
       ],
       [],
       [],

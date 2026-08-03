@@ -78,7 +78,7 @@ export function worldHealth(
     "Voiced NPCs with nothing to say",
     "These have an Agent and a voice, but their entry is empty — so they will improvise instead of speaking to your world.",
     nodes
-      .filter((n) => n.agentId !== "" && n.bodyLen === 0 && n.aspectCount === 0)
+      .filter((n) => n.agentId !== "" && n.bodyLen === 0 && n.publicAspectCount === 0)
       .map((n) => finding(n, "entry has no facts and no content")),
   );
 
