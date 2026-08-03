@@ -401,13 +401,15 @@ func TestFacts_AspectsRespectFactBudget(t *testing.T) {
 	if len(facts) != 1 {
 		t.Fatalf("got %d facts, want 1", len(facts))
 	}
-	// The contract is the BOUND, not an exact length: a Node with both aspects and
-	// a body splits the budget between them (each fitted exactly), while a
-	// single-source Node keeps the ellipsis-appending truncation. Both stay within
-	// one rune of the cap, which is what the block accounting relies on.
+	// TWO-SIDED on purpose. An upper bound alone passes for a renderer that emits
+	// ten runes of an eight-thousand-rune Node — the budget is a target as much as
+	// a ceiling, and this is the suite's only multibyte-rune coverage, so an
+	// off-by-one in the rune arithmetic has to show up here. The ±1 band absorbs
+	// the ellipsis accounting: a split fits each side exactly, a single source
+	// keeps the ellipsis-appending truncation.
 	_, content, _ := strings.Cut(facts[0], "\n")
-	if got := len([]rune(content)); got > kgfacts.MaxFactChars+1 {
-		t.Errorf("composed content = %d runes, past the budget %d", got, kgfacts.MaxFactChars)
+	if got := len([]rune(content)); got < kgfacts.MaxFactChars-1 || got > kgfacts.MaxFactChars+1 {
+		t.Errorf("composed content = %d runes, want the budget %d filled (±1)", got, kgfacts.MaxFactChars)
 	}
 	if len(facts[0]) > kgfacts.MaxBlockChars {
 		t.Errorf("one fact = %d bytes, past the whole block budget %d", len(facts[0]), kgfacts.MaxBlockChars)
@@ -587,10 +589,11 @@ func TestFacts_AspectsDoNotEvictTheBody(t *testing.T) {
 	if !strings.Contains(facts[0], "Fact:") {
 		t.Error("the aspects were evicted by the body")
 	}
-	// And the whole fact still respects the per-fact bound.
+	// The whole fact respects the per-fact bound AND fills it — a split that
+	// silently threw away half the budget would satisfy a ceiling-only assertion.
 	_, content, _ := strings.Cut(facts[0], "\n")
-	if got := len([]rune(content)); got > kgfacts.MaxFactChars+2 {
-		t.Errorf("composed content = %d runes, past the budget %d", got, kgfacts.MaxFactChars)
+	if got := len([]rune(content)); got < kgfacts.MaxFactChars-1 || got > kgfacts.MaxFactChars+1 {
+		t.Errorf("composed content = %d runes, want the budget %d filled (±1)", got, kgfacts.MaxFactChars)
 	}
 }
 

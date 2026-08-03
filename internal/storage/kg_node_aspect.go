@@ -266,9 +266,18 @@ func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uui
 		return ErrAspectsFull
 	}
 
-	// New rows go in ONE statement. Each write fires the fts-sync trigger, which
-	// re-aggregates the Node's whole aspect list — so a per-row insert loop made a
-	// full save quadratic in its own row count for no reason.
+	// New rows go in ONE statement, which saves the round-trips — and nothing more.
+	//
+	// It does NOT avoid the fts-sync trigger's re-aggregation: migration 00042
+	// declares it FOR EACH ROW, so a 50-row insert still fires 50 times and each
+	// fire re-runs string_agg over the whole list. The in-place UPDATE loop below
+	// and the survivor renumbering do the same. That work is quadratic in the row
+	// count, and it is acceptable only because kgvocab.MaxAspectsPerNode caps the
+	// count at 50 — 2500 aggregations of at most 50 short rows, inside one
+	// transaction, on a GM's manual save. If that cap ever rises materially the
+	// trigger should become statement-level with transition tables; until then the
+	// simpler per-row trigger is the right trade, and saying so beats a comment
+	// claiming a fix that never happened.
 	var insertPos []int32
 	var insertKeys, insertValues []string
 	var insertPrivate []bool

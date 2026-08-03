@@ -390,12 +390,20 @@ func composeContent(n storage.KGNode) string {
 // needs exactness: two parts that each overshoot by a rune would push the composed
 // fact past the budget the split exists to respect.
 func fitRunes(s string, max int) string {
+	// A negative max would panic on the slice below. It is unreachable with the
+	// current constants — every share is either >= MinBodyShare of a positive
+	// budget or equal to an actual rune count — but this function is one tuning
+	// change away from being called with one, and a panic in the prompt path takes
+	// down a live turn.
+	if max <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= max {
 		return s
 	}
-	if max <= 1 {
-		return string(r[:max])
+	if max == 1 {
+		return string(r[:1])
 	}
 	return string(r[:max-1]) + "…"
 }
