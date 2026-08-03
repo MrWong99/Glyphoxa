@@ -285,9 +285,10 @@ func toProtoKnowledgeProposal(p storage.KnowledgeProposal) *managementv1.Knowled
 	switch w.Kind {
 	case kgvocab.KindFact:
 		out.Write = &managementv1.KnowledgeProposal_Fact{Fact: &managementv1.ProposedFact{
-			NodeId:  w.NodeID,
-			Subject: w.Subject,
-			Fact:    w.Fact,
+			NodeId:    w.NodeID,
+			Subject:   w.Subject,
+			Fact:      w.Fact,
+			AspectKey: w.AspectKey,
 		}}
 	case kgvocab.KindEdge:
 		out.Write = &managementv1.KnowledgeProposal_Edge{Edge: &managementv1.ProposedEdge{

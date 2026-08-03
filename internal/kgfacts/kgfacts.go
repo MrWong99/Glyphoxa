@@ -218,17 +218,63 @@ func renderFacts(nodes []storage.KGNode) []string {
 	return out
 }
 
-// renderFact renders one Node as "### <Name> (<TypeLabel>)\n<Body>". The name is
-// rune-safe-truncated to MaxNameChars and the body to MaxFactChars, each with a
-// trailing ellipsis when cut, so no single Node can blow the block budget. A
-// bodiless Node emits only its header line (no dangling newline).
+// renderFact renders one Node as "### <Name> (<TypeLabel>)" followed by its
+// content: the Node's public Aspects as "- <Key>: <Value>" lines (#542), then its
+// free-form body remainder. The name is rune-safe-truncated to MaxNameChars and
+// the COMPOSED content to MaxFactChars, each with a trailing ellipsis when cut, so
+// one fact stays bounded at head + MaxFactChars no matter how many Aspects a Node
+// carries — the budget arithmetic in renderFacts is unchanged, and a Node with no
+// Aspects renders byte-identically to before this slice.
+//
+// Aspects are already public-only: the [PromptKG] seam filters gm_private rows in
+// SQL. The defensive skip below costs nothing and keeps the guarantee readable at
+// the point it matters.
 func renderFact(n storage.KGNode) string {
 	head := fmt.Sprintf("### %s (%s)", truncateRunes(n.Name, MaxNameChars), typeLabel(n.Type))
-	body := truncateRunes(strings.TrimSpace(n.Body), MaxFactChars)
-	if body == "" {
+	content := truncateRunes(composeContent(n), MaxFactChars)
+	if content == "" {
 		return head
 	}
-	return head + "\n" + body
+	return head + "\n" + content
+}
+
+// composeContent joins a Node's public Aspect lines and its body remainder into
+// the one content string renderFact truncates as a whole. An Aspect with no value
+// renders as its key alone rather than a dangling colon.
+func composeContent(n storage.KGNode) string {
+	var b strings.Builder
+	for _, a := range n.Aspects {
+		if a.GMPrivate {
+			continue
+		}
+		key := strings.TrimSpace(a.Key)
+		value := strings.TrimSpace(a.Value)
+		if key == "" && value == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("- ")
+		switch {
+		case key == "":
+			b.WriteString(value)
+		case value == "":
+			b.WriteString(key)
+		default:
+			b.WriteString(key)
+			b.WriteString(": ")
+			b.WriteString(value)
+		}
+	}
+	body := strings.TrimSpace(n.Body)
+	if body == "" {
+		return b.String()
+	}
+	if b.Len() == 0 {
+		return body
+	}
+	return b.String() + "\n\n" + body
 }
 
 // typeLabel maps a Node type onto its GM-facing label (#126 test contract) via

@@ -67,8 +67,11 @@ func (s *Store) searchNodes(ctx context.Context, campaignID uuid.UUID, query str
 	if publicOnly {
 		privacy = " AND NOT gm_private"
 	}
+	// The SAME publicOnly flag drives the Aspect aggregate (#542): a prompt-facing
+	// search returns public Aspects only, a GM search returns all of them, and the
+	// two cannot drift because there is one flag.
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
+		`SELECT `+kgNodeColumnsAspects(publicOnly)+`
 		   FROM kg_node, to_tsquery('simple', $2) q
 		  WHERE campaign_id = $1 AND fts @@ q`+privacy+`
 		  ORDER BY ts_rank(fts, q) DESC, updated_at DESC, id
@@ -80,7 +83,7 @@ func (s *Store) searchNodes(ctx context.Context, campaignID uuid.UUID, query str
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan kg node search row: %w", err)
 		}

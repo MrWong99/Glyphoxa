@@ -227,9 +227,14 @@ function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
   const w = proposal.write;
   switch (w.case) {
     case "fact":
+      // The aspect label is shown because approving files the fact UNDER it as a
+      // row on the entry (#542) — the GM is deciding where it lands, not just
+      // whether the sentence is true.
       return (
         <span>
-          <strong>{w.value.subject}</strong> — {w.value.fact}
+          <strong>{w.value.subject}</strong> —{" "}
+          {w.value.aspectKey && <em>{w.value.aspectKey}: </em>}
+          {w.value.fact}
         </span>
       );
     case "edge":

@@ -473,10 +473,57 @@ type fakeKGNodeStore struct {
 	searchCalls         int
 	searchNodesCampaign uuid.UUID
 	nodeSearchErr       error
+
+	// aspects is the per-Node Aspect store (#542), keyed by node id; aspectWrites
+	// records every ReplaceNodeAspects call so a test can assert the replace-in-full
+	// contract (including the empty list that clears the last row).
+	aspects           map[uuid.UUID][]storage.KGNodeAspect
+	aspectWrites      []replaceAspectsCall
+	aspectsCampaign   uuid.UUID
+	nodeAspectSaveErr error
+	nodeAspectListErr error
+}
+
+// replaceAspectsCall is one recorded ReplaceNodeAspects invocation.
+type replaceAspectsCall struct {
+	nodeID  uuid.UUID
+	aspects []storage.NewKGNodeAspect
 }
 
 func newFakeKGNodeStore() *fakeKGNodeStore {
-	return &fakeKGNodeStore{fakeActive: newFakeActive()}
+	return &fakeKGNodeStore{
+		fakeActive: newFakeActive(),
+		aspects:    map[uuid.UUID][]storage.KGNodeAspect{},
+	}
+}
+
+// ReplaceNodeAspects mirrors the store's replace-in-full semantics: the supplied
+// order becomes dense positions, and an empty list clears the Node's Aspects.
+func (f *fakeKGNodeStore) ReplaceNodeAspects(_ context.Context, campaignID, nodeID uuid.UUID, in []storage.NewKGNodeAspect) error {
+	f.aspectsCampaign = campaignID
+	f.aspectWrites = append(f.aspectWrites, replaceAspectsCall{nodeID: nodeID, aspects: in})
+	if f.nodeAspectSaveErr != nil {
+		return f.nodeAspectSaveErr
+	}
+	saved := make([]storage.KGNodeAspect, 0, len(in))
+	for i, a := range in {
+		saved = append(saved, storage.KGNodeAspect{
+			ID: uuid.New(), Position: i, Key: a.Key, Value: a.Value, GMPrivate: a.GMPrivate,
+		})
+	}
+	if len(saved) == 0 {
+		delete(f.aspects, nodeID)
+		return nil
+	}
+	f.aspects[nodeID] = saved
+	return nil
+}
+
+func (f *fakeKGNodeStore) ListNodeAspects(_ context.Context, _, nodeID uuid.UUID) ([]storage.KGNodeAspect, error) {
+	if f.nodeAspectListErr != nil {
+		return nil, f.nodeAspectListErr
+	}
+	return f.aspects[nodeID], nil
 }
 
 func (f *fakeKGNodeStore) CreateNode(_ context.Context, n storage.NewKGNode) (storage.KGNode, error) {

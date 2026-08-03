@@ -45,6 +45,10 @@ var rememberKnowledgeInputSchema = json.RawMessage(`{
       "type": "string",
       "description": "The fact to remember about the subject (kind=fact)."
     },
+    "aspect": {
+      "type": "string",
+      "description": "A short label the fact is filed under, like 'Role', 'Manner' or 'Rumour' (kind=fact). Optional — omit it and the fact is filed under a generic label."
+    },
     "relation": {
       "type": "string",
       "enum": ` + enumJSON(kgvocab.Relations()...) + `,
@@ -86,11 +90,22 @@ type rememberArgs struct {
 	Kind     string `json:"kind"`
 	Subject  string `json:"subject"`
 	Fact     string `json:"fact"`
+	Aspect   string `json:"aspect"`
 	Relation string `json:"relation"`
 	Target   string `json:"target"`
 	NodeType string `json:"node_type"`
 	Name     string `json:"name"`
 	Body     string `json:"body"`
+}
+
+// aspectKey resolves the label a kind=fact proposal lands under: the model's
+// `aspect` when it named one, else the generic default. Never empty, so a v2
+// payload always carries the key its approve path appends (#542).
+func aspectKey(a rememberArgs) string {
+	if k := strings.TrimSpace(a.Aspect); k != "" {
+		return k
+	}
+	return kgvocab.DefaultAspectKey
 }
 
 // RememberKnowledge is the first side-effecting built-in (#300, ADR-0052): an
@@ -280,6 +295,11 @@ func validateArgs(a rememberArgs) error {
 		if err := capName("subject", a.Subject); err != nil {
 			return err
 		}
+		// The aspect label is a short filing key, not prose — cap it far below the
+		// fact text so a model cannot smuggle a wall of text through it (#542).
+		if utf8.RuneCountInString(a.Aspect) > kgvocab.MaxAspectKeyRunes {
+			return fmt.Errorf("remember_knowledge: aspect is too long (max %d characters)", kgvocab.MaxAspectKeyRunes)
+		}
 	case kgvocab.KindEdge:
 		if !kgvocab.ValidRelation(a.Relation) {
 			return fmt.Errorf("remember_knowledge: %q is not a known relation", a.Relation)
@@ -351,6 +371,7 @@ func (rk *RememberKnowledge) ownNodeWrite(ctx context.Context, a rememberArgs) (
 	switch a.Kind {
 	case kgvocab.KindFact:
 		w.Fact = a.Fact
+		w.AspectKey = aspectKey(a)
 	case kgvocab.KindEdge:
 		w.Relation = a.Relation
 		w.Target = a.Target
@@ -370,6 +391,7 @@ func campaignWrite(a rememberArgs) (ProposedWrite, error) {
 		}
 		w.Subject = a.Subject
 		w.Fact = a.Fact
+		w.AspectKey = aspectKey(a)
 	case kgvocab.KindEdge:
 		if strings.TrimSpace(a.Subject) == "" {
 			return ProposedWrite{}, fmt.Errorf("remember_knowledge: an edge requires a 'subject'")

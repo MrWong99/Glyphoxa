@@ -15,6 +15,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
@@ -67,11 +68,12 @@ func TestListKnowledgeProposals_MapsThreeKinds(t *testing.T) {
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.pendingProposals = []storage.KnowledgeProposal{
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Bart", CreatedAt: time.Now(),
-			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"})},
+			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Bart",
+				AspectKey: "Manner", Fact: "Fears dark"})},
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Glyphoxa", CreatedAt: time.Now(),
-			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "edge", Subject: "Bart", Relation: "resides_in", Target: "Inn"})},
+			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "edge", Subject: "Bart", Relation: "resides_in", Target: "Inn"})},
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Glyphoxa", CreatedAt: time.Now(),
-			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "node", NodeType: "faction", Name: "Zhent", Body: "shadow"})},
+			ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "faction", Name: "Zhent", Body: "shadow"})},
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Glyphoxa", CreatedAt: time.Now(),
 			ProposedWrite: json.RawMessage(`{"garbage":true}`)},
 	}
@@ -221,7 +223,8 @@ func TestListSimilarKnowledge_EmbedderPath(t *testing.T) {
 	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
-		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
+		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Bart",
+			AspectKey: "Manner", Fact: "Fears dark"}),
 	}
 	store.similarResults = []storage.KGNode{{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart"}}
 	emb := &fakeEmbedder{vec: make([]float32, embeddings.Dim)} // correct dimension → vector path
@@ -251,7 +254,8 @@ func TestListSimilarKnowledge_WrongDimFallsBackToFTS(t *testing.T) {
 	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
-		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
+		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Bart",
+			AspectKey: "Manner", Fact: "Fears dark"}),
 	}
 	emb := &fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}} // 3 dims, not embeddings.Dim
 	client := proposalClientWithEmbedder(t, store, emb)
@@ -275,7 +279,7 @@ func TestListSimilarKnowledge_NilEmbedderFallsBackToFTS(t *testing.T) {
 	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
-		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "node", Name: "Zhent", Body: "shadow"}),
+		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "node", Name: "Zhent", Body: "shadow"}),
 	}
 	store.searchResults = []storage.KGNode{{ID: uuid.New(), Type: storage.KGNodeFaction, Name: "Zhentarim"}}
 	client := proposalClient(t, store) // no embedder
@@ -303,7 +307,7 @@ func TestListSimilarKnowledge_EmbedErrorFallsBackToFTS(t *testing.T) {
 	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
-		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "edge", Subject: "Bart", Relation: "knows", Target: "Gundren"}),
+		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "edge", Subject: "Bart", Relation: "knows", Target: "Gundren"}),
 	}
 	emb := &fakeEmbedder{err: errors.New("provider down")}
 	client := proposalClientWithEmbedder(t, store, emb)

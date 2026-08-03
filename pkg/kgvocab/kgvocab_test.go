@@ -89,7 +89,27 @@ func TestKindsAndVersion(t *testing.T) {
 		t.Errorf("kinds = %q/%q/%q, want fact/edge/node (the on-disk contract)",
 			kgvocab.KindFact, kgvocab.KindEdge, kgvocab.KindNode)
 	}
-	if kgvocab.ProposalWriteVersion != 1 {
-		t.Errorf("ProposalWriteVersion = %d, want 1 (ADR-0052)", kgvocab.ProposalWriteVersion)
+	// v2 is the aspect-carrying fact payload (#542). Bumping it is the mechanism
+	// that makes a stored v1 row unreadable rather than misread, so the constant is
+	// pinned here: changing it silently would let an old proposal land under a shape
+	// its author never wrote.
+	if kgvocab.ProposalWriteVersion != 2 {
+		t.Errorf("ProposalWriteVersion = %d, want 2 (ADR-0052, #542 aspect payload)", kgvocab.ProposalWriteVersion)
+	}
+}
+
+// TestAspectBounds pins the Aspect caps every side of the contract shares — the
+// Tool create path, the RPC editor path and the renderer all validate against
+// these, so a drift here would let one side admit what another rejects.
+func TestAspectBounds(t *testing.T) {
+	if kgvocab.MaxAspectKeyRunes <= 0 || kgvocab.MaxAspectKeyRunes >= kgvocab.MaxAspectValueRunes {
+		t.Errorf("MaxAspectKeyRunes = %d, want a positive cap well below MaxAspectValueRunes = %d",
+			kgvocab.MaxAspectKeyRunes, kgvocab.MaxAspectValueRunes)
+	}
+	if kgvocab.MaxAspectsPerNode <= 0 {
+		t.Errorf("MaxAspectsPerNode = %d, want a positive cap", kgvocab.MaxAspectsPerNode)
+	}
+	if kgvocab.DefaultAspectKey == "" {
+		t.Error("DefaultAspectKey must be non-empty: a v2 fact payload always carries a key")
 	}
 }

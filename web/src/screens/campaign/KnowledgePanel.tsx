@@ -4,6 +4,9 @@ import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connec
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  ChevronDown,
+  ChevronUp,
+  Eye,
   EyeOff,
   Plus,
   Pencil,
@@ -278,10 +281,17 @@ export function KnowledgePanel() {
               name: fields.name,
               body: fields.body,
               gmPrivate: fields.gmPrivate,
+              aspects: toWireAspects(fields.aspects),
             });
           } else {
             createNode.mutate(
-              { nodeType: fields.nodeType, name: fields.name, body: fields.body, gmPrivate: fields.gmPrivate },
+              {
+                nodeType: fields.nodeType,
+                name: fields.name,
+                body: fields.body,
+                gmPrivate: fields.gmPrivate,
+                aspects: toWireAspects(fields.aspects),
+              },
               { onSuccess: reset },
             );
           }
@@ -685,7 +695,145 @@ function KnowledgeCard({
   );
 }
 
-type EditorFields = { nodeType: NodeType; name: string; body: string; gmPrivate: boolean };
+// AspectRow is one editable aspect in the editor's local state (#542). `uid` is a
+// client-only React key: a freshly added row has no server id yet, and reusing the
+// array index as a key made a reorder remount the wrong inputs and lose focus
+// mid-typing.
+type AspectRow = { uid: number; key: string; value: string; gmPrivate: boolean };
+
+let nextAspectUid = 0;
+const newAspectRow = (): AspectRow => ({ uid: ++nextAspectUid, key: "", value: "", gmPrivate: false });
+
+function toAspectRows(node: Node | null): AspectRow[] {
+  return (node?.aspects ?? []).map((a) => ({
+    uid: ++nextAspectUid,
+    key: a.key,
+    value: a.value,
+    gmPrivate: a.gmPrivate,
+  }));
+}
+
+// NodeAspects is the per-fact editor: an ordered list of (label, fact) rows, each
+// with its own "GM only" toggle, plus reorder and delete. This is what lets an NPC
+// keep its public facts and lose only its secret — the entry itself stays public.
+function NodeAspects({
+  rows,
+  onChange,
+  disabled,
+}: {
+  rows: AspectRow[];
+  onChange: (rows: AspectRow[]) => void;
+  disabled: boolean;
+}) {
+  const patch = (uid: number, next: Partial<AspectRow>) =>
+    onChange(rows.map((r) => (r.uid === uid ? { ...r, ...next } : r)));
+  const remove = (uid: number) => onChange(rows.filter((r) => r.uid !== uid));
+  const move = (index: number, delta: number) => {
+    const to = index + delta;
+    if (to < 0 || to >= rows.length) return;
+    const next = [...rows];
+    [next[index], next[to]] = [next[to], next[index]];
+    onChange(next);
+  };
+
+  return (
+    <div className="gx-field gx-kg-aspects">
+      <span className="gx-field__label">Facts</span>
+      <span className="gx-field__hint">
+        Each fact hides on its own — an entry can be public and still keep a secret.
+      </span>
+      <ul className="gx-kg-aspects__list">
+        {rows.map((row, i) => (
+          <li key={row.uid} className="gx-kg-aspect" data-private={row.gmPrivate || undefined}>
+            <div className="gx-kg-aspect__fields">
+              <Input
+                aria-label={`Fact ${i + 1} label`}
+                placeholder="Role"
+                className="gx-kg-aspect__key"
+                value={row.key}
+                disabled={disabled}
+                onChange={(e) => patch(row.uid, { key: e.target.value })}
+              />
+              <Input
+                aria-label={`Fact ${i + 1} text`}
+                placeholder="Runs the Rusty Anchor"
+                className="gx-kg-aspect__value"
+                value={row.value}
+                disabled={disabled}
+                onChange={(e) => patch(row.uid, { value: e.target.value })}
+              />
+            </div>
+            <div className="gx-kg-aspect__actions">
+              <button
+                type="button"
+                className="gx-kg-iconbtn"
+                aria-label={`Move fact ${i + 1} up`}
+                disabled={disabled || i === 0}
+                onClick={() => move(i, -1)}
+              >
+                <ChevronUp size={14} />
+              </button>
+              <button
+                type="button"
+                className="gx-kg-iconbtn"
+                aria-label={`Move fact ${i + 1} down`}
+                disabled={disabled || i === rows.length - 1}
+                onClick={() => move(i, 1)}
+              >
+                <ChevronDown size={14} />
+              </button>
+              <button
+                type="button"
+                className="gx-kg-iconbtn"
+                aria-label={
+                  row.gmPrivate ? `Make fact ${i + 1} public` : `Make fact ${i + 1} GM private`
+                }
+                aria-pressed={row.gmPrivate}
+                disabled={disabled}
+                onClick={() => patch(row.uid, { gmPrivate: !row.gmPrivate })}
+              >
+                {row.gmPrivate ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button
+                type="button"
+                className="gx-kg-iconbtn gx-kg-iconbtn--danger"
+                aria-label={`Remove fact ${i + 1}`}
+                disabled={disabled}
+                onClick={() => remove(row.uid)}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <Button
+        variant="ghost"
+        iconStart={<Plus size={13} />}
+        disabled={disabled}
+        onClick={() => onChange([...rows, newAspectRow()])}
+      >
+        Add fact
+      </Button>
+    </div>
+  );
+}
+
+type EditorFields = {
+  nodeType: NodeType;
+  name: string;
+  body: string;
+  gmPrivate: boolean;
+  aspects: AspectRow[];
+};
+
+// toWireAspects drops rows the GM left entirely blank — the editor keeps an empty
+// row around for the next fact, and that convenience must not become a save error.
+function toWireAspects(rows: AspectRow[]) {
+  return rows
+    .filter((r) => r.key.trim() !== "" || r.value.trim() !== "")
+    .map((r) => ({ id: "", key: r.key.trim(), value: r.value.trim(), gmPrivate: r.gmPrivate }));
+}
 
 // EntryEditor is the sticky editor card. In create mode it offers the Type select
 // (all seven types) plus Name/Content/GM-private; in edit mode the type is fixed
@@ -711,16 +859,18 @@ function EntryEditor({
   const [name, setName] = useState(node?.name ?? "");
   const [body, setBody] = useState(node?.body ?? "");
   const [gmPrivate, setGmPrivate] = useState(node?.gmPrivate ?? false);
+  const [aspects, setAspects] = useState<AspectRow[]>(() => toAspectRows(node));
 
   const reset = () => {
     setNodeType(NodeType.NOTE);
     setName("");
     setBody("");
     setGmPrivate(false);
+    setAspects([]);
   };
   const submit = () => {
     if (name.trim() === "") return;
-    onSubmit({ nodeType, name: name.trim(), body, gmPrivate }, reset);
+    onSubmit({ nodeType, name: name.trim(), body, gmPrivate, aspects }, reset);
   };
 
   return (
@@ -752,6 +902,8 @@ function EntryEditor({
       </div>
 
       <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="What is it called?" />
+
+      <NodeAspects rows={aspects} onChange={setAspects} disabled={pending} />
 
       <div className="gx-field">
         <label className="gx-field__label" htmlFor="gx-kg-body">

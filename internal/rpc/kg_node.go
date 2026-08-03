@@ -3,8 +3,10 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -12,6 +14,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // kgNodes is the Knowledge Graph Node feature module (#126, ADR-0008 v1.0):
@@ -32,6 +35,52 @@ type kgNodeStore interface {
 	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
 	// SearchNodes is the ranked fulltext wiki search (#131).
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+	// ReplaceNodeAspects rewrites a Node's Aspects to exactly the supplied list
+	// (#542); ListNodeAspects reads them back with their assigned ids and positions.
+	ReplaceNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID, aspects []storage.NewKGNodeAspect) error
+	ListNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID) ([]storage.KGNodeAspect, error)
+}
+
+// toStorageAspects validates and maps the wire Aspect rows onto their storage
+// form (#542). Blank rows (no key AND no value) are DROPPED rather than rejected:
+// the editor keeps an empty trailing row for the next entry, and a save should not
+// fail because the GM left it untouched. The caps come from pkg/kgvocab so the
+// editor path and the Tool create path bound the same shape.
+func toStorageAspects(in []*managementv1.NodeAspect) ([]storage.NewKGNodeAspect, error) {
+	out := make([]storage.NewKGNodeAspect, 0, len(in))
+	for _, a := range in {
+		key := strings.TrimSpace(a.GetKey())
+		value := strings.TrimSpace(a.GetValue())
+		if key == "" && value == "" {
+			continue
+		}
+		if utf8.RuneCountInString(key) > kgvocab.MaxAspectKeyRunes {
+			return nil, fmt.Errorf("aspect label is too long (max %d characters)", kgvocab.MaxAspectKeyRunes)
+		}
+		if utf8.RuneCountInString(value) > kgvocab.MaxAspectValueRunes {
+			return nil, fmt.Errorf("aspect text is too long (max %d characters)", kgvocab.MaxAspectValueRunes)
+		}
+		out = append(out, storage.NewKGNodeAspect{Key: key, Value: value, GMPrivate: a.GetGmPrivate()})
+	}
+	if len(out) > kgvocab.MaxAspectsPerNode {
+		return nil, fmt.Errorf("an entry may carry at most %d aspects", kgvocab.MaxAspectsPerNode)
+	}
+	return out, nil
+}
+
+// saveAspects replaces a Node's Aspects and reads them back onto the node so the
+// response carries the persisted ids and positions — the editor re-renders from
+// the response, so returning what the client SENT would hide a dropped blank row.
+func (s *kgNodes) saveAspects(ctx context.Context, campaignID uuid.UUID, n *storage.KGNode, aspects []storage.NewKGNodeAspect) error {
+	if err := s.store.ReplaceNodeAspects(ctx, campaignID, n.ID, aspects); err != nil {
+		return err
+	}
+	saved, err := s.store.ListNodeAspects(ctx, campaignID, n.ID)
+	if err != nil {
+		return err
+	}
+	n.Aspects = saved
+	return nil
 }
 
 // CreateNode adds a Knowledge Graph Node to the active campaign and returns it. An
@@ -59,6 +108,11 @@ func (s *kgNodes) CreateNode(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
+	aspects, err := toStorageAspects(m.GetAspects())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
 	created, err := s.store.CreateNode(ctx, storage.NewKGNode{
 		CampaignID: c.ID,
 		Type:       nodeType,
@@ -69,6 +123,15 @@ func (s *kgNodes) CreateNode(
 	if err != nil {
 		slog.Default().Error("CreateNode: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// Aspects are written after the Node exists (they reference it). A failure here
+	// leaves a created Node with no aspects rather than rolling back: the entry is
+	// real and the GM re-saves its aspects, which beats losing the entry entirely.
+	if len(aspects) > 0 {
+		if err := s.saveAspects(ctx, c.ID, &created, aspects); err != nil {
+			slog.Default().Error("CreateNode: store aspects failed", "node_id", created.ID, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
 	}
 	return connect.NewResponse(&managementv1.CreateNodeResponse{Node: toProtoNode(created)}), nil
 }
@@ -130,6 +193,11 @@ func (s *kgNodes) UpdateNode(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
+	aspects, err := toStorageAspects(m.GetAspects())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
 	updated, err := s.store.UpdateNode(ctx, storage.KGNodeUpdate{
 		ID:         id,
 		CampaignID: c.ID,
@@ -142,6 +210,13 @@ func (s *kgNodes) UpdateNode(
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 		}
 		slog.Default().Error("UpdateNode: store update failed", "node_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// The aspect list is REPLACE-in-full (#542), so it runs on every save — including
+	// an empty list, which is how the GM clears the last aspect. Skipping the call
+	// when the list is empty would make "delete my last aspect" silently impossible.
+	if err := s.saveAspects(ctx, c.ID, &updated, aspects); err != nil {
+		slog.Default().Error("UpdateNode: store aspects failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateNodeResponse{Node: toProtoNode(updated)}), nil
@@ -235,6 +310,14 @@ func toProtoNode(n storage.KGNode) *managementv1.Node {
 	}
 	if n.AgentID.Valid {
 		pn.AgentId = n.AgentID.UUID.String()
+	}
+	for _, a := range n.Aspects {
+		pn.Aspects = append(pn.Aspects, &managementv1.NodeAspect{
+			Id:        a.ID.String(),
+			Key:       a.Key,
+			Value:     a.Value,
+			GmPrivate: a.GMPrivate,
+		})
 	}
 	return pn
 }

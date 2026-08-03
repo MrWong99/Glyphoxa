@@ -202,9 +202,13 @@ func (w *Worker) passChunks(ctx context.Context) {
 }
 
 // passNodes is the Knowledge Graph Node half of the backfill (#300), mirroring
-// passChunks exactly. The embed text is the Node's name + body joined by a blank
-// line and trimmed, so a body-less Node still embeds on its name alone. A wiki edit
-// resets the row's embedding (storage.UpdateNode), so it is re-claimed here.
+// passChunks exactly. The embed text is the Node's name + its Aspects + its body,
+// joined by blank lines and trimmed, so a body-less Node still embeds on its name
+// and aspects alone. Private Aspects are INCLUDED: the vector feeds the GM-facing
+// similarity hints (ADR-0052), which never reach a prompt, and leaving secrets out
+// would make duplicate detection blind to the facts GMs most want deduped. A wiki
+// or aspect edit resets the row's embedding (storage.UpdateNode /
+// storage.ReplaceNodeAspects), so it is re-claimed here.
 func (w *Worker) passNodes(ctx context.Context) {
 	nodes, err := w.store.ListUnembeddedNodes(ctx, w.cfg.BatchSize)
 	if err != nil {
@@ -217,7 +221,8 @@ func (w *Worker) passNodes(ctx context.Context) {
 
 	texts := make([]string, len(nodes))
 	for i, n := range nodes {
-		texts[i] = strings.TrimSpace(n.Name + "\n\n" + n.Body)
+		parts := append([]string{n.Name}, n.AspectLines(false)...)
+		texts[i] = strings.TrimSpace(strings.Join(append(parts, n.Body), "\n\n"))
 	}
 
 	vecs, ok := w.embedBatch(ctx, "nodes", texts)

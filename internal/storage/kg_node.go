@@ -50,6 +50,13 @@ type KGNode struct {
 	AgentID   uuid.NullUUID
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// Aspects is the Node's ordered per-fact visibility layer (#542, ADR-0008 third
+	// amendment), populated only by the reads that project it. A PROMPT-FACING read
+	// returns public Aspects ONLY — the exclusion lives in the read's SQL, so this
+	// field can never carry a GM secret into prompt assembly. nil means "this Node
+	// has none" for a projecting read, and "not loaded" for one that does not
+	// project them (the RETURNING projections of Create/Update).
+	Aspects []KGNodeAspect
 }
 
 // NewKGNode is the input to CreateNode. node_type is set once at insert and never
@@ -72,6 +79,38 @@ func scanKGNode(row pgx.Row) (KGNode, error) {
 		&n.CreatedAt, &n.UpdatedAt,
 	)
 	return n, err
+}
+
+// kgNodeColumnsAspects is kgNodeColumns plus the Aspect aggregate (#542):
+// publicOnly filters gm_private Aspects inside the SQL, so a prompt-facing read
+// and a GM read differ by this one flag rather than by post-fetch discipline. The
+// unaliased form is for `FROM kg_node`; [kgNodeColumnsNAspects] is the `n`-aliased
+// form the neighbourhood join needs.
+func kgNodeColumnsAspects(publicOnly bool) string {
+	return kgNodeColumns + ", " + kgNodeAspectsExpr("kg_node.id", publicOnly)
+}
+
+// kgNodeColumnsNAspects is [kgNodeColumnsAspects] for the `n`-aliased neighbourhood
+// join.
+func kgNodeColumnsNAspects(publicOnly bool) string {
+	return kgNodeColumnsN + ", " + kgNodeAspectsExpr("n.id", publicOnly)
+}
+
+// scanKGNodeAspects scans a row from one of the aspect-projecting column lists.
+func scanKGNodeAspects(row pgx.Row) (KGNode, error) {
+	var n KGNode
+	var aspects []byte
+	err := row.Scan(
+		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
+		&n.CreatedAt, &n.UpdatedAt, &aspects,
+	)
+	if err != nil {
+		return n, err
+	}
+	if err := decodeAspects(aspects, &n.Aspects); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // CreateNode inserts a Knowledge Graph Node and returns the persisted row. The
@@ -157,10 +196,12 @@ func (s *Store) DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error 
 
 // ListNodes returns every Knowledge Graph Node in a Campaign in a stable display
 // order (node_type enum order, then case-insensitive name, then id) — the
-// Knowledge panel's list. An empty result is not an error.
+// Knowledge panel's list. Each Node carries its Aspects, private ones INCLUDED:
+// this is a GM-facing read and never flows into prompt assembly (#450, #542). An
+// empty result is not an error.
 func (s *Store) ListNodes(ctx context.Context, campaignID uuid.UUID) ([]KGNode, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
+		`SELECT `+kgNodeColumnsAspects(false)+`
 		   FROM kg_node
 		  WHERE campaign_id = $1
 		  ORDER BY node_type, lower(name), id`, campaignID)
@@ -171,7 +212,7 @@ func (s *Store) ListNodes(ctx context.Context, campaignID uuid.UUID) ([]KGNode, 
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan kg node: %w", err)
 		}
@@ -206,6 +247,11 @@ const kgNodeColumnsN = `
 // (no campaign-wide fallback: the NPC injects only its own neighbourhood). The
 // UNION dedupes multi-edge neighbours; min(hop) keeps the own Node at hop 0 even
 // if an Edge also makes it a neighbour of itself's neighbour.
+//
+// Aspects (#542) ride the same seam: each returned Node carries its PUBLIC Aspects
+// only, filtered inside the aggregate's SQL. A gm_private Aspect on an otherwise
+// public Node is therefore unreachable from prompt assembly by construction —
+// which is the whole point of splitting visibility per fact.
 func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode, error) {
 	rows, err := s.db.Query(ctx,
 		`WITH own AS (
@@ -219,7 +265,7 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 		 ranked AS (
 		     SELECT id, min(hop) AS hop FROM hood GROUP BY id
 		 )
-		 SELECT `+kgNodeColumnsN+`
+		 SELECT `+kgNodeColumnsNAspects(true)+`
 		   FROM kg_node n
 		   JOIN ranked r ON r.id = n.id
 		  WHERE NOT n.gm_private
@@ -232,7 +278,7 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan agent node fact: %w", err)
 		}
@@ -257,7 +303,7 @@ func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []
 		return nil, fmt.Errorf("storage: similar nodes: k must be > 0, got %d", k)
 	}
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
+		`SELECT `+kgNodeColumnsAspects(false)+`
 		   FROM kg_node
 		  WHERE campaign_id = $1 AND embedding IS NOT NULL
 		  ORDER BY embedding <=> $2::vector
@@ -269,7 +315,7 @@ func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan similar kg node: %w", err)
 		}
@@ -284,11 +330,14 @@ func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []
 // ListUnembeddedNodes returns up to limit Knowledge Graph Nodes still awaiting an
 // embedding (embedding IS NULL), oldest first — the node half of the embedworker
 // backfill queue (#300, ADR-0011), mirroring ListUnembeddedChunks. An empty
-// result means the backlog is drained. The name+body is embedded by the worker;
-// both columns are selected via kgNodeColumns.
+// result means the backlog is drained. The name + aspects + body is embedded by
+// the worker, so the projection carries the Aspects — private ones included: the
+// embedding feeds the GM-facing similarity hints (ADR-0052), which are never
+// prompt-facing, and a secret that is invisible to the vector would make
+// duplicate detection blind to exactly the facts GMs most want deduped.
 func (s *Store) ListUnembeddedNodes(ctx context.Context, limit int) ([]KGNode, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
+		`SELECT `+kgNodeColumnsAspects(false)+`
 		   FROM kg_node
 		  WHERE embedding IS NULL
 		  ORDER BY created_at, id
@@ -300,7 +349,7 @@ func (s *Store) ListUnembeddedNodes(ctx context.Context, limit int) ([]KGNode, e
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNode(rows)
+		n, err := scanKGNodeAspects(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan unembedded kg node: %w", err)
 		}

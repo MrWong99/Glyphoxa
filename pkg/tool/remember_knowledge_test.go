@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // fakeKGWriter records what remember_knowledge asked the KG write seam to do so
@@ -137,7 +139,8 @@ func TestRememberKnowledge_OwnNodeAnchoring(t *testing.T) {
 			t.Errorf("CreateProposal agent %q, want agent-9", w.createAgentID)
 		}
 		got := w.created[0]
-		want := ProposedWrite{V: 1, Kind: "fact", NodeID: "node-1", Subject: "Bartholomew", Fact: "I brew the best ale"}
+		want := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: "node-1", Subject: "Bartholomew",
+			AspectKey: kgvocab.DefaultAspectKey, Fact: "I brew the best ale"}
 		if got != want {
 			t.Errorf("proposed write = %+v, want %+v", got, want)
 		}
@@ -153,7 +156,7 @@ func TestRememberKnowledge_OwnNodeAnchoring(t *testing.T) {
 			t.Fatalf("Execute: %v", err)
 		}
 		got := w.created[0]
-		want := ProposedWrite{V: 1, Kind: "edge", NodeID: "node-1", Subject: "Bartholomew", Relation: "knows", Target: "The Duke"}
+		want := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: "node-1", Subject: "Bartholomew", Relation: "knows", Target: "The Duke"}
 		if got != want {
 			t.Errorf("proposed write = %+v, want %+v", got, want)
 		}
@@ -226,7 +229,8 @@ func TestRememberKnowledge_CampaignScope(t *testing.T) {
 			t.Error("OwnNode was called under campaign scope")
 		}
 		got := w.created[0]
-		want := ProposedWrite{V: 1, Kind: "fact", Subject: "The Duke", Fact: "rules the city"}
+		want := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "The Duke",
+			AspectKey: kgvocab.DefaultAspectKey, Fact: "rules the city"}
 		if got != want {
 			t.Errorf("proposed write = %+v, want %+v", got, want)
 		}
@@ -242,7 +246,7 @@ func TestRememberKnowledge_CampaignScope(t *testing.T) {
 			t.Fatalf("Execute: %v", err)
 		}
 		got := w.created[0]
-		want := ProposedWrite{V: 1, Kind: "node", NodeType: "faction", Name: "Ironhold", Body: "a smiths' guild"}
+		want := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "faction", Name: "Ironhold", Body: "a smiths' guild"}
 		if got != want {
 			t.Errorf("proposed write = %+v, want %+v", got, want)
 		}

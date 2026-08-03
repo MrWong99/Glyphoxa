@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -98,7 +99,7 @@ func TestRejectKnowledgeProposal(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "note", Name: "Rumor", Body: "x",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "Rumor", Body: "x",
 	})
 
 	if err := st.RejectKnowledgeProposal(ctx, campaignID, id); err != nil {
@@ -144,15 +145,22 @@ func TestApproveFactViaNodeID(t *testing.T) {
 	}
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("ApproveKnowledgeProposal: %v", err)
 	}
 
-	want := "An innkeeper.\n\nHe fears the dark."
-	if got := nodeBody(t, st, campaignID, node.ID); got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	// #542: approval appends an ASPECT row; the free-form body is left untouched.
+	if got := nodeBody(t, st, campaignID, node.ID); got != "An innkeeper." {
+		t.Errorf("body = %q, want the untouched original — a fact lands as an aspect now", got)
+	}
+	aspects := nodeAspects(t, st, campaignID, node.ID)
+	if len(aspects) != 1 || aspects[0].Value != "He fears the dark." {
+		t.Fatalf("aspects = %+v, want one row carrying the approved fact", aspects)
+	}
+	if aspects[0].Key == "" || aspects[0].GMPrivate {
+		t.Errorf("approved aspect = %+v, want a non-empty key and public visibility", aspects[0])
 	}
 	if pendingIDs(t, st, campaignID)[id] {
 		t.Error("approved proposal still pending")
@@ -192,18 +200,18 @@ func TestApproveFactViaSubject(t *testing.T) {
 
 	// Case-insensitive + trimmed subject resolves; blank body → fact alone.
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "  neverWINTER ", Fact: "A cold city.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "  neverWINTER ", Fact: "A cold city.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("Approve (subject): %v", err)
 	}
-	if got := nodeBody(t, st, campaignID, loc.ID); got != "A cold city." {
-		t.Errorf("body = %q, want %q", got, "A cold city.")
+	if got := nodeAspects(t, st, campaignID, loc.ID); len(got) != 1 || got[0].Value != "A cold city." {
+		t.Errorf("aspects = %+v, want the approved fact as one aspect row", got)
 	}
 
 	// Unknown subject → blocked, row stays pending, KG untouched.
 	unknownID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Waterdeep", Fact: "A big city.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Waterdeep", Fact: "A big city.",
 	})
 	err = st.ApproveKnowledgeProposal(ctx, campaignID, unknownID)
 	var blocked *storage.ProposalBlockedError
@@ -225,7 +233,7 @@ func TestApproveFactViaSubject(t *testing.T) {
 		t.Fatalf("CreateNode ring2: %v", err)
 	}
 	ambID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Ring", Fact: "It is gold.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Ring", Fact: "It is gold.",
 	})
 	err = st.ApproveKnowledgeProposal(ctx, campaignID, ambID)
 	if !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "multiple entries named") {
@@ -252,7 +260,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Happy: Bart resides_in Inn (resides_in → Location, valid).
 	okID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, okID); err != nil {
 		t.Fatalf("approve valid edge: %v", err)
@@ -266,7 +274,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Duplicate: same (from,to,type) again → blocked.
 	dupID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, dupID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "already exists") {
 		t.Errorf("approve duplicate: got %v, want already-exists blocked", err)
@@ -277,7 +285,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Matrix violation: resides_in → Faction is invalid.
 	badID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Guild",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "resides_in", Target: "Guild",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, badID); !errors.As(err, &blocked) {
 		t.Errorf("approve matrix violation: got %v, want blocked", err)
@@ -285,7 +293,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Missing target: no entry named "Nowhere".
 	missID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "knows", Target: "Nowhere",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: npc.ID.String(), Subject: "Bart", Relation: "knows", Target: "Nowhere",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, missID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "no wiki entry named") {
 		t.Errorf("approve missing target: got %v, want no-entry blocked", err)
@@ -293,7 +301,7 @@ func TestApproveEdge(t *testing.T) {
 
 	// Dangling node_id: a syntactically-valid uuid that no longer exists.
 	danglingID := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "edge", NodeID: uuid.New().String(), Subject: "Ghost", Relation: "knows", Target: "Inn",
+		V: kgvocab.ProposalWriteVersion, Kind: "edge", NodeID: uuid.New().String(), Subject: "Ghost", Relation: "knows", Target: "Inn",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, danglingID); !errors.As(err, &blocked) || !strings.Contains(blocked.Reason, "no longer exists") {
 		t.Errorf("approve dangling node_id: got %v, want dangling blocked", err)
@@ -310,7 +318,7 @@ func TestApproveNode(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "faction", Name: "Zhentarim", Body: "A shadowy network.",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "faction", Name: "Zhentarim", Body: "A shadowy network.",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("approve node: %v", err)
@@ -353,7 +361,7 @@ func TestApproveDoubleIsNotFound(t *testing.T) {
 	butler := seedButlerAgent(t, st, campaignID)
 
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "node", NodeType: "note", Name: "Once", Body: "x",
+		V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "Once", Body: "x",
 	})
 	if err := st.ApproveKnowledgeProposal(ctx, campaignID, id); err != nil {
 		t.Fatalf("first approve: %v", err)
@@ -371,7 +379,7 @@ func TestListPendingCarriesAgentName(t *testing.T) {
 	st := storage.New(pool)
 	butler := seedButlerAgent(t, st, campaignID)
 
-	fileProposal(t, st, campaignID, butler, tool.ProposedWrite{V: 1, Kind: "node", NodeType: "note", Name: "n", Body: "b"})
+	fileProposal(t, st, campaignID, butler, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "node", NodeType: "note", Name: "n", Body: "b"})
 	ps, err := st.ListPendingKnowledgeProposals(ctx, campaignID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -487,7 +495,7 @@ func TestApproveFactSubjectDeletedBeforeApprove(t *testing.T) {
 		t.Fatalf("CreateNode: %v", err)
 	}
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
-		V: 1, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
+		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
 	})
 	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
@@ -556,4 +564,138 @@ func unitVec(axis int) []float32 {
 	v := make([]float32, 768)
 	v[axis] = 1
 	return v
+}
+
+// nodeAspects reads one Node's Aspects back through the GM-facing read.
+func nodeAspects(t *testing.T, st *storage.Store, campaignID, id uuid.UUID) []storage.KGNodeAspect {
+	t.Helper()
+	aspects, err := st.ListNodeAspects(context.Background(), campaignID, id)
+	if err != nil {
+		t.Fatalf("ListNodeAspects: %v", err)
+	}
+	return aspects
+}
+
+// TestApproveRejectsStaleWriteVersion pins the #542 version gate: a proposal
+// stored under the OLD write shape is refused as unreadable rather than
+// reinterpreted under the new one. That is the whole reason ProposalWriteVersion
+// exists — a v1 fact was "append this prose to the body", and silently landing it
+// as an aspect row would put words in the GM's wiki under a shape nobody wrote.
+func TestApproveRejectsStaleWriteVersion(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeNPC, Name: "Bart", Body: "An innkeeper.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+
+	stale := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: kgvocab.ProposalWriteVersion - 1, Kind: "fact",
+		NodeID: node.ID.String(), Subject: "Bart", Fact: "He fears the dark.",
+	})
+	err = st.ApproveKnowledgeProposal(ctx, campaignID, stale)
+	var blocked *storage.ProposalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("approve stale-version proposal: got %v, want ProposalBlockedError", err)
+	}
+	if !strings.Contains(blocked.Reason, "unreadable") {
+		t.Errorf("reason = %q, want the unreadable-proposal message", blocked.Reason)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("stale proposal wrote %d aspects; it must write nothing", len(got))
+	}
+	if got := nodeBody(t, st, campaignID, node.ID); got != "An innkeeper." {
+		t.Errorf("body = %q, want untouched", got)
+	}
+	if !pendingIDs(t, st, campaignID)[stale] {
+		t.Error("blocked proposal must stay pending so the GM can reject it")
+	}
+}
+
+// TestReplaceNodeAspects covers the editor's save path: replace-in-full assigns
+// dense positions from the slice order, a second call rewrites (reorder + edit +
+// delete in one save), an empty list clears, and the write is campaign-scoped.
+func TestReplaceNodeAspects(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
+		{Key: "Role", Value: "Runs the Rusty Anchor"},
+		{Key: "Manner", Value: "Grumbles"},
+		{Key: "Secret", Value: "Took a bribe", GMPrivate: true},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+	got := nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 3 {
+		t.Fatalf("got %d aspects, want 3", len(got))
+	}
+	for i, a := range got {
+		if a.Position != i {
+			t.Errorf("aspect %d position = %d, want dense %d", i, a.Position, i)
+		}
+	}
+	if got[0].Key != "Role" || !got[2].GMPrivate {
+		t.Errorf("aspects did not round-trip in order with their privacy: %+v", got)
+	}
+
+	// One save covers reorder, edit and delete together.
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
+		{Key: "Secret", Value: "Took a bribe in Eastmonth", GMPrivate: true},
+		{Key: "Role", Value: "Runs the Rusty Anchor"},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects (rewrite): %v", err)
+	}
+	got = nodeAspects(t, st, campaignID, node.ID)
+	if len(got) != 2 || got[0].Key != "Secret" || got[0].Value != "Took a bribe in Eastmonth" || got[1].Key != "Role" {
+		t.Fatalf("rewrite = %+v, want the reordered/edited pair with Manner deleted", got)
+	}
+
+	// Another campaign cannot clear this Node's aspects.
+	_, _, otherCampaign := seedCampaign(t, dsn)
+	if err := st.ReplaceNodeAspects(ctx, otherCampaign, node.ID, nil); err != nil {
+		t.Fatalf("cross-campaign ReplaceNodeAspects should be a no-op, got: %v", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 2 {
+		t.Errorf("a cross-campaign write cleared %d aspects; the scope must refuse it", 2-len(got))
+	}
+
+	// Empty list clears, and the free-form body survives.
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, nil); err != nil {
+		t.Fatalf("ReplaceNodeAspects (clear): %v", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("clear left %d aspects", len(got))
+	}
+}
+
+// TestDeleteNodeCascadesAspects pins that a Node delete reaps its Aspects through
+// the composite FK, so no orphan row survives its entry.
+func TestDeleteNodeCascadesAspects(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Doomed")
+	if err := st.ReplaceNodeAspects(ctx, campaignID, node.ID, []storage.NewKGNodeAspect{
+		{Key: "Note", Value: "about to vanish"},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {
+		t.Errorf("%d aspect rows outlived their node", len(got))
+	}
 }

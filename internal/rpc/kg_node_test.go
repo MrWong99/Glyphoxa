@@ -2,6 +2,8 @@ package rpc_test
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -11,6 +13,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // kgNodeClient composes a CampaignServer over just the KG-Node slice (#445):
@@ -642,5 +645,114 @@ func TestSearchNodesHonorsLiveSession(t *testing.T) {
 	if store.searchNodesCampaign != live.ID {
 		t.Errorf("SearchNodes scoped to %s, want the LIVE session campaign %s (not durable %s / newer %s)",
 			store.searchNodesCampaign, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestNodeAspects_RoundTripAndReplaceInFull covers the #542 editor contract at
+// the RPC seam: aspects arrive on create and update, the update REPLACES the list
+// in full (so one save covers add/edit/reorder/delete), the response carries the
+// persisted rows rather than the client's input, and blank rows are dropped
+// instead of failing the save.
+func TestNodeAspects_RoundTripAndReplaceInFull(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGNodeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Saltmarsh"}
+	client := kgNodeClient(t, store)
+	ctx := context.Background()
+
+	created, err := client.CreateNode(ctx, connect.NewRequest(&managementv1.CreateNodeRequest{
+		NodeType: managementv1.NodeType_NODE_TYPE_NPC,
+		Name:     "Bart the innkeeper",
+		Aspects: []*managementv1.NodeAspect{
+			{Key: "Role", Value: "Runs the Rusty Anchor"},
+			{Key: "Secret", Value: "Took the smugglers' bribe", GmPrivate: true},
+			{Key: "  ", Value: "   "}, // the editor's untouched trailing row
+		},
+	}))
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	got := created.Msg.GetNode().GetAspects()
+	if len(got) != 2 {
+		t.Fatalf("created aspects = %d, want 2 (the blank row dropped, not rejected)", len(got))
+	}
+	if got[0].GetKey() != "Role" || got[0].GetGmPrivate() {
+		t.Errorf("aspect[0] = %+v, want the public Role row first", got[0])
+	}
+	if !got[1].GetGmPrivate() {
+		t.Errorf("aspect[1] = %+v, want the secret to keep its own privacy", got[1])
+	}
+	if got[0].GetId() == "" {
+		t.Error("response aspects carry no ids — the editor re-renders from the persisted rows")
+	}
+
+	// The node itself stays PUBLIC: that is the whole point of per-aspect privacy.
+	if created.Msg.GetNode().GetGmPrivate() {
+		t.Error("node went gm_private because one aspect is private")
+	}
+
+	nodeID := created.Msg.GetNode().GetId()
+	if _, err := client.UpdateNode(ctx, connect.NewRequest(&managementv1.UpdateNodeRequest{
+		Id:   nodeID,
+		Name: "Bart the innkeeper",
+		Aspects: []*managementv1.NodeAspect{
+			{Key: "Secret", Value: "Took the smugglers' bribe in Eastmonth", GmPrivate: true},
+		},
+	})); err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	last := store.aspectWrites[len(store.aspectWrites)-1]
+	if len(last.aspects) != 1 || last.aspects[0].Key != "Secret" {
+		t.Errorf("update wrote %+v, want the replacement list verbatim", last.aspects)
+	}
+
+	// Clearing the last aspect must reach storage as an empty replace — skipping the
+	// call when the list is empty would make "delete my last aspect" impossible.
+	if _, err := client.UpdateNode(ctx, connect.NewRequest(&managementv1.UpdateNodeRequest{
+		Id: nodeID, Name: "Bart the innkeeper",
+	})); err != nil {
+		t.Fatalf("UpdateNode (clear): %v", err)
+	}
+	last = store.aspectWrites[len(store.aspectWrites)-1]
+	if len(last.aspects) != 0 {
+		t.Errorf("clearing wrote %+v, want an empty replace", last.aspects)
+	}
+	if store.aspectsCampaign != store.campaign.ID {
+		t.Errorf("aspect writes scoped to %s, want the active campaign %s", store.aspectsCampaign, store.campaign.ID)
+	}
+}
+
+// TestNodeAspects_RejectsOversizedRows pins the shared kgvocab caps at the RPC
+// seam: an overlong label or value, or too many rows, is CodeInvalidArgument
+// BEFORE anything is written.
+func TestNodeAspects_RejectsOversizedRows(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGNodeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Saltmarsh"}
+	client := kgNodeClient(t, store)
+	ctx := context.Background()
+
+	tooMany := make([]*managementv1.NodeAspect, 0, kgvocab.MaxAspectsPerNode+1)
+	for i := range kgvocab.MaxAspectsPerNode + 1 {
+		tooMany = append(tooMany, &managementv1.NodeAspect{Key: "k", Value: strconv.Itoa(i)})
+	}
+
+	cases := map[string][]*managementv1.NodeAspect{
+		"overlong key":   {{Key: strings.Repeat("k", kgvocab.MaxAspectKeyRunes+1), Value: "v"}},
+		"overlong value": {{Key: "k", Value: strings.Repeat("v", kgvocab.MaxAspectValueRunes+1)}},
+		"too many rows":  tooMany,
+	}
+	for name, aspects := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := client.CreateNode(ctx, connect.NewRequest(&managementv1.CreateNodeRequest{
+				NodeType: managementv1.NodeType_NODE_TYPE_NOTE, Name: "Entry", Aspects: aspects,
+			}))
+			if connect.CodeOf(err) != connect.CodeInvalidArgument {
+				t.Errorf("err = %v, want CodeInvalidArgument", err)
+			}
+			if len(store.nodesCreated) != 0 {
+				t.Error("a rejected aspect list still created the node")
+			}
+		})
 	}
 }

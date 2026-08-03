@@ -184,33 +184,45 @@ func (s *Store) ApproveKnowledgeProposal(ctx context.Context, campaignID, id uui
 	})
 }
 
-// applyProposedFact appends the proposal's fact sentence to the target Node's body
-// (blank body → the fact alone; non-blank → separated by a blank line) and resets
-// the Node's embedding so the edit re-enters the backfill queue. The anchor is the
-// proposal's NodeID when set (an own_node NPC proposal), else the Subject resolved
-// by name. A NodeID that no longer resolves is blocked (the entry was deleted
-// after the proposal was filed). Runs inside the approval tx.
+// applyProposedFact appends the proposal's fact to the target Node as an ASPECT
+// row — (aspect_key, fact), public, at the end of the Node's list (#542, write
+// contract v2). Appending a row rather than concatenating prose is what makes
+// approval a structural act the GM can later relabel, reorder or make private
+// per-fact, instead of a paragraph they must hand-edit apart again.
+//
+// The anchor is the proposal's NodeID when set (an own_node NPC proposal), else
+// the Subject resolved by name. A NodeID that no longer resolves is blocked (the
+// entry was deleted after the proposal was filed). Runs inside the approval tx.
 func (tx *Store) applyProposedFact(ctx context.Context, campaignID uuid.UUID, w tool.ProposedWrite) error {
 	anchor, err := tx.resolveProposalAnchor(ctx, campaignID, w.NodeID, w.Subject)
 	if err != nil {
 		return err
 	}
-	tag, err := tx.db.Exec(ctx,
-		`UPDATE kg_node
-		    SET body = CASE WHEN body = '' THEN $2 ELSE body || E'\n\n' || $2 END,
-		        embedding = NULL,
-		        embedding_model = '',
-		        updated_at = now()
-		  WHERE id = $1 AND campaign_id = $3`, anchor, w.Fact, campaignID)
+	key := strings.TrimSpace(w.AspectKey)
+	if key == "" {
+		// A v2 payload always carries a key (the Tool substitutes the default), so this
+		// is defensive only — a keyless row still lands under the same generic label
+		// rather than blocking a legitimate fact on a formatting detail.
+		key = kgvocab.DefaultAspectKey
+	}
+	rows, err := appendNodeAspectTx(ctx, tx, campaignID, anchor, key, w.Fact)
 	if err != nil {
-		return fmt.Errorf("storage: approve fact: append body: %w", err)
+		return fmt.Errorf("storage: approve fact: %w", err)
 	}
 	// The anchor was resolved earlier in this same tx, but a concurrent DELETE could
-	// land between resolve and UPDATE. 0 rows means the entry is gone: block (tx
+	// land between resolve and INSERT. 0 rows means the entry is gone: block (tx
 	// rolls back, row stays pending) rather than silently swallow the fact —
 	// consistent with the edge path's dangling-endpoint refusal.
-	if tag.RowsAffected() == 0 {
+	if rows == 0 {
 		return &ProposalBlockedError{Reason: "the entry this proposal is about no longer exists — reject it"}
+	}
+	// The Node's embedded text now includes the new Aspect, so reset the embedding
+	// and let the backfill worker re-embed (#300, ADR-0011) — the same invalidation
+	// a body edit performs.
+	if _, err := tx.db.Exec(ctx,
+		`UPDATE kg_node SET embedding = NULL, embedding_model = '', updated_at = now()
+		  WHERE id = $1 AND campaign_id = $2`, anchor, campaignID); err != nil {
+		return fmt.Errorf("storage: approve fact: invalidate embedding: %w", err)
 	}
 	return nil
 }

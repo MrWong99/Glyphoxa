@@ -59,16 +59,21 @@ type Recapper interface {
 // proposal row; that is ADR-0052-consistent (the NPC heard the fact) and the GM
 // review is the safety net.
 type ProposedWrite struct {
-	V        int    `json:"v"`
-	Kind     string `json:"kind"`
-	NodeID   string `json:"node_id,omitempty"`
-	Subject  string `json:"subject,omitempty"`
-	Fact     string `json:"fact,omitempty"`
-	Relation string `json:"relation,omitempty"`
-	Target   string `json:"target,omitempty"`
-	NodeType string `json:"node_type,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Body     string `json:"body,omitempty"`
+	V       int    `json:"v"`
+	Kind    string `json:"kind"`
+	NodeID  string `json:"node_id,omitempty"`
+	Subject string `json:"subject,omitempty"`
+	// AspectKey is the LABEL a kind=fact proposal lands under (#542): approving
+	// appends the Aspect row (AspectKey, Fact) to the target Node rather than
+	// rewriting its prose. Always non-empty on a v2 fact — the handler substitutes
+	// [kgvocab.DefaultAspectKey] when the model names none.
+	AspectKey string `json:"aspect_key,omitempty"`
+	Fact      string `json:"fact,omitempty"`
+	Relation  string `json:"relation,omitempty"`
+	Target    string `json:"target,omitempty"`
+	NodeType  string `json:"node_type,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Body      string `json:"body,omitempty"`
 }
 
 // KGNodeRef is a storage-free handle to an Agent's own linked Node (ADR-0008
