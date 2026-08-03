@@ -153,6 +153,7 @@ type conversationDeps struct {
 	memory     agent.MemoryRecaller
 	facts      agent.FactsRecaller
 	directives agent.DirectiveRecaller
+	location   agent.LocationRecaller
 
 	// speakerName resolves a route's SpeakerID to the human speaker's display
 	// name for the agent-facing transcript (the transcript-names seam); it is

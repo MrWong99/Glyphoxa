@@ -21,5 +21,10 @@ func BuiltinRegistry(deps Deps) *Registry {
 	r.MustRegister(NewKGQuery(deps.KG))
 	r.MustRegister(NewRememberKnowledge(deps.KGW))
 	r.MustRegister(NewRecap(deps.Recap))
+	// The spatial reads (#539, ADR-0060). Read-only and grant-scoped, so they run
+	// inline and cost nothing when unused — the alternative was widening every NPC
+	// prompt, which would silently evict world knowledge from the capped fact block.
+	r.MustRegister(NewLocateEntity(deps.Spatial))
+	r.MustRegister(NewWhatsNearby(deps.Spatial))
 	return r
 }
