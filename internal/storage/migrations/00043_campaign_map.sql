@@ -33,8 +33,14 @@ CREATE TABLE campaign_map (
     -- campaigns without a trigger (the ADR-0008 pattern).
     CONSTRAINT campaign_map_id_campaign_unique UNIQUE (id, campaign_id),
     -- The anchor Node must be in the SAME Campaign — same declarative pattern.
+    --
+    -- ON DELETE SET NULL (anchor_node_id): the column list is MANDATORY here. A
+    -- bare SET NULL on a composite FK nulls EVERY referencing column, which would
+    -- include campaign_id — a NOT NULL column, so deleting an anchored Node would
+    -- fail the whole delete. Naming the column confines the null to the anchor,
+    -- which is the only part that lost its referent.
     CONSTRAINT campaign_map_anchor_fk FOREIGN KEY (anchor_node_id, campaign_id)
-        REFERENCES kg_node (id, campaign_id) ON DELETE SET NULL,
+        REFERENCES kg_node (id, campaign_id) ON DELETE SET NULL (anchor_node_id),
     CONSTRAINT campaign_map_dimensions_positive CHECK (width_px > 0 AND height_px > 0)
 );
 

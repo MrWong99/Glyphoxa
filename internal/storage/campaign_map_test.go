@@ -324,3 +324,41 @@ func TestUnpinnedNodes(t *testing.T) {
 		t.Errorf("tray = %d entries, want 2 after pinning one", len(after))
 	}
 }
+
+// TestMapAnchorNodeDelete pins the composite-FK column list. A bare
+// ON DELETE SET NULL on a composite FK nulls EVERY referencing column — including
+// campaign_id, which is NOT NULL — so deleting an anchored Node would fail the
+// whole delete. Naming the column confines the null to the anchor.
+func TestMapAnchorNodeDelete(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	town := mkNode(t, st, campaignID, storage.KGNodeLocation, "Saltmarsh")
+	m, err := st.CreateMap(ctx, storage.NewCampaignMap{
+		CampaignID: campaignID, Name: "Saltmarsh",
+		BlobKey: "t/" + uuid.New().String() + "/map/" + uuid.New().String() + "/image",
+		WidthPx: 100, HeightPx: 100,
+		AnchorNodeID: uuid.NullUUID{UUID: town.ID, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateMap: %v", err)
+	}
+
+	// Deleting the anchor Node must succeed, not fail on a NOT NULL campaign_id.
+	if err := st.DeleteNode(ctx, campaignID, town.ID); err != nil {
+		t.Fatalf("DeleteNode on an anchored map: %v", err)
+	}
+
+	after, err := st.GetMap(ctx, campaignID, m.ID)
+	if err != nil {
+		t.Fatalf("GetMap after anchor delete: %v", err)
+	}
+	if after.AnchorNodeID.Valid {
+		t.Errorf("anchor = %v, want cleared", after.AnchorNodeID)
+	}
+	if after.CampaignID != campaignID {
+		t.Errorf("campaign_id = %v, want it untouched (%v)", after.CampaignID, campaignID)
+	}
+}

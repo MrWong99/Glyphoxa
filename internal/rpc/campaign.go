@@ -148,7 +148,7 @@ var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 // the composition root alongside the store, and a nil seam simply makes the map
 // WRITE paths report unavailable — the read paths never touch it.
 func (s *CampaignServer) SetBlobs(blobs blob.Store) {
-	s.campaignMaps.blobs = blobs
+	s.blobs = blobs
 }
 
 // SetSessions wires the live Voice Session source the Active Campaign resolution
