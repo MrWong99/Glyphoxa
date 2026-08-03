@@ -291,11 +291,19 @@ func toProtoKnowledgeProposal(p storage.KnowledgeProposal) *managementv1.Knowled
 			AspectKey: w.AspectKey,
 		}}
 	case kgvocab.KindEdge:
+		// note and disposition MUST travel. applyProposedEdge writes them on
+		// approval, and the note reaches an NPC's system prompt through the relation
+		// clause — so a card that renders only "subject —knows→ target" asks the GM
+		// to approve 280 runes of model-authored text they were never shown. That is
+		// approval of content the GM never saw, which is the one thing ADR-0052's
+		// queue exists to prevent.
 		out.Write = &managementv1.KnowledgeProposal_Edge{Edge: &managementv1.ProposedEdge{
-			NodeId:   w.NodeID,
-			Subject:  w.Subject,
-			Relation: toProtoEdgeType(storage.KGEdgeType(w.Relation)),
-			Target:   w.Target,
+			NodeId:      w.NodeID,
+			Subject:     w.Subject,
+			Relation:    toProtoEdgeType(storage.KGEdgeType(w.Relation)),
+			Target:      w.Target,
+			Note:        w.Note,
+			Disposition: int32(w.Disposition),
 		}}
 	case kgvocab.KindNode:
 		out.Write = &managementv1.KnowledgeProposal_Node{Node: &managementv1.ProposedNode{

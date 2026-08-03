@@ -29,13 +29,15 @@ func linkAgent(t *testing.T, st *storage.Store, campaignID, npcID uuid.UUID, nam
 }
 
 // mkEdge creates a typed Edge between two same-Campaign Nodes, failing on error.
-func mkEdge(t *testing.T, st *storage.Store, campaignID, from, to uuid.UUID, typ storage.KGEdgeType) {
+func mkEdge(t *testing.T, st *storage.Store, campaignID, from, to uuid.UUID, typ storage.KGEdgeType) storage.KGEdge {
 	t.Helper()
-	if _, err := st.CreateEdge(context.Background(), storage.NewKGEdge{
+	e, err := st.CreateEdge(context.Background(), storage.NewKGEdge{
 		CampaignID: campaignID, FromNodeID: from, ToNodeID: to, Type: typ,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateEdge %s: %v", typ, err)
 	}
+	return e
 }
 
 // nodeIDSet projects a Node slice to id→count for membership assertions.
@@ -184,4 +186,90 @@ func TestAgentNodeFacts_Unlinked(t *testing.T) {
 	if len(facts) != 0 {
 		t.Errorf("unlinked agent got facts: %+v", facts)
 	}
+}
+
+// TestAgentNodeFacts_NeutralNoteSurvivesTheReciprocalEdge is the tie-break the
+// slice shipped inverted.
+//
+// Every INCOMING edge contributes a (”, 0) row — incoming edges expand the
+// neighbourhood but carry no feeling, because how someone else feels about a Node
+// is not this NPC's feeling. An ordinary reciprocal pair (Bart knows Mira, Mira
+// knows Bart) therefore puts Bart's real note next to an empty row, both at
+// abs(disposition) = 0. Ordering on abs alone tied them, and `note` ASC then
+// picked ” — so the feature's own headline case, a NEUTRAL note ("owes me money
+// since the siege"), silently never reached the Hot Context.
+func TestAgentNodeFacts_NeutralNoteSurvivesTheReciprocalEdge(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	agentID := linkAgent(t, st, campaignID, bart.ID, "Bart")
+	mira := mkNode(t, st, campaignID, storage.KGNodeNPC, "Mira")
+
+	// Bart's own assertion, with texture but a NEUTRAL disposition.
+	out := mkEdge(t, st, campaignID, bart.ID, mira.ID, storage.KGEdgeKnows)
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, out.ID, "owes me money since the siege", 0); err != nil {
+		t.Fatalf("UpdateEdgeDetails: %v", err)
+	}
+	// The ordinary reciprocal edge, which contributes ('', 0).
+	mkEdge(t, st, campaignID, mira.ID, bart.ID, storage.KGEdgeKnows)
+
+	facts, err := st.AgentNodeFacts(ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentNodeFacts: %v", err)
+	}
+	var found bool
+	for _, n := range facts {
+		if n.ID != mira.ID {
+			continue
+		}
+		found = true
+		if n.RelationNote != "owes me money since the siege" {
+			t.Errorf("the note lost to the reciprocal edge's empty row: %q", n.RelationNote)
+		}
+	}
+	if !found {
+		t.Fatal("Mira did not surface at all")
+	}
+}
+
+// TestAgentNodeFacts_StrongestFeelingStillWins: among edges that DO say
+// something, the strongest disposition is still what surfaces — the "says
+// something first" term must not have inverted that.
+func TestAgentNodeFacts_StrongestFeelingStillWins(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	agentID := linkAgent(t, st, campaignID, bart.ID, "Bart")
+	mira := mkNode(t, st, campaignID, storage.KGNodeNPC, "Mira")
+
+	mild := mkEdge(t, st, campaignID, bart.ID, mira.ID, storage.KGEdgeKnows)
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, mild.ID, "a passing acquaintance", 1); err != nil {
+		t.Fatalf("UpdateEdgeDetails mild: %v", err)
+	}
+	strong := mkEdge(t, st, campaignID, bart.ID, mira.ID, storage.KGEdgeEnemyOf)
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, strong.ID, "burned down the stables", -2); err != nil {
+		t.Fatalf("UpdateEdgeDetails strong: %v", err)
+	}
+
+	facts, err := st.AgentNodeFacts(ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentNodeFacts: %v", err)
+	}
+	for _, n := range facts {
+		if n.ID != mira.ID {
+			continue
+		}
+		if n.RelationDisposition != -2 || n.RelationNote != "burned down the stables" {
+			t.Fatalf("the strongest feeling did not win: note=%q disposition=%d",
+				n.RelationNote, n.RelationDisposition)
+		}
+		return
+	}
+	t.Fatal("Mira did not surface at all")
 }

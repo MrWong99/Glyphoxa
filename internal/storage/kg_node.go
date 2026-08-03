@@ -282,11 +282,25 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 		       FROM kg_edge e JOIN own o ON e.to_node_id = o.id
 		 ),
 		 ranked AS (
-		     -- One row per Node. Where several edges reach the same neighbour, the
-		     -- strongest feeling wins by absolute value, deterministically.
+		     -- One row per Node. Where several edges reach the same neighbour, a row
+		     -- that SAYS SOMETHING wins first, then the strongest feeling by absolute
+		     -- value, then deterministic text and sign tiebreaks.
+		     --
+		     -- The "says something" term is load-bearing. Every incoming edge
+		     -- contributes a ('', 0) row, and an ordinary reciprocal edge (Bart knows
+		     -- Mira, Mira knows Bart) produces exactly that alongside Bart's real note.
+		     -- Ordering on abs(disposition) alone ties them at 0, and a plain note ASC
+		     -- then sorts '' FIRST — so a neutral note, the feature's own headline case
+		     -- ("owes me money since the siege"), silently never reached the prompt.
+		     --
+		     -- Both array_agg calls MUST carry the identical ORDER BY: they are picked
+		     -- element-wise, so any divergence would pair one edge's note with another
+		     -- edge's disposition.
 		     SELECT id, min(hop) AS hop,
-		            (array_agg(note ORDER BY abs(disposition) DESC, note))[1] AS note,
-		            (array_agg(disposition ORDER BY abs(disposition) DESC, note))[1] AS disposition
+		            (array_agg(note ORDER BY (note <> '' OR disposition <> 0) DESC,
+		                                     abs(disposition) DESC, note, disposition DESC))[1] AS note,
+		            (array_agg(disposition ORDER BY (note <> '' OR disposition <> 0) DESC,
+		                                     abs(disposition) DESC, note, disposition DESC))[1] AS disposition
 		       FROM hood GROUP BY id
 		 )
 		 SELECT `+kgNodeColumnsNAspects(true)+`, r.note, r.disposition
