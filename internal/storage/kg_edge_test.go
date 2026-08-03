@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // mkNode is a tiny helper: create a Node of a type in a campaign, failing the test
@@ -485,5 +486,70 @@ func TestSetNodeAgentIsCampaignScoped(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("npc node vanished")
+	}
+}
+
+// TestNodeEdgesCarriesNoteAndDisposition: the relations editor loads its fields
+// FROM this read and saves them back, so a column missing here is not a display
+// gap — it is a write path that erases the GM's note.
+//
+// The failure it pins: save "owes money since the siege" → the editor refetches →
+// the note comes back empty → the GM opens the row again, changes the
+// disposition, saves → the empty string overwrites the note that was there.
+func TestNodeEdgesCarriesNoteAndDisposition(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	mira := mkNode(t, st, campaignID, storage.KGNodeNPC, "Mira")
+	edge, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignID, FromNodeID: bart.ID, ToNodeID: mira.ID, Type: storage.KGEdgeKnows,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge: %v", err)
+	}
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, edge.ID, "owes money since the siege", -2); err != nil {
+		t.Fatalf("UpdateEdgeDetails: %v", err)
+	}
+
+	outgoing, _, err := st.NodeEdges(ctx, campaignID, bart.ID)
+	if err != nil {
+		t.Fatalf("NodeEdges: %v", err)
+	}
+	if len(outgoing) != 1 {
+		t.Fatalf("want one outgoing edge, got %d", len(outgoing))
+	}
+	if outgoing[0].Note != "owes money since the siege" {
+		t.Errorf("note lost on the way to the editor: %q", outgoing[0].Note)
+	}
+	if outgoing[0].Disposition != -2 {
+		t.Errorf("disposition = %d, want -2", outgoing[0].Disposition)
+	}
+}
+
+// TestUpdateEdgeDetails_RefusesAnOverLongNote: the bound is enforced where the
+// write happens, not only at the RPC boundary — kgvocab is the one definition.
+func TestUpdateEdgeDetails_RefusesAnOverLongNote(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	a := mkNode(t, st, campaignID, storage.KGNodeNPC, "A")
+	b := mkNode(t, st, campaignID, storage.KGNodeNPC, "B")
+	edge, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignID, FromNodeID: a.ID, ToNodeID: b.ID, Type: storage.KGEdgeKnows,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge: %v", err)
+	}
+	long := ""
+	for i := 0; i <= kgvocab.MaxEdgeNoteRunes; i++ {
+		long += "x"
+	}
+	if _, err := st.UpdateEdgeDetails(ctx, campaignID, edge.ID, long, 0); !errors.Is(err, storage.ErrNoteTooLong) {
+		t.Fatalf("an over-long note was accepted: err = %v", err)
 	}
 }

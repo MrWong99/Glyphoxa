@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ArrowLeft, Pencil, X, Plus, Link as LinkIcon } from "lucide-react";
@@ -10,7 +10,13 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { EDGE_LABEL, EDGE_OPTIONS, TYPE_META as NODE_TYPE_META } from "./knowledgeVocab";
+import {
+  DISPOSITION_OPTIONS,
+  EDGE_LABEL,
+  EDGE_OPTIONS,
+  MAX_EDGE_NOTE_RUNES,
+  TYPE_META as NODE_TYPE_META,
+} from "./knowledgeVocab";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 function typeMeta(t: NodeType) {
@@ -91,8 +97,16 @@ export function NodeRelations({ node }: { node: PbNode }) {
   });
   // The relation's texture (#546). It shares the edge invalidation because the
   // graph colours relations by disposition and shows the note on hover.
+  //
+  // savedEdgeID is what closes the inline editor: it must close on the SAVE
+  // LANDING, not on the click. Closing on click hid every rejection — an
+  // over-long note came back InvalidArgument and the GM saw a tidy closed row.
+  const [savedEdgeID, setSavedEdgeID] = useState<string | null>(null);
   const updateDetails = useMutation(CampaignService.method.updateEdgeDetails, {
-    onSuccess: () => void invalidateEdges(),
+    onSuccess: (_res, vars) => {
+      setSavedEdgeID(vars.id ?? null);
+      void invalidateEdges();
+    },
   });
   const setNodeAgent = useMutation(CampaignService.method.setNodeAgent, {
     onSuccess: (res) => {
@@ -191,6 +205,12 @@ export function NodeRelations({ node }: { node: PbNode }) {
               updateDetails.mutate({ id: e.id, note, disposition })
             }
             saving={updateDetails.isPending && updateDetails.variables?.id === e.id}
+            saveError={
+              updateDetails.isError && updateDetails.variables?.id === e.id
+                ? `Couldn't save: ${updateDetails.error.message}`
+                : null
+            }
+            saved={savedEdgeID === e.id}
           />
         ))}
         {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
@@ -239,33 +259,29 @@ export function NodeRelations({ node }: { node: PbNode }) {
   );
 }
 
-// DISPOSITION_OPTIONS names the -2..+2 scale in the words the GM chooses by. A
-// small closed scale rather than a free number: a scale nobody can calibrate is
-// worse than none, and this one drives an edge colour and ONE prompt clause.
-const DISPOSITION_OPTIONS = [
-  { value: "-2", label: "hostile" },
-  { value: "-1", label: "wary" },
-  { value: "0", label: "neutral" },
-  { value: "1", label: "warm" },
-  { value: "2", label: "devoted" },
-];
-
 function OutgoingRow({
   edge,
   onDelete,
   onSaveDetails,
   saving,
+  saveError,
+  saved,
 }: {
   edge: PbEdge;
   onDelete: () => void;
   onSaveDetails: (note: string, disposition: number) => void;
   saving: boolean;
+  saveError: string | null;
+  saved: boolean;
 }) {
   const meta = typeMeta(edge.toNodeType);
   const label = EDGE_LABEL.get(edge.edgeType) ?? "";
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState(edge.note);
   const [disposition, setDisposition] = useState(String(edge.disposition));
+  useEffect(() => {
+    if (saved) setOpen(false);
+  }, [saved]);
   return (
     <div className="gx-kg-edge">
       <ArrowRight size={13} className="gx-kg-edge__dir" aria-hidden />
@@ -301,6 +317,7 @@ function OutgoingRow({
             label="What it's like"
             placeholder="owes you money since the siege"
             value={note}
+            maxLength={MAX_EDGE_NOTE_RUNES}
             onChange={(e) => setNote(e.target.value)}
           />
           <Select
@@ -313,13 +330,18 @@ function OutgoingRow({
             variant="secondary"
             size="sm"
             disabled={saving}
-            onClick={() => {
-              onSaveDetails(note.trim(), Number(disposition));
-              setOpen(false);
-            }}
+            onClick={() => onSaveDetails(note.trim(), Number(disposition))}
           >
             {saving ? "Saving…" : "Save"}
           </Button>
+          {/* The editor stays OPEN until the save actually lands. Closing on click
+              and never rendering the failure told the GM their note was saved when
+              the server had rejected it. */}
+          {saveError && (
+            <span className="gx-editor__status gx-editor__status--error" role="alert">
+              {saveError}
+            </span>
+          )}
         </div>
       )}
     </div>

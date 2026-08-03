@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -161,17 +162,24 @@ func scanKGEdge(row pgx.Row) (KGEdge, error) {
 	return e, err
 }
 
-// MaxEdgeNoteRunes bounds an Edge note. It is texture on a relation, not prose —
-// and one clause of it may reach a prompt.
-const MaxEdgeNoteRunes = 280
-
 // ErrInvalidDisposition is returned when a disposition falls outside -2..+2.
 var ErrInvalidDisposition = errors.New("storage: disposition must be between -2 and +2")
+
+// ErrNoteTooLong is returned when an Edge note exceeds kgvocab.MaxEdgeNoteRunes.
+var ErrNoteTooLong = errors.New("storage: edge note is too long")
 
 // UpdateEdgeDetails saves an Edge's note and disposition, scoped to its Campaign
 // (#342, #546). The relation TYPE is not touched: retyping an edge is deleting one
 // and creating another, since the type carries validity rules.
 func (s *Store) UpdateEdgeDetails(ctx context.Context, campaignID, id uuid.UUID, note string, disposition int) (KGEdge, error) {
+	// The note bound lives in kgvocab and is enforced HERE as well as at the RPC
+	// boundary. There were two copies of the constant, one of which nothing read —
+	// a storage layer naming a bound it never applied, while the Tool write path
+	// and the RPC path each checked their own. One definition, applied where the
+	// write actually happens.
+	if utf8.RuneCountInString(note) > kgvocab.MaxEdgeNoteRunes {
+		return KGEdge{}, fmt.Errorf("storage: update edge details %s: %w", id, ErrNoteTooLong)
+	}
 	if disposition < -2 || disposition > 2 {
 		return KGEdge{}, ErrInvalidDisposition
 	}
@@ -364,8 +372,14 @@ func (s *Store) NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (ou
 
 	// Edges are same-campaign by construction (CreateEdge enforces it), so filtering
 	// the anchor by campaign above is sufficient; the WHERE below stays direction-only.
+	// note and disposition are part of the row the relations editor loads and saves
+	// back. Omitting them here does not merely hide the texture: the editor
+	// initialises its fields FROM this read, so the next save writes the empty
+	// string over whatever the GM had written. A read that forgets a column is a
+	// write path that erases it.
 	rows, err := s.db.Query(ctx,
-		`SELECT e.id, e.campaign_id, e.from_node_id, e.to_node_id, e.edge_type, e.created_at,
+		`SELECT e.id, e.campaign_id, e.from_node_id, e.to_node_id, e.edge_type,
+		        e.note, e.disposition, e.created_at,
 		        fn.name, fn.node_type, tn.name, tn.node_type
 		   FROM kg_edge e
 		   JOIN kg_node fn ON fn.id = e.from_node_id
@@ -380,7 +394,8 @@ func (s *Store) NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (ou
 	for rows.Next() {
 		var e KGEdgeWithNodes
 		if err := rows.Scan(
-			&e.ID, &e.CampaignID, &e.FromNodeID, &e.ToNodeID, &e.Type, &e.CreatedAt,
+			&e.ID, &e.CampaignID, &e.FromNodeID, &e.ToNodeID, &e.Type,
+			&e.Note, &e.Disposition, &e.CreatedAt,
 			&e.FromName, &e.FromType, &e.ToName, &e.ToType,
 		); err != nil {
 			return nil, nil, fmt.Errorf("storage: node edges %s: scan: %w", nodeID, err)

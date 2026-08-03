@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { failedPreconditionMessage } from "@/lib/connectError";
-import { EDGE_LABEL, metaOf } from "./knowledgeVocab";
+import { DISPOSITION_LABEL, EDGE_LABEL, metaOf } from "./knowledgeVocab";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 // The Proposals panel (#300, ADR-0052) backs the Campaign screen's "Proposals"
@@ -209,10 +209,25 @@ function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
         </span>
       );
     case "edge":
+      // The note and disposition are rendered because APPROVING WRITES THEM, and
+      // the note reaches an NPC's system prompt through the relation clause. A card
+      // that showed only "subject —knows→ target" asked the GM to approve up to 280
+      // runes of model-authored text they had never seen — approval of unseen
+      // content, which is the one thing the review queue exists to prevent.
       return (
         <span>
           <strong>{w.value.subject}</strong> —{EDGE_LABEL.get(w.value.relation) ?? ""}→{" "}
           <strong>{w.value.target}</strong>
+          {(w.value.note || w.value.disposition !== 0) && (
+            <span className="gx-proposal-card__body">
+              {" — "}
+              {DISPOSITION_LABEL.get(w.value.disposition) ?? ""}
+              {w.value.note && w.value.disposition !== 0 ? ", " : ""}
+              {/* Newlines are collapsed: a proposal is one clause, and a note that
+                  can open a new line can forge a section header in the prompt. */}
+              {w.value.note.replace(/\s+/g, " ")}
+            </span>
+          )}
         </span>
       );
     case "node":
