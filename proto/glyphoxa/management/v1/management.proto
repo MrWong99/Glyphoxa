@@ -134,6 +134,12 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // GetAgentFactPreview returns exactly what a Character NPC's Hot Context
+  // facts block will contain, with the real budget accounting (#535). Read-only.
+  rpc GetAgentFactPreview(GetAgentFactPreviewRequest) returns (GetAgentFactPreviewResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
   // body match the query, ranked by relevance (tsvector fts, ADR-0008 v1.0). It
   // backs the Campaign screen's live wiki search; gm_private Nodes ARE included
@@ -505,6 +511,50 @@ message GetKnowledgeGraphResponse {
   repeated GraphNode nodes = 1;
   // edges is every Edge in the campaign.
   repeated GraphEdge edges = 2;
+}
+
+// GetAgentFactPreviewRequest names the Agent to preview.
+message GetAgentFactPreviewRequest {
+  // agent_id is the Character NPC whose Hot Context facts block to render.
+  string agent_id = 1;
+}
+
+// GetAgentFactPreviewResponse is what the NPC's facts block will actually
+// contain (#535), rendered by the SAME code the voice loop injects — so the
+// preview cannot drift from reality.
+message GetAgentFactPreviewResponse {
+  // facts are the rendered fact strings, in injection order. Empty when the
+  // Agent has no linked entry, or its neighbourhood is empty.
+  repeated string facts = 1;
+  // included_node_ids are the Nodes that made it in, in the same order — what
+  // the graph lens dims to.
+  repeated string included_node_ids = 2;
+  // dropped_node_ids are Nodes the read returned that the caps excluded. This is
+  // the visible half of the deterministic prefix-stop, which is otherwise a
+  // silent quality cliff.
+  repeated string dropped_node_ids = 3;
+  // chars is the assembled block length (header and joins included);
+  // max_chars is the budget it is measured against.
+  int32 chars = 4;
+  int32 max_chars = 5;
+  // max_facts is the count cap.
+  int32 max_facts = 6;
+  // truncated reports that the prefix-stop fired.
+  bool truncated = 7;
+  // linked reports whether the Agent has a linked wiki entry at all. false means
+  // an explicit "not linked" state, NOT an empty world: AgentNodeFacts is keyed
+  // by Agent, so an unlinked one legitimately gets nothing and there is no
+  // campaign-wide fallback.
+  bool linked = 8;
+  // linked_node_id is the Agent's own Node when linked, empty otherwise.
+  string linked_node_id = 9;
+  // neighbourhood_clipped reports that the SQL read hit its own row cap BEFORE
+  // the renderer's caps — the Agent has more neighbours than the prompt read will
+  // ever look at. Distinct from `truncated`: that is the renderer's budget, this
+  // is the read's, and they need different fixes.
+  bool neighbourhood_clipped = 10;
+  // max_neighbours is that row cap, so the readout can name it.
+  int32 max_neighbours = 11;
 }
 
 // NodeAspect is one ordered (key, value) fact on a Node, carrying its OWN
