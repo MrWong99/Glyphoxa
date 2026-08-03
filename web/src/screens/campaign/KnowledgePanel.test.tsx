@@ -10,6 +10,7 @@ import {
   EdgeSchema,
   EdgeType,
   CreateNodeResponseSchema,
+  GetKnowledgeGraphResponseSchema,
   ListNodesResponseSchema,
   ListNodeEdgesResponseSchema,
   UpdateNodeResponseSchema,
@@ -61,6 +62,25 @@ function mockTransport(
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
+      // The graph payload mirrors the list, minus prose (#534).
+      getKnowledgeGraph: () =>
+        create(GetKnowledgeGraphResponseSchema, {
+          nodes: nodes.map((n) => ({
+            id: n.id,
+            nodeType: n.nodeType,
+            name: n.name,
+            gmPrivate: n.gmPrivate,
+            agentId: n.agentId,
+            bodyLen: n.body.length,
+            aspectCount: n.aspects.length,
+          })),
+          edges: edges.map((e) => ({
+            id: e.id,
+            fromNodeId: e.fromNodeId,
+            toNodeId: e.toNodeId,
+            edgeType: e.edgeType,
+          })),
+        }),
       // The delete-confirm dialog fetches a node's edges to show the cascade
       // count; split the seeded edges by which side touches the asked node.
       listNodeEdges: (req) => {
@@ -541,5 +561,45 @@ describe("KnowledgePanel", () => {
     // learns to remove it while leaving rows it never saw (a proposal approval
     // landing mid-edit) alone.
     expect(ctx.updateCalls[0].knownAspectIds.sort()).toEqual(["a1", "a2"]);
+  });
+
+  it("switches between List and Graph modes, keeping the list unchanged (#534)", async () => {
+    renderPanel([
+      create(NodeSchema, {
+        id: "n1",
+        campaignId: "c1",
+        nodeType: NodeType.NPC,
+        name: "Bart",
+        body: "An innkeeper.",
+      }),
+    ]);
+    // List mode is the default and is untouched by this slice.
+    expect(await screen.findByText("An innkeeper.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Graph/ }));
+    expect(await screen.findByLabelText("Bart (NPC)")).toBeInTheDocument();
+    // The search box belongs to the list view and should not linger over the graph.
+    expect(screen.queryByLabelText("Search entries")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /List/ }));
+    expect(await screen.findByLabelText("Search entries")).toBeInTheDocument();
+  });
+
+  it("clicking a graph node opens the SAME editor the list opens (#534)", async () => {
+    renderPanel([
+      create(NodeSchema, {
+        id: "n1",
+        campaignId: "c1",
+        nodeType: NodeType.NPC,
+        name: "Bart",
+        body: "An innkeeper.",
+      }),
+    ]);
+    fireEvent.click(await screen.findByRole("button", { name: /Graph/ }));
+    fireEvent.click(await screen.findByLabelText("Bart (NPC)"));
+
+    // The editor rail switched into edit mode for that entry — no second editor.
+    expect(await screen.findByText("Edit entry")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("Bart");
   });
 });

@@ -914,3 +914,37 @@ func campaignClientServe(t *testing.T, srv *rpc.CampaignServer, opts ...connect.
 		http.DefaultClient, s.URL, connect.WithProtoJSON(),
 	)
 }
+
+// fakeKGGraphStore fakes the whole-graph read slice (#534): graphNodes/edges are
+// returned verbatim so the handler's 1:1 mapping is asserted, the *Calls counters
+// prove the handler makes exactly one read per side, and the *Campaign fields
+// record the resolved scope.
+type fakeKGGraphStore struct {
+	*fakeActive
+
+	graphNodes     []storage.KGGraphNode
+	graphNodeErr   error
+	graphNodeCalls int
+	graphCampaign  uuid.UUID
+
+	edges        []storage.KGEdge
+	edgeErr      error
+	edgeCalls    int
+	edgeCampaign uuid.UUID
+}
+
+func newFakeKGGraphStore() *fakeKGGraphStore {
+	return &fakeKGGraphStore{fakeActive: newFakeActive()}
+}
+
+func (f *fakeKGGraphStore) ListGraphNodes(_ context.Context, campaignID uuid.UUID) ([]storage.KGGraphNode, error) {
+	f.graphNodeCalls++
+	f.graphCampaign = campaignID
+	return f.graphNodes, f.graphNodeErr
+}
+
+func (f *fakeKGGraphStore) ListEdges(_ context.Context, campaignID uuid.UUID) ([]storage.KGEdge, error) {
+	f.edgeCalls++
+	f.edgeCampaign = campaignID
+	return f.edges, f.edgeErr
+}

@@ -45,6 +45,7 @@ type CampaignServer struct {
 	*characterRoster
 	*kgNodes
 	*kgEdges
+	*kgGraph
 	*knowledgeProposals
 	*toolGrants
 	*campaignAssist
@@ -72,6 +73,8 @@ type CampaignStores struct {
 	KGNodes kgNodeStore
 	// KGEdges backs the Knowledge Graph Edge CRUD + the voiced-by link (#132).
 	KGEdges kgEdgeStore
+	// KGGraph backs the whole-graph read the Graph view renders (#534).
+	KGGraph kgGraphStore
 	// Proposals backs the Knowledge Proposal review queue + similarity hint
 	// (#300, ADR-0052).
 	Proposals knowledgeProposalStore
@@ -97,6 +100,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		Characters: s,
 		KGNodes:    s,
 		KGEdges:    s,
+		KGGraph:    s,
 		Proposals:  s,
 		Grants:     s,
 		Assist:     s,
@@ -117,6 +121,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		characterRoster:    &characterRoster{store: stores.Characters, active: active},
 		kgNodes:            &kgNodes{store: stores.KGNodes, active: active},
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
+		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
 		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
 		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
 		campaignAssist:     &campaignAssist{store: stores.Assist, active: active},

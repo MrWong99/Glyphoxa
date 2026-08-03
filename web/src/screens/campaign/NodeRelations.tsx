@@ -9,6 +9,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { EDGE_LABEL, EDGE_OPTIONS, TYPE_META as NODE_TYPE_META } from "./knowledgeVocab";
+
+function typeMeta(t: NodeType) {
+  return NODE_TYPE_META[t] ?? NODE_TYPE_META[NodeType.NOTE];
+}
 
 // NodeRelations (#132) is the editor card's "Relations · N" section on the live
 // CampaignService edge RPCs (ADR-0008 v1.0 + 2026-07-04 amendment). Edges are
@@ -17,36 +22,6 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 // entry. An NPC Node also carries the optional "Voiced by" Character NPC Agent
 // link. Kept a self-contained component so it slots into the EntryEditor without
 // entangling the #129 authoring code.
-
-// The nine edge types in enum order. The label is the snake_case type itself —
-// rendered in a mono arcane font in the row, matching the approved design.
-const EDGE_TYPES: { value: EdgeType; label: string }[] = [
-  { value: EdgeType.RESIDES_IN, label: "resides_in" },
-  { value: EdgeType.MEMBER_OF, label: "member_of" },
-  { value: EdgeType.OWNS, label: "owns" },
-  { value: EdgeType.KNOWS, label: "knows" },
-  { value: EdgeType.ENEMY_OF, label: "enemy_of" },
-  { value: EdgeType.ALLY_OF, label: "ally_of" },
-  { value: EdgeType.PARENT_OF, label: "parent_of" },
-  { value: EdgeType.PARTICIPATED_IN, label: "participated_in" },
-  { value: EdgeType.MENTIONED_IN, label: "mentioned_in" },
-];
-const EDGE_LABEL = new Map<EdgeType, string>(EDGE_TYPES.map((e) => [e.value, e.label]));
-const EDGE_OPTIONS = EDGE_TYPES.map((e) => ({ value: String(e.value), label: e.label }));
-
-// Per-type badge colors (approved design), with the Note grey as the fallback.
-const NODE_TYPE_META: Record<number, { label: string; color: string }> = {
-  [NodeType.CHARACTER]: { label: "Character", color: "#4fa9ff" },
-  [NodeType.NPC]: { label: "NPC", color: "#9059ff" },
-  [NodeType.LOCATION]: { label: "Location", color: "#35c48d" },
-  [NodeType.FACTION]: { label: "Faction", color: "#ffbd4f" },
-  [NodeType.ITEM]: { label: "Item", color: "#ff7139" },
-  [NodeType.PLOT_THREAD]: { label: "Plot thread", color: "#ff4f5e" },
-  [NodeType.NOTE]: { label: "Note", color: "#8b93a7" },
-};
-function typeMeta(t: NodeType) {
-  return NODE_TYPE_META[t] ?? NODE_TYPE_META[NodeType.NOTE];
-}
 
 // AGENT_NONE is the Radix Select sentinel for "no agent" — Radix forbids an empty
 // item value, so the unlink option carries this and maps back to "" on the wire.

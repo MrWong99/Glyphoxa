@@ -8,24 +8,18 @@ import {
   ChevronUp,
   Eye,
   EyeOff,
+  Network,
   Plus,
   Pencil,
+  Rows3,
   Search,
   Sparkles,
   Trash2,
-  User,
-  VenetianMask,
-  MapPin,
-  Flag,
-  Gem,
-  GitBranch,
-  StickyNote,
   Link as LinkIcon,
   X,
-  type LucideIcon,
 } from "lucide-react";
 
-import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { DraftEdge, DraftNode, Node } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -35,6 +29,8 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
+import { KnowledgeGraph } from "./graph/KnowledgeGraph";
+import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "./knowledgeVocab";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
 // on the live CampaignService node RPCs (ADR-0008 v1.0). An "entry" is the
@@ -44,48 +40,27 @@ import { NodeRelations } from "./NodeRelations";
 // entries are injected into NPC prompts; a gm_private entry never reaches the
 // table. Type-filter chips + fulltext search arrive in #131.
 
-type TypeMeta = { label: string; color: string; Icon: LucideIcon };
-
-// Per-type label, design color, and lucide icon (approved #129 design). The Note
-// entry's neutral grey doubles as the defensive fallback for an unknown type.
-const TYPE_META: Record<number, TypeMeta> = {
-  [NodeType.CHARACTER]: { label: "Character", color: "#4fa9ff", Icon: User },
-  [NodeType.NPC]: { label: "NPC", color: "#9059ff", Icon: VenetianMask },
-  [NodeType.LOCATION]: { label: "Location", color: "#35c48d", Icon: MapPin },
-  [NodeType.FACTION]: { label: "Faction", color: "#ffbd4f", Icon: Flag },
-  [NodeType.ITEM]: { label: "Item", color: "#ff7139", Icon: Gem },
-  [NodeType.PLOT_THREAD]: { label: "Plot thread", color: "#ff4f5e", Icon: GitBranch },
-  [NodeType.NOTE]: { label: "Note", color: "#8b93a7", Icon: StickyNote },
-};
-
-// The authorable types in enum order; UNSPECIFIED (0) is never offered, and this
-// order also drives the grouped list and the type-select options.
-const TYPE_ORDER: NodeType[] = [
-  NodeType.CHARACTER,
-  NodeType.NPC,
-  NodeType.LOCATION,
-  NodeType.FACTION,
-  NodeType.ITEM,
-  NodeType.PLOT_THREAD,
-  NodeType.NOTE,
-];
-
 const TYPE_OPTIONS = TYPE_ORDER.map((t) => ({ value: String(t), label: TYPE_META[t].label }));
 const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
 
-function metaOf(t: NodeType): TypeMeta {
-  return TYPE_META[t] ?? TYPE_META[NodeType.NOTE];
-}
-
-// alphaBg tints a type color to the design's 14%-alpha tile background (0x24 ≈ 14%).
-function alphaBg(color: string): string {
-  return `${color}24`;
-}
+// ViewMode is the Knowledge tab's [ List | Graph ] switch (#534). The List mode
+// is unchanged — the graph is an ADDITIONAL way to read the same wiki, not a
+// replacement, and the editor rail is shared by both.
+type ViewMode = "list" | "graph";
 
 export function KnowledgePanel() {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
+  const [mode, setMode] = useState<ViewMode>("list");
+
+  // The whole-graph payload (#534). It is fetched only in graph mode, so a GM who
+  // never opens the graph pays nothing for it.
+  const graphQuery = useQuery(
+    CampaignService.method.getKnowledgeGraph,
+    {},
+    { enabled: mode === "graph" },
+  );
   // The entry a delete has been requested for; drives the confirm dialog. Delete
   // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
   // operator confirms here (#209).
@@ -161,19 +136,37 @@ export function KnowledgePanel() {
     });
   };
 
+  // The graph payload is a THIRD read of the same data (#534), so every mutation
+  // that changes nodes or edges has to drop it too — otherwise a node created in
+  // the list is missing from the graph until a reload, which reads as a bug in
+  // the graph rather than a stale cache.
+  const invalidateGraph = () => {
+    void queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.getKnowledgeGraph,
+        cardinality: "finite",
+      }),
+    });
+  };
+
   const createNode = useMutation(CampaignService.method.createNode, {
-    onSuccess: () => void invalidateNodes(),
+    onSuccess: () => {
+      invalidateNodes();
+      invalidateGraph();
+    },
   });
   const updateNode = useMutation(CampaignService.method.updateNode, {
     onSuccess: () => {
       setEditing(null);
-      void invalidateNodes();
+      invalidateNodes();
+      invalidateGraph();
     },
   });
   const deleteNode = useMutation(CampaignService.method.deleteNode, {
     onSuccess: () => {
       invalidateNodes();
       invalidateEdges();
+      invalidateGraph();
     },
   });
 
@@ -217,52 +210,102 @@ export function KnowledgePanel() {
       ? `Couldn't delete: ${deleteNode.error.message}`
       : null;
 
+  // Clicking a graph node opens the SAME editor the list opens (#534): the graph
+  // is a navigation surface, not a second editing surface.
+  const editByID = (id: string) => {
+    const node = listQuery.data?.nodes.find((n) => n.id === id);
+    if (node) setEditing(node);
+  };
+
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
-        <KnowledgeDraftCard
-          onApplied={() => {
-            invalidateNodes();
-            invalidateEdges();
-          }}
-        />
-        <Input
-          type="search"
-          aria-label="Search entries"
-          icon={<Search size={15} />}
-          placeholder="Search the wiki — names and content"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="gx-kg-search"
-        />
-        {searchFailed ? (
-          <p className="gx-campaign__error" role="alert">
-            Couldn't search: {searchQuery.error?.message}
-          </p>
+        <div className="gx-kg-modes" role="group" aria-label="View mode">
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={mode === "list"}
+            onClick={() => setMode("list")}
+          >
+            <Rows3 size={13} /> List
+          </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={mode === "graph"}
+            onClick={() => setMode("graph")}
+          >
+            <Network size={13} /> Graph
+          </button>
+        </div>
+
+        {mode === "graph" ? (
+          graphQuery.isPending ? (
+            <div className="gx-skeleton" data-testid="kg-graph-loading" />
+          ) : graphQuery.isError ? (
+            <p className="gx-campaign__error" role="alert">
+              Could not load the graph: {graphQuery.error.message}
+            </p>
+          ) : (
+            <KnowledgeGraph
+              nodes={graphQuery.data.nodes}
+              edges={graphQuery.data.edges}
+              selectedID={editing?.id ?? null}
+              onSelectNode={editByID}
+              onGraphChanged={() => {
+                invalidateGraph();
+                invalidateEdges();
+              }}
+            />
+          )
         ) : (
           <>
-            {groups.map((g) => (
-              <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
-                <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
-                {g.items.map((n) => (
-                  <KnowledgeCard
-                    key={n.id}
-                    node={n}
-                    onEdit={() => setEditing(n)}
-                    onDelete={() => setConfirmNode(n)}
-                    deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
-                  />
+            <KnowledgeDraftCard
+              onApplied={() => {
+                invalidateNodes();
+                invalidateEdges();
+                invalidateGraph();
+              }}
+            />
+            <Input
+              type="search"
+              aria-label="Search entries"
+              icon={<Search size={15} />}
+              placeholder="Search the wiki — names and content"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="gx-kg-search"
+            />
+            {searchFailed ? (
+              <p className="gx-campaign__error" role="alert">
+                Couldn't search: {searchQuery.error?.message}
+              </p>
+            ) : (
+              <>
+                {groups.map((g) => (
+                  <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
+                    <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+                    {g.items.map((n) => (
+                      <KnowledgeCard
+                        key={n.id}
+                        node={n}
+                        onEdit={() => setEditing(n)}
+                        onDelete={() => setConfirmNode(n)}
+                        deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
+                      />
+                    ))}
+                  </section>
                 ))}
-              </section>
-            ))}
-            {nodes.length === 0 &&
-              (searching ? (
-                <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
-              ) : (
-                <p className="gx-kg-empty">
-                  No entries yet. Add what the world knows and your NPCs will speak to it.
-                </p>
-              ))}
+                {nodes.length === 0 &&
+                  (searching ? (
+                    <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+                  ) : (
+                    <p className="gx-kg-empty">
+                      No entries yet. Add what the world knows and your NPCs will speak to it.
+                    </p>
+                  ))}
+              </>
+            )}
           </>
         )}
       </div>
@@ -312,20 +355,6 @@ export function KnowledgePanel() {
     </div>
   );
 }
-
-// EDGE_TYPE_LABEL mirrors NodeRelations' label map for the draft preview's
-// relation rows.
-const EDGE_TYPE_LABEL = new Map<EdgeType, string>([
-  [EdgeType.RESIDES_IN, "resides_in"],
-  [EdgeType.MEMBER_OF, "member_of"],
-  [EdgeType.OWNS, "owns"],
-  [EdgeType.KNOWS, "knows"],
-  [EdgeType.ENEMY_OF, "enemy_of"],
-  [EdgeType.ALLY_OF, "ally_of"],
-  [EdgeType.PARENT_OF, "parent_of"],
-  [EdgeType.PARTICIPATED_IN, "participated_in"],
-  [EdgeType.MENTIONED_IN, "mentioned_in"],
-]);
 
 // KnowledgeDraftCard is the on-demand "generate entries" flow (#479). Strictly
 // button-driven: collapsed it is a single affordance; expanded, the GM writes a

@@ -1,0 +1,11 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`graph layout > pins the laid-out coordinates 1`] = `
+[
+  "bart@131,-48",
+  "town@39,1",
+  "guild@40,-67",
+  "secret@105,15",
+  "lonely@-315,99",
+]
+`;
