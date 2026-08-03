@@ -463,6 +463,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.MuteAllCommand(mgr, store, intentControl),
 		presence.SayCommand(mgr, store, intentControl),
 		presence.DirectCommand(mgr, store, intentControl),
+		presence.WhereCommand(mgr, store),
 	)
 	if err := clients.EnsureAll(ctx); err != nil {
 		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
@@ -591,11 +592,20 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 		// NPC KG-facts recall (#126, ADR-0008): UNCONDITIONAL — needs only the
 		// process store, never the embeddings provider.
 		Facts: kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
+		// Where the party is (#540, ADR-0060): one clause in the VOLATILE Hot Context
+		// tail, read per turn from the session's Party Marker. Storage-backed and
+		// unconditional, like Facts — it needs no provider.
+		Location: worldmap.NewLocator(store, log),
 		Tools: tool.Deps{
 			Transcripts: knowledgeAdapter,
 			KG:          knowledgeAdapter,
 			KGW:         knowledgeAdapter,
 			Recap:       knowledge.NewRecap(recapEngine, store),
+			// locate_entity / whats_nearby (#539, ADR-0060). Without this the Tools are
+			// registered — the grant editor's catalog is mode-independent — but every
+			// call returns "unavailable", and an error is exactly what makes a model
+			// invent a location.
+			Spatial: worldmap.NewSpatialAdapter(store),
 		},
 	}
 	if clients != nil {
@@ -1187,6 +1197,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// (NewManager wired cfg.Directives = mgr), so the note reaches exactly one
 			// Agent's Hot Context tail — steering, not the /say puppet takeover.
 			presence.DirectCommand(mgr, store, nil),
+			// /where map:<map> [at:<pin>] (#540, ADR-0060): the Party Marker's Discord
+			// half. The web Maps tab sets the same state by dragging, but a GM mid-scene
+			// is in Discord, not in a browser tab. GM-only and ephemeral — where the party
+			// is going next is the GM's information until they say it out loud.
+			presence.WhereCommand(mgr, store),
 		)
 		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
 		// Session), one standing client per distinct Bot token (#489, ADR-0039

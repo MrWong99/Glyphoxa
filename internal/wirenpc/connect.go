@@ -246,6 +246,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		memory:           cfg.Memory,
 		facts:            cfg.Facts,
 		directives:       cfg.Directives,
+		location:         cfg.Location,
 		speakerName:      cfg.SpeakerName,
 		playerCharacters: cfg.playerCharacters,
 		mutes:            cfg.Mutes,

@@ -43,21 +43,57 @@ type Place struct {
 	Distance float64
 }
 
+// SpatialScope is the ADR-0029 narrowing the spatial Tools apply, resolved from
+// the Agent's grant config and NEVER from the model's arguments.
+//
+// It is a real narrowing, not a label: an innkeeper knowing the town's layout is
+// correct, and the same innkeeper reciting the enemy capital's is not. A Tool that
+// answered SupportsScope() true while ignoring the configured scope would be the
+// silent widening ADR-0029 exists to forbid — the grant editor would offer the
+// narrowing, the GM would set it, and nothing would apply it.
+type SpatialScope int
+
+const (
+	// SpatialScopeCampaign reaches every public Map in the Campaign. It is the
+	// default for an unset grant, on the same reasoning kg_query uses for its read
+	// direction: the read is gm_private-filtered either way, so the wider default
+	// is safe, and a WRITE would fail closed instead.
+	SpatialScopeCampaign SpatialScope = iota
+	// SpatialScopeOwnMaps reaches only the Maps the calling Agent's own linked Node
+	// is pinned on — "where I am and what I can see from here".
+	SpatialScopeOwnMaps
+)
+
 // SpatialReader is the read seam the spatial Tools need. It is a READ ONLY seam
 // with no write anywhere on it, which is what makes these Tools structurally
 // incapable of changing the world.
 //
 // Both methods are campaign-scoped from the turn's session, never from LLM
 // arguments, and BOTH filter gm_private Maps, Pins and Nodes in the handler-side
-// read — on the same seam-not-call-site principle kgfacts.PromptKG follows.
+// read — on the same seam-not-call-site principle kgfacts.PromptKG follows. The
+// scope is likewise applied in the read, so no crafted argument can widen it.
 type SpatialReader interface {
-	// Locate answers "where is this?" for a named entry: every Map it is pinned on.
-	// An unknown name yields no places and no error — not knowing where something
-	// is, is a legitimate answer.
-	Locate(ctx context.Context, agentID, name string) ([]Place, error)
+	// Locate answers "where is this?" for a named entry: every Map within scope it
+	// is pinned on. An unknown name yields no places and no error — not knowing
+	// where something is, is a legitimate answer.
+	Locate(ctx context.Context, agentID, name string, scope SpatialScope) ([]Place, error)
 	// Nearby answers "what is around us?": Pins within radius of the Party Marker,
 	// or of the calling Agent's own pinned Node when no marker is set.
-	Nearby(ctx context.Context, agentID string, radius float64, limit int) ([]Place, error)
+	Nearby(ctx context.Context, agentID string, radius float64, limit int, scope SpatialScope) ([]Place, error)
+}
+
+// spatialScopeOf maps a grant config onto the reachable slice. The own_node grant
+// vocabulary is shared with the other scoped Tools rather than inventing a
+// spatial-only word, so one grant editor covers all of them (ADR-0029).
+func spatialScopeOf(grantConfig any) (SpatialScope, error) {
+	scope, err := parseScope(grantConfig)
+	if err != nil {
+		return SpatialScopeCampaign, err
+	}
+	if scope == scopeOwnNode {
+		return SpatialScopeOwnMaps, nil
+	}
+	return SpatialScopeCampaign, nil
 }
 
 var locateEntityInputSchema = json.RawMessage(`{
@@ -108,9 +144,8 @@ func (t *LocateEntity) Execute(ctx context.Context, args json.RawMessage, grantC
 	if t.src == nil {
 		return "", fmt.Errorf("locate_entity: map lookups are unavailable in this mode")
 	}
-	// The scope is resolved for its side effect of REJECTING a misconfigured grant.
-	// Its narrowing is applied handler-side by the reader, never by the model.
-	if _, err := parseScope(grantConfig); err != nil {
+	scope, err := spatialScopeOf(grantConfig)
+	if err != nil {
 		return "", fmt.Errorf("locate_entity: %w", err)
 	}
 
@@ -125,7 +160,7 @@ func (t *LocateEntity) Execute(ctx context.Context, args json.RawMessage, grantC
 		return "", fmt.Errorf("locate_entity: name is required")
 	}
 
-	places, err := t.src.Locate(ctx, CallerID(ctx), name)
+	places, err := t.src.Locate(ctx, CallerID(ctx), name, scope)
 	if err != nil {
 		return "", fmt.Errorf("locate_entity: %w", err)
 	}
@@ -134,10 +169,13 @@ func (t *LocateEntity) Execute(ctx context.Context, args json.RawMessage, grantC
 		return fmt.Sprintf("You do not know where %s is.", name), nil
 	}
 
+	// The entry's own label is rendered, not just the map's: the search resolves
+	// "the anchor" to "The Rusty Anchor", and an answer that never says the resolved
+	// name leaves the NPC agreeing about the wrong thing.
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s is on:", name)
 	for _, p := range places {
-		fmt.Fprintf(&b, "\n- %s (%s)", p.MapName, p.Kind)
+		fmt.Fprintf(&b, "\n- %s — %s (%s)", p.MapName, p.Name, p.Kind)
 	}
 	return b.String(), nil
 }
@@ -185,7 +223,8 @@ func (t *WhatsNearby) Execute(ctx context.Context, args json.RawMessage, grantCo
 	if t.src == nil {
 		return "", fmt.Errorf("whats_nearby: map lookups are unavailable in this mode")
 	}
-	if _, err := parseScope(grantConfig); err != nil {
+	scope, err := spatialScopeOf(grantConfig)
+	if err != nil {
 		return "", fmt.Errorf("whats_nearby: %w", err)
 	}
 
@@ -200,7 +239,7 @@ func (t *WhatsNearby) Execute(ctx context.Context, args json.RawMessage, grantCo
 		radius = DefaultNearbyRadius
 	}
 
-	places, err := t.src.Nearby(ctx, CallerID(ctx), radius, MaxNearbyResults)
+	places, err := t.src.Nearby(ctx, CallerID(ctx), radius, MaxNearbyResults, scope)
 	if err != nil {
 		return "", fmt.Errorf("whats_nearby: %w", err)
 	}

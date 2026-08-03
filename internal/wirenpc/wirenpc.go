@@ -284,6 +284,12 @@ type Config struct {
 	// (voice/bench standalone) disables directives entirely, so the prompt is
 	// byte-identical to the pre-directive behavior.
 	Directives agent.DirectiveRecaller
+	// Location is the party-location recaller injected into every NPC's Agent loop
+	// (#540, ADR-0060). It fills the location slot of the volatile Hot Context tail,
+	// AFTER the cache-stable prefix, so a party that moves mid-session never
+	// invalidates the cached prompt. nil (voice/bench standalone) leaves the clause
+	// off and the prompt byte-identical to the pre-marker behaviour.
+	Location agent.LocationRecaller
 
 	// SpeakerName resolves a route's SpeakerID (ADR-0050) to the human speaker's
 	// display name for the agent-facing transcript: every NPC's Agent loop

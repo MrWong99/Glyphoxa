@@ -45,11 +45,24 @@ func (m PartyMarker) Set() bool { return m.MapID.Valid }
 //
 // The write is scoped to (id, campaign_id): a session from another Campaign
 // matches nothing and yields ErrNotFound.
+//
+// The Map and Pin are verified to belong to THIS Campaign, and the Pin to that
+// Map, inside the same statement. voice_sessions has only plain single-column FKs
+// to them, so without these EXISTS guards any existing map/pin uuid would be
+// accepted — a marker pointing into another Tenant's world, whose label the
+// location clause would then read out at the table. The guards are in the SQL, not
+// in the caller, because every future caller inherits them there.
 func (s *Store) SetPartyMarker(ctx context.Context, campaignID, sessionID uuid.UUID, mapID, pinID uuid.NullUUID, x, y *float64) error {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE voice_sessions
 		    SET current_map_id = $3, current_pin_id = $4, current_x = $5, current_y = $6
-		  WHERE id = $1 AND campaign_id = $2`,
+		  WHERE id = $1 AND campaign_id = $2
+		    AND ($3::uuid IS NULL OR EXISTS (
+		          SELECT 1 FROM campaign_map m
+		           WHERE m.id = $3 AND m.campaign_id = $2))
+		    AND ($4::uuid IS NULL OR EXISTS (
+		          SELECT 1 FROM map_pin p
+		           WHERE p.id = $4 AND p.campaign_id = $2 AND p.map_id = $3))`,
 		sessionID, campaignID, mapID, pinID, x, y)
 	if err != nil {
 		return fmt.Errorf("storage: set party marker for session %s: %w", sessionID, err)

@@ -16,19 +16,63 @@ type fakeSpatial struct {
 	gotName    string
 	gotRadius  float64
 	gotLimit   int
+	gotScope   SpatialScope
 	calls      int
 }
 
-func (f *fakeSpatial) Locate(_ context.Context, agentID, name string) ([]Place, error) {
+func (f *fakeSpatial) Locate(_ context.Context, agentID, name string, scope SpatialScope) ([]Place, error) {
 	f.calls++
-	f.gotAgentID, f.gotName = agentID, name
+	f.gotAgentID, f.gotName, f.gotScope = agentID, name, scope
 	return f.places, f.err
 }
 
-func (f *fakeSpatial) Nearby(_ context.Context, agentID string, radius float64, limit int) ([]Place, error) {
+func (f *fakeSpatial) Nearby(_ context.Context, agentID string, radius float64, limit int, scope SpatialScope) ([]Place, error) {
 	f.calls++
-	f.gotAgentID, f.gotRadius, f.gotLimit = agentID, radius, limit
+	f.gotAgentID, f.gotRadius, f.gotLimit, f.gotScope = agentID, radius, limit, scope
 	return f.places, f.err
+}
+
+// TestSpatialScopeReachesTheReader is the ADR-0029 assertion the slice shipped
+// without: SupportsScope() true is a PROMISE that a narrowed grant narrows
+// something. The original code parsed the scope purely to reject a malformed one
+// and then threw the value away, so a GM who scoped an innkeeper to own_node got
+// an innkeeper that still read every map in the campaign — the silent widening
+// ADR-0029 exists to forbid, with the grant editor cheerfully offering the
+// control.
+func TestSpatialScopeReachesTheReader(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grant string
+		want  SpatialScope
+	}{
+		{"own_node narrows", `{"scope":"own_node"}`, SpatialScopeOwnMaps},
+		{"campaign is the whole world", `{"scope":"campaign"}`, SpatialScopeCampaign},
+		{"an unset grant reads wide", "", SpatialScopeCampaign},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var grant any
+			if tc.grant != "" {
+				grant = json.RawMessage(tc.grant)
+			}
+			ctx := WithCaller(context.Background(), "agent-9")
+
+			locSrc := &fakeSpatial{}
+			if _, err := NewLocateEntity(locSrc).Execute(ctx, json.RawMessage(`{"name":"anywhere"}`), grant); err != nil {
+				t.Fatalf("locate_entity: %v", err)
+			}
+			if locSrc.gotScope != tc.want {
+				t.Errorf("locate_entity scope = %v, want %v", locSrc.gotScope, tc.want)
+			}
+
+			nearSrc := &fakeSpatial{}
+			if _, err := NewWhatsNearby(nearSrc).Execute(ctx, json.RawMessage(`{}`), grant); err != nil {
+				t.Fatalf("whats_nearby: %v", err)
+			}
+			if nearSrc.gotScope != tc.want {
+				t.Errorf("whats_nearby scope = %v, want %v", nearSrc.gotScope, tc.want)
+			}
+		})
+	}
 }
 
 // TestSpatialToolsAreReadOnly pins the ADR-0030 shape: these Tools only read, so
