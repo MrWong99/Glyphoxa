@@ -69,7 +69,9 @@ func (s *Store) ListGraphNodes(ctx context.Context, campaignID uuid.UUID) ([]KGG
 
 // KGNodePair is two Nodes in one Campaign whose embeddings are close — a
 // PROBABLE-duplicate hint for the world health panel (#536). Similarity is 1
-// minus cosine distance, so 1.0 is identical text.
+// minus pgvector's cosine distance (<=>), so it ranges over [-1, 1]: 1.0 is
+// identical direction, 0 orthogonal, negative opposed. Only the high end is ever
+// surfaced, so the sign never reaches a caller in practice.
 type KGNodePair struct {
 	AID, BID     uuid.UUID
 	AName, BName string
@@ -88,7 +90,12 @@ type KGNodePair struct {
 // approximate one for something a human is about to act on. Rows without an
 // embedding are invisible until the backfill worker reaches them.
 //
-// minSimilarity is the cosine-similarity floor in [0,1]; limit caps the result.
+// minSimilarity is the cosine-similarity floor; limit caps the result.
+//
+// Cost: the pairwise join cannot use the HNSW index — it is a nested loop, O(n²)
+// distance evaluations. At campaign scale (hundreds of Nodes) that is tens of
+// milliseconds, which is why an exact answer is affordable here; it would not be
+// at thousands, and the GM-initiated framing is what keeps that bounded.
 func (s *Store) SimilarNodePairs(ctx context.Context, campaignID uuid.UUID, minSimilarity float64, limit int) ([]KGNodePair, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("storage: similar node pairs: limit must be > 0, got %d", limit)

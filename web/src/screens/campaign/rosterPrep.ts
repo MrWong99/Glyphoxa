@@ -15,8 +15,23 @@ export type Check = {
   key: string;
   label: string;
   ok: boolean;
-  /** Where the GM goes to satisfy it. */
-  fix: "persona" | "voice" | "link" | "content" | "relations";
+  /**
+   * Where the GM goes to satisfy it — `agent` opens the Agent editor, `entry`
+   * opens the linked wiki entry, and `link` opens the Knowledge tab where the
+   * "Voiced by" control actually lives. The Agent editor has NO link control, so
+   * routing `link` there would land the GM somewhere the fix cannot be made.
+   */
+  fix: "agent" | "entry" | "link";
+};
+
+/** One cast Agent's prompt-side readiness, from the batch preview read (#544). */
+export type Readiness = {
+  linked: boolean;
+  factCount: number;
+  chars: number;
+  maxChars: number;
+  truncated: boolean;
+  lastSpokeAt?: Date;
 };
 
 export type RosterEntry = {
@@ -24,8 +39,15 @@ export type RosterEntry = {
   /** The Agent's linked Node, when it has one. */
   node: GraphNode | null;
   checks: Check[];
-  /** True once every check passes. */
+  /** True once every check passes. Always true for the Butler, which is ungraded. */
   ready: boolean;
+  /**
+   * The Butler is LISTED but not graded: Address-Only, auto-created, undeletable
+   * and with no linked Node by design (ADR-0009), so character-oriented checks
+   * would be a permanent false alarm rather than information.
+   */
+  exempt: boolean;
+  readiness?: Readiness;
 };
 
 export type RosterGroup = {
@@ -39,18 +61,19 @@ export type RosterGroup = {
 export const UNPLACED_TITLE = "Not placed in the world";
 
 /**
- * rosterPrep groups cast NPCs by their linked Node's faction/location neighbours
- * and computes each one's readiness.
+ * rosterPrep groups roster members by their linked Node's faction/location
+ * neighbours and computes each cast NPC's readiness.
  *
- * The Butler is deliberately absent from the CHECKS: it is Address-Only,
- * auto-created and undeletable (ADR-0009) and has no linked Node by design, so
- * grading it against character-oriented checks would be a permanent false alarm.
- * The caller still lists it.
+ * The Butler is PRESENT and UNGRADED (`exempt`). It is Address-Only,
+ * auto-created and undeletable (ADR-0009) with no linked Node by design, so
+ * grading it against character-oriented checks would be a permanent false alarm —
+ * but dropping it from the view would hide a roster member the GM looks for.
  */
 export function rosterPrep(
   roster: Agent[],
   nodes: GraphNode[],
   edges: GraphEdge[],
+  readiness: Map<string, Readiness> = new Map(),
 ): RosterGroup[] {
   const byID = new Map(nodes.map((n) => [n.id, n]));
   const nodeByAgent = new Map<string, GraphNode>();
@@ -78,9 +101,19 @@ export function rosterPrep(
   };
 
   for (const agent of roster) {
-    if (agent.role !== "character") continue;
     const node = nodeByAgent.get(agent.id) ?? null;
-    const entry: RosterEntry = { agent, node, checks: checksFor(agent, node), ready: false };
+    // The Butler is present, ungraded. Excluding it entirely would hide a roster
+    // member the GM is looking for; grading it would flag it forever.
+    const exempt = agent.role !== "character";
+    const r = readiness.get(agent.id);
+    const entry: RosterEntry = {
+      agent,
+      node,
+      checks: exempt ? [] : checksFor(agent, node, r),
+      ready: true,
+      exempt,
+      readiness: r,
+    };
     entry.ready = entry.checks.every((c) => c.ok);
 
     const places = node ? (placement.get(node.id) ?? []) : [];
@@ -102,22 +135,31 @@ export function rosterPrep(
   return unplaced ? [...named, unplaced] : named;
 }
 
-function checksFor(agent: Agent, node: GraphNode | null): Check[] {
+function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[] {
   return [
-    {
-      key: "persona",
-      label: "Persona written",
-      ok: agent.persona.trim() !== "",
-      fix: "persona",
-    },
-    { key: "voice", label: "Voice configured", ok: agent.voice !== "", fix: "voice" },
+    { key: "persona", label: "Persona written", ok: agent.persona.trim() !== "", fix: "agent" },
+    { key: "voice", label: "Voice configured", ok: agent.voice !== "", fix: "agent" },
     { key: "link", label: "Wiki entry linked", ok: node !== null, fix: "link" },
     {
       key: "content",
       label: "Entry has content",
       // The ADR-0008 auto-node starts empty; either facts or prose counts.
       ok: node !== null && (node.bodyLen > 0 || node.aspectCount > 0),
-      fix: "content",
+      fix: "entry",
+    },
+    {
+      key: "facts",
+      // The figure the voice loop will actually inject, from the same renderer
+      // (#535) — content on the entry does not guarantee the NPC receives it.
+      label: r ? `${r.factCount} facts in reach` : "Facts in reach",
+      ok: (r?.factCount ?? 0) > 0,
+      fix: "entry",
     },
   ];
+}
+
+/** lastSpokeLabel renders the "last spoke" prep signal, which is context, not a check. */
+export function lastSpokeLabel(r?: Readiness): string {
+  if (!r?.lastSpokeAt) return "never spoken";
+  return `last spoke ${r.lastSpokeAt.toLocaleDateString()}`;
 }

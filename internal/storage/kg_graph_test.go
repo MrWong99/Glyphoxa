@@ -4,7 +4,9 @@ package storage_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -194,5 +196,66 @@ func TestSimilarNodePairs(t *testing.T) {
 	}
 	if len(again) != 1 {
 		t.Errorf("got %d pairs after seeding another campaign, want the scan campaign-scoped", len(again))
+	}
+}
+
+// TestLastSpokenByAgent pins the prep dashboard's "last spoke" signal (#544): one
+// grouped read for the whole roster, Agent turns only, most recent per speaker.
+func TestLastSpokenByAgent(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	sessionID := vs.ID
+
+	base := time.Now().UTC().Truncate(time.Second)
+	lines := []struct {
+		who, kind string
+		at        time.Time
+	}{
+		{"Bart", "npc", base.Add(-3 * time.Hour)},
+		{"Bart", "npc", base.Add(-1 * time.Hour)}, // the most recent Bart line
+		{"Glyphoxa", "butler", base.Add(-2 * time.Hour)},
+		{"Lukas", "player", base}, // a human turn — a different question
+	}
+	for i, l := range lines {
+		if err := st.UpsertTranscriptLine(ctx, storage.TranscriptLine{
+			VoiceSessionID: sessionID, CampaignID: campaignID,
+			LineID: fmt.Sprintf("l%d", i), Seq: int64(i),
+			Who: l.who, Kind: l.kind, TS: l.at, Text: "…",
+		}); err != nil {
+			t.Fatalf("UpsertTranscriptLine: %v", err)
+		}
+	}
+
+	got, err := st.LastSpokenByAgent(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("LastSpokenByAgent: %v", err)
+	}
+	byWho := map[string]time.Time{}
+	for _, g := range got {
+		byWho[g.Who] = g.At
+	}
+	if len(byWho) != 2 {
+		t.Fatalf("got %v, want exactly the two Agent speakers", byWho)
+	}
+	if _, ok := byWho["Lukas"]; ok {
+		t.Error("a player turn was reported as an Agent speaking")
+	}
+	if !byWho["Bart"].Equal(base.Add(-1 * time.Hour)) {
+		t.Errorf("Bart's last line = %v, want the most recent one", byWho["Bart"])
+	}
+	if !byWho["Glyphoxa"].Equal(base.Add(-2 * time.Hour)) {
+		t.Errorf("Butler's last line = %v", byWho["Glyphoxa"])
+	}
+
+	// Another campaign's lines must not leak in.
+	_, _, other := seedCampaign(t, dsn)
+	if empty, err := st.LastSpokenByAgent(ctx, other); err != nil || len(empty) != 0 {
+		t.Errorf("other campaign = %v (err %v), want empty", empty, err)
 	}
 }

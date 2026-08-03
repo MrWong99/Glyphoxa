@@ -15,8 +15,10 @@ import type { Agent, GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/ma
 // every finding is a pointer to the editor, never a button that rewrites the wiki.
 
 export type Finding = {
-  /** The Node to open in the editor. */
+  /** The Node to open in the editor, or "" when the finding is about an Agent. */
   nodeID: string;
+  /** The Agent to open on the roster, for findings whose fix is not a Node. */
+  agentID?: string;
   name: string;
   nodeType: NodeType;
   /** Extra context for the row, when the name alone does not explain the problem. */
@@ -109,6 +111,7 @@ export function worldHealth(
       why: "Their world knowledge is empty by construction — the fact read is keyed by Agent, with no campaign-wide fallback.",
       findings: unlinkedCast.map((a) => ({
         nodeID: "",
+        agentID: a.id,
         name: a.name,
         nodeType: NodeType.NPC,
         detail: "link an NPC entry to this Agent",

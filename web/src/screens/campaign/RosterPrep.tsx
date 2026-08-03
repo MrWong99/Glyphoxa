@@ -2,9 +2,16 @@ import { useMemo } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { Check, X } from "lucide-react";
 
+import { timestampDate } from "@bufbuild/protobuf/wkt";
+
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
-import { rosterPrep, type Check as ReadinessCheck } from "./rosterPrep";
+import {
+  lastSpokeLabel,
+  rosterPrep,
+  type Check as ReadinessCheck,
+  type Readiness,
+} from "./rosterPrep";
 
 // The roster prep dashboard (#544). The roster was a flat list of Agents; this
 // shows what a GM needs BEFORE a session: where each NPC sits in the world, and
@@ -19,24 +26,50 @@ export function RosterPrep({
   roster,
   onSelectAgent,
   onOpenNode,
+  onOpenKnowledge,
 }: {
   roster: Agent[];
   onSelectAgent: (id: string) => void;
+  /** Opens ONE entry in the Knowledge editor. */
   onOpenNode: (id: string) => void;
+  /** Opens the Knowledge tab, where the "Voiced by" link control lives. */
+  onOpenKnowledge: () => void;
 }) {
-  // One graph read on top of the roster read the screen already does — not a
-  // per-NPC RPC storm.
+  // Two reads on top of the roster the screen already has — one graph, one batch
+  // readiness. Not a per-NPC RPC storm on a screen opened before every session.
   const graphQuery = useQuery(CampaignService.method.getKnowledgeGraph, {});
+  const readyQuery = useQuery(CampaignService.method.getRosterReadiness, {});
+
+  const readiness = useMemo(() => {
+    const m = new Map<string, Readiness>();
+    for (const r of readyQuery.data?.agents ?? []) {
+      m.set(r.agentId, {
+        linked: r.linked,
+        factCount: r.factCount,
+        chars: r.chars,
+        maxChars: r.maxChars,
+        truncated: r.truncated,
+        lastSpokeAt: r.lastSpokeAt ? timestampDate(r.lastSpokeAt) : undefined,
+      });
+    }
+    return m;
+  }, [readyQuery.data]);
+
   const groups = useMemo(
-    () => rosterPrep(roster, graphQuery.data?.nodes ?? [], graphQuery.data?.edges ?? []),
-    [roster, graphQuery.data],
+    () => rosterPrep(roster, graphQuery.data?.nodes ?? [], graphQuery.data?.edges ?? [], readiness),
+    [roster, graphQuery.data, readiness],
   );
 
-  if (graphQuery.isPending) return <div className="gx-skeleton" data-testid="prep-loading" />;
-  if (graphQuery.isError) {
+  // Both reads must land before grading: showing "0 facts in reach" for every NPC
+  // while the readiness read is still in flight would be a screen full of false
+  // alarms on the exact screen the GM consults to trust the roster.
+  if (graphQuery.isPending || readyQuery.isPending) {
+    return <div className="gx-skeleton" data-testid="prep-loading" />;
+  }
+  if (graphQuery.isError || readyQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load the world: {graphQuery.error.message}
+        Could not load the world: {(graphQuery.error ?? readyQuery.error)?.message}
       </p>
     );
   }
@@ -58,16 +91,31 @@ export function RosterPrep({
               >
                 {e.agent.name}
               </button>
-              <div className="gx-prep__checks">
-                {e.checks.map((c) => (
-                  <ReadinessMark
-                    key={c.key}
-                    check={c}
-                    agentName={e.agent.name}
-                    onFix={() => (c.fix === "content" && e.node ? onOpenNode(e.node.id) : onSelectAgent(e.agent.id))}
-                  />
-                ))}
-              </div>
+              {e.exempt ? (
+                // Listed, not graded — see rosterPrep's Butler note.
+                <span className="gx-prep__exempt">Butler — always ready</span>
+              ) : (
+                <>
+                  <div className="gx-prep__checks">
+                    {e.checks.map((c) => (
+                      <ReadinessMark
+                        key={c.key}
+                        check={c}
+                        agentName={e.agent.name}
+                        onFix={() => {
+                          // Each fix goes where it can ACTUALLY be made: the link
+                          // control lives in the Knowledge tab's relations card, not
+                          // in the Agent editor.
+                          if (c.fix === "entry" && e.node) onOpenNode(e.node.id);
+                          else if (c.fix === "link" || c.fix === "entry") onOpenKnowledge();
+                          else onSelectAgent(e.agent.id);
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <span className="gx-prep__spoke">{lastSpokeLabel(e.readiness)}</span>
+                </>
+              )}
             </div>
           ))}
         </section>

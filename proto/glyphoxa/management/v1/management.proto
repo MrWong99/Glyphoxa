@@ -142,6 +142,14 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // GetRosterReadiness returns, for every cast Agent at once, the prep signals
+  // the roster dashboard grades on (#544): the SAME fact-preview seam #535 uses,
+  // plus when each last spoke. ONE call for the whole roster — a per-NPC preview
+  // would be an RPC storm on a screen the GM opens before every session.
+  rpc GetRosterReadiness(GetRosterReadinessRequest) returns (GetRosterReadinessResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // GetAgentFactPreview returns exactly what a Character NPC's Hot Context
   // facts block will contain, with the real budget accounting (#535). Read-only.
   rpc GetAgentFactPreview(GetAgentFactPreviewRequest) returns (GetAgentFactPreviewResponse) {
@@ -521,6 +529,39 @@ message GetKnowledgeGraphResponse {
   repeated GraphEdge edges = 2;
 }
 
+// GetRosterReadinessRequest is the (empty) request; the active campaign is
+// resolved server-side.
+message GetRosterReadinessRequest {}
+
+// AgentReadiness is one cast Agent's prep signals (#544). The fact figures come
+// from the SAME render the voice loop injects (#535), so the dashboard cannot
+// claim an NPC is ready on arithmetic the turn does not share.
+message AgentReadiness {
+  // agent_id is the Agent these signals describe.
+  string agent_id = 1;
+  // linked reports whether the Agent has a linked wiki entry at all.
+  bool linked = 2;
+  // fact_count is how many facts its Hot Context block will actually contain;
+  // chars is what they consume of max_chars.
+  int32 fact_count = 3;
+  int32 chars = 4;
+  int32 max_chars = 5;
+  // truncated reports that the caps cut part of its neighbourhood.
+  bool truncated = 6;
+  // last_spoke_at is when this Agent last spoke a committed Transcript Line in
+  // this campaign; unset when it has never spoken (or was renamed since — the
+  // Line grain records the speaker label, not an Agent id).
+  google.protobuf.Timestamp last_spoke_at = 7;
+}
+
+// GetRosterReadinessResponse carries one entry per CAST Agent. The Butler is
+// deliberately absent: it is Address-Only with no linked Node by design
+// (ADR-0009), so these signals do not describe it.
+message GetRosterReadinessResponse {
+  // agents is the readiness of every Character NPC in the campaign.
+  repeated AgentReadiness agents = 1;
+}
+
 // FindDuplicateEntriesRequest is the (empty) request; the active campaign is
 // resolved server-side. The threshold and cap are server policy (ADR-0039).
 message FindDuplicateEntriesRequest {}
@@ -533,7 +574,8 @@ message DuplicateEntryPair {
   string a_name = 2;
   string b_id = 3;
   string b_name = 4;
-  // similarity is cosine similarity in [0,1]; 1.0 is identical text.
+  // similarity is cosine similarity; 1.0 is identical direction. Only pairs above
+  // a high server-side floor are ever returned.
   double similarity = 5;
 }
 

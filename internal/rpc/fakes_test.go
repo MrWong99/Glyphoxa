@@ -984,6 +984,20 @@ type fakeKGPreviewStore struct {
 	factCalls int
 	factsErr  error
 	linkedErr error
+
+	// The batch roster readiness read (#544).
+	agentList []storage.Agent
+	agentsErr error
+	lastSpoke []storage.AgentLastSpoke
+	spokeErr  error
+}
+
+func (f *fakeKGPreviewStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent, error) {
+	return f.agentList, f.agentsErr
+}
+
+func (f *fakeKGPreviewStore) LastSpokenByAgent(_ context.Context, _ uuid.UUID) ([]storage.AgentLastSpoke, error) {
+	return f.lastSpoke, f.spokeErr
 }
 
 func newFakeKGPreviewStore() *fakeKGPreviewStore {

@@ -20,12 +20,18 @@ export function WorldHealthPanel({
   nodes,
   edges,
   onOpenNode,
+  onOpenCast,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   onOpenNode: (id: string) => void;
+  /** Where a cast Agent with no entry gets fixed — the roster, not the wiki. */
+  onOpenCast?: (agentID: string) => void;
 }) {
-  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {});
+  // retry:false so a failure settles into isError promptly. This panel's whole job
+  // is telling the GM what is wrong; silently backing off for seconds while
+  // withholding the cast checks is the opposite of that.
+  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: false });
   const categories = useMemo(
     () => worldHealth(nodes, edges, rosterQuery.data?.roster ?? []),
     [nodes, edges, rosterQuery.data],
@@ -36,10 +42,20 @@ export function WorldHealthPanel({
   const duplicates = useMutation(CampaignService.method.findDuplicateEntries);
   const [ranDuplicates, setRanDuplicates] = useState(false);
 
-  const healthy = categories.length === 0;
+  // "Nothing to flag" must not be claimed while the roster read is still in
+  // flight or failed: the cast-without-entry category depends on it, so a clean
+  // bill of health would be a lie the GM has no reason to doubt.
+  const rosterKnown = rosterQuery.isSuccess;
+  const healthy = categories.length === 0 && rosterKnown;
 
   return (
     <section className="gx-kg-health" aria-label="World health">
+      {rosterQuery.isError && (
+        <p className="gx-campaign__error" role="alert">
+          Could not check the cast: {rosterQuery.error.message} — the entry checks below are
+          still complete.
+        </p>
+      )}
       {healthy ? (
         <p className="gx-kg-health__clear">
           Nothing to flag — every entry is connected, and every voiced NPC has something to say.
@@ -57,18 +73,19 @@ export function WorldHealthPanel({
                 const meta = metaOf(f.nodeType);
                 return (
                   <li key={f.nodeID || `${c.key}-${i}`} className="gx-kg-health__row">
-                    {f.nodeID ? (
-                      <button
-                        type="button"
-                        className="gx-kg-health__link"
-                        style={{ color: meta.color }}
-                        onClick={() => onOpenNode(f.nodeID)}
-                      >
-                        {f.name}
-                      </button>
-                    ) : (
-                      <span style={{ color: meta.color }}>{f.name}</span>
-                    )}
+                    {/* Every row is actionable: an entry opens in the editor, and a
+                        cast Agent with no entry opens on the roster — its fix is
+                        there, not in the wiki. */}
+                    <button
+                      type="button"
+                      className="gx-kg-health__link"
+                      style={{ color: meta.color }}
+                      onClick={() =>
+                        f.nodeID ? onOpenNode(f.nodeID) : f.agentID && onOpenCast?.(f.agentID)
+                      }
+                    >
+                      {f.name}
+                    </button>
                     {f.detail && <span className="gx-kg-health__detail"> — {f.detail}</span>}
                   </li>
                 );

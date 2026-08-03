@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -251,6 +252,101 @@ func TestGetAgentFactPreview_ErrorMapping(t *testing.T) {
 		store.factsErr = errAny
 		_, err := kgPreviewClient(t, store).GetAgentFactPreview(context.Background(),
 			connect.NewRequest(&managementv1.GetAgentFactPreviewRequest{AgentId: agentID.String()}))
+		if got := connect.CodeOf(err); got != connect.CodeInternal {
+			t.Errorf("code = %v, want Internal", got)
+		}
+	})
+}
+
+// TestGetRosterReadiness pins the batch prep read (#544): every cast Agent graded
+// in ONE call on the SAME fact renderer the turn uses, with the last-spoke signal
+// matched by speaker label, and the Butler excluded from grading.
+func TestGetRosterReadiness(t *testing.T) {
+	t.Parallel()
+	store := newFakeKGPreviewStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Saltmarsh"}
+
+	bart, ilva, butler := uuid.New(), uuid.New(), uuid.New()
+	store.agentList = []storage.Agent{
+		{ID: butler, CampaignID: store.campaign.ID, Role: storage.AgentRoleButler, Name: "Glyphoxa"},
+		{ID: bart, CampaignID: store.campaign.ID, Role: storage.AgentRoleCharacter, Name: "Bart"},
+		{ID: ilva, CampaignID: store.campaign.ID, Role: storage.AgentRoleCharacter, Name: "Ilva"},
+	}
+	own := storage.KGNode{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart", Body: "An innkeeper."}
+	store.linked[bart] = own
+	store.facts[bart] = []storage.KGNode{
+		own,
+		{ID: uuid.New(), Type: storage.KGNodeLocation, Name: "Saltmarsh", Body: "A damp town."},
+	}
+	spokeAt := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
+	store.lastSpoke = []storage.AgentLastSpoke{{Who: "Bart", At: spokeAt}}
+
+	resp, err := kgPreviewClient(t, store).GetRosterReadiness(context.Background(),
+		connect.NewRequest(&managementv1.GetRosterReadinessRequest{}))
+	if err != nil {
+		t.Fatalf("GetRosterReadiness: %v", err)
+	}
+	got := resp.Msg.GetAgents()
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want the 2 cast Agents (the Butler is not graded)", len(got))
+	}
+
+	byID := map[string]*managementv1.AgentReadiness{}
+	for _, a := range got {
+		byID[a.GetAgentId()] = a
+	}
+	if _, graded := byID[butler.String()]; graded {
+		t.Error("the Butler was graded — it is Address-Only with no linked Node by design")
+	}
+
+	b := byID[bart.String()]
+	if !b.GetLinked() || b.GetFactCount() != 2 {
+		t.Errorf("Bart = %+v, want linked with the 2 facts the renderer produces", b)
+	}
+	// The SAME renderer the turn uses, not a second implementation.
+	want := kgfacts.RenderPreview(store.facts[bart])
+	if int(b.GetFactCount()) != len(want.Facts) || int(b.GetChars()) != want.Chars {
+		t.Errorf("Bart's figures = %d facts / %d chars, want the renderer's %d / %d",
+			b.GetFactCount(), b.GetChars(), len(want.Facts), want.Chars)
+	}
+	if b.GetLastSpokeAt() == nil || !b.GetLastSpokeAt().AsTime().Equal(spokeAt) {
+		t.Errorf("Bart's last-spoke = %v, want %v", b.GetLastSpokeAt(), spokeAt)
+	}
+
+	// An unlinked NPC is reported as unlinked with no facts, not omitted — the
+	// dashboard's whole job is showing which NPCs are NOT ready.
+	i := byID[ilva.String()]
+	if i == nil || i.GetLinked() || i.GetFactCount() != 0 {
+		t.Errorf("Ilva = %+v, want an explicit unlinked, zero-fact entry", i)
+	}
+	if i.GetLastSpokeAt() != nil {
+		t.Errorf("Ilva reported a last-spoke time without ever speaking: %v", i.GetLastSpokeAt())
+	}
+	// No facts read is made for an Agent with no linked entry.
+	if store.factCalls != 1 {
+		t.Errorf("made %d facts reads, want exactly 1 (only the linked Agent)", store.factCalls)
+	}
+}
+
+func TestGetRosterReadiness_ErrorMapping(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no campaign is NotFound", func(t *testing.T) {
+		store := newFakeKGPreviewStore()
+		store.campErr = storage.ErrNotFound
+		_, err := kgPreviewClient(t, store).GetRosterReadiness(context.Background(),
+			connect.NewRequest(&managementv1.GetRosterReadinessRequest{}))
+		if got := connect.CodeOf(err); got != connect.CodeNotFound {
+			t.Errorf("code = %v, want NotFound", got)
+		}
+	})
+
+	t.Run("last-spoken failure is Internal", func(t *testing.T) {
+		store := newFakeKGPreviewStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		store.spokeErr = errAny
+		_, err := kgPreviewClient(t, store).GetRosterReadiness(context.Background(),
+			connect.NewRequest(&managementv1.GetRosterReadinessRequest{}))
 		if got := connect.CodeOf(err); got != connect.CodeInternal {
 			t.Errorf("code = %v, want Internal", got)
 		}

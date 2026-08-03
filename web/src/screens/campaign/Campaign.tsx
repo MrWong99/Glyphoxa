@@ -67,6 +67,9 @@ export function Campaign() {
   // editor stays the default because adding and shaping NPCs is the common act;
   // readiness is what you check before a session.
   const [castMode, setCastMode] = useState<"edit" | "prep">("edit");
+  // The entry a readiness mark asked to open, handed to the Knowledge panel so
+  // "Entry has content" lands ON that entry instead of dumping the GM on the list.
+  const [focusNodeID, setFocusNodeID] = useState<string | null>(null);
 
   const invalidateRoster = () =>
     queryClient.invalidateQueries({
@@ -151,7 +154,15 @@ export function Campaign() {
       </header>
 
       {view === "knowledge" ? (
-        <KnowledgePanel />
+        <KnowledgePanel
+          focusNodeID={focusNodeID}
+          onFocusHandled={() => setFocusNodeID(null)}
+          onOpenCast={(agentID) => {
+            setSelectedId(agentID);
+            setCastMode("edit");
+            setView("cast");
+          }}
+        />
       ) : view === "players" ? (
         <PlayersPanel />
       ) : view === "proposals" ? (
@@ -189,7 +200,11 @@ export function Campaign() {
               setSelectedId(id);
               setCastMode("edit");
             }}
-            onOpenNode={() => setView("knowledge")}
+            onOpenNode={(id) => {
+              setFocusNodeID(id);
+              setView("knowledge");
+            }}
+            onOpenKnowledge={() => setView("knowledge")}
           />
         ) : (
         <div className="gx-roster-layout">

@@ -116,10 +116,44 @@ describe("worldHealth", () => {
     expect(cats).toHaveLength(0);
   });
 
+  // A fixture that triggers EVERY category at once — the earlier version fed one
+  // orphan and then looped over the single category it produced, so an empty
+  // `why` anywhere else would have sailed through.
   it("names a consequence for every category, not just a label", () => {
-    const cats = worldHealth([node({ id: "x", name: "Loose end" })], [], []);
+    const cats = worldHealth(
+      [
+        node({ id: "orphan", name: "A lost ring", nodeType: NodeType.ITEM }),
+        node({ id: "bart", nodeType: NodeType.NPC, name: "Bart", agentId: "a1" }),
+        node({ id: "mute", nodeType: NodeType.NPC, name: "Unvoiced" }),
+        node({ id: "heist", nodeType: NodeType.PLOT_THREAD, name: "The heist" }),
+      ],
+      [],
+      [create(AgentSchema, { id: "a2", name: "No entry", role: "character" })],
+    );
+    expect(
+      cats.map((c) => c.key).sort(),
+      "the fixture must trigger every category, or this test proves nothing",
+    ).toEqual([
+      "cast-without-entry",
+      "dangling-threads",
+      "empty-voiced",
+      "orphans",
+      "unlinked-npcs",
+    ]);
     for (const c of cats) {
       expect(c.why.length, `${c.key} has no stated consequence`).toBeGreaterThan(20);
+      expect(c.title.length, `${c.key} has no title`).toBeGreaterThan(0);
     }
+  });
+
+  // Every row must be actionable, so a finding that is not about a Node has to
+  // carry the Agent whose roster row IS the fix.
+  it("gives a cast-without-entry finding an agent to open", () => {
+    const cats = worldHealth([], [], [
+      create(AgentSchema, { id: "a2", name: "No entry", role: "character" }),
+    ]);
+    const f = byKey(cats, "cast-without-entry")?.findings[0];
+    expect(f?.agentID).toBe("a2");
+    expect(f?.nodeID).toBe("");
   });
 });

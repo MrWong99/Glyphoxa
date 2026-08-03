@@ -51,7 +51,21 @@ const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
 // replacement, and the editor rail is shared by both.
 type ViewMode = "list" | "graph" | "health";
 
-export function KnowledgePanel() {
+export function KnowledgePanel({
+  focusNodeID,
+  onFocusHandled,
+  onOpenCast,
+}: {
+  /**
+   * An entry another screen asked to open — the roster's readiness marks and the
+   * health panel both point HERE, and pointing at the list instead would leave the
+   * GM hunting for the entry by hand in a campaign of any size (#544).
+   */
+  focusNodeID?: string | null;
+  onFocusHandled?: () => void;
+  /** Hands a cast Agent back to the Cast tab, where its fix lives. */
+  onOpenCast?: (agentID: string) => void;
+} = {}) {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
@@ -75,6 +89,16 @@ export function KnowledgePanel() {
   // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
   // operator confirms here (#209).
   const [confirmNode, setConfirmNode] = useState<Node | null>(null);
+
+  // Honour an entry handed in from another screen, once its row has loaded.
+  useEffect(() => {
+    if (!focusNodeID) return;
+    const node = listQuery.data?.nodes.find((n) => n.id === focusNodeID);
+    if (!node) return;
+    setEditing(node);
+    setMode("list");
+    onFocusHandled?.();
+  }, [focusNodeID, listQuery.data, onFocusHandled]);
 
   // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
   // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
@@ -222,6 +246,7 @@ export function KnowledgePanel() {
               nodes={graphQuery.data.nodes}
               edges={graphQuery.data.edges}
               onOpenNode={editByID}
+              onOpenCast={onOpenCast}
             />
           ) : (
             <KnowledgeGraph
