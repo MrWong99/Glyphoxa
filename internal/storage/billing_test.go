@@ -181,7 +181,17 @@ func TestAddUsageAccumulatesAndReports(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	// The report window has to contain BOTH the usage bucket AND the
+	// subscription's started_at — and started_at is stamped by the DB's now(),
+	// not by the test (00033_billing_plans.sql: DEFAULT now()). BillingReport's
+	// subs CTE requires `started_at < to`, so a window hardcoded to a past month
+	// silently stops matching the subscription once that month is over: the plan
+	// join drops and the line comes back with an empty PlanSlug at price 0 while
+	// the usage sums still look right. Anchor everything to the CURRENT UTC month
+	// so the test does not expire (it did, on 2026-08-01).
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	day := monthStart.AddDate(0, 0, 9)
 	row := storage.UsageRow{
 		TenantID: tenantID, Day: day,
 		Component: storage.ComponentLLM, Provider: "groq", Model: "openai/gpt-oss-120b",
@@ -201,8 +211,11 @@ func TestAddUsageAccumulatesAndReports(t *testing.T) {
 		t.Fatalf("outside AddUsage: %v", err)
 	}
 
-	from := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	to := from.AddDate(0, 1, 0)
+	// A month of slack on each side of the current month, so a run that ticks over
+	// a month boundary between this line and the DB's now() still brackets
+	// started_at. `outside` (day + 2 months) stays past `to` either way.
+	from := monthStart.AddDate(0, -1, 0)
+	to := monthStart.AddDate(0, 1, 0)
 	lines, err := st.BillingReport(ctx, from, to)
 	if err != nil {
 		t.Fatalf("BillingReport: %v", err)
