@@ -99,3 +99,14 @@ hearing it. Regie statt Puppenspiel.
 The prompt now states the other half of the convention ("those labels mark who is speaking TO you; never write one in front of your own words"), emitted under the same gate as the prefix itself — a wired `SpeakerName` resolver — and NOT under the roster block's gate, which renders nothing when no player characters or fellow NPCs are configured while lines are still labelled `"Player / DM: "`. Being session-constant it is legitimate stable-prefix material and does not fork the cache.
 
 A prompt cannot guarantee an output shape, so the guarantee is deterministic: `Persona.Name` (wired from the NPC spec — the same name Address Detection matches and the Chunker labels with) lets the Replier strip a leading `"<own name>:"` label off its own output. It runs on every batch completion and, on the streaming path, on the first sentence inside the shared emitter — upstream of the TTS dispatch, the history commit, and the Transcript at once, since streaming has no whole-completion string to clean. Only the Agent's OWN name immediately followed by a colon is removed (optionally markdown- or bracket-wrapped), so quoted dialogue ("Greta said: …"), ordinary colons ("Listen: the bridge is out"), and ADR-0022 audio tags are untouched. An empty `Persona.Name` disables it.
+
+## Amendment: the party-location block is a sanctioned tail block (2026-08-03, #540)
+
+The Party Marker (#540, ADR-0060) adds a **third** volatile-tail block: one short clause naming where the party is — `You are at the Rusty Anchor, in Saltmarsh.` This amendment records that it is sanctioned, and the bound it is sanctioned under.
+
+- **Tail, never the stable prefix.** The party moves. A per-turn-changing line in the cache-stable system prompt would fork the prefix on every move and cost the whole history's cache hit — the exact cost this ADR was written to avoid. The clause therefore sits with the facts, memory and directive blocks, after the append-only history.
+- **Hard-bounded to one clause** (`agent.MaxLocationChars`, 160 runes) and replaced per turn. The entire justification for putting location in a prompt at all is that it is one clause; unbounded it would become another block competing with the `MaxBlockChars` fact budget, which is what #539 exists to avoid.
+- **Absent by default.** No marker, no live session, a `gm_private` Map, or a marker sitting on a hidden Pin all yield the empty string and the block is dropped — leaving the prompt byte-identical to the pre-marker path, the same guarantee every other tail block keeps.
+- **Slot order** is facts → location → memory → cross-talk → directive. Location sits with the world content it belongs to; the directive keeps the last, strongest recency slot.
+
+Every *other* spatial question goes through the read-only `locate_entity` / `whats_nearby` Tools (#539), not the prompt. The block budget is shared, and anything added to it silently evicts world knowledge.
