@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PlayersPanel } from "./PlayersPanel";
+import { RosterPrep } from "./RosterPrep";
 import { ProposalsPanel } from "./ProposalsPanel";
 
 import "./campaign.css";
@@ -62,6 +63,10 @@ export function Campaign() {
   // User bindings, #279) — the design's seg-control beside the title. Cast is the
   // default so the roster is what loads first (#71).
   const [view, setView] = useState<"cast" | "knowledge" | "players" | "proposals">("cast");
+  // Within Cast: the editor (default), or the prep readiness view (#544). The
+  // editor stays the default because adding and shaping NPCs is the common act;
+  // readiness is what you check before a session.
+  const [castMode, setCastMode] = useState<"edit" | "prep">("edit");
 
   const invalidateRoster = () =>
     queryClient.invalidateQueries({
@@ -158,6 +163,35 @@ export function Campaign() {
           Could not load the campaign: {error.message}
         </p>
       ) : (
+        <>
+        <div className="gx-kg-modes" role="group" aria-label="Cast view">
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={castMode === "edit"}
+            onClick={() => setCastMode("edit")}
+          >
+            Roster
+          </button>
+          <button
+            type="button"
+            className="gx-kg-chip"
+            aria-pressed={castMode === "prep"}
+            onClick={() => setCastMode("prep")}
+          >
+            Session prep
+          </button>
+        </div>
+        {castMode === "prep" ? (
+          <RosterPrep
+            roster={roster}
+            onSelectAgent={(id) => {
+              setSelectedId(id);
+              setCastMode("edit");
+            }}
+            onOpenNode={() => setView("knowledge")}
+          />
+        ) : (
         <div className="gx-roster-layout">
           {/* Roster list */}
           <div className="gx-roster">
@@ -230,6 +264,8 @@ export function Campaign() {
           />
         )}
         </div>
+        )}
+        </>
       )}
     </div>
   );

@@ -113,3 +113,86 @@ func mustGraphNodes(t *testing.T, st *storage.Store, campaignID uuid.UUID) []sto
 	}
 	return got
 }
+
+// TestSimilarNodePairs exercises the GM-initiated duplicate scan against a real
+// DB (#536): each unordered pair once, closest first, above the floor, scoped to
+// the campaign, and blind to rows the embedding worker has not reached.
+func TestSimilarNodePairs(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A and B embed on the same axis (identical direction ⇒ similarity 1); C is
+	// orthogonal; D is left unembedded and must be invisible to the scan.
+	a := mkNode(t, st, campaignID, storage.KGNodeNote, "Bart")
+	b := mkNode(t, st, campaignID, storage.KGNodeNote, "Bart the innkeeper")
+	c := mkNode(t, st, campaignID, storage.KGNodeNote, "Something else")
+	d := mkNode(t, st, campaignID, storage.KGNodeNote, "Not yet indexed")
+	for _, n := range []struct {
+		node storage.KGNode
+		axis int
+	}{{a, 0}, {b, 0}, {c, 1}} {
+		if err := st.SetNodeEmbedding(ctx, n.node.ID, unitVec(n.axis), "m", n.node.UpdatedAt); err != nil {
+			t.Fatalf("SetNodeEmbedding: %v", err)
+		}
+	}
+
+	pairs, err := st.SimilarNodePairs(ctx, campaignID, 0.9, 25)
+	if err != nil {
+		t.Fatalf("SimilarNodePairs: %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("got %d pairs, want exactly the A/B pair: %+v", len(pairs), pairs)
+	}
+	got := map[uuid.UUID]bool{pairs[0].AID: true, pairs[0].BID: true}
+	if !got[a.ID] || !got[b.ID] {
+		t.Errorf("pair = %+v, want the two same-axis nodes", pairs[0])
+	}
+	if pairs[0].AID == pairs[0].BID {
+		t.Error("a node was paired with itself")
+	}
+	if pairs[0].Similarity < 0.99 {
+		t.Errorf("similarity = %v, want ~1 for identical vectors", pairs[0].Similarity)
+	}
+	if pairs[0].AName == "" || pairs[0].BName == "" {
+		t.Errorf("pair carries no names: %+v", pairs[0])
+	}
+
+	// The orthogonal node is below the floor; the unembedded one is invisible.
+	for _, p := range pairs {
+		if p.AID == c.ID || p.BID == c.ID {
+			t.Error("an orthogonal node was reported as a probable duplicate")
+		}
+		if p.AID == d.ID || p.BID == d.ID {
+			t.Error("an unembedded node appeared in the scan")
+		}
+	}
+
+	// The unembedded count is what stops "no duplicates" from implying a clean
+	// bill of health the scan could not give.
+	n, err := st.CountUnembeddedNodesInCampaign(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CountUnembeddedNodesInCampaign: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("unembedded = %d, want 1", n)
+	}
+
+	// Another campaign's identical pair must not surface here.
+	_, _, other := seedCampaign(t, dsn)
+	oa := mkNode(t, st, other, storage.KGNodeNote, "Bart")
+	ob := mkNode(t, st, other, storage.KGNodeNote, "Bart again")
+	for _, n := range []storage.KGNode{oa, ob} {
+		if err := st.SetNodeEmbedding(ctx, n.ID, unitVec(0), "m", n.UpdatedAt); err != nil {
+			t.Fatalf("SetNodeEmbedding (other): %v", err)
+		}
+	}
+	again, err := st.SimilarNodePairs(ctx, campaignID, 0.9, 25)
+	if err != nil {
+		t.Fatalf("SimilarNodePairs (rescan): %v", err)
+	}
+	if len(again) != 1 {
+		t.Errorf("got %d pairs after seeding another campaign, want the scan campaign-scoped", len(again))
+	}
+}

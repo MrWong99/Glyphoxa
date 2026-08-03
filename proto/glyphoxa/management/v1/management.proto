@@ -134,6 +134,14 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // FindDuplicateEntries returns the campaign's closest Node pairs by embedding
+  // similarity — the world health panel's "probable duplicates" check (#536).
+  // GM-INITIATED: it is an exact pairwise scan and must never run on render.
+  // A hint only; nothing here merges anything (ADR-0052).
+  rpc FindDuplicateEntries(FindDuplicateEntriesRequest) returns (FindDuplicateEntriesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // GetAgentFactPreview returns exactly what a Character NPC's Hot Context
   // facts block will contain, with the real budget accounting (#535). Read-only.
   rpc GetAgentFactPreview(GetAgentFactPreviewRequest) returns (GetAgentFactPreviewResponse) {
@@ -511,6 +519,32 @@ message GetKnowledgeGraphResponse {
   repeated GraphNode nodes = 1;
   // edges is every Edge in the campaign.
   repeated GraphEdge edges = 2;
+}
+
+// FindDuplicateEntriesRequest is the (empty) request; the active campaign is
+// resolved server-side. The threshold and cap are server policy (ADR-0039).
+message FindDuplicateEntriesRequest {}
+
+// DuplicateEntryPair is two entries whose text embeds close together — a hint,
+// never a merge (ADR-0052: similarity is not a semantic judgment).
+message DuplicateEntryPair {
+  // a_id / b_id are the two Nodes; a_name / b_name their display names.
+  string a_id = 1;
+  string a_name = 2;
+  string b_id = 3;
+  string b_name = 4;
+  // similarity is cosine similarity in [0,1]; 1.0 is identical text.
+  double similarity = 5;
+}
+
+// FindDuplicateEntriesResponse carries the closest pairs, closest first.
+message FindDuplicateEntriesResponse {
+  // pairs is the probable-duplicate hints, closest first. Empty is the healthy
+  // case, not an error.
+  repeated DuplicateEntryPair pairs = 1;
+  // unembedded is how many Nodes have no embedding yet, so the panel can say the
+  // check was partial rather than implying a clean bill of health.
+  int32 unembedded = 2;
 }
 
 // GetAgentFactPreviewRequest names the Agent to preview.
