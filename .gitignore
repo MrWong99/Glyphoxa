@@ -65,6 +65,13 @@ web/dist/
 # no node step (mirroring how gen/ is handled — but committed, not an artifact).
 # The real built index.html overwrites the placeholder locally/in CI; git keeps
 # the placeholder version. The hashed assets/ are build output, never tracked.
+#
+# The trap this creates: `npm run build` overwrites the tracked placeholder and
+# `git add -A` commits it, so a fresh clone embeds an index.html referencing
+# hashed assets that were never tracked and serves a blank page (it has reached
+# main twice — 155772c, 6d6089e). If you are here because of that, restore the
+# placeholder; internal/spa.TestEmbeddedIndexReferencesResolve is the gate that
+# fails when it is not.
 /internal/spa/dist/*
 !/internal/spa/dist/index.html
 

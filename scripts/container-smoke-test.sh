@@ -16,9 +16,10 @@ cd "$(dirname "$0")/.."
 
 PLACEHOLDER_IMG="glyphoxa-smoke-selftest-placeholder"
 REAL_IMG="glyphoxa-smoke-selftest-real"
+MIXED_IMG="glyphoxa-smoke-selftest-mixed"
 
 cleanup() {
-	docker rmi -f "$PLACEHOLDER_IMG" "$REAL_IMG" >/dev/null 2>&1 || true
+	docker rmi -f "$PLACEHOLDER_IMG" "$REAL_IMG" "$MIXED_IMG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -33,22 +34,43 @@ RUN mkdir -p /usr/local/bin && printf '%s' '${content}' > /usr/local/bin/glyphox
 DOCKERFILE
 }
 
-# The committed placeholder index.html, verbatim (internal/spa/dist/index.html).
-PLACEHOLDER='<!doctype html><html><body><div id="root"></div></body></html>'
+# The committed placeholder index.html, read from the one source of truth rather
+# than hardcoded. A literal copy here would go stale in lockstep with the gate's
+# own copy the moment the placeholder is edited: the gate would grep for bytes no
+# real placeholder has (its two-sided check silently degrading to one-sided) and
+# THIS self-test would keep passing, because the fixture it builds would carry
+# the same stale bytes. Reading the committed blob — not the working tree, which
+# the spa-dist download replaces with the real Vite build in CI — is what makes
+# the fixture track reality.
+PLACEHOLDER="$(git show HEAD:internal/spa/dist/index.html)"
 # A representative slice of a real Vite index.html: a content-hashed bundle ref.
 REAL='<script type="module" crossorigin src="/assets/index-a1b2c3d4.js"></script>'
 
-echo "container-smoke-test: [1/2] gate FAILS on a placeholder-only embedded web root"
+echo "container-smoke-test: [1/3] gate FAILS on a placeholder-only embedded web root"
 build_fixture "$PLACEHOLDER_IMG" "$PLACEHOLDER"
 if SMOKE_ONLY=spa ./scripts/container-smoke.sh "$PLACEHOLDER_IMG" >/dev/null 2>&1; then
 	echo "container-smoke-test: FAIL — the SPA gate passed on the placeholder image" >&2
 	exit 1
 fi
 
-echo "container-smoke-test: [2/2] gate PASSES on a real Vite-built embedded web root"
+echo "container-smoke-test: [2/3] gate PASSES on a real Vite-built embedded web root"
 build_fixture "$REAL_IMG" "$REAL"
 if ! SMOKE_ONLY=spa ./scripts/container-smoke.sh "$REAL_IMG" >/dev/null 2>&1; then
 	echo "container-smoke-test: FAIL — the SPA gate failed on a real console image" >&2
+	exit 1
+fi
+
+# [1/3] and [2/3] both turn on the POSITIVE half alone: the placeholder-only
+# image has no hashed ref (so it fails whether or not the placeholder-absent
+# grep exists), and the real image carries no placeholder bytes. Deleting the
+# negative half of assert_spa outright would leave both of them green. This case
+# is the one that holds it to account — a real bundle embedded ALONGSIDE a
+# surviving placeholder, which is precisely what that half exists to catch, and
+# the only case here that fails if it is dead or grepping stale bytes.
+echo "container-smoke-test: [3/3] gate FAILS when the placeholder survives ALONGSIDE a real bundle"
+build_fixture "$MIXED_IMG" "${REAL}${PLACEHOLDER}"
+if SMOKE_ONLY=spa ./scripts/container-smoke.sh "$MIXED_IMG" >/dev/null 2>&1; then
+	echo "container-smoke-test: FAIL — the SPA gate passed with the placeholder still embedded (its negative half is dead)" >&2
 	exit 1
 fi
 
