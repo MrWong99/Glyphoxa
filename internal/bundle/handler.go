@@ -25,13 +25,21 @@ import (
 // upload) to this same type.
 type Handler struct {
 	Store *storage.Store
+	// Blobs is the seam a Map's image bytes ride on an images-included export
+	// (#547, ADR-0048). Nil leaves maps exporting without their pictures, which is
+	// what a composition with no blob backend can honestly offer.
+	Blobs blob.Store
 	Log   *slog.Logger
 }
+
+// pg is the export/import adapter for this handler's store and blob seam.
+func (h *Handler) pg() PGStore { return PGStore{Store: h.Store, Blobs: h.Blobs} }
 
 // ServeExport streams a campaign bundle download: GET
 // /api/v1/campaigns/{id}/export. The {id} path value must parse as a UUID (400
 // otherwise); an unknown campaign is 404. ?include_history=true nests the
-// transcript payload (ADR-0053 §1, default off). Archived campaigns are
+// transcript payload (ADR-0053 §1, default off) and ?include_images=true embeds
+// map image bytes (#547, default off — the blob cap is 32 MiB per image). Archived campaigns are
 // exportable — a backup must still capture a campaign after it is archived.
 //
 // Tenant posture (#439): the mount declares TenantRequired (session AND
@@ -56,7 +64,13 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := ExportOptions{IncludeHistory: r.URL.Query().Get("include_history") == "true"}
+	opts := ExportOptions{
+		IncludeHistory: r.URL.Query().Get("include_history") == "true",
+		// Images are a separate opt-in from history: a GM may well want their maps
+		// in a share bundle without the transcripts, or the transcripts without the
+		// megabytes (#547).
+		IncludeImages: r.URL.Query().Get("include_images") == "true",
+	}
 
 	// GetCampaign resolves name (for the filename), existence AND tenant
 	// ownership (both 404, #439) before any bytes are written, so a missing or
@@ -77,7 +91,7 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, err := Export(r.Context(), h.Store, id, opts)
+	b, err := Export(r.Context(), h.pg(), id, opts)
 	if err != nil {
 		h.logError("build bundle", err)
 		http.Error(w, "export failed", http.StatusInternalServerError)
@@ -166,7 +180,7 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := Import(r.Context(), PGStore{h.Store}, tenantID, b)
+	res, err := Import(r.Context(), h.pg(), tenantID, b)
 	if err != nil {
 		if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) {
 			writeImportError(w, http.StatusBadRequest, importErrorMessage(err))

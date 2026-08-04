@@ -13,7 +13,16 @@ import (
 )
 
 // FormatVersion is the current campaign bundle format version (ADR-0053 §7).
-const FormatVersion = 1
+//
+// v2 (#547) added Aspects and Tags on a Node, Note/Disposition on an Edge, and
+// the Maps, Pins, Boards and Appearances sections. Every one of them is an
+// OMITEMPTY addition, so a v1 bundle is a valid v2 bundle with those sections
+// absent — which is why [CheckVersion] accepts v1 rather than rejecting it. A
+// backup format that refuses last year's backup is not a backup format.
+const FormatVersion = 2
+
+// MinSupportedVersion is the oldest format this build can import.
+const MinSupportedVersion = 1
 
 // MaxDecodedBytes caps the decompressed JSON size Decode will read, guarding
 // against gzip bombs.
@@ -100,7 +109,7 @@ func Decode(r io.Reader) (*Bundle, error) {
 // CheckVersion reports whether v is a supported bundle format version.
 func CheckVersion(v int) error {
 	switch {
-	case v == FormatVersion:
+	case v >= MinSupportedVersion && v <= FormatVersion:
 		return nil
 	case v > FormatVersion:
 		return ErrNewerFormat

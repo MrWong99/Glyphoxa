@@ -116,7 +116,7 @@ func TestSecretsExclusionProperty(t *testing.T) {
 		{"history", bundle.ExportOptions{IncludeHistory: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := bundle.Export(ctx, st, cid, tc.opts)
+			b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, tc.opts)
 			if err != nil {
 				t.Fatalf("Export: %v", err)
 			}

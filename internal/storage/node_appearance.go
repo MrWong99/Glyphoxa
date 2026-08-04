@@ -118,6 +118,39 @@ func (s *Store) ListNodeAppearances(ctx context.Context, campaignID, nodeID uuid
 	return out, nil
 }
 
+// SessionAppearance is one session's appearance row, for the Campaign Bundle
+// export (#547). It carries the Node id and the Line's own stable key — the two
+// things an import has to remap or preserve.
+type SessionAppearance struct {
+	NodeID uuid.UUID
+	LineID string
+	At     time.Time
+}
+
+// ListSessionAppearances returns every appearance recorded in one Voice Session,
+// for the history-flagged bundle export.
+func (s *Store) ListSessionAppearances(ctx context.Context, sessionID uuid.UUID) ([]SessionAppearance, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT node_id, line_id, at FROM node_appearance
+		  WHERE voice_session_id = $1 ORDER BY at, line_id, node_id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list session appearances %s: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var out []SessionAppearance
+	for rows.Next() {
+		var a SessionAppearance
+		if err := rows.Scan(&a.NodeID, &a.LineID, &a.At); err != nil {
+			return nil, fmt.Errorf("storage: scan session appearance: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list session appearances %s: %w", sessionID, err)
+	}
+	return out, nil
+}
+
 // IndexableLine is one committed Transcript Line the indexer scans.
 type IndexableLine struct {
 	LineID string

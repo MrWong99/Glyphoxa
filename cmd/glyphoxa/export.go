@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -29,6 +30,7 @@ func RunExport(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	campaignStr := fs.String("campaign", "", "campaign UUID to export (required)")
 	includeHistory := fs.Bool("include-history", false, "include Voice Session transcripts (default off; backup/migration)")
+	includeImages := fs.Bool("include-images", false, "embed map images as base64 (default off; the blob cap is 32 MiB per image and base64 inflates by a third)")
 	outPath := fs.String("o", "", "output file (default stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -55,8 +57,16 @@ func RunExport(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
-	b, err := bundle.Export(ctx, storage.New(pool), campaignID, bundle.ExportOptions{
+	// The CLI export has no blob store wired, so an images-included export from
+	// here would silently produce mapless pictures. Build the seam over the same
+	// pool the rows come from — blob.NewPostgres is pool-backed (ADR-0048).
+	var blobs blob.Store
+	if *includeImages {
+		blobs = blob.NewPostgres(pool)
+	}
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: storage.New(pool), Blobs: blobs}, campaignID, bundle.ExportOptions{
 		IncludeHistory: *includeHistory,
+		IncludeImages:  *includeImages,
 	})
 	if err != nil {
 		return err
