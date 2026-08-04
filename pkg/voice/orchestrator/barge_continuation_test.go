@@ -26,7 +26,12 @@ func TestBargeIn_AttributesCutAgent(t *testing.T) {
 	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
 	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "player-1"})
 
-	voicetest.AssertEvent(t, h,
+	// WaitEvent, not AssertEvent: the turn ctx being Done does NOT mean
+	// barge.detected has been published — the cancel and the publish are separate
+	// steps on the barge-in goroutine. A snapshot assertion here passes on an idle
+	// machine and fails under load, which is how this became a CI flake that
+	// blocked unrelated PRs.
+	voicetest.WaitEvent(t, h, 2*time.Second,
 		func(e voiceevent.BargeDetected) bool { return e.AgentID == "npc-bart" && e.SpeakerID == "player-1" },
 		"barge.detected naming both the barging speaker and the cut Agent",
 	)
@@ -55,7 +60,8 @@ func TestBargeIn_AttributesRetargetedHolder(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("speech crossing the confirm window must cancel the turn")
 	}
-	voicetest.AssertEvent(t, h,
+	// Same race as above: the publish trails the cancel.
+	voicetest.WaitEvent(t, h, 2*time.Second,
 		func(e voiceevent.BargeDetected) bool { return e.AgentID == "npc-lead" },
 		"barge.detected naming the Agent that actually held the floor at cut time",
 	)
