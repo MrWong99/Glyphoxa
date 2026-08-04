@@ -427,6 +427,111 @@ func TestDeleteMap_DropsTheImageThroughTheSeam(t *testing.T) {
 	}
 }
 
+// seedKeylessMap inserts the row an imageless bundle import leaves: a Map with
+// every field but a picture. It is inserted straight into the fake because no RPC
+// can produce one — CreateMap requires bytes.
+func seedKeylessMap(store *fakeMapStore) uuid.UUID {
+	id := uuid.New()
+	store.maps[id] = storage.CampaignMap{
+		ID: id, Name: "Saltmarsh", BlobKey: "", WidthPx: 1200, HeightPx: 800,
+	}
+	return id
+}
+
+// TestKeylessMap_NeverAsksTheSeamToDeleteNothing. A Map restored from an imageless
+// bundle carries an EMPTY blob_key, and blob.Delete("") is ErrInvalidKey — not the
+// idempotent no-op an absent key gets. Handing "" to the seam therefore warns about
+// reclaimable bytes that never existed, on the two most ordinary things a GM does
+// to such a map: delete it, or upload the picture it is missing. The second is
+// worse, because it is the repair path — the log would claim a leak on the very
+// action that fixed the map.
+//
+// Asserted on the seam's CALL LOG rather than on the returned error: the point is
+// that the handler does not ASK, which stays true whatever a backend answers.
+func TestKeylessMap_NeverAsksTheSeamToDeleteNothing(t *testing.T) {
+	t.Parallel()
+	for name, act := range map[string]func(context.Context, managementv1connect.CampaignServiceClient, string) error{
+		"delete": func(ctx context.Context, c managementv1connect.CampaignServiceClient, id string) error {
+			_, err := c.DeleteMap(ctx, connect.NewRequest(&managementv1.DeleteMapRequest{Id: id}))
+			return err
+		},
+		"replace image": func(ctx context.Context, c managementv1connect.CampaignServiceClient, id string) error {
+			_, err := c.ReplaceMapImage(ctx, connect.NewRequest(&managementv1.ReplaceMapImageRequest{
+				Id: id, ImageBytes: pngBytes, ContentType: "image/png", WidthPx: 1200, HeightPx: 800,
+			}))
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newFakeMapStore()
+			blobs := newMemBlobs()
+			client, _ := mapClient(t, store, blobs)
+			id := seedKeylessMap(store)
+
+			if err := act(context.Background(), client, id.String()); err != nil {
+				t.Fatalf("%s on a keyless map: %v", name, err)
+			}
+			for _, call := range blobs.log() {
+				if call == "delete:" {
+					t.Errorf("%s asked the seam to delete the empty key", name)
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceMapImage_RepairsAKeylessMap is the other half: the repair must
+// actually work, so the no-delete assertion above is not passing because the whole
+// call bailed out early.
+func TestReplaceMapImage_RepairsAKeylessMap(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	blobs := newMemBlobs()
+	client, _ := mapClient(t, store, blobs)
+	id := seedKeylessMap(store)
+
+	resp, err := client.ReplaceMapImage(context.Background(), connect.NewRequest(&managementv1.ReplaceMapImageRequest{
+		Id: id.String(), ImageBytes: pngBytes, ContentType: "image/png", WidthPx: 1200, HeightPx: 800,
+	}))
+	if err != nil {
+		t.Fatalf("ReplaceMapImage: %v", err)
+	}
+	if !resp.Msg.GetMap().GetHasImage() {
+		t.Error("the repaired map still reports no image")
+	}
+	if got := blobs.keys(); len(got) != 1 {
+		t.Errorf("blobs after repair = %v, want exactly the uploaded one", got)
+	}
+}
+
+// TestListMaps_HasImageFollowsTheKey: has_image is what tells the Maps tab to draw
+// a "no image" surface instead of requesting a picture that is not there, so it
+// must track the key and not merely default to true.
+func TestListMaps_HasImageFollowsTheKey(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	blobs := newMemBlobs()
+	client, _ := mapClient(t, store, blobs)
+
+	created, err := client.CreateMap(context.Background(), connect.NewRequest(createReq("Saltmarsh")))
+	if err != nil {
+		t.Fatalf("CreateMap: %v", err)
+	}
+	if !created.Msg.GetMap().GetHasImage() {
+		t.Error("a map created with bytes reports no image")
+	}
+
+	id := seedKeylessMap(store)
+	view, err := client.GetMapView(context.Background(), connect.NewRequest(&managementv1.GetMapViewRequest{Id: id.String()}))
+	if err != nil {
+		t.Fatalf("GetMapView: %v", err)
+	}
+	if view.Msg.GetMap().GetHasImage() {
+		t.Error("a map with no blob key claims to have an image")
+	}
+}
+
 // ── Generated maps (#541) ─────────────────────────────────────────────────────
 
 // fakeMapGen stands in for the mapgen engine at the handler seam.

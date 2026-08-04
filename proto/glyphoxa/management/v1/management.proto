@@ -687,6 +687,13 @@ message Map {
   bool gm_private = 7;
   // updated_at doubles as the image cache validator.
   google.protobuf.Timestamp updated_at = 8;
+  // has_image reports whether this map HAS a picture to fetch. Every map made
+  // through the UI does, but a map restored from a bundle exported WITHOUT
+  // -include-images does not: it kept its name, nesting, anchor and pins, and lost
+  // only the scan. The client needs to be told, because the alternative is
+  // requesting an image that isn't there and rendering the browser's broken-image
+  // glyph — which reads as a bug rather than as "re-upload the picture".
+  bool has_image = 9;
 }
 
 // Pin is a normalized position on a Map for one KG Node (#538, ADR-0060).

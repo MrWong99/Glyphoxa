@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -132,7 +133,17 @@ func runSeedBundle(ctx context.Context, log *slog.Logger, path string) error {
 		return fmt.Errorf("seed: check campaign %q: %w", b.Campaign.Name, err)
 	}
 
-	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tenantID, b)
+	// The blob seam, built over the same pool the rows go to (blob.NewPostgres is
+	// pool-backed, ADR-0048) — exactly as the web path (main.go) and `export
+	// -include-images` do. Without it every `-include-images` bundle is refused at
+	// the first map image, which made the flag's own output importable only through
+	// the web UI: an unusable backup is not a backup.
+	//
+	// Unconditional, unlike export's flag-gated seam: whether the bundle carries
+	// images is a property of the FILE, and the importer also needs this seam for
+	// the post-failure orphan sweep.
+	pg := bundle.PGStore{Store: st, Blobs: blob.NewPostgres(pool)}
+	res, err := bundle.Import(ctx, pg, tenantID, b)
 	if err != nil {
 		return fmt.Errorf("seed: import bundle: %w", err)
 	}
