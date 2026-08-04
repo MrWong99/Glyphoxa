@@ -100,7 +100,7 @@
 
 .gx-discord__unlink-note {
   font-size: var(--body-sm);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   max-width: 46ch;
 }
 
