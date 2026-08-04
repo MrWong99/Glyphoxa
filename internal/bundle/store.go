@@ -1,10 +1,14 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -46,6 +50,18 @@ type ExportStore interface {
 	ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error)
 	ListTranscriptLines(ctx context.Context, sessionID uuid.UUID) ([]storage.TranscriptLine, error)
 	ListTranscriptChunks(ctx context.Context, campaignID uuid.UUID, includeVectors bool) ([]storage.ExportChunk, error)
+	// The world this epic added (#547). Aspects need no method: ListNodes already
+	// projects them GM-facing, private ones included, which is what a backup needs.
+	ListMaps(ctx context.Context, campaignID uuid.UUID) ([]storage.CampaignMap, error)
+	ListPins(ctx context.Context, campaignID, mapID uuid.UUID) ([]storage.MapPin, error)
+	CampaignTags(ctx context.Context, campaignID uuid.UUID) ([]storage.TaggedNode, error)
+	ListBoards(ctx context.Context, campaignID uuid.UUID) ([]storage.KGBoard, error)
+	ListSessionAppearances(ctx context.Context, sessionID uuid.UUID) ([]storage.SessionAppearance, error)
+	// ReadMapImage fetches a Map's bytes THROUGH THE BLOB SEAM (ADR-0048) — the
+	// one read on this interface that is not SQL. It is here rather than on a
+	// separate seam so the secrets-exclusion property stays visible in one place:
+	// this interface is still the complete list of what an export can reach.
+	ReadMapImage(ctx context.Context, blobKey string) (data []byte, contentType string, err error)
 }
 
 // ImportStore is the tx-bound write surface one import runs against —
@@ -92,6 +108,32 @@ type ImportStore interface {
 	ImportVoiceSession(ctx context.Context, v storage.VoiceSession) (uuid.UUID, error)
 	UpsertTranscriptLine(ctx context.Context, l storage.TranscriptLine) error
 	InsertTranscriptChunk(ctx context.Context, c storage.TranscriptChunk) (uuid.UUID, error)
+	// The world this epic added (#547). Every one of these already flattens into
+	// the ambient import transaction (the TxRunner contract above), so a failure
+	// anywhere still rolls the whole bundle back.
+	ReplaceNodeAspects(ctx context.Context, campaignID, nodeID uuid.UUID, w storage.KGNodeAspectWrite) error
+	SetNodeTags(ctx context.Context, campaignID, nodeID uuid.UUID, tags []string) error
+	UpdateEdgeDetails(ctx context.Context, campaignID, id uuid.UUID, note string, disposition int) (storage.KGEdge, error)
+	CreateMap(ctx context.Context, m storage.NewCampaignMap) (storage.CampaignMap, error)
+	UpdateMap(ctx context.Context, u storage.CampaignMapUpdate) (storage.CampaignMap, error)
+	CreatePin(ctx context.Context, n storage.NewMapPin) (storage.MapPin, error)
+	CreateBoard(ctx context.Context, campaignID uuid.UUID, name string) (storage.KGBoard, error)
+	UpdateBoard(ctx context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error
+	RecordNodeAppearances(ctx context.Context, rows []storage.NodeAppearance) error
+}
+
+// MapImageWriter is the OPTIONAL blob half of an import (#547, ADR-0048): a
+// [TxRunner] that also implements it can restore map images, one that does not
+// imports every map's metadata and pins without its picture.
+//
+// It is deliberately not folded into [ImportStore]. ImportStore is the tx-bound
+// SQL seam and every method on it rolls back together; these two do NOT — the
+// blob store runs on its own pool — and hiding that difference behind one
+// interface is how orphaned bytes happen. [Import] tracks what it writes here and
+// drops it by hand when the transaction fails.
+type MapImageWriter interface {
+	WriteMapImage(ctx context.Context, key, contentType string, data []byte) error
+	DeleteMapImage(ctx context.Context, key string) error
 }
 
 // TxRunner is [Import]'s transaction entry point: InTx runs fn against a
@@ -124,7 +166,34 @@ type TxRunner interface {
 // [TxRunner] needs the tx-bound store re-typed as the [ImportStore] slice.
 // Behavior is the embedded Store's exactly: one BEGIN/COMMIT with rollback on
 // error, and nested InTx calls flattening into the ambient transaction (#291).
-type PGStore struct{ *storage.Store }
+type PGStore struct {
+	*storage.Store
+	// Blobs is the ADR-0048 seam a Map's image bytes ride (#547). Nil is
+	// legitimate — a composition with no blob backend — and makes ReadMapImage
+	// report "not found", which the exporter treats as "this map has no picture"
+	// rather than failing the whole backup.
+	Blobs blob.Store
+}
+
+// ReadMapImage implements the export seam's one non-SQL read: a Map's bytes,
+// through the blob seam. It lives on the ADAPTER rather than on *storage.Store
+// because storage deliberately knows nothing about blobs — the row carries a key,
+// and resolving that key is the seam's job (ADR-0048).
+func (p PGStore) ReadMapImage(ctx context.Context, key string) ([]byte, string, error) {
+	if p.Blobs == nil || key == "" {
+		return nil, "", storage.ErrNotFound
+	}
+	rc, meta, err := p.Blobs.Get(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, meta.ContentType, nil
+}
 
 // InTx implements [TxRunner] over the embedded Store's single-transaction
 // runner.
@@ -132,12 +201,30 @@ func (p PGStore) InTx(ctx context.Context, fn func(tx ImportStore) error) error 
 	return p.Store.InTx(ctx, func(tx *storage.Store) error { return fn(tx) })
 }
 
+// WriteMapImage implements [MapImageWriter].
+func (p PGStore) WriteMapImage(ctx context.Context, key, contentType string, data []byte) error {
+	if p.Blobs == nil {
+		return fmt.Errorf("bundle: no blob store configured")
+	}
+	return p.Blobs.Put(ctx, key, contentType, bytes.NewReader(data), int64(len(data)))
+}
+
+// DeleteMapImage implements [MapImageWriter].
+func (p PGStore) DeleteMapImage(ctx context.Context, key string) error {
+	if p.Blobs == nil {
+		return nil
+	}
+	return p.Blobs.Delete(ctx, key)
+}
+
 // Compile-time proofs the Postgres adapter satisfies the whole seam: the
 // concrete store IS the read and write slices, and PGStore adds the
 // transaction entry point on top.
 var (
-	_ ExportStore = (*storage.Store)(nil)
 	_ ImportStore = (*storage.Store)(nil)
 	_ TxRunner    = PGStore{}
-	_ ExportStore = PGStore{}
+	// ExportStore is satisfied by the ADAPTER, not the bare store: one of its reads
+	// crosses the blob seam, which storage deliberately knows nothing about.
+	_ ExportStore    = PGStore{}
+	_ MapImageWriter = PGStore{}
 )

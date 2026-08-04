@@ -13,11 +13,41 @@ import (
 )
 
 // FormatVersion is the current campaign bundle format version (ADR-0053 §7).
-const FormatVersion = 1
+//
+// v2 (#547) added Aspects and Tags on a Node, Note/Disposition on an Edge, and
+// the Maps, Pins, Boards and Appearances sections. Every one of them is an
+// OMITEMPTY addition, so a v1 bundle is a valid v2 bundle with those sections
+// absent — which is why [CheckVersion] accepts v1 rather than rejecting it. A
+// backup format that refuses last year's backup is not a backup format.
+const FormatVersion = 2
+
+// MinSupportedVersion is the oldest format this build can import.
+const MinSupportedVersion = 1
 
 // MaxDecodedBytes caps the decompressed JSON size Decode will read, guarding
 // against gzip bombs.
 const MaxDecodedBytes int64 = 256 << 20 // 256 MiB
+
+// MaxImportBytes caps the COMPRESSED bundle an import will accept.
+//
+// It is deliberately larger than blob.MaxSize (#547). That constant is the cap on
+// ONE image; an images-included bundle carries several, base64-inflated by a
+// third and only partly recovered by gzip. Capping the whole upload at the
+// per-image limit made an export this build can PRODUCE impossible to import
+// through the only import path — a backup that cannot be restored. This is the
+// binding bound on bundle size and it is documented as such in ADR-0053.
+const MaxImportBytes int64 = 192 << 20 // 192 MiB compressed
+
+// importLimit is the effective upload cap; a var so a test can shrink it rather
+// than allocate 192 MiB to prove the guard fires. Mirrors decodeLimit.
+var importLimit = MaxImportBytes
+
+// SetImportLimitForTest shrinks the upload cap for the duration of a test.
+func SetImportLimitForTest(n int64) func() {
+	prev := importLimit
+	importLimit = n
+	return func() { importLimit = prev }
+}
 
 // decodeLimit is the effective decode cap; a var so tests can shrink it.
 var decodeLimit = MaxDecodedBytes
@@ -100,7 +130,7 @@ func Decode(r io.Reader) (*Bundle, error) {
 // CheckVersion reports whether v is a supported bundle format version.
 func CheckVersion(v int) error {
 	switch {
-	case v == FormatVersion:
+	case v >= MinSupportedVersion && v <= FormatVersion:
 		return nil
 	case v > FormatVersion:
 		return ErrNewerFormat

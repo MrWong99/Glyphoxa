@@ -78,7 +78,70 @@ func seededCampaign(t *testing.T) (*storage.Store, uuid.UUID, uuid.UUID) {
 	}); err != nil {
 		t.Fatalf("CreateCharacter: %v", err)
 	}
+	seedV2(t, st, cid, npcNode.ID, loc.ID)
 	return st, cid, bartID
+}
+
+// seedV2 adds everything #547 made exportable, against a REAL Postgres — the
+// composite FKs, the self-referential parent, the aspect and tag write paths.
+// Without it every v2 claim would rest on the in-memory fake alone, and a fake is
+// only ever as strict as someone remembered to make it.
+func seedV2(t *testing.T, st *storage.Store, cid, npcID, locID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+
+	if err := st.ReplaceNodeAspects(ctx, cid, npcID, storage.KGNodeAspectWrite{
+		Rows: []storage.NewKGNodeAspect{
+			{Key: "Role", Value: "Innkeeper"},
+			{Key: "Secret", Value: "Skims the till", GMPrivate: true},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+	if err := st.SetNodeTags(ctx, cid, npcID, []string{"act two", "needs a voice"}); err != nil {
+		t.Fatalf("SetNodeTags: %v", err)
+	}
+	edges, _, err := st.NodeEdges(ctx, cid, npcID)
+	if err != nil {
+		t.Fatalf("NodeEdges: %v", err)
+	}
+	if len(edges) > 0 {
+		if _, err := st.UpdateEdgeDetails(ctx, cid, edges[0].ID, "owes money since the siege", -2); err != nil {
+			t.Fatalf("UpdateEdgeDetails: %v", err)
+		}
+	}
+
+	town, err := st.CreateMap(ctx, storage.NewCampaignMap{
+		CampaignID: cid, Name: "Saltmarsh", BlobKey: "t/seed/map/town/image",
+		WidthPx: 1200, HeightPx: 800,
+		AnchorNodeID: uuid.NullUUID{UUID: locID, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateMap town: %v", err)
+	}
+	// Named to sort BEFORE its parent, so a one-pass import would try to nest it
+	// under a map that does not exist yet.
+	if _, err := st.CreateMap(ctx, storage.NewCampaignMap{
+		CampaignID: cid, Name: "A cellar", BlobKey: "t/seed/map/cellar/image",
+		WidthPx: 600, HeightPx: 400, GMPrivate: true,
+		ParentMapID: uuid.NullUUID{UUID: town.ID, Valid: true},
+	}); err != nil {
+		t.Fatalf("CreateMap cellar: %v", err)
+	}
+	if _, err := st.CreatePin(ctx, storage.NewMapPin{
+		MapID: town.ID, CampaignID: cid, NodeID: npcID, X: 0.25, Y: 0.75,
+		LabelOverride: "The Rusty Anchor",
+	}); err != nil {
+		t.Fatalf("CreatePin: %v", err)
+	}
+	board, err := st.CreateBoard(ctx, cid, "tonight: the harbour heist")
+	if err != nil {
+		t.Fatalf("CreateBoard: %v", err)
+	}
+	if err := st.UpdateBoard(ctx, cid, board.ID, "tonight: the harbour heist",
+		[]uuid.UUID{locID, npcID}); err != nil {
+		t.Fatalf("UpdateBoard: %v", err)
+	}
 }
 
 // TestExportDemoCampaign is TEST 1: the seeded demo exports Butler + Bart with
@@ -87,7 +150,7 @@ func TestExportDemoCampaign(t *testing.T) {
 	ctx := context.Background()
 	st, cid, bartID := seededCampaign(t)
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -192,7 +255,7 @@ func TestExportHistoryFlag(t *testing.T) {
 	}
 
 	// IncludeHistory=false omits sessions even though transcript rows exist.
-	noHist, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: false})
+	noHist, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: false})
 	if err != nil {
 		t.Fatalf("Export no-history: %v", err)
 	}
@@ -200,7 +263,7 @@ func TestExportHistoryFlag(t *testing.T) {
 		t.Errorf("IncludeHistory=false still nested History")
 	}
 
-	hist, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: true})
+	hist, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export history: %v", err)
 	}
@@ -250,7 +313,7 @@ func TestExportVoiceRoundTrip(t *testing.T) {
 		t.Fatal("seed produced no provider FK ids to check exclusion against")
 	}
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -330,7 +393,7 @@ func TestExportHistorySkipsSessionlessChunk(t *testing.T) {
 		t.Fatalf("raw null-session chunk insert: %v", err)
 	}
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: true})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}

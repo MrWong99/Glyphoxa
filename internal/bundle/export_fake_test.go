@@ -61,10 +61,63 @@ func seedFakeCampaign(t *testing.T, f *fakeStore) (campaignID, bartID uuid.UUID)
 	if err != nil {
 		t.Fatalf("CreateNode location: %v", err)
 	}
-	if _, err := f.CreateEdge(ctx, storage.NewKGEdge{
+	edge, err := f.CreateEdge(ctx, storage.NewKGEdge{
 		CampaignID: campaignID, FromNodeID: npc.ID, ToNodeID: loc.ID, Type: "resides_in",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateEdge: %v", err)
+	}
+	// #547: everything this epic added, so the round-trip proves it survives.
+	if _, err := f.UpdateEdgeDetails(ctx, campaignID, edge.ID, "owes money since the siege", -2); err != nil {
+		t.Fatalf("UpdateEdgeDetails: %v", err)
+	}
+	if err := f.ReplaceNodeAspects(ctx, campaignID, npc.ID, storage.KGNodeAspectWrite{
+		Rows: []storage.NewKGNodeAspect{
+			{Key: "Role", Value: "Innkeeper"},
+			{Key: "Secret", Value: "Skims the till", GMPrivate: true},
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceNodeAspects: %v", err)
+	}
+	if err := f.SetNodeTags(ctx, campaignID, npc.ID, []string{"act two", "needs a voice"}); err != nil {
+		t.Fatalf("SetNodeTags: %v", err)
+	}
+	// Two maps, nested, with pins — the nesting is what a one-pass import breaks.
+	town, err := f.CreateMap(ctx, storage.NewCampaignMap{
+		CampaignID: campaignID, Name: "Saltmarsh", BlobKey: "t/x/map/a/image",
+		WidthPx: 1200, HeightPx: 800,
+		AnchorNodeID: uuid.NullUUID{UUID: loc.ID, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateMap town: %v", err)
+	}
+	if err := f.WriteMapImage(ctx, "t/x/map/a/image", "image/png", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+		t.Fatalf("WriteMapImage: %v", err)
+	}
+	// Named so it sorts BEFORE its parent — a one-pass import in ListMaps order
+	// would try to nest it under a map that does not exist yet.
+	inn, err := f.CreateMap(ctx, storage.NewCampaignMap{
+		CampaignID: campaignID, Name: "A cellar", BlobKey: "t/x/map/b/image",
+		WidthPx: 600, HeightPx: 400, GMPrivate: true,
+		ParentMapID: uuid.NullUUID{UUID: town.ID, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateMap inn: %v", err)
+	}
+	_ = inn
+	if _, err := f.CreatePin(ctx, storage.NewMapPin{
+		MapID: town.ID, CampaignID: campaignID, NodeID: npc.ID, X: 0.25, Y: 0.75,
+		LabelOverride: "The Rusty Anchor",
+	}); err != nil {
+		t.Fatalf("CreatePin: %v", err)
+	}
+	board, err := f.CreateBoard(ctx, campaignID, "tonight: the harbour heist")
+	if err != nil {
+		t.Fatalf("CreateBoard: %v", err)
+	}
+	if err := f.UpdateBoard(ctx, campaignID, board.ID, "tonight: the harbour heist",
+		[]uuid.UUID{loc.ID, npc.ID}); err != nil {
+		t.Fatalf("UpdateBoard: %v", err)
 	}
 	if _, err := f.CreateCharacter(ctx, storage.NewCharacter{
 		CampaignID: campaignID, Name: "Frodo", Aliases: []string{"Ringbearer"},
@@ -89,6 +142,11 @@ func seedFakeCampaign(t *testing.T, f *fakeStore) (campaignID, bartID uuid.UUID)
 		if err := f.UpsertTranscriptLine(ctx, l); err != nil {
 			t.Fatalf("UpsertTranscriptLine: %v", err)
 		}
+	}
+	if err := f.RecordNodeAppearances(ctx, []storage.NodeAppearance{
+		{NodeID: npc.ID, CampaignID: campaignID, VoiceSessionID: sid, LineID: "l1", At: started},
+	}); err != nil {
+		t.Fatalf("RecordNodeAppearances: %v", err)
 	}
 	if _, err := f.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
 		CampaignID: campaignID, VoiceSessionID: sid,
@@ -310,10 +368,36 @@ func normalizeRefs(t *testing.T, b *bundle.Bundle) {
 		e.From = mustKey(t, key, e.From)
 		e.To = mustKey(t, key, e.To)
 	}
+	for i := range b.Campaign.Maps {
+		m := &b.Campaign.Maps[i]
+		key[m.ID] = "map:" + m.Name
+	}
+	for i := range b.Campaign.Maps {
+		m := &b.Campaign.Maps[i]
+		m.ID = key[m.ID]
+		if m.ParentMapID != "" {
+			m.ParentMapID = mustKey(t, key, m.ParentMapID)
+		}
+		if m.AnchorNodeID != "" {
+			m.AnchorNodeID = mustKey(t, key, m.AnchorNodeID)
+		}
+		for j := range m.Pins {
+			m.Pins[j].NodeID = mustKey(t, key, m.Pins[j].NodeID)
+		}
+	}
+	for i := range b.Campaign.Boards {
+		refs := b.Campaign.Boards[i].NodeIDs
+		for j := range refs {
+			refs[j] = mustKey(t, key, refs[j])
+		}
+	}
 	if b.Campaign.History != nil {
 		for i := range b.Campaign.History.Sessions {
 			s := &b.Campaign.History.Sessions[i]
 			s.ID = "session:" + s.StartedAt.UTC().Format(time.RFC3339)
+			for j := range s.Appearances {
+				s.Appearances[j].NodeID = mustKey(t, key, s.Appearances[j].NodeID)
+			}
 			for j := range s.Chunks {
 				refs := s.Chunks[j].ParticipatedAgentIDs
 				for k := range refs {

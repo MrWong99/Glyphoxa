@@ -1570,7 +1570,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// download does not fit Connect's message model. Operator-only via the
 	// guarded mount table, the same gate the relay reads (ADR-0041). The GET
 	// export (#290) and the POST import (#291) share this handler.
-	bundleHandler := &bundle.Handler{Store: store, Log: log}
+	bundleHandler := &bundle.Handler{Store: store, Blobs: blobStore, Log: log}
 
 	// The plain (non-Connect) mounts bind their handlers here; their auth
 	// posture is declared separately in [plainMountPolicy] (#446), and the two

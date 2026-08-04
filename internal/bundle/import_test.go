@@ -177,7 +177,7 @@ func TestImportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src, srcCID, srcBartID := seededCampaign(t)
 
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestImportRoundTrip(t *testing.T) {
 func TestImportTwiceMakesTwoCampaigns(t *testing.T) {
 	ctx := context.Background()
 	src, srcCID, _ := seededCampaign(t)
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestImportRoundTripWithHistory(t *testing.T) {
 		t.Fatalf("EndVoiceSession 2: %v", err)
 	}
 
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{IncludeHistory: true})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -928,4 +928,100 @@ func TestImportHistorylessBundleUnchanged(t *testing.T) {
 	if len(sessions) != 0 {
 		t.Errorf("history-less bundle wrote %d voice sessions, want 0", len(sessions))
 	}
+}
+
+// TestPGRoundTrip_V2SectionsSurviveRealConstraints is the #547 acceptance
+// criterion against a REAL Postgres, where the composite FKs, the self-referential
+// parent and the aspect/tag write paths are actually enforced.
+//
+// The in-memory fake proves the remap logic; only this proves the remapped ids
+// satisfy the constraints the database will apply to them.
+func TestPGRoundTrip_V2SectionsSurviveRealConstraints(t *testing.T) {
+	ctx := context.Background()
+	src, cid, _ := seededCampaign(t)
+
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, cid, bundle.ExportOptions{})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(b.Campaign.Maps) != 2 || len(b.Campaign.Boards) == 0 {
+		t.Fatalf("the export lost a v2 section: %d maps, %d boards",
+			len(b.Campaign.Maps), len(b.Campaign.Boards))
+	}
+
+	dst, tid := freshTenant(t)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.Maps != 2 || res.Pins == 0 || res.Boards == 0 || res.Aspects != 2 || res.Tags != 2 {
+		t.Fatalf("import counts: %+v", res)
+	}
+
+	// The nesting survived the composite FK — the two-pass import's whole reason.
+	maps, err := dst.ListMaps(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListMaps: %v", err)
+	}
+	var nested int
+	for _, m := range maps {
+		if m.ParentMapID.Valid {
+			nested++
+			if !mapInCampaign(t, dst, m.ParentMapID.UUID, res.CampaignID) {
+				t.Error("the nested map's parent is outside the imported campaign")
+			}
+		}
+		if m.AnchorNodeID.Valid && !nodeInCampaign(t, dst, m.AnchorNodeID.UUID, res.CampaignID) {
+			t.Error("a map anchors an entry outside the imported campaign")
+		}
+	}
+	if nested != 1 {
+		t.Errorf("nested maps = %d, want 1", nested)
+	}
+
+	// The private Aspect came back private: a backup that silently publishes the
+	// GM's secrets on restore is worse than one that drops them.
+	nodes, err := dst.ListNodes(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	var sawPrivateAspect bool
+	for _, n := range nodes {
+		for _, a := range n.Aspects {
+			if a.GMPrivate && a.Value == "Skims the till" {
+				sawPrivateAspect = true
+			}
+		}
+	}
+	if !sawPrivateAspect {
+		t.Error("the GM-private aspect did not survive the round trip as private")
+	}
+}
+
+func mapInCampaign(t *testing.T, st *storage.Store, id, campaignID uuid.UUID) bool {
+	t.Helper()
+	maps, err := st.ListMaps(context.Background(), campaignID)
+	if err != nil {
+		t.Fatalf("ListMaps: %v", err)
+	}
+	for _, m := range maps {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeInCampaign(t *testing.T, st *storage.Store, id, campaignID uuid.UUID) bool {
+	t.Helper()
+	nodes, err := st.ListNodes(context.Background(), campaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	for _, n := range nodes {
+		if n.ID == id {
+			return true
+		}
+	}
+	return false
 }

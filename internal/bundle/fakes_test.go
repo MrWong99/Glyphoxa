@@ -48,17 +48,296 @@ type fakeStore struct {
 	sessions   []storage.VoiceSession
 	lines      []storage.TranscriptLine
 	chunks     []storage.TranscriptChunk
+
+	// The world #547 added. Aspects and tags hang off the node rows themselves
+	// (kg_node projects Aspects), so only the standalone tables are held here.
+	tags        map[uuid.UUID][]string
+	maps        []storage.CampaignMap
+	pins        map[uuid.UUID][]storage.MapPin
+	boards      []storage.KGBoard
+	appearances []storage.NodeAppearance
+	images      map[string][]byte
+	imageTypes  map[string]string
+	// deletedImages records the rollback path's cleanup so a test can prove a
+	// failed import does not strand bytes.
+	deletedImages []string
 }
 
 // Compile-time proofs the fake satisfies the whole seam — the second adapter
 // that, with PGStore, makes the seam real (#451).
 var (
-	_ bundle.ExportStore = (*fakeStore)(nil)
-	_ bundle.ImportStore = (*fakeStore)(nil)
-	_ bundle.TxRunner    = (*fakeStore)(nil)
+	_ bundle.ExportStore    = (*fakeStore)(nil)
+	_ bundle.ImportStore    = (*fakeStore)(nil)
+	_ bundle.TxRunner       = (*fakeStore)(nil)
+	_ bundle.MapImageWriter = (*fakeStore)(nil)
 )
 
-func newFakeStore() *fakeStore { return &fakeStore{} }
+func newFakeStore() *fakeStore {
+	return &fakeStore{
+		tags:       map[uuid.UUID][]string{},
+		pins:       map[uuid.UUID][]storage.MapPin{},
+		images:     map[string][]byte{},
+		imageTypes: map[string]string{},
+	}
+}
+
+// ── #547: maps, pins, aspects, tags, boards, appearances ────────────────────
+//
+// These emulate the real adapter's contracts, not merely its signatures: the
+// composite FKs are enforced by hand (a pin whose map or node is not in this
+// campaign is refused), UpdateMap replaces the whole editor field set, and
+// UpdateBoard is one call for the rename AND the entries.
+
+func (f *fakeStore) CampaignTags(_ context.Context, campaignID uuid.UUID) ([]storage.TaggedNode, error) {
+	var out []storage.TaggedNode
+	for _, n := range f.nodes {
+		if n.CampaignID != campaignID {
+			continue
+		}
+		for _, t := range f.tags[n.ID] {
+			out = append(out, storage.TaggedNode{NodeID: n.ID, Tag: t})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) SetNodeTags(_ context.Context, campaignID, nodeID uuid.UUID, tags []string) error {
+	for _, n := range f.nodes {
+		if n.ID == nodeID && n.CampaignID == campaignID {
+			f.tags[nodeID] = append([]string(nil), tags...)
+			return nil
+		}
+	}
+	return storage.ErrNotFound
+}
+
+func (f *fakeStore) ReplaceNodeAspects(_ context.Context, campaignID, nodeID uuid.UUID, w storage.KGNodeAspectWrite) error {
+	for i := range f.nodes {
+		if f.nodes[i].ID != nodeID || f.nodes[i].CampaignID != campaignID {
+			continue
+		}
+		out := make([]storage.KGNodeAspect, 0, len(w.Rows))
+		for j, r := range w.Rows {
+			out = append(out, storage.KGNodeAspect{
+				ID: uuid.New(), Position: j, Key: r.Key, Value: r.Value, GMPrivate: r.GMPrivate,
+			})
+		}
+		f.nodes[i].Aspects = out
+		return nil
+	}
+	return storage.ErrNotFound
+}
+
+func (f *fakeStore) UpdateEdgeDetails(_ context.Context, campaignID, id uuid.UUID, note string, disposition int) (storage.KGEdge, error) {
+	if disposition < -2 || disposition > 2 {
+		return storage.KGEdge{}, storage.ErrInvalidDisposition
+	}
+	for i := range f.edges {
+		if f.edges[i].ID == id && f.edges[i].CampaignID == campaignID {
+			f.edges[i].Note = note
+			f.edges[i].Disposition = disposition
+			return f.edges[i], nil
+		}
+	}
+	return storage.KGEdge{}, storage.ErrNotFound
+}
+
+func (f *fakeStore) ListMaps(_ context.Context, campaignID uuid.UUID) ([]storage.CampaignMap, error) {
+	var out []storage.CampaignMap
+	for _, m := range f.maps {
+		if m.CampaignID == campaignID {
+			out = append(out, m)
+		}
+	}
+	// The real read orders by (name, id); a deterministic bundle depends on it.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
+}
+
+func (f *fakeStore) CreateMap(_ context.Context, m storage.NewCampaignMap) (storage.CampaignMap, error) {
+	created := storage.CampaignMap{
+		ID: uuid.New(), CampaignID: m.CampaignID, Name: m.Name, BlobKey: m.BlobKey,
+		WidthPx: m.WidthPx, HeightPx: m.HeightPx,
+		ParentMapID: m.ParentMapID, AnchorNodeID: m.AnchorNodeID, GMPrivate: m.GMPrivate,
+	}
+	// The composite FK: an anchor from another campaign is refused, not stored.
+	if m.AnchorNodeID.Valid && !f.nodeInCampaign(m.AnchorNodeID.UUID, m.CampaignID) {
+		return storage.CampaignMap{}, storage.ErrNotFound
+	}
+	f.maps = append(f.maps, created)
+	return created, nil
+}
+
+func (f *fakeStore) UpdateMap(_ context.Context, u storage.CampaignMapUpdate) (storage.CampaignMap, error) {
+	if u.ParentMapID.Valid && u.ParentMapID.UUID == u.ID {
+		return storage.CampaignMap{}, storage.ErrInvalidMapParent
+	}
+	for i := range f.maps {
+		if f.maps[i].ID != u.ID || f.maps[i].CampaignID != u.CampaignID {
+			continue
+		}
+		if u.ParentMapID.Valid && !f.mapInCampaign(u.ParentMapID.UUID, u.CampaignID) {
+			return storage.CampaignMap{}, storage.ErrNotFound
+		}
+		// Replaces the WHOLE editor field set, exactly as the real UPDATE does.
+		f.maps[i].Name = u.Name
+		f.maps[i].ParentMapID = u.ParentMapID
+		f.maps[i].AnchorNodeID = u.AnchorNodeID
+		f.maps[i].GMPrivate = u.GMPrivate
+		return f.maps[i], nil
+	}
+	return storage.CampaignMap{}, storage.ErrNotFound
+}
+
+func (f *fakeStore) ListPins(_ context.Context, campaignID, mapID uuid.UUID) ([]storage.MapPin, error) {
+	if !f.mapInCampaign(mapID, campaignID) {
+		return nil, nil
+	}
+	return f.pins[mapID], nil
+}
+
+func (f *fakeStore) CreatePin(_ context.Context, n storage.NewMapPin) (storage.MapPin, error) {
+	if n.X < 0 || n.X > 1 || n.Y < 0 || n.Y > 1 {
+		return storage.MapPin{}, storage.ErrInvalidPin
+	}
+	// Both composite FKs.
+	if !f.mapInCampaign(n.MapID, n.CampaignID) || !f.nodeInCampaign(n.NodeID, n.CampaignID) {
+		return storage.MapPin{}, storage.ErrNotFound
+	}
+	for _, p := range f.pins[n.MapID] {
+		if p.NodeID == n.NodeID {
+			return storage.MapPin{}, storage.ErrConflict // one pin per node per map
+		}
+	}
+	created := storage.MapPin{
+		ID: uuid.New(), MapID: n.MapID, CampaignID: n.CampaignID, NodeID: n.NodeID,
+		X: n.X, Y: n.Y, LabelOverride: n.LabelOverride, GMPrivate: n.GMPrivate,
+	}
+	f.pins[n.MapID] = append(f.pins[n.MapID], created)
+	return created, nil
+}
+
+func (f *fakeStore) ListBoards(_ context.Context, campaignID uuid.UUID) ([]storage.KGBoard, error) {
+	var out []storage.KGBoard
+	for _, b := range f.boards {
+		if b.CampaignID == campaignID {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) CreateBoard(_ context.Context, campaignID uuid.UUID, name string) (storage.KGBoard, error) {
+	b := storage.KGBoard{ID: uuid.New(), CampaignID: campaignID, Name: name}
+	f.boards = append(f.boards, b)
+	return b, nil
+}
+
+func (f *fakeStore) UpdateBoard(_ context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error {
+	for i := range f.boards {
+		if f.boards[i].ID != id || f.boards[i].CampaignID != campaignID {
+			continue
+		}
+		for _, n := range nodeIDs {
+			if !f.nodeInCampaign(n, campaignID) {
+				return storage.ErrNotFound
+			}
+		}
+		f.boards[i].Name = name
+		f.boards[i].NodeIDs = append([]uuid.UUID(nil), nodeIDs...)
+		return nil
+	}
+	return storage.ErrNotFound
+}
+
+func (f *fakeStore) ListSessionAppearances(_ context.Context, sessionID uuid.UUID) ([]storage.SessionAppearance, error) {
+	var out []storage.SessionAppearance
+	for _, a := range f.appearances {
+		if a.VoiceSessionID == sessionID {
+			out = append(out, storage.SessionAppearance{NodeID: a.NodeID, LineID: a.LineID, At: a.At})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RecordNodeAppearances(_ context.Context, rows []storage.NodeAppearance) error {
+	// ON CONFLICT DO NOTHING over (node, session, line) — AND the composite FK to
+	// transcript_line, which Postgres enforces and a fake that skipped it would
+	// hide: an appearance naming a line the import did not write fails the FK and
+	// rolls the WHOLE bundle back.
+	for _, r := range rows {
+		if !f.lineExists(r.VoiceSessionID, r.LineID) {
+			return fmt.Errorf("fake: node_appearance_line_fk: no line %q in session %s", r.LineID, r.VoiceSessionID)
+		}
+		if !f.nodeInCampaign(r.NodeID, r.CampaignID) {
+			return fmt.Errorf("fake: node_appearance_node_fk: node %s not in campaign %s", r.NodeID, r.CampaignID)
+		}
+		dup := false
+		for _, e := range f.appearances {
+			if e.NodeID == r.NodeID && e.VoiceSessionID == r.VoiceSessionID && e.LineID == r.LineID {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			f.appearances = append(f.appearances, r)
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) lineExists(sessionID uuid.UUID, lineID string) bool {
+	for _, l := range f.lines {
+		if l.VoiceSessionID == sessionID && l.LineID == lineID {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeStore) ReadMapImage(_ context.Context, key string) ([]byte, string, error) {
+	data, ok := f.images[key]
+	if !ok {
+		return nil, "", storage.ErrNotFound
+	}
+	return data, f.imageTypes[key], nil
+}
+
+func (f *fakeStore) WriteMapImage(_ context.Context, key, contentType string, data []byte) error {
+	f.images[key] = append([]byte(nil), data...)
+	f.imageTypes[key] = contentType
+	return nil
+}
+
+func (f *fakeStore) DeleteMapImage(_ context.Context, key string) error {
+	delete(f.images, key)
+	delete(f.imageTypes, key)
+	f.deletedImages = append(f.deletedImages, key)
+	return nil
+}
+
+func (f *fakeStore) nodeInCampaign(id, campaignID uuid.UUID) bool {
+	for _, n := range f.nodes {
+		if n.ID == id && n.CampaignID == campaignID {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeStore) mapInCampaign(id, campaignID uuid.UUID) bool {
+	for _, m := range f.maps {
+		if m.ID == id && m.CampaignID == campaignID {
+			return true
+		}
+	}
+	return false
+}
 
 // commitFailTx runs the tx body against the fake and then fails the way a
 // COMMIT can (serialization failure, dropped connection) — the only shape in
