@@ -15,6 +15,11 @@ import (
 // parser is deliberate: the input is machine-generated Vite output, and
 // golang.org/x/net (the only reasonable parser) is in neither go.mod nor
 // go.sum — a whole new module dependency to read two tags is a bad trade.
+//
+// Accepted residual: the unquoted alternative lets a match start inside another
+// attribute's value, so prose containing a literal "src=" (say in a <meta
+// content=…>) yields a spurious ref. That errs toward a red test a human then
+// reads — the safe direction here — and only real HTML parsing would fix it.
 var srcHrefRe = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`)
 
 // schemeRe matches any URL scheme prefix (https:, data:, mailto:, tel:, blob:).

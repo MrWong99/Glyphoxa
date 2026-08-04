@@ -92,6 +92,13 @@ assert_spa() {
 	placeholder="$(committed_placeholder || true)"
 	if [ -z "$placeholder" ]; then
 		bad 'could not read the committed placeholder (git show HEAD:internal/spa/dist/index.html) — the placeholder-absent half of this gate cannot run'
+	elif [ "$placeholder" != "${placeholder%$'\n'*}" ]; then
+		# grep -F treats a multi-line pattern as one pattern PER LINE, so a
+		# pretty-printed placeholder would silently weaken this to "any single
+		# line of it appears" — and a line like <div id="root"></div> appears in
+		# the real Vite index.html too, reddening good images. Fail by name
+		# instead of drifting into that.
+		bad 'committed placeholder is multi-line — grep -F would match any single line of it; keep internal/spa/dist/index.html a one-liner (or rework this check)'
 	elif grep -aqF "$placeholder" "$bin"; then
 		bad 'binary still contains the committed placeholder index.html one-liner (a real build must overwrite it)'
 	else
