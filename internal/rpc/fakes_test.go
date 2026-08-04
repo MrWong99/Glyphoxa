@@ -1053,3 +1053,93 @@ func (f *fakeKGPreviewStore) AgentNodeFacts(_ context.Context, agentID uuid.UUID
 	}
 	return f.facts[agentID], nil
 }
+
+// fakeOrganizeStore fakes the tags-and-boards slice (#543).
+type fakeOrganizeStore struct {
+	*fakeActive
+
+	tags         map[uuid.UUID][]string
+	tagsCampaign uuid.UUID
+	tagErr       error
+	renamedFrom  string
+	renamedTo    string
+	// updateBoardErr forces the atomic board save's failure path.
+	updateBoardErr error
+
+	boards    []storage.KGBoard
+	boardErr  error
+	nextBoard int
+}
+
+func newFakeOrganizeStore() *fakeOrganizeStore {
+	return &fakeOrganizeStore{fakeActive: newFakeActive(), tags: map[uuid.UUID][]string{}}
+}
+
+func (f *fakeOrganizeStore) CampaignTags(_ context.Context, _ uuid.UUID) ([]storage.TaggedNode, error) {
+	var out []storage.TaggedNode
+	for id, tags := range f.tags {
+		for _, t := range tags {
+			out = append(out, storage.TaggedNode{NodeID: id, Tag: t})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeOrganizeStore) SetNodeTags(_ context.Context, campaignID, nodeID uuid.UUID, tags []string) error {
+	f.tagsCampaign = campaignID
+	if f.tagErr != nil {
+		return f.tagErr
+	}
+	f.tags[nodeID] = tags
+	return nil
+}
+
+func (f *fakeOrganizeStore) NodeTags(_ context.Context, _, nodeID uuid.UUID) ([]string, error) {
+	return f.tags[nodeID], f.tagErr
+}
+
+func (f *fakeOrganizeStore) RenameTag(_ context.Context, _ uuid.UUID, from, to string) error {
+	f.renamedFrom, f.renamedTo = from, to
+	return f.tagErr
+}
+
+func (f *fakeOrganizeStore) ListBoards(_ context.Context, _ uuid.UUID) ([]storage.KGBoard, error) {
+	return f.boards, f.boardErr
+}
+
+func (f *fakeOrganizeStore) CreateBoard(_ context.Context, campaignID uuid.UUID, name string) (storage.KGBoard, error) {
+	if f.boardErr != nil {
+		return storage.KGBoard{}, f.boardErr
+	}
+	f.nextBoard++
+	b := storage.KGBoard{ID: uuid.New(), CampaignID: campaignID, Name: name}
+	f.boards = append(f.boards, b)
+	return b, nil
+}
+
+// UpdateBoard applies the rename and the entry list together, as the real
+// transaction does — the campaignID IS checked here, because a fake that ignores
+// scoping turns every "campaign scoping" assertion into a tautology.
+func (f *fakeOrganizeStore) UpdateBoard(_ context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error {
+	if f.updateBoardErr != nil {
+		return f.updateBoardErr
+	}
+	for i := range f.boards {
+		if f.boards[i].ID == id && f.boards[i].CampaignID == campaignID {
+			f.boards[i].Name = name
+			f.boards[i].NodeIDs = nodeIDs
+			return nil
+		}
+	}
+	return storage.ErrNotFound
+}
+
+func (f *fakeOrganizeStore) DeleteBoard(_ context.Context, _, id uuid.UUID) error {
+	for i := range f.boards {
+		if f.boards[i].ID == id {
+			f.boards = append(f.boards[:i], f.boards[i+1:]...)
+			return nil
+		}
+	}
+	return storage.ErrNotFound
+}

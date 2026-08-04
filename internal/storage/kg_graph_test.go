@@ -4,7 +4,9 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,5 +259,242 @@ func TestLastSpokenByAgent(t *testing.T) {
 	_, _, other := seedCampaign(t, dsn)
 	if empty, err := st.LastSpokenByAgent(ctx, other); err != nil || len(empty) != 0 {
 		t.Errorf("other campaign = %v (err %v), want empty", empty, err)
+	}
+}
+
+// TestNodeTags covers the free-form tag layer (#543): replace-in-full, blank and
+// duplicate handling, the campaign-wide read, a campaign-wide rename that
+// collapses collisions, and the delete cascade.
+func TestNodeTags(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	bart := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	town := mkNode(t, st, campaignID, storage.KGNodeLocation, "Saltmarsh")
+
+	// Blanks are dropped and case-insensitive duplicates collapse: the chip editor
+	// leaves an empty field around, and that convenience must not be a save error.
+	if err := st.SetNodeTags(ctx, campaignID, bart.ID,
+		[]string{"seafaring", "  ", "Act Two", "act two", "  needs   a voice  "}); err != nil {
+		t.Fatalf("SetNodeTags: %v", err)
+	}
+	got, err := st.NodeTags(ctx, campaignID, bart.ID)
+	if err != nil {
+		t.Fatalf("NodeTags: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("tags = %v, want 3 after dropping blanks and collapsing duplicates", got)
+	}
+	// Inner whitespace is collapsed but case is PRESERVED: a GM who writes
+	// "Act Two" gets "Act Two" back.
+	joined := strings.Join(got, "|")
+	if !strings.Contains(joined, "Act Two") || !strings.Contains(joined, "needs a voice") {
+		t.Errorf("tags = %v, want normalized whitespace and preserved case", got)
+	}
+
+	if err := st.SetNodeTags(ctx, campaignID, town.ID, []string{"act two", "harbour"}); err != nil {
+		t.Fatalf("SetNodeTags town: %v", err)
+	}
+
+	pairs, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags: %v", err)
+	}
+	if len(pairs) != 5 {
+		t.Errorf("campaign tags = %d pairs, want 5", len(pairs))
+	}
+
+	// Renaming is campaign-wide — a tag is ONE concept, and renaming it
+	// entry-by-entry is how half-renamed vocabularies happen. Bart already carries
+	// "Act Two", so renaming "seafaring" onto it must collapse rather than fail.
+	if err := st.RenameTag(ctx, campaignID, "seafaring", "Act Two"); err != nil {
+		t.Fatalf("RenameTag: %v", err)
+	}
+	after, err := st.NodeTags(ctx, campaignID, bart.ID)
+	if err != nil {
+		t.Fatalf("NodeTags after rename: %v", err)
+	}
+	if len(after) != 2 {
+		t.Errorf("tags after collapsing rename = %v, want 2", after)
+	}
+
+	// A CASE-ONLY rename is the same tag under a tidier name — the commonest
+	// rename a GM makes. It deleted the tag from every entry in the campaign: the
+	// collision sweep's EXISTS was satisfied by each row itself when
+	// lower(from) = lower(to), so every row matched and the UPDATE that followed
+	// found nothing left. Silent, campaign-wide data loss behind a successful call.
+	// The original test only covered from != to, so the suite could not see it.
+	before, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags before case rename: %v", err)
+	}
+	if err := st.RenameTag(ctx, campaignID, "act two", "Act Two"); err != nil {
+		t.Fatalf("RenameTag case-only: %v", err)
+	}
+	afterCase, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags after case rename: %v", err)
+	}
+	if len(afterCase) != len(before) {
+		t.Fatalf("a case-only rename changed the tag count: %d → %d (%v)",
+			len(before), len(afterCase), afterCase)
+	}
+	var casedCount int
+	for _, p := range afterCase {
+		if p.Tag == "Act Two" {
+			casedCount++
+		}
+		if strings.EqualFold(p.Tag, "act two") && p.Tag != "Act Two" {
+			t.Errorf("a tag kept its old casing after the rename: %q", p.Tag)
+		}
+	}
+	if casedCount == 0 {
+		t.Error(`no entry carries "Act Two" after the rename — the tag was deleted`)
+	}
+
+	// An over-long tag is refused before anything is written.
+	if err := st.SetNodeTags(ctx, campaignID, bart.ID,
+		[]string{strings.Repeat("x", storage.MaxTagRunes+1)}); !errors.Is(err, storage.ErrInvalidTag) {
+		t.Errorf("over-long tag: got %v, want ErrInvalidTag", err)
+	}
+
+	// Deleting the entry takes its tags with it.
+	if err := st.DeleteNode(ctx, campaignID, bart.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	left, err := st.CampaignTags(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CampaignTags after delete: %v", err)
+	}
+	for _, p := range left {
+		if p.NodeID == bart.ID {
+			t.Error("tags outlived their entry")
+		}
+	}
+}
+
+// TestPrepBoards covers a board's lifecycle: create, ordered entries,
+// replace-in-full, and that deleting a board leaves its entries alone while
+// deleting an entry removes it from every board.
+func TestPrepBoards(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	a := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	b := mkNode(t, st, campaignID, storage.KGNodeLocation, "Saltmarsh")
+	c := mkNode(t, st, campaignID, storage.KGNodeItem, "A key")
+
+	board, err := st.CreateBoard(ctx, campaignID, "tonight: the harbour heist")
+	if err != nil {
+		t.Fatalf("CreateBoard: %v", err)
+	}
+	if err := st.SetBoardNodes(ctx, campaignID, board.ID, []uuid.UUID{c.ID, a.ID, b.ID}); err != nil {
+		t.Fatalf("SetBoardNodes: %v", err)
+	}
+
+	boards, err := st.ListBoards(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListBoards: %v", err)
+	}
+	if len(boards) != 1 {
+		t.Fatalf("got %d boards, want 1", len(boards))
+	}
+	// Board ORDER is the GM's, not the database's.
+	if len(boards[0].NodeIDs) != 3 || boards[0].NodeIDs[0] != c.ID || boards[0].NodeIDs[2] != b.ID {
+		t.Errorf("board order = %v, want the authored order", boards[0].NodeIDs)
+	}
+
+	// Replace-in-full: reorder and remove in one save.
+	if err := st.SetBoardNodes(ctx, campaignID, board.ID, []uuid.UUID{b.ID, a.ID}); err != nil {
+		t.Fatalf("SetBoardNodes (rewrite): %v", err)
+	}
+	boards, _ = st.ListBoards(ctx, campaignID)
+	if len(boards[0].NodeIDs) != 2 || boards[0].NodeIDs[0] != b.ID {
+		t.Errorf("board after rewrite = %v", boards[0].NodeIDs)
+	}
+
+	// Deleting an ENTRY removes it from the board — a board row pointing at
+	// nothing is not a reminder.
+	if err := st.DeleteNode(ctx, campaignID, b.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	boards, _ = st.ListBoards(ctx, campaignID)
+	if len(boards[0].NodeIDs) != 1 || boards[0].NodeIDs[0] != a.ID {
+		t.Errorf("board after entry delete = %v, want just the survivor", boards[0].NodeIDs)
+	}
+
+	// Deleting the BOARD leaves its entries alone: a board is a shortlist, not
+	// ownership.
+	if err := st.DeleteBoard(ctx, campaignID, board.ID); err != nil {
+		t.Fatalf("DeleteBoard: %v", err)
+	}
+	if _, err := st.ListNodes(ctx, campaignID); err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	nodes, _ := st.ListNodes(ctx, campaignID)
+	if len(nodes) != 2 {
+		t.Errorf("entries after board delete = %d, want both survivors untouched", len(nodes))
+	}
+}
+
+// TestTagsAndBoardsNeverReachAPrompt is the #543 AC that matters most: tags and
+// boards are GM ORGANIZATION, and neither may enter an NPC's Hot Context.
+//
+// If they did, tags would quietly become a second, unvalidated type system inside
+// NPC context — and they would spend the fact budget world knowledge draws on.
+func TestTagsAndBoardsNeverReachAPrompt(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	view := st.PromptKG()
+
+	own := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart")
+	agentID := linkAgent(t, st, campaignID, own.ID, "Bart")
+
+	const secretTag = "zzz-tag-sentinel"
+	const secretBoard = "zzz-board-sentinel"
+	if err := st.SetNodeTags(ctx, campaignID, own.ID, []string{secretTag}); err != nil {
+		t.Fatalf("SetNodeTags: %v", err)
+	}
+	board, err := st.CreateBoard(ctx, campaignID, secretBoard)
+	if err != nil {
+		t.Fatalf("CreateBoard: %v", err)
+	}
+	if err := st.SetBoardNodes(ctx, campaignID, board.ID, []uuid.UUID{own.ID}); err != nil {
+		t.Fatalf("SetBoardNodes: %v", err)
+	}
+
+	assertClean := func(op string, nodes []storage.KGNode, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		for _, n := range nodes {
+			blob := n.Name + "\x00" + n.Body
+			for _, a := range n.Aspects {
+				blob += "\x00" + a.Key + "\x00" + a.Value
+			}
+			if strings.Contains(blob, secretTag) {
+				t.Errorf("%s carried a TAG into prompt-facing data: %q", op, blob)
+			}
+			if strings.Contains(blob, secretBoard) {
+				t.Errorf("%s carried a BOARD name into prompt-facing data: %q", op, blob)
+			}
+		}
+	}
+
+	facts, err := view.AgentNodeFacts(ctx, agentID)
+	assertClean("AgentNodeFacts", facts, err)
+	hits, err := view.SearchPublicNodes(ctx, campaignID, secretTag, 10)
+	assertClean("SearchPublicNodes", hits, err)
+	// A tag must not even make its entry FINDABLE by prompt-facing search — that
+	// would let an NPC surface an entry because of a GM's private filing label.
+	if len(hits) != 0 {
+		t.Errorf("prompt-facing search matched on a tag: %+v", hits)
 	}
 }

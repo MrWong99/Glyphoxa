@@ -49,6 +49,7 @@ type CampaignServer struct {
 	*kgGraph
 	*kgPreview
 	*campaignMaps
+	*kgOrganize
 	*knowledgeProposals
 	*toolGrants
 	*campaignAssist
@@ -83,6 +84,9 @@ type CampaignStores struct {
 	KGPreview kgPreviewStore
 	// Maps backs the Maps and Pins surface (#538, ADR-0060).
 	Maps campaignMapStore
+	// Organize backs free-form tags and prep boards (#543) — GM organization
+	// only; nothing here reaches a prompt.
+	Organize kgOrganizeStore
 	// Proposals backs the Knowledge Proposal review queue + similarity hint
 	// (#300, ADR-0052).
 	Proposals knowledgeProposalStore
@@ -111,6 +115,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		KGGraph:    s,
 		KGPreview:  kgPreviewStoreOf(s),
 		Maps:       s,
+		Organize:   s,
 		Proposals:  s,
 		Grants:     s,
 		Assist:     s,
@@ -134,6 +139,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
 		kgPreview:          &kgPreview{store: stores.KGPreview, active: active},
 		campaignMaps:       &campaignMaps{store: stores.Maps, active: active, tenant: auth.TenantID},
+		kgOrganize:         &kgOrganize{store: stores.Organize, active: active},
 		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
 		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
 		campaignAssist:     &campaignAssist{store: stores.Assist, active: active},

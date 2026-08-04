@@ -46,6 +46,19 @@ describe("invalidateKnowledgeReads", () => {
       cardinality: "finite",
       input: {},
     }),
+    // Reads that REFERENCE nodes. A node delete cascades their rows away
+    // server-side, so a stale one shows a tag whose entries have vanished, or
+    // "(deleted entry)" sitting on a board.
+    getCampaignTags: createConnectQueryKey({
+      schema: CampaignService.method.getCampaignTags,
+      cardinality: "finite",
+      input: {},
+    }),
+    listBoards: createConnectQueryKey({
+      schema: CampaignService.method.listBoards,
+      cardinality: "finite",
+      input: {},
+    }),
   };
 
   it("marks every Knowledge Graph read stale", () => {
