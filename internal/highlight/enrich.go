@@ -101,6 +101,9 @@ type EnrichStore interface {
 //   - image generation is not configured for the tenant → log + nil (the
 //     Highlight stays intact without media, AC — never a retry loop on a missing
 //     key).
+//   - a provider failure → the error is returned (retry / dead-letter) whatever
+//     its status, but a rejected key and an exhausted quota are LOGGED apart:
+//     they need different humans doing different things.
 //   - otherwise generate → meter usage (caps-free spend meter teed onto the
 //     production recorder; Gemini bills the image as output tokens, so it prices
 //     through LLMTokens — no image-specific meter, #311) → store the image behind
@@ -195,7 +198,32 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
+			//
+			// EVERY provider failure takes this exit, including a rejected key (401/403)
+			// that cannot possibly succeed on retry. That looks wrong and is not: what
+			// the exit really chooses is the RECOVERY path, not the retry. A handler
+			// returning nil completes the job 'done', and
+			// ListPromotedHighlightsNeedingEnrichment treats 'done' as satisfied while
+			// treating 'dead' as absent — so dead-lettering a rejected key is precisely
+			// what lets the boot sweep re-enrich these Highlights once the key is fixed,
+			// and a "permanent, log and move on" branch would strand every Highlight
+			// promoted during a bad-key window imageless forever, with a log line as
+			// its only trace. The missing-key case above returns nil because there is
+			// no key to fix and nothing to come back for.
+			//
+			// What DOES vary by status is the DIAGNOSIS, because "HTTP 401" and
+			// "HTTP 429" buried in a dead-letter payload look alike and share nothing:
+			// one needs a new key from a human, the other needs a bill paid — or just
+			// the next attempt.
 			release()
+			switch {
+			case imagegen.IsAuthFailure(err):
+				log.Error("highlight enrich: image provider rejected the configured key",
+					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
+			case imagegen.IsQuotaExceeded(err):
+				log.Warn("highlight enrich: image provider out of quota or rate-limited",
+					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
+			}
 			return fmt.Errorf("highlight enrich: generate image: %w", err)
 		}
 

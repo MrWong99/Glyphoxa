@@ -45,6 +45,68 @@ var ErrImageTooLarge = errors.New("imagegen: generated image exceeds the blob si
 // happened (#541 review), and one value with two aliases makes it unrepresentable.
 var ErrNotConfigured = errors.New("imagegen: image generation is not configured")
 
+// StatusError is a non-2xx response from the image provider, carrying the HTTP
+// status so a caller can tell the failures apart instead of collapsing them into
+// one sentence.
+//
+// The three that matter have three different fixes and only one of them is the
+// configuration:
+//
+//   - 429 — the key is VALID and was accepted; the account is out of quota or
+//     rate-limited. The fix is billing, a plan change, or waiting.
+//   - 401/403 — the key is missing, wrong, revoked, or not entitled to the model.
+//     This is the only case where "check the configuration" is true.
+//   - 5xx — the provider is having a bad day. Nothing on this side is wrong and
+//     nothing on this side can fix it.
+//
+// Sending a GM to re-check a correct setting because their provider rate-limited
+// them is exactly the failure this type exists to prevent (#541 follow-up).
+//
+// Branch on it with the predicates below (or errors.As), never by matching
+// substrings of Error(): the message is for humans and logs, the status is the
+// contract.
+type StatusError struct {
+	// StatusCode is the HTTP status the provider returned.
+	StatusCode int
+	// Body is the provider's response body, already truncated for logging.
+	Body string
+}
+
+// Error keeps the pre-typed wording verbatim so log lines and dead-letter
+// payloads read the same as before the type existed.
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("imagegen: HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+// IsQuotaExceeded reports whether err is an upstream quota or rate-limit
+// rejection (HTTP 429). The configuration is CORRECT in this case — the key was
+// accepted and then refused for spend — so a caller must never answer it with
+// advice to check the key.
+func IsQuotaExceeded(err error) bool {
+	return statusIs(err, func(code int) bool { return code == http.StatusTooManyRequests })
+}
+
+// IsAuthFailure reports whether err is an upstream credential rejection (401 or
+// 403): the key is missing, wrong, revoked, or lacks access to the model. It is
+// PERMANENT for the key in hand — retrying re-sends the same rejected credential
+// — and it is the one failure a configuration change actually fixes.
+func IsAuthFailure(err error) bool {
+	return statusIs(err, func(code int) bool {
+		return code == http.StatusUnauthorized || code == http.StatusForbidden
+	})
+}
+
+// There is deliberately no IsProviderFault: nothing needs it. The 5xx case is
+// classified in internal/rpc alongside the text provider's equivalent error,
+// where the two seams meet, and a predicate here with no caller but its own test
+// would just be API pretending to be used. [StatusError] is exported, so anyone
+// who later needs a different cut takes it with errors.As.
+
+func statusIs(err error, pred func(int) bool) bool {
+	var se *StatusError
+	return errors.As(err, &se) && pred(se.StatusCode)
+}
+
 const (
 	// ProviderID is the stable string identifying this adapter; it matches the
 	// Provider Config's provider name and observe.ProviderGemini.
@@ -217,7 +279,10 @@ func (g *Gemini) Generate(ctx context.Context, prompt string) (Result, error) {
 		return Result{}, fmt.Errorf("imagegen: read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("imagegen: HTTP %d: %s", resp.StatusCode, truncate(respBody, 256))
+		// Typed, not fmt.Errorf: the status is the only thing that tells a quota
+		// rejection apart from a rejected key, and a caller that has to grep the
+		// message for "429" is one provider-wording change away from being wrong.
+		return Result{}, &StatusError{StatusCode: resp.StatusCode, Body: truncate(respBody, 256)}
 	}
 
 	var parsed generateContentResponse

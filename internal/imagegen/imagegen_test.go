@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -116,18 +117,108 @@ func TestGemini_Generate_RequestShapeAndParse(t *testing.T) {
 	}
 }
 
-func TestGemini_Generate_Non2xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, `{"error":{"message":"quota"}}`)
+// statusServer replies with one status + body, the shape every non-2xx test needs.
+func statusServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestGemini_Generate_Non2xx(t *testing.T) {
+	srv := statusServer(t, http.StatusTooManyRequests, `{"error":{"message":"quota"}}`)
 
 	gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
 	if _, err := gen.Generate(context.Background(), "x"); err == nil {
 		t.Fatal("want error on 429, got nil")
 	} else if !strings.Contains(err.Error(), "429") {
 		t.Errorf("error should carry the status: %v", err)
+	}
+}
+
+// TestGemini_Generate_StatusIsTyped is the whole point of [imagegen.StatusError]:
+// the status must survive as DATA, not only as text in the message, so a caller
+// can tell "you are out of quota" from "your key was rejected" without grepping.
+func TestGemini_Generate_StatusIsTyped(t *testing.T) {
+	srv := statusServer(t, http.StatusTooManyRequests,
+		`{"error":{"code":429,"message":"You exceeded your current quota"}}`)
+
+	gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
+	_, err := gen.Generate(context.Background(), "x")
+
+	var se *imagegen.StatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("want a *StatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want 429", se.StatusCode)
+	}
+	if !strings.Contains(se.Body, "exceeded your current quota") {
+		t.Errorf("the provider's own explanation was dropped: %q", se.Body)
+	}
+	// The message is unchanged from the untyped version, so logs and dead-letter
+	// payloads read exactly as they did.
+	if got, want := se.Error(), "imagegen: HTTP 429: "+se.Body; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestGemini_Generate_StatusPredicates pins the classification each caller
+// branches on. The 429 row is the reported bug: a VALID key that ran out of
+// quota must never be reported as an auth or configuration problem.
+func TestGemini_Generate_StatusPredicates(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		quota, auth bool
+	}{
+		{"rate limited", http.StatusTooManyRequests, true, false},
+		{"key rejected", http.StatusUnauthorized, false, true},
+		{"key forbidden", http.StatusForbidden, false, true},
+		{"provider down", http.StatusInternalServerError, false, false},
+		{"malformed request", http.StatusBadRequest, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := statusServer(t, tc.status, `{"error":{"message":"nope"}}`)
+			gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
+			_, err := gen.Generate(context.Background(), "x")
+			if err == nil {
+				t.Fatalf("want an error on HTTP %d", tc.status)
+			}
+			if got := imagegen.IsQuotaExceeded(err); got != tc.quota {
+				t.Errorf("IsQuotaExceeded = %v, want %v", got, tc.quota)
+			}
+			if got := imagegen.IsAuthFailure(err); got != tc.auth {
+				t.Errorf("IsAuthFailure = %v, want %v", got, tc.auth)
+			}
+			// A 5xx and a 400 are neither: they must fall through to the caller's
+			// own handling rather than being reported as a bill or a bad key.
+		})
+	}
+}
+
+// TestStatusPredicates_IgnoreOtherErrors: every predicate must say "no" to an
+// error that is not an upstream status at all — an oversize image, a transport
+// failure, a nil error — so no caller silently reclassifies them.
+func TestStatusPredicates_IgnoreOtherErrors(t *testing.T) {
+	for _, err := range []error{nil, imagegen.ErrImageTooLarge, imagegen.ErrNotConfigured, errors.New("dial tcp: i/o timeout")} {
+		if imagegen.IsQuotaExceeded(err) || imagegen.IsAuthFailure(err) {
+			t.Errorf("%v was classified as an upstream status failure", err)
+		}
+	}
+}
+
+// TestStatusError_WrapsThroughFmt: callers wrap with %w on the way up (mapgen,
+// the enrichment job), so the predicates must see through those layers.
+func TestStatusError_WrapsThroughFmt(t *testing.T) {
+	err := fmt.Errorf("highlight enrich: generate image: %w",
+		&imagegen.StatusError{StatusCode: http.StatusTooManyRequests, Body: "quota"})
+	if !imagegen.IsQuotaExceeded(err) {
+		t.Error("a wrapped 429 stopped being a quota failure")
 	}
 }
 

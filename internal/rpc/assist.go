@@ -60,21 +60,36 @@ func validAssistPrompt(raw string) (string, *connect.Error) {
 	return p, nil
 }
 
+// assistSubject names what the GM asked this surface for, in the words it has
+// always used. Both handlers here draft content, so they share one subject.
+const assistSubject = "content generation"
+
 // assistEngineErr maps a drafting failure onto its Connect code: a refused
 // platform-key entitlement is an actionable precondition (save a key, ADR-0054);
-// an unusable model response is CodeUnavailable (a retry may succeed); anything
-// else is logged raw and returned as a static CodeUnavailable — provider
-// failures are the expected failure mode here, not an internal fault.
+// an unusable model response is CodeUnavailable (a retry may succeed); an
+// upstream rejection is classified by upstream_error.go, shared with the Maps
+// surface; anything left is logged raw and returned as a static CodeUnavailable
+// — provider failures are the expected failure mode here, not an internal fault.
+//
+// The classification is why the default no longer says "check the LLM provider
+// configuration". That sentence sent the GM to re-check a CORRECT key every time
+// the account merely ran out of quota — the provider answers a spent allowance
+// with 429 and a key it accepted — and it is now reserved for the 401/403 that
+// actually means it, where the wording is kept verbatim.
 func assistEngineErr(op string, err error) *connect.Error {
 	switch {
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
 		return connect.NewError(connect.CodeFailedPrecondition, llmbuild.ErrNoPlatformKeyEntitlement)
 	case errors.Is(err, assist.ErrUnusableResponse):
 		return connect.NewError(connect.CodeUnavailable, errors.New("the model returned an unusable draft — try again or rephrase the prompt"))
-	default:
-		slog.Default().Error(op+": assist engine failed", "err", err)
-		return connect.NewError(connect.CodeUnavailable, errors.New("content generation failed — check the LLM provider configuration and try again"))
 	}
+
+	if ce := upstreamErr(op, assistSubject, err); ce != nil {
+		return ce
+	}
+
+	slog.Default().Error(op+": assist engine failed", "err", err)
+	return connect.NewError(connect.CodeUnavailable, errors.New("content generation failed — try again in a moment"))
 }
 
 // GeneratePersona drafts a Persona for one Agent from the GM's short prompt

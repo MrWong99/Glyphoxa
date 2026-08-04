@@ -3,6 +3,7 @@ package rpc_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 )
 
 // fakeAssistStore fakes the campaign-assist store slice (#479): agents backs
@@ -230,6 +232,142 @@ func TestGeneratePersona_EngineErrors(t *testing.T) {
 	down := &fakeAssistEngine{personaErr: errors.New("connection refused")}
 	if _, err := assistClient(t, store, down).GeneratePersona(context.Background(), req()); connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Errorf("provider down: code = %v, want Unavailable", connect.CodeOf(err))
+	}
+}
+
+// personaErrClient is the assist fixture every upstream-status test needs: a
+// wired campaign and agent, plus a client whose engine fails with err.
+func personaErrClient(t *testing.T, err error) (managementv1connect.CampaignServiceClient, *connect.Request[managementv1.GeneratePersonaRequest]) {
+	t.Helper()
+	store := newFakeAssistStore()
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID}
+	agentID := uuid.New()
+	store.agents[agentID] = storage.Agent{ID: agentID, CampaignID: campID, Role: storage.AgentRoleCharacter}
+	client := assistClient(t, store, &fakeAssistEngine{personaErr: err})
+	return client, connect.NewRequest(&managementv1.GeneratePersonaRequest{AgentId: agentID.String(), Prompt: "ok"})
+}
+
+// TestAssist_QuotaIsResourceExhausted: the same defect the Maps surface had. An
+// LLM account with a VALID key that has run out of quota answers 429, and
+// "check the LLM provider configuration" sends the GM to the one thing that is
+// not wrong.
+//
+// The injected error is *providererr.HTTPError because that is what this path
+// really produces (the adapters return it on a non-2xx start call, ADR-0044;
+// llmcall wraps it with %w and the assist engine returns it unwrapped).
+func TestAssist_QuotaIsResourceExhausted(t *testing.T) {
+	t.Parallel()
+	client, req := personaErrClient(t, &providererr.HTTPError{
+		Op: "anthropic.Complete", StatusCode: http.StatusTooManyRequests,
+		Status: "429 Too Many Requests", Body: `{"type":"error","error":{"type":"rate_limit_error"}}`,
+	})
+
+	_, err := client.GeneratePersona(context.Background(), req)
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Errorf("code = %v, want ResourceExhausted", got)
+	}
+	if strings.Contains(err.Error(), "configuration") {
+		t.Errorf("a quota failure still blames the configuration: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "quota") {
+		t.Errorf("the message does not name what is actually wrong: %q", err.Error())
+	}
+}
+
+// TestAssist_AuthFailureKeepsTheConfigurationAdvice: the sentence is correct for
+// a rejected key, so it survives verbatim — code included.
+func TestAssist_AuthFailureKeepsTheConfigurationAdvice(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		client, req := personaErrClient(t, &providererr.HTTPError{
+			Op: "anthropic.Complete", StatusCode: status,
+			Status: "unauthorized", Body: `{"error":{"message":"invalid x-api-key"}}`,
+		})
+
+		_, err := client.GeneratePersona(context.Background(), req)
+		if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+			t.Errorf("HTTP %d: code = %v, want Unavailable", status, got)
+		}
+		if want := "content generation failed — check the LLM provider configuration and try again"; !strings.Contains(err.Error(), want) {
+			t.Errorf("HTTP %d: message = %q, want it to contain %q", status, err.Error(), want)
+		}
+	}
+}
+
+// TestAssist_ProviderFaultAndUnknownGuessNothing: a 5xx is the provider's
+// problem and a transport failure is nobody's known problem. Neither is a
+// reason to send the GM to Configuration.
+func TestAssist_ProviderFaultAndUnknownGuessNothing(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want string // a fragment the message must contain
+	}{
+		{
+			"provider 503",
+			&providererr.HTTPError{Op: "anthropic.Complete", StatusCode: http.StatusServiceUnavailable, Status: "503", Body: "overloaded"},
+			"LLM provider is having trouble",
+		},
+		{"transport failure", errors.New("dial tcp: i/o timeout"), "try again in a moment"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, req := personaErrClient(t, tc.err)
+
+			_, err := client.GeneratePersona(context.Background(), req)
+			if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+				t.Errorf("code = %v, want Unavailable", got)
+			}
+			if strings.Contains(err.Error(), "configuration") {
+				t.Errorf("still blames the configuration: %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("message = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestGenerateKnowledge_QuotaIsResourceExhausted: the second handler on this
+// mapper. Both must classify, or the surface is only half fixed.
+func TestGenerateKnowledge_QuotaIsResourceExhausted(t *testing.T) {
+	t.Parallel()
+	store := newFakeAssistStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	eng := &fakeAssistEngine{draftErr: &providererr.HTTPError{
+		Op: "openaicompat.Complete", StatusCode: http.StatusTooManyRequests,
+		Status: "429 Too Many Requests", Body: `{"error":{"message":"rate limit exceeded"}}`,
+	}}
+
+	_, err := assistClient(t, store, eng).GenerateKnowledge(context.Background(),
+		connect.NewRequest(&managementv1.GenerateKnowledgeRequest{Prompt: "the thieves' guild"}))
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Errorf("code = %v, want ResourceExhausted", got)
+	}
+	if strings.Contains(err.Error(), "configuration") {
+		t.Errorf("a quota failure still blames the configuration: %q", err.Error())
+	}
+}
+
+// TestAssist_UnusableDraftKeepsItsRephraseAdvice pins the one message on this
+// surface that the quota split must NOT touch: a 200 carrying prose instead of a
+// draft is the model's fault, not the account's, and "rephrase the prompt" is
+// still the only useful thing to say. It pins wording, not ordering — an
+// ErrUnusableResponse carries no HTTP status, so no reordering against the status
+// classification could reach it.
+func TestAssist_UnusableDraftKeepsItsRephraseAdvice(t *testing.T) {
+	t.Parallel()
+	client, req := personaErrClient(t, assist.ErrUnusableResponse)
+
+	_, err := client.GeneratePersona(context.Background(), req)
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", got)
+	}
+	if !strings.Contains(err.Error(), "unusable draft") {
+		t.Errorf("message = %q, want the rephrase advice", err.Error())
 	}
 }
 

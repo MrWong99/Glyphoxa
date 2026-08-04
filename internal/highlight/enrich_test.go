@@ -3,6 +3,7 @@ package highlight
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -607,6 +608,64 @@ func TestEnrichImageHandler_GeneratorError_ReturnsErr_RowUntouched(t *testing.T)
 	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
 	if got.ImageKey != "" {
 		t.Fatalf("row must be untouched on generator failure")
+	}
+}
+
+// TestEnrichImageHandler_UpstreamFailures_StayRetryable covers the two statuses
+// the handler now tells apart in its logs — and pins the thing that is easy to
+// get wrong when you do: BOTH still return an error.
+//
+// A rejected key (401/403) is permanent for that key, so "log it and return nil"
+// looks like the tidy answer. It is not, and the reason is recovery rather than
+// retry: returning nil completes the job 'done', and
+// ListPromotedHighlightsNeedingEnrichment (internal/storage/highlight.go) counts a
+// 'done' job as satisfied while treating a 'dead' one as absent. Dead-lettering is
+// therefore what lets the boot sweep re-enrich these Highlights once the key is
+// fixed; the tidy answer would leave every Highlight promoted during a bad-key
+// window imageless forever.
+func TestEnrichImageHandler_UpstreamFailures_StayRetryable(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"rejected key", http.StatusUnauthorized},
+		{"forbidden key", http.StatusForbidden},
+		{"exhausted quota", http.StatusTooManyRequests},
+		{"provider down", http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenantID := uuid.New()
+			store := newFakeEnrichStore()
+			h := seedRow(store, tenantID)
+			blobs := newFakeBlobs()
+			gen := &fakeGen{err: &imagegen.StatusError{StatusCode: tc.status, Body: `{"error":{"message":"nope"}}`}}
+
+			handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+			payload, _ := MarshalEnrichImage(h.ID, tenantID)
+			err := handler(context.Background(), payload)
+			if err == nil {
+				t.Fatalf("HTTP %d returned nil: the job completes 'done' and the boot sweep will never re-drive it", tc.status)
+			}
+			// The status survives the handler's wrapping, so whoever reads the
+			// dead-letter can still tell a bill from a bad key from an outage.
+			var se *imagegen.StatusError
+			if !errors.As(err, &se) || se.StatusCode != tc.status {
+				t.Errorf("the upstream status was lost on the way up: %v", err)
+			}
+			// Nothing stored, row untouched, and the claim released so the retry can
+			// re-claim without waiting out the ttl.
+			if len(blobs.data) != 0 {
+				t.Errorf("HTTP %d: a blob was stored on a provider failure", tc.status)
+			}
+			got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
+			if got.ImageKey != "" {
+				t.Errorf("HTTP %d: row must be untouched", tc.status)
+			}
+			if store.releaseCalls != 1 {
+				t.Errorf("HTTP %d: releaseCalls = %d, want 1", tc.status, store.releaseCalls)
+			}
+		})
 	}
 }
 

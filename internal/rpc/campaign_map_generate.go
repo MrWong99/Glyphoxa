@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -83,7 +84,7 @@ func (s *campaignMaps) GenerateMapImage(
 
 	res, err := s.gen.Generate(ctx, c, mapgen.Input{Prompt: prompt, AnchorNodeID: anchor})
 	if err != nil {
-		return nil, mapGenerateErr("GenerateMapImage", err)
+		return nil, mapGenerateErr("GenerateMapImage", "map generation", err)
 	}
 	return connect.NewResponse(&managementv1.GenerateMapImageResponse{
 		ImageBytes:  res.Data,
@@ -93,13 +94,21 @@ func (s *campaignMaps) GenerateMapImage(
 	}), nil
 }
 
-// mapGenerateErr maps a generation failure onto its Connect code.
+// mapGenerateErr maps a generation or suggestion failure onto its Connect code.
+// subject names what the GM asked for ("map generation", "pin suggestions") so a
+// mapper shared by both handlers cannot report one as the other — and the two
+// handlers do not even share a provider: generation calls the image seam, pin
+// suggestion calls the text one.
 //
 // ErrImageTooLarge is InvalidArgument, matching what putImage already returns for
 // an oversize UPLOAD — one failure, one code, one sentence, whichever door the
 // bytes came through. It is emphatically NOT Unavailable: Unavailable invites a
 // retry, and retrying re-bills the identical oversize generation.
-func mapGenerateErr(op string, err error) *connect.Error {
+//
+// Upstream rejections are classified in upstream_error.go, shared with the assist
+// surface: an exhausted quota is not a misconfiguration, and the default here
+// names no cause at all rather than guessing "configuration".
+func mapGenerateErr(op, subject string, err error) *connect.Error {
 	switch {
 	case errors.Is(err, mapgen.ErrNotConfigured):
 		return connect.NewError(connect.CodeFailedPrecondition,
@@ -112,11 +121,14 @@ func mapGenerateErr(op string, err error) *connect.Error {
 	case errors.Is(err, storage.ErrNotFound):
 		return connect.NewError(connect.CodeNotFound,
 			errors.New("that entry is not in this campaign, or it is GM private"))
-	default:
-		slog.Default().Error(op+": map generation failed", "err", err)
-		return connect.NewError(connect.CodeUnavailable,
-			errors.New("map generation failed — check the image provider configuration and try again"))
 	}
+
+	if ce := upstreamErr(op, subject, err); ce != nil {
+		return ce
+	}
+
+	slog.Default().Error(op+": "+subject+" failed", "err", err)
+	return connect.NewError(connect.CodeUnavailable, fmt.Errorf("%s failed — try again in a moment", subject))
 }
 
 // SuggestMapPins asks which of the campaign's existing entries belong on a Map.
@@ -177,7 +189,7 @@ func (s *campaignMaps) SuggestMapPins(
 
 	picked, err := s.suggest.SuggestPins(ctx, c, m.AnchorNodeID.UUID, candidates)
 	if err != nil {
-		return nil, mapGenerateErr("SuggestMapPins", err)
+		return nil, mapGenerateErr("SuggestMapPins", "pin suggestions", err)
 	}
 
 	byID := make(map[uuid.UUID]storage.KGNode, len(candidates))
