@@ -101,10 +101,9 @@ type EnrichStore interface {
 //   - image generation is not configured for the tenant → log + nil (the
 //     Highlight stays intact without media, AC — never a retry loop on a missing
 //     key).
-//   - the provider REJECTED the configured key (401/403) → log + nil, for the
-//     same reason: a credential the provider refuses is not fixed by sending it
-//     again. Quota and rate-limit rejections (429) are the opposite case and stay
-//     retryable — those do clear on their own.
+//   - a provider failure → the error is returned (retry / dead-letter) whatever
+//     its status, but a rejected key and an exhausted quota are LOGGED apart:
+//     they need different humans doing different things.
 //   - otherwise generate → meter usage (caps-free spend meter teed onto the
 //     production recorder; Gemini bills the image as output tokens, so it prices
 //     through LLMTokens — no image-specific meter, #311) → store the image behind
@@ -196,33 +195,32 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 				"highlight", p.HighlightID)
 			return nil
 		}
-		if imagegen.IsAuthFailure(err) {
-			// PERMANENT for the key in hand, and therefore the same posture as
-			// ErrImageNotConfigured above — a rejected key is a missing key in every
-			// way that matters, and this handler's rule is "never a retry loop on a
-			// missing key". Retrying re-sends the identical rejected credential until
-			// the job dead-letters, once per promoted Highlight.
-			//
-			// Logged at Error, not Info: a key IS configured and the provider refused
-			// it, which needs an operator, whereas no key at all is a choice. Nothing
-			// is lost by returning nil — the boot sweep
-			// (SweepEnrichmentReconciliation) re-enqueues imageless promoted
-			// Highlights, so fixing the key and restarting picks them all back up.
-			release()
-			log.Error("highlight enrich: image provider rejected the configured key, leaving highlight without media",
-				"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
-			return nil
-		}
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
 			//
-			// A quota or rate-limit rejection belongs HERE and not above: unlike a
-			// rejected key it does clear on its own, so the runner's backoff is the
-			// right answer. It is called out in the log because "HTTP 429" buried in a
-			// dead-letter payload reads like a provider outage when it is a bill.
+			// EVERY provider failure takes this exit, including a rejected key (401/403)
+			// that cannot possibly succeed on retry. That looks wrong and is not: what
+			// the exit really chooses is the RECOVERY path, not the retry. A handler
+			// returning nil completes the job 'done', and
+			// ListPromotedHighlightsNeedingEnrichment treats 'done' as satisfied while
+			// treating 'dead' as absent — so dead-lettering a rejected key is precisely
+			// what lets the boot sweep re-enrich these Highlights once the key is fixed,
+			// and a "permanent, log and move on" branch would strand every Highlight
+			// promoted during a bad-key window imageless forever, with a log line as
+			// its only trace. The missing-key case above returns nil because there is
+			// no key to fix and nothing to come back for.
+			//
+			// What DOES vary by status is the DIAGNOSIS, because "HTTP 401" and
+			// "HTTP 429" buried in a dead-letter payload look alike and share nothing:
+			// one needs a new key from a human, the other needs a bill paid — or just
+			// the next attempt.
 			release()
-			if imagegen.IsQuotaExceeded(err) {
+			switch {
+			case imagegen.IsAuthFailure(err):
+				log.Error("highlight enrich: image provider rejected the configured key",
+					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
+			case imagegen.IsQuotaExceeded(err):
 				log.Warn("highlight enrich: image provider out of quota or rate-limited, will retry",
 					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
 			}

@@ -611,66 +611,61 @@ func TestEnrichImageHandler_GeneratorError_ReturnsErr_RowUntouched(t *testing.T)
 	}
 }
 
-// TestEnrichImageHandler_AuthFailure_Nil: a key the provider REJECTS is a missing
-// key in every way that matters, so it takes the same exit as ErrImageNotConfigured
-// — log + nil — instead of retrying the identical rejected credential until the
-// job dead-letters, once per promoted Highlight. The row stays intact and the boot
-// sweep picks it back up once the key is fixed.
-func TestEnrichImageHandler_AuthFailure_Nil(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		tenantID := uuid.New()
-		store := newFakeEnrichStore()
-		h := seedRow(store, tenantID)
-		blobs := newFakeBlobs()
-		gen := &fakeGen{err: &imagegen.StatusError{StatusCode: status, Body: `{"error":{"message":"API key not valid"}}`}}
-
-		handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
-		payload, _ := MarshalEnrichImage(h.ID, tenantID)
-		if err := handler(context.Background(), payload); err != nil {
-			t.Fatalf("HTTP %d: a rejected key must not churn retries, got %v", status, err)
-		}
-		// Highlight intact and imageless, nothing stored, and the claim released so a
-		// later re-drive (fixed key + boot sweep) can re-claim without waiting the ttl.
-		if len(blobs.data) != 0 {
-			t.Errorf("HTTP %d: a blob was stored on an auth failure", status)
-		}
-		got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
-		if got.ImageKey != "" {
-			t.Errorf("HTTP %d: row must be untouched", status)
-		}
-		if store.releaseCalls != 1 {
-			t.Errorf("HTTP %d: releaseCalls = %d, want 1", status, store.releaseCalls)
-		}
+// TestEnrichImageHandler_UpstreamFailures_StayRetryable covers the two statuses
+// the handler now tells apart in its logs — and pins the thing that is easy to
+// get wrong when you do: BOTH still return an error.
+//
+// A rejected key (401/403) is permanent for that key, so "log it and return nil"
+// looks like the tidy answer. It is not, and the reason is recovery rather than
+// retry: returning nil completes the job 'done', and
+// ListPromotedHighlightsNeedingEnrichment (internal/storage/highlight.go) counts a
+// 'done' job as satisfied while treating a 'dead' one as absent. Dead-lettering is
+// therefore what lets the boot sweep re-enrich these Highlights once the key is
+// fixed; the tidy answer would leave every Highlight promoted during a bad-key
+// window imageless forever.
+func TestEnrichImageHandler_UpstreamFailures_StayRetryable(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"rejected key", http.StatusUnauthorized},
+		{"forbidden key", http.StatusForbidden},
+		{"exhausted quota", http.StatusTooManyRequests},
+		{"provider down", http.StatusInternalServerError},
 	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenantID := uuid.New()
+			store := newFakeEnrichStore()
+			h := seedRow(store, tenantID)
+			blobs := newFakeBlobs()
+			gen := &fakeGen{err: &imagegen.StatusError{StatusCode: tc.status, Body: `{"error":{"message":"nope"}}`}}
 
-// TestEnrichImageHandler_QuotaExceeded_ReturnsErr is the deliberate opposite: a
-// 429 clears on its own, so it stays retryable and must NOT take the permanent
-// exit the rejected key takes.
-func TestEnrichImageHandler_QuotaExceeded_ReturnsErr(t *testing.T) {
-	tenantID := uuid.New()
-	store := newFakeEnrichStore()
-	h := seedRow(store, tenantID)
-	blobs := newFakeBlobs()
-	gen := &fakeGen{err: &imagegen.StatusError{
-		StatusCode: http.StatusTooManyRequests,
-		Body:       `{"error":{"code":429,"message":"You exceeded your current quota"}}`,
-	}}
-
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
-	payload, _ := MarshalEnrichImage(h.ID, tenantID)
-	err := handler(context.Background(), payload)
-	if err == nil {
-		t.Fatal("a quota failure must return an error so the runner retries after backoff")
-	}
-	// The status survives the handler's wrapping, so a dead-letter reader can still
-	// tell a bill from an outage.
-	if !imagegen.IsQuotaExceeded(err) {
-		t.Errorf("the 429 was lost on the way up: %v", err)
-	}
-	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
-	if got.ImageKey != "" {
-		t.Error("row must be untouched on a quota failure")
+			handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+			payload, _ := MarshalEnrichImage(h.ID, tenantID)
+			err := handler(context.Background(), payload)
+			if err == nil {
+				t.Fatalf("HTTP %d returned nil: the job completes 'done' and the boot sweep will never re-drive it", tc.status)
+			}
+			// The status survives the handler's wrapping, so whoever reads the
+			// dead-letter can still tell a bill from a bad key from an outage.
+			var se *imagegen.StatusError
+			if !errors.As(err, &se) || se.StatusCode != tc.status {
+				t.Errorf("the upstream status was lost on the way up: %v", err)
+			}
+			// Nothing stored, row untouched, and the claim released so the retry can
+			// re-claim without waiting out the ttl.
+			if len(blobs.data) != 0 {
+				t.Errorf("HTTP %d: a blob was stored on a provider failure", tc.status)
+			}
+			got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
+			if got.ImageKey != "" {
+				t.Errorf("HTTP %d: row must be untouched", tc.status)
+			}
+			if store.releaseCalls != 1 {
+				t.Errorf("HTTP %d: releaseCalls = %d, want 1", tc.status, store.releaseCalls)
+			}
+		})
 	}
 }
 

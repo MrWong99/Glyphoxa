@@ -21,6 +21,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 )
 
 // The Maps and Pins handlers (#538, ADR-0060). The storage layer is covered
@@ -705,6 +706,13 @@ func TestGenerateMapImage_UnknownFailureGuessesNothing(t *testing.T) {
 
 // TestSuggestMapPins_QuotaIsResourceExhausted: the pin suggester shares
 // mapGenerateErr, so it must not regress to the configuration sentence either.
+//
+// The injected error is a *providererr.HTTPError and NOT an imagegen.StatusError,
+// because that is what this path actually produces: suggestions run on the TEXT
+// provider (mapgen/suggest.go → assist.CallText → the LLM adapters, ADR-0044), and
+// a test that faked an image error here would certify a branch that is dead in
+// production — the "one sentinel across a shared seam" trap this repo has already
+// paid for once (see mapgen.ErrNotConfigured's comment).
 func TestSuggestMapPins_QuotaIsResourceExhausted(t *testing.T) {
 	t.Parallel()
 	store := newFakeMapStore()
@@ -712,13 +720,75 @@ func TestSuggestMapPins_QuotaIsResourceExhausted(t *testing.T) {
 	anchor := uuid.New()
 	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh", AnchorNodeID: uuid.NullUUID{UUID: anchor, Valid: true}}
 	store.unpinned = []storage.KGNode{{ID: uuid.New(), Name: "The Snapping Line", Type: storage.KGNodeLocation}}
-	gen := &fakeMapGen{pickErr: &imagegen.StatusError{StatusCode: http.StatusTooManyRequests, Body: "quota"}}
+	gen := &fakeMapGen{pickErr: &providererr.HTTPError{
+		Op: "anthropic.Complete", StatusCode: http.StatusTooManyRequests,
+		Status: "429 Too Many Requests", Body: `{"type":"error","error":{"type":"rate_limit_error"}}`,
+	}}
 	client := genClient(t, store, gen)
 
 	_, err := client.SuggestMapPins(context.Background(),
 		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
 	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
 		t.Errorf("code = %v, want ResourceExhausted", got)
+	}
+	// The rate-limited provider is the LLM one, and blaming the image provider —
+	// which was never called — sends the GM to the wrong half of Configuration.
+	if !strings.Contains(err.Error(), "LLM provider") {
+		t.Errorf("the wrong provider is named: %q", err.Error())
+	}
+}
+
+// TestSuggestMapPins_FailureIsNotReportedAsMapGeneration: one mapper, two ops. A
+// failed pin suggestion that announces itself as a failed map generation sends
+// the GM looking at a map that is fine.
+func TestSuggestMapPins_FailureIsNotReportedAsMapGeneration(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	mapID := uuid.New()
+	anchor := uuid.New()
+	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh", AnchorNodeID: uuid.NullUUID{UUID: anchor, Valid: true}}
+	store.unpinned = []storage.KGNode{{ID: uuid.New(), Name: "The Snapping Line", Type: storage.KGNodeLocation}}
+	gen := &fakeMapGen{pickErr: errors.New("dial tcp: i/o timeout")}
+	client := genClient(t, store, gen)
+
+	_, err := client.SuggestMapPins(context.Background(),
+		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), "map generation") {
+		t.Errorf("a pin-suggestion failure reports itself as map generation: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "pin suggestions") {
+		t.Errorf("the message does not name what failed: %q", err.Error())
+	}
+}
+
+// TestSuggestMapPins_AuthFailureNamesTheLLMKey: the same split on the credential
+// side — a rejected LLM key must not send the GM to the image provider's key.
+func TestSuggestMapPins_AuthFailureNamesTheLLMKey(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	mapID := uuid.New()
+	anchor := uuid.New()
+	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh", AnchorNodeID: uuid.NullUUID{UUID: anchor, Valid: true}}
+	store.unpinned = []storage.KGNode{{ID: uuid.New(), Name: "The Snapping Line", Type: storage.KGNodeLocation}}
+	gen := &fakeMapGen{pickErr: &providererr.HTTPError{
+		Op: "anthropic.Complete", StatusCode: http.StatusUnauthorized,
+		Status: "401 Unauthorized", Body: `{"error":{"message":"invalid x-api-key"}}`,
+	}}
+	client := genClient(t, store, gen)
+
+	_, err := client.SuggestMapPins(context.Background(),
+		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", got)
+	}
+	if !strings.Contains(err.Error(), "LLM provider configuration") {
+		t.Errorf("a rejected LLM key should point at the LLM configuration: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "image provider") {
+		t.Errorf("a rejected LLM key blames the image provider: %q", err.Error())
 	}
 }
 

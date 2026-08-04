@@ -3,7 +3,9 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -14,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 )
 
 // Generated maps (#541, ADR-0060): the draft-review half of the Maps surface.
@@ -83,7 +86,7 @@ func (s *campaignMaps) GenerateMapImage(
 
 	res, err := s.gen.Generate(ctx, c, mapgen.Input{Prompt: prompt, AnchorNodeID: anchor})
 	if err != nil {
-		return nil, mapGenerateErr("GenerateMapImage", err)
+		return nil, mapGenerateErr("GenerateMapImage", "map generation", err)
 	}
 	return connect.NewResponse(&managementv1.GenerateMapImageResponse{
 		ImageBytes:  res.Data,
@@ -93,7 +96,39 @@ func (s *campaignMaps) GenerateMapImage(
 	}), nil
 }
 
-// mapGenerateErr maps a generation failure onto its Connect code.
+// upstreamRejection is a non-2xx from whichever provider this handler called,
+// reduced to the two things a GM-facing message needs: the status, and which
+// provider produced it.
+//
+// Both seams feeding mapGenerateErr already carry the status as DATA, and they
+// carry it in two different types because they are two different seams: the
+// image path returns [imagegen.StatusError], the pin-suggestion path runs on the
+// text provider and returns [providererr.HTTPError] (ADR-0044). Reading both here
+// is what keeps the classification honest on BOTH paths — a branch that only ever
+// matched the image type would be dead on the suggestion path while its unit test,
+// which injects an image error through a fake, passed happily.
+type upstreamRejection struct {
+	// provider is the GM-facing noun, matching the vocabulary the Configuration
+	// screen and the assist handler already use: "image" or "LLM".
+	provider string
+	status   int
+}
+
+func classifyUpstream(err error) (upstreamRejection, bool) {
+	var ie *imagegen.StatusError
+	if errors.As(err, &ie) {
+		return upstreamRejection{provider: "image", status: ie.StatusCode}, true
+	}
+	var pe *providererr.HTTPError
+	if errors.As(err, &pe) {
+		return upstreamRejection{provider: "LLM", status: pe.StatusCode}, true
+	}
+	return upstreamRejection{}, false
+}
+
+// mapGenerateErr maps a generation or suggestion failure onto its Connect code.
+// subject names what the GM asked for ("map generation", "pin suggestions") so a
+// shared mapper cannot report one as the other.
 //
 // ErrImageTooLarge is InvalidArgument, matching what putImage already returns for
 // an oversize UPLOAD — one failure, one code, one sentence, whichever door the
@@ -106,7 +141,7 @@ func (s *campaignMaps) GenerateMapImage(
 // valid key, and the real fix is billing or waiting. Each branch now names the
 // thing the GM can actually act on, and the unknown default names nothing rather
 // than guessing "configuration" — that guess is wrong far more often than right.
-func mapGenerateErr(op string, err error) *connect.Error {
+func mapGenerateErr(op, subject string, err error) *connect.Error {
 	switch {
 	case errors.Is(err, mapgen.ErrNotConfigured):
 		return connect.NewError(connect.CodeFailedPrecondition,
@@ -119,28 +154,33 @@ func mapGenerateErr(op string, err error) *connect.Error {
 	case errors.Is(err, storage.ErrNotFound):
 		return connect.NewError(connect.CodeNotFound,
 			errors.New("that entry is not in this campaign, or it is GM private"))
-	case imagegen.IsQuotaExceeded(err):
-		// ResourceExhausted, the same code a spend cap returns (session.go): the
-		// request was well-formed, the credential was accepted, and the account has
-		// no allowance left. Warn rather than Error — it is an expected operating
-		// condition of a metered key, not a defect.
-		slog.Default().Warn(op+": image provider quota or rate limit hit", "err", err)
-		return connect.NewError(connect.CodeResourceExhausted,
-			errors.New("your image provider is out of quota or rate-limited — check your plan, or try again shortly"))
-	case imagegen.IsAuthFailure(err):
-		// The one case the original sentence was written for, kept verbatim.
-		slog.Default().Error(op+": image provider rejected the key", "err", err)
-		return connect.NewError(connect.CodeUnavailable,
-			errors.New("map generation failed — check the image provider configuration and try again"))
-	case imagegen.IsProviderFault(err):
-		slog.Default().Error(op+": image provider server error", "err", err)
-		return connect.NewError(connect.CodeUnavailable,
-			errors.New("the image provider is having trouble right now — try again shortly"))
-	default:
-		slog.Default().Error(op+": map generation failed", "err", err)
-		return connect.NewError(connect.CodeUnavailable,
-			errors.New("map generation failed — try again in a moment"))
 	}
+
+	if up, ok := classifyUpstream(err); ok {
+		switch {
+		case up.status == http.StatusTooManyRequests:
+			// ResourceExhausted, the same code a spend cap returns (session.go): the
+			// request was well-formed, the credential was ACCEPTED, and the account has
+			// no allowance left. Warn rather than Error — an expected operating
+			// condition of a metered key, not a defect.
+			slog.Default().Warn(op+": provider quota or rate limit hit", "provider", up.provider, "err", err)
+			return connect.NewError(connect.CodeResourceExhausted, fmt.Errorf(
+				"your %s provider is out of quota or rate-limited — check your plan, or try again shortly", up.provider))
+		case up.status == http.StatusUnauthorized || up.status == http.StatusForbidden:
+			// The one case the original sentence was written for, kept verbatim for
+			// the image path it was written on.
+			slog.Default().Error(op+": provider rejected the key", "provider", up.provider, "err", err)
+			return connect.NewError(connect.CodeUnavailable, fmt.Errorf(
+				"%s failed — check the %s provider configuration and try again", subject, up.provider))
+		case up.status >= 500:
+			slog.Default().Error(op+": provider server error", "provider", up.provider, "status", up.status, "err", err)
+			return connect.NewError(connect.CodeUnavailable, fmt.Errorf(
+				"the %s provider is having trouble right now — try again shortly", up.provider))
+		}
+	}
+
+	slog.Default().Error(op+": "+subject+" failed", "err", err)
+	return connect.NewError(connect.CodeUnavailable, fmt.Errorf("%s failed — try again in a moment", subject))
 }
 
 // SuggestMapPins asks which of the campaign's existing entries belong on a Map.
@@ -201,7 +241,7 @@ func (s *campaignMaps) SuggestMapPins(
 
 	picked, err := s.suggest.SuggestPins(ctx, c, m.AnchorNodeID.UUID, candidates)
 	if err != nil {
-		return nil, mapGenerateErr("SuggestMapPins", err)
+		return nil, mapGenerateErr("SuggestMapPins", "pin suggestions", err)
 	}
 
 	byID := make(map[uuid.UUID]storage.KGNode, len(candidates))
