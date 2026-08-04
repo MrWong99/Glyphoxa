@@ -297,16 +297,35 @@ func renderFacts(nodes []storage.KGNode) []string {
 // the point it matters.
 func renderFact(n storage.KGNode) string {
 	head := fmt.Sprintf("### %s (%s)", truncateRunes(n.Name, MaxNameChars), typeLabel(n.Type))
-	content := truncateRunes(composeContent(n), MaxFactChars)
+	// composeContent owns the whole per-fact bound. Truncating its result AGAIN
+	// here would cut from the tail and undo the split — deleting the body it just
+	// reserved room for.
+	content := composeContent(n)
 	if content == "" {
 		return head
 	}
 	return head + "\n" + content
 }
 
+// MinBodyShare is the fraction of MaxFactChars the free-form body is guaranteed
+// when a Node's Aspects and body together overrun the per-fact budget.
+//
+// Without a reserve, Aspects — which are composed FIRST — could consume the whole
+// budget and evict the GM's authored prose entirely, silently and with no signal.
+// A GM who writes both meant both to reach the table, so each side is cut rather
+// than one deleting the other.
+const MinBodyShare = 0.4
+
 // composeContent joins a Node's public Aspect lines and its body remainder into
-// the one content string renderFact truncates as a whole. An Aspect with no value
-// renders as its key alone rather than a dangling colon.
+// the content string renderFact emits.
+//
+// When the two together exceed MaxFactChars, each is trimmed to its own share
+// rather than the composite being cut from the end: cutting the tail would drop
+// the body wholesale for any Node with 500 runes of Aspects. Whichever side needs
+// less than its share donates the slack to the other, so a short body still leaves
+// the Aspects nearly all of the budget.
+//
+// An Aspect with no value renders as its key alone rather than a dangling colon.
 func composeContent(n storage.KGNode) string {
 	var b strings.Builder
 	for _, a := range n.Aspects {
@@ -333,14 +352,60 @@ func composeContent(n storage.KGNode) string {
 			b.WriteString(value)
 		}
 	}
+	aspects := b.String()
 	body := strings.TrimSpace(n.Body)
-	if body == "" {
-		return b.String()
+
+	// One source: the pre-aspect behaviour, unchanged.
+	switch {
+	case body == "":
+		return truncateRunes(aspects, MaxFactChars)
+	case aspects == "":
+		return truncateRunes(body, MaxFactChars)
 	}
-	if b.Len() == 0 {
-		return body
+
+	const sep = "\n\n"
+	aspectRunes, bodyRunes := len([]rune(aspects)), len([]rune(body))
+	if aspectRunes+bodyRunes+len(sep) <= MaxFactChars {
+		return aspects + sep + body
 	}
-	return b.String() + "\n\n" + body
+
+	// Over budget: split it. Each side is guaranteed a share, and whatever it does
+	// not use goes to the other — so a one-line body costs the aspects almost
+	// nothing, while a long one still cannot be deleted outright.
+	budget := MaxFactChars - len(sep)
+	bodyShare := int(float64(budget) * MinBodyShare)
+	aspectShare := budget - bodyShare
+	if bodyRunes < bodyShare {
+		aspectShare += bodyShare - bodyRunes
+		bodyShare = bodyRunes
+	} else if aspectRunes < aspectShare {
+		bodyShare += aspectShare - aspectRunes
+		aspectShare = aspectRunes
+	}
+	return fitRunes(aspects, aspectShare) + sep + fitRunes(body, bodyShare)
+}
+
+// fitRunes trims s to at most max runes INCLUDING the ellipsis it adds when it
+// cuts — unlike truncateRunes, whose result is max+1 when it cuts. The split above
+// needs exactness: two parts that each overshoot by a rune would push the composed
+// fact past the budget the split exists to respect.
+func fitRunes(s string, max int) string {
+	// A negative max would panic on the slice below. It is unreachable with the
+	// current constants — every share is either >= MinBodyShare of a positive
+	// budget or equal to an actual rune count — but this function is one tuning
+	// change away from being called with one, and a panic in the prompt path takes
+	// down a live turn.
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max == 1 {
+		return string(r[:1])
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // typeLabel maps a Node type onto its GM-facing label (#126 test contract) via

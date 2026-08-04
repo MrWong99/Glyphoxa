@@ -401,9 +401,15 @@ func TestFacts_AspectsRespectFactBudget(t *testing.T) {
 	if len(facts) != 1 {
 		t.Fatalf("got %d facts, want 1", len(facts))
 	}
+	// TWO-SIDED on purpose. An upper bound alone passes for a renderer that emits
+	// ten runes of an eight-thousand-rune Node — the budget is a target as much as
+	// a ceiling, and this is the suite's only multibyte-rune coverage, so an
+	// off-by-one in the rune arithmetic has to show up here. The ±1 band absorbs
+	// the ellipsis accounting: a split fits each side exactly, a single source
+	// keeps the ellipsis-appending truncation.
 	_, content, _ := strings.Cut(facts[0], "\n")
-	if got := len([]rune(content)); got != kgfacts.MaxFactChars+1 {
-		t.Errorf("composed content = %d runes, want %d + ellipsis", got, kgfacts.MaxFactChars)
+	if got := len([]rune(content)); got < kgfacts.MaxFactChars-1 || got > kgfacts.MaxFactChars+1 {
+		t.Errorf("composed content = %d runes, want the budget %d filled (±1)", got, kgfacts.MaxFactChars)
 	}
 	if len(facts[0]) > kgfacts.MaxBlockChars {
 		t.Errorf("one fact = %d bytes, past the whole block budget %d", len(facts[0]), kgfacts.MaxBlockChars)
@@ -549,5 +555,73 @@ func TestRenderPreview_ContentFacts(t *testing.T) {
 	}
 	if len(both.Facts) != 2 {
 		t.Errorf("Facts = %d, want both rendered (the block is what it is)", len(both.Facts))
+	}
+}
+
+// TestFacts_AspectsDoNotEvictTheBody is the regression pin for a real quality
+// bug: Aspects are composed BEFORE the body, so truncating the composite from the
+// end deleted the GM's authored prose wholesale for any Node carrying MaxFactChars
+// of aspects — silently, with no signal anywhere.
+//
+// A GM who wrote both meant both to reach the table, so each side is cut instead.
+func TestFacts_AspectsDoNotEvictTheBody(t *testing.T) {
+	camp := uuid.New()
+	var aspects []storage.KGNodeAspect
+	for i := range 30 {
+		aspects = append(aspects, storage.KGNodeAspect{
+			Position: i, Key: "Fact", Value: strings.Repeat("a", 60),
+		})
+	}
+	nodes := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNPC, Name: "Overstuffed",
+		Body:    "THE BODY SURVIVES.",
+		Aspects: aspects,
+	}}}
+	r := newRecaller(t, nodes, &fakeMetrics{})
+
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	if !strings.Contains(facts[0], "THE BODY SURVIVES.") {
+		t.Error("the authored body was evicted by the aspects")
+	}
+	if !strings.Contains(facts[0], "Fact:") {
+		t.Error("the aspects were evicted by the body")
+	}
+	// The whole fact respects the per-fact bound AND fills it — a split that
+	// silently threw away half the budget would satisfy a ceiling-only assertion.
+	_, content, _ := strings.Cut(facts[0], "\n")
+	if got := len([]rune(content)); got < kgfacts.MaxFactChars-1 || got > kgfacts.MaxFactChars+1 {
+		t.Errorf("composed content = %d runes, want the budget %d filled (±1)", got, kgfacts.MaxFactChars)
+	}
+}
+
+// TestFacts_ShortBodyDonatesItsShare pins that the reserve is a floor, not a
+// quota: a one-line body leaves the aspects nearly the whole budget rather than
+// permanently costing them 40%.
+func TestFacts_ShortBodyDonatesItsShare(t *testing.T) {
+	camp := uuid.New()
+	var aspects []storage.KGNodeAspect
+	for i := range 30 {
+		aspects = append(aspects, storage.KGNodeAspect{
+			Position: i, Key: "Fact", Value: strings.Repeat("a", 60),
+		})
+	}
+	short := &fakeNodes{nodes: []storage.KGNode{{
+		ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "N",
+		Body: "tiny", Aspects: aspects,
+	}}}
+	r := newRecaller(t, short, &fakeMetrics{})
+	facts := r.Facts(liveCtx(camp), testAgent.String())
+
+	_, content, _ := strings.Cut(facts[0], "\n")
+	aspectPart, bodyPart, _ := strings.Cut(content, "\n\n")
+	if bodyPart != "tiny" {
+		t.Errorf("body = %q, want it whole", bodyPart)
+	}
+	// With a 4-rune body, the aspects should get far more than the 60% floor.
+	if got := len([]rune(aspectPart)); got < int(float64(kgfacts.MaxFactChars)*0.85) {
+		t.Errorf("aspects got %d runes; a short body must donate its unused share", got)
 	}
 }

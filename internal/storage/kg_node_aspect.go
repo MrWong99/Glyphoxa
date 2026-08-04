@@ -266,6 +266,21 @@ func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uui
 		return ErrAspectsFull
 	}
 
+	// New rows go in ONE statement, which saves the round-trips — and nothing more.
+	//
+	// It does NOT avoid the fts-sync trigger's re-aggregation: migration 00042
+	// declares it FOR EACH ROW, so a 50-row insert still fires 50 times and each
+	// fire re-runs string_agg over the whole list. The in-place UPDATE loop below
+	// and the survivor renumbering do the same. That work is quadratic in the row
+	// count, and it is acceptable only because kgvocab.MaxAspectsPerNode caps the
+	// count at 50 — 2500 aggregations of at most 50 short rows, inside one
+	// transaction, on a GM's manual save. If that cap ever rises materially the
+	// trigger should become statement-level with transition tables; until then the
+	// simpler per-row trigger is the right trade, and saying so beats a comment
+	// claiming a fix that never happened.
+	var insertPos []int32
+	var insertKeys, insertValues []string
+	var insertPrivate []bool
 	for i, r := range w.Rows {
 		if r.ID != uuid.Nil && existing[r.ID] {
 			// Update IN PLACE: the row keeps its id, so a repeated save is idempotent
@@ -279,11 +294,18 @@ func replaceNodeAspectsTx(ctx context.Context, tx *Store, campaignID, nodeID uui
 			}
 			continue
 		}
+		insertPos = append(insertPos, int32(i)) //nolint:gosec // bounded by kgvocab.MaxAspectsPerNode
+		insertKeys = append(insertKeys, r.Key)
+		insertValues = append(insertValues, r.Value)
+		insertPrivate = append(insertPrivate, r.GMPrivate)
+	}
+	if len(insertPos) > 0 {
 		if _, err := tx.db.Exec(ctx,
 			`INSERT INTO kg_node_aspect (node_id, campaign_id, position, key, value, gm_private)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			nodeID, campaignID, i, r.Key, r.Value, r.GMPrivate); err != nil {
-			return fmt.Errorf("storage: replace node aspects %s: insert %d: %w", nodeID, i, err)
+			 SELECT $1, $2, p, k, v, g
+			   FROM unnest($3::int[], $4::text[], $5::text[], $6::boolean[]) AS t(p, k, v, g)`,
+			nodeID, campaignID, insertPos, insertKeys, insertValues, insertPrivate); err != nil {
+			return fmt.Errorf("storage: replace node aspects %s: insert: %w", nodeID, err)
 		}
 	}
 
