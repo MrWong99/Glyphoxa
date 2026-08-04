@@ -87,7 +87,7 @@ func TestExportDemoCampaign(t *testing.T) {
 	ctx := context.Background()
 	st, cid, bartID := seededCampaign(t)
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestExportHistoryFlag(t *testing.T) {
 	}
 
 	// IncludeHistory=false omits sessions even though transcript rows exist.
-	noHist, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: false})
+	noHist, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: false})
 	if err != nil {
 		t.Fatalf("Export no-history: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestExportHistoryFlag(t *testing.T) {
 		t.Errorf("IncludeHistory=false still nested History")
 	}
 
-	hist, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: true})
+	hist, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export history: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestExportVoiceRoundTrip(t *testing.T) {
 		t.Fatal("seed produced no provider FK ids to check exclusion against")
 	}
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestExportHistorySkipsSessionlessChunk(t *testing.T) {
 		t.Fatalf("raw null-session chunk insert: %v", err)
 	}
 
-	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: true})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: st}, cid, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}

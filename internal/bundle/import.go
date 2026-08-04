@@ -2,10 +2,12 @@ package bundle
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -29,9 +31,15 @@ type ImportResult struct {
 	Nodes                  int
 	Edges                  int
 	Characters             int
+	Aspects                int
+	Tags                   int
+	Maps                   int
+	Pins                   int
+	Boards                 int
 	Sessions               int
 	Lines                  int
 	Chunks                 int
+	Appearances            int
 	DroppedParticipantRefs int
 }
 
@@ -78,10 +86,24 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 		AgentIDs: make(map[string]uuid.UUID),
 	}
 
+	// Map image bytes ride the blob seam, which is OUTSIDE the import transaction —
+	// blob.NewPostgres runs on its own pool, so a Put is not rolled back when the
+	// transaction is. Every key this import writes is tracked, and a failure drops
+	// them by hand. Without this a failed import would leave orphaned bytes with no
+	// row that names them and no sweep that would ever find them.
+	var written []string
+	imgs, _ := st.(MapImageWriter)
+
 	err := st.InTx(ctx, func(tx ImportStore) error {
-		return importInTx(ctx, tx, tenantID, b, &res)
+		return importInTx(ctx, tx, tenantID, b, imgs, &written, &res)
 	})
 	if err != nil {
+		for _, key := range written {
+			if derr := imgs.DeleteMapImage(ctx, key); derr != nil {
+				observe.CtxLogger(ctx).Warn("bundle: could not drop an orphaned map image after a failed import",
+					"key", key, "err", derr)
+			}
+		}
 		return ImportResult{}, err
 	}
 	// Surface a lossy import (a foreign/deleted participant carried no local NPC):
@@ -100,7 +122,15 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 // split out so the transaction body reads top-to-bottom: campaign → Butler merge
 // → character Agents → Nodes → node↔Agent links → Edges → Characters. Every step
 // records or consumes the ref→id remaps in res.AgentIDs and a local node map.
-func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bundle, res *ImportResult) error {
+func importInTx(
+	ctx context.Context,
+	tx ImportStore,
+	tenantID uuid.UUID,
+	b *Bundle,
+	imgs MapImageWriter,
+	written *[]string,
+	res *ImportResult,
+) error {
 	campaignID, err := tx.CreateCampaign(ctx, storage.NewCampaign{
 		TenantID: tenantID,
 		Name:     b.Campaign.Name,
@@ -157,6 +187,27 @@ func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bund
 		nodeIDs[n.ID] = created.ID
 		res.Nodes++
 
+		// Aspects and tags belong to the entry, not to history: an import that
+		// restored an NPC's prose without its facts would look like a successful
+		// restore of a hollowed-out campaign.
+		if len(n.Aspects) > 0 {
+			rows := make([]storage.NewKGNodeAspect, 0, len(n.Aspects))
+			for _, a := range n.Aspects {
+				rows = append(rows, storage.NewKGNodeAspect{Key: a.Key, Value: a.Value, GMPrivate: a.GMPrivate})
+			}
+			if err := tx.ReplaceNodeAspects(ctx, campaignID, created.ID,
+				storage.KGNodeAspectWrite{Rows: rows}); err != nil {
+				return fmt.Errorf("bundle: import: aspects for node %q: %w", n.Name, err)
+			}
+			res.Aspects += len(rows)
+		}
+		if len(n.Tags) > 0 {
+			if err := tx.SetNodeTags(ctx, campaignID, created.ID, n.Tags); err != nil {
+				return fmt.Errorf("bundle: import: tags for node %q: %w", n.Name, err)
+			}
+			res.Tags += len(n.Tags)
+		}
+
 		if n.AgentID != "" {
 			agentID, ok := res.AgentIDs[n.AgentID]
 			if !ok {
@@ -179,13 +230,22 @@ func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bund
 		if !ok {
 			return fmt.Errorf("bundle: import: edge references unknown to-node %q", e.To)
 		}
-		if _, err := tx.CreateEdge(ctx, storage.NewKGEdge{
+		created, err := tx.CreateEdge(ctx, storage.NewKGEdge{
 			CampaignID: campaignID,
 			FromNodeID: from,
 			ToNodeID:   to,
 			Type:       storage.KGEdgeType(e.Type),
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("bundle: import: create edge %s->%s: %w", e.From, e.To, err)
+		}
+		// The relation's texture (#546). CreateEdge takes only the type, so the note
+		// and disposition land in a second write — a relation restored as bare
+		// "knows" would reach every NPC prompt flatter than it left.
+		if e.Note != "" || e.Disposition != 0 {
+			if _, err := tx.UpdateEdgeDetails(ctx, campaignID, created.ID, e.Note, e.Disposition); err != nil {
+				return fmt.Errorf("bundle: import: edge details %s->%s: %w", e.From, e.To, err)
+			}
 		}
 		res.Edges++
 	}
@@ -203,10 +263,187 @@ func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bund
 		res.Characters++
 	}
 
-	if err := importHistory(ctx, tx, campaignID, b, res); err != nil {
+	if _, err := importMaps(ctx, tx, campaignID, tenantID, b, nodeIDs, imgs, written, res); err != nil {
 		return err
 	}
 
+	if err := importBoards(ctx, tx, campaignID, b, nodeIDs, res); err != nil {
+		return err
+	}
+
+	if err := importHistory(ctx, tx, campaignID, b, nodeIDs, res); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// importMaps recreates the campaign's Maps and their Pins, remapping every
+// cross-reference onto the freshly minted ids.
+//
+// It is TWO passes over the maps, and that is mandatory rather than tidy.
+// parent_map_id is self-referential with a composite FK, so a single pass in
+// bundle order would be refused outright the first time a child sorted before its
+// parent — and bundle order is the source's ListMaps order, which is alphabetical
+// by name. "The Vault inside Saltmarsh" would import as two top-level maps, or
+// not at all, depending on their names.
+func importMaps(
+	ctx context.Context,
+	tx ImportStore,
+	campaignID, tenantID uuid.UUID,
+	b *Bundle,
+	nodeIDs map[string]uuid.UUID,
+	imgs MapImageWriter,
+	written *[]string,
+	res *ImportResult,
+) (map[string]uuid.UUID, error) {
+	if len(b.Campaign.Maps) == 0 {
+		return nil, nil
+	}
+	mapIDs := make(map[string]uuid.UUID, len(b.Campaign.Maps))
+
+	// Pass 1: every map, flat — no parent yet.
+	for i := range b.Campaign.Maps {
+		m := &b.Campaign.Maps[i]
+		if _, dup := mapIDs[m.ID]; dup {
+			return nil, fmt.Errorf("bundle: import: duplicate map ref %q", m.ID)
+		}
+		anchor := uuid.NullUUID{}
+		if m.AnchorNodeID != "" {
+			id, ok := nodeIDs[m.AnchorNodeID]
+			if !ok {
+				return nil, fmt.Errorf("bundle: import: map %q references unknown anchor entry %q", m.Name, m.AnchorNodeID)
+			}
+			anchor = uuid.NullUUID{UUID: id, Valid: true}
+		}
+		// A fresh blob key per imported map, minted the same way CreateMap's RPC
+		// mints one. It is minted even when the bundle carries no bytes, so the row's
+		// shape is identical either way and a later re-upload lands where the row
+		// already points.
+		key, err := blob.Key(tenantID, "map", uuid.New(), "image")
+		if err != nil {
+			return nil, fmt.Errorf("bundle: import: map %q blob key: %w", m.Name, err)
+		}
+		// Bytes BEFORE the row, the same ordering CreateMap's RPC uses: a row that
+		// references missing bytes is a broken map forever, while bytes with no row
+		// are invisible and get dropped by the rollback path above.
+		if m.ImageBase64 != "" {
+			if imgs == nil {
+				return nil, fmt.Errorf("bundle: import: map %q carries an image but this deployment has no blob store", m.Name)
+			}
+			data, derr := base64.StdEncoding.DecodeString(m.ImageBase64)
+			if derr != nil {
+				return nil, fmt.Errorf("bundle: import: map %q image is not valid base64: %w", m.Name, derr)
+			}
+			contentType := m.ContentType
+			if contentType == "" {
+				contentType = "image/png"
+			}
+			if err := imgs.WriteMapImage(ctx, key, contentType, data); err != nil {
+				return nil, fmt.Errorf("bundle: import: map %q image: %w", m.Name, err)
+			}
+			*written = append(*written, key)
+		}
+
+		created, err := tx.CreateMap(ctx, storage.NewCampaignMap{
+			CampaignID:   campaignID,
+			Name:         m.Name,
+			BlobKey:      key,
+			WidthPx:      m.WidthPx,
+			HeightPx:     m.HeightPx,
+			AnchorNodeID: anchor,
+			GMPrivate:    m.GMPrivate,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bundle: import: create map %q: %w", m.Name, err)
+		}
+		mapIDs[m.ID] = created.ID
+		res.Maps++
+	}
+
+	// Pass 2: the nesting, now that every id exists.
+	for i := range b.Campaign.Maps {
+		m := &b.Campaign.Maps[i]
+		if m.ParentMapID == "" {
+			continue
+		}
+		parent, ok := mapIDs[m.ParentMapID]
+		if !ok {
+			return nil, fmt.Errorf("bundle: import: map %q references unknown parent %q", m.Name, m.ParentMapID)
+		}
+		anchor := uuid.NullUUID{}
+		if m.AnchorNodeID != "" {
+			anchor = uuid.NullUUID{UUID: nodeIDs[m.AnchorNodeID], Valid: true}
+		}
+		// UpdateMap replaces the whole editor field set, so the fields set in pass 1
+		// are passed again rather than lost.
+		if _, err := tx.UpdateMap(ctx, storage.CampaignMapUpdate{
+			ID:           mapIDs[m.ID],
+			CampaignID:   campaignID,
+			Name:         m.Name,
+			ParentMapID:  uuid.NullUUID{UUID: parent, Valid: true},
+			AnchorNodeID: anchor,
+			GMPrivate:    m.GMPrivate,
+		}); err != nil {
+			return nil, fmt.Errorf("bundle: import: nest map %q: %w", m.Name, err)
+		}
+	}
+
+	// Pins last: they need both a map and a node.
+	for i := range b.Campaign.Maps {
+		m := &b.Campaign.Maps[i]
+		for _, p := range m.Pins {
+			nodeID, ok := nodeIDs[p.NodeID]
+			if !ok {
+				return nil, fmt.Errorf("bundle: import: pin on map %q references unknown entry %q", m.Name, p.NodeID)
+			}
+			if _, err := tx.CreatePin(ctx, storage.NewMapPin{
+				MapID:         mapIDs[m.ID],
+				CampaignID:    campaignID,
+				NodeID:        nodeID,
+				X:             p.X,
+				Y:             p.Y,
+				LabelOverride: p.LabelOverride,
+				GMPrivate:     p.GMPrivate,
+			}); err != nil {
+				return nil, fmt.Errorf("bundle: import: pin on map %q: %w", m.Name, err)
+			}
+			res.Pins++
+		}
+	}
+	return mapIDs, nil
+}
+
+// importBoards recreates the GM's session prep boards, remapping their entries.
+func importBoards(
+	ctx context.Context,
+	tx ImportStore,
+	campaignID uuid.UUID,
+	b *Bundle,
+	nodeIDs map[string]uuid.UUID,
+	res *ImportResult,
+) error {
+	for i := range b.Campaign.Boards {
+		bd := &b.Campaign.Boards[i]
+		created, err := tx.CreateBoard(ctx, campaignID, bd.Name)
+		if err != nil {
+			return fmt.Errorf("bundle: import: create board %q: %w", bd.Name, err)
+		}
+		ids := make([]uuid.UUID, 0, len(bd.NodeIDs))
+		for _, ref := range bd.NodeIDs {
+			id, ok := nodeIDs[ref]
+			if !ok {
+				return fmt.Errorf("bundle: import: board %q references unknown entry %q", bd.Name, ref)
+			}
+			ids = append(ids, id)
+		}
+		// Rename-and-set in ONE call: the storage layer fused them deliberately, so
+		// a failed entry write cannot leave a renamed board with the wrong contents.
+		if err := tx.UpdateBoard(ctx, campaignID, created.ID, bd.Name, ids); err != nil {
+			return fmt.Errorf("bundle: import: board %q entries: %w", bd.Name, err)
+		}
+		res.Boards++
+	}
 	return nil
 }
 
@@ -221,7 +458,7 @@ func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bund
 // DROPPED and counted in DroppedParticipantRefs (not fatal — a foreign agent
 // simply carries no local knowledge), while speaker snowflakes travel verbatim
 // (ADR-0053 §6). A nil History section is a no-op: counts stay zero (part-1 parity).
-func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b *Bundle, res *ImportResult) error {
+func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b *Bundle, nodeIDs map[string]uuid.UUID, res *ImportResult) error {
 	if b.Campaign.History == nil {
 		return nil
 	}
@@ -272,6 +509,34 @@ func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b 
 				return fmt.Errorf("bundle: import: session %q line %q: %w", s.ID, l.LineID, err)
 			}
 			res.Lines++
+		}
+
+		// Appearances AFTER the lines, because the composite FK points at them.
+		// A row whose Node ref is unknown is DROPPED rather than fatal: an
+		// appearance is a derived convenience, and refusing an entire restore
+		// because one mention pointed at a since-deleted entry would be the wrong
+		// trade for something the destination can regenerate by re-indexing.
+		if len(s.Appearances) > 0 {
+			rows := make([]storage.NodeAppearance, 0, len(s.Appearances))
+			for _, a := range s.Appearances {
+				nodeID, ok := nodeIDs[a.NodeID]
+				if !ok {
+					continue
+				}
+				rows = append(rows, storage.NodeAppearance{
+					NodeID:         nodeID,
+					CampaignID:     campaignID,
+					VoiceSessionID: sessionID,
+					LineID:         a.LineID,
+					At:             a.At,
+				})
+			}
+			if len(rows) > 0 {
+				if err := tx.RecordNodeAppearances(ctx, rows); err != nil {
+					return fmt.Errorf("bundle: import: session %q appearances: %w", s.ID, err)
+				}
+				res.Appearances += len(rows)
+			}
 		}
 
 		for j := range s.Chunks {

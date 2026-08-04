@@ -27,7 +27,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **NPC** | A non-player character in the Campaign world, modeled as a Knowledge Graph Node and optionally as a Character NPC Agent. | Character (overloaded — Character is reserved for PCs) |
 | **System** | The TTRPG ruleset of a Campaign (D&D 5e, Pathfinder 2e, Call of Cthulhu, etc.); consumed by Tools that need rules context. | Ruleset, Game system |
 | **Campaign Language** | The natural language a Campaign is played in; selects the phonetic scheme used by Address Detection's name matching and the language hint for STT/TTS. | Locale, Lang |
-| **Campaign Bundle** | The versioned gzipped-JSON export of a Campaign's setup (Agents, Tool Grants, KG, Characters; Transcript history flag-gated) with secrets always excluded; import mints fresh IDs (ADR-0053). | Export (unqualified), Backup, Archive (reserved for archived Campaigns) |
+| **Campaign Bundle** | The versioned gzipped-JSON export of a Campaign's setup (Agents, Tool Grants, KG including Aspects/Tags/edge texture, Maps + Pins, Boards, Characters; Transcript history and Appearances flag-gated, map images opt-in) with secrets always excluded; import mints fresh IDs (ADR-0053, format v2 per #547). | Export (unqualified), Backup, Archive (reserved for archived Campaigns) |
 | **Recap** | A Butler-Persona-flavored summary of a Voice Session's Transcript Lines, generated on demand and never persisted; delivered voiced, as public text, or GM-only per request (#271). | Summary, Digest |
 
 ## Knowledge Graph

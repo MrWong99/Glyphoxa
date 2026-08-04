@@ -22,3 +22,24 @@ Epic 6's exporter, importer, and external-tool converters all implement one form
 ## Relationship to other ADRs
 
 ADR-0009 (Butler trigger the importer must merge with), ADR-0041 (operator-only transport auth), ADR-0011 (embedding regeneration path), ADR-0049 (import stays a synchronous RPC), ADR-0048 (size-cap constants), #276/#279 (Characters section and post-import rebinding), #289 (converters target this format).
+
+## Amendment: format v2 — the world epic #533 added (2026-08-04, #547)
+
+Every new table in an epic is a place where "we exported the campaign" quietly stops being true, and a silent omission in a backup is worse than a missing feature: it is discovered only when someone restores. Format **v2** closes that for #533.
+
+**What v2 adds.** Aspects and Tags on a Node; Note and Disposition on an Edge; the `maps` section (each Map carrying its Pins nested, since a Pin has no meaning apart from its Map); the `boards` section; and `appearances` inside each history Session.
+
+**v1 still imports.** Every addition is `omitempty`, so a v1 bundle IS a valid v2 bundle with those sections absent — `CheckVersion` accepts the range `[MinSupportedVersion, FormatVersion]` rather than an exact match. A backup format that refuses last year's backup is not a backup format.
+
+**Map images are opt-in, separately from history.** `?include_images=true` (and `--include-images` on the CLI) embeds the bytes as base64. Off by default because the blob cap is 32 MiB *per image* and base64 inflates by a third — a campaign with a handful of scans would turn a setup export into something nobody can mail. Without the flag a Map still round-trips completely: name, nesting, anchor, privacy, and every Pin. Losing the picture is not losing the map. The flag is deliberately separate from `include_history`: a GM may want their maps in a share bundle without the transcripts, or the transcripts without the megabytes.
+
+**Appearances follow the history flag**, because an Appearance is a record of what was *said*, not part of the campaign's setup — and it is derived, so a destination that re-indexes gets them back anyway. An appearance whose Node ref does not resolve is dropped rather than fatal, for the same reason.
+
+**Import invariants the new sections needed:**
+
+- **Maps import in two passes.** `parent_map_id` is self-referential with a composite FK, and bundle order is the source's `ListMaps` order — alphabetical by name. A single pass would be refused outright the first time a child sorted before its parent, so "The Vault inside Saltmarsh" would import as two top-level maps or not at all. Pass 1 creates every map flat; pass 2 applies the nesting; pins come last, since they need both a map and a node.
+- **A fresh blob key per imported map.** The source key names the *source* tenant (`t/<tenant>/map/…`), so reusing it would let one tenant's import overwrite another tenant's picture.
+- **Blob writes are outside the transaction and are swept by hand.** `blob.NewPostgres` runs on its own pool, so a `Put` is *not* rolled back when the import transaction is. Import tracks every key it writes and deletes them when the transaction fails; without that, a failed import would strand bytes with no row naming them and no sweep that would ever find them. This is the one place the all-or-nothing property is enforced by code rather than by the database.
+- **Unknown refs stay fatal.** A map anchored to a node not in the bundle, a pin on an unknown entry, a board entry that resolves to nothing — each fails the whole import, the same all-or-nothing discipline v1 applies to edge endpoints.
+
+**Secrets exclusion is unaffected.** None of the new tables carry credentials, and the bundle structs remain the allowlist: the exporter still populates fields explicitly and never reflects over tables. The one non-SQL read the export seam gained (`ReadMapImage`) resolves a key the row already stores, through the ADR-0048 seam, and lives on the adapter rather than on `*storage.Store` — storage deliberately knows nothing about blobs.

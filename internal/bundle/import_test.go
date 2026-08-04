@@ -177,7 +177,7 @@ func TestImportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src, srcCID, srcBartID := seededCampaign(t)
 
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestImportRoundTrip(t *testing.T) {
 func TestImportTwiceMakesTwoCampaigns(t *testing.T) {
 	ctx := context.Background()
 	src, srcCID, _ := seededCampaign(t)
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestImportRoundTripWithHistory(t *testing.T) {
 		t.Fatalf("EndVoiceSession 2: %v", err)
 	}
 
-	b, err := bundle.Export(ctx, src, srcCID, bundle.ExportOptions{IncludeHistory: true})
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{IncludeHistory: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
