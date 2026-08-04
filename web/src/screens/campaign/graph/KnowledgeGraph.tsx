@@ -1,13 +1,20 @@
-import { useMemo, useState } from "react";
-import { useMutation } from "@connectrpc/connect-query";
+import { useMemo, useRef, useState } from "react";
+import { useMutation, useQuery } from "@connectrpc/connect-query";
+import { useQueryClient } from "@tanstack/react-query";
+import { Sparkles } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { EDGE_TYPES, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "../knowledgeVocab";
+import { invalidateProposalReview } from "../knowledgeCache";
+import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from "../proposalParts";
 import { AgentLensBar, useAgentLens } from "./AgentLens";
 import { LAYOUT, egoNetwork, filterGraph, layout } from "./layout";
+import type { Pin } from "./layout";
+import { placeProposals, resolveProposals } from "./proposalGhosts";
+import type { ResolvedProposal } from "./proposalGhosts";
 
 // The Graph view (#534, ADR-0008 amendment "no graph viz" reversal). Edges were
 // authorable through NodeRelations' dropdown pair and then never displayed
@@ -72,6 +79,14 @@ export function KnowledgeGraph({
   const [linkError, setLinkError] = useState<string | null>(null);
   // The agent-knowledge lens (#535): which NPC's injected subgraph to highlight.
   const [lensAgentID, setLensAgentID] = useState("");
+  // Pending Knowledge Proposals drawn in place (#537). showProposals is on by
+  // default: a queue the GM cannot see is a queue that grows.
+  const [showProposals, setShowProposals] = useState(true);
+  const [reviewID, setReviewID] = useState<string | null>(null);
+  // layoutEpoch is the "Re-arrange" button. Bumping it drops the pinned positions
+  // and lets the simulation lay the graph out fresh.
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  const queryClient = useQueryClient();
 
   const lens = useAgentLens(lensAgentID, nodes, edges);
   const active = lens.state?.linked ? lens.state.lens : null;
@@ -79,6 +94,14 @@ export function KnowledgeGraph({
   // OBJECT would re-run the filter — and therefore the 300-tick layout — on every
   // preview refetch, for an output that did not change.
   const lensOn = active !== null;
+
+  // The pending queue. It is the SAME read the Proposals panel uses, so the two
+  // review surfaces can never disagree about what is pending.
+  const proposalsQuery = useQuery(CampaignService.method.listKnowledgeProposals, {});
+  const resolved = useMemo(
+    () => resolveProposals(proposalsQuery.data?.proposals ?? [], nodes),
+    [proposalsQuery.data, nodes],
+  );
 
   const createEdge = useMutation(CampaignService.method.createEdge, {
     onSuccess: () => {
@@ -111,13 +134,64 @@ export function KnowledgeGraph({
     [nodes, edges, types, relations, hidePrivate, focus, lensOn],
   );
 
-  // Layout is a pure function of the filtered payload, so this memo is the whole
-  // performance story — and re-running it yields the identical picture.
-  const laid = useMemo(() => layout(filtered.nodes, filtered.edges), [filtered]);
+  // Position memory. `layout` is pure in its inputs, so adding one Node reshuffles
+  // every other Node — which is exactly what happens when the GM approves a
+  // suggestion mid-review, and "the graph jumped" is how a review session stops
+  // being a review session (#537 AC3).
+  //
+  // A change to the FILTERS is a request for a fresh picture and clears the pins;
+  // a change to the PAYLOAD is not, so an approve, an edit, or a refetch leaves
+  // every Node exactly where it was.
+  const filterKey = useMemo(
+    () =>
+      JSON.stringify([
+        [...types].sort(),
+        [...relations].sort(),
+        hidePrivate,
+        focusID,
+        focusDepth,
+        lensOn,
+        layoutEpoch,
+      ]),
+    [types, relations, hidePrivate, focusID, focusDepth, lensOn, layoutEpoch],
+  );
+  const sticky = useRef<{ key: string; pins: Map<string, Pin>; seeds: Map<string, Pin> }>({
+    key: "",
+    pins: new Map(),
+    seeds: new Map(),
+  });
+
+  const laid = useMemo(() => {
+    if (sticky.current.key !== filterKey) {
+      sticky.current = { key: filterKey, pins: new Map(), seeds: new Map() };
+    }
+    const out = layout(filtered.nodes, filtered.edges, {
+      pins: sticky.current.pins,
+      seeds: sticky.current.seeds,
+    });
+    // Recording the result makes the next run idempotent: with every Node pinned,
+    // layout returns exactly these coordinates again.
+    sticky.current.pins = new Map(out.nodes.map((p) => [p.node.id, { x: p.x, y: p.y }]));
+    return out;
+  }, [filtered, filterKey]);
+
+  // Ghosts are an OVERLAY: placement never moves a laid-out Node, which is what
+  // lets an approved suggestion turn solid in place.
+  const placed = useMemo(
+    () => placeProposals(showProposals ? resolved : [], laid),
+    [resolved, laid, showProposals],
+  );
+  const reviewing = reviewID ? (resolved.find((r) => r.id === reviewID) ?? null) : null;
+
+  const afterReview = () => {
+    setReviewID(null);
+    invalidateProposalReview(queryClient);
+    onGraphChanged();
+  };
 
   const showAllLabels = laid.nodes.length <= LABEL_BUDGET;
-  const width = laid.bounds.maxX - laid.bounds.minX;
-  const height = laid.bounds.maxY - laid.bounds.minY;
+  const width = placed.bounds.maxX - placed.bounds.minX;
+  const height = placed.bounds.maxY - placed.bounds.minY;
 
   // Zoom. A viewBox alone fits the WHOLE graph into a fixed-height canvas, which
   // at a few hundred nodes shrinks every glyph to a few pixels — "it all fits" is
@@ -128,8 +202,8 @@ export function KnowledgeGraph({
   const view = {
     w: width / zoom,
     h: height / zoom,
-    x: laid.bounds.minX + (width - width / zoom) / 2 + pan.x,
-    y: laid.bounds.minY + (height - height / zoom) / 2 + pan.y,
+    x: placed.bounds.minX + (width - width / zoom) / 2 + pan.x,
+    y: placed.bounds.minY + (height - height / zoom) / 2 + pan.y,
   };
 
   const toggle = <T,>(set: ReadonlySet<T>, value: T): ReadonlySet<T> => {
@@ -186,6 +260,19 @@ export function KnowledgeGraph({
           >
             Table view
           </button>
+          {resolved.length > 0 && (
+            <button
+              type="button"
+              className="gx-kg-chip gx-kg-chip--proposals"
+              aria-pressed={showProposals}
+              onClick={() => {
+                setShowProposals((v) => !v);
+                setReviewID(null);
+              }}
+            >
+              <Sparkles size={12} /> Suggestions ({resolved.length})
+            </button>
+          )}
           <button
             type="button"
             className="gx-kg-chip"
@@ -214,6 +301,11 @@ export function KnowledgeGraph({
               Fit
             </Button>
           )}
+          {/* Positions are sticky across edits so a review never reshuffles the
+              GM's mental map. This is the deliberate way to ask for a fresh one. */}
+          <Button variant="ghost" size="sm" onClick={() => setLayoutEpoch((n) => n + 1)}>
+            Re-arrange
+          </Button>
           {focusID && (
             <>
               <span className="gx-kg-graph__focus">Focused on {nodeName(focusID)}</span>
@@ -292,6 +384,30 @@ export function KnowledgeGraph({
                   <title>{edgeTooltip(e.edge)}</title>
                 )}
               </line>
+            ))}
+            {/* Proposed relations, dashed. A wide transparent line rides on top of
+                each so it can actually be clicked — a 1px stroke is not a target. */}
+            {placed.ghostEdges.map((g) => (
+              <g key={g.key} className="gx-kg-graph__proposed-edge">
+                <line x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2} />
+                <line
+                  className="gx-kg-graph__proposed-hit"
+                  x1={g.x1}
+                  y1={g.y1}
+                  x2={g.x2}
+                  y2={g.y2}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Suggested relationship from ${g.agentName} — review`}
+                  onClick={() => setReviewID(g.proposalID)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      setReviewID(g.proposalID);
+                    }
+                  }}
+                />
+              </g>
             ))}
           </g>
           <g className="gx-kg-graph__nodes">
@@ -393,7 +509,100 @@ export function KnowledgeGraph({
               );
             })}
           </g>
+
+          {/* Pending proposals, drawn in place (#537). Dashed and hollow
+              throughout: a suggestion must never be mistakable for canon, which is
+              the whole reason the queue exists. */}
+          <g className="gx-kg-graph__proposals">
+            {placed.factMarks.map((m) => (
+              <g
+                key={m.key}
+                className="gx-kg-graph__fact-mark"
+                transform={`translate(${m.x} ${m.y})`}
+                role="button"
+                tabIndex={0}
+                aria-label={`Suggested fact from ${m.agentName} — review`}
+                onClick={() => setReviewID(m.proposalID)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    setReviewID(m.proposalID);
+                  }
+                }}
+              >
+                <title>{`${m.agentName} suggests a fact here`}</title>
+                <circle r={LAYOUT.nodeRadius + 7} />
+              </g>
+            ))}
+            {placed.ghostNodes.map((g) => {
+              const meta = metaOf(g.nodeType);
+              return (
+                <g
+                  key={g.key}
+                  className="gx-kg-graph__proposed-node"
+                  data-proposed
+                  data-selected={reviewID === g.proposalID || undefined}
+                  transform={`translate(${g.x} ${g.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Suggested new entry ${g.name} (${meta.label}) from ${g.agentName} — review`}
+                  onClick={() => setReviewID(g.proposalID)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      setReviewID(g.proposalID);
+                    }
+                  }}
+                >
+                  <title>{`${g.agentName} suggests creating ${g.name}`}</title>
+                  <circle r={LAYOUT.nodeRadius} stroke={meta.color} />
+                  <text className="gx-kg-graph__label" x={LAYOUT.nodeRadius + 4} y={4}>
+                    {g.name}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
         </svg>
+      )}
+
+      {/* Suggestions that cannot be drawn are LISTED, never dropped: an
+          unresolvable name is a proposal that will be refused at approval, and
+          that is worth knowing before clicking. */}
+      {showProposals && placed.unplaced.length > 0 && (
+        <details className="gx-kg-graph__unplaced">
+          <summary>
+            {placed.unplaced.length} suggestion{placed.unplaced.length === 1 ? "" : "s"} can&apos;t be
+            drawn here
+          </summary>
+          <ul>
+            {placed.unplaced.map((u) => (
+              <li key={u.proposal.id}>
+                <button type="button" className="gx-kg-chip" onClick={() => setReviewID(u.proposal.id)}>
+                  {u.proposal.agentName}
+                </button>
+                <span className="gx-kg-graph__unplaced-why">{u.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {reviewing && (
+        <ProposalReview
+          resolved={reviewing}
+          onClose={() => setReviewID(null)}
+          onApproved={() => {
+            // Remember where the ghost stood so the created Node inherits the spot:
+            // the server mints a fresh id at approval, and the NAME is the only
+            // thing that survives the transition (#537 AC3).
+            const ghost = placed.ghostNodes.find((g) => g.proposalID === reviewing.id);
+            if (ghost) {
+              sticky.current.seeds.set(ghost.name.trim().toLowerCase(), { x: ghost.x, y: ghost.y });
+            }
+          }}
+          onReviewed={afterReview}
+        />
       )}
 
       {pendingLink && (
@@ -436,6 +645,67 @@ function edgeTooltip(edge: GraphEdge): string {
   if (edge.disposition !== 0) parts.push(DISPOSITION_LABEL[edge.disposition] ?? "");
   if (edge.note !== "") parts.push(edge.note);
   return parts.filter(Boolean).join(" — ");
+}
+
+// ProposalReview is the in-place review card: everything the queue's card shows,
+// beside the graph, for the ghost the GM just clicked.
+//
+// It renders the SAME widgets and drives the SAME RPCs as the Proposals panel —
+// the write path is untouched, exactly as ADR-0052 requires. What the graph adds
+// is POSITION: the question "does this belong here, next to what the world already
+// says" is a question about the picture, and now it is asked in front of one.
+function ProposalReview({
+  resolved,
+  onClose,
+  onApproved,
+  onReviewed,
+}: {
+  resolved: ResolvedProposal;
+  onClose: () => void;
+  onApproved: () => void;
+  onReviewed: () => void;
+}) {
+  // An endpoint the client could not resolve will be REFUSED at approval. Saying
+  // so before the GM clicks beats an inline server error afterwards.
+  const unresolved =
+    resolved.write.kind === "edge"
+      ? [resolved.write.from, resolved.write.to].find((a) => a.at === "unknown")
+      : resolved.write.kind === "fact" && resolved.write.anchor.at === "unknown"
+        ? resolved.write.anchor
+        : undefined;
+
+  return (
+    <div className="gx-kg-graph__review" role="dialog" aria-label="Review suggestion">
+      <div className="gx-proposal-card__head">
+        {/* WHO proposed is most of the judgement: a Character NPC may only propose
+            on its own linked Node, the Butler campaign-wide. */}
+        <span className="gx-proposal-card__author">{resolved.agentName}</span>
+        <span className="gx-proposal-card__when">{fmtWhen(resolved.proposal)}</span>
+        <KindBadge proposal={resolved.proposal} />
+      </div>
+
+      <div className="gx-proposal-card__write">
+        <ProposalWrite proposal={resolved.proposal} />
+      </div>
+
+      {unresolved && unresolved.at === "unknown" && (
+        <p className="gx-editor__status gx-editor__status--error" role="alert">
+          Approving will be refused: {unresolved.reason}.
+        </p>
+      )}
+
+      {/* The ADR-0011 similarity hint travels with the proposal rather than being
+          dropped for the visual — "is this a duplicate" is the other half of the
+          decision, and the graph does not answer it. */}
+      <SimilarHint proposalId={resolved.id} />
+
+      <ProposalActions proposalID={resolved.id} onApproved={onApproved} onReviewed={onReviewed} />
+
+      <Button variant="ghost" size="sm" onClick={onClose}>
+        Close
+      </Button>
+    </div>
+  );
 }
 
 // RelationPicker is the one authoring affordance on the graph: after dragging one

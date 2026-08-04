@@ -34,6 +34,12 @@ import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/managemen
 // then N manual ticks) rather than animated: an animated layout would be a
 // different picture on a fast machine than a slow one, and a settling graph is
 // harder to click than a settled one.
+//
+// Determinism alone is not stability, though. `layout` is pure in its INPUTS, so
+// adding one Node reshuffles every other Node — which is precisely what happens
+// when the GM approves a suggestion mid-review (#537). `opts.pins` answers that:
+// a pinned Node is fixed where it already was and the newcomer settles around it,
+// so approving turns one dashed thing solid instead of redrawing the world.
 
 /** One laid-out node: the payload row plus its computed position. */
 export type PositionedNode = {
@@ -82,7 +88,28 @@ export const LAYOUT = {
   minExtent: 520,
 } as const;
 
-// simNode is the mutable datum d3-force writes x/y/vx/vy onto.
+/** A remembered position. */
+export type Pin = { x: number; y: number };
+
+/**
+ * Options for `layout`.
+ *
+ * Both maps FIX a Node's position; they differ only in what they key on.
+ *
+ * `pins` keys by Node ID — the ordinary case, remembering where a Node already
+ * was. `seeds` keys by lower-cased Node NAME, for a Node whose id is not knowable
+ * in advance: an approved suggestion gets a fresh server-minted id, so the name is
+ * the only thing that survives the ghost→Node transition, and pinning by name is
+ * what makes the ghost turn solid exactly where it stood rather than merely near
+ * it. A seed only applies to a Node with no pin.
+ */
+export type LayoutOpts = {
+  pins?: ReadonlyMap<string, Pin>;
+  seeds?: ReadonlyMap<string, Pin>;
+};
+
+// simNode is the mutable datum d3-force writes x/y/vx/vy onto. fx/fy come from
+// SimulationNodeDatum and are what freeze a pinned node in place.
 type SimNode = SimulationNodeDatum & { id: string; node: GraphNode };
 type SimLink = SimulationLinkDatum<SimNode> & { edge: GraphEdge };
 
@@ -109,14 +136,23 @@ export function seededRandom(seed = 0x2545f491): () => number {
  * dropped rather than crashing d3-force's link resolution — the filter chips
  * legitimately produce that state on every render.
  */
-export function layout(nodes: GraphNode[], edges: GraphEdge[]): Layout {
+export function layout(nodes: GraphNode[], edges: GraphEdge[], opts: LayoutOpts = {}): Layout {
   if (nodes.length === 0) {
     return { nodes: [], edges: [], bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
   }
 
   // Deterministic initial placement: a phyllotaxis spiral keyed on the node's
-  // index in the (server-ordered) payload.
+  // index in the (server-ordered) payload — unless the caller remembers where this
+  // node already was, in which case it is pinned there and the spiral is skipped.
   const sim: SimNode[] = nodes.map((node, i) => {
+    const pin = opts.pins?.get(node.id);
+    if (pin) {
+      return { id: node.id, node, x: pin.x, y: pin.y, fx: pin.x, fy: pin.y, vx: 0, vy: 0 };
+    }
+    const seed = opts.seeds?.get(node.name.trim().toLowerCase());
+    if (seed) {
+      return { id: node.id, node, x: seed.x, y: seed.y, fx: seed.x, fy: seed.y, vx: 0, vy: 0 };
+    }
     const angle = i * 2.399963229728653; // the golden angle, in radians
     const radius = LAYOUT.spiralSpacing * Math.sqrt(i);
     return {
@@ -148,8 +184,17 @@ export function layout(nodes: GraphNode[], edges: GraphEdge[]): Layout {
     )
     .force("charge", forceManyBody().strength(LAYOUT.charge))
     .force("collide", forceCollide(LAYOUT.collideRadius))
-    .force("center", forceCenter(0, 0))
     .stop();
+
+  // forceCenter is DELIBERATELY absent once anything is pinned. It recentres by
+  // translating every node by the cloud's offset from the origin — but a pinned
+  // node is snapped back to its fx/fy at the end of each tick, so that offset never
+  // shrinks and the correction is re-applied every tick, walking the free nodes off
+  // to infinity. Pins already fix the frame of reference, which is all centring was
+  // for.
+  if (!sim.some((s) => s.fx != null)) {
+    simulation.force("center", forceCenter(0, 0));
+  }
 
   simulation.tick(LAYOUT.ticks);
 

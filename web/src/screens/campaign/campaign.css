@@ -1508,6 +1508,107 @@
   align-items: flex-end;
   gap: var(--spacing-xs);
   padding-top: var(--spacing-xs);
+/* ── Pending proposals, drawn in place (#537) ────────────────────────────── */
+
+/* Every proposal glyph is DASHED and hollow. A suggestion that could be mistaken
+   for canon defeats the queue it came from, so the visual distinction is carried
+   by shape and stroke rather than colour alone — colour is already spent on the
+   seven entry types, and a colour-only difference is no difference to a GM who
+   cannot see it. */
+.gx-kg-graph__proposed-node circle {
+  fill: none;
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  opacity: 0.9;
+}
+
+.gx-kg-graph__proposed-node {
+  cursor: pointer;
+}
+
+.gx-kg-graph__proposed-node .gx-kg-graph__label {
+  font-style: italic;
+  fill: var(--accent, #ffcf5a);
+}
+
+.gx-kg-graph__proposed-node:focus-visible circle,
+.gx-kg-graph__proposed-node[data-selected] circle {
+  stroke-width: 3;
+  stroke-dasharray: none;
+}
+
+.gx-kg-graph__proposed-edge line {
+  stroke: var(--accent, #ffcf5a);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  stroke-opacity: 0.8;
+}
+
+/* A 1.5px line is not a click target. The hit line is invisible and fat. */
+.gx-kg-graph__proposed-hit {
+  stroke: transparent;
+  stroke-width: 12;
+  cursor: pointer;
+}
+
+.gx-kg-graph__proposed-hit:focus-visible {
+  stroke: var(--accent, #ffcf5a);
+  stroke-opacity: 0.35;
+}
+
+/* A proposed FACT has nowhere of its own to stand — it lands on an entry that
+   already exists — so it marks that entry with a dashed halo instead. */
+.gx-kg-graph__fact-mark circle {
+  fill: none;
+  stroke: var(--accent, #ffcf5a);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 4;
+  cursor: pointer;
+}
+
+.gx-kg-graph__fact-mark:focus-visible circle {
+  stroke-width: 3;
+}
+
+.gx-kg-chip--proposals {
+  color: var(--accent, #ffcf5a);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gx-kg-graph__review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--accent, #ffcf5a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface, #171b23);
+}
+
+.gx-kg-graph__unplaced {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-kg-graph__unplaced ul {
+  list-style: none;
+  margin: var(--spacing-xs) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-graph__unplaced li {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-graph__unplaced-why {
+  color: var(--text-muted);
 }
 
 /* Free-form tags (#543). Visually distinct from the closed type vocabulary,
