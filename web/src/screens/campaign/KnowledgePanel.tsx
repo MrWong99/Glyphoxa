@@ -769,8 +769,12 @@ function KnowledgeCard({
               <EyeOff size={11} /> GM private
             </Badge>
           )}
+          {/* The entry-type badge above is inline-styled because its colour is per-type
+              data; this one is a constant, and the constant it used was #ffcf5a — a
+              yellow that appears nowhere in the palette. `gold` is the variant that
+              already paints exactly this: --gold on a 14% gold wash. */}
           {node.agentId !== "" && (
-            <Badge size="sm" className="gx-kg-card__linked" style={{ color: "#ffcf5a", background: "#ffcf5a24" }}>
+            <Badge variant="gold" size="sm" className="gx-kg-card__linked">
               <LinkIcon size={11} /> Linked agent
             </Badge>
           )}

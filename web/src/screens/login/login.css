@@ -85,11 +85,11 @@
 
 .gx-login__consent input {
   margin-top: 3px;
-  accent-color: var(--accent, #9059ff);
+  accent-color: var(--arcane);
 }
 
 .gx-login__consent a {
-  color: var(--accent, #9059ff);
+  color: var(--arcane);
 }
 
 /* The login/signup cards are centered in the viewport; the legal footer sits

@@ -171,7 +171,7 @@
 
 /* Resolved Discord bot tag from the live gateway login (#70), under the name. */
 .gx-provider-row__tag {
-  font-size: var(--text-xs, 0.75rem);
+  font-size: var(--body-xs);
   color: var(--text-subtle);
   margin-top: 2px;
 }
@@ -271,6 +271,6 @@
 
 .gx-invite-picker__id {
   font-family: var(--font-mono);
-  font-size: var(--text-xs, 0.75rem);
+  font-size: var(--body-xs);
   color: var(--text-subtle);
 }

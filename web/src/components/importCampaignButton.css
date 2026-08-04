@@ -24,7 +24,7 @@
 .gx-import-campaign__error {
   display: block;
   margin-top: var(--spacing-sm);
-  color: var(--danger, #e5484d);
+  color: var(--status-danger);
   font-size: 13px;
 }
 
