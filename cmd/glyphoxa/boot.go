@@ -744,6 +744,15 @@ func guardAllModeMixedDeployment(ctx context.Context, s mixedModeGuardStore) err
 	return nil
 }
 
+// providerConfigReader is the one read the image factory needs. It is an
+// interface rather than *storage.Store so the factory's own behaviour — in
+// particular WHICH sentinel it returns when no key is configured — is testable
+// without a database. That sentinel being untestable is precisely how it came to
+// be a value neither consumer recognised (#541 review).
+type providerConfigReader interface {
+	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
+}
+
 // newImageFactory builds the image-generator factory both image consumers share:
 // Session Highlight enrichment (#311) and generated Maps (#541).
 //
@@ -757,7 +766,7 @@ func guardAllModeMixedDeployment(ctx context.Context, s mixedModeGuardStore) err
 // The returned sentinel is highlight.ErrImageNotConfigured; mapgen.ErrNotConfigured
 // wraps nothing and is matched separately by its own caller, so the two packages
 // stay independent while sharing the resolution.
-func newImageFactory(store *storage.Store, cipher *crypto.Cipher, keyEnt llmbuild.PlatformKeyEntitlement) func(context.Context, uuid.UUID) (imagegen.Generator, string, error) {
+func newImageFactory(store providerConfigReader, cipher *crypto.Cipher, keyEnt llmbuild.PlatformKeyEntitlement) func(context.Context, uuid.UUID) (imagegen.Generator, string, error) {
 	return func(fctx context.Context, tenantID uuid.UUID) (imagegen.Generator, string, error) {
 		var cfgPtr *storage.ProviderConfig
 		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentImage)

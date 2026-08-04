@@ -33,6 +33,18 @@ import (
 // (log + leave the Highlight intact) rather than a retryable error.
 var ErrImageTooLarge = errors.New("imagegen: generated image exceeds the blob size cap")
 
+// ErrNotConfigured is what a generator factory returns when the tenant has no
+// image provider key: no BYOK row AND no GEMINI_API_KEY.
+//
+// It lives HERE, on the package both consumers already depend on, because it is
+// produced by ONE shared factory and consumed by two features. Two packages each
+// declaring their own `errors.New("not configured")` compare unequal under
+// errors.Is, so the consumer's actionable "save a key in Configuration" branch is
+// simply never reached in production while its unit test — which injects the
+// consumer's own sentinel through a fake factory — passes. That is exactly what
+// happened (#541 review), and one value with two aliases makes it unrepresentable.
+var ErrNotConfigured = errors.New("imagegen: image generation is not configured")
+
 const (
 	// ProviderID is the stable string identifying this adapter; it matches the
 	// Provider Config's provider name and observe.ProviderGemini.

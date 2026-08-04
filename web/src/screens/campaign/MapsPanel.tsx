@@ -91,7 +91,10 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
       </div>
 
       {currentID ? (
+        // key={currentID}: a suggestion answers "does this belong on THIS map",
+        // so its highlight must not survive navigating to another one.
         <MapView
+          key={currentID}
           mapID={currentID}
           onNavigate={setOpenID}
           onChanged={invalidate}
@@ -475,13 +478,24 @@ function NewMapButton({
 
   // Object URLs are a leak if they outlive their draft, and a draft is discarded
   // far more often than it is saved — that is the point of a review step.
+  //
+  // The live URL is mirrored in a REF because the unmount cleanup must revoke it
+  // without touching state: React discards updates to an unmounted component, so
+  // revoking inside a setState updater relies on that updater being run at all.
+  const draftURL = useRef<string | null>(null);
   const dropDraft = () => {
-    setDraft((d) => {
-      if (d) URL.revokeObjectURL(d.url);
-      return null;
-    });
+    if (draftURL.current) {
+      URL.revokeObjectURL(draftURL.current);
+      draftURL.current = null;
+    }
+    setDraft(null);
   };
-  useEffect(() => () => dropDraft(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(
+    () => () => {
+      if (draftURL.current) URL.revokeObjectURL(draftURL.current);
+    },
+    [],
+  );
 
   const runGenerate = async () => {
     setError(null);
@@ -490,7 +504,9 @@ function NewMapButton({
       const res = await generate.mutateAsync({ prompt: prompt.trim(), anchorNodeId: anchorID });
       dropDraft();
       const blob = new Blob([res.imageBytes as BlobPart], { type: res.contentType });
-      setDraft({ bytes: res.imageBytes, contentType: res.contentType, url: URL.createObjectURL(blob) });
+      const url = URL.createObjectURL(blob);
+      draftURL.current = url;
+      setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -512,11 +528,20 @@ function NewMapButton({
     if (name.trim() === "") return;
     // Both doors land in the SAME CreateMap call. A generated map is not a
     // different kind of map — it is a map whose bytes came from a model.
-    const source: { bytes: Uint8Array; contentType: string } | null = draft
-      ? { bytes: draft.bytes, contentType: draft.contentType }
-      : file
-        ? { bytes: new Uint8Array(await file.arrayBuffer()), contentType: file.type }
-        : null;
+    //
+    // The bytes and the anchor both key off MODE, and switching mode drops the
+    // other source. Keying the bytes off "is there a draft" while keying the
+    // anchor off the mode gave two conditions that could disagree: a GM who
+    // generated, switched back to Upload and picked a file saved the GENERATED
+    // bytes under the file's name.
+    const source: { bytes: Uint8Array; contentType: string } | null =
+      mode === "generate"
+        ? draft
+          ? { bytes: draft.bytes, contentType: draft.contentType }
+          : null
+        : file
+          ? { bytes: new Uint8Array(await file.arrayBuffer()), contentType: file.type }
+          : null;
     if (!source) return;
     try {
       const dims = await imageDimensions(new Blob([source.bytes as BlobPart], { type: source.contentType }));
@@ -558,7 +583,10 @@ function NewMapButton({
           className="gx-kg-chip"
           aria-label="Upload an image"
           aria-pressed={mode === "upload"}
-          onClick={() => setMode("upload")}
+          onClick={() => {
+            setMode("upload");
+            dropDraft();
+          }}
         >
           <Upload size={12} /> Upload
         </button>
@@ -567,7 +595,10 @@ function NewMapButton({
           className="gx-kg-chip"
           aria-label="Generate an image"
           aria-pressed={mode === "generate"}
-          onClick={() => setMode("generate")}
+          onClick={() => {
+            setMode("generate");
+            setFile(null);
+          }}
         >
           <Sparkles size={12} /> Generate
         </button>
@@ -676,7 +707,11 @@ function NewMapButton({
       <div className="gx-kg-editor__actions">
         <Button
           variant="primary"
-          disabled={create.isPending || (!file && !draft) || name.trim() === ""}
+          disabled={
+            create.isPending ||
+            (mode === "generate" ? !draft : !file) ||
+            name.trim() === ""
+          }
           onClick={() => void submit()}
         >
           {create.isPending ? "Saving…" : "Add map"}

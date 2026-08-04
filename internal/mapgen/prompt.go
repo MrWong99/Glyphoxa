@@ -24,8 +24,9 @@ const (
 	// is there to shape the picture ("a harbour, a tavern, a chapel"), and a
 	// hundred names shape nothing.
 	maxResidents = 12
-	// maxPromptRunes bounds the GM's own words.
-	maxPromptRunes = 2000
+	// MaxPromptRunes bounds the GM's own words. Exported so the RPC boundary can
+	// REFUSE an over-long prompt rather than accept it and silently drop the tail.
+	MaxPromptRunes = 2000
 )
 
 // mapInstruction is the fixed directive.
@@ -73,7 +74,7 @@ func buildPrompt(c storage.Campaign, gmPrompt string, seed seedContext) string {
 		}
 	}
 
-	b.WriteString("\n\nThe GM asks for: " + truncateRunes(strings.TrimSpace(gmPrompt), maxPromptRunes))
+	b.WriteString("\n\nThe GM asks for: " + truncateRunes(strings.TrimSpace(gmPrompt), MaxPromptRunes))
 
 	// The Campaign Language is deliberately NOT pinned here. Every other generated
 	// artefact is prose the table reads, but this instruction says to put no

@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/imagegen"
+	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
@@ -1172,4 +1175,35 @@ func TestGuardAllModeMixedDeployment(t *testing.T) {
 	if err := guardAllModeMixedDeployment(ctx, fakeMixedGuardStore{err: errors.New("db down")}); err == nil {
 		t.Fatal("guard swallowed a read error")
 	}
+}
+
+// TestNewImageFactory_NoKeyIsTheSharedSentinel is the test the #541 review showed
+// was missing.
+//
+// The factory is shared by Highlight enrichment and generated Maps, and each
+// consumer branches on "no key configured" to give an actionable message. Both
+// branches were unit-tested by INJECTING each consumer's own sentinel through a
+// fake factory — so both passed while the production factory returned a third,
+// unequal value and neither actionable branch was reachable at all.
+//
+// This asserts the real factory's real return value against both consumers'
+// errors.Is checks, which is the only place the mismatch could show.
+func TestNewImageFactory_NoKeyIsTheSharedSentinel(t *testing.T) {
+	t.Setenv(imagegen.APIKeyEnv, "")
+	factory := newImageFactory(noProviderConfig{}, nil, nil)
+
+	_, _, err := factory(context.Background(), uuid.New())
+	if !errors.Is(err, highlight.ErrImageNotConfigured) {
+		t.Errorf("Highlight's no-key branch is unreachable: err = %v", err)
+	}
+	if !errors.Is(err, mapgen.ErrNotConfigured) {
+		t.Errorf("the map generator's no-key branch is unreachable: err = %v", err)
+	}
+}
+
+// noProviderConfig is a tenant with no saved image key.
+type noProviderConfig struct{}
+
+func (noProviderConfig) GetProviderConfigByComponent(context.Context, uuid.UUID, storage.Component) (storage.ProviderConfig, error) {
+	return storage.ProviderConfig{}, storage.ErrNotFound
 }

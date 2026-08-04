@@ -48,8 +48,12 @@ type MapPinSuggester interface {
 	SuggestPins(ctx context.Context, campaign storage.Campaign, anchorNodeID uuid.UUID, candidates []storage.KGNode) ([]uuid.UUID, error)
 }
 
-// maxMapPromptChars bounds the GM's prompt, matching the assist surface's cap.
-const maxMapPromptChars = 4000
+// maxMapPromptChars bounds the GM's prompt.
+//
+// It matches mapgen's own rune cap rather than the assist surface's 4000: a
+// higher bound here would accept 4000 characters and silently drop half of them
+// in the prompt builder, which is worse than refusing them.
+const maxMapPromptChars = mapgen.MaxPromptRunes
 
 // GenerateMapImage drafts a map image from the GM's prompt (#541).
 func (s *campaignMaps) GenerateMapImage(
@@ -150,10 +154,22 @@ func (s *campaignMaps) SuggestMapPins(
 	// yet pinned here. Suggesting something already on the map is noise, and
 	// suggesting something that does not exist is the auto-create this slice
 	// refuses (ADR-0052).
-	candidates, err := s.store.UnpinnedNodes(ctx, c.ID, mapID)
+	all, err := s.store.UnpinnedNodes(ctx, c.ID, mapID)
 	if err != nil {
 		slog.Default().Error("SuggestMapPins: unpinned nodes failed", "map_id", mapID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// gm_private entries are dropped BEFORE the prompt is built. The seed prose is
+	// already public-only, and sending the NAMES of the GM's secrets to the
+	// provider alongside it would reopen the same channel one step to the left —
+	// "The smugglers' cellar" in a candidate list is the secret. The GM can still
+	// pin a private entry by hand; it is only never suggested.
+	candidates := make([]storage.KGNode, 0, len(all))
+	for _, n := range all {
+		if n.GMPrivate {
+			continue
+		}
+		candidates = append(candidates, n)
 	}
 	if len(candidates) == 0 {
 		return connect.NewResponse(&managementv1.SuggestMapPinsResponse{}), nil

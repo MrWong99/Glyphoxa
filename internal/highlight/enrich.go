@@ -43,7 +43,10 @@ const excerptPromptLimit = 1000
 // tenant has no image provider key (no BYOK row AND no GEMINI_API_KEY). The
 // handler treats it as a clean no-op: the Highlight stays intact without media
 // (AC), no retry, no spend.
-var ErrImageNotConfigured = errors.New("highlight: image generation is not configured")
+// It is an ALIAS for imagegen.ErrNotConfigured, not a second value: the factory
+// is shared with generated Maps (#541) and two distinct sentinels would compare
+// unequal under errors.Is, silently disabling one consumer's actionable branch.
+var ErrImageNotConfigured = imagegen.ErrNotConfigured
 
 // GeneratorFactory builds the tenant's image [imagegen.Generator] and returns the
 // model id to meter against. It resolves the BYOK key under the hybrid policy

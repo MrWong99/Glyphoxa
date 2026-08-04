@@ -36,7 +36,12 @@ import (
 
 // ErrNotConfigured is returned when the tenant has no image provider key. It is
 // an actionable refusal, not a failure: the GM is told to add a key.
-var ErrNotConfigured = errors.New("mapgen: image generation is not configured")
+//
+// An ALIAS for imagegen.ErrNotConfigured — the one value the shared factory
+// actually returns. Declaring a second one here made this whole branch dead in
+// production while its unit test, which injected THIS sentinel through a fake
+// factory, passed happily.
+var ErrNotConfigured = imagegen.ErrNotConfigured
 
 // GeneratorFactory builds the tenant's image generator and returns the model id
 // to meter against. It is structurally identical to highlight.GeneratorFactory
