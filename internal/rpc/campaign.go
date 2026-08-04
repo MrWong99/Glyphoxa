@@ -212,6 +212,18 @@ func (s *CampaignServer) SetEmbedder(e Embedder) {
 	s.embedder = e
 }
 
+// SetMapGenerator wires the generated-map engine (#541). Called once at boot
+// before serving; nil leaves GenerateMapImage / SuggestMapPins reporting
+// CodeUnavailable, which is the honest answer for a deployment with no image
+// provider — the Maps tab still uploads.
+func (s *CampaignServer) SetMapGenerator(g MapGenerator) { s.gen = g }
+
+// SetMapPinSuggester wires the "which entries belong on this map" engine (#541).
+// Separate from SetMapGenerator because they need different providers — an image
+// model and a text model — and a deployment can legitimately have one and not the
+// other.
+func (s *CampaignServer) SetMapPinSuggester(g MapPinSuggester) { s.suggest = g }
+
 // SetCampaignBlobSweeper wires the blob sweep the campaign hard delete runs
 // (#308/#538): Highlight clips and Map images alike. Called once at boot before
 // serving; nil leaves the sweep off (the rows still cascade, only their blobs

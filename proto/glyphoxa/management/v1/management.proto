@@ -190,8 +190,13 @@ service CampaignService {
 
   // ── Maps and Pins (#538, ADR-0060) ────────────────────────────────────────
   // A Map's image rides the blob seam and is fetched over a plain HTTP mount
-  // (GET /api/v1/maps/{id}/image), not through these unary calls; the bytes
-  // travel once, on create or re-upload.
+  // (GET /api/v1/maps/{id}/image), not through these unary calls; a SAVED map's
+  // bytes travel once, on create or re-upload.
+  //
+  // GenerateMapImage (#541) is the one exception, and it is not a saved map: it
+  // returns DRAFT bytes that exist only in the GM's browser until they either
+  // save them through CreateMap or discard them. Nothing is stored, so there is
+  // no key to fetch them by.
 
   // ListMaps returns the active campaign's Maps. GM-facing (gm_private Maps
   // included). Read-only.
@@ -212,6 +217,23 @@ service CampaignService {
 
   // UpdateMap saves a Map's editor fields (name, nesting, anchor, privacy).
   rpc UpdateMap(UpdateMapRequest) returns (UpdateMapResponse);
+
+  // GenerateMapImage draws a map from a prompt and returns the DRAFT bytes
+  // (#541, ADR-0060, ADR-0004 amendment). It writes nothing — no row, no blob,
+  // no job — so a discarded draft leaves no trace; saving is the ordinary
+  // CreateMap call with the returned bytes.
+  //
+  // It spends money, so it is a mutation (CSRF-guarded) despite storing nothing,
+  // exactly like GeneratePersona.
+  rpc GenerateMapImage(GenerateMapImageRequest) returns (GenerateMapImageResponse);
+
+  // SuggestMapPins asks the LLM which of the campaign's existing entries belong
+  // on a Map, from its anchor Location's prose (#541). It returns NODE IDS ONLY,
+  // never coordinates: coordinates from a language model are not trustworthy, and
+  // pretending otherwise would put garbage straight into the spatial layer every
+  // later feature reads. The GM drags each suggestion into place, which is the
+  // ordinary CreatePin path.
+  rpc SuggestMapPins(SuggestMapPinsRequest) returns (SuggestMapPinsResponse);
 
   // ReplaceMapImage repoints a Map at new bytes. Pins are untouched: coordinates
   // are normalized, so a re-upload at a different resolution keeps every pin.
@@ -756,7 +778,6 @@ message UpdateMapResponse {
   Map map = 1;
 }
 
-// ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
 // ListNodeAppearancesRequest names the entry whose mentions to list (#545).
 message ListNodeAppearancesRequest {
   // node_id is the entry.
@@ -785,6 +806,55 @@ message ListNodeAppearancesResponse {
   repeated NodeAppearance appearances = 1;
 }
 
+// GenerateMapImageRequest asks for a map draft (#541).
+message GenerateMapImageRequest {
+  // prompt is the GM's own description of the map they want.
+  string prompt = 1;
+  // anchor_node_id optionally seeds the prompt from a Location entry — its public
+  // prose and the names of what publicly resides in it — so the picture matches
+  // the wiki instead of inventing a second world. Empty for a bare prompt.
+  string anchor_node_id = 2;
+}
+
+// GenerateMapImageResponse carries DRAFT bytes. They are not stored anywhere: the
+// GM previews them and either saves them through CreateMap or discards them.
+message GenerateMapImageResponse {
+  // image_bytes is the generated image.
+  bytes image_bytes = 1;
+  // content_type is its media type, for CreateMap and for the preview.
+  string content_type = 2;
+  // model is what generated it, so the GM knows what they are paying for.
+  string model = 3;
+  // prompt is the FULLY COMPOSED prompt, not just what the GM typed — a
+  // location-seeded generation folds in wiki prose, and the GM should be able to
+  // see what was actually asked for.
+  string prompt = 4;
+}
+
+// SuggestMapPinsRequest asks which existing entries belong on a Map (#541).
+message SuggestMapPinsRequest {
+  // map_id is the Map to suggest for; its anchor Location supplies the prose.
+  string map_id = 1;
+}
+
+// SuggestedPin is one suggestion: an entry that already exists, never a new one
+// and never a position.
+message SuggestedPin {
+  // node_id is an EXISTING Node in this campaign.
+  string node_id = 1;
+  // name is that Node's name, for display.
+  string name = 2;
+  // node_type is its type, for the type colour.
+  NodeType node_type = 3;
+}
+
+// SuggestMapPinsResponse carries the suggestions, deduped and already filtered to
+// entries not yet pinned on that Map.
+message SuggestMapPinsResponse {
+  repeated SuggestedPin suggestions = 1;
+}
+
+// ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
 message ReplaceMapImageRequest {
   string id = 1;
   bytes image_bytes = 2;

@@ -33,6 +33,11 @@ type campaignMaps struct {
 	// tenant resolves the request's Tenant, which the blob key is prefixed with
 	// (ADR-0048 makes the tenant prefix mandatory).
 	tenant func(ctx context.Context) (uuid.UUID, bool)
+	// gen and suggest back the generated-map draft flow (#541). Both nil in a
+	// composition with no image provider, which the handlers report rather than
+	// panic on. They store NOTHING — see campaign_map_generate.go.
+	gen     MapGenerator
+	suggest MapPinSuggester
 }
 
 // campaignMapStore is the narrow Map/Pin surface the module needs; *storage.Store

@@ -1,10 +1,10 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, EyeOff, Plus, Trash2, Upload } from "lucide-react";
+import { ChevronRight, EyeOff, Plus, Sparkles, Trash2, Upload } from "lucide-react";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Map as PbMap, Node as PbNode, Pin } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -33,6 +33,8 @@ const DRAG_SLOP_PX = 4;
 export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => void }) {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listMaps, {});
+  // The Location entries a generated map can be seeded from (#541).
+  const nodesQuery = useQuery(CampaignService.method.listNodes, {});
   const [openID, setOpenID] = useState<string | null>(null);
 
   const maps = useMemo(() => listQuery.data?.maps ?? [], [listQuery.data]);
@@ -78,11 +80,21 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
             {m.gmPrivate && <EyeOff size={11} aria-label="GM private" />}
           </button>
         ))}
-        <NewMapButton onCreated={(id) => { invalidate(); setOpenID(id); }} maps={maps} />
+        <NewMapButton
+          onCreated={(id) => {
+            invalidate();
+            setOpenID(id);
+          }}
+          maps={maps}
+          nodes={nodesQuery.data?.nodes ?? []}
+        />
       </div>
 
       {currentID ? (
+        // key={currentID}: a suggestion answers "does this belong on THIS map",
+        // so its highlight must not survive navigating to another one.
         <MapView
+          key={currentID}
           mapID={currentID}
           onNavigate={setOpenID}
           onChanged={invalidate}
@@ -125,6 +137,12 @@ function MapView({
     { id: string; x: number; y: number; fromClientX: number; fromClientY: number; moved: boolean } | null
   >(null);
   const [placing, setPlacing] = useState<PbNode | null>(null);
+  // Suggested pins (#541): a set of node ids the model thinks belong here. It is
+  // a HIGHLIGHT over the existing tray, never a second list and never a position.
+  const [suggested, setSuggested] = useState<ReadonlySet<string>>(() => new Set());
+  const suggest = useMutation(CampaignService.method.suggestMapPins, {
+    onSuccess: (res) => setSuggested(new Set(res.suggestions.map((s) => s.nodeId))),
+  });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -288,9 +306,36 @@ function MapView({
         </div>
       )}
 
-      {/* The unpinned tray: placing the world is a drag, not a form. */}
+      {/* The unpinned tray: placing the world is a drag, not a form.
+          Suggestions (#541) MARK entries already in this tray rather than opening
+          a second list — the model narrows what to look at, and the placing
+          gesture is untouched, which is what keeps "suggest, never place" true. */}
       <div className="gx-maps__tray">
-        <span className="gx-field__label">Not on this map yet</span>
+        <div className="gx-maps__tray-head">
+          <span className="gx-field__label">Not on this map yet</span>
+          {view.unpinned.length > 0 && map.anchorNodeId !== "" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              iconStart={<Sparkles size={12} />}
+              disabled={suggest.isPending}
+              onClick={() => suggest.mutate({ mapId: map.id })}
+            >
+              {suggest.isPending ? "Reading the entry…" : "Suggest pins"}
+            </Button>
+          )}
+        </div>
+        {suggest.isError && (
+          <span className="gx-editor__status gx-editor__status--error" role="alert">
+            {suggest.error.message}
+          </span>
+        )}
+        {suggested.size > 0 && (
+          <span className="gx-field__hint">
+            Highlighted entries look like they belong here. Click one, then click the map to place it
+            — nothing moves until you do.
+          </span>
+        )}
         {view.unpinned.length === 0 ? (
           <span className="gx-field__hint">Everything placeable is already pinned here.</span>
         ) : (
@@ -303,6 +348,10 @@ function MapView({
                     type="button"
                     className="gx-kg-chip"
                     aria-pressed={placing?.id === n.id}
+                    data-suggested={suggested.has(n.id) || undefined}
+                    aria-label={
+                      suggested.has(n.id) ? `${n.name} — suggested for this map` : undefined
+                    }
                     style={{ color: meta.color, background: alphaBg(meta.color) }}
                     onClick={() => setPlacing((p) => (p?.id === n.id ? null : n))}
                   >
@@ -389,10 +438,26 @@ function PinGlyph({
   );
 }
 
-// NewMapButton uploads an image and creates the Map around it. The image's real
-// pixel dimensions are measured here, client-side, because only the browser has
-// decoded it — the server stores what it is told and uses it for aspect ratio only.
-function NewMapButton({ onCreated, maps }: { onCreated: (id: string) => void; maps: PbMap[] }) {
+// NewMapButton adds a Map, from an upload or from a generated draft (#538, #541).
+//
+// The image's real pixel dimensions are measured here, client-side, because only
+// the browser has decoded it — the server stores what it is told and uses it for
+// aspect ratio only.
+//
+// Generate mode is a DRAFT-REVIEW flow, deliberately identical in shape to the
+// Knowledge generator: prompt → preview → save or discard. Nothing reaches
+// campaign_map until the GM presses Add map, and discarding costs one closed
+// dialog and zero RPCs. The bytes only ever existed here.
+function NewMapButton({
+  onCreated,
+  maps,
+  nodes,
+}: {
+  onCreated: (id: string) => void;
+  maps: PbMap[];
+  /** Location entries, for seeding a generated map from the wiki. */
+  nodes: PbNode[];
+}) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [parentID, setParentID] = useState("");
@@ -401,26 +466,99 @@ function NewMapButton({ onCreated, maps }: { onCreated: (id: string) => void; ma
   const [error, setError] = useState<string | null>(null);
   const create = useMutation(CampaignService.method.createMap);
 
+  // Generate mode (#541). `draft` is the unsaved image: bytes plus the object URL
+  // the preview renders. It is the ONLY place those bytes exist.
+  const [mode, setMode] = useState<"upload" | "generate">("upload");
+  const [prompt, setPrompt] = useState("");
+  const [anchorID, setAnchorID] = useState("");
+  const [draft, setDraft] = useState<{ bytes: Uint8Array; contentType: string; url: string } | null>(
+    null,
+  );
+  const generate = useMutation(CampaignService.method.generateMapImage);
+
+  // Object URLs are a leak if they outlive their draft, and a draft is discarded
+  // far more often than it is saved — that is the point of a review step.
+  //
+  // The live URL is mirrored in a REF because the unmount cleanup must revoke it
+  // without touching state: React discards updates to an unmounted component, so
+  // revoking inside a setState updater relies on that updater being run at all.
+  const draftURL = useRef<string | null>(null);
+  const dropDraft = () => {
+    if (draftURL.current) {
+      URL.revokeObjectURL(draftURL.current);
+      draftURL.current = null;
+    }
+    setDraft(null);
+  };
+  useEffect(
+    () => () => {
+      if (draftURL.current) URL.revokeObjectURL(draftURL.current);
+    },
+    [],
+  );
+
+  const runGenerate = async () => {
+    setError(null);
+    if (prompt.trim() === "") return;
+    try {
+      const res = await generate.mutateAsync({ prompt: prompt.trim(), anchorNodeId: anchorID });
+      dropDraft();
+      const blob = new Blob([res.imageBytes as BlobPart], { type: res.contentType });
+      const url = URL.createObjectURL(blob);
+      draftURL.current = url;
+      setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const reset = () => {
+    dropDraft();
+    setOpen(false);
+    setName("");
+    setFile(null);
+    setParentID("");
+    setGmPrivate(false);
+    setPrompt("");
+    setAnchorID("");
+  };
+
   const submit = async () => {
     setError(null);
-    if (!file || name.trim() === "") return;
+    if (name.trim() === "") return;
+    // Both doors land in the SAME CreateMap call. A generated map is not a
+    // different kind of map — it is a map whose bytes came from a model.
+    //
+    // The bytes and the anchor both key off MODE, and switching mode drops the
+    // other source. Keying the bytes off "is there a draft" while keying the
+    // anchor off the mode gave two conditions that could disagree: a GM who
+    // generated, switched back to Upload and picked a file saved the GENERATED
+    // bytes under the file's name.
+    const source: { bytes: Uint8Array; contentType: string } | null =
+      mode === "generate"
+        ? draft
+          ? { bytes: draft.bytes, contentType: draft.contentType }
+          : null
+        : file
+          ? { bytes: new Uint8Array(await file.arrayBuffer()), contentType: file.type }
+          : null;
+    if (!source) return;
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const dims = await imageDimensions(file);
+      const dims = await imageDimensions(new Blob([source.bytes as BlobPart], { type: source.contentType }));
       const res = await create.mutateAsync({
         name: name.trim(),
-        imageBytes: bytes,
-        contentType: file.type,
+        imageBytes: source.bytes,
+        contentType: source.contentType,
         widthPx: dims.width,
         heightPx: dims.height,
         parentMapId: parentID,
+        // The anchor is carried through on save. Without it a generated map lands
+        // with a NULL anchor and SuggestMapPins has no prose to read — the feature
+        // would be unreachable for exactly the flow that seeded it.
+        anchorNodeId: mode === "generate" ? anchorID : "",
         gmPrivate,
       });
-      setOpen(false);
-      setName("");
-      setFile(null);
-      setParentID("");
-      setGmPrivate(false);
+      reset();
       if (res.map) onCreated(res.map.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -435,20 +573,116 @@ function NewMapButton({ onCreated, maps }: { onCreated: (id: string) => void; ma
     );
   }
 
+  const locations = nodes.filter((n) => n.nodeType === NodeType.LOCATION);
+
   return (
     <div className="gx-maps__new" role="dialog" aria-label="Add map">
-      <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Saltmarsh" />
-      <div className="gx-field">
-        <label className="gx-field__label" htmlFor="gx-map-file">
-          Image
-        </label>
-        <input
-          id="gx-map-file"
-          type="file"
-          accept="image/*"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        />
+      <div className="gx-maps__modes" role="group" aria-label="Image source">
+        <button
+          type="button"
+          className="gx-kg-chip"
+          aria-label="Upload an image"
+          aria-pressed={mode === "upload"}
+          onClick={() => {
+            setMode("upload");
+            dropDraft();
+          }}
+        >
+          <Upload size={12} /> Upload
+        </button>
+        <button
+          type="button"
+          className="gx-kg-chip"
+          aria-label="Generate an image"
+          aria-pressed={mode === "generate"}
+          onClick={() => {
+            setMode("generate");
+            setFile(null);
+          }}
+        >
+          <Sparkles size={12} /> Generate
+        </button>
       </div>
+
+      <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Saltmarsh" />
+
+      {mode === "upload" ? (
+        <div className="gx-field">
+          <label className="gx-field__label" htmlFor="gx-map-file">
+            Image
+          </label>
+          <input
+            id="gx-map-file"
+            type="file"
+            accept="image/*"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="gx-field">
+            <label className="gx-field__label" htmlFor="gx-map-prompt">
+              What should the map show?
+            </label>
+            <span className="gx-field__hint">
+              Costs a generation each time. Nothing is saved until you press Add map.
+            </span>
+            <textarea
+              id="gx-map-prompt"
+              className="gx-input gx-maps__prompt"
+              rows={3}
+              value={prompt}
+              placeholder="a damp fishing town around a grey estuary, docks to the south"
+              onChange={(e) => setPrompt(e.target.value)}
+            />
+          </div>
+          {locations.length > 0 && (
+            <div className="gx-field">
+              <label className="gx-field__label" htmlFor="gx-map-anchor">
+                Base on entry
+              </label>
+              <span className="gx-field__hint">
+                Folds that entry&apos;s public description and what resides in it into the prompt, so
+                the picture matches the wiki.
+              </span>
+              <select
+                id="gx-map-anchor"
+                className="gx-input"
+                value={anchorID}
+                onChange={(e) => setAnchorID(e.target.value)}
+              >
+                <option value="">— Prompt only —</option>
+                {locations.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className="gx-kg-editor__actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              iconStart={<Sparkles size={13} />}
+              disabled={generate.isPending || prompt.trim() === ""}
+              onClick={() => void runGenerate()}
+            >
+              {generate.isPending ? "Generating…" : draft ? "Regenerate" : "Generate"}
+            </Button>
+            {draft && (
+              <Button variant="ghost" size="sm" onClick={dropDraft} disabled={generate.isPending}>
+                Discard
+              </Button>
+            )}
+          </div>
+          {draft && (
+            <div className="gx-maps__draft">
+              <img className="gx-maps__draft-img" src={draft.url} alt="Generated map draft" />
+            </div>
+          )}
+        </>
+      )}
       {maps.length > 0 && (
         <div className="gx-field">
           <label className="gx-field__label" htmlFor="gx-map-parent">
@@ -471,10 +705,18 @@ function NewMapButton({ onCreated, maps }: { onCreated: (id: string) => void; ma
       )}
       <Switch label="GM private — never shown to players" checked={gmPrivate} onCheckedChange={setGmPrivate} />
       <div className="gx-kg-editor__actions">
-        <Button variant="primary" disabled={create.isPending || !file || name.trim() === ""} onClick={() => void submit()}>
-          {create.isPending ? "Uploading…" : "Add map"}
+        <Button
+          variant="primary"
+          disabled={
+            create.isPending ||
+            (mode === "generate" ? !draft : !file) ||
+            name.trim() === ""
+          }
+          onClick={() => void submit()}
+        >
+          {create.isPending ? "Saving…" : "Add map"}
         </Button>
-        <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
+        <Button variant="ghost" onClick={reset} disabled={create.isPending}>
           Cancel
         </Button>
         {error && (
@@ -487,8 +729,13 @@ function NewMapButton({ onCreated, maps }: { onCreated: (id: string) => void; ma
   );
 }
 
-/** imageDimensions decodes just enough of the file to read its pixel size. */
-function imageDimensions(file: File): Promise<{ width: number; height: number }> {
+/**
+ * imageDimensions decodes just enough of a blob to read its pixel size.
+ *
+ * Takes a Blob rather than a File so it serves both doors: an uploaded File and
+ * the generated bytes (#541), which never were a file.
+ */
+function imageDimensions(file: Blob): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();

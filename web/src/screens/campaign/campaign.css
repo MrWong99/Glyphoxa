@@ -1702,6 +1702,50 @@
 .gx-boards__list li {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
+}
+
+/* ── Generated maps (#541) ───────────────────────────────────────────────── */
+
+.gx-maps__modes {
+  display: flex;
+  gap: var(--spacing-xs);
+}
+
+.gx-maps__prompt {
+  resize: vertical;
+  min-height: 4.5rem;
+  font-family: inherit;
+}
+
+/* The draft frame reads as PROVISIONAL: a dashed border, the same visual grammar
+   the graph's proposal ghosts use. A preview that looks like a saved map invites
+   the GM to assume it is one. */
+.gx-maps__draft {
+  border: 2px dashed var(--accent, #ffcf5a);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--spacing-xs);
+  background: var(--surface-sunken, #12151c);
+}
+
+.gx-maps__draft-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.gx-maps__tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+/* A suggested entry is MARKED in place, not moved into a second list: the model
+   narrows what to look at, and the GM's placing gesture is unchanged. */
+.gx-maps__tray .gx-kg-chip[data-suggested] {
+  box-shadow: 0 0 0 1px var(--accent, #ffcf5a);
 }
 
 /* ── Appearances (#545) ──────────────────────────────────────────────────── */
