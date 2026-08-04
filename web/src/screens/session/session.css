@@ -284,9 +284,9 @@
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
   border-radius: var(--radius-md);
-  border: 1px solid var(--danger, #b3261e);
-  background: color-mix(in srgb, var(--danger, #b3261e) 12%, transparent);
-  color: var(--danger, #b3261e);
+  border: 1px solid var(--status-danger);
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
   font-size: 0.875rem;
 }
 
@@ -296,9 +296,9 @@
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
   border-radius: var(--radius-md);
-  border: 1px solid var(--warning, #a86800);
-  background: color-mix(in srgb, var(--warning, #a86800) 12%, transparent);
-  color: var(--warning, #a86800);
+  border: 1px solid var(--status-warning);
+  background: var(--status-warning-bg);
+  color: var(--status-warning);
   font-size: 0.875rem;
 }
 
@@ -651,7 +651,7 @@
   padding: var(--spacing-sm);
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
   border-radius: var(--radius-md, 8px);
-  background: var(--surface-sunken, rgba(0, 0, 0, 0.15));
+  background: var(--surface-inset);
   width: 100%;
 }
 
@@ -670,7 +670,7 @@
 }
 
 .gx-highlight-share__error {
-  color: var(--danger, #f87171);
+  color: var(--status-danger);
 }
 
 .gx-highlight-share__download {
@@ -684,7 +684,7 @@
 }
 
 .gx-highlight-share__download:hover {
-  color: var(--text);
+  color: var(--text-default);
   text-decoration: underline;
 }
 
@@ -698,7 +698,7 @@
 }
 
 .gx-highlights__error {
-  color: var(--danger, #ff4f5e);
+  color: var(--status-danger);
 }
 
 /* Non-fatal refresh blip: the last loaded set stays on screen (AC2 — never

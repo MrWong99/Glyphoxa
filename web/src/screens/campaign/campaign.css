@@ -179,11 +179,11 @@
 
 .gx-kg-iconbtn:hover {
   color: var(--text-strong);
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  background: var(--surface-card-hover);
 }
 
 .gx-kg-iconbtn--danger:hover {
-  color: var(--danger, #ff4f5e);
+  color: var(--status-danger);
 }
 
 .gx-kg-iconbtn:disabled {
@@ -270,7 +270,7 @@
 }
 
 .gx-kg-editor__title {
-  font-size: var(--heading-sm, var(--body-lg));
+  font-size: var(--body-lg);
   color: var(--text-strong);
   margin: 0;
 }
@@ -302,7 +302,7 @@
 /* A GM-only fact is marked on the row itself, so the one line that never reaches
    the table is obvious while scanning a public entry. */
 .gx-kg-aspect[data-private] {
-  border-left: 2px solid var(--accent, #ffcf5a);
+  border-left: 2px solid var(--gold);
   padding-left: var(--spacing-xs);
 }
 
@@ -650,7 +650,7 @@
 .gx-kg-relations__list {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-2xs, 4px);
+  gap: var(--spacing-xs);
 }
 
 .gx-kg-relations__list--incoming {
@@ -662,12 +662,12 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
-  padding: var(--spacing-2xs, 4px) var(--spacing-xs);
+  padding: var(--spacing-xs);
   border-radius: var(--radius-sm, 8px);
 }
 
 .gx-kg-edge:hover {
-  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  background: var(--surface-card-hover);
 }
 
 .gx-kg-edge--incoming {
@@ -845,7 +845,7 @@
   background: var(--surface-card);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover, 0 8px 24px rgba(0, 0, 0, 0.4));
+  box-shadow: var(--shadow-md);
 }
 
 .gx-playerform__picker-item {
@@ -931,7 +931,7 @@
   gap: 4px;
   padding: var(--spacing-sm);
   border-radius: var(--radius-sm);
-  background: var(--surface-sunken, rgba(127, 127, 127, 0.08));
+  background: var(--surface-inset);
 }
 
 .gx-proposal-card__similar-title {
@@ -983,7 +983,7 @@
   gap: 4px;
   align-self: flex-start;
   padding: 4px 8px;
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-subtle);
@@ -992,7 +992,7 @@
 }
 
 .gx-proposal-card__similar-btn:hover {
-  color: var(--text);
+  color: var(--text-default);
 }
 
 /* ── Knowledge Graph view (#534) ─────────────────────────────────────────── */
@@ -1029,7 +1029,7 @@
   align-items: center;
   gap: 4px;
   padding: 2px var(--spacing-xs);
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm, 4px);
   background: transparent;
   color: var(--text-muted);
@@ -1063,9 +1063,9 @@
   /* Tall enough to be a map rather than a strip, capped so it never pushes the
      editor rail off-screen. */
   height: clamp(320px, 60vh, 720px);
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
-  background: var(--surface-sunken, #12151c);
+  background: var(--surface-inset);
   touch-action: none;
 }
 
@@ -1080,7 +1080,7 @@
 }
 
 .gx-kg-graph__node:focus-visible circle {
-  outline: 2px solid var(--accent, #ffcf5a);
+  outline: 2px solid var(--rune);
   outline-offset: 2px;
 }
 
@@ -1089,10 +1089,10 @@
 }
 
 .gx-kg-graph__label {
-  fill: var(--text, #d7dae3);
+  fill: var(--text-default);
   font-size: 11px;
   paint-order: stroke;
-  stroke: var(--surface-sunken, #12151c);
+  stroke: var(--surface-inset);
   stroke-width: 3px;
   pointer-events: none;
 }
@@ -1102,9 +1102,9 @@
   flex-direction: column;
   gap: var(--spacing-sm);
   padding: var(--spacing-md);
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
-  background: var(--surface, #171b23);
+  background: var(--surface-card);
 }
 
 .gx-kg-graph__picker-text {
@@ -1135,7 +1135,7 @@
 .gx-kg-lens__truncated,
 .gx-kg-lens__empty {
   font-size: var(--body-sm);
-  color: var(--accent, #ffcf5a);
+  color: var(--status-warning);
   margin: 0;
 }
 
@@ -1161,7 +1161,7 @@
    fewer relations — a different problem, so a different shape. */
 .gx-kg-graph__overflow {
   fill: none;
-  stroke: var(--accent, #ffcf5a);
+  stroke: var(--status-warning);
   stroke-width: 1;
   stroke-dasharray: 1 3;
 }
@@ -1172,7 +1172,7 @@
 }
 
 .gx-kg-graph__node[data-lens="dropped"] .gx-kg-graph__label {
-  fill: var(--accent, #ffcf5a);
+  fill: var(--status-warning);
 }
 
 .gx-kg-graph__node[data-lens="lit"] circle {
@@ -1196,8 +1196,8 @@
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: var(--mono-sm);
-  background: var(--surface-sunken, #12151c);
-  border: 1px solid var(--border, #2a2f3a);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm, 4px);
 }
 
@@ -1293,7 +1293,7 @@
   gap: var(--spacing-sm);
   flex-wrap: wrap;
   padding: var(--spacing-xs) 0;
-  border-bottom: 1px solid var(--border, #2a2f3a);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .gx-prep__name {
@@ -1320,11 +1320,11 @@
   align-items: center;
   gap: 3px;
   padding: 1px var(--spacing-xs);
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm, 4px);
   background: none;
   font-size: var(--body-sm);
-  color: var(--accent, #ffcf5a);
+  color: var(--status-warning);
   cursor: pointer;
 }
 
@@ -1394,9 +1394,9 @@
 .gx-maps__frame {
   position: relative;
   overflow: auto;
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
-  background: var(--surface-sunken, #12151c);
+  background: var(--surface-inset);
   max-height: clamp(320px, 65vh, 820px);
 }
 
@@ -1461,9 +1461,9 @@
 
 .gx-maps__pin-label {
   font-size: var(--body-sm);
-  color: var(--text);
+  color: var(--text-default);
   paint-order: stroke;
-  text-shadow: 0 0 3px var(--surface-sunken, #12151c);
+  text-shadow: 0 0 3px var(--surface-inset);
   pointer-events: none;
 }
 
@@ -1504,7 +1504,7 @@
 
 .gx-maps__hint {
   font-size: var(--body-sm);
-  color: var(--accent, #ffcf5a);
+  color: var(--gold);
 }
 
 .gx-maps__new {
@@ -1512,9 +1512,9 @@
   flex-direction: column;
   gap: var(--spacing-sm);
   padding: var(--spacing-md);
-  border: 1px solid var(--border, #2a2f3a);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
-  background: var(--surface, #171b23);
+  background: var(--surface-card);
   width: 100%;
 }
 
@@ -1577,7 +1577,7 @@
 
 .gx-kg-graph__proposed-node .gx-kg-graph__label {
   font-style: italic;
-  fill: var(--accent, #ffcf5a);
+  fill: var(--gold);
 }
 
 .gx-kg-graph__proposed-node:focus-visible circle,
@@ -1587,7 +1587,7 @@
 }
 
 .gx-kg-graph__proposed-edge line {
-  stroke: var(--accent, #ffcf5a);
+  stroke: var(--gold);
   stroke-width: 1.5;
   stroke-dasharray: 5 4;
   stroke-opacity: 0.8;
@@ -1607,7 +1607,7 @@
 }
 
 .gx-kg-graph__proposed-edge line.gx-kg-graph__proposed-hit:focus-visible {
-  stroke: var(--accent, #ffcf5a);
+  stroke: var(--rune);
   stroke-opacity: 0.35;
 }
 
@@ -1618,7 +1618,7 @@
    on. The ring itself is the review target, widened by a transparent hit ring. */
 .gx-kg-graph__fact-mark circle {
   fill: none;
-  stroke: var(--accent, #ffcf5a);
+  stroke: var(--gold);
   stroke-width: 1.5;
   stroke-dasharray: 3 4;
   cursor: pointer;
@@ -1638,7 +1638,7 @@
 }
 
 .gx-kg-chip--proposals {
-  color: var(--accent, #ffcf5a);
+  color: var(--gold);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1649,9 +1649,9 @@
   flex-direction: column;
   gap: var(--spacing-sm);
   padding: var(--spacing-md);
-  border: 1px solid var(--accent, #ffcf5a);
+  border: 1px solid var(--gold);
   border-radius: var(--radius-md, 8px);
-  background: var(--surface, #171b23);
+  background: var(--surface-card);
 }
 
 .gx-kg-graph__unplaced {
@@ -1780,10 +1780,10 @@
    the graph's proposal ghosts use. A preview that looks like a saved map invites
    the GM to assume it is one. */
 .gx-maps__draft {
-  border: 2px dashed var(--accent, #ffcf5a);
+  border: 2px dashed var(--gold);
   border-radius: var(--radius-md, 8px);
   padding: var(--spacing-xs);
-  background: var(--surface-sunken, #12151c);
+  background: var(--surface-inset);
 }
 
 .gx-maps__draft-img {
@@ -1803,7 +1803,7 @@
 /* A suggested entry is MARKED in place, not moved into a second list: the model
    narrows what to look at, and the GM's placing gesture is unchanged. */
 .gx-maps__tray .gx-kg-chip[data-suggested] {
-  box-shadow: 0 0 0 1px var(--accent, #ffcf5a);
+  box-shadow: 0 0 0 1px var(--gold);
 }
 
 /* ── Appearances (#545) ──────────────────────────────────────────────────── */
@@ -1834,14 +1834,14 @@
   border: 0;
   border-radius: var(--radius-sm, 4px);
   background: transparent;
-  color: var(--text);
+  color: var(--text-default);
   font: inherit;
   cursor: pointer;
 }
 
 .gx-kg-appearances__row:hover,
 .gx-kg-appearances__row:focus-visible {
-  background: var(--surface-sunken, #12151c);
+  background: var(--surface-inset);
 }
 
 .gx-kg-appearances__who {
@@ -1851,10 +1851,27 @@
 }
 
 /* The same speaker vocabulary the transcript uses, so a line reads the same in
-   both places. */
-.gx-kg-appearances__who[data-kind="npc"],
+   both places. That means mirroring ALL FOUR kinds .gx-line__who paints, not
+   just the Agent ones: `kind` arrives straight off NodeAppearance as one of
+   gm/player/npc/butler, so a rule that covers only two leaves the other two on
+   the muted base while the transcript gives them their own colour. One shared
+   npc+butler rule also painted every Character NPC in the Butler's gold, which
+   is the one colour on this list that means a specific speaker. The muted base
+   above now only catches a kind we do not recognise. */
+.gx-kg-appearances__who[data-kind="gm"] {
+  color: var(--text-strong);
+}
+
+.gx-kg-appearances__who[data-kind="player"] {
+  color: var(--rune);
+}
+
 .gx-kg-appearances__who[data-kind="butler"] {
-  color: var(--accent, #ffcf5a);
+  color: var(--gold);
+}
+
+.gx-kg-appearances__who[data-kind="npc"] {
+  color: var(--text-default);
 }
 
 .gx-kg-appearances__text {

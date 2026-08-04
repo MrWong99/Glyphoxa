@@ -65,8 +65,8 @@
   cursor: default;
 }
 .gx-campaign-row-actions__menu .gx-select__item--danger {
-  color: var(--danger, #e5484d);
+  color: var(--status-danger);
 }
 .gx-campaign-row-actions__menu .gx-select__item--danger:hover:not(:disabled) {
-  background: rgba(229, 72, 77, 0.12);
+  background: var(--status-danger-bg);
 }
