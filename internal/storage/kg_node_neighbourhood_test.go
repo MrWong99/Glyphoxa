@@ -4,9 +4,13 @@ package storage_test
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -272,4 +276,102 @@ func TestAgentNodeFacts_StrongestFeelingStillWins(t *testing.T) {
 		return
 	}
 	t.Fatal("Mira did not surface at all")
+}
+
+// TestAppearances_DoNotChangeWhatAnNPCKnows is #545's AC4, and the reason the
+// Appearances index is deliberately NOT an Edge.
+//
+// An Edge is world truth that AgentNodeFacts walks into an NPC's Hot Context. If
+// a mention were modelled as one, "the party talked about the ogre" would become
+// "the ogre is connected to the party" in the NPC's head — a fact nobody wrote,
+// recited back at the table. So the index lives outside the graph, and this test
+// pins that: index a session hard, and the NPC's facts are byte-identical.
+func TestAppearances_DoNotChangeWhatAnNPCKnows(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	own := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart the innkeeper")
+	agentID := linkAgent(t, st, campaignID, own.ID, "Bart")
+	inn := mkNode(t, st, campaignID, storage.KGNodeLocation, "The Inn")
+	mkEdge(t, st, campaignID, own.ID, inn.ID, storage.KGEdgeResidesIn)
+
+	before, err := st.AgentNodeFacts(ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentNodeFacts before: %v", err)
+	}
+	edgesBefore := countRows(t, pool, "kg_edge", campaignID)
+
+	// Record appearances for BOTH nodes, several times over.
+	sess, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	var rows []storage.NodeAppearance
+	for i, nodeID := range []uuid.UUID{own.ID, inn.ID, own.ID} {
+		lineID := fmt.Sprintf("u:%d", i)
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO transcript_line (voice_session_id, campaign_id, line_id, seq, who, kind, ts, text)
+			 VALUES ($1,$2,$3,$4,'GM','gm',now(),'they spoke of it')
+			 ON CONFLICT DO NOTHING`,
+			sess.ID, campaignID, lineID, i); err != nil {
+			t.Fatalf("seed line: %v", err)
+		}
+		rows = append(rows, storage.NodeAppearance{
+			NodeID: nodeID, CampaignID: campaignID, VoiceSessionID: sess.ID,
+			LineID: lineID, At: time.Now(),
+		})
+	}
+	if err := st.RecordNodeAppearances(ctx, rows); err != nil {
+		t.Fatalf("RecordNodeAppearances: %v", err)
+	}
+
+	after, err := st.AgentNodeFacts(ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentNodeFacts after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("indexing changed the NPC's facts:\nbefore %+v\nafter  %+v", before, after)
+	}
+	if got := countRows(t, pool, "kg_edge", campaignID); got != edgesBefore {
+		t.Errorf("indexing created %d edges", got-edgesBefore)
+	}
+
+	// And the index itself works: the entry knows where it was mentioned.
+	hits, err := st.ListNodeAppearances(ctx, campaignID, own.ID, 0)
+	if err != nil {
+		t.Fatalf("ListNodeAppearances: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("appearances = %d, want the two lines Bart was named in", len(hits))
+	}
+	if hits[0].Text != "they spoke of it" || hits[0].Who != "GM" {
+		t.Errorf("the line did not travel with the appearance: %+v", hits[0])
+	}
+
+	// Retraction (#437, ADR-0040): deleting a Line takes its appearances with it.
+	// A GM who retracts something said at the table must not find it still listed.
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM transcript_line WHERE voice_session_id = $1 AND line_id = 'u:0'`, sess.ID); err != nil {
+		t.Fatalf("delete line: %v", err)
+	}
+	left, err := st.ListNodeAppearances(ctx, campaignID, own.ID, 0)
+	if err != nil {
+		t.Fatalf("ListNodeAppearances after retraction: %v", err)
+	}
+	if len(left) != 1 {
+		t.Errorf("appearances after retracting a line = %d, want 1", len(left))
+	}
+}
+
+// countRows counts a campaign's rows in a table.
+func countRows(t *testing.T, pool *pgxpool.Pool, table string, campaignID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM "+table+" WHERE campaign_id = $1", campaignID).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
 }

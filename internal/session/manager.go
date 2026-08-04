@@ -301,6 +301,8 @@ type Manager struct {
 	usage      UsageWriter         // persists the Usage Ledger at loop exit (ADR-0054); nil = no durable usage
 	allowance  AllowanceChecker    // the Start-time plan-allowance gate (ADR-0055 gate (b)); nil = no gate
 	clients    ClientSource        // resolves the Tenant's standing Discord client per session (#489); nil = base provider
+	// appearances enqueues the end-of-session KG appearance index (#545); nil off.
+	appearances AppearanceIndexer
 	// gmSpeakerForTenant overlays cfg.GMSpeaker per Start with the session's Tenant
 	// (#490); nil leaves the base deployment-wide gate.
 	gmSpeakerForTenant func(tenantID uuid.UUID, discordUserID string) bool
@@ -331,6 +333,14 @@ type Manager struct {
 	// per-Tenant-single and cap-K invariants hold even while the I/O is unlocked.
 	reservations map[uuid.UUID]struct{}
 	closed       bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
+}
+
+// AppearanceIndexer schedules the Knowledge Graph appearance index for an ended
+// Voice Session (#545, ADR-0008 amendment). main.go wires it over the durable job
+// enqueuer, so the matching work happens on the job runner and never on a voice
+// turn — the session-end path only enqueues.
+type AppearanceIndexer interface {
+	IndexSession(ctx context.Context, sessionID uuid.UUID) error
 }
 
 // Deps are the Manager's construction-time collaborator seams (#448): the six
@@ -369,6 +379,11 @@ type Deps struct {
 	// filling the reserved Hot Context KG-facts slot per turn. nil leaves facts
 	// off (the prompt stays byte-identical).
 	Facts agent.FactsRecaller
+	// Appearances enqueues the end-of-session Knowledge Graph appearance index (see
+	// [AppearanceIndexer])
+	// (#545). nil disables indexing entirely — the wiki simply has no "where was
+	// this mentioned" list, which is what every deployment had before this slice.
+	Appearances AppearanceIndexer
 	// Location is the party-location recaller wired onto the base voice config
 	// (#540, ADR-0060), filling the location slot of the VOLATILE Hot Context tail
 	// per turn. nil leaves the clause off entirely — which is what the prompt looked
@@ -478,6 +493,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	m.base.Memory = deps.Memory
 	m.base.Facts = deps.Facts
 	m.base.Location = deps.Location
+	m.appearances = deps.Appearances
 	m.base.ToolDeps = deps.Tools
 	// cfg.Highlights is NO LONGER wired on the base config (#488): with N concurrent
 	// sessions the detector Sink must be per-session, so Start sets cfg.Highlights to
@@ -928,6 +944,23 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 			m.log.Warn("finalize highlights before end", "err", err, "voice_session", as.session.ID)
 		}
 		hlCancel()
+	}
+
+	// Index this session's Transcript Lines against the Campaign's Knowledge Graph
+	// (#545, ADR-0008 amendment): "when did we last see that ogre".
+	//
+	// AFTER the transcript Finalize above, deliberately — the job reads
+	// transcript_line, and enqueuing before the drain would index a session that is
+	// still missing its last lines. It is an ENQUEUE, not the work: the matching
+	// runs on the job runner, so nothing here is on the voice turn's critical path.
+	// Best-effort with its own budget, like its neighbours: a missing index is a
+	// missing convenience, never a reason a session cannot end.
+	if m.appearances != nil {
+		apCtx, apCancel := context.WithTimeout(base, m.endTimeout)
+		if err := m.appearances.IndexSession(apCtx, as.session.ID); err != nil {
+			m.log.Warn("enqueue appearance index before end", "err", err, "voice_session", as.session.ID)
+		}
+		apCancel()
 	}
 
 	// Close the session's open Transcript Chunk (#104, ADR-0011): a lone trailing

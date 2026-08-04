@@ -55,3 +55,24 @@ What changed is that Edges stopped being decoration. `AgentNodeFacts` walks them
 - Still **no graph database**. Everything here is one or two hops over a few hundred rows; the original reasoning holds and strengthens.
 
 The v2.x temporal line is untouched by this amendment.
+
+## Fifth amendment: Appearances are an index, not Edges (2026-08-04, #545)
+
+"When did we last see that ogre" is the question a GM asks constantly and the KG cannot answer. A Node records what a thing IS; nothing records where it came up.
+
+The obvious modelling answer is an Edge — `Node -mentioned_in-> Session`. It is the wrong one, twice:
+
+- **An Edge is world truth an NPC recites.** `AgentNodeFacts` walks Edges every turn to fill an NPC's Hot Context (the 2026-07-04 amendment). A mention modelled as an Edge would make "the party talked about the ogre" into "the ogre is connected to the party" in the NPC's head — a fact nobody wrote, spoken back at the table. The edge-type vocabulary is closed for exactly this reason, and widening it here would be widening it for the one case that must not be in it.
+- **The volumes are wrong.** Edges are a few hundred hand-authored rows the GM curates. Mentions are thousands of derived rows per campaign, machine-written, never reviewed. Putting them in the same table would drown the curated set that every NPC prompt walks.
+
+So an Appearance is a **retrieval index that lives beside the graph**: `node_appearance(node_id, campaign_id, voice_session_id, line_id, at)`, read by one GM-facing RPC and by nothing in prompt assembly. `PromptKGView` does not gain a method.
+
+- **Derived, never authored.** One durable job per ended Voice Session (ADR-0049) matches the Campaign's entry names against its committed Transcript Lines. Nothing runs on a voice turn; the session-end path only enqueues.
+- **Committed lines only**, which needs no filter: a partial never reaches `transcript_line` (ADR-0012/ADR-0040).
+- **One matcher, not two.** Matching reuses `pkg/voice/address`'s fuzzy index through a thin exported wrapper, so the Campaign Language's phonetic encoder applies and "was this named" has ONE definition. The confidence bar is deliberately stricter than the live Address Detector's: a live mis-detection costs one NPC answering when it should not have, which the GM hears and shrugs off, while a mis-detection here writes a durable row nobody reviews.
+- **Keyed on `(voice_session_id, line_id)`**, the relay's own stable Line key, which `transcript_line` already declares UNIQUE. Not on a surrogate id: `transcript_line.id` exists in SQL but is unreachable from Go, and its insert/scan column lists are order-coupled, so reaching for it would touch every caller of a load-bearing table for no gain.
+- **Retraction cascades.** The composite FK to `transcript_line` is `ON DELETE CASCADE`, so a retracted line (#437, ADR-0040) takes its appearances with it. A GM who unsays something at the table must not find it still listed under an entry.
+- **Idempotent.** The write is `ON CONFLICT DO NOTHING`, so a retried, replayed or manually re-run job produces the same rows and changes nothing.
+- **`gm_private` entries are indexed and shown.** This is the operator's own retrieval over their own campaign (ADR-0039/0041); hiding a GM's secret from the GM's own search would make the index lie about their world. Nothing here is player- or prompt-facing.
+
+The v2.x temporal line is still untouched: this records WHERE something was said, not a timeline of what became true when.

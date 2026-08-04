@@ -47,6 +47,7 @@ type CampaignServer struct {
 	*kgNodes
 	*kgEdges
 	*kgGraph
+	*kgAppearances
 	*kgPreview
 	*campaignMaps
 	*kgOrganize
@@ -82,6 +83,9 @@ type CampaignStores struct {
 	// KGPreview backs the agent-knowledge lens (#535) — the PROMPT-FACING read, so
 	// the preview shows what the turn shows.
 	KGPreview kgPreviewStore
+	// KGAppearances backs the "where was this mentioned" retrieval read (#545).
+	// Deliberately NOT on PromptKGView: an appearance is retrieval, not world truth.
+	KGAppearances kgAppearanceStore
 	// Maps backs the Maps and Pins surface (#538, ADR-0060).
 	Maps campaignMapStore
 	// Organize backs free-form tags and prep boards (#543) — GM organization
@@ -105,20 +109,21 @@ type CampaignStores struct {
 // nothing external configures it.
 func NewCampaignServer(s *storage.Store) *CampaignServer {
 	return NewCampaignServerWith(CampaignStores{
-		Active:     s,
-		Campaigns:  s,
-		Archive:    s,
-		Agents:     s,
-		Characters: s,
-		KGNodes:    s,
-		KGEdges:    s,
-		KGGraph:    s,
-		KGPreview:  kgPreviewStoreOf(s),
-		Maps:       s,
-		Organize:   s,
-		Proposals:  s,
-		Grants:     s,
-		Assist:     s,
+		Active:        s,
+		Campaigns:     s,
+		Archive:       s,
+		Agents:        s,
+		Characters:    s,
+		KGNodes:       s,
+		KGEdges:       s,
+		KGGraph:       s,
+		KGAppearances: s,
+		KGPreview:     kgPreviewStoreOf(s),
+		Maps:          s,
+		Organize:      s,
+		Proposals:     s,
+		Grants:        s,
+		Assist:        s,
 	})
 }
 
@@ -137,6 +142,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		kgNodes:            &kgNodes{store: stores.KGNodes, active: active},
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
 		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
+		kgAppearances:      &kgAppearances{store: stores.KGAppearances, active: active},
 		kgPreview:          &kgPreview{store: stores.KGPreview, active: active},
 		campaignMaps:       &campaignMaps{store: stores.Maps, active: active, tenant: auth.TenantID},
 		kgOrganize:         &kgOrganize{store: stores.Organize, active: active},
