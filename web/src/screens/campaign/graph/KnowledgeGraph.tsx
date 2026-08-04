@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
@@ -665,6 +665,14 @@ function ProposalReview({
   onApproved: () => void;
   onReviewed: () => void;
 }) {
+  // The card renders BELOW the canvas, and the canvas is up to 720px tall — so on
+  // an ordinary screen clicking a ghost opened a card the GM could not see, which
+  // reads as "clicking did nothing". Found by using it, not by a test.
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    card.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [resolved.id]);
+
   // An endpoint the client could not resolve will be REFUSED at approval. Saying
   // so before the GM clicks beats an inline server error afterwards.
   const unresolved =
@@ -675,7 +683,7 @@ function ProposalReview({
         : undefined;
 
   return (
-    <div className="gx-kg-graph__review" role="dialog" aria-label="Review suggestion">
+    <div className="gx-kg-graph__review" role="dialog" aria-label="Review suggestion" ref={card}>
       <div className="gx-proposal-card__head">
         {/* WHO proposed is most of the judgement: a Character NPC may only propose
             on its own linked Node, the Butler campaign-wide. */}
