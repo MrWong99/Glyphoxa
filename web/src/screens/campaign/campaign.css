@@ -1508,6 +1508,8 @@
   align-items: flex-end;
   gap: var(--spacing-xs);
   padding-top: var(--spacing-xs);
+}
+
 /* ── Pending proposals, drawn in place (#537) ────────────────────────────── */
 
 /* Every proposal glyph is DASHED and hollow. A suggestion that could be mistaken
