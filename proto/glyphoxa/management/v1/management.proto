@@ -179,6 +179,15 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ListNodeAppearances returns where an entry was mentioned in play, newest
+  // first (#545, ADR-0008 amendment). It is a RETRIEVAL read, never prompt-facing:
+  // an appearance is deliberately not an Edge, because an Edge is world truth an
+  // NPC's Hot Context walks, and "the party talked about the ogre" must not
+  // become "the ogre is connected to the party" in an NPC's head.
+  rpc ListNodeAppearances(ListNodeAppearancesRequest) returns (ListNodeAppearancesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // ── Maps and Pins (#538, ADR-0060) ────────────────────────────────────────
   // A Map's image rides the blob seam and is fetched over a plain HTTP mount
   // (GET /api/v1/maps/{id}/image), not through these unary calls; the bytes
@@ -748,6 +757,34 @@ message UpdateMapResponse {
 }
 
 // ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
+// ListNodeAppearancesRequest names the entry whose mentions to list (#545).
+message ListNodeAppearancesRequest {
+  // node_id is the entry.
+  string node_id = 1;
+}
+
+// NodeAppearance is one recorded mention, joined to the line that produced it so
+// the list reads without following every link.
+message NodeAppearance {
+  // voice_session_id and line_id together deep-link the exact Transcript Line.
+  string voice_session_id = 1;
+  string line_id = 2;
+  // at is when the line was spoken.
+  google.protobuf.Timestamp at = 3;
+  // who and kind are the line's speaker label and its kind (gm/player/npc/butler).
+  string who = 4;
+  string kind = 5;
+  // text is the line itself.
+  string text = 6;
+  // session_started_at labels which session the mention came from.
+  google.protobuf.Timestamp session_started_at = 7;
+}
+
+// ListNodeAppearancesResponse carries the entry's most recent mentions.
+message ListNodeAppearancesResponse {
+  repeated NodeAppearance appearances = 1;
+}
+
 message ReplaceMapImageRequest {
   string id = 1;
   bytes image_bytes = 2;

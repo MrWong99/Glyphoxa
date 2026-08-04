@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/appearance"
 	"github.com/MrWong99/Glyphoxa/internal/assist"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
@@ -54,6 +55,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/internal/worldmap"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -586,6 +588,9 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 		// Durable Usage Ledger (ADR-0054): attribution only; gating stays with the
 		// spend meter (ADR-0046).
 		Usage: store,
+		// Index this session's mentions when it ends (#545). An enqueue, not the
+		// work — the matching runs on the job runner.
+		Appearances: appearanceIndexer{jobEnqueuer{store}},
 		// Monthly plan-allowance gate (ADR-0055 gate (b)): store-backed only in
 		// `open` Admission Mode; nil (a no-op) in allowlist mode.
 		Allowance: allowanceForMode(admission, store),
@@ -1135,6 +1140,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
 	}
 	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
+	// The Knowledge Graph appearance index (#545, ADR-0008 amendment): one pass per
+	// ended session, matching its committed Transcript Lines against the campaign's
+	// entry names. A job because the work is per-session and must never touch a
+	// voice turn; idempotent, so a retry writes nothing new.
+	jobRunner.Register(appearance.JobKindIndexSession,
+		appearance.IndexHandler(store, address.DefaultEncoders(), log))
 	go jobRunner.Run(ctx)
 
 	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
@@ -1342,6 +1353,20 @@ func (e jobEnqueuer) Enqueue(ctx context.Context, kind string, payload any, runA
 		return fmt.Errorf("marshal %s payload: %w", kind, err)
 	}
 	_, err = e.store.EnqueueJobAt(ctx, kind, b, 0, runAfter)
+	return err
+}
+
+// appearanceIndexer adapts the durable job enqueuer to the Manager's end-of-
+// session hook (#545). The Manager only ENQUEUES: the name matching runs on the
+// job runner, so a long transcript cannot slow a session down as it ends.
+type appearanceIndexer struct{ enqueue jobEnqueuer }
+
+func (a appearanceIndexer) IndexSession(ctx context.Context, sessionID uuid.UUID) error {
+	payload, err := appearance.Marshal(sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = a.enqueue.store.EnqueueJobAt(ctx, appearance.JobKindIndexSession, payload, 0, time.Now())
 	return err
 }
 
