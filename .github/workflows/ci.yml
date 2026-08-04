@@ -135,6 +135,16 @@ jobs:
         run: npm run test
         working-directory: web
 
+  # Compile, vet and run the default Go suite against the COMMITTED tree. This
+  # job deliberately downloads only the `gen` artifact and NOT `spa-dist`: its
+  # workspace is a fresh-checkout tree (placeholder internal/spa/dist/index.html,
+  # no gitignored assets/), which is exactly the shape
+  # internal/spa.TestEmbeddedIndexReferencesResolve needs to catch a real
+  # `npm run build` index.html having been committed over the placeholder — the
+  # mistake that ships a binary serving a blank page, and that has reached main
+  # twice (155772c, 6d6089e). Downloading `spa-dist` here would make that test
+  # pass unconditionally and silently retire the guard; the docker builds in
+  # `image`/`e2e` are where the real console gets embedded.
   test:
     name: build + vet + test
     needs: [proto]
