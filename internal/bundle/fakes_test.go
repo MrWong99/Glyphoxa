@@ -266,8 +266,17 @@ func (f *fakeStore) ListSessionAppearances(_ context.Context, sessionID uuid.UUI
 }
 
 func (f *fakeStore) RecordNodeAppearances(_ context.Context, rows []storage.NodeAppearance) error {
-	// ON CONFLICT DO NOTHING over (node, session, line).
+	// ON CONFLICT DO NOTHING over (node, session, line) — AND the composite FK to
+	// transcript_line, which Postgres enforces and a fake that skipped it would
+	// hide: an appearance naming a line the import did not write fails the FK and
+	// rolls the WHOLE bundle back.
 	for _, r := range rows {
+		if !f.lineExists(r.VoiceSessionID, r.LineID) {
+			return fmt.Errorf("fake: node_appearance_line_fk: no line %q in session %s", r.LineID, r.VoiceSessionID)
+		}
+		if !f.nodeInCampaign(r.NodeID, r.CampaignID) {
+			return fmt.Errorf("fake: node_appearance_node_fk: node %s not in campaign %s", r.NodeID, r.CampaignID)
+		}
 		dup := false
 		for _, e := range f.appearances {
 			if e.NodeID == r.NodeID && e.VoiceSessionID == r.VoiceSessionID && e.LineID == r.LineID {
@@ -280,6 +289,15 @@ func (f *fakeStore) RecordNodeAppearances(_ context.Context, rows []storage.Node
 		}
 	}
 	return nil
+}
+
+func (f *fakeStore) lineExists(sessionID uuid.UUID, lineID string) bool {
+	for _, l := range f.lines {
+		if l.VoiceSessionID == sessionID && l.LineID == lineID {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeStore) ReadMapImage(_ context.Context, key string) ([]byte, string, error) {

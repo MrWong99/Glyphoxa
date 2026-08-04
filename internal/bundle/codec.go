@@ -28,6 +28,16 @@ const MinSupportedVersion = 1
 // against gzip bombs.
 const MaxDecodedBytes int64 = 256 << 20 // 256 MiB
 
+// MaxImportBytes caps the COMPRESSED bundle an import will accept.
+//
+// It is deliberately larger than blob.MaxSize (#547). That constant is the cap on
+// ONE image; an images-included bundle carries several, base64-inflated by a
+// third and only partly recovered by gzip. Capping the whole upload at the
+// per-image limit made an export this build can PRODUCE impossible to import
+// through the only import path — a backup that cannot be restored. This is the
+// binding bound on bundle size and it is documented as such in ADR-0053.
+const MaxImportBytes int64 = 192 << 20 // 192 MiB compressed
+
 // decodeLimit is the effective decode cap; a var so tests can shrink it.
 var decodeLimit = MaxDecodedBytes
 

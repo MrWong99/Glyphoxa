@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -98,12 +99,20 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 		return importInTx(ctx, tx, tenantID, b, imgs, &written, &res)
 	})
 	if err != nil {
+		// The sweep runs on a DETACHED context. The most likely way an
+		// images-included import fails is the client disconnecting or timing out
+		// mid-transaction — which cancels this very ctx, so a sweep that inherited
+		// it would refuse every Delete and strand exactly the bytes it exists to
+		// clean up. That is the failure this code claims to prevent, arriving
+		// through the door it left open.
+		sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blobSweepTimeout)
 		for _, key := range written {
-			if derr := imgs.DeleteMapImage(ctx, key); derr != nil {
+			if derr := imgs.DeleteMapImage(sweepCtx, key); derr != nil {
 				observe.CtxLogger(ctx).Warn("bundle: could not drop an orphaned map image after a failed import",
 					"key", key, "err", derr)
 			}
 		}
+		cancel()
 		return ImportResult{}, err
 	}
 	// Surface a lossy import (a foreign/deleted participant carried no local NPC):
@@ -117,6 +126,11 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 	}
 	return res, nil
 }
+
+// blobSweepTimeout bounds the post-failure orphan sweep. Short: it is a handful
+// of Deletes against a store that is either responding or is not, and the caller
+// is already returning an error.
+const blobSweepTimeout = 15 * time.Second
 
 // importInTx runs the whole ingest against the tx-bound seam (see [Import]). It is
 // split out so the transaction body reads top-to-bottom: campaign → Butler merge
@@ -263,7 +277,7 @@ func importInTx(
 		res.Characters++
 	}
 
-	if _, err := importMaps(ctx, tx, campaignID, tenantID, b, nodeIDs, imgs, written, res); err != nil {
+	if err := importMaps(ctx, tx, campaignID, tenantID, b, nodeIDs, imgs, written, res); err != nil {
 		return err
 	}
 
@@ -296,9 +310,9 @@ func importMaps(
 	imgs MapImageWriter,
 	written *[]string,
 	res *ImportResult,
-) (map[string]uuid.UUID, error) {
+) error {
 	if len(b.Campaign.Maps) == 0 {
-		return nil, nil
+		return nil
 	}
 	mapIDs := make(map[string]uuid.UUID, len(b.Campaign.Maps))
 
@@ -306,13 +320,13 @@ func importMaps(
 	for i := range b.Campaign.Maps {
 		m := &b.Campaign.Maps[i]
 		if _, dup := mapIDs[m.ID]; dup {
-			return nil, fmt.Errorf("bundle: import: duplicate map ref %q", m.ID)
+			return fmt.Errorf("bundle: import: duplicate map ref %q", m.ID)
 		}
 		anchor := uuid.NullUUID{}
 		if m.AnchorNodeID != "" {
 			id, ok := nodeIDs[m.AnchorNodeID]
 			if !ok {
-				return nil, fmt.Errorf("bundle: import: map %q references unknown anchor entry %q", m.Name, m.AnchorNodeID)
+				return fmt.Errorf("bundle: import: map %q references unknown anchor entry %q", m.Name, m.AnchorNodeID)
 			}
 			anchor = uuid.NullUUID{UUID: id, Valid: true}
 		}
@@ -322,25 +336,25 @@ func importMaps(
 		// already points.
 		key, err := blob.Key(tenantID, "map", uuid.New(), "image")
 		if err != nil {
-			return nil, fmt.Errorf("bundle: import: map %q blob key: %w", m.Name, err)
+			return fmt.Errorf("bundle: import: map %q blob key: %w", m.Name, err)
 		}
 		// Bytes BEFORE the row, the same ordering CreateMap's RPC uses: a row that
 		// references missing bytes is a broken map forever, while bytes with no row
 		// are invisible and get dropped by the rollback path above.
 		if m.ImageBase64 != "" {
 			if imgs == nil {
-				return nil, fmt.Errorf("bundle: import: map %q carries an image but this deployment has no blob store", m.Name)
+				return fmt.Errorf("bundle: import: map %q carries an image but this deployment has no blob store", m.Name)
 			}
 			data, derr := base64.StdEncoding.DecodeString(m.ImageBase64)
 			if derr != nil {
-				return nil, fmt.Errorf("bundle: import: map %q image is not valid base64: %w", m.Name, derr)
+				return fmt.Errorf("bundle: import: map %q image is not valid base64: %w", m.Name, derr)
 			}
 			contentType := m.ContentType
 			if contentType == "" {
 				contentType = "image/png"
 			}
 			if err := imgs.WriteMapImage(ctx, key, contentType, data); err != nil {
-				return nil, fmt.Errorf("bundle: import: map %q image: %w", m.Name, err)
+				return fmt.Errorf("bundle: import: map %q image: %w", m.Name, err)
 			}
 			*written = append(*written, key)
 		}
@@ -355,7 +369,7 @@ func importMaps(
 			GMPrivate:    m.GMPrivate,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("bundle: import: create map %q: %w", m.Name, err)
+			return fmt.Errorf("bundle: import: create map %q: %w", m.Name, err)
 		}
 		mapIDs[m.ID] = created.ID
 		res.Maps++
@@ -369,7 +383,7 @@ func importMaps(
 		}
 		parent, ok := mapIDs[m.ParentMapID]
 		if !ok {
-			return nil, fmt.Errorf("bundle: import: map %q references unknown parent %q", m.Name, m.ParentMapID)
+			return fmt.Errorf("bundle: import: map %q references unknown parent %q", m.Name, m.ParentMapID)
 		}
 		anchor := uuid.NullUUID{}
 		if m.AnchorNodeID != "" {
@@ -385,7 +399,7 @@ func importMaps(
 			AnchorNodeID: anchor,
 			GMPrivate:    m.GMPrivate,
 		}); err != nil {
-			return nil, fmt.Errorf("bundle: import: nest map %q: %w", m.Name, err)
+			return fmt.Errorf("bundle: import: nest map %q: %w", m.Name, err)
 		}
 	}
 
@@ -395,7 +409,7 @@ func importMaps(
 		for _, p := range m.Pins {
 			nodeID, ok := nodeIDs[p.NodeID]
 			if !ok {
-				return nil, fmt.Errorf("bundle: import: pin on map %q references unknown entry %q", m.Name, p.NodeID)
+				return fmt.Errorf("bundle: import: pin on map %q references unknown entry %q", m.Name, p.NodeID)
 			}
 			if _, err := tx.CreatePin(ctx, storage.NewMapPin{
 				MapID:         mapIDs[m.ID],
@@ -406,12 +420,12 @@ func importMaps(
 				LabelOverride: p.LabelOverride,
 				GMPrivate:     p.GMPrivate,
 			}); err != nil {
-				return nil, fmt.Errorf("bundle: import: pin on map %q: %w", m.Name, err)
+				return fmt.Errorf("bundle: import: pin on map %q: %w", m.Name, err)
 			}
 			res.Pins++
 		}
 	}
-	return mapIDs, nil
+	return nil
 }
 
 // importBoards recreates the GM's session prep boards, remapping their entries.
@@ -512,15 +526,27 @@ func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b 
 		}
 
 		// Appearances AFTER the lines, because the composite FK points at them.
-		// A row whose Node ref is unknown is DROPPED rather than fatal: an
-		// appearance is a derived convenience, and refusing an entire restore
+		//
+		// A row whose Node ref OR line ref is unknown is DROPPED rather than fatal:
+		// an appearance is a derived convenience, and refusing an entire restore
 		// because one mention pointed at a since-deleted entry would be the wrong
 		// trade for something the destination can regenerate by re-indexing.
+		//
+		// The LINE check is not belt-and-braces. node_appearance's composite FK
+		// points at transcript_line, so an appearance naming a line this bundle
+		// does not carry — a hand-edited bundle, or an export whose line was
+		// retracted between reads — would fail the FK and roll back the WHOLE
+		// import. The in-memory fake does not model that FK, so nothing in the unit
+		// suite would have shown it.
 		if len(s.Appearances) > 0 {
+			imported := make(map[string]bool, len(s.Lines))
+			for j := range s.Lines {
+				imported[s.Lines[j].LineID] = true
+			}
 			rows := make([]storage.NodeAppearance, 0, len(s.Appearances))
 			for _, a := range s.Appearances {
 				nodeID, ok := nodeIDs[a.NodeID]
-				if !ok {
+				if !ok || !imported[a.LineID] {
 					continue
 				}
 				rows = append(rows, storage.NodeAppearance{

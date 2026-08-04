@@ -328,3 +328,43 @@ type noBlobTx struct{ inner *fakeStore }
 func (n noBlobTx) InTx(ctx context.Context, fn func(tx bundle.ImportStore) error) error {
 	return n.inner.InTx(ctx, fn)
 }
+
+// TestImport_DropsAnAppearanceNamingAnAbsentLine. node_appearance's composite FK
+// points at transcript_line, so an appearance naming a line the bundle does not
+// carry would fail the FK and roll the WHOLE import back — a restore refused
+// because one derived convenience row pointed at a retracted line.
+func TestImport_DropsAnAppearanceNamingAnAbsentLine(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{IncludeHistory: true})
+
+	var seeded bool
+	for i := range b.Campaign.History.Sessions {
+		s := &b.Campaign.History.Sessions[i]
+		if len(s.Appearances) == 0 {
+			continue
+		}
+		seeded = true
+		// A hand-edited bundle, or an export whose line was retracted between reads.
+		s.Appearances = append(s.Appearances, bundle.Appearance{
+			NodeID: s.Appearances[0].NodeID, LineID: "l-gone", At: s.Appearances[0].At,
+		})
+	}
+	if !seeded {
+		t.Fatal("the fixture carries no appearances to test with")
+	}
+
+	dst := newFakeStore()
+	res, err := bundle.Import(ctx, dst, uuid.New(), b)
+	if err != nil {
+		t.Fatalf("one dangling appearance must not fail the whole restore: %v", err)
+	}
+	if res.Appearances == 0 {
+		t.Error("the GOOD appearances were dropped too")
+	}
+	for _, a := range dst.appearances {
+		if a.LineID == "l-gone" {
+			t.Error("the dangling appearance was written")
+		}
+	}
+}

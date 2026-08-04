@@ -49,8 +49,10 @@ func (h *Handler) pg() PGStore { return PGStore{Store: h.Store, Blobs: h.Blobs} 
 // the Highlight mounts' don't-reveal-existence posture. A missing context
 // tenant is a miswired mount and rejects 401, fail-closed.
 //
-// The bundle is [Encode]d STRAIGHT to the ResponseWriter (ADR-0048: no
-// blob.Store round-trip — the download never lands in object storage). The
+// The bundle JSON is [Encode]d STRAIGHT to the ResponseWriter — it never lands
+// in object storage. (Map image BYTES do come FROM the blob seam on an
+// images-included export, and go back through it on import; it is the bundle
+// itself that never round-trips through blob storage.) The
 // filename is the canonical [Filename] for the campaign name.
 func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
@@ -115,16 +117,25 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 // that mapped to no imported Agent was dropped (not fatal), and a nonzero count
 // also lands as a slog.Warn in the importer (#381).
 type importResponse struct {
-	CampaignID             string `json:"campaign_id"`
-	Name                   string `json:"name"`
-	Agents                 int    `json:"agents"`
-	Nodes                  int    `json:"nodes"`
-	Edges                  int    `json:"edges"`
-	Characters             int    `json:"characters"`
-	Sessions               int    `json:"sessions"`
-	Lines                  int    `json:"lines"`
-	Chunks                 int    `json:"chunks"`
-	DroppedParticipantRefs int    `json:"dropped_participant_refs"`
+	CampaignID string `json:"campaign_id"`
+	Name       string `json:"name"`
+	Agents     int    `json:"agents"`
+	Nodes      int    `json:"nodes"`
+	Edges      int    `json:"edges"`
+	Characters int    `json:"characters"`
+	// The v2 sections (#547). Reporting only the v1 counts would make a successful
+	// import of maps, boards and aspects LOOK like they were dropped — the exact
+	// silent-omission genre this slice exists to close.
+	Aspects                int `json:"aspects"`
+	Tags                   int `json:"tags"`
+	Maps                   int `json:"maps"`
+	Pins                   int `json:"pins"`
+	Boards                 int `json:"boards"`
+	Sessions               int `json:"sessions"`
+	Lines                  int `json:"lines"`
+	Chunks                 int `json:"chunks"`
+	Appearances            int `json:"appearances"`
+	DroppedParticipantRefs int `json:"dropped_participant_refs"`
 }
 
 // ServeImport ingests an uploaded campaign bundle: POST /api/v1/campaigns/import,
@@ -133,7 +144,7 @@ type importResponse struct {
 // double-submit (403, ADR-0016) — this handler assumes both have passed and
 // reads the operator from the context.
 //
-// The request body is capped by http.MaxBytesReader at [blob.MaxSize] (ADR-0048's
+// The request body is capped by [MaxImportBytes] (ADR-0048's
 // 32 MiB constant used purely as a request cap — blob.Store is NOT involved, the
 // bundle never lands in object storage) BEFORE anything reads it, so an oversized
 // upload is a clean 413 rather than an OOM. A malformed bundle or a newer/older
@@ -141,7 +152,7 @@ type importResponse struct {
 // (ADR-0053 §7); the import runs SYNCHRONOUSLY (ADR-0049, no job row) and does NOT
 // auto-activate the imported campaign (ADR-0053 §7 — the UI offers the switch).
 func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, blob.MaxSize)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxImportBytes)
 
 	file, _, err := r.FormFile("bundle")
 	if err != nil {
@@ -200,6 +211,12 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		Nodes:                  res.Nodes,
 		Edges:                  res.Edges,
 		Characters:             res.Characters,
+		Aspects:                res.Aspects,
+		Tags:                   res.Tags,
+		Maps:                   res.Maps,
+		Pins:                   res.Pins,
+		Boards:                 res.Boards,
+		Appearances:            res.Appearances,
 		Sessions:               res.Sessions,
 		Lines:                  res.Lines,
 		Chunks:                 res.Chunks,
