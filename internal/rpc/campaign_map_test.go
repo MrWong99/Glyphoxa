@@ -16,6 +16,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
+	"github.com/MrWong99/Glyphoxa/internal/imagegen"
+	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -114,6 +116,8 @@ type fakeMapStore struct {
 	deleteKey    string
 	deleteErr    error
 	createPinErr error
+	unpinned     []storage.KGNode
+	pinned       int
 }
 
 func newFakeMapStore() *fakeMapStore {
@@ -187,6 +191,7 @@ func (f *fakeMapStore) MapAncestors(context.Context, uuid.UUID, uuid.UUID) ([]st
 }
 
 func (f *fakeMapStore) CreatePin(_ context.Context, n storage.NewMapPin) (storage.MapPin, error) {
+	f.pinned++
 	if f.createPinErr != nil {
 		return storage.MapPin{}, f.createPinErr
 	}
@@ -204,7 +209,7 @@ func (f *fakeMapStore) UpdatePin(_ context.Context, u storage.MapPinUpdate) (sto
 func (f *fakeMapStore) DeletePin(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 func (f *fakeMapStore) UnpinnedNodes(context.Context, uuid.UUID, uuid.UUID) ([]storage.KGNode, error) {
-	return nil, nil
+	return f.unpinned, nil
 }
 
 // mapClient composes a CampaignServer over the map fake plus a blob seam.
@@ -419,5 +424,187 @@ func TestDeleteMap_DropsTheImageThroughTheSeam(t *testing.T) {
 	}
 	if got := blobs.keys(); len(got) != 0 {
 		t.Fatalf("the map image survived the delete: %v", got)
+	}
+}
+
+// ── Generated maps (#541) ─────────────────────────────────────────────────────
+
+// fakeMapGen stands in for the mapgen engine at the handler seam.
+type fakeMapGen struct {
+	res     mapgen.Result
+	err     error
+	gotIn   mapgen.Input
+	picked  []uuid.UUID
+	pickErr error
+	calls   int
+}
+
+func (f *fakeMapGen) Generate(_ context.Context, _ storage.Campaign, in mapgen.Input) (mapgen.Result, error) {
+	f.calls++
+	f.gotIn = in
+	return f.res, f.err
+}
+
+func (f *fakeMapGen) SuggestPins(_ context.Context, _ storage.Campaign, _ uuid.UUID, _ []storage.KGNode) ([]uuid.UUID, error) {
+	f.calls++
+	return f.picked, f.pickErr
+}
+
+func genClient(t *testing.T, store *fakeMapStore, gen *fakeMapGen) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	campaignID := uuid.New()
+	tenantID := uuid.New()
+	active := &fakeActive{campaign: storage.Campaign{ID: campaignID, TenantID: tenantID, Name: "Saltmarsh"}}
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: active, Maps: store})
+	srv.SetBlobs(newMemBlobs())
+	if gen != nil {
+		srv.SetMapGenerator(gen)
+		srv.SetMapPinSuggester(gen)
+	}
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			ctx = auth.WithUser(ctx, storage.User{DiscordUserID: "999"})
+			ctx = auth.WithTenant(ctx, tenantID)
+			return next(ctx, req)
+		}
+	})
+	return campaignClientServe(t, srv, connect.WithInterceptors(inject))
+}
+
+// TestGenerateMapImage_WritesNothing is AC1, and it is the whole design: the
+// bytes exist only in the GM's browser until they choose to save them, so a
+// discarded draft cannot leave a row or an orphaned blob behind.
+func TestGenerateMapImage_WritesNothing(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	gen := &fakeMapGen{res: mapgen.Result{
+		Data: pngBytes, ContentType: "image/png", Model: "gemini-2.5-flash-image",
+		Prompt: "Draw a top-down fantasy map …",
+	}}
+	client := genClient(t, store, gen)
+
+	resp, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a fishing town"}))
+	if err != nil {
+		t.Fatalf("GenerateMapImage: %v", err)
+	}
+	if len(resp.Msg.GetImageBytes()) == 0 {
+		t.Fatal("no draft bytes came back")
+	}
+	if resp.Msg.GetModel() != "gemini-2.5-flash-image" {
+		t.Errorf("model = %q", resp.Msg.GetModel())
+	}
+	// The composed prompt travels back so the GM sees what was actually asked for.
+	if resp.Msg.GetPrompt() == "" {
+		t.Error("the composed prompt was not returned")
+	}
+	if len(store.created) != 0 || len(store.maps) != 0 {
+		t.Fatalf("generation created a map row: %+v", store.created)
+	}
+}
+
+// TestGenerateMapImage_TooLargeIsInvalidArgument is AC5. NOT Unavailable:
+// Unavailable invites a retry, and retrying re-bills the identical oversize
+// generation.
+func TestGenerateMapImage_TooLargeIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	gen := &fakeMapGen{err: imagegen.ErrImageTooLarge}
+	client := genClient(t, newFakeMapStore(), gen)
+
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "an entire continent"}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}
+
+func TestGenerateMapImage_NoKeyIsActionable(t *testing.T) {
+	t.Parallel()
+	client := genClient(t, newFakeMapStore(), &fakeMapGen{err: mapgen.ErrNotConfigured})
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", got)
+	}
+}
+
+func TestGenerateMapImage_UnwiredIsUnavailable(t *testing.T) {
+	t.Parallel()
+	client := genClient(t, newFakeMapStore(), nil)
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", got)
+	}
+}
+
+func TestGenerateMapImage_EmptyPromptNeverReachesTheProvider(t *testing.T) {
+	t.Parallel()
+	gen := &fakeMapGen{}
+	client := genClient(t, newFakeMapStore(), gen)
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "   "}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+	if gen.calls != 0 {
+		t.Error("an empty prompt spent a generation")
+	}
+}
+
+// TestSuggestMapPins_OnlyReturnsUnpinnedCandidates is AC3's first half: the
+// suggestions are entries the GM could already have pinned, never new ones and
+// never positions.
+func TestSuggestMapPins_OnlyReturnsUnpinnedCandidates(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	mapID := uuid.New()
+	anchor := uuid.New()
+	store.maps[mapID] = storage.CampaignMap{
+		ID: mapID, Name: "Saltmarsh",
+		AnchorNodeID: uuid.NullUUID{UUID: anchor, Valid: true},
+	}
+	inn := storage.KGNode{ID: uuid.New(), Name: "The Rusty Anchor", Type: storage.KGNodeLocation}
+	store.unpinned = []storage.KGNode{inn}
+
+	// The engine names the real candidate AND a uuid that is not in the set — a
+	// hallucinated id must be dropped, not trusted into the response.
+	gen := &fakeMapGen{picked: []uuid.UUID{inn.ID, uuid.New()}}
+	client := genClient(t, store, gen)
+
+	resp, err := client.SuggestMapPins(context.Background(),
+		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
+	if err != nil {
+		t.Fatalf("SuggestMapPins: %v", err)
+	}
+	if len(resp.Msg.GetSuggestions()) != 1 {
+		t.Fatalf("suggestions = %+v, want only the real candidate", resp.Msg.GetSuggestions())
+	}
+	if resp.Msg.GetSuggestions()[0].GetNodeId() != inn.ID.String() {
+		t.Errorf("wrong node suggested: %+v", resp.Msg.GetSuggestions()[0])
+	}
+	// Nothing was pinned. AC3: a suggestion requires a GM drag before it persists.
+	if store.pinned != 0 {
+		t.Fatalf("suggesting created %d pins", store.pinned)
+	}
+}
+
+// TestSuggestMapPins_NoAnchorIsRefusedWithAReason: without an anchor there is no
+// prose to read, and guessing from the map's name alone is not suggesting.
+func TestSuggestMapPins_NoAnchorIsRefusedWithAReason(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	mapID := uuid.New()
+	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh"}
+	gen := &fakeMapGen{}
+	client := genClient(t, store, gen)
+
+	_, err := client.SuggestMapPins(context.Background(),
+		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", got)
+	}
+	if gen.calls != 0 {
+		t.Error("an anchorless map still spent a call")
 	}
 }

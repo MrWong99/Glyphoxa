@@ -17,11 +17,14 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
 
 // webEnvVars are the environment variables a web/all-Mode Web Instance must have
@@ -739,4 +742,46 @@ func guardAllModeMixedDeployment(ctx context.Context, s mixedModeGuardStore) err
 			"(see docs/devs/2026-07-19-voice-claim-plane-rollout.md)")
 	}
 	return nil
+}
+
+// newImageFactory builds the image-generator factory both image consumers share:
+// Session Highlight enrichment (#311) and generated Maps (#541).
+//
+// It is ONE closure deliberately. It encodes the ADR-0039 hybrid key policy — a
+// saved key needs the cipher (else a loud error, never a silent env fallback), no
+// row falls back to GEMINI_API_KEY, neither present is "not configured" — plus
+// the ADR-0054 gated resolve that refuses an unentitled tenant BEFORE the env
+// fallback can spend the deployment's key. A second copy for the second consumer
+// would be a second place for all of that to drift.
+//
+// The returned sentinel is highlight.ErrImageNotConfigured; mapgen.ErrNotConfigured
+// wraps nothing and is matched separately by its own caller, so the two packages
+// stay independent while sharing the resolution.
+func newImageFactory(store *storage.Store, cipher *crypto.Cipher, keyEnt llmbuild.PlatformKeyEntitlement) func(context.Context, uuid.UUID) (imagegen.Generator, string, error) {
+	return func(fctx context.Context, tenantID uuid.UUID) (imagegen.Generator, string, error) {
+		var cfgPtr *storage.ProviderConfig
+		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentImage)
+		if cerr == nil {
+			cfgPtr = &cfg
+		} else if !errors.Is(cerr, storage.ErrNotFound) {
+			return nil, "", cerr
+		}
+		// Gated resolve (ADR-0054 seam (a)): an entitlement refusal errors HERE,
+		// before the env fallback below can spend the deployment's GEMINI key.
+		key, kerr := llmbuild.ResolveKeyGated(fctx, keyEnt, tenantID, cipher, cfgPtr, storage.ComponentImage)
+		if kerr != nil {
+			return nil, "", kerr // saved key without cipher = loud error (ADR-0039)
+		}
+		if key == "" {
+			key = os.Getenv(imagegen.APIKeyEnv)
+		}
+		if key == "" {
+			return nil, "", highlight.ErrImageNotConfigured
+		}
+		model := imagegen.DefaultModel
+		if cfgPtr != nil && cfgPtr.Model != "" {
+			model = cfgPtr.Model
+		}
+		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
+	}
 }

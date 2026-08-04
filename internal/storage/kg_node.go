@@ -200,6 +200,65 @@ func (s *Store) DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error 
 	return nil
 }
 
+// MapSeedContext returns the PUBLIC material a generated map's prompt may be
+// seeded from (#541): the anchor Location itself, and the names of what resides
+// in it.
+//
+// Public-only, filtered in the QUERY, on the same seam-not-call-site principle
+// PromptKG follows — and for a sharper reason than usual. A generated map is an
+// artefact the GM shows the table. Seeding its prompt from gm_private prose, or
+// from the name of a gm_private neighbour, launders a secret into a picture, and
+// unlike a prompt a picture cannot be filtered afterwards or un-seen. Composing
+// this from ListNodes + NodeEdges would have done exactly that: both are
+// GM-facing reads that deliberately include private rows.
+//
+// A gm_private anchor yields ErrNotFound. That is not an oversight: a secret
+// place has no public depiction to generate.
+func (s *Store) MapSeedContext(ctx context.Context, campaignID, nodeID uuid.UUID) (KGNode, []string, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+kgNodeColumnsAspects(true)+`
+		   FROM kg_node
+		  WHERE id = $1 AND campaign_id = $2 AND NOT gm_private`, nodeID, campaignID)
+	node, err := scanKGNodeAspects(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KGNode{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return KGNode{}, nil, fmt.Errorf("storage: map seed context %s: %w", nodeID, err)
+	}
+
+	// What resides IN this place — the inbound direction. A map depicts what is
+	// inside its bounds, not what the place itself belongs to.
+	rows, err := s.db.Query(ctx,
+		`SELECT n.name
+		   FROM kg_edge e JOIN kg_node n ON n.id = e.from_node_id
+		  WHERE e.to_node_id = $1 AND e.campaign_id = $2
+		    AND e.edge_type = 'resides_in' AND NOT n.gm_private
+		  ORDER BY n.name
+		  LIMIT $3`, nodeID, campaignID, maxMapSeedResidents)
+	if err != nil {
+		return KGNode{}, nil, fmt.Errorf("storage: map seed residents %s: %w", nodeID, err)
+	}
+	defer rows.Close()
+	var residents []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return KGNode{}, nil, fmt.Errorf("storage: scan map seed resident: %w", err)
+		}
+		residents = append(residents, n)
+	}
+	if err := rows.Err(); err != nil {
+		return KGNode{}, nil, fmt.Errorf("storage: map seed residents %s: %w", nodeID, err)
+	}
+	return node, residents, nil
+}
+
+// maxMapSeedResidents caps the seed list in SQL as well as in the prompt builder.
+// The bound belongs at BOTH ends: the query should not haul a thousand names
+// across the wire for a prompt that will use twelve.
+const maxMapSeedResidents = 40
+
 // ListNodes returns every Knowledge Graph Node in a Campaign in a stable display
 // order (node_type enum order, then case-insensitive name, then id) — the
 // Knowledge panel's list. Each Node carries its Aspects, private ones INCLUDED:

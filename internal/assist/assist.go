@@ -208,6 +208,27 @@ func (e *Engine) GenerateKnowledge(ctx context.Context, campaign storage.Campaig
 	return d, nil
 }
 
+// CallText runs ONE metered text completion for a caller outside this package,
+// through the campaign's own provider resolution and the same attribution line
+// every assist feature emits.
+//
+// It exists so a sibling package that needs a single text call — the map-pin
+// suggester (#541) — does not re-implement the Butler-config → tenant-config →
+// gated-env-default chain and its metering. Re-implementing that is how a
+// second surface ends up spending the deployment's key for a tenant that is not
+// entitled to it.
+//
+// `feature` is the attribution label. The caller owns its prompts and its
+// parsing; this owns provider resolution, metering and attribution.
+func (e *Engine) CallText(ctx context.Context, campaign storage.Campaign, feature, system, user string, maxTokens int) (text string, err error) {
+	caller, estimatedUSD, err := e.newCaller(ctx, campaign)
+	if err != nil {
+		return "", err
+	}
+	defer e.attribute(feature, campaign.ID, caller, estimatedUSD, &err)
+	return caller.Call(system, user, maxTokens)
+}
+
 // newCaller resolves the campaign's LLM provider (Butler config → tenant 'llm'
 // config → gated env default) and wires the shared metered caller over the
 // caps-free PriceOnly meter — the recap engine's exact posture.

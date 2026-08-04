@@ -362,3 +362,57 @@ func TestMapAnchorNodeDelete(t *testing.T) {
 		t.Errorf("campaign_id = %v, want it untouched (%v)", after.CampaignID, campaignID)
 	}
 }
+
+// TestMapSeedContext_PublicOnly: the read that seeds a generated map's prompt
+// (#541).
+//
+// A generated map is an artefact the GM shows the table, so seeding its prompt
+// from gm_private prose or from the name of a gm_private neighbour would launder
+// a secret into a picture — and unlike a prompt, a picture cannot be filtered
+// afterwards or un-seen. Composing this from ListNodes + NodeEdges would have
+// done exactly that: both deliberately include private rows.
+func TestMapSeedContext_PublicOnly(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	town, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeLocation, Name: "Saltmarsh",
+		Body: "A damp fishing town.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	inn := mkNode(t, st, campaignID, storage.KGNodeLocation, "The Rusty Anchor")
+	secret, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeLocation, Name: "The smugglers' cellar",
+		GMPrivate: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateNode secret: %v", err)
+	}
+	for _, from := range []uuid.UUID{inn.ID, secret.ID} {
+		if _, err := st.CreateEdge(ctx, storage.NewKGEdge{
+			CampaignID: campaignID, FromNodeID: from, ToNodeID: town.ID, Type: storage.KGEdgeResidesIn,
+		}); err != nil {
+			t.Fatalf("CreateEdge: %v", err)
+		}
+	}
+
+	node, residents, err := st.MapSeedContext(ctx, campaignID, town.ID)
+	if err != nil {
+		t.Fatalf("MapSeedContext: %v", err)
+	}
+	if node.Name != "Saltmarsh" || node.Body != "A damp fishing town." {
+		t.Fatalf("anchor came back wrong: %+v", node)
+	}
+	if len(residents) != 1 || residents[0] != "The Rusty Anchor" {
+		t.Fatalf("residents = %v; a gm_private neighbour leaked or a public one was lost", residents)
+	}
+
+	// And a private anchor has no public depiction to generate at all.
+	if _, _, err := st.MapSeedContext(ctx, campaignID, secret.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("a gm_private anchor: err = %v, want ErrNotFound", err)
+	}
+}

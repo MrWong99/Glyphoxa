@@ -33,11 +33,11 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
-	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/mixdown"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
@@ -1113,32 +1113,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// (ADR-0039): a saved key needs the cipher (else a loud error, never a silent
 	// env fallback), no row falls back to GEMINI_API_KEY, and neither present is
 	// ErrImageNotConfigured (the handler leaves the Highlight intact without media).
-	imageFactory := func(fctx context.Context, tenantID uuid.UUID) (imagegen.Generator, string, error) {
-		var cfgPtr *storage.ProviderConfig
-		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentImage)
-		if cerr == nil {
-			cfgPtr = &cfg
-		} else if !errors.Is(cerr, storage.ErrNotFound) {
-			return nil, "", cerr
-		}
-		// Gated resolve (ADR-0054 seam (a)): an entitlement refusal errors HERE,
-		// before the env fallback below can spend the deployment's GEMINI key.
-		key, kerr := llmbuild.ResolveKeyGated(fctx, keyEnt, tenantID, cipher, cfgPtr, storage.ComponentImage)
-		if kerr != nil {
-			return nil, "", kerr // saved key without cipher = loud error (ADR-0039)
-		}
-		if key == "" {
-			key = os.Getenv(imagegen.APIKeyEnv)
-		}
-		if key == "" {
-			return nil, "", highlight.ErrImageNotConfigured
-		}
-		model := imagegen.DefaultModel
-		if cfgPtr != nil && cfgPtr.Model != "" {
-			model = cfgPtr.Model
-		}
-		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
-	}
+	imageFactory := newImageFactory(store, cipher, keyEnt)
 	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
 	// The Knowledge Graph appearance index (#545, ADR-0008 amendment): one pass per
 	// ended session, matching its committed Transcript Lines against the campaign's
@@ -1509,6 +1484,13 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// The on-demand campaign-creation assist engine (#479): persona drafting and
 	// knowledge-draft generation, strictly on GM button press.
 	campaignSrv.SetAssist(assistEngine)
+	// Generated maps (#541, ADR-0060). The engine shares the image factory with
+	// Highlight enrichment, and borrows the assist engine's metered text call for
+	// pin suggestions rather than resolving a second LLM provider of its own.
+	mapEngine := mapgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log).
+		WithTextCaller(assistEngine)
+	campaignSrv.SetMapGenerator(mapEngine)
+	campaignSrv.SetMapPinSuggester(mapEngine)
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
