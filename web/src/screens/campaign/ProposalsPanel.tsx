@@ -1,18 +1,11 @@
-import { useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { timestampDate } from "@bufbuild/protobuf/wkt";
-import { Check, Sparkles, X } from "lucide-react";
 
-import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { failedPreconditionMessage } from "@/lib/connectError";
-import { DISPOSITION_LABEL, EDGE_LABEL, metaOf } from "./knowledgeVocab";
-import { invalidateKnowledgeReads } from "./knowledgeCache";
+import { invalidateProposalReview } from "./knowledgeCache";
+import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from "./proposalParts";
 
 // The Proposals panel (#300, ADR-0052) backs the Campaign screen's "Proposals"
 // view: the GM review queue an Agent's remember_knowledge call files into. Each
@@ -22,42 +15,19 @@ import { invalidateKnowledgeReads } from "./knowledgeCache";
 // refused approval (no such entry, matrix violation, duplicate) surfaces the
 // server's actionable reason inline. Reject drops the suggestion. Similarity is a
 // HINT the GM acts on — never an auto-merge (ADR-0052).
-
-// The type and relation vocabularies come from the one shared module so a new
-// type cannot colour or label itself differently here than in the list or the
-// graph (#534).
-function nodeTypeLabel(t: NodeType): string {
-  return metaOf(t).label;
-}
-
-function fmtWhen(p: KnowledgeProposal): string {
-  if (!p.createdAt) return "";
-  return timestampDate(p.createdAt).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
+//
+// The card's parts live in proposalParts so the graph overlay (#537) reviews the
+// same proposal through the same widgets and the same RPCs.
 
 export function ProposalsPanel() {
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.listKnowledgeProposals, {});
   const proposals = data?.proposals ?? [];
 
-  // A review action must refresh the queue AND the wiki list (an approved write
-  // lands a new/edited Node the Knowledge panel shows) AND any cached node-edges
-  // (an approved edge adds a relationship the relations view / delete-count reads).
-  // Each key is built without an input so it prefix-matches every cached query.
-  const invalidateAfterReview = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listKnowledgeProposals,
-        cardinality: "finite",
-      }),
-    });
-    // An approved write lands a new/edited Node or Edge, so every read of the KG —
-    // the list, the search, a node's relations, and the graph — is now stale.
-    invalidateKnowledgeReads(queryClient);
-  };
+  // A review action must refresh the queue AND every read of the KG — an approved
+  // write lands a new/edited Node or Edge, so the list, the search, a node's
+  // relations and the graph are all stale.
+  const invalidateAfterReview = () => invalidateProposalReview(queryClient);
 
   if (status === "pending") {
     return <div className="gx-skeleton" data-testid="proposals-loading" />;
@@ -88,9 +58,7 @@ export function ProposalsPanel() {
 }
 
 // ProposalCard renders one pending proposal: who + when, the kind badge, the
-// human-rendered write, a lazy similarity hint, and Approve/Reject. A refused
-// approval (FailedPrecondition) shows the server's reason inline so the GM knows
-// exactly what to fix; any other failure shows a generic inline error.
+// human-rendered write, a lazy similarity hint, and Approve/Reject.
 function ProposalCard({
   proposal,
   onReviewed,
@@ -98,29 +66,6 @@ function ProposalCard({
   proposal: KnowledgeProposal;
   onReviewed: () => void;
 }) {
-  const [confirmReject, setConfirmReject] = useState(false);
-
-  const approve = useMutation(CampaignService.method.approveKnowledgeProposal, {
-    onSuccess: () => onReviewed(),
-  });
-  const reject = useMutation(CampaignService.method.rejectKnowledgeProposal, {
-    onSuccess: () => onReviewed(),
-  });
-
-  // A refused approval carries an actionable server reason; anything else is a
-  // generic failure. Reject failures fall into the same inline line so a dead
-  // button is never silent.
-  const blockedReason = approve.isError ? failedPreconditionMessage(approve.error) : null;
-  const inlineError = blockedReason
-    ? blockedReason
-    : approve.isError
-      ? `Couldn't approve: ${approve.error.message}`
-      : reject.isError
-        ? `Couldn't reject: ${reject.error.message}`
-        : null;
-
-  const pending = approve.isPending || reject.isPending;
-
   return (
     <Card className="gx-proposal-card">
       <div className="gx-proposal-card__head">
@@ -135,161 +80,7 @@ function ProposalCard({
 
       <SimilarHint proposalId={proposal.id} />
 
-      <div className="gx-proposal-card__actions">
-        <Button
-          variant="primary"
-          size="sm"
-          iconStart={<Check size={14} />}
-          onClick={() => approve.mutate({ id: proposal.id })}
-          disabled={pending}
-        >
-          Approve
-        </Button>
-        <Button
-          variant="danger"
-          size="sm"
-          iconStart={<X size={14} />}
-          onClick={() => setConfirmReject(true)}
-          disabled={pending}
-        >
-          Reject
-        </Button>
-        {inlineError && (
-          <span className="gx-editor__status gx-editor__status--error" role="alert">
-            {inlineError}
-          </span>
-        )}
-      </div>
-
-      {confirmReject && (
-        <ConfirmDialog
-          open
-          onOpenChange={(open) => {
-            if (!open) setConfirmReject(false);
-          }}
-          title="Reject this suggestion?"
-          description="The suggestion is dropped and never becomes canon. This can't be undone."
-          confirmLabel="Reject suggestion"
-          onConfirm={() => {
-            reject.mutate({ id: proposal.id });
-            setConfirmReject(false);
-          }}
-        />
-      )}
+      <ProposalActions proposalID={proposal.id} onReviewed={onReviewed} />
     </Card>
-  );
-}
-
-// KindBadge labels the proposal's kind, or "Unreadable" when the write is unset.
-function KindBadge({ proposal }: { proposal: KnowledgeProposal }) {
-  const kind = proposal.write.case;
-  if (kind === "fact") return <Badge size="sm">Fact</Badge>;
-  if (kind === "edge") return <Badge size="sm">Relationship</Badge>;
-  if (kind === "node") return <Badge size="sm">New entry</Badge>;
-  return (
-    <Badge variant="neutral" size="sm">
-      Unreadable
-    </Badge>
-  );
-}
-
-// ProposalWrite renders the human form of the proposed write per kind.
-function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
-  const w = proposal.write;
-  switch (w.case) {
-    case "fact":
-      // The aspect label is shown because approving files the fact UNDER it as a
-      // row on the entry (#542) — the GM is deciding where it lands, not just
-      // whether the sentence is true.
-      return (
-        <span>
-          <strong>{w.value.subject}</strong> —{" "}
-          {w.value.aspectKey && <em>{w.value.aspectKey}: </em>}
-          {w.value.fact}
-        </span>
-      );
-    case "edge":
-      // The note and disposition are rendered because APPROVING WRITES THEM, and
-      // the note reaches an NPC's system prompt through the relation clause. A card
-      // that showed only "subject —knows→ target" asked the GM to approve up to 280
-      // runes of model-authored text they had never seen — approval of unseen
-      // content, which is the one thing the review queue exists to prevent.
-      return (
-        <span>
-          <strong>{w.value.subject}</strong> —{EDGE_LABEL.get(w.value.relation) ?? ""}→{" "}
-          <strong>{w.value.target}</strong>
-          {(w.value.note || w.value.disposition !== 0) && (
-            <span className="gx-proposal-card__body">
-              {" — "}
-              {DISPOSITION_LABEL.get(w.value.disposition) ?? ""}
-              {w.value.note && w.value.disposition !== 0 ? ", " : ""}
-              {/* Newlines are collapsed: a proposal is one clause, and a note that
-                  can open a new line can forge a section header in the prompt. */}
-              {w.value.note.replace(/\s+/g, " ")}
-            </span>
-          )}
-        </span>
-      );
-    case "node":
-      return (
-        <span>
-          New {nodeTypeLabel(w.value.nodeType)}: <strong>{w.value.name}</strong>
-          {w.value.body && <span className="gx-proposal-card__body"> — {w.value.body}</span>}
-        </span>
-      );
-    default:
-      return <span className="gx-proposal-card__unreadable">Unreadable proposal</span>;
-  }
-}
-
-// SimilarHint lazily fetches the existing entries most similar to a proposal's
-// subject (the ADR-0011 vector hint) so the GM can merge or reject rather than
-// duplicate. A skeleton shows while loading; "No similar entries." when none.
-function SimilarHint({ proposalId }: { proposalId: string }) {
-  // Truly lazy: the similarity RPC embeds the subject (a provider call), so it
-  // fires ONLY after the GM opts in — never on mount for every card (that would
-  // fan N concurrent Embed calls across the whole queue).
-  const [show, setShow] = useState(false);
-  const { data, status } = useQuery(
-    CampaignService.method.listSimilarKnowledge,
-    { proposalId },
-    { enabled: show },
-  );
-
-  if (!show) {
-    return (
-      <button type="button" className="gx-proposal-card__similar-btn" onClick={() => setShow(true)}>
-        <Sparkles size={12} /> Show similar entries
-      </button>
-    );
-  }
-  if (status === "pending") {
-    return <div className="gx-skeleton gx-proposal-card__similar-skel" data-testid="similar-loading" />;
-  }
-  if (status === "error") {
-    return null; // the hint is best-effort; a failure is silent (no scary error on a suggestion)
-  }
-
-  const nodes = data.nodes;
-  return (
-    <div className="gx-proposal-card__similar">
-      <span className="gx-proposal-card__similar-title">
-        <Sparkles size={12} /> Similar existing entries
-      </span>
-      {nodes.length === 0 ? (
-        <span className="gx-proposal-card__similar-empty">No similar entries.</span>
-      ) : (
-        <ul className="gx-proposal-card__similar-list">
-          {nodes.map((n) => (
-            <li key={n.id}>
-              <span className="gx-proposal-card__similar-name">{n.name}</span>
-              <Badge size="sm" variant="neutral">
-                {nodeTypeLabel(n.nodeType)}
-              </Badge>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }

@@ -214,3 +214,93 @@ describe("filterGraph", () => {
     expect(out.nodes.map((n) => n.id).sort()).toEqual(["bart", "guild", "town"]);
   });
 });
+
+// Position memory (#537). `layout` is pure in its INPUTS, so adding one Node
+// reshuffles every other Node — which is exactly what happens when the GM
+// approves a suggestion mid-review. Determinism is not stability.
+describe("layout position memory", () => {
+  it("pinned nodes come back at exactly their pinned coordinates", () => {
+    const { nodes, edges } = fixture();
+    const first = layout(nodes, edges);
+    const pins = new Map(first.nodes.map((p) => [p.node.id, { x: p.x, y: p.y }]));
+
+    // A new entry arrives — an approved suggestion, or any other edit.
+    const grown = [
+      ...nodes,
+      create(GraphNodeSchema, { id: "new", nodeType: NodeType.NPC, name: "Mira" }),
+    ];
+    const second = layout(grown, edges, { pins });
+
+    for (const before of first.nodes) {
+      const after = second.nodes.find((p) => p.node.id === before.node.id);
+      expect(after, `${before.node.id} vanished`).toBeDefined();
+      expect([after!.x, after!.y], `${before.node.id} moved`).toEqual([before.x, before.y]);
+    }
+  });
+
+  it("without pins, the same growth DOES reshuffle — which is why pins exist", () => {
+    const { nodes, edges } = fixture();
+    const first = layout(nodes, edges);
+    const grown = [
+      ...nodes,
+      create(GraphNodeSchema, { id: "new", nodeType: NodeType.NPC, name: "Mira" }),
+    ];
+    const second = layout(grown, edges);
+
+    const moved = first.nodes.some((before) => {
+      const after = second.nodes.find((p) => p.node.id === before.node.id);
+      return after && (after.x !== before.x || after.y !== before.y);
+    });
+    expect(moved, "the unpinned layout was stable by accident, so the pin test proves nothing").toBe(
+      true,
+    );
+  });
+
+  it("a fully pinned layout is idempotent", () => {
+    const { nodes, edges } = fixture();
+    const first = layout(nodes, edges);
+    const pins = new Map(first.nodes.map((p) => [p.node.id, { x: p.x, y: p.y }]));
+    const second = layout(nodes, edges, { pins });
+    expect(second.nodes.map((p) => [p.node.id, p.x, p.y])).toEqual(
+      first.nodes.map((p) => [p.node.id, p.x, p.y]),
+    );
+    expect(second.bounds).toEqual(first.bounds);
+  });
+
+  it("a seed places a brand-new node where its ghost stood", () => {
+    const { nodes, edges } = fixture();
+    const first = layout(nodes, edges);
+    const pins = new Map(first.nodes.map((p) => [p.node.id, { x: p.x, y: p.y }]));
+    // The server mints a fresh id at approval, so the NAME is the only thing that
+    // survives the ghost→node transition.
+    const seeds = new Map([["mira", { x: 400, y: -250 }]]);
+    const grown = [
+      ...nodes,
+      create(GraphNodeSchema, { id: "fresh-uuid", nodeType: NodeType.NPC, name: "Mira" }),
+    ];
+    const out = layout(grown, edges, { pins, seeds });
+    const mira = out.nodes.find((p) => p.node.id === "fresh-uuid")!;
+    // EXACTLY where the ghost stood. "Near enough" is not what the GM watched
+    // happen: they clicked a dashed circle and it should become a solid one, in
+    // that spot, with nothing else moving.
+    expect([mira.x, mira.y]).toEqual([400, -250]);
+  });
+
+  it("pinned nodes do not drift as the free node settles", () => {
+    // forceCenter recentres by translating every node, and a pinned node is snapped
+    // back each tick — so the offset never shrinks and the correction is re-applied
+    // forever, walking the free nodes away. It must be off once anything is pinned.
+    const { nodes, edges } = fixture();
+    const pins = new Map(nodes.map((n, i) => [n.id, { x: 1000 + i * 60, y: 1000 }]));
+    const grown = [
+      ...nodes,
+      create(GraphNodeSchema, { id: "new", nodeType: NodeType.NPC, name: "Mira" }),
+    ];
+    const out = layout(grown, edges, { pins });
+    const fresh = out.nodes.find((p) => p.node.id === "new")!;
+    expect(Number.isFinite(fresh.x)).toBe(true);
+    // Sane means "in the same neighbourhood as the cloud", not "at ±1e12".
+    expect(Math.abs(fresh.x - 1000)).toBeLessThan(2000);
+    expect(Math.abs(fresh.y - 1000)).toBeLessThan(2000);
+  });
+});

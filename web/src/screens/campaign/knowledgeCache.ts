@@ -80,3 +80,21 @@ export function invalidateKnowledgeReads(queryClient: QueryClient): void {
     }),
   });
 }
+
+/**
+ * invalidateProposalReview drops everything a reviewed Knowledge Proposal changes:
+ * the pending queue itself, plus every read of the KG the approved write lands in.
+ *
+ * Two surfaces now review the same queue — the Proposals panel and the graph
+ * overlay (#537) — which is exactly the shape that produced the stale-graph bug
+ * this module exists to prevent, so both call this one helper.
+ */
+export function invalidateProposalReview(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({
+    queryKey: createConnectQueryKey({
+      schema: CampaignService.method.listKnowledgeProposals,
+      cardinality: "finite",
+    }),
+  });
+  invalidateKnowledgeReads(queryClient);
+}
