@@ -221,7 +221,7 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 				log.Error("highlight enrich: image provider rejected the configured key",
 					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
 			case imagegen.IsQuotaExceeded(err):
-				log.Warn("highlight enrich: image provider out of quota or rate-limited, will retry",
+				log.Warn("highlight enrich: image provider out of quota or rate-limited",
 					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
 			}
 			return fmt.Errorf("highlight enrich: generate image: %w", err)

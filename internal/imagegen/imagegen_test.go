@@ -171,16 +171,15 @@ func TestGemini_Generate_StatusIsTyped(t *testing.T) {
 // quota must never be reported as an auth or configuration problem.
 func TestGemini_Generate_StatusPredicates(t *testing.T) {
 	cases := []struct {
-		name                   string
-		status                 int
-		quota, auth, providerF bool
+		name        string
+		status      int
+		quota, auth bool
 	}{
-		{"rate limited", http.StatusTooManyRequests, true, false, false},
-		{"key rejected", http.StatusUnauthorized, false, true, false},
-		{"key forbidden", http.StatusForbidden, false, true, false},
-		{"provider down", http.StatusInternalServerError, false, false, true},
-		{"provider gateway", http.StatusBadGateway, false, false, true},
-		{"malformed request", http.StatusBadRequest, false, false, false},
+		{"rate limited", http.StatusTooManyRequests, true, false},
+		{"key rejected", http.StatusUnauthorized, false, true},
+		{"key forbidden", http.StatusForbidden, false, true},
+		{"provider down", http.StatusInternalServerError, false, false},
+		{"malformed request", http.StatusBadRequest, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,9 +195,8 @@ func TestGemini_Generate_StatusPredicates(t *testing.T) {
 			if got := imagegen.IsAuthFailure(err); got != tc.auth {
 				t.Errorf("IsAuthFailure = %v, want %v", got, tc.auth)
 			}
-			if got := imagegen.IsProviderFault(err); got != tc.providerF {
-				t.Errorf("IsProviderFault = %v, want %v", got, tc.providerF)
-			}
+			// A 5xx and a 400 are neither: they must fall through to the caller's
+			// own handling rather than being reported as a bill or a bad key.
 		})
 	}
 }
@@ -208,7 +206,7 @@ func TestGemini_Generate_StatusPredicates(t *testing.T) {
 // failure, a nil error — so no caller silently reclassifies them.
 func TestStatusPredicates_IgnoreOtherErrors(t *testing.T) {
 	for _, err := range []error{nil, imagegen.ErrImageTooLarge, imagegen.ErrNotConfigured, errors.New("dial tcp: i/o timeout")} {
-		if imagegen.IsQuotaExceeded(err) || imagegen.IsAuthFailure(err) || imagegen.IsProviderFault(err) {
+		if imagegen.IsQuotaExceeded(err) || imagegen.IsAuthFailure(err) {
 			t.Errorf("%v was classified as an upstream status failure", err)
 		}
 	}

@@ -96,11 +96,11 @@ func IsAuthFailure(err error) bool {
 	})
 }
 
-// IsProviderFault reports whether err is an upstream server-side failure (5xx).
-// Transient and nobody's configuration: the honest answer is "try again shortly".
-func IsProviderFault(err error) bool {
-	return statusIs(err, func(code int) bool { return code >= 500 })
-}
+// There is deliberately no IsProviderFault: nothing needs it. The 5xx case is
+// classified in internal/rpc alongside the text provider's equivalent error,
+// where the two seams meet, and a predicate here with no caller but its own test
+// would just be API pretending to be used. [StatusError] is exported, so anyone
+// who later needs a different cut takes it with errors.As.
 
 func statusIs(err error, pred func(int) bool) bool {
 	var se *StatusError
