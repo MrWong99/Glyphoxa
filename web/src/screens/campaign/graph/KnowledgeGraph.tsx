@@ -162,7 +162,15 @@ export function KnowledgeGraph({
   });
 
   const laid = useMemo(() => {
-    if (sticky.current.key !== filterKey) {
+    // A DIFFERENT WORLD resets the memory too. The graph stays mounted across a
+    // campaign switch, and seeds are keyed by lower-cased NAME — so an approved
+    // "Bart" in campaign A would pin campaign B's "Bart" to A's coordinates. If
+    // not one remembered id survives into the new payload, this is not the same
+    // world.
+    const carriedOver =
+      sticky.current.pins.size === 0 ||
+      filtered.nodes.some((n) => sticky.current.pins.has(n.id));
+    if (sticky.current.key !== filterKey || !carriedOver) {
       sticky.current = { key: filterKey, pins: new Map(), seeds: new Map() };
     }
     const out = layout(filtered.nodes, filtered.edges, {
@@ -175,13 +183,19 @@ export function KnowledgeGraph({
     return out;
   }, [filtered, filterKey]);
 
-  // Ghosts are an OVERLAY: placement never moves a laid-out Node, which is what
-  // lets an approved suggestion turn solid in place.
+  // Table view is the players-are-watching mode: it removes gm_private entries
+  // outright so the GM can share the screen. Unreviewed suggestions are strictly
+  // worse than a private entry there — they are an Agent's unvetted guesses about
+  // the plot, they can name a gm_private entry in their subject line, and the
+  // review card spells out the whole write. So table view takes the overlay with
+  // it, rather than leaving the GM to remember the toggle.
+  const proposalsVisible = showProposals && !hidePrivate;
   const placed = useMemo(
-    () => placeProposals(showProposals ? resolved : [], laid),
-    [resolved, laid, showProposals],
+    () => placeProposals(proposalsVisible ? resolved : [], laid),
+    [resolved, laid, proposalsVisible],
   );
-  const reviewing = reviewID ? (resolved.find((r) => r.id === reviewID) ?? null) : null;
+  const reviewing =
+    proposalsVisible && reviewID ? (resolved.find((r) => r.id === reviewID) ?? null) : null;
 
   const afterReview = () => {
     setReviewID(null);
@@ -260,7 +274,7 @@ export function KnowledgeGraph({
           >
             Table view
           </button>
-          {resolved.length > 0 && (
+          {resolved.length > 0 && !hidePrivate && (
             <button
               type="button"
               className="gx-kg-chip gx-kg-chip--proposals"
@@ -328,9 +342,16 @@ export function KnowledgeGraph({
         </div>
       </div>
 
-      {laid.nodes.length === 0 ? (
+      {/* The canvas is skipped only when there is NOTHING to draw — including
+          suggestions. A brand-new campaign whose Butler has proposed its first
+          entries has no committed Nodes at all, and gating on those alone hid
+          every ghost behind "nothing to draw" while the chip said there were
+          suggestions. */}
+      {laid.nodes.length === 0 && placed.ghostNodes.length === 0 ? (
         <p className="gx-kg-empty">
-          Nothing to draw — every entry is filtered out. Turn a type chip back on.
+          {resolved.length > 0 && !proposalsVisible
+            ? "Nothing to draw here. Suggestions are hidden in table view."
+            : "Nothing to draw — every entry is filtered out. Turn a type chip back on."}
         </p>
       ) : (
         <svg
@@ -532,6 +553,8 @@ export function KnowledgeGraph({
               >
                 <title>{`${m.agentName} suggests a fact here`}</title>
                 <circle r={LAYOUT.nodeRadius + 7} />
+                {/* A 1.5px dashed ring is not a click target. */}
+                <circle className="gx-kg-graph__fact-hit" r={LAYOUT.nodeRadius + 7} />
               </g>
             ))}
             {placed.ghostNodes.map((g) => {
@@ -569,7 +592,7 @@ export function KnowledgeGraph({
       {/* Suggestions that cannot be drawn are LISTED, never dropped: an
           unresolvable name is a proposal that will be refused at approval, and
           that is worth knowing before clicking. */}
-      {showProposals && placed.unplaced.length > 0 && (
+      {proposalsVisible && placed.unplaced.length > 0 && (
         <details className="gx-kg-graph__unplaced">
           <summary>
             {placed.unplaced.length} suggestion{placed.unplaced.length === 1 ? "" : "s"} can&apos;t be
@@ -578,8 +601,10 @@ export function KnowledgeGraph({
           <ul>
             {placed.unplaced.map((u) => (
               <li key={u.proposal.id}>
+                {/* Labelled with the WRITE, not just the author: two undrawable
+                    suggestions from the same Agent were two identical buttons. */}
                 <button type="button" className="gx-kg-chip" onClick={() => setReviewID(u.proposal.id)}>
-                  {u.proposal.agentName}
+                  {u.proposal.agentName}: <ProposalWrite proposal={u.proposal.proposal} />
                 </button>
                 <span className="gx-kg-graph__unplaced-why">{u.reason}</span>
               </li>

@@ -95,14 +95,29 @@ describe("resolveProposals", () => {
     expect(r.write.anchor.reason).toMatch(/2 entries/);
   });
 
-  it("an exact-case match disambiguates a case-insensitive collision", () => {
+  it("refuses a case-insensitive collision even when one match is exact-case", () => {
     const twins = [
       ...NODES,
       create(GraphNodeSchema, { id: "bart-lower", nodeType: NodeType.ITEM, name: "bart" }),
     ];
     const [r] = resolveProposals([factProposal({ subject: "Bart" })], twins);
     if (r.write.kind !== "fact") throw new Error("expected a fact");
-    expect(r.write.anchor).toEqual({ at: "node", id: "bart" });
+    // The SERVER refuses any multi-match on lower(name) ("rename one first"), so
+    // an exact-case tiebreak here would draw a confident halo on an approval that
+    // cannot land — a promise the GM then watches fail.
+    expect(r.write.anchor.at).toBe("unknown");
+    if (r.write.anchor.at !== "unknown") return;
+    expect(r.write.anchor.reason).toMatch(/rename one/);
+  });
+
+  it("an id that names nothing never falls back to a same-named entry", () => {
+    // The server treats node_id as authoritative and NEVER falls back to the name.
+    // A client that did would draw the halo on a different entry that happens to
+    // share the name, and the GM would approve a write anchored somewhere they
+    // were never shown.
+    const [r] = resolveProposals([factProposal({ nodeId: "stale-id", subject: "Bart" })], NODES);
+    if (r.write.kind !== "fact") throw new Error("expected a fact");
+    expect(r.write.anchor.at).toBe("unknown");
   });
 
   it("an edge into an entry the same queue proposes creating resolves to a ghost", () => {
@@ -163,9 +178,17 @@ describe("placeProposals", () => {
     expect(placed.ghostNodes).toHaveLength(1);
     const bart = laid.nodes.find((p) => p.node.id === "bart")!;
     const ghost = placed.ghostNodes[0];
-    // Exactly the attach offset away from its one neighbour — near enough to read
-    // as "this goes here", far enough not to sit on top of it.
-    expect(Math.hypot(ghost.x - bart.x, ghost.y - bart.y)).toBeCloseTo(GHOST.attachOffset, 0);
+    // Near enough to read as "this goes here", far enough not to sit on top of it.
+    // The exact radius carries a per-id ring offset (so ghosts spread instead of
+    // stacking), hence a band rather than a point.
+    const d = Math.hypot(ghost.x - bart.x, ghost.y - bart.y);
+    expect(d).toBeGreaterThanOrEqual(GHOST.attachOffset);
+    expect(d).toBeLessThanOrEqual(GHOST.attachOffset + 4 * GHOST.minClearance);
+    // And it is beside THAT neighbour, not merely somewhere on the canvas.
+    const nearest = [...laid.nodes].sort(
+      (a, b) => Math.hypot(a.x - ghost.x, a.y - ghost.y) - Math.hypot(b.x - ghost.x, b.y - ghost.y),
+    )[0];
+    expect(nearest.node.id).toBe("bart");
     // And the proposed edge now runs to the ghost.
     expect(placed.ghostEdges).toHaveLength(1);
     expect([placed.ghostEdges[0].x2, placed.ghostEdges[0].y2]).toEqual([ghost.x, ghost.y]);
@@ -231,6 +254,72 @@ describe("placeProposals", () => {
     const placed = placeProposals(resolved, withoutBart);
     expect(placed.unplaced).toHaveLength(1);
     expect(placed.unplaced[0].reason).toMatch(/filtered out/);
+  });
+
+  it("ghosts keep their spot when another proposal leaves the queue", () => {
+    // Keying the angle on the ghost's INDEX meant approving one node proposal
+    // renumbered the rest, so every remaining ghost jumped — the same spatial
+    // bearings the committed nodes are pinned for, broken for the very things
+    // being reviewed.
+    const three = resolveProposals(
+      [nodeProposal("Chapel", "p1"), nodeProposal("Crypt", "p2"), nodeProposal("Vault", "p3")],
+      NODES,
+    );
+    const before = placeProposals(three, laid);
+    const afterApproval = placeProposals(
+      three.filter((r) => r.id !== "p1"),
+      laid,
+    );
+    for (const g of afterApproval.ghostNodes) {
+      const was = before.ghostNodes.find((b) => b.proposalID === g.proposalID)!;
+      expect([g.x, g.y], `${g.name} moved when another suggestion was reviewed`).toEqual([
+        was.x,
+        was.y,
+      ]);
+    }
+  });
+
+  it("a ghost is never placed on top of a committed entry", () => {
+    // A dashed circle sitting on a solid one is exactly the "mistakable for canon"
+    // hazard the dashing exists to prevent.
+    const many = resolveProposals(
+      Array.from({ length: 12 }, (_, i) => nodeProposal(`Ghost ${i}`, `p${i}`)),
+      NODES,
+    );
+    const placed = placeProposals(many, laid);
+    for (const g of placed.ghostNodes) {
+      for (const p of laid.nodes) {
+        expect(
+          Math.hypot(g.x - p.x, g.y - p.y),
+          `${g.name} landed on ${p.node.name}`,
+        ).toBeGreaterThanOrEqual(GHOST.minClearance);
+      }
+    }
+  });
+
+  it("no two ghosts share a spot", () => {
+    // Deliberately weaker than the committed-node clearance above. Ghosts do NOT
+    // push each other apart, because that would make each one's position depend on
+    // which other suggestions are pending — approving one would shift the rest.
+    // The per-id ring makes an exact stack vanishingly unlikely instead.
+    const many = resolveProposals(
+      Array.from({ length: 12 }, (_, i) => nodeProposal(`Ghost ${i}`, `p${i}`)),
+      NODES,
+    );
+    const placed = placeProposals(many, laid);
+    const spots = new Set(placed.ghostNodes.map((g) => `${g.x},${g.y}`));
+    expect(spots.size).toBe(placed.ghostNodes.length);
+  });
+
+  it("places proposed entries even when the campaign has no entries yet", () => {
+    // A brand-new campaign whose Butler has proposed its first entries: gating the
+    // canvas on committed nodes alone hid every ghost behind "nothing to draw".
+    const empty = layout([], []);
+    const placed = placeProposals(resolveProposals([nodeProposal("First Light")], []), empty);
+    expect(placed.ghostNodes).toHaveLength(1);
+    expect(Number.isFinite(placed.ghostNodes[0].x)).toBe(true);
+    expect(placed.bounds.maxX).toBeGreaterThan(placed.bounds.minX);
+    expect(placed.bounds.maxY).toBeGreaterThan(placed.bounds.minY);
   });
 
   it("an empty queue changes nothing at all", () => {

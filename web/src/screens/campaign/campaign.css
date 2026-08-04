@@ -1515,8 +1515,14 @@
    by shape and stroke rather than colour alone — colour is already spent on the
    seven entry types, and a colour-only difference is no difference to a GM who
    cannot see it. */
+/* fill: transparent, NOT none. `none` means the interior is not painted, and an
+   unpainted interior is not hit-testable — so a click inside a ghost fell straight
+   through to whatever was behind it, and the only clickable part was the 2px
+   dashed stroke. jsdom's fireEvent.click dispatches directly on the element and
+   skips hit-testing entirely, so every test passed while the feature was
+   unusable in a browser. */
 .gx-kg-graph__proposed-node circle {
-  fill: none;
+  fill: transparent;
   stroke-width: 2;
   stroke-dasharray: 4 3;
   opacity: 0.9;
@@ -1544,25 +1550,43 @@
   stroke-opacity: 0.8;
 }
 
-/* A 1.5px line is not a click target. The hit line is invisible and fat. */
-.gx-kg-graph__proposed-hit {
+/* A 1.5px line is not a click target. The hit line is invisible and fat.
+   The selector must out-specify `.gx-kg-graph__proposed-edge line` (0,1,1) —
+   a bare `.gx-kg-graph__proposed-hit` (0,1,0) LOSES to it, and the hit line then
+   silently inherited the visible 1.5px stroke. Only hit-testing in a real browser
+   catches that: jsdom dispatches clicks straight at the element. */
+.gx-kg-graph__proposed-edge line.gx-kg-graph__proposed-hit {
   stroke: transparent;
-  stroke-width: 12;
+  stroke-width: 14;
+  stroke-dasharray: none;
+  stroke-opacity: 1;
   cursor: pointer;
 }
 
-.gx-kg-graph__proposed-hit:focus-visible {
+.gx-kg-graph__proposed-edge line.gx-kg-graph__proposed-hit:focus-visible {
   stroke: var(--accent, #ffcf5a);
   stroke-opacity: 0.35;
 }
 
 /* A proposed FACT has nowhere of its own to stand — it lands on an entry that
    already exists — so it marks that entry with a dashed halo instead. */
+/* The halo rings a committed Node, so its interior deliberately stays clickable
+   as that Node — the GM must still be able to open the entry the fact would land
+   on. The ring itself is the review target, widened by a transparent hit ring. */
 .gx-kg-graph__fact-mark circle {
   fill: none;
   stroke: var(--accent, #ffcf5a);
   stroke-width: 1.5;
   stroke-dasharray: 3 4;
+  cursor: pointer;
+}
+
+/* Same specificity trap as the edge hit line above. */
+.gx-kg-graph__fact-mark circle.gx-kg-graph__fact-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  stroke-dasharray: none;
   cursor: pointer;
 }
 

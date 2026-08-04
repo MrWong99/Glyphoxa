@@ -236,7 +236,7 @@ describe("proposals on the graph", () => {
     // WILL be refused, which is worth knowing before clicking.
     const strip = await screen.findByText(/can't be drawn here/);
     expect(strip).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Glyphoxa" }));
+    fireEvent.click(screen.getByRole("button", { name: /Glyphoxa:.*Smugglers/ }));
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
     expect(within(dialog).getByText(/Approving will be refused/)).toBeInTheDocument();
   });
@@ -256,6 +256,40 @@ describe("proposals on the graph", () => {
     // And the committed graph is still there — the toggle hides suggestions, not
     // the world.
     expect(screen.getByRole("button", { name: /^Bart \(/ })).toBeInTheDocument();
+  });
+
+  it("table view takes the suggestions with it", async () => {
+    renderGraph([NODE_PROPOSAL, EDGE_PROPOSAL]);
+    await screen.findByRole("button", { name: /Suggested new entry The Sunken Chapel/ });
+    expect(screen.getByText(/can't be drawn here/)).toBeInTheDocument();
+
+    // Table view is the players-are-watching mode — it removes gm_private entries
+    // outright so the GM can share the screen. Unreviewed suggestions are strictly
+    // worse there: an Agent's unvetted guesses about the plot, whose subject line
+    // can name a gm_private entry and whose review card spells out the whole write.
+    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Suggested new entry The Sunken Chapel/ }),
+      ).toBeNull(),
+    );
+    // Including the strip that names the undrawable ones, and the toggle itself.
+    expect(screen.queryByText(/can't be drawn here/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Suggestions \(/ })).toBeNull();
+    // The world is still drawn — table view hides suggestions, not the campaign.
+    expect(screen.getByRole("button", { name: /^Bart \(/ })).toBeInTheDocument();
+  });
+
+  it("draws proposed entries even in a campaign with nothing in it yet", async () => {
+    renderGraph([NODE_PROPOSAL], []);
+    // A brand-new campaign whose Butler proposed its first entries: gating the
+    // canvas on committed nodes alone hid every ghost behind "nothing to draw"
+    // while the chip insisted there were suggestions.
+    expect(
+      await screen.findByRole("button", { name: /Suggested new entry The Sunken Chapel/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing to draw/)).toBeNull();
   });
 
   it("shows no suggestions affordance when the queue is empty", async () => {

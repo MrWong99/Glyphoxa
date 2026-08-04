@@ -52,10 +52,21 @@ export type ResolvedProposal = {
 /**
  * resolveProposals maps the pending queue onto the campaign's Nodes.
  *
- * Resolution runs against ALL campaign nodes, not the filtered subset: a name that
- * resolves fine but happens to be filtered out of the current view is a DRAWING
- * problem, not a proposal problem, and conflating the two would tell the GM their
- * Butler had hallucinated an entry that exists.
+ * It MIRRORS the server's resolution (storage.resolveProposalAnchor /
+ * resolveNodeByName) rule for rule, because every difference is a lie told to the
+ * GM at the moment they decide:
+ *
+ *   - A non-empty node_id is AUTHORITATIVE. The server never falls back to the
+ *     name, so neither may this: falling back would draw the halo on a DIFFERENT
+ *     entry that happens to share the name, and the GM would approve a write
+ *     anchored somewhere they were never shown.
+ *   - Any case-insensitive multi-match is refused. Disambiguating by exact case
+ *     would promise an approval the server then rejects.
+ *
+ * `nodes` must be the WHOLE campaign payload, not a filtered subset — a name that
+ * resolves fine but is filtered out of the current view is a DRAWING problem, not
+ * a proposal problem, and conflating the two would tell the GM their Butler had
+ * hallucinated an entry that exists. Callers pass the raw GetKnowledgeGraph nodes.
  */
 export function resolveProposals(
   proposals: readonly KnowledgeProposal[],
@@ -80,7 +91,13 @@ export function resolveProposals(
   }
 
   const resolve = (id: string, name: string): Anchor => {
-    if (id && byID.has(id)) return { at: "node", id };
+    // An id short-circuits everything, exactly as the server does. No name
+    // fallback: an id that names nothing is a deleted anchor, not an invitation to
+    // find something similarly named.
+    if (id) {
+      if (byID.has(id)) return { at: "node", id };
+      return { at: "unknown", name, reason: "the entry this was filed against is gone" };
+    }
     const key = name.trim().toLowerCase();
     if (!key) {
       return { at: "unknown", name, reason: "the suggestion names no entry" };
@@ -88,20 +105,15 @@ export function resolveProposals(
     const candidates = byName.get(key) ?? [];
     if (candidates.length === 1) return { at: "node", id: candidates[0].id };
     if (candidates.length > 1) {
-      // Prefer an exact-case match when it is unique — that is a real
-      // disambiguation, not a coin flip.
-      const exact = candidates.filter((c) => c.name === name);
-      if (exact.length === 1) return { at: "node", id: exact[0].id };
+      // The server refuses ANY multi-match ("rename one first"), so an exact-case
+      // tiebreak here would draw a confident halo on an approval that cannot land.
       return {
         at: "unknown",
         name,
-        reason: `${candidates.length} entries are called "${name}" — approval can't tell which`,
+        reason: `${candidates.length} entries are called "${name}" — rename one first`,
       };
     }
     if (proposedNames.has(key)) return { at: "ghost", name };
-    // An id that resolves to nothing means the anchor Node was deleted after the
-    // Agent filed; say so, because approving will fail with exactly that.
-    if (id) return { at: "unknown", name, reason: "the entry this was filed against is gone" };
     return { at: "unknown", name, reason: `no entry called "${name}" yet` };
   };
 
@@ -185,10 +197,34 @@ export type PlacedProposals = {
   bounds: Layout["bounds"];
 };
 
+/**
+ * angleOf turns a proposal id into a stable direction.
+ *
+ * Keying the angle on the ghost's INDEX meant approving or rejecting one node
+ * proposal renumbered the rest, so every remaining ghost jumped to a new spot —
+ * the same "keep your spatial bearings across a review session" the committed
+ * nodes are pinned for, broken for the very things being reviewed. A hash of the
+ * id does not renumber.
+ */
+function hashOf(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 /** Placement tuning, exported so the view and its tests agree on one set of numbers. */
 export const GHOST = {
   /** How far a ghost sits from the neighbour(s) it attaches to. */
   attachOffset: 62,
+  /**
+   * How close a ghost may come to a committed Node before it is pushed out. A
+   * dashed circle sitting on top of a solid one is exactly the "mistakable for
+   * canon" hazard the dashing exists to prevent.
+   */
+  minClearance: 38,
   /** How far outside the node cloud an unattached ghost is ringed. */
   orbitMargin: 70,
   /** Padding added around a ghost when growing the bounds, so its label is not clipped. */
@@ -234,7 +270,7 @@ export function placeProposals(
   // cloud — visibly not yet part of the world, and never buried under it.
   const ghostByName = new Map<string, GhostNode>();
   const proposedNodes = resolved.filter((r) => r.write.kind === "node");
-  proposedNodes.forEach((r, i) => {
+  proposedNodes.forEach((r) => {
     if (r.write.kind !== "node") return; // narrowing only
     const key = r.write.name.trim().toLowerCase();
     const neighbours: Array<{ x: number; y: number }> = [];
@@ -250,21 +286,34 @@ export function placeProposals(
       }
     }
 
-    // The offset direction comes from the ghost's INDEX, not from anything
-    // render-order dependent, so two ghosts on the same neighbour separate
-    // deterministically instead of stacking.
-    const angle = i * 2.399963229728653; // the golden angle, in radians
-    let x: number;
-    let y: number;
-    if (neighbours.length > 0) {
-      const mx = neighbours.reduce((s, n) => s + n.x, 0) / neighbours.length;
-      const my = neighbours.reduce((s, n) => s + n.y, 0) / neighbours.length;
-      x = Math.round(mx + GHOST.attachOffset * Math.cos(angle));
-      y = Math.round(my + GHOST.attachOffset * Math.sin(angle));
-    } else {
-      const r = cloudRadius + GHOST.orbitMargin;
-      x = Math.round(cx + r * Math.cos(angle));
-      y = Math.round(cy + r * Math.sin(angle));
+    // Direction AND distance both come from a hash of the proposal ID, so two
+    // ghosts on the same neighbour separate deterministically and neither moves
+    // when a third is approved out of the queue.
+    const h = hashOf(r.id);
+    const angle = (h / 0x100000000) * Math.PI * 2;
+    const ring = h % 4;
+    const anchorX = neighbours.length > 0 ? neighbours.reduce((s, n) => s + n.x, 0) / neighbours.length : cx;
+    const anchorY = neighbours.length > 0 ? neighbours.reduce((s, n) => s + n.y, 0) / neighbours.length : cy;
+    const baseR = neighbours.length > 0 ? GHOST.attachOffset : cloudRadius + GHOST.orbitMargin;
+
+    // Walk outward along the ray until the spot is clear of every committed Node.
+    //
+    // Only COMMITTED Nodes push a ghost outward — deliberately not other ghosts.
+    // Avoiding other ghosts would make each ghost's position depend on which OTHER
+    // suggestions are currently pending, so approving one would shift the rest:
+    // exactly the instability that keying the angle on the id removes. The two
+    // goals genuinely conflict and stability wins, because a ghost overlapping
+    // another ghost is untidy whereas a ghost overlapping canon is the "mistakable
+    // for committed" hazard AC1 forbids. The per-id ring below spreads ghosts
+    // across four radii so an exact stack is vanishingly unlikely anyway.
+    let x = 0;
+    let y = 0;
+    for (let step = 0; step < 6; step++) {
+      const rad = baseR + (ring + step) * GHOST.minClearance;
+      x = Math.round(anchorX + rad * Math.cos(angle));
+      y = Math.round(anchorY + rad * Math.sin(angle));
+      const clash = laid.nodes.some((p) => Math.hypot(p.x - x, p.y - y) < GHOST.minClearance);
+      if (!clash) break;
     }
 
     const ghost: GhostNode = {
