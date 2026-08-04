@@ -152,7 +152,7 @@ type importResponse struct {
 // (ADR-0053 §7); the import runs SYNCHRONOUSLY (ADR-0049, no job row) and does NOT
 // auto-activate the imported campaign (ADR-0053 §7 — the UI offers the switch).
 func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, MaxImportBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, importLimit)
 
 	file, _, err := r.FormFile("bundle")
 	if err != nil {

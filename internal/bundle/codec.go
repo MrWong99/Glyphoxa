@@ -38,6 +38,17 @@ const MaxDecodedBytes int64 = 256 << 20 // 256 MiB
 // binding bound on bundle size and it is documented as such in ADR-0053.
 const MaxImportBytes int64 = 192 << 20 // 192 MiB compressed
 
+// importLimit is the effective upload cap; a var so a test can shrink it rather
+// than allocate 192 MiB to prove the guard fires. Mirrors decodeLimit.
+var importLimit = MaxImportBytes
+
+// SetImportLimitForTest shrinks the upload cap for the duration of a test.
+func SetImportLimitForTest(n int64) func() {
+	prev := importLimit
+	importLimit = n
+	return func() { importLimit = prev }
+}
+
 // decodeLimit is the effective decode cap; a var so tests can shrink it.
 var decodeLimit = MaxDecodedBytes
 

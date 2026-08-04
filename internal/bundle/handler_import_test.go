@@ -145,7 +145,12 @@ func TestServeImport(t *testing.T) {
 	})
 
 	t.Run("oversized upload is 413", func(t *testing.T) {
-		huge := make([]byte, (32<<20)+4096) // > blob.MaxSize
+		// The cap is shrunk rather than the payload grown: MaxImportBytes is 192 MiB
+		// (#547 — an images-included bundle carries several base64-inflated images,
+		// so capping the upload at the PER-IMAGE limit made a producible export
+		// un-importable), and allocating that to prove one guard fires is waste.
+		defer bundle.SetImportLimitForTest(1 << 20)()
+		huge := make([]byte, (1<<20)+4096)
 		body, ct := multipartBundle(t, huge)
 		rec := httptest.NewRecorder()
 		route.ServeHTTP(rec, authedImport(t, body, ct))
