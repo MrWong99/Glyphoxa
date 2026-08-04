@@ -53,8 +53,8 @@ func NewImageServer(store MapStore, blobs blob.Store, resolve CampaignResolver, 
 }
 
 // ServeImage streams one Map's image. A Map outside the resolved Active Campaign,
-// an unparsable id, and a missing blob are all 404 — existence is never leaked,
-// matching the Highlight serve's posture.
+// an unparsable id, a Map that carries no image at all, and a missing blob are all
+// 404 — existence is never leaked, matching the Highlight serve's posture.
 //
 // NOTE on gm_private: a private MAP is still served to the OPERATOR here, because
 // every caller that reaches this mount is the GM (ADR-0041 operator gate). The
@@ -95,6 +95,16 @@ func (s *ImageServer) ServeImage(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		s.log.Error("map image: load row", "err", err, "map", id)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// A Map with no key has no picture — an imageless bundle import produces exactly
+	// this row (internal/bundle/import.go). It is a 404 like any other missing
+	// image, and it must be caught HERE: blob.Get("") is ErrInvalidKey, not
+	// ErrNotFound, so falling through would log a bogus internal error and answer
+	// 500 for an ordinary, expected state.
+	if m.BlobKey == "" {
+		http.NotFound(w, req)
 		return
 	}
 

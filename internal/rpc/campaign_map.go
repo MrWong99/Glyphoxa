@@ -343,9 +343,14 @@ func (s *campaignMaps) ReplaceMapImage(
 		slog.Default().Error("ReplaceMapImage: store update failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	// The row now points at the new bytes, so the old ones are unreachable.
-	if derr := s.blobs.Delete(ctx, existing.BlobKey); derr != nil {
-		slog.Default().Warn("ReplaceMapImage: could not drop superseded blob", "key", existing.BlobKey, "err", derr)
+	// The row now points at the new bytes, so the old ones are unreachable. A map
+	// that had NO key supersedes nothing — an imageless bundle import leaves exactly
+	// that row, and this call is its repair path. Deleting "" is ErrInvalidKey, which
+	// would warn about leaked bytes on the very action that fixed the map.
+	if existing.BlobKey != "" {
+		if derr := s.blobs.Delete(ctx, existing.BlobKey); derr != nil {
+			slog.Default().Warn("ReplaceMapImage: could not drop superseded blob", "key", existing.BlobKey, "err", derr)
+		}
 	}
 	return connect.NewResponse(&managementv1.ReplaceMapImageResponse{Map: toProtoMap(updated)}), nil
 }
@@ -376,7 +381,9 @@ func (s *campaignMaps) DeleteMap(
 	}
 	// A failed blob delete leaves reclaimable bytes, not a broken map — so it is a
 	// warning, not a failed request the GM would retry against an already-gone row.
-	if s.blobs != nil {
+	// An empty key names no bytes (a map restored from an imageless bundle), and
+	// deleting "" is ErrInvalidKey — a warning about leaked bytes that never existed.
+	if s.blobs != nil && key != "" {
 		if err := s.blobs.Delete(ctx, key); err != nil {
 			slog.Default().Warn("DeleteMap: could not drop image blob", "key", key, "err", err)
 		}
@@ -564,6 +571,9 @@ func toProtoMap(m storage.CampaignMap) *managementv1.Map {
 		HeightPx:  int32(m.HeightPx), //nolint:gosec // CHECK-constrained positive, image-sized
 		GmPrivate: m.GMPrivate,
 		UpdatedAt: timestamppb.New(m.UpdatedAt),
+		// The key IS the picture's existence: it is minted only when bytes are
+		// written, so an empty one means this map has no image to fetch.
+		HasImage: m.BlobKey != "",
 	}
 	if m.ParentMapID.Valid {
 		pm.ParentMapId = m.ParentMapID.UUID.String()

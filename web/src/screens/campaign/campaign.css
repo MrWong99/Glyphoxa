@@ -1414,6 +1414,27 @@
   pointer-events: none;
 }
 
+/* A map whose bundle carried no picture. It fills the surface so the pins that DID
+   survive still land where they belong, at their normalized coordinates. */
+.gx-maps__image--missing {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted, #8b93a7);
+  background:
+    repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 10px,
+      var(--surface-raised, #1a1e27) 10px,
+      var(--surface-raised, #1a1e27) 20px
+    );
+}
+
 /* Pins sit at NORMALIZED coordinates, so the whole layer is resolution
    independent and a re-uploaded image keeps every pin. */
 .gx-maps__pin {

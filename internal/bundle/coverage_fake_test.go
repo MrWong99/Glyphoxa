@@ -309,6 +309,89 @@ func TestImport_FailureDropsTheImagesItWrote(t *testing.T) {
 	}
 }
 
+// TestImport_AnImagelessMapClaimsNoBlob. The blob key is a claim that bytes
+// exist, so an import that mints one for a map the bundle carried no picture for
+// produces a row that lies: GET /api/v1/maps/{id}/image 404s forever and the Maps
+// tab draws the browser's broken-image glyph, with nothing in the UI to tell a lost
+// picture from one that was never in the backup. Nothing repairs it either — a
+// re-upload mints its OWN key rather than filling the one the row holds.
+//
+// The seeded fixture has one map WITH bytes and one without, so this pins both
+// directions at once: an imageless map gets no key, an imaged one does.
+func TestImport_AnImagelessMapClaimsNoBlob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{IncludeImages: true})
+
+	var carried int
+	for _, m := range b.Campaign.Maps {
+		if m.ImageBase64 != "" {
+			carried++
+		}
+	}
+	if carried != 1 {
+		t.Fatalf("fixture carries %d images, want exactly 1 (so both directions are covered)", carried)
+	}
+
+	dst := newFakeStore()
+	res, err := bundle.Import(ctx, dst, uuid.New(), b)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	maps, err := dst.ListMaps(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListMaps: %v", err)
+	}
+	if len(maps) != 2 {
+		t.Fatalf("imported maps = %d, want 2", len(maps))
+	}
+
+	var keyed int
+	for _, m := range maps {
+		if m.BlobKey == "" {
+			continue
+		}
+		keyed++
+		// Every key a row holds must name bytes that were actually written.
+		if _, ok := dst.images[m.BlobKey]; !ok {
+			t.Errorf("map %q claims blob %q, but nothing was written there", m.Name, m.BlobKey)
+		}
+	}
+	if keyed != 1 {
+		t.Errorf("maps with a blob key = %d, want 1 (only the map that carried bytes)", keyed)
+	}
+}
+
+// TestImport_AnImagelessBundleLeavesNoBlobKeys is the same contract for the case that made
+// the bug visible in the first place: a whole bundle exported WITHOUT images. Every
+// map restores — name, size, nesting, pins — and not one of them claims a picture.
+func TestImport_AnImagelessBundleLeavesNoBlobKeys(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
+
+	dst := newFakeStore()
+	res, err := bundle.Import(ctx, dst, uuid.New(), b)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	maps, err := dst.ListMaps(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListMaps: %v", err)
+	}
+	if len(maps) != 2 {
+		t.Fatalf("imported maps = %d, want 2 — losing the picture is not losing the map", len(maps))
+	}
+	for _, m := range maps {
+		if m.BlobKey != "" {
+			t.Errorf("map %q claims blob %q after an imageless import", m.Name, m.BlobKey)
+		}
+	}
+	if len(dst.images) != 0 {
+		t.Errorf("an imageless import wrote %d blob(s)", len(dst.images))
+	}
+}
+
 // TestImport_RejectsAnImageWithNoBlobStore rather than silently importing a map
 // whose picture is gone.
 func TestImport_RejectsAnImageWithNoBlobStore(t *testing.T) {

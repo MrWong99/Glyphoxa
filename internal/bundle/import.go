@@ -330,21 +330,31 @@ func importMaps(
 			}
 			anchor = uuid.NullUUID{UUID: id, Valid: true}
 		}
-		// A fresh blob key per imported map, minted the same way CreateMap's RPC
-		// mints one. It is minted even when the bundle carries no bytes, so the row's
-		// shape is identical either way and a later re-upload lands where the row
-		// already points.
-		key, err := blob.Key(tenantID, "map", uuid.New(), "image")
-		if err != nil {
-			return fmt.Errorf("bundle: import: map %q blob key: %w", m.Name, err)
-		}
+		// The blob key names bytes, so it is minted ONLY when there are bytes. An
+		// imageless bundle imports maps with an EMPTY blob_key.
+		//
+		// Minting one anyway would make the row claim a picture that was never
+		// written: every image request 404s and the Maps tab renders a broken image
+		// with no way for the GM to tell a lost picture from one that was simply not
+		// in the backup. Nothing recovers it either — a re-upload mints its OWN key
+		// (ReplaceMapImage) rather than filling the one the row already holds. Empty
+		// is the state the rest of the system already expects from a keyless map:
+		// ListCampaignMapBlobKeys skips blob_key = '', and the image mount serves 404
+		// for it deliberately.
+		//
 		// Bytes BEFORE the row, the same ordering CreateMap's RPC uses: a row that
 		// references missing bytes is a broken map forever, while bytes with no row
 		// are invisible and get dropped by the rollback path above.
+		var key string
 		if m.ImageBase64 != "" {
 			if imgs == nil {
 				return fmt.Errorf("bundle: import: map %q carries an image but this deployment has no blob store", m.Name)
 			}
+			k, kerr := blob.Key(tenantID, "map", uuid.New(), "image")
+			if kerr != nil {
+				return fmt.Errorf("bundle: import: map %q blob key: %w", m.Name, kerr)
+			}
+			key = k
 			data, derr := base64.StdEncoding.DecodeString(m.ImageBase64)
 			if derr != nil {
 				return fmt.Errorf("bundle: import: map %q image is not valid base64: %w", m.Name, derr)

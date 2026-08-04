@@ -272,7 +272,18 @@ function MapView({
           // than committing wherever the pointer happened to leave.
           onMouseLeave={() => setDrag(null)}
         >
-          <img className="gx-maps__image" src={mapImageURL(map)} alt={`${map.name} map`} draggable={false} />
+          {/* A map restored from a bundle exported WITHOUT its images keeps its name,
+              nesting, anchor and every pin, and has no picture. Requesting one
+              anyway renders the browser's broken-image glyph, which reads as a bug;
+              this says what actually happened and what fixes it. Pins still draw on
+              top, at their normalized coordinates — they are the part that survived. */}
+          {map.hasImage ? (
+            <img className="gx-maps__image" src={mapImageURL(map)} alt={`${map.name} map`} draggable={false} />
+          ) : (
+            <div className="gx-maps__image gx-maps__image--missing" role="img" aria-label={`${map.name} has no image`}>
+              <span>No image — this map was restored from a bundle that carried none.</span>
+            </div>
+          )}
           {view.pins.map((pin) => (
             <PinGlyph
               key={pin.id}
