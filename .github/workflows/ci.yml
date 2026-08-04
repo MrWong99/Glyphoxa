@@ -144,7 +144,9 @@ jobs:
   # mistake that ships a binary serving a blank page, and that has reached main
   # twice (155772c, 6d6089e). Downloading `spa-dist` here would make that test
   # pass unconditionally and silently retire the guard; the docker builds in
-  # `image`/`e2e` are where the real console gets embedded.
+  # `image`/`e2e` are where the real console gets embedded. `integration` runs
+  # the same untagged test on the same committed tree, so the guard survives one
+  # of these two jobs being changed — retiring it takes both.
   test:
     name: build + vet + test
     needs: [proto]
@@ -161,6 +163,8 @@ jobs:
       # Restore the generated stubs (produced once by the `proto` job) BEFORE
       # any go build/vet/test — gen/ is gitignored, so without this the module
       # doesn't compile. `path: gen` lands files at ./gen/glyphoxa/...
+      #
+      # Only `gen` — deliberately NOT `spa-dist`; see this job's comment above.
       - name: Download gen artifact
         uses: actions/download-artifact@v8
         with:

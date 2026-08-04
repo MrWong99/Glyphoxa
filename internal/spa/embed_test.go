@@ -2,17 +2,25 @@ package spa
 
 import (
 	"io/fs"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// srcHrefRe matches src="…" / href='…' attributes in dist/index.html. A regexp
-// rather than an HTML parser is deliberate: the input is machine-generated Vite
-// output with quoted attributes, and golang.org/x/net (the only reasonable
-// parser) is in neither go.mod nor go.sum — a whole new module dependency to
-// read two tags is a bad trade.
-var srcHrefRe = regexp.MustCompile(`(?:src|href)\s*=\s*["']([^"']+)["']`)
+// srcHrefRe matches src=/href= attribute values in dist/index.html, quoted with
+// either quote style or unquoted — an html-minify pass (removeAttributeQuotes)
+// would otherwise emit src=/assets/index-abc.js and slip past a quote-only
+// pattern, silently retiring the check below. A regexp rather than an HTML
+// parser is deliberate: the input is machine-generated Vite output, and
+// golang.org/x/net (the only reasonable parser) is in neither go.mod nor
+// go.sum — a whole new module dependency to read two tags is a bad trade.
+var srcHrefRe = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`)
+
+// schemeRe matches any URL scheme prefix (https:, data:, mailto:, tel:, blob:).
+// Matching the grammar rather than listing schemes keeps a new one from being
+// mistaken for an embedded path.
+var schemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 
 // TestEmbeddedIndexReferencesResolve is the fresh-clone gate for the embedded
 // SPA bundle: every same-origin src/href in dist/index.html must resolve to a
@@ -25,7 +33,9 @@ var srcHrefRe = regexp.MustCompile(`(?:src|href)\s*=\s*["']([^"']+)["']`)
 // with no node step embeds an index.html pointing at hashed assets that do not
 // exist, and the binary silently serves a BLANK PAGE. Nothing else in the suite
 // notices: the existing handler tests only assert `<div id="root">`, which the
-// real Vite output contains too.
+// real Vite output contains too, and the container-smoke embedded-console gate
+// (#114, ADR-0034 amendment) runs against an image that downloads the real
+// spa-dist artifact, so it is green either way.
 //
 // This asserts the invariant ("the embedded index is self-consistent") rather
 // than the mechanism, so it keeps working across vite `base`/`assetsDir`
@@ -37,10 +47,11 @@ var srcHrefRe = regexp.MustCompile(`(?:src|href)\s*=\s*["']([^"']+)["']`)
 //
 // It passes in BOTH tree shapes. On a node-free checkout the placeholder
 // references nothing. After a local `npm run build`, dist/ holds the real
-// bundle and every reference resolves. In CI it runs in the `test` and
-// `integration` jobs, whose workspaces are exactly the committed tree — do NOT
-// download the `spa-dist` artifact into those jobs, or this test stops guarding
-// anything (see the note on the `test` job in .github/workflows/ci.yml).
+// bundle and every reference resolves. In CI it runs in the `test` AND
+// `integration` jobs (the latter's `-tags=integration` run includes untagged
+// tests), whose workspaces are exactly the committed tree — do NOT download the
+// `spa-dist` artifact into either, or this test stops guarding anything (see
+// the note on the `test` job in .github/workflows/ci.yml).
 //
 // If this fails in CI but not on your machine, your local dist/assets/ is
 // hiding the bug: the COMMITTED index.html is Vite build output. Restore the
@@ -58,10 +69,11 @@ func TestEmbeddedIndexReferencesResolve(t *testing.T) {
 	}
 
 	for _, m := range srcHrefRe.FindAllStringSubmatch(string(index), -1) {
-		ref := m[1]
-		if !isSameOrigin(ref) {
+		ref := attrValue(m)
+		if ref == "" || !isSameOrigin(ref) {
 			continue
 		}
+
 		// Strip the leading slash (embedded paths are dist-relative) and any
 		// query/fragment a future cache-buster might append.
 		p := strings.TrimPrefix(ref, "/")
@@ -69,6 +81,15 @@ func TestEmbeddedIndexReferencesResolve(t *testing.T) {
 			p = p[:i]
 		}
 		if p == "" {
+			continue
+		}
+		// Normalise "./assets/x" — what vite emits under a relative `base` — to
+		// the dist-relative form embed.FS expects. io/fs rejects an unclean
+		// path outright, which would surface as a missing file and blame the
+		// wrong thing on a tree that is actually fine.
+		p = path.Clean(p)
+		if !fs.ValidPath(p) {
+			t.Errorf("embedded index.html references %q, which escapes the embedded dist/ tree", ref)
 			continue
 		}
 
@@ -86,18 +107,29 @@ func TestEmbeddedIndexReferencesResolve(t *testing.T) {
 	}
 }
 
+// attrValue returns the populated capture from a srcHrefRe match: double-quoted,
+// single-quoted, or unquoted, in that order.
+func attrValue(m []string) string {
+	for _, g := range m[1:] {
+		if g != "" {
+			return g
+		}
+	}
+	return ""
+}
+
 // isSameOrigin reports whether ref addresses the embedded bundle itself, as
 // opposed to an external resource (the Google Fonts preconnect/stylesheet
 // links), an inline data: URI, or a bare fragment. Only same-origin refs are
 // ours to resolve.
 func isSameOrigin(ref string) bool {
 	switch {
-	case strings.Contains(ref, "://"), strings.HasPrefix(ref, "//"):
-		return false // absolute or protocol-relative URL
-	case strings.HasPrefix(ref, "data:"), strings.HasPrefix(ref, "mailto:"):
+	case schemeRe.MatchString(ref): // absolute URL, data:, mailto:, tel:, …
 		return false
-	case strings.HasPrefix(ref, "#"):
-		return false // in-page fragment
+	case strings.HasPrefix(ref, "//"): // protocol-relative
+		return false
+	case strings.HasPrefix(ref, "#"): // in-page fragment
+		return false
 	}
 	return true
 }

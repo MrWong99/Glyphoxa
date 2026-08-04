@@ -33,8 +33,15 @@ RUN mkdir -p /usr/local/bin && printf '%s' '${content}' > /usr/local/bin/glyphox
 DOCKERFILE
 }
 
-# The committed placeholder index.html, verbatim (internal/spa/dist/index.html).
-PLACEHOLDER='<!doctype html><html><body><div id="root"></div></body></html>'
+# The committed placeholder index.html, read from the one source of truth rather
+# than hardcoded. A literal copy here would go stale in lockstep with the gate's
+# own copy the moment the placeholder is edited: the gate would grep for bytes no
+# real placeholder has (its two-sided check silently degrading to one-sided) and
+# THIS self-test would keep passing, because the fixture it builds would carry
+# the same stale bytes. Reading the committed blob — not the working tree, which
+# the spa-dist download replaces with the real Vite build in CI — is what makes
+# the fixture track reality.
+PLACEHOLDER="$(git show HEAD:internal/spa/dist/index.html)"
 # A representative slice of a real Vite index.html: a content-hashed bundle ref.
 REAL='<script type="module" crossorigin src="/assets/index-a1b2c3d4.js"></script>'
 

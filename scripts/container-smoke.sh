@@ -21,6 +21,8 @@ IMAGE="${1:-glyphoxa:smoke}"
 
 BIN_PATH="/usr/local/bin/glyphoxa"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 pass=0
 fail=0
 note() { printf '  -> %s\n' "$*"; }
@@ -61,6 +63,19 @@ extract_from_image() {
 # The check is two-sided: a hashed asset reference must be PRESENT and the exact
 # placeholder one-liner must be ABSENT, so a bundle embedded alongside a stale
 # placeholder fails as loudly as a missing one.
+#
+# committed_placeholder prints internal/spa/dist/index.html as COMMITTED, which
+# is the one source of truth for the negative half below. Deliberately not the
+# working-tree copy: the `image` CI job downloads the spa-dist artifact over that
+# path before this script runs, so on disk it is already the real Vite build.
+# Deriving the bytes (here and in container-smoke-test.sh) instead of hardcoding
+# them keeps the gate honest — a hardcoded literal goes stale the moment the
+# placeholder is edited, quietly turning this two-sided check one-sided while the
+# self-test, carrying its own copy of the same stale bytes, stayed green.
+committed_placeholder() {
+	git -C "$REPO_ROOT" show HEAD:internal/spa/dist/index.html 2>/dev/null
+}
+
 assert_spa() {
 	printf '[5] embedded web root is the real console, not the placeholder\n'
 	local bin="$EXTRACT_DIR/glyphoxa-spa"
@@ -73,7 +88,11 @@ assert_spa() {
 	else
 		bad 'no hashed /assets/ reference in the binary — embedded web root is the placeholder, not a real console build'
 	fi
-	if grep -aqF '<!doctype html><html><body><div id="root"></div></body></html>' "$bin"; then
+	local placeholder
+	placeholder="$(committed_placeholder || true)"
+	if [ -z "$placeholder" ]; then
+		bad 'could not read the committed placeholder (git show HEAD:internal/spa/dist/index.html) — the placeholder-absent half of this gate cannot run'
+	elif grep -aqF "$placeholder" "$bin"; then
 		bad 'binary still contains the committed placeholder index.html one-liner (a real build must overwrite it)'
 	else
 		ok 'committed placeholder index.html one-liner is absent'
