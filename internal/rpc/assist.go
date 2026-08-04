@@ -60,6 +60,10 @@ func validAssistPrompt(raw string) (string, *connect.Error) {
 	return p, nil
 }
 
+// assistSubject names what the GM asked this surface for, in the words it has
+// always used. Both handlers here draft content, so they share one subject.
+const assistSubject = "content generation"
+
 // assistEngineErr maps a drafting failure onto its Connect code: a refused
 // platform-key entitlement is an actionable precondition (save a key, ADR-0054);
 // an unusable model response is CodeUnavailable (a retry may succeed); an
@@ -72,11 +76,6 @@ func validAssistPrompt(raw string) (string, *connect.Error) {
 // the account merely ran out of quota — the provider answers a spent allowance
 // with 429 and a key it accepted — and it is now reserved for the 401/403 that
 // actually means it, where the wording is kept verbatim.
-//
-// assistSubject is "content generation" for both handlers, matching the sentence
-// this surface has always used.
-const assistSubject = "content generation"
-
 func assistEngineErr(op string, err error) *connect.Error {
 	switch {
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):

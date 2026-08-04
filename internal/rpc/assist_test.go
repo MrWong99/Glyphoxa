@@ -352,10 +352,13 @@ func TestGenerateKnowledge_QuotaIsResourceExhausted(t *testing.T) {
 	}
 }
 
-// TestAssist_UnusableDraftStillWins: an unusable response is matched by
-// errors.Is BEFORE the status classification, so a provider that answers 200
-// with prose keeps its own actionable message.
-func TestAssist_UnusableDraftStillWins(t *testing.T) {
+// TestAssist_UnusableDraftKeepsItsRephraseAdvice pins the one message on this
+// surface that the quota split must NOT touch: a 200 carrying prose instead of a
+// draft is the model's fault, not the account's, and "rephrase the prompt" is
+// still the only useful thing to say. It pins wording, not ordering — an
+// ErrUnusableResponse carries no HTTP status, so no reordering against the status
+// classification could reach it.
+func TestAssist_UnusableDraftKeepsItsRephraseAdvice(t *testing.T) {
 	t.Parallel()
 	client, req := personaErrClient(t, assist.ErrUnusableResponse)
 
