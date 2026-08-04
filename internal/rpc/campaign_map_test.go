@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -620,6 +621,104 @@ func TestGenerateMapImage_TooLargeIsInvalidArgument(t *testing.T) {
 		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "an entire continent"}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
 		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}
+
+// TestGenerateMapImage_QuotaIsResourceExhausted is the reported bug: a Gemini key
+// that is VALID but out of quota came back as "check the image provider
+// configuration", sending the GM to fix the one thing that was not broken. The
+// key was accepted; the fix is billing or waiting.
+func TestGenerateMapImage_QuotaIsResourceExhausted(t *testing.T) {
+	t.Parallel()
+	gen := &fakeMapGen{err: &imagegen.StatusError{
+		StatusCode: http.StatusTooManyRequests,
+		Body:       `{"error":{"code":429,"message":"You exceeded your current quota"}}`,
+	}}
+	client := genClient(t, newFakeMapStore(), gen)
+
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Errorf("code = %v, want ResourceExhausted", got)
+	}
+	if strings.Contains(err.Error(), "configuration") {
+		t.Errorf("a quota failure still blames the configuration: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "quota") {
+		t.Errorf("the message does not name what is actually wrong: %q", err.Error())
+	}
+}
+
+// TestGenerateMapImage_AuthFailureIsUnavailable is the other half: a REJECTED key
+// is the one case where "check the image provider configuration" is true advice,
+// so that wording (and its code) must survive the quota split.
+func TestGenerateMapImage_AuthFailureIsUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		gen := &fakeMapGen{err: &imagegen.StatusError{StatusCode: status, Body: `{"error":{"message":"API key not valid"}}`}}
+		client := genClient(t, newFakeMapStore(), gen)
+
+		_, err := client.GenerateMapImage(context.Background(),
+			connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+		if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+			t.Errorf("HTTP %d: code = %v, want Unavailable", status, got)
+		}
+		if !strings.Contains(err.Error(), "image provider configuration") {
+			t.Errorf("HTTP %d: a rejected key should point at the configuration: %q", status, err.Error())
+		}
+	}
+}
+
+// TestGenerateMapImage_ProviderFaultBlamesTheProvider: a 5xx is neither the key
+// nor the quota, and telling the GM to check either is a wild goose chase.
+func TestGenerateMapImage_ProviderFaultBlamesTheProvider(t *testing.T) {
+	t.Parallel()
+	gen := &fakeMapGen{err: &imagegen.StatusError{StatusCode: http.StatusBadGateway, Body: "upstream connect error"}}
+	client := genClient(t, newFakeMapStore(), gen)
+
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", got)
+	}
+	if strings.Contains(err.Error(), "configuration") {
+		t.Errorf("a provider-side 502 still blames the configuration: %q", err.Error())
+	}
+}
+
+// TestGenerateMapImage_UnknownFailureGuessesNothing: an error with no upstream
+// status (a transport failure, a decode error) must not fabricate a cause.
+func TestGenerateMapImage_UnknownFailureGuessesNothing(t *testing.T) {
+	t.Parallel()
+	gen := &fakeMapGen{err: errors.New("dial tcp: i/o timeout")}
+	client := genClient(t, newFakeMapStore(), gen)
+
+	_, err := client.GenerateMapImage(context.Background(),
+		connect.NewRequest(&managementv1.GenerateMapImageRequest{Prompt: "a town"}))
+	if got := connect.CodeOf(err); got != connect.CodeUnavailable {
+		t.Errorf("code = %v, want Unavailable", got)
+	}
+	if strings.Contains(err.Error(), "configuration") {
+		t.Errorf("an unknown failure still blames the configuration: %q", err.Error())
+	}
+}
+
+// TestSuggestMapPins_QuotaIsResourceExhausted: the pin suggester shares
+// mapGenerateErr, so it must not regress to the configuration sentence either.
+func TestSuggestMapPins_QuotaIsResourceExhausted(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	mapID := uuid.New()
+	anchor := uuid.New()
+	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh", AnchorNodeID: uuid.NullUUID{UUID: anchor, Valid: true}}
+	store.unpinned = []storage.KGNode{{ID: uuid.New(), Name: "The Snapping Line", Type: storage.KGNodeLocation}}
+	gen := &fakeMapGen{pickErr: &imagegen.StatusError{StatusCode: http.StatusTooManyRequests, Body: "quota"}}
+	client := genClient(t, store, gen)
+
+	_, err := client.SuggestMapPins(context.Background(),
+		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Errorf("code = %v, want ResourceExhausted", got)
 	}
 }
 

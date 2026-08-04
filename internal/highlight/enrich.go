@@ -101,6 +101,10 @@ type EnrichStore interface {
 //   - image generation is not configured for the tenant → log + nil (the
 //     Highlight stays intact without media, AC — never a retry loop on a missing
 //     key).
+//   - the provider REJECTED the configured key (401/403) → log + nil, for the
+//     same reason: a credential the provider refuses is not fixed by sending it
+//     again. Quota and rate-limit rejections (429) are the opposite case and stay
+//     retryable — those do clear on their own.
 //   - otherwise generate → meter usage (caps-free spend meter teed onto the
 //     production recorder; Gemini bills the image as output tokens, so it prices
 //     through LLMTokens — no image-specific meter, #311) → store the image behind
@@ -192,10 +196,36 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 				"highlight", p.HighlightID)
 			return nil
 		}
+		if imagegen.IsAuthFailure(err) {
+			// PERMANENT for the key in hand, and therefore the same posture as
+			// ErrImageNotConfigured above — a rejected key is a missing key in every
+			// way that matters, and this handler's rule is "never a retry loop on a
+			// missing key". Retrying re-sends the identical rejected credential until
+			// the job dead-letters, once per promoted Highlight.
+			//
+			// Logged at Error, not Info: a key IS configured and the provider refused
+			// it, which needs an operator, whereas no key at all is a choice. Nothing
+			// is lost by returning nil — the boot sweep
+			// (SweepEnrichmentReconciliation) re-enqueues imageless promoted
+			// Highlights, so fixing the key and restarting picks them all back up.
+			release()
+			log.Error("highlight enrich: image provider rejected the configured key, leaving highlight without media",
+				"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
+			return nil
+		}
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
+			//
+			// A quota or rate-limit rejection belongs HERE and not above: unlike a
+			// rejected key it does clear on its own, so the runner's backoff is the
+			// right answer. It is called out in the log because "HTTP 429" buried in a
+			// dead-letter payload reads like a provider outage when it is a bill.
 			release()
+			if imagegen.IsQuotaExceeded(err) {
+				log.Warn("highlight enrich: image provider out of quota or rate-limited, will retry",
+					"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
+			}
 			return fmt.Errorf("highlight enrich: generate image: %w", err)
 		}
 

@@ -99,6 +99,13 @@ func (s *campaignMaps) GenerateMapImage(
 // an oversize UPLOAD — one failure, one code, one sentence, whichever door the
 // bytes came through. It is emphatically NOT Unavailable: Unavailable invites a
 // retry, and retrying re-bills the identical oversize generation.
+//
+// The upstream-status branches exist because collapsing every provider failure
+// into "check the image provider configuration" told the GM to fix the one thing
+// that was NOT broken: an exhausted Gemini quota returns 429 with a perfectly
+// valid key, and the real fix is billing or waiting. Each branch now names the
+// thing the GM can actually act on, and the unknown default names nothing rather
+// than guessing "configuration" — that guess is wrong far more often than right.
 func mapGenerateErr(op string, err error) *connect.Error {
 	switch {
 	case errors.Is(err, mapgen.ErrNotConfigured):
@@ -112,10 +119,27 @@ func mapGenerateErr(op string, err error) *connect.Error {
 	case errors.Is(err, storage.ErrNotFound):
 		return connect.NewError(connect.CodeNotFound,
 			errors.New("that entry is not in this campaign, or it is GM private"))
+	case imagegen.IsQuotaExceeded(err):
+		// ResourceExhausted, the same code a spend cap returns (session.go): the
+		// request was well-formed, the credential was accepted, and the account has
+		// no allowance left. Warn rather than Error — it is an expected operating
+		// condition of a metered key, not a defect.
+		slog.Default().Warn(op+": image provider quota or rate limit hit", "err", err)
+		return connect.NewError(connect.CodeResourceExhausted,
+			errors.New("your image provider is out of quota or rate-limited — check your plan, or try again shortly"))
+	case imagegen.IsAuthFailure(err):
+		// The one case the original sentence was written for, kept verbatim.
+		slog.Default().Error(op+": image provider rejected the key", "err", err)
+		return connect.NewError(connect.CodeUnavailable,
+			errors.New("map generation failed — check the image provider configuration and try again"))
+	case imagegen.IsProviderFault(err):
+		slog.Default().Error(op+": image provider server error", "err", err)
+		return connect.NewError(connect.CodeUnavailable,
+			errors.New("the image provider is having trouble right now — try again shortly"))
 	default:
 		slog.Default().Error(op+": map generation failed", "err", err)
 		return connect.NewError(connect.CodeUnavailable,
-			errors.New("map generation failed — check the image provider configuration and try again"))
+			errors.New("map generation failed — try again in a moment"))
 	}
 }
 
