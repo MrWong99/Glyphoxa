@@ -1702,6 +1702,9 @@
 .gx-boards__list li {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
+}
+
 /* ── Generated maps (#541) ───────────────────────────────────────────────── */
 
 .gx-maps__modes {

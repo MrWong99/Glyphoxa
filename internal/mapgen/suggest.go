@@ -91,7 +91,7 @@ func (e *Engine) SuggestPins(ctx context.Context, campaign storage.Campaign, anc
 	}
 	user.WriteString("\n\nEntries:")
 	for i, n := range candidates {
-		user.WriteString(fmt.Sprintf("\n%d. %s (%s)", i+1, n.Name, n.Type))
+		fmt.Fprintf(&user, "\n%d. %s (%s)", i+1, n.Name, n.Type)
 	}
 
 	raw, err := e.text.CallText(ctx, campaign, "map_pins", suggestSystemPrompt, user.String(), suggestMaxTokens)

@@ -778,7 +778,6 @@ message UpdateMapResponse {
   Map map = 1;
 }
 
-// ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
 // ListNodeAppearancesRequest names the entry whose mentions to list (#545).
 message ListNodeAppearancesRequest {
   // node_id is the entry.
@@ -805,6 +804,8 @@ message NodeAppearance {
 // ListNodeAppearancesResponse carries the entry's most recent mentions.
 message ListNodeAppearancesResponse {
   repeated NodeAppearance appearances = 1;
+}
+
 // GenerateMapImageRequest asks for a map draft (#541).
 message GenerateMapImageRequest {
   // prompt is the GM's own description of the map they want.
@@ -853,6 +854,7 @@ message SuggestMapPinsResponse {
   repeated SuggestedPin suggestions = 1;
 }
 
+// ReplaceMapImageRequest repoints a Map at new bytes. Pins are untouched.
 message ReplaceMapImageRequest {
   string id = 1;
   bytes image_bytes = 2;
