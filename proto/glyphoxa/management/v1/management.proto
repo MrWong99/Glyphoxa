@@ -114,6 +114,11 @@ service CampaignService {
   // DeleteEdge removes a typed Edge by id (#132). An unknown id is CodeNotFound.
   rpc DeleteEdge(DeleteEdgeRequest) returns (DeleteEdgeResponse);
 
+  // UpdateEdgeDetails saves a relation's note and disposition (#546). The
+  // relation TYPE is not editable: retyping is deleting and re-creating, since
+  // the type carries validity rules.
+  rpc UpdateEdgeDetails(UpdateEdgeDetailsRequest) returns (UpdateEdgeDetailsResponse);
+
   // ListNodeEdges returns a Node's incident Edges split into outgoing and
   // incoming lists (strictly directional; no auto-inverse, ADR-0008 amendment),
   // each carrying its endpoints' joined name/type. It is a read (NO_SIDE_EFFECTS).
@@ -449,6 +454,13 @@ message Edge {
   NodeType to_node_type = 8;
   // created_at is when the edge was created.
   google.protobuf.Timestamp created_at = 9;
+  // note is the relation's texture — "owes money to", "since the siege" (#546).
+  // A bare `knows` carries nothing; this is what makes it a relationship.
+  string note = 10;
+  // disposition is how the SUBJECT feels about the object, -2..+2 (hostile, cold,
+  // neutral, warm, devoted). Edges are one-way with no auto-inverse, which is what
+  // makes asymmetric feelings expressible.
+  int32 disposition = 11;
 }
 
 // CreateEdgeRequest is the "Add relation" payload. The campaign is resolved
@@ -520,6 +532,21 @@ enum NodeType {
   NODE_TYPE_NOTE = 7;
 }
 
+// UpdateEdgeDetailsRequest saves a relation's texture.
+message UpdateEdgeDetailsRequest {
+  // id is the edge to update.
+  string id = 1;
+  // note is the free-text texture; empty clears it.
+  string note = 2;
+  // disposition is -2..+2; anything outside is rejected.
+  int32 disposition = 3;
+}
+
+// UpdateEdgeDetailsResponse carries the updated Edge.
+message UpdateEdgeDetailsResponse {
+  Edge edge = 1;
+}
+
 // GraphNode is one Node as the Graph view needs it (#534): identity, type, name
 // and the flags the rendering distinguishes on — deliberately WITHOUT body or
 // aspect text, so a several-hundred-node campaign stays one small payload.
@@ -559,6 +586,9 @@ message GraphEdge {
   string to_node_id = 3;
   // edge_type is the relationship type.
   EdgeType edge_type = 4;
+  // disposition drives the drawn edge's colour; note shows on hover (#546).
+  int32 disposition = 5;
+  string note = 6;
 }
 
 // GetKnowledgeGraphRequest is the (empty) request; the active campaign is
@@ -1097,6 +1127,11 @@ message ProposedEdge {
   EdgeType relation = 3;
   // target is the to-Node's NAME (resolved to a Node at approval time).
   string target = 4;
+  // note and disposition are the relation's texture (#546). A Character NPC
+  // proposing "I now distrust her" after a scene is a good use of the queue, and
+  // it stays GM-reviewed.
+  string note = 5;
+  int32 disposition = 6;
 }
 
 // ProposedNode is a remember_knowledge proposal to create a new Node (#300,

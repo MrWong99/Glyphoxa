@@ -3,8 +3,10 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -12,6 +14,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // kgEdges is the Knowledge Graph Edge feature module (#132, ADR-0008 v1.0 +
@@ -33,6 +36,52 @@ type kgEdgeStore interface {
 	NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
 	// SetNodeAgent links/unlinks an NPC Node's "voiced by" Agent.
 	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
+	// UpdateEdgeDetails saves a relation's note and disposition (#546).
+	UpdateEdgeDetails(ctx context.Context, campaignID, id uuid.UUID, note string, disposition int) (storage.KGEdge, error)
+}
+
+// UpdateEdgeDetails saves a relation's note and disposition (#546). The relation
+// TYPE is deliberately absent: retyping an Edge is deleting one and creating
+// another, because the type carries the ADR-0008 validity rules.
+//
+// An unparsable id or an out-of-range disposition is CodeInvalidArgument; a
+// missing/cross-campaign id is CodeNotFound.
+func (s *kgEdges) UpdateEdgeDetails(
+	ctx context.Context,
+	req *connect.Request[managementv1.UpdateEdgeDetailsRequest],
+) (*connect.Response[managementv1.UpdateEdgeDetailsResponse], error) {
+	m := req.Msg
+	id, err := uuid.Parse(m.GetId())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid relation id"))
+	}
+	note := strings.TrimSpace(m.GetNote())
+	if utf8.RuneCountInString(note) > kgvocab.MaxEdgeNoteRunes {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("note is too long (max %d characters)", kgvocab.MaxEdgeNoteRunes))
+	}
+
+	c, err := s.active.resolve(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateEdgeDetails: get active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	updated, err := s.store.UpdateEdgeDetails(ctx, c.ID, id, note, int(m.GetDisposition()))
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("relation not found"))
+	case errors.Is(err, storage.ErrInvalidDisposition):
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("disposition must be between -2 and +2"))
+	case err != nil:
+		slog.Default().Error("UpdateEdgeDetails: store update failed", "edge_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.UpdateEdgeDetailsResponse{Edge: toProtoEdge(updated)}), nil
 }
 
 // CreateEdge adds a typed Edge between two same-campaign Nodes. An UNSPECIFIED
@@ -220,11 +269,13 @@ func toProtoEdges(edges []storage.KGEdgeWithNodes) []*managementv1.Edge {
 // follow-up ListNodeEdges refetch).
 func toProtoEdge(e storage.KGEdge) *managementv1.Edge {
 	return &managementv1.Edge{
-		Id:         e.ID.String(),
-		FromNodeId: e.FromNodeID.String(),
-		ToNodeId:   e.ToNodeID.String(),
-		EdgeType:   toProtoEdgeType(e.Type),
-		CreatedAt:  timestamppb.New(e.CreatedAt),
+		Id:          e.ID.String(),
+		FromNodeId:  e.FromNodeID.String(),
+		ToNodeId:    e.ToNodeID.String(),
+		EdgeType:    toProtoEdgeType(e.Type),
+		CreatedAt:   timestamppb.New(e.CreatedAt),
+		Note:        e.Note,
+		Disposition: int32(e.Disposition), //nolint:gosec // CHECK-constrained to -2..+2
 	}
 }
 

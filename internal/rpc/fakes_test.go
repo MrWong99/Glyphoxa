@@ -636,6 +636,22 @@ func (f *fakeKGNodeStore) SearchNodes(_ context.Context, campaignID uuid.UUID, q
 	return f.searchResults, nil
 }
 
+// UpdateEdgeDetails records the relation texture write (#546) and echoes it back.
+func (f *fakeKGEdgeStore) UpdateEdgeDetails(_ context.Context, campaignID, id uuid.UUID, note string, disposition int) (storage.KGEdge, error) {
+	f.edgeDetailsCampaign = campaignID
+	if f.edgeDetailsErr != nil {
+		return storage.KGEdge{}, f.edgeDetailsErr
+	}
+	for i := range f.edges {
+		if f.edges[i].ID == id {
+			f.edges[i].Note = note
+			f.edges[i].Disposition = disposition
+			return f.edges[i], nil
+		}
+	}
+	return storage.KGEdge{}, storage.ErrNotFound
+}
+
 // setAgentCall records one SetNodeAgent invocation for assertions.
 type setAgentCall struct {
 	nodeID  uuid.UUID
@@ -660,6 +676,11 @@ type fakeKGEdgeStore struct {
 	nodeEdgesCampaign  uuid.UUID
 	deleteEdgeCampaign uuid.UUID
 	setAgentCampaign   uuid.UUID
+
+	// The relation-texture write (#546).
+	edges               []storage.KGEdge
+	edgeDetailsCampaign uuid.UUID
+	edgeDetailsErr      error
 
 	setAgentCalls []setAgentCall
 	setAgentNode  storage.KGNode

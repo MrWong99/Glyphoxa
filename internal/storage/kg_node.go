@@ -57,6 +57,12 @@ type KGNode struct {
 	// has none" for a projecting read, and "not loaded" for one that does not
 	// project them (the RETURNING projections of Create/Update).
 	Aspects []KGNodeAspect
+	// Relation is how the READING Agent relates to this Node, populated only by
+	// [Store.AgentNodeFacts] (#546): the disposition and note on the Agent's own
+	// OUTGOING edge to it. Outgoing only, because an Edge is a one-way assertion —
+	// how someone else feels about this Node is not this NPC's feeling.
+	RelationNote        string
+	RelationDisposition int
 }
 
 // NewKGNode is the input to CreateNode. node_type is set once at insert and never
@@ -265,14 +271,39 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 		     SELECT id FROM kg_node WHERE agent_id = $1
 		 ),
 		 hood AS (
-		     SELECT id, 0 AS hop FROM own
-		     UNION SELECT e.to_node_id,   1 FROM kg_edge e JOIN own o ON e.from_node_id = o.id
-		     UNION SELECT e.from_node_id, 1 FROM kg_edge e JOIN own o ON e.to_node_id   = o.id
+		     SELECT id, 0 AS hop, '' AS note, 0 AS disposition FROM own
+		     -- OUTGOING: the Agent's own assertion about the neighbour, so its note
+		     -- and disposition are this NPC's feeling and may reach its prompt.
+		     UNION ALL SELECT e.to_node_id, 1, e.note, e.disposition
+		       FROM kg_edge e JOIN own o ON e.from_node_id = o.id
+		     -- INCOMING: still expands the neighbourhood, but carries no feeling —
+		     -- how someone else feels about this Node is not this NPC's feeling.
+		     UNION ALL SELECT e.from_node_id, 1, '', 0
+		       FROM kg_edge e JOIN own o ON e.to_node_id = o.id
 		 ),
 		 ranked AS (
-		     SELECT id, min(hop) AS hop FROM hood GROUP BY id
+		     -- One row per Node. Where several edges reach the same neighbour, a row
+		     -- that SAYS SOMETHING wins first, then the strongest feeling by absolute
+		     -- value, then deterministic text and sign tiebreaks.
+		     --
+		     -- The "says something" term is load-bearing. Every incoming edge
+		     -- contributes a ('', 0) row, and an ordinary reciprocal edge (Bart knows
+		     -- Mira, Mira knows Bart) produces exactly that alongside Bart's real note.
+		     -- Ordering on abs(disposition) alone ties them at 0, and a plain note ASC
+		     -- then sorts '' FIRST — so a neutral note, the feature's own headline case
+		     -- ("owes me money since the siege"), silently never reached the prompt.
+		     --
+		     -- Both array_agg calls MUST carry the identical ORDER BY: they are picked
+		     -- element-wise, so any divergence would pair one edge's note with another
+		     -- edge's disposition.
+		     SELECT id, min(hop) AS hop,
+		            (array_agg(note ORDER BY (note <> '' OR disposition <> 0) DESC,
+		                                     abs(disposition) DESC, note, disposition DESC))[1] AS note,
+		            (array_agg(disposition ORDER BY (note <> '' OR disposition <> 0) DESC,
+		                                     abs(disposition) DESC, note, disposition DESC))[1] AS disposition
+		       FROM hood GROUP BY id
 		 )
-		 SELECT `+kgNodeColumnsNAspects(true)+`
+		 SELECT `+kgNodeColumnsNAspects(true)+`, r.note, r.disposition
 		   FROM kg_node n
 		   JOIN ranked r ON r.id = n.id
 		  WHERE NOT n.gm_private
@@ -285,7 +316,7 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 
 	var out []KGNode
 	for rows.Next() {
-		n, err := scanKGNodeAspects(rows)
+		n, err := scanKGNodeFact(rows)
 		if err != nil {
 			return nil, fmt.Errorf("storage: scan agent node fact: %w", err)
 		}
@@ -295,6 +326,24 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 		return nil, fmt.Errorf("storage: agent node facts for agent %s: %w", agentID, err)
 	}
 	return out, nil
+}
+
+// scanKGNodeFact scans the neighbourhood projection: a Node with its public
+// Aspects, plus the reading Agent's own relation to it (#546).
+func scanKGNodeFact(row pgx.Row) (KGNode, error) {
+	var n KGNode
+	var aspects []byte
+	err := row.Scan(
+		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
+		&n.CreatedAt, &n.UpdatedAt, &aspects, &n.RelationNote, &n.RelationDisposition,
+	)
+	if err != nil {
+		return n, err
+	}
+	if err := decodeAspects(aspects, &n.Aspects); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // SimilarNodes returns the k Knowledge Graph Nodes in campaignID nearest the

@@ -74,3 +74,31 @@ export const EDGE_TYPES: { value: EdgeType; label: string }[] = [
 
 export const EDGE_LABEL = new Map<EdgeType, string>(EDGE_TYPES.map((e) => [e.value, e.label]));
 export const EDGE_OPTIONS = EDGE_TYPES.map((e) => ({ value: String(e.value), label: e.label }));
+
+/**
+ * DISPOSITION_OPTIONS names the -2..+2 relation scale in the words the GM chooses
+ * by. A small closed scale rather than a free number: a scale nobody can calibrate
+ * is worse than none, and this one drives an edge colour and ONE prompt clause.
+ *
+ * It lives here, beside the type and relation vocabularies, because two surfaces
+ * show it — the relations editor authors it, and the proposal review card has to
+ * render what an Agent PROPOSED before the GM approves it.
+ */
+export const DISPOSITION_OPTIONS = [
+  { value: "-2", label: "hostile" },
+  { value: "-1", label: "wary" },
+  { value: "0", label: "neutral" },
+  { value: "1", label: "warm" },
+  { value: "2", label: "devoted" },
+];
+
+export const DISPOSITION_LABEL = new Map<number, string>(
+  DISPOSITION_OPTIONS.map((d) => [Number(d.value), d.label]),
+);
+
+/**
+ * MAX_EDGE_NOTE_RUNES mirrors kgvocab.MaxEdgeNoteRunes. The server is the
+ * authority and rejects anything longer; this stops the GM typing 300 characters
+ * before finding that out.
+ */
+export const MAX_EDGE_NOTE_RUNES = 280;

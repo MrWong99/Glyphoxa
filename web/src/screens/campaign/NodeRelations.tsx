@@ -1,15 +1,22 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ArrowLeft, X, Plus, Link as LinkIcon } from "lucide-react";
+import { ArrowRight, ArrowLeft, Pencil, X, Plus, Link as LinkIcon } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node as PbNode, Edge as PbEdge } from "@gen/glyphoxa/management/v1/management_pb";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { EDGE_LABEL, EDGE_OPTIONS, TYPE_META as NODE_TYPE_META } from "./knowledgeVocab";
+import {
+  DISPOSITION_OPTIONS,
+  EDGE_LABEL,
+  EDGE_OPTIONS,
+  MAX_EDGE_NOTE_RUNES,
+  TYPE_META as NODE_TYPE_META,
+} from "./knowledgeVocab";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 function typeMeta(t: NodeType) {
@@ -87,6 +94,19 @@ export function NodeRelations({ node }: { node: PbNode }) {
   });
   const deleteEdge = useMutation(CampaignService.method.deleteEdge, {
     onSuccess: () => void invalidateEdges(),
+  });
+  // The relation's texture (#546). It shares the edge invalidation because the
+  // graph colours relations by disposition and shows the note on hover.
+  //
+  // savedEdgeID is what closes the inline editor: it must close on the SAVE
+  // LANDING, not on the click. Closing on click hid every rejection — an
+  // over-long note came back InvalidArgument and the GM saw a tidy closed row.
+  const [savedEdgeID, setSavedEdgeID] = useState<string | null>(null);
+  const updateDetails = useMutation(CampaignService.method.updateEdgeDetails, {
+    onSuccess: (_res, vars) => {
+      setSavedEdgeID(vars.id ?? null);
+      void invalidateEdges();
+    },
   });
   const setNodeAgent = useMutation(CampaignService.method.setNodeAgent, {
     onSuccess: (res) => {
@@ -177,7 +197,21 @@ export function NodeRelations({ node }: { node: PbNode }) {
 
       <section className="gx-kg-relations__list" aria-label="Outgoing relations">
         {outgoing.map((e) => (
-          <OutgoingRow key={e.id} edge={e} onDelete={() => setConfirmEdge(e)} />
+          <OutgoingRow
+            key={e.id}
+            edge={e}
+            onDelete={() => setConfirmEdge(e)}
+            onSaveDetails={(note, disposition) =>
+              updateDetails.mutate({ id: e.id, note, disposition })
+            }
+            saving={updateDetails.isPending && updateDetails.variables?.id === e.id}
+            saveError={
+              updateDetails.isError && updateDetails.variables?.id === e.id
+                ? `Couldn't save: ${updateDetails.error.message}`
+                : null
+            }
+            saved={savedEdgeID === e.id}
+          />
         ))}
         {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
         {deleteEdge.isError && (
@@ -225,9 +259,29 @@ export function NodeRelations({ node }: { node: PbNode }) {
   );
 }
 
-function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void }) {
+function OutgoingRow({
+  edge,
+  onDelete,
+  onSaveDetails,
+  saving,
+  saveError,
+  saved,
+}: {
+  edge: PbEdge;
+  onDelete: () => void;
+  onSaveDetails: (note: string, disposition: number) => void;
+  saving: boolean;
+  saveError: string | null;
+  saved: boolean;
+}) {
   const meta = typeMeta(edge.toNodeType);
   const label = EDGE_LABEL.get(edge.edgeType) ?? "";
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState(edge.note);
+  const [disposition, setDisposition] = useState(String(edge.disposition));
+  useEffect(() => {
+    if (saved) setOpen(false);
+  }, [saved]);
   return (
     <div className="gx-kg-edge">
       <ArrowRight size={13} className="gx-kg-edge__dir" aria-hidden />
@@ -236,6 +290,18 @@ function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void })
       <Badge size="sm" style={{ color: meta.color, background: `${meta.color}24` }}>
         {meta.label}
       </Badge>
+      {/* The relation's texture, collapsed. "Knows and despises" is the
+          difference between a flat NPC and a live one — but most relations are
+          plain, so it stays out of the way until asked for. */}
+      <button
+        type="button"
+        className="gx-kg-iconbtn"
+        aria-label={`Edit what ${label} ${edge.toNodeName} is like`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Pencil size={13} />
+      </button>
       <button
         type="button"
         className="gx-kg-iconbtn gx-kg-iconbtn--danger"
@@ -244,6 +310,40 @@ function OutgoingRow({ edge, onDelete }: { edge: PbEdge; onDelete: () => void })
       >
         <X size={13} />
       </button>
+
+      {open && (
+        <div className="gx-kg-edge__details">
+          <Input
+            label="What it's like"
+            placeholder="owes you money since the siege"
+            value={note}
+            maxLength={MAX_EDGE_NOTE_RUNES}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <Select
+            label="How you feel"
+            options={DISPOSITION_OPTIONS}
+            value={disposition}
+            onValueChange={setDisposition}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={saving}
+            onClick={() => onSaveDetails(note.trim(), Number(disposition))}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+          {/* The editor stays OPEN until the save actually lands. Closing on click
+              and never rendering the failure told the GM their note was saved when
+              the server had rejected it. */}
+          {saveError && (
+            <span className="gx-editor__status gx-editor__status--error" role="alert">
+              {saveError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
