@@ -51,12 +51,22 @@ to miss.
    Optional: `phone`, `contentResponsible` (§ 18 Abs. 2 MStV),
    `vatId` (§ 27a UStG), `dataProtectionOfficer` (most beta-scale operators do
    not need one — Art. 37 GDPR). Leave them empty to omit those lines.
+   - `edgeProvider` — the reverse proxy or CDN your web tier is reached
+     **through**, if any (e.g. `"Cloudflare"` when you run the chart's
+     `cloudflared.enabled` tunnel or a `cloudflared` compose service). Such a
+     provider terminates TLS, so it sees connection data *and* the web traffic
+     in the clear: §5 names it as a recipient, and states that Voice Session
+     audio does not cross it (that goes straight to Discord). **Leave it empty
+     if you are reached directly or only through your own proxy** — the section
+     then names no such provider at all. An empty value is a complete answer,
+     not a TODO, and never raises the banner.
 2. Read the Datenschutzerklärung end to end and correct anything that does not
    match YOUR deployment — in particular §5 (which AI providers you actually
    use) and §6 (where the data lives). The template names the shipped adapters
    (Discord, ElevenLabs, Groq, Anthropic, Google Gemini, OpenAI-compatible
-   endpoints, Cloudflare) — cross-check against your configured providers, and
-   remember an "OpenAI-compatible endpoint" is whatever vendor you point it at.
+   endpoints) plus whatever `edgeProvider` you declared — cross-check against
+   your configured providers, and remember an "OpenAI-compatible endpoint" is
+   whatever vendor you point it at.
 3. Rebuild the SPA (`npm run build` in `web/`, or rebuild the container image —
    the pages are compiled into the bundle) and deploy.
 4. Verify before you publish DNS. The legal pages are client-rendered, so

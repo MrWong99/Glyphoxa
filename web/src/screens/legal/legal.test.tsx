@@ -82,13 +82,30 @@ describe("legal routes", () => {
       "Groq",
       "Anthropic",
       "Gemini",
-      "Cloudflare",
+      OPERATOR.edgeProvider,
       "Auftragsverarbeitung",
       "Speicherdauer",
       "Aufsichtsbehörde",
     ]) {
       expect(doc, `Datenschutzerklärung must mention ${topic}`).toContain(topic);
     }
+  });
+
+  it("names the declared edge provider as a recipient, and what it can see", async () => {
+    // This deployment is reached through a Cloudflare Tunnel, so the proxy that
+    // terminates its TLS is a recipient that must be named (Art. 13 Abs. 1
+    // lit. e DSGVO) — including the part operators forget: TLS ends there, so
+    // it sees the web traffic in the clear. The empty case (a deployment
+    // reached directly) is covered in edgeProvider.test.tsx.
+    expect(OPERATOR.edgeProvider).not.toBe("");
+    renderAt("/datenschutz");
+    await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+    const doc = document.body.textContent ?? "";
+    expect(doc).toContain(OPERATOR.edgeProvider);
+    expect(doc).toContain("TLS-Terminierung");
+    // Voice audio goes straight to Discord and never crosses the proxy — a
+    // material fact for players being transcribed, so it is stated, not implied.
+    expect(doc).toMatch(/Audio der Sprachsitzungen/);
   });
 
   it("links the other documents from every legal page", async () => {
