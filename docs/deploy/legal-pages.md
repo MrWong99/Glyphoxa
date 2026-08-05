@@ -31,13 +31,15 @@ start (#519). Keep the route as it is, or set `privacyPolicyUrl` explicitly.
 
 ## Operator TODO — before the deployment is reachable
 
-The operator's identity is **not** something this project can supply, so it
-ships as clearly-marked placeholders in
-[`web/src/screens/legal/operator.ts`](../../web/src/screens/legal/operator.ts).
-While any required field is unfilled, every legal page renders a red
-"Hinweis an den Betreiber" banner naming the missing fields, and each unfilled
-value is highlighted inline — an unfinished Impressum is meant to be impossible
-to miss.
+The operator's identity is **not** something this project can supply. It lives
+in [`web/src/screens/legal/operator.ts`](../../web/src/screens/legal/operator.ts),
+which ships filled in with the identity of the canonical glyphoxa.com
+deployment — **if you deploy your own instance, every value there is wrong for
+you and has to be replaced.** A field you have not answered is either empty or
+carries a `[BITTE AUSFÜLLEN: …]` placeholder; while any required one is in that
+state, every legal page renders a red "Hinweis an den Betreiber" banner naming
+the missing fields, and each placeholder value is highlighted inline — an
+unfinished Impressum is meant to be impossible to miss.
 
 1. Edit `web/src/screens/legal/operator.ts` and fill in:
    - `legalName`, `street`, `city`, `country` — § 5 DDG requires a real,
@@ -69,21 +71,46 @@ to miss.
    whatever vendor you point it at.
 3. Rebuild the SPA (`npm run build` in `web/`, or rebuild the container image —
    the pages are compiled into the bundle) and deploy.
-4. Verify before you publish DNS. The legal pages are client-rendered, so
-   fetching `/imprint` only returns the SPA shell — grep the **built bundle**,
-   not the HTML:
+4. Verify before you publish DNS. Ask the identity itself, from `web/`:
 
    ```sh
-   # locally, against the build you are about to ship (vite outDir):
-   grep -R "BITTE AUSFÜLLEN" internal/spa/dist/assets/ && echo "STILL UNFILLED"
+   npm run check:operator
+   ```
+
+   That runs the very `operatorTodos()` the pages call for their banner, over
+   your `operator.ts`, and exits non-zero naming every field that is still a
+   placeholder **or empty** — plus any optional field left on template text,
+   which renders red without raising the banner. It must exit 0.
+
+   Then confirm the bundle you are shipping actually carries that identity.
+   The legal pages are client-rendered, so fetching `/imprint` only returns the
+   SPA shell — check the **built bundle**, not the HTML:
+
+   ```sh
+   # locally, from the repo root, against the build you are about to ship (vite
+   # outDir). Take the bundle index.html references: emptyOutDir is false, so
+   # dist/assets/ keeps earlier builds and a stale sibling would answer for it.
+   js=$(grep -o '/assets/[^"]*\.js' internal/spa/dist/index.html | head -1)
+   grep -q "BITTE AUSFÜLLEN:" "internal/spa/dist$js" && echo "STILL UNFILLED"
 
    # or against the deployed instance (fetches the hashed JS the shell references):
    host=https://<your-host>
-   curl -sf "$host$(curl -sf "$host/" | grep -o '/assets/[^"]*\.js' | head -1)" \
-     | grep -q "BITTE AUSF" && echo "STILL UNFILLED"
+   js=$(curl -sf "$host/" | grep -o '/assets/[^"]*\.js' | head -1)
+   curl -sf "$host$js" | grep -q "BITTE AUSFÜLLEN:" && echo "STILL UNFILLED"
+   curl -sf "$host$js" | grep -q "<your legalName>" || echo "STALE BUNDLE"
    ```
 
-   Neither command may print `STILL UNFILLED`.
+   Neither may print `STILL UNFILLED`, and the live bundle must contain your own
+   `legalName` — a bundle built before you edited `operator.ts` still serves the
+   previous operator's Impressum, which is the failure step 3 exists to prevent.
+
+   Grep for the **colon** form. An unfilled value reads `[BITTE AUSFÜLLEN: …]`,
+   whereas the bare `[BITTE AUSFÜLLEN` prefix that `isPlaceholder()` compares
+   against is a constant compiled into *every* bundle: matching on it — as this
+   step did until 2026-08-06 — reports `STILL UNFILLED` on a perfectly filled
+   deployment, which is worse than no check at all. And no grep over a minified
+   bundle can see a required field left empty; that is what `check:operator` is
+   for, and why it, not the grep, is the check that decides.
 
 ## Keeping the texts honest
 
