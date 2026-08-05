@@ -167,8 +167,12 @@ export function Privacy() {
               Verbindungsdaten an (u. a. IP-Adresse, aufgerufene Adresse,
               Zeitpunkt, Browserkennung). Da die Transportverschlüsselung dort
               endet, kann der Anbieter die Inhalte der Web-Oberfläche im Klartext
-              verarbeiten. Das Audio der Sprachsitzungen läuft <em>nicht</em> über
-              diesen Weg, sondern unmittelbar zwischen dieser Instanz und Discord.
+              verarbeiten. Das <em>Live</em>-Audio einer Sprachsitzung läuft nicht
+              über diesen Weg: es fließt unmittelbar zwischen dieser Instanz,
+              Discord und den unter dieser Ziffer genannten Sprach-Anbietern.
+              Gespeicherte Highlight-Clips (Ziffer 4) werden dagegen wie jeder
+              andere Web-Inhalt über diesen Anbieter ausgeliefert, sobald die
+              Spielleitung sie in der Web-Oberfläche abspielt.
             </li>
           )}
         </ul>
