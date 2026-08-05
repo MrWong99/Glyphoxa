@@ -47,6 +47,22 @@ export type OperatorIdentity = {
   supervisoryAuthority: string;
   /** Where the servers physically run — the residency claim must be true. */
   hostingLocation: string;
+  /**
+   * Optional: the reverse proxy / CDN the web tier is reached THROUGH, named as
+   * a data recipient in the Datenschutzerklärung (e.g. "Cloudflare").
+   *
+   * Such a provider terminates TLS and therefore sees connection data and the
+   * plaintext of the web traffic, which makes it a recipient that has to be
+   * disclosed (Art. 13 Abs. 1 lit. e DSGVO). But it is a DEPLOYMENT choice, not
+   * a property of the software: a self-host reached directly, or behind the
+   * operator's own proxy, sends nothing to a third party here. Leave this empty
+   * for those — the Datenschutzerklärung then names no such provider at all,
+   * rather than claiming one "where applicable".
+   *
+   * Set it to the provider's name only when traffic genuinely flows through it
+   * (chart: `cloudflared.enabled`; compose: a `cloudflared` service).
+   */
+  edgeProvider: string;
   /** Last review date of the legal texts, shown at the top of each page. */
   lastUpdated: string;
 };
@@ -74,7 +90,10 @@ export const OPERATOR: OperatorIdentity = {
   supervisoryAuthority:
     "Landesbeauftragte für Datenschutz und Informationsfreiheit Nordrhein-Westfalen (LDI NRW), Kavalleriestraße 2–4, 40213 Düsseldorf",
   hostingLocation: "Deutschland (eigener Server)",
-  lastUpdated: "26. Juli 2026",
+  // This deployment is reached through a Cloudflare Tunnel (no inbound ports),
+  // so Cloudflare terminates TLS for every web request and is a recipient.
+  edgeProvider: "Cloudflare",
+  lastUpdated: "5. August 2026",
 };
 
 /** isPlaceholder reports whether a field is still an unfilled template value. */
@@ -85,8 +104,10 @@ export function isPlaceholder(value: string): boolean {
 /**
  * operatorTodos lists the fields an operator still has to fill. Empty means the
  * identity is complete; the legal pages render a banner while it is not.
- * Optional fields (phone, VAT id, DPO, editorial responsibility) are excluded —
- * an empty optional field is a decision, not an omission.
+ * Optional fields (phone, VAT id, DPO, editorial responsibility, edge provider)
+ * are excluded — an empty optional field is a decision, not an omission. An
+ * empty `edgeProvider` in particular is the CORRECT value for a deployment
+ * reached directly, not an unfinished one.
  */
 export function operatorTodos(o: OperatorIdentity = OPERATOR): string[] {
   const required: Array<keyof OperatorIdentity> = [

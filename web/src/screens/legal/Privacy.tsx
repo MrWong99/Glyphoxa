@@ -159,10 +159,18 @@ export function Privacy() {
             <strong>Google Gemini</strong> — Bilderzeugung für Kampagnenillustrationen:
             erhält die jeweilige Bildbeschreibung.
           </li>
-          <li>
-            <strong>Cloudflare</strong> (soweit eingesetzt) — Tunnel und TLS-Terminierung
-            für den Web-Zugang: verarbeitet dabei Verbindungsdaten (u. a. IP-Adresse).
-          </li>
+          {OPERATOR.edgeProvider && (
+            <li>
+              <strong>{OPERATOR.edgeProvider}</strong> — Reverse-Proxy und
+              TLS-Terminierung für den Web-Zugang. Der gesamte Web-Verkehr dieser
+              Instanz wird über diesen Anbieter geleitet; dabei fallen
+              Verbindungsdaten an (u. a. IP-Adresse, aufgerufene Adresse,
+              Zeitpunkt, Browserkennung). Da die Transportverschlüsselung dort
+              endet, kann der Anbieter die Inhalte der Web-Oberfläche im Klartext
+              verarbeiten. Das Audio der Sprachsitzungen läuft <em>nicht</em> über
+              diesen Weg, sondern unmittelbar zwischen dieser Instanz und Discord.
+            </li>
+          )}
         </ul>
         <p>
           Bei Anbietern mit Sitz in den USA erfolgt die Übermittlung auf Grundlage von
