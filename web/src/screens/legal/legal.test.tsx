@@ -6,7 +6,7 @@ import { createRouterTransport } from "@connectrpc/connect";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { routeTree } from "@/app/router";
-import { operatorTodos, isPlaceholder, OPERATOR } from "./operator";
+import { OPERATOR } from "./operator";
 
 // The legal documents (#518). Two properties matter beyond "the text renders":
 //
@@ -127,37 +127,9 @@ describe("legal routes", () => {
     // This repository ships the identity of the canonical beta deployment,
     // filled in by its operator on 2026-07-26 — so no banner here. The banner
     // machinery itself stays covered in todoBanner.test.tsx against a mocked,
-    // unfilled identity.
+    // unfilled identity, and operatorFilled.test.ts (npm run check:operator)
+    // holds the fork-safe completeness check an operator runs before deploying.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByText(/Lukas Schmidt/)).toBeInTheDocument();
-  });
-});
-
-describe("operator identity", () => {
-  it("is completely filled for this deployment", () => {
-    // The maintainer operates the canonical deployment from this repo and
-    // committed their own identity (2026-07-26). Anyone forking this source
-    // for their OWN instance must replace operator.ts — see the warning there
-    // and docs/deploy/legal-pages.md.
-    expect(operatorTodos()).toEqual([]);
-    expect(isPlaceholder(OPERATOR.legalName)).toBe(false);
-    expect(isPlaceholder(OPERATOR.email)).toBe(false);
-  });
-
-  it("counts an empty required field as a TODO and ignores optional ones", () => {
-    const filled = {
-      ...OPERATOR,
-      legalName: "Rin Okabe",
-      street: "Beispielweg 1",
-      city: "10115 Berlin",
-      country: "Deutschland",
-      email: "hallo@example.org",
-      supervisoryAuthority: "Berliner Beauftragte für Datenschutz",
-      hostingLocation: "Deutschland",
-      lastUpdated: "2026-07-25",
-      phone: "", // optional — an empty value is a decision, not an omission
-    };
-    expect(operatorTodos(filled)).toEqual([]);
-    expect(operatorTodos({ ...filled, email: "  " })).toEqual(["email"]);
   });
 });

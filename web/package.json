@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:operator": "vitest run src/screens/legal/operatorFilled.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
