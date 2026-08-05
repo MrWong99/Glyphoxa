@@ -71,7 +71,7 @@ export type OperatorIdentity = {
  * OPERATOR is the deployment's own identity. EVERY placeholder below must be
  * replaced before the deployment is reachable from the internet.
  *
- * This repository ships the identity of the canonical glyphoxa.net beta
+ * This repository ships the identity of the canonical glyphoxa.com beta
  * deployment, filled in by its operator (the project maintainer) on
  * 2026-07-26. If you deploy your OWN instance from this source, you MUST
  * replace every value below with your own identity — publishing someone
@@ -93,7 +93,7 @@ export const OPERATOR: OperatorIdentity = {
   // This deployment is reached through a Cloudflare Tunnel (no inbound ports),
   // so Cloudflare terminates TLS for every web request and is a recipient.
   edgeProvider: "Cloudflare",
-  lastUpdated: "5. August 2026",
+  lastUpdated: "6. August 2026",
 };
 
 /** isPlaceholder reports whether a field is still an unfilled template value. */

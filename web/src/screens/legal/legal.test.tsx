@@ -103,9 +103,15 @@ describe("legal routes", () => {
     const doc = document.body.textContent ?? "";
     expect(doc).toContain(OPERATOR.edgeProvider);
     expect(doc).toContain("TLS-Terminierung");
-    // Voice audio goes straight to Discord and never crosses the proxy — a
-    // material fact for players being transcribed, so it is stated, not implied.
-    expect(doc).toMatch(/Audio der Sprachsitzungen/);
+    // The audio split, stated rather than implied — and it IS a split, which an
+    // earlier draft got wrong. LIVE session audio never crosses the proxy: the
+    // voice tier dials Discord and the speech providers outbound. But stored
+    // Highlight clips are served BY the web tier
+    // (HighlightsStrip renders <audio src="/api/v1/highlights/{id}/clip">), so
+    // they cross it like any other web content. Both halves are material to the
+    // players whose consented voice is in those clips.
+    expect(doc).toMatch(/Live-Audio einer Sprachsitzung läuft nicht über diesen Weg/);
+    expect(doc).toMatch(/Highlight-Clips .* über diesen Anbieter ausgeliefert/);
   });
 
   it("links the other documents from every legal page", async () => {
