@@ -203,6 +203,7 @@ spec:
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json
+            {{- include "glyphoxa.idleCloseEnv" . | nindent 12 }}
             {{- with (include "glyphoxa.privacyPolicyURL" .) }}
             # The privacy-policy page the Bot links from the Voice Session
             # transcription disclosure it posts in the voice channel (#519).

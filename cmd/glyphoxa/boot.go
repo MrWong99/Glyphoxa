@@ -18,6 +18,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
@@ -481,6 +482,112 @@ func voicePresenceElectorConfig(getenv func(string) string) presence.OwnerElecto
 	return presence.OwnerElectorConfig{
 		Interval: envDuration(getenv, "GLYPHOXA_PRESENCE_OWNER_INTERVAL", defaultPresenceOwnerInterval),
 		Expiry:   envDuration(getenv, "GLYPHOXA_PRESENCE_OWNER_EXPIRY", defaultPresenceOwnerExpiry),
+	}
+}
+
+// Idle Close defaults (ADR-0061). A Voice Session that has processed no audio for
+// 15 minutes is closed by its Voice Instance, and one that has run through 200
+// Discord connect cycles is closed as churning — both ON by default, because both
+// protect a resource the deployment pays for and neither can fire on a table that
+// is actually playing. The two process ceilings are OFF by default: they are a
+// load-shedding valve an operator sizes against their own pod limits, and a
+// wrongly-guessed default would shed sessions nobody asked it to.
+const (
+	defaultVoiceIdleCloseWindow  = 15 * time.Minute
+	defaultVoiceIdleCloseSweep   = 30 * time.Second
+	defaultVoiceMaxConnectCycles = 200
+)
+
+// idleCloseOffToken is the literal that disables a duration knob whose zero value
+// would otherwise be indistinguishable from a typo. [envDuration]'s contract is
+// that a mis-set knob falls back to the default rather than to zero — right for a
+// cadence, wrong for a protection an operator may genuinely want off — so the
+// off switch is a word nobody types by accident.
+const idleCloseOffToken = "off"
+
+// envDurationOff is [envDuration] with an explicit disable: the literal "off"
+// (case-insensitive) yields 0. Every other blank, unparsable or non-positive value
+// still falls back to def, so a typo can never silently switch a resource
+// protection off — it can only be switched off on purpose.
+func envDurationOff(getenv func(string) string, key string, def time.Duration) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(getenv(key)), idleCloseOffToken) {
+		return 0
+	}
+	return envDuration(getenv, key, def)
+}
+
+// envCeiling reads a non-negative integer ceiling, where an explicit 0 IS honoured
+// as "disabled" (the GLYPHOXA_STT_STREAM_MAX_LANES convention) while a blank,
+// unparsable or negative value falls back to def.
+func envCeiling(getenv func(string) string, key string, def int) int {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n // 0 = explicitly disabled
+}
+
+// maxCeilingMiB caps the heap ceiling at 4 TiB expressed in MiB. Above it the
+// ceiling already exceeds any machine this runs on, so clamping costs nothing
+// real — and it is what keeps the MiB→bytes shift from WRAPPING.
+const maxCeilingMiB = 1 << 42 >> 20
+
+// mibToBytes converts a MiB heap ceiling to bytes, clamping first. Without the
+// clamp a fat-fingered value (a pasted byte count, say) shifts past 64 bits and
+// wraps to a tiny ceiling — flipping an off-by-default valve into the most
+// aggressive setting there is, which is the exact inverse of the rule every other
+// knob here follows: a typo must never weaken a resource protection, and it
+// certainly must never arm one nobody asked for.
+func mibToBytes(mib int) uint64 {
+	if mib <= 0 {
+		return 0
+	}
+	if mib > maxCeilingMiB {
+		mib = maxCeilingMiB
+	}
+	return uint64(mib) << 20
+}
+
+// voiceIdleClosePolicy reads the Voice Instance's Idle Close policy (ADR-0061)
+// from the GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW / _SWEEP, _MAX_CONNECT_CYCLES,
+// _HEAP_CEILING_MIB and _GOROUTINE_CEILING env vars. Parsed HERE in the
+// composition root, never in internal/session or internal/idleclose, so the
+// policy stays a deployment knob.
+//
+// The heap ceiling is taken in MiB rather than bytes because an operator sizes it
+// against a container memory limit, which kubernetes also states in MiB — a raw
+// byte count is a number nobody can read back.
+func voiceIdleClosePolicy(getenv func(string) string) idleclose.Policy {
+	return idleclose.Policy{
+		Window:           envDurationOff(getenv, "GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW", defaultVoiceIdleCloseWindow),
+		Sweep:            envDuration(getenv, "GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP", defaultVoiceIdleCloseSweep),
+		MaxCycles:        envCeiling(getenv, "GLYPHOXA_VOICE_MAX_CONNECT_CYCLES", defaultVoiceMaxConnectCycles),
+		HeapCeiling:      mibToBytes(envCeiling(getenv, "GLYPHOXA_VOICE_HEAP_CEILING_MIB", 0)),
+		GoroutineCeiling: envCeiling(getenv, "GLYPHOXA_VOICE_GOROUTINE_CEILING", 0),
+	}
+}
+
+// warnIdleClosePolicy flags an Idle Close policy that will surprise its operator.
+// It warns (never clamps — an operator may know their timing, the warnClaimCadence
+// doctrine) on a window short enough that an ordinary lull at the table trips it,
+// and on the feature being off entirely, since "no session ever closes itself" is
+// exactly the state the production incident this exists for was in.
+func warnIdleClosePolicy(p idleclose.Policy, log *slog.Logger) {
+	if !p.Enabled() {
+		log.Warn("Idle Close is disabled: a Voice Session with nobody in the channel will run until it is stopped by hand")
+		return
+	}
+	if p.Window > 0 && p.Window < 2*time.Minute {
+		log.Warn("very short GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW: an ordinary pause at the table will end the Voice Session",
+			"window", p.Window)
+	}
+	if p.Window > 0 && p.Sweep > p.Window {
+		log.Warn("GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP exceeds the window: the close will land late, at the next sweep",
+			"sweep", p.Sweep, "window", p.Window)
 	}
 }
 

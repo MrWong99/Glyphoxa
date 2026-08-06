@@ -479,3 +479,133 @@ tests:
       - equal:
           path: spec.template.metadata.labels["app.kubernetes.io/component"]
           value: voice
+
+  - it: omits every Idle Close env var by default
+    # ADR-0061: a stock install renders no Idle Close env at all and takes the
+    # binary's own defaults (15m window, 30s sweep, 200 connect cycles, both
+    # process ceilings off). Emitting the defaults here instead would pin them in
+    # the chart, so a binary-side change to a default would silently not apply.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_GOROUTINE_CEILING
+          any: true
+
+  - it: renders the Idle Close env vars an operator sets
+    # The voice pod is where the loop runs in a split deployment, so this is the
+    # pod the watchdog protects. "off" is a legal window: it disables idle
+    # closing without disabling the churn ceiling.
+    set:
+      idleClose:
+        window: 45m
+        sweep: 10s
+        maxConnectCycles: 50
+        heapCeilingMiB: 1536
+        goroutineCeiling: 8000
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+            value: "45m"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP
+            value: "10s"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+            value: "50"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+            value: "1536"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_GOROUTINE_CEILING
+            value: "8000"
+
+  - it: renders only the Idle Close keys that are set
+    # Each key is independent: switching the window off must not drag the
+    # unconfigured ceilings into the manifest as zeros, which the binary would
+    # then read as "explicitly disabled" — the same value, but pinned by the
+    # chart rather than defaulted by the binary.
+    set:
+      idleClose:
+        window: "off"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+            value: "off"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+          any: true
+
+  - it: renders an explicit 0 churn ceiling instead of swallowing it
+    # The one key whose BINARY default is ON (200), so unset and 0 mean different
+    # things and the helper must test "is it set", not "is it > 0". Omitting the
+    # env var here would hand the operator back the 200 they were turning off —
+    # silently, and while values.yaml told them 0 disables it.
+    set:
+      idleClose:
+        maxConnectCycles: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+            value: "0"
+
+  - it: renders an explicit 0 for the process ceilings too
+    # Same rule, applied uniformly: their binary default is already 0, so this
+    # changes no behaviour — it keeps one shape for all three so a future default
+    # flip cannot reintroduce the trap above.
+    set:
+      idleClose:
+        heapCeilingMiB: 0
+        goroutineCeiling: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+            value: "0"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_GOROUTINE_CEILING
+            value: "0"

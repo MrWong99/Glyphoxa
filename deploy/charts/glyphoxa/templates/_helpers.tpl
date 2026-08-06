@@ -375,6 +375,59 @@ Voice Session from starting.
 {{- end }}
 
 {{/*
+Idle Close env (ADR-0061), shared by the voice and web pods so a split
+deployment and an `all`-Mode one cannot drift: the voice loop runs in the voice
+pod under `mode: split` and in the web pod under `mode: all`, and the watchdog
+lives beside it either way.
+
+Every key is emitted ONLY when set away from its default, so a stock install
+renders NO env var here and the binary's own defaults (15m window, 30s sweep,
+200 connect cycles, both process ceilings off) apply — the same "unset means
+byte-identical" posture maxVoiceSessions uses. Include it inside a container's
+`env:` list; it emits nothing at all when idleClose is left untouched.
+*/}}
+{{- define "glyphoxa.idleCloseEnv" -}}
+{{- with .Values.idleClose }}
+{{- if .window }}
+# How long a Voice Session may process no audio before its Voice Instance closes
+# it (ADR-0061). "off" disables idle closing.
+- name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+  value: {{ .window | quote }}
+{{- end }}
+{{- if .sweep }}
+# How often the Idle Close watchdog checks (default 30s).
+- name: GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP
+  value: {{ .sweep | quote }}
+{{- end }}
+{{/*
+The three integer knobs test for "explicitly set" (kindIs "invalid" is Helm's
+nil), NOT for "greater than zero". The difference is load-bearing for
+maxConnectCycles, whose BINARY default is 200: treating an explicit 0 as
+"omit the env var" would hand back the 200 the operator was trying to turn
+off, silently. 0 means disabled to the binary, so it has to be rendered.
+The `int` coercion is only reached once the key is known to be non-nil.
+*/}}
+{{- if not (kindIs "invalid" .maxConnectCycles) }}
+# Reconnect-churn ceiling: a Voice Session past this many Discord connect cycles
+# has leaked a per-cycle world that many times and is closed. 0 disables.
+- name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+  value: {{ int .maxConnectCycles | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" .heapCeilingMiB) }}
+# Process heap ceiling in MiB: over it, the Voice Instance sheds its quietest
+# Voice Session. Size it comfortably under the container memory limit. 0 disables.
+- name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+  value: {{ int .heapCeilingMiB | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" .goroutineCeiling) }}
+# Process goroutine ceiling: same shed as the heap ceiling. 0 disables.
+- name: GLYPHOXA_VOICE_GOROUTINE_CEILING
+  value: {{ int .goroutineCeiling | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
 first, then the migrate Job, then the seed Job, then the serving workloads. All
 are pre-install/pre-upgrade hooks EXCEPT the voice + web Deployments, which are

@@ -387,6 +387,38 @@ type Config struct {
 	// before.
 	GMSpeaker func(speakerID string) bool
 
+	// Activity, when non-nil, is called once per audio frame this Voice Session
+	// processes — the Idle Close activity signal (ADR-0061). The Voice Instance's
+	// idleclose.Guard satisfies it (idleclose.Session.Mark, a single atomic
+	// increment), and its watchdog closes the session once the signal has been
+	// silent for the Idle Close Window.
+	//
+	// It is wired ONLY onto the inbound room-audio branch (wire.WithInboundActivityTap):
+	// the outbound half — a GM /say, a voiced recap, a Highlight replay, the three
+	// ways this Bot can speak with nobody talking to it — marks at its request seam
+	// in internal/session instead, which is both cheaper than tapping every Opus
+	// frame and starts the window from the moment the GM asked rather than from the
+	// last packet of the resulting speech.
+	//
+	// nil is the feature-off default: no tap is added, so the audio loop is
+	// byte-identical to the pre-Idle-Close path (voice standalone with the window
+	// disabled, the benchmark, the -hardcoded smoke path).
+	Activity func()
+
+	// ConnectCycle, when non-nil, is called once per Discord connect cycle this
+	// Voice Session runs — the Idle Close reconnect-churn signal (ADR-0061), which
+	// the Voice Instance's watchdog closes a session on once it passes its ceiling.
+	//
+	// A cycle is the unit that leaks: connectAndServe rebuilds the voice connection,
+	// the codec, every provider adapter with its own http.Transport, a Silero
+	// session per Speaker Lane and (with streaming STT) a realtime websocket, and
+	// not all of that is reclaimed. Counting cycles is therefore the closest thing
+	// to a direct per-session resource measurement this process has.
+	//
+	// nil is the feature-off default. Like [Config.Activity] it is satisfied by the
+	// session's idleclose.Session handle (a single atomic increment).
+	ConnectCycle func()
+
 	// KeyEntitlement gates the session's provider-key env fallback behind the
 	// tenant's platform-key entitlement (ADR-0054 seam (a), ADR-0055): a
 	// resolution landing on "" (no Provider Config row, or the seeded "env"

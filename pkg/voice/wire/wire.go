@@ -103,6 +103,13 @@ type Pipeline struct {
 	// (ADR-0020/0026).
 	inboundTap func(f gxvoice.Frame)
 	pcmTap     func(f audio.Frame)
+
+	// activityTap, when set, is called once per non-silence inbound frame — the
+	// Idle Close activity signal (ADR-0061). It carries no payload deliberately, so
+	// the whole thing can be one atomic increment on the audio loop; the watchdog
+	// samples the counter on its own cadence and reads the clock there. Same
+	// must-not-block contract as the taps above.
+	activityTap func()
 }
 
 // WithInboundTap installs a tap called with every non-silence inbound Opus frame
@@ -118,6 +125,24 @@ func WithInboundTap(tap func(f gxvoice.Frame)) Option {
 // Without this option the loop is unchanged.
 func WithPCMTap(tap func(f audio.Frame)) Option {
 	return func(p *Pipeline) { p.pcmTap = tap }
+}
+
+// WithInboundActivityTap installs the Idle Close activity signal (ADR-0061): tap
+// is called once per non-silence inbound frame, i.e. exactly once per packet of
+// real room audio this Voice Session processes.
+//
+// It fires on the SAME branch as [WithInboundTap] rather than anywhere further
+// down the pipeline, and that placement is the whole point. Discord's explicit
+// Opus silence frames say a speaker STOPPED, so they are not audio and must not
+// keep a session alive; and everything downstream of this branch — the VAD, the
+// Segmenter, the lane sweep — is also driven by the synthesized silence clock,
+// which keeps ticking at the frame cadence through a completely empty channel.
+// A signal taken from any of those would never go stale.
+//
+// The tap MUST NOT block: it runs inline on the audio loop. Without this option
+// the loop is unchanged.
+func WithInboundActivityTap(tap func()) Option {
+	return func(p *Pipeline) { p.activityTap = tap }
 }
 
 // silenceClock paces synthesized PCM silence into the VAD so trailing silence
@@ -313,6 +338,12 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 			armed = false
 			if clk != nil {
 				clk.reset()
+			}
+			// Idle Close activity signal (ADR-0061): this Voice Session is processing
+			// audio, so its idle window restarts. Nil unless the Voice Instance armed
+			// the watchdog; must not block.
+			if p.activityTap != nil {
+				p.activityTap()
 			}
 			// Rollover tape capture (#306): every non-silence inbound frame, before
 			// decode, with its Opus payload + UserID intact. Nil unless armed; must
