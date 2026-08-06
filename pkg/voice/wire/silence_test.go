@@ -110,8 +110,10 @@ func (c *fakeSilenceClock) resetCount() int {
 // newSilenceRig builds a Conversation around a REAL silero VAD (production
 // geometry + 12-frame hangover) and a stub recognizer, plus the "hello-test"
 // clip pre-framed at the VAD chunk size. The conversation publishes onto the
-// returned harness's bus; the silero session is closed at end of t.
-func newSilenceRig(t *testing.T, recText string) (*orchestrator.Conversation, *voicetest.Harness, []audio.Frame) {
+// returned harness's bus; the silero session is closed at end of t. An optional
+// wrapVAD decorates the silero session before it is wired in (the #578 disarm
+// test counts forward passes through it); existing call sites pass nothing.
+func newSilenceRig(t *testing.T, recText string, wrapVAD ...func(vad.SessionHandle) vad.SessionHandle) (*orchestrator.Conversation, *voicetest.Harness, []audio.Frame) {
 	t.Helper()
 
 	h := voicetest.New(t)
@@ -131,7 +133,11 @@ func newSilenceRig(t *testing.T, recText string) (*orchestrator.Conversation, *v
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 
-	vadStage := orchestrator.NewVAD(h.Bus, sess)
+	wrapped := sess
+	for _, wrap := range wrapVAD {
+		wrapped = wrap(wrapped)
+	}
+	vadStage := orchestrator.NewVAD(h.Bus, wrapped)
 	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{text: recText})
 	conv, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil)
 	if err != nil {
@@ -371,5 +377,96 @@ func TestPipeline_DiscordSilenceFramesDriveTheClock(t *testing.T) {
 	}
 	if got := clk.resetCount(); got != len(frames) {
 		t.Errorf("clock reset %d times, want %d: Discord silence frames must not reset the clock", got, len(frames))
+	}
+}
+
+// countingVAD decorates the rig's real silero session and counts ProcessFrame
+// calls — each one is the full Silero forward pass whose unbounded repetition
+// issue #578 is about.
+type countingVAD struct {
+	vad.SessionHandle
+
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingVAD) ProcessFrame(f audio.Frame) (vad.VADEvent, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.SessionHandle.ProcessFrame(f)
+}
+
+func (c *countingVAD) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// TestPipeline_SilenceClockDisarmsAfterHangoverWindow is issue #578: once the
+// last speaker stops, Discord's silence frames arm the clock and NOTHING before
+// this fix ever disarmed it — the ticker kept feeding a Silero pass per lane
+// every frame interval for the rest of the Voice Session (~2.7M passes per idle
+// day on zero audio). The clock's job is finished once the injected silence has
+// covered the end-of-speech hangover with margin, so after disarmTicks
+// consecutive injected frames it must disarm: further ticks reach the VAD not at
+// all. A fresh speaker-stop signal re-arms it for another bounded window, so a
+// later genuine stop still endpoints.
+func TestPipeline_SilenceClockDisarmsAfterHangoverWindow(t *testing.T) {
+	counter := &countingVAD{}
+	conv, h, frames := newSilenceRig(t, "hello there", func(s vad.SessionHandle) vad.SessionHandle {
+		counter.SessionHandle = s
+		return counter
+	})
+	codec := &replayCodec{frames: frames}
+	clk := &fakeSilenceClock{ch: make(chan time.Time)}
+	pipe := NewPipeline(conv, codec, nil, "guild", nil,
+		withSilenceClock(testSampleRate, testFrameMs, func() silenceClock { return clk }))
+
+	// The disarm window must sit comfortably above the hangover these tests
+	// drive (testHangoverTicks > silero's default 15-frame threshold), or the
+	// clock would cut endpointing short — the #91 regression.
+	disarm := pipe.disarmTicks
+	if disarm <= testHangoverTicks {
+		t.Fatalf("disarmTicks=%d must exceed the %d-tick hangover the silence tests drive", disarm, testHangoverTicks)
+	}
+
+	inbound := make(chan gxvoice.Frame)
+	done := make(chan error, 1)
+	go func() { done <- pipe.run(t.Context(), inbound) }()
+
+	feedSpeech(inbound, frames)
+	// The speaker stops for the night: silence frames arm the clock, then the
+	// channel is empty. Fire well past the disarm window — only the first
+	// disarmTicks ticks may reach the VAD.
+	for range discordStopSilenceFrames {
+		inbound <- gxvoice.Frame{Silence: true}
+	}
+	const overshoot = 40
+	for range disarm + overshoot {
+		clk.tick()
+	}
+	// A fresh speaker-stop signal re-arms the clock: these ticks must be
+	// injected again (another bounded window, not a permanent latch-off).
+	inbound <- gxvoice.Frame{Silence: true}
+	const rearmed = 5
+	for range rearmed {
+		clk.tick()
+	}
+	close(inbound)
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	want := len(frames) + disarm + rearmed
+	if got := counter.count(); got != want {
+		t.Errorf("VAD saw %d frames, want %d (%d real + %d injected before disarm + %d after re-arm): ticks past the disarm window must not reach the VAD",
+			got, want, len(frames), disarm, rearmed)
+	}
+	// Bounding the injection must not break what the clock exists for: the
+	// trailing utterance still endpointed inside the window.
+	starts, ends, _ := eventCounts(h)
+	if starts < 1 || ends != starts {
+		t.Errorf("trailing utterance not endpointed within the disarm window: speech_start=%d speech_end=%d", starts, ends)
 	}
 }

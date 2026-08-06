@@ -89,10 +89,14 @@ type Pipeline struct {
 	// the VAD during inbound gaps (issue #91); silenceOn gates the whole mechanism
 	// off when no [WithSilenceClock] was given (the pre-#91 behaviour). newClock
 	// builds the frame-cadence clock — a real time.Ticker in production, a fake in
-	// tests. See [WithSilenceClock] and [Pipeline.run].
-	silence   audio.Frame
-	silenceOn bool
-	newClock  func() silenceClock
+	// tests. disarmTicks bounds continuous injection (issue #578): the number of
+	// consecutive clock frames — [silenceDisarmAfter] at this pipeline's frame
+	// geometry — after which the armed clock disarms itself. See
+	// [WithSilenceClock] and [Pipeline.run].
+	silence     audio.Frame
+	silenceOn   bool
+	newClock    func() silenceClock
+	disarmTicks int
 
 	// inboundTap, when set, is called with every non-silence inbound Opus frame
 	// just before it is decoded (the rollover tape's inbound capture point, #306);
@@ -180,6 +184,22 @@ func (c *tickerClock) stop()                   { c.t.Stop() }
 // Option configures a [Pipeline] at construction.
 type Option func(*Pipeline)
 
+// silenceDisarmAfter bounds how long the armed silence clock keeps injecting
+// synthesized silence after the last speaker-stop signal (issue #578). The
+// clock's whole job (#91) is to advance silero's end-of-speech hangover through
+// the packet gap a stopped speaker leaves — vadMinSilenceFrames worth of
+// frames, a few hundred ms. Without a bound, the last participant leaving
+// latches the clock armed for the rest of the Voice Session (nothing after the
+// arming silence frames ever disarms it), burning a full Silero forward pass
+// per Speaker Lane every frame interval on a channel carrying zero audio —
+// ~2.7M passes per idle day at the 32 ms cadence. Two seconds of continuous
+// injection (62 frames at the production 16 kHz / 32 ms geometry) covers the
+// corpus-validated 12-frame hangover — and the 20 hand-fired ticks the silence
+// tests drive — several times over, so anything still open by then has long
+// since endpointed; a fresh speaker-stop signal re-arms the clock for another
+// window.
+const silenceDisarmAfter = 2 * time.Second
+
 // WithSilenceClock enables the continuous silence clock (issue #91): once a
 // speaker stop is signalled by Discord's explicit Opus silence frames, the
 // pipeline feeds synthesized PCM silence into the VAD at the orchestrator frame
@@ -210,6 +230,7 @@ func withSilenceClock(sampleRate, frameMs int, newClock func() silenceClock) Opt
 		p.silence = f
 		p.silenceOn = true
 		p.newClock = newClock
+		p.disarmTicks = int(silenceDisarmAfter / (time.Duration(frameMs) * time.Millisecond))
 	}
 }
 
@@ -292,9 +313,19 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 	// disarms it. If all stop-silence frames are lost, the utterance endpoints at
 	// the next arming signal or the shutdown Flush — the pre-#91 worst case —
 	// instead of risking a false mid-utterance split.
+	//
+	// Arming is also BOUNDED (#578): injected counts the consecutive clock frames
+	// fed since the last real audio, and once it covers the hangover with margin
+	// (p.disarmTicks, ~2s) the clock disarms itself. The endpointing work is done
+	// a few hundred ms after the speaker stops; without the bound the arm from
+	// the LAST speaker-stop of the night latches forever and every subsequent
+	// tick burns a Silero pass per Speaker Lane on an empty channel. A fresh
+	// silence frame re-arms for another full window, so a genuine later stop
+	// still endpoints.
 	var clk silenceClock
 	var clockTicks <-chan time.Time
 	armed := false
+	injected := 0
 	if p.silenceOn {
 		clk = p.newClock()
 		defer clk.stop()
@@ -319,6 +350,15 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 			if err := p.conv.FeedSilence(p.silence); err != nil {
 				p.log.Debug("feed silence frame", "err", err)
 			}
+			injected++
+			if injected >= p.disarmTicks {
+				// The hangover window is covered several times over: whatever was
+				// open has endpointed, and every further tick would be a wasted
+				// Silero pass per lane (#578). Disarm until the next speaker-stop
+				// signal.
+				armed = false
+				injected = 0
+			}
 		case frame, ok := <-inbound:
 			if !ok {
 				return nil // session closed
@@ -332,10 +372,12 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 				armed = true
 				continue
 			}
-			// Real audio arrived: the speaker is talking again. Disarm and reset the
-			// idle clock so no synthesized silence is injected while frames keep
-			// flowing — not even through an arrival gap (#147).
+			// Real audio arrived: the speaker is talking again. Disarm, clear the
+			// injection count (#578), and reset the idle clock so no synthesized
+			// silence is injected while frames keep flowing — not even through an
+			// arrival gap (#147).
 			armed = false
+			injected = 0
 			if clk != nil {
 				clk.reset()
 			}
