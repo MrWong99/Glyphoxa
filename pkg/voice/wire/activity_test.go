@@ -38,12 +38,19 @@ func TestPipeline_ActivityTapFiresOncePerRealAudioFrame(t *testing.T) {
 	go func() { done <- pipe.run(t.Context(), inbound) }()
 
 	feedSpeech(inbound, frames)
+
+	// The speaker stops: Discord's stop-silence frames must NOT mark.
+	//
+	// The FIRST silence send doubles as the read barrier for the speech frames.
+	// inbound is unbuffered and the loop processes one frame to completion before
+	// selecting again, so a send that has returned proves the PREVIOUS frame's tap
+	// already ran. Reading the counter straight after feedSpeech would instead race
+	// the last frame's tap and flake as len(frames)-1.
+	inbound <- gxvoice.Frame{Silence: true}
 	if got, want := marks.Load(), int64(len(frames)); got != want {
 		t.Fatalf("marks after %d real frames = %d, want %d (one per processed packet)", len(frames), got, want)
 	}
-
-	// The speaker stops: Discord's stop-silence frames must NOT mark.
-	for range discordStopSilenceFrames {
+	for range discordStopSilenceFrames - 1 {
 		inbound <- gxvoice.Frame{Silence: true}
 	}
 	if got, want := marks.Load(), int64(len(frames)); got != want {
@@ -61,9 +68,13 @@ func TestPipeline_ActivityTapFiresOncePerRealAudioFrame(t *testing.T) {
 			testHangoverTicks, got, want)
 	}
 
+	// The definitive read: the loop has exited, so nothing can still be marking.
 	close(inbound)
 	if err := <-done; err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	if got, want := marks.Load(), int64(len(frames)); got != want {
+		t.Fatalf("marks after the loop exited = %d, want %d — exactly one per real inbound frame and nothing else", got, want)
 	}
 }
 

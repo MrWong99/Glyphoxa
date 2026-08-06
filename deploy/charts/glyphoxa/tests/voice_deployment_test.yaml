@@ -574,3 +574,38 @@ tests:
           content:
             name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
           any: true
+
+  - it: renders an explicit 0 churn ceiling instead of swallowing it
+    # The one key whose BINARY default is ON (200), so unset and 0 mean different
+    # things and the helper must test "is it set", not "is it > 0". Omitting the
+    # env var here would hand the operator back the 200 they were turning off —
+    # silently, and while values.yaml told them 0 disables it.
+    set:
+      idleClose:
+        maxConnectCycles: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+            value: "0"
+
+  - it: renders an explicit 0 for the process ceilings too
+    # Same rule, applied uniformly: their binary default is already 0, so this
+    # changes no behaviour — it keeps one shape for all three so a future default
+    # flip cannot reintroduce the trap above.
+    set:
+      idleClose:
+        heapCeilingMiB: 0
+        goroutineCeiling: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
+            value: "0"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_GOROUTINE_CEILING
+            value: "0"

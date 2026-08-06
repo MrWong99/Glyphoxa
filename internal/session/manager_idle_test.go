@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -202,6 +203,45 @@ func TestIdleClose_ChurnEndsSessionWithItsOwnReason(t *testing.T) {
 		t.Fatalf("churn-closed end_reason = %v, want %q", closed.EndReason, idleclose.ReasonChurn)
 	}
 	mgr.Shutdown()
+}
+
+// TestIdleClose_StartRacingShutdownLeavesNoEnrollment pins the one path that
+// never enters runLoop, and so never reaches its deferred Release: a Shutdown
+// landing while Start is mid-I/O tears the half-built session down inline and
+// returns ErrManagerClosed. Without an explicit Release there, the watchdog would
+// sweep a session that never ran — forever — holding its close callback and the
+// activeSession it captured alive. That is exactly the leak class this package
+// exists to prevent, so leaking one here would be its own punchline.
+func TestIdleClose_StartRacingShutdownLeavesNoEnrollment(t *testing.T) {
+	store := newFakeStore()
+	// Park the first deployment-config read so Shutdown can land inside Start's
+	// unlocked I/O phase, which is the only way to reach that branch.
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	store.depGate = gate // the fakeStore clears its own field when it parks
+	store.depEntered = entered
+	runner := newBlockingRunner()
+	mgr, guard := idleGuardManager(t, store, runner.run, idleclose.Policy{
+		Window: time.Hour,
+		Sweep:  time.Hour,
+	})
+
+	started := make(chan error, 1)
+	go func() {
+		_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+		started <- err
+	}()
+
+	<-entered // Start is parked in its unlocked I/O phase
+	mgr.Shutdown()
+	close(gate) // Start now runs on, enrolls, and finds m.closed at the commit
+
+	if err := <-started; !errors.Is(err, session.ErrManagerClosed) {
+		t.Fatalf("Start racing Shutdown returned %v, want ErrManagerClosed", err)
+	}
+	if n := guard.Enrolled(); n != 0 {
+		t.Fatalf("watchdog still tracks %d session(s) after a Start that never launched a loop, want 0", n)
+	}
 }
 
 // TestIdleClose_StoppedSessionIsNotClosedTwice: a GM pressing End while the

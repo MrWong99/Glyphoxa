@@ -531,6 +531,27 @@ func envCeiling(getenv func(string) string, key string, def int) int {
 	return n // 0 = explicitly disabled
 }
 
+// maxCeilingMiB caps the heap ceiling at 4 TiB expressed in MiB. Above it the
+// ceiling already exceeds any machine this runs on, so clamping costs nothing
+// real — and it is what keeps the MiB→bytes shift from WRAPPING.
+const maxCeilingMiB = 1 << 42 >> 20
+
+// mibToBytes converts a MiB heap ceiling to bytes, clamping first. Without the
+// clamp a fat-fingered value (a pasted byte count, say) shifts past 64 bits and
+// wraps to a tiny ceiling — flipping an off-by-default valve into the most
+// aggressive setting there is, which is the exact inverse of the rule every other
+// knob here follows: a typo must never weaken a resource protection, and it
+// certainly must never arm one nobody asked for.
+func mibToBytes(mib int) uint64 {
+	if mib <= 0 {
+		return 0
+	}
+	if mib > maxCeilingMiB {
+		mib = maxCeilingMiB
+	}
+	return uint64(mib) << 20
+}
+
 // voiceIdleClosePolicy reads the Voice Instance's Idle Close policy (ADR-0061)
 // from the GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW / _SWEEP, _MAX_CONNECT_CYCLES,
 // _HEAP_CEILING_MIB and _GOROUTINE_CEILING env vars. Parsed HERE in the
@@ -545,7 +566,7 @@ func voiceIdleClosePolicy(getenv func(string) string) idleclose.Policy {
 		Window:           envDurationOff(getenv, "GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW", defaultVoiceIdleCloseWindow),
 		Sweep:            envDuration(getenv, "GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP", defaultVoiceIdleCloseSweep),
 		MaxCycles:        envCeiling(getenv, "GLYPHOXA_VOICE_MAX_CONNECT_CYCLES", defaultVoiceMaxConnectCycles),
-		HeapCeiling:      uint64(envCeiling(getenv, "GLYPHOXA_VOICE_HEAP_CEILING_MIB", 0)) << 20,
+		HeapCeiling:      mibToBytes(envCeiling(getenv, "GLYPHOXA_VOICE_HEAP_CEILING_MIB", 0)),
 		GoroutineCeiling: envCeiling(getenv, "GLYPHOXA_VOICE_GOROUTINE_CEILING", 0),
 	}
 }

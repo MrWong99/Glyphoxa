@@ -317,6 +317,9 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		defer h.Release()
 		cfg.Activity = h.Mark
 		cfg.ConnectCycle = h.CycleStarted
+		// This node has no commit step — the session is live the moment RunFromDB
+		// runs — so admit it to the sweep as soon as the config carries its marks.
+		h.Activate()
 	}
 
 	err = wirenpc.RunFromDB(runCtx, cfg, pool, cipher)

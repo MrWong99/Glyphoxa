@@ -18,14 +18,20 @@
 // ADR-0057 (e)) — and the row closes 'ended', never 'failed': a deliberate policy
 // stop is not a fault (ADR-0043, ADR-0046).
 //
-// The hot path is one atomic increment. [Session.Mark] is called once per audio
-// frame the voice loop processes (inbound room audio and outbound Agent speech),
-// so it takes no lock, allocates nothing, and reads no clock; the watchdog
-// samples the counter on its own sweep and only then consults the clock. That is
-// also why idleness is measured off a COUNTER rather than a timestamp: the
-// silence clock (pkg/voice/wire) keeps the VAD and Segmenter busy at ~31 Hz
-// through a completely empty channel, so anything keyed off those call rates
-// would never go stale.
+// The hot path is one atomic increment. [Session.Mark] is called once per
+// INBOUND room-audio frame the voice loop processes, so it takes no lock,
+// allocates nothing, and reads no clock; the watchdog samples the counter on its
+// own sweep and only then consults the clock. That is also why idleness is
+// measured off a COUNTER rather than a timestamp: the silence clock
+// (pkg/voice/wire) keeps the VAD and Segmenter busy at ~31 Hz through a
+// completely empty channel, so anything keyed off those call rates would never
+// go stale.
+//
+// The outbound half — the Bot speaking with nobody talking to it (a GM /say, a
+// voiced recap, a Highlight replay) — marks ONCE PER REQUEST at its seam in
+// internal/session, not once per Opus frame. That is deliberate: it costs one
+// increment instead of one per 20 ms of speech, and it restarts the window from
+// when the GM asked rather than from the last packet of the resulting audio.
 package idleclose
 
 import (
@@ -182,6 +188,15 @@ type Session struct {
 	// written by the reconnect loop and read by the sweep. Same lock-free
 	// discipline as marks, though this one moves at most once per reconnect.
 	cycles atomic.Uint64
+	// live gates the session into the sweep. An owner enrolls BEFORE its session
+	// can be ended — it has to, since the enrollment supplies the loop's activity
+	// mark — so there is a window where a breach callback would find nothing to
+	// close, latch the session as closed, and thereby exempt it from every future
+	// check for the rest of its life. [Session.Activate] closes that window: until
+	// the owner says the session is really live, the sweep passes over it.
+	// Atomic rather than Guard.mu-guarded so an owner can call it while holding its
+	// OWN lock without introducing a lock order between the two.
+	live atomic.Bool
 
 	// The fields below are guarded by Guard.mu.
 	seen       uint64    // marks as of lastActive
@@ -196,8 +211,15 @@ type Session struct {
 // in the watchdog's logs only.
 //
 // close is invoked at most once, from the sweep goroutine, with one of
-// [ReasonIdle] / [ReasonResource]. The session stays enrolled after it fires (its
-// loop takes seconds to unwind through its finalizers) but is never chosen again.
+// [ReasonIdle] / [ReasonChurn] / [ReasonResource]. The session stays enrolled
+// after it fires (its loop takes seconds to unwind through its finalizers) but is
+// never chosen again.
+//
+// The returned handle is INERT until [Session.Activate]: it accepts marks and
+// counts cycles, but no sweep will close it. Enroll therefore cannot fire a
+// breach against a session the owner has not finished starting — an unwinnable
+// race, since the owner needs the handle to wire the activity mark before it can
+// commit the session.
 func (g *Guard) Enroll(id string, close func(reason string)) *Session {
 	if g == nil || !g.policy.Enabled() || close == nil {
 		return nil
@@ -210,15 +232,30 @@ func (g *Guard) Enroll(id string, close func(reason string)) *Session {
 	return s
 }
 
-// Mark records that this Voice Session processed one audio frame. It is THE hot
-// path — called once per inbound room frame and once per outbound Agent frame,
-// roughly 50/s per active speaker — so it is a single atomic increment: no lock,
-// no allocation, and no clock read. Safe on a nil handle.
+// Mark records that this Voice Session processed audio. It is THE hot path —
+// called once per inbound room-audio frame, roughly 50/s per active speaker — so
+// it is a single atomic increment: no lock, no allocation, and no clock read.
+// Safe on a nil handle.
+//
+// Bot speech marks here too, but once per REQUEST (a /say, a voiced recap, a
+// Highlight replay) rather than once per outbound frame — see the package doc.
 func (s *Session) Mark() {
 	if s == nil {
 		return
 	}
 	s.marks.Add(1)
+}
+
+// Activate admits the session to the watchdog's sweep. The owner calls it once
+// its session is genuinely live — for the session Manager, the moment the session
+// is committed to m.active, so the close callback it handed to [Guard.Enroll] can
+// actually find something to end. Before it, the handle collects marks and cycles
+// but is never swept. Idempotent and safe on a nil handle.
+func (s *Session) Activate() {
+	if s == nil {
+		return
+	}
+	s.live.Store(true)
 }
 
 // CycleStarted records that this Voice Session began another Discord connect
@@ -332,7 +369,9 @@ func (g *Guard) sweep(now time.Time) {
 			s.seen = n
 			s.lastActive = now
 		}
-		if s.closed {
+		// Not yet admitted (the owner is still starting it): collect its marks, close
+		// nothing. See [Session.Activate].
+		if s.closed || !s.live.Load() {
 			continue
 		}
 		// Churn first: a session cycling itself to death is leaking whether or not it
@@ -387,8 +426,9 @@ func (g *Guard) quietestLocked() *Session {
 	var victim *Session
 	for _, s := range g.order {
 		// A session this Guard already closed is still unwinding; picking it again
-		// would spend the sweep's one shed on a session that is already leaving.
-		if s.closed {
+		// would spend the sweep's one shed on a session that is already leaving. One
+		// the owner has not admitted yet cannot be ended at all (see Session.Activate).
+		if s.closed || !s.live.Load() {
 			continue
 		}
 		if victim == nil || s.lastActive.Before(victim.lastActive) {

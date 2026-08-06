@@ -70,6 +70,15 @@ func newGuard(t *testing.T, p Policy) (*Guard, func(d time.Duration)) {
 	}
 }
 
+// enroll registers a session and admits it to the sweep in one step — what every
+// owner does, only split across the two calls because the owner needs the handle
+// to wire its activity mark before it can declare the session live.
+func enroll(g *Guard, id string, close func(string)) *Session {
+	h := g.Enroll(id, close)
+	h.Activate()
+	return h
+}
+
 // TestGuard_ClosesSessionAfterWindowWithNoAudio is the acceptance case: a Voice
 // Session that never marks a single audio frame is closed once the Idle Close
 // Window elapses, and not one sweep earlier.
@@ -77,7 +86,7 @@ func TestGuard_ClosesSessionAfterWindowWithNoAudio(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy())
 	var rec recorder
-	if h := g.Enroll("s1", rec.close); h == nil {
+	if h := enroll(g, "s1", rec.close); h == nil {
 		t.Fatal("Enroll returned nil for an enabled Policy, want a live handle")
 	}
 
@@ -100,7 +109,7 @@ func TestGuard_MarkedAudioResetsTheWindow(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy())
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 
 	// Ten minutes of quiet, one frame of audio, ten more minutes: the mark moves
 	// the deadline, so the cumulative 20 min never trips the 15 min window.
@@ -126,7 +135,7 @@ func TestGuard_ClosesOnlyOnce(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy())
 	var rec recorder
-	g.Enroll("s1", rec.close)
+	enroll(g, "s1", rec.close)
 
 	advance(15 * time.Minute)
 	advance(time.Minute)
@@ -144,7 +153,7 @@ func TestGuard_ReleasedSessionIsNeverClosed(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy())
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 	h.Release()
 
 	advance(time.Hour)
@@ -161,7 +170,7 @@ func TestGuard_ReleasedSessionIsNeverClosed(t *testing.T) {
 func TestGuard_ReleaseIsIdempotent(t *testing.T) {
 	t.Parallel()
 	g, _ := newGuard(t, testPolicy())
-	h := g.Enroll("s1", func(string) {})
+	h := enroll(g, "s1", func(string) {})
 	h.Release()
 	h.Release()
 	if n := g.Enrolled(); n != 0 {
@@ -197,8 +206,60 @@ func TestGuard_NilGuardEnrollsNothing(t *testing.T) {
 	// unconditionally in some paths.
 	var h *Session
 	h.Mark()
+	h.CycleStarted()
+	h.Activate()
 	h.Release()
 	g.Run(context.Background()) // must return at once, not block on a ticker
+}
+
+// TestGuard_UnactivatedSessionIsNeverClosed pins the enroll→commit window. An
+// owner cannot admit a session before it enrolls — the enrollment IS what supplies
+// the loop's activity mark — so there is a gap where a breach would find nothing
+// to close. Left open, that callback would no-op, the handle would latch itself
+// closed, and the session would run its entire life exempt from every check,
+// silently. Until Activate, the sweep must pass over it entirely.
+func TestGuard_UnactivatedSessionIsNeverClosed(t *testing.T) {
+	t.Parallel()
+	p := testPolicy()
+	p.MaxCycles = 1
+	p.HeapCeiling = 1 << 30
+	g, advance := newGuard(t, p)
+	g.usage = func() Usage { return Usage{HeapBytes: 1<<30 + 1} } // every trigger armed
+
+	var rec recorder
+	h := g.Enroll("starting", rec.close) // deliberately NOT activated
+	h.CycleStarted()
+	h.CycleStarted()
+
+	advance(time.Hour)
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("closed a session the owner had not admitted yet: %v", got)
+	}
+
+	// And once admitted it is closed on the very next sweep — the gate delays the
+	// check, it does not cancel it.
+	h.Activate()
+	advance(time.Minute)
+	if got := rec.snapshot(); len(got) != 1 || got[0] != ReasonChurn {
+		t.Fatalf("close reasons after Activate = %v, want one %q", got, ReasonChurn)
+	}
+}
+
+// TestGuard_ActivateIsIdempotent: an owner that retries a start must not be able
+// to re-arm a handle it already closed.
+func TestGuard_ActivateIsIdempotent(t *testing.T) {
+	t.Parallel()
+	g, advance := newGuard(t, testPolicy())
+	var rec recorder
+	h := enroll(g, "s1", rec.close)
+	h.Activate()
+
+	advance(15 * time.Minute)
+	h.Activate()
+	advance(time.Minute)
+	if got := rec.snapshot(); len(got) != 1 {
+		t.Fatalf("close fired %d times with Activate called after the close, want 1: %v", len(got), got)
+	}
 }
 
 // TestGuard_HeapCeilingShedsTheLeastRecentlyActiveSession pins the resource
@@ -211,8 +272,8 @@ func TestGuard_HeapCeilingShedsTheLeastRecentlyActiveSession(t *testing.T) {
 	g, advance := newGuard(t, p)
 
 	var quiet, busy recorder
-	quietH := g.Enroll("quiet", quiet.close)
-	busyH := g.Enroll("busy", busy.close)
+	quietH := enroll(g, "quiet", quiet.close)
+	busyH := enroll(g, "busy", busy.close)
 
 	// Under the ceiling: nothing is shed however the marks fall.
 	g.usage = func() Usage { return Usage{HeapBytes: 1 << 29} }
@@ -243,7 +304,7 @@ func TestGuard_GoroutineCeilingSheds(t *testing.T) {
 	p.GoroutineCeiling = 5000
 	g, advance := newGuard(t, p)
 	var rec recorder
-	g.Enroll("s1", rec.close)
+	enroll(g, "s1", rec.close)
 
 	g.usage = func() Usage { return Usage{Goroutines: 5000} }
 	advance(time.Minute)
@@ -265,7 +326,7 @@ func TestGuard_ZeroCeilingsNeverShed(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy()) // ceilings 0
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 
 	g.usage = func() Usage { return Usage{HeapBytes: 1 << 40, Goroutines: 1 << 20} }
 	h.Mark()
@@ -289,8 +350,8 @@ func TestGuard_IdleCloseDefersTheResourceShed(t *testing.T) {
 	g.usage = func() Usage { return Usage{HeapBytes: 1 << 29} }
 
 	var idle, live recorder
-	g.Enroll("idle", idle.close)
-	liveH := g.Enroll("live", live.close)
+	enroll(g, "idle", idle.close)
+	liveH := enroll(g, "live", live.close)
 
 	// 29 sweeps of 30s = 14m30s: `live` keeps marking, so only `idle` ages.
 	for range 29 {
@@ -335,8 +396,8 @@ func TestGuard_ResourceShedSkipsAlreadyClosedSessions(t *testing.T) {
 	g.usage = func() Usage { return Usage{HeapBytes: 1<<30 + 1} }
 
 	var first, second recorder
-	g.Enroll("first", first.close)
-	secondH := g.Enroll("second", second.close)
+	enroll(g, "first", first.close)
+	secondH := enroll(g, "second", second.close)
 	secondH.Mark()
 
 	advance(time.Minute) // sheds `first` (quietest)
@@ -360,7 +421,7 @@ func TestGuard_ClosesSessionThatExceedsTheCycleCeiling(t *testing.T) {
 	p.MaxCycles = 3
 	g, advance := newGuard(t, p)
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 
 	// Keep marking so the idle window can never be what fires.
 	for range 3 {
@@ -390,7 +451,7 @@ func TestGuard_ChurnOutranksIdle(t *testing.T) {
 	p.MaxCycles = 1
 	g, advance := newGuard(t, p)
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 	h.CycleStarted()
 	h.CycleStarted()
 
@@ -406,7 +467,7 @@ func TestGuard_ZeroCycleCeilingNeverCloses(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, testPolicy()) // MaxCycles 0
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 	for range 10_000 {
 		h.CycleStarted()
 	}
@@ -423,7 +484,7 @@ func TestGuard_CycleCeilingAloneEnablesTheGuard(t *testing.T) {
 	t.Parallel()
 	g, advance := newGuard(t, Policy{MaxCycles: 1, Sweep: time.Second})
 	var rec recorder
-	h := g.Enroll("s1", rec.close)
+	h := enroll(g, "s1", rec.close)
 	if h == nil {
 		t.Fatal("Enroll returned nil for a cycle-ceiling-only Policy, want a live handle")
 	}
@@ -468,7 +529,7 @@ func TestGuard_RunSweepsOnEveryTick(t *testing.T) {
 	g.usage = func() Usage { return Usage{} }
 
 	var rec recorder
-	g.Enroll("s1", rec.close)
+	enroll(g, "s1", rec.close)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -506,7 +567,7 @@ func TestGuard_MarkRacesSweep(t *testing.T) {
 	t.Parallel()
 	g := New(testPolicy(), slog.New(slog.DiscardHandler))
 	g.usage = func() Usage { return Usage{} }
-	h := g.Enroll("s1", func(string) {})
+	h := enroll(g, "s1", func(string) {})
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup

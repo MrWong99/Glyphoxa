@@ -206,18 +206,23 @@ idleClose:
   sweep: ""
 
   # How many Discord connect cycles one Voice Session may run through before it
-  # is closed as churning (GLYPHOXA_VOICE_MAX_CONNECT_CYCLES). Default 200; 0
-  # disables. Every cycle rebuilds the per-cycle world — the voice connection,
-  # the codec, each provider adapter with its own HTTP transport, a VAD session
-  # per Speaker Lane, and with streaming STT a fresh realtime websocket — and
-  # not all of it is reclaimed, so a session that has cycled hundreds of times
-  # has leaked in proportion. This is the closest thing to a direct per-session
-  # resource measurement the process has.
-  maxConnectCycles: 0
+  # is closed as churning (GLYPHOXA_VOICE_MAX_CONNECT_CYCLES). Every cycle
+  # rebuilds the per-cycle world — the voice connection, the codec, each provider
+  # adapter with its own HTTP transport, a VAD session per Speaker Lane, and with
+  # streaming STT a fresh realtime websocket — and not all of it is reclaimed, so
+  # a session that has cycled hundreds of times has leaked in proportion. This is
+  # the closest thing to a direct per-session resource measurement the process
+  # has.
+  #
+  # Leave EMPTY for the binary's default of 200. Set `0` to disable the check —
+  # empty and 0 mean different things here, unlike the two ceilings below, and
+  # only an explicit 0 turns it off.
+  maxConnectCycles:
 
-  # Process-wide load-shedding ceilings, both OFF by default. When the Voice
-  # Instance crosses one, it closes the SINGLE least-recently-active Voice
-  # Session it hosts and re-checks on the next sweep.
+  # Process-wide load-shedding ceilings, both OFF by default (empty ⇒ the
+  # binary's 0 ⇒ disabled). When the Voice Instance crosses one, it closes the
+  # SINGLE least-recently-active Voice Session it hosts and re-checks on the next
+  # sweep.
   #
   # Read the trade-off before enabling: these are PROCESS readings, because Go
   # attributes no heap to a logical owner and a per-session number would be a
@@ -227,8 +232,8 @@ idleClose:
   # it — but it is a valve you size against your own pod limits, not something
   # to guess. Size heapCeilingMiB comfortably under the container memory limit
   # (voice.resources.limits.memory).
-  heapCeilingMiB: 0
-  goroutineCeiling: 0
+  heapCeilingMiB:
+  goroutineCeiling:
 
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point

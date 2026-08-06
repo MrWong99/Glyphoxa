@@ -399,22 +399,30 @@ byte-identical" posture maxVoiceSessions uses. Include it inside a container's
 - name: GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP
   value: {{ .sweep | quote }}
 {{- end }}
-{{- if gt (int .maxConnectCycles) 0 }}
+{{/*
+The three integer knobs test for "explicitly set" (kindIs "invalid" is Helm's
+nil), NOT for "greater than zero". The difference is load-bearing for
+maxConnectCycles, whose BINARY default is 200: treating an explicit 0 as
+"omit the env var" would hand back the 200 the operator was trying to turn
+off, silently. 0 means disabled to the binary, so it has to be rendered.
+The `int` coercion is only reached once the key is known to be non-nil.
+*/}}
+{{- if not (kindIs "invalid" .maxConnectCycles) }}
 # Reconnect-churn ceiling: a Voice Session past this many Discord connect cycles
-# has leaked a per-cycle world that many times and is closed.
+# has leaked a per-cycle world that many times and is closed. 0 disables.
 - name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
-  value: {{ .maxConnectCycles | quote }}
+  value: {{ int .maxConnectCycles | quote }}
 {{- end }}
-{{- if gt (int .heapCeilingMiB) 0 }}
+{{- if not (kindIs "invalid" .heapCeilingMiB) }}
 # Process heap ceiling in MiB: over it, the Voice Instance sheds its quietest
-# Voice Session. Size it comfortably under the container memory limit.
+# Voice Session. Size it comfortably under the container memory limit. 0 disables.
 - name: GLYPHOXA_VOICE_HEAP_CEILING_MIB
-  value: {{ .heapCeilingMiB | quote }}
+  value: {{ int .heapCeilingMiB | quote }}
 {{- end }}
-{{- if gt (int .goroutineCeiling) 0 }}
-# Process goroutine ceiling: same shed as the heap ceiling.
+{{- if not (kindIs "invalid" .goroutineCeiling) }}
+# Process goroutine ceiling: same shed as the heap ceiling. 0 disables.
 - name: GLYPHOXA_VOICE_GOROUTINE_CEILING
-  value: {{ .goroutineCeiling | quote }}
+  value: {{ int .goroutineCeiling | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

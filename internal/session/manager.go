@@ -824,6 +824,12 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		// it is not left 'running' (the boot reconciliation is the backstop, #143).
 		as.cancel()
 		stopForward()
+		// Leave the Idle Close watchdog here too (ADR-0061). runLoop's deferred
+		// Release is the usual path, but this branch never launches a loop — without
+		// this the Guard would sweep a session that never existed forever, holding its
+		// close callback and the activeSession it captured alive. That is precisely
+		// the leak class the watchdog exists to prevent.
+		as.idle.Release()
 		if m.highlights != nil {
 			hlCtx, hlCancel := context.WithTimeout(context.Background(), m.endTimeout)
 			_ = m.highlights.Finalize(hlCtx, vs.ID)
@@ -837,6 +843,12 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, ErrManagerClosed
 	}
 	m.active[tenantID] = as
+	// Admit the session to the Idle Close sweep (ADR-0061) only now that it is
+	// committed. The enrollment had to happen earlier — it supplies the loop's
+	// activity mark, which cfg carries — but a breach firing in that gap would find
+	// no active session, no-op inside policyEnd, and latch the handle closed,
+	// exempting the session from every future check for the rest of its life.
+	as.idle.Activate()
 	go m.runLoop(runCtx, as, cfg)
 	m.mu.Unlock()
 	return vs, nil

@@ -1121,6 +1121,38 @@ func TestEnvCeiling(t *testing.T) {
 	}
 }
 
+// TestMibToBytes pins the clamp on the MiB→bytes conversion (ADR-0061). Without
+// it a fat-fingered value — a byte count pasted into a MiB field, say — shifts
+// past 64 bits and WRAPS to a tiny ceiling, which would flip an off-by-default
+// load-shedding valve into the most aggressive setting there is: the instance
+// would shed its quietest Voice Session on every single sweep. That is the exact
+// inverse of the rule the rest of this file follows, so it gets its own test.
+func TestMibToBytes(t *testing.T) {
+	for _, c := range []struct {
+		mib  int
+		want uint64
+	}{
+		{0, 0},
+		{-1, 0},
+		{1, 1 << 20},
+		{1536, 1536 << 20},
+		{maxCeilingMiB, maxCeilingMiB << 20},
+		{maxCeilingMiB + 1, maxCeilingMiB << 20},
+		{1 << 44, maxCeilingMiB << 20}, // the wrap case
+		{17592186044417, uint64(maxCeilingMiB) << 20}, // a pasted byte count
+	} {
+		got := mibToBytes(c.mib)
+		if got != c.want {
+			t.Errorf("mibToBytes(%d) = %d, want %d", c.mib, got, c.want)
+		}
+		// The property that actually matters: a bigger input can never yield a
+		// SMALLER — i.e. more aggressive — ceiling.
+		if c.mib > 0 && got == 0 {
+			t.Errorf("mibToBytes(%d) = 0, which reads as 'disabled' for a positive ceiling", c.mib)
+		}
+	}
+}
+
 // TestVoiceIdleClosePolicy pins the Idle Close policy a stock deployment gets and
 // each knob's override (ADR-0061).
 //
