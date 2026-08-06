@@ -454,6 +454,15 @@ func (l *ClaimLoop) finishSelfExit(intent storage.VoiceSessionIntent) {
 			if vs.EndReason != nil {
 				lastError = *vs.EndReason
 			}
+		case vs.EndReason != nil:
+			// A POLICY stop — a hard spend cap, an exhausted allowance, an Idle Close
+			// (ADR-0046, ADR-0055, ADR-0061). The row is 'ended', not 'failed', because
+			// the session did exactly what it was configured to do (ADR-0043), so the
+			// intent stays VoiceIntentDone — but the reason must still reach the claim
+			// plane. Without this the only durable record of an auto-close lives on the
+			// voice_sessions row, and an operator reading voice_session_intents sees a
+			// policy stop as indistinguishable from a GM pressing End.
+			lastError = *vs.EndReason
 		}
 	}
 	l.finish(intent.ID, status, lastError)

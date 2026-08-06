@@ -224,9 +224,9 @@ func Run(ctx context.Context, cfg Config) error {
 	// cycle that joins and never again, however many times Discord drops.
 	var disclosed sessionOnce
 	runErr := runWithReconnect(ctx, log, defaultReconnectPolicy(),
-		func(ctx context.Context, connected func()) error {
+		countCycles(cfg.ConnectCycle, func(ctx context.Context, connected func()) error {
 			return connectAndServe(ctx, cfg, guild, channel, log, connected, &disclosed)
-		})
+		}))
 	// A non-nil return is a FATAL, terminal failure (a classified *FatalError):
 	// publish the terminal connection.state{failed} with its readable reason so the
 	// Session screen flips to failed without a reload (#123). nil is a clean

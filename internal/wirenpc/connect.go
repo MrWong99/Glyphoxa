@@ -315,8 +315,11 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// tapeInboundOptions adds the inbound (consented Speaker) tape tap when armed
 	// (#306); nil tape → no option → byte-identical inbound loop. highlightPCMOptions
 	// adds the detector's decoded-PCM tap (#307) when the detector is built.
+	// activityInboundOptions adds the Idle Close activity mark (ADR-0061) when the
+	// Voice Instance armed a watchdog; nil Activity → no option → unchanged loop.
 	pipeOpts := append([]wire.Option{wire.WithSilenceClock(vadSampleRate, vadFrameMs)}, tapeInboundOptions(cfg.Tape)...)
 	pipeOpts = append(pipeOpts, highlightPCMOptions(detector)...)
+	pipeOpts = append(pipeOpts, activityInboundOptions(cfg.Activity)...)
 	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics, pipeOpts...)
 	return pipe.Run(cycleCtx, sess)
 }

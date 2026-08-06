@@ -225,6 +225,14 @@ func (l *LiveSession) SayAs(ctx context.Context, agentID, text string) error {
 	if err := l.revalidate(nil); err != nil {
 		return err
 	}
+	// Idle Close activity (ADR-0061): the Bot is about to speak. Inbound room audio
+	// is the only OTHER thing that marks, and a GM puppeteering NPCs into a silent
+	// room produces none of it — so without this mark the watchdog would close a
+	// session out from under a /say monologue. Marked at the REQUEST rather than per
+	// outbound Opus frame: one atomic increment instead of one per 20 ms of speech,
+	// and the window restarts from when the GM asked rather than from the last
+	// packet of the resulting audio. No-op on an unenrolled session.
+	l.as.idle.Mark()
 	l.as.bus.Publish(voiceevent.SpeakRequested{ // #487: onto this session's bus (Forward stamps to process)
 		At:     time.Now(),
 		TurnID: voiceevent.NewTurnID(),
@@ -289,6 +297,10 @@ func (l *LiveSession) ReplayHighlight(_ context.Context, clipKey string) error {
 	if err := l.revalidate(nil); err != nil {
 		return err
 	}
+	// Idle Close activity (ADR-0061): a clip is about to play into the channel. Same
+	// reasoning as SayAs — a Highlight replay is Bot speech that inbound room audio
+	// never accounts for.
+	l.as.idle.Mark()
 	l.as.bus.Publish(voiceevent.ReplayRequested{ // #487: onto this session's bus (Forward stamps to process)
 		At:      time.Now(),
 		TurnID:  voiceevent.NewTurnID(),

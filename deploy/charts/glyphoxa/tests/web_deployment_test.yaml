@@ -536,3 +536,38 @@ tests:
       - equal:
           path: spec.template.metadata.labels["app.kubernetes.io/component"]
           value: web
+
+  - it: omits every Idle Close env var by default
+    # ADR-0061: unset means the binary's own defaults apply — the same posture
+    # maxVoiceSessions takes. The web pod needs these because in `all` Mode the
+    # voice loop runs HERE, so the watchdog does too.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+          any: true
+
+  - it: renders the Idle Close env vars an operator sets
+    # One `idleClose` block feeds BOTH pods through the shared helper, so a split
+    # deployment and an `all`-Mode one can never drift on this policy.
+    set:
+      idleClose:
+        window: 45m
+        maxConnectCycles: 50
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW
+            value: "45m"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
+            value: "50"

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/google/uuid"
@@ -1063,6 +1064,115 @@ func TestVoiceClaimLoopConfig(t *testing.T) {
 	}
 	if got.DrainBeatCap != 2*time.Minute {
 		t.Fatalf("overridden DrainBeatCap = %v, want 2m", got.DrainBeatCap)
+	}
+}
+
+// TestEnvDurationOff pins the Idle Close disable switch (ADR-0061). envDuration's
+// contract — blank/unparsable/zero/negative all take the default — is right for a
+// cadence but wrong for a protection an operator may genuinely want off, so the
+// off switch is a word nobody types by accident. A typo must still take the
+// default: silently disabling a resource protection because someone wrote "15"
+// instead of "15m" is the exact failure this feature exists to prevent.
+func TestEnvDurationOff(t *testing.T) {
+	const def = 15 * time.Minute
+	for _, c := range []struct {
+		val  string
+		want time.Duration
+	}{
+		{"", def},
+		{"   ", def},
+		{"nope", def},
+		{"15", def}, // a duration without a unit is a typo, not a disable
+		{"0s", def},
+		{"0", def},
+		{"-3s", def},
+		{"off", 0},
+		{"OFF", 0},
+		{"  Off  ", 0},
+		{"20m", 20 * time.Minute},
+	} {
+		if got := envDurationOff(envMap(map[string]string{"K": c.val}), "K", def); got != c.want {
+			t.Errorf("envDurationOff(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
+// TestEnvCeiling pins the integer-ceiling parse (ADR-0061): unlike a duration, an
+// explicit 0 IS honoured here — it is how the two process ceilings are switched
+// off, and it is their default — while a blank, unparsable or negative value
+// falls back. Same convention as GLYPHOXA_STT_STREAM_MAX_LANES.
+func TestEnvCeiling(t *testing.T) {
+	const def = 200
+	for _, c := range []struct {
+		val  string
+		want int
+	}{
+		{"", def},
+		{"  ", def},
+		{"nope", def},
+		{"-1", def},
+		{"0", 0}, // explicitly disabled
+		{"1", 1},
+		{"5000", 5000},
+	} {
+		if got := envCeiling(envMap(map[string]string{"K": c.val}), "K", def); got != c.want {
+			t.Errorf("envCeiling(%q) = %d, want %d", c.val, got, c.want)
+		}
+	}
+}
+
+// TestVoiceIdleClosePolicy pins the Idle Close policy a stock deployment gets and
+// each knob's override (ADR-0061).
+//
+// The defaults are the contract: the idle window and the churn ceiling are ON, so
+// the day-long unattended session that motivated this feature cannot recur in a
+// deployment that configures nothing; the two PROCESS ceilings are OFF, because
+// they shed a session for pressure the process as a whole is under and a guessed
+// default would evict sessions nobody asked it to.
+func TestVoiceIdleClosePolicy(t *testing.T) {
+	def := voiceIdleClosePolicy(envMap(nil))
+	if def.Window != defaultVoiceIdleCloseWindow {
+		t.Errorf("default Window = %v, want %v", def.Window, defaultVoiceIdleCloseWindow)
+	}
+	if def.Sweep != defaultVoiceIdleCloseSweep {
+		t.Errorf("default Sweep = %v, want %v", def.Sweep, defaultVoiceIdleCloseSweep)
+	}
+	if def.MaxCycles != defaultVoiceMaxConnectCycles {
+		t.Errorf("default MaxCycles = %d, want %d", def.MaxCycles, defaultVoiceMaxConnectCycles)
+	}
+	if def.HeapCeiling != 0 || def.GoroutineCeiling != 0 {
+		t.Errorf("default ceilings = %d bytes / %d goroutines, want 0/0: a process ceiling sheds a session for process-wide pressure, so it must be opt-in",
+			def.HeapCeiling, def.GoroutineCeiling)
+	}
+	if !def.Enabled() {
+		t.Error("the default policy arms no check: a stock deployment would be exactly as exposed as the one that leaked")
+	}
+
+	got := voiceIdleClosePolicy(envMap(map[string]string{
+		"GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW":  "30m",
+		"GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP":   "10s",
+		"GLYPHOXA_VOICE_MAX_CONNECT_CYCLES": "50",
+		"GLYPHOXA_VOICE_HEAP_CEILING_MIB":   "1536",
+		"GLYPHOXA_VOICE_GOROUTINE_CEILING":  "8000",
+	}))
+	want := idleclose.Policy{
+		Window:           30 * time.Minute,
+		Sweep:            10 * time.Second,
+		MaxCycles:        50,
+		HeapCeiling:      1536 << 20,
+		GoroutineCeiling: 8000,
+	}
+	if got != want {
+		t.Errorf("overridden policy = %+v, want %+v", got, want)
+	}
+
+	// Every check off is a legal, reachable state — and the only way to reach it.
+	off := voiceIdleClosePolicy(envMap(map[string]string{
+		"GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW":  "off",
+		"GLYPHOXA_VOICE_MAX_CONNECT_CYCLES": "0",
+	}))
+	if off.Enabled() {
+		t.Errorf("policy with the window off and no cycle ceiling still arms a check: %+v", off)
 	}
 }
 

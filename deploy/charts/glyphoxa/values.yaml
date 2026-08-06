@@ -175,6 +175,61 @@ cloudflared:
 # when the policy lives on another host (a company site, a static page).
 privacyPolicyUrl: ""
 
+# Idle Close (ADR-0061): the Voice Instance watchdog that ends a Voice Session
+# nothing is using. It exists because a Voice Session holds real resources for
+# as long as it runs — a Discord voice connection with its DAVE/MLS state, a
+# claim-plane heartbeat, a Rollover Tape ring per consented Speaker and its
+# consent poller, a VAD session per Speaker Lane — and none of that is bounded
+# by a silent room. A session left running for a day in a channel nobody ever
+# joined paid all of it and produced nothing.
+#
+# Shared by BOTH pods, so a split deployment and an `all`-Mode one behave the
+# same: the voice loop runs in the voice pod under `mode: split` and in the web
+# pod under `mode: all`. Every key below is emitted ONLY when set away from its
+# default, so a stock install sets no env var and takes the binary's own
+# defaults — 15m / 200 cycles / ceilings off.
+idleClose:
+  # How long a Voice Session may process no audio before its Voice Instance
+  # closes it (GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW). A Go duration ("15m", "45m").
+  # The literal "off" disables idle closing entirely; a value that is not a
+  # duration is treated as a typo and takes the 15m default rather than silently
+  # switching the protection off.
+  #
+  # Audio means audio: inbound room speech, or the Bot speaking on a GM /say or
+  # Highlight replay. A table that is present but silent for the whole window IS
+  # closed — raise this if your group takes long quiet breaks mid-session.
+  window: ""
+
+  # How often the watchdog checks (GLYPHOXA_VOICE_IDLE_CLOSE_SWEEP). Default 30s.
+  # This is the granularity of the close, not of the window: a session is closed
+  # on the first sweep at or after its window elapses.
+  sweep: ""
+
+  # How many Discord connect cycles one Voice Session may run through before it
+  # is closed as churning (GLYPHOXA_VOICE_MAX_CONNECT_CYCLES). Default 200; 0
+  # disables. Every cycle rebuilds the per-cycle world — the voice connection,
+  # the codec, each provider adapter with its own HTTP transport, a VAD session
+  # per Speaker Lane, and with streaming STT a fresh realtime websocket — and
+  # not all of it is reclaimed, so a session that has cycled hundreds of times
+  # has leaked in proportion. This is the closest thing to a direct per-session
+  # resource measurement the process has.
+  maxConnectCycles: 0
+
+  # Process-wide load-shedding ceilings, both OFF by default. When the Voice
+  # Instance crosses one, it closes the SINGLE least-recently-active Voice
+  # Session it hosts and re-checks on the next sweep.
+  #
+  # Read the trade-off before enabling: these are PROCESS readings, because Go
+  # attributes no heap to a logical owner and a per-session number would be a
+  # fiction. With `web.maxVoiceSessions` > 1 that means one Tenant's leak can
+  # cost another Tenant their session. That is deliberate — the alternative when
+  # a pod reaches its memory limit is an OOM kill that takes every session with
+  # it — but it is a valve you size against your own pod limits, not something
+  # to guess. Size heapCeilingMiB comfortably under the container memory limit
+  # (voice.resources.limits.memory).
+  heapCeilingMiB: 0
+  goroutineCeiling: 0
+
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point
 # the migrate Job (and later the serving workloads) at an external Postgres

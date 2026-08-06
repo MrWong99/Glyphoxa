@@ -20,6 +20,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -257,6 +258,12 @@ type activeSession struct {
 	// beside the meter (attribution only, never a gate) and is flushed into the
 	// usage_ledger table at loop exit.
 	ledger *billing.Ledger
+	// idle is this session's enrollment in the Voice Instance's Idle Close watchdog
+	// (ADR-0061), non-nil only when the Manager was wired a Guard whose Policy arms
+	// a check. The voice loop marks it on every processed audio frame, the GM
+	// puppeteering ops mark it at their request seams, and the watchdog closes the
+	// session through [Manager.policyEnd] once it breaches. runLoop releases it.
+	idle *idleclose.Session
 	// endReasonOverride records a deliberate policy end_reason for a session that
 	// ended cleanly (status 'ended') rather than by a fault — set by the hard-cap
 	// trip before it cancels the run ctx (#130). runLoop reads it under Manager.mu
@@ -312,9 +319,12 @@ type Manager struct {
 	// read. The Manager rebinds it here per session, pinning THIS session's Campaign.
 	// nil leaves the base cfg.SpeakerName untouched (voice-standalone / test).
 	speakerNameForCampaign func(campaignID uuid.UUID, speakerID string) string
-	log                    *slog.Logger
-	enabled                bool          // false in web-only mode: Start is rejected (ADR-0039)
-	endTimeout             time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
+	// idleGuard is the Voice Instance's Idle Close watchdog (ADR-0061); nil off.
+	// Every Start enrolls its session in it and runLoop releases the enrollment.
+	idleGuard  *idleclose.Guard
+	log        *slog.Logger
+	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
+	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
 	// maxSessions is the process-wide cap on concurrent live Voice Sessions
 	// (Deps.MaxSessions, #488, ADR-0057's per-process K): a Start when
 	// len(active) == maxSessions is refused with ErrSessionLimit. Always >= 1
@@ -439,6 +449,14 @@ type Deps struct {
 	// zero value (unset) means 1 — today's single-session default, byte-identical
 	// behaviour; the composition root reads GLYPHOXA_MAX_VOICE_SESSIONS into it.
 	MaxSessions int
+	// IdleGuard, when non-nil, is the Voice Instance's Idle Close watchdog
+	// (ADR-0061): Start enrolls every session it launches, wires the loop's audio
+	// activity mark onto the per-session config copy, and the watchdog ends a
+	// session that breaches the Policy through the same endReasonOverride + cancel
+	// mechanism the ADR-0046 hard cap uses. nil (or a Guard whose Policy arms no
+	// check) leaves every session unenrolled and the voice loop untapped —
+	// byte-for-byte the pre-Idle-Close behaviour.
+	IdleGuard *idleclose.Guard
 }
 
 // NewManager wraps the store, loop runner, base config and collaborator deps in
@@ -475,6 +493,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		clients:                deps.Clients,
 		gmSpeakerForTenant:     deps.GMSpeakerForTenant,
 		speakerNameForCampaign: deps.SpeakerNameForCampaign,
+		idleGuard:              deps.IdleGuard,
 		log:                    log,
 		enabled:                enabled,
 		endTimeout:             endTimeout,
@@ -722,6 +741,21 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		directives:  map[string]*directiveState{}, // fresh: no directive survives a session boundary (ADR-0059)
 	}
 
+	// Idle Close (ADR-0061): enroll this session in the Voice Instance's watchdog
+	// and hand the loop the activity mark. Enroll reports the feature-off path by
+	// returning nil (no Guard wired, or a Policy that arms no check), and cfg.Activity
+	// then stays nil so the audio loop adds no tap at all.
+	//
+	// Enrolled HERE, before the loop launches, so the Idle Close Window starts at
+	// session start rather than at the first sweep that happens to notice the
+	// session — a session that never hears a frame ages from the moment it began.
+	// The enrollment is released in runLoop, at every loop exit.
+	if h := m.idleGuard.Enroll(vs.ID.String(), m.idleCloseTrip(as)); h != nil {
+		as.idle = h
+		cfg.Activity = h.Mark
+		cfg.ConnectCycle = h.CycleStarted
+	}
+
 	// Spend meter (#130, ADR-0046): only when the Tenant configured at least one
 	// cap. It rides the EXISTING recorder config copy — the tee wraps cfg's
 	// StageMetrics, so the meter reads the same usage calls #127 records with ZERO
@@ -824,36 +858,70 @@ func (m *Manager) softCapTrip(as *activeSession) func() {
 }
 
 // hardCapTrip returns the meter's onHard callback for session as: end the session
-// itself cleanly (#130, ADR-0046). It runs on a FRESH goroutine (the #211
-// lock-order pattern): the meter fires it outside its own mutex, but it must take
-// Manager.mu to record the deliberate end_reason override, then publish + cancel
-// OUTSIDE Manager.mu — the relay's SpendCapReached handler calls Snapshot (Manager.mu),
-// so publishing under the lock would deadlock. Guarded by m.active == as AND
-// !as.ended so a trip arriving after the session already rolled over — or during
-// the end window after the loop returned (#487) — is a no-op: publishing then
-// would race the bridge cut and try to stamp a hard-cap onto an ended session.
+// itself cleanly (#130, ADR-0046), announcing the hard cap on the session's bus so
+// the Session screen shows WHY before the row closes.
+//
+// The mechanics — the fresh goroutine, the end_reason override under Manager.mu,
+// the publish and cancel outside it, and the already-ended guard — all live in
+// [Manager.policyEnd], which this was generalised into when Idle Close (ADR-0061)
+// became its second caller. Read the constraints there.
 func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	return func() {
-		go func() {
-			m.mu.Lock()
-			if m.active[as.tenantID] != as || as.ended {
-				m.mu.Unlock()
-				return // this session already ended / rolled over
-			}
-			as.endReasonOverride = reason
-			cancel := as.cancel
-			bus := as.bus
-			m.mu.Unlock()
-
+		m.policyEnd(as, reason, func(bus *voiceevent.Bus) {
 			// Onto this session's own bus (#487): Forward stamps it onto the process
 			// bus so the relay attributes the hard-cap to the right session.
 			bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapHard})
-			// Cancel the run ctx: runLoop then closes the row via the CLEAN path
-			// (ctx.Err() != nil ⇒ not 'failed') and stamps the endReasonOverride —
-			// 'ended' + spend_cap_hard reason, a deliberate policy stop.
-			cancel()
-		}()
+		})
 	}
+}
+
+// idleCloseTrip returns the callback the Voice Instance's Idle Close watchdog
+// (ADR-0061) ends session as with: the reason it decided on — one of
+// idleclose.Reason* — becomes the row's end_reason through the same policy-stop
+// path the hard cap uses.
+//
+// Unlike the hard cap it announces nothing on the bus. The relay already emits a
+// terminal frame when the session ends, and an Idle Close is by construction a
+// session with nobody listening — there is no live Session screen to tell. The
+// end_reason on the row is the durable record; the watchdog logs the decision.
+func (m *Manager) idleCloseTrip(as *activeSession) func(reason string) {
+	return func(reason string) { m.policyEnd(as, reason, nil) }
+}
+
+// policyEnd is THE one mechanism a policy inside (or watching) a running Voice
+// Session uses to end it with a deliberate end_reason (#130, ADR-0046 for the
+// hard cap; ADR-0061 for Idle Close). It records the override and cancels the run
+// ctx, so runLoop closes the row via the CLEAN path — status 'ended', NOT
+// 'failed', because ctx.Err() is then non-nil (ADR-0043: 'failed' is reserved for
+// faults) — carrying WHY it stopped. announce, when non-nil, publishes onto the
+// session's own bus before the cancel.
+//
+// The fresh goroutine is mandatory, not stylistic (the #211 lock-order pattern):
+// callers reach this from a meter callback or a watchdog sweep, and Manager.mu
+// must not be held across announce — the relay's SpendCapReached handler re-enters
+// Manager.Spend, which takes m.mu.
+//
+// The m.active[...] != as || as.ended guard makes a second call a no-op, so a
+// policy that fires twice — or one that fires while another already ended the
+// session, or during the multi-second finalizer window (#487) — can never clobber
+// an override that already landed or publish onto a detached bus.
+func (m *Manager) policyEnd(as *activeSession, reason string, announce func(*voiceevent.Bus)) {
+	go func() {
+		m.mu.Lock()
+		if m.active[as.tenantID] != as || as.ended {
+			m.mu.Unlock()
+			return // this session already ended / rolled over
+		}
+		as.endReasonOverride = reason
+		cancel := as.cancel
+		bus := as.bus
+		m.mu.Unlock()
+
+		if announce != nil {
+			announce(bus)
+		}
+		cancel()
+	}()
 }
 
 // Spend returns a snapshot of tenantID's active session spend meter (#130, #488):
@@ -875,6 +943,11 @@ func (m *Manager) Spend(tenantID uuid.UUID) spend.Status {
 // a Stop waiting on done observes both the updated session and the freed guard.
 func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Config) {
 	defer close(as.done)
+	// Leave the Idle Close watchdog (ADR-0061) at EVERY loop exit — including the
+	// one the watchdog itself caused. Deferred rather than inline so no early return
+	// can strand an enrollment, which would leave the Guard sweeping a session that
+	// no longer exists and, worse, holding its close callback alive. Idempotent.
+	defer as.idle.Release()
 
 	loopErr := m.run(ctx, cfg)
 

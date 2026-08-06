@@ -33,6 +33,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
@@ -297,7 +298,37 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// runs a pure `-mode voice` node knows why it stays silent.
 	log.Info("standalone voice mode: knowledge Tools (transcript_search, kg_query) are unavailable; run -mode all or web to enable them")
 
-	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
+	// Idle Close (ADR-0061) for the standalone node. It has no session Manager, so
+	// there is no voice_sessions row to stamp an end_reason onto — the close is a
+	// ctx cancel plus a log line, which is exactly what "end this process's one
+	// session" means here. The Guard, its policy and its enrollment are otherwise
+	// identical to the Manager-backed paths, so a self-host node running a single
+	// static channel gets the same protection the fleet does.
+	runCtx, closeSession := context.WithCancel(ctx)
+	defer closeSession()
+	idlePolicy := voiceIdleClosePolicy(os.Getenv)
+	warnIdleClosePolicy(idlePolicy, log)
+	guard := idleclose.New(idlePolicy, log)
+	go guard.Run(runCtx)
+	if h := guard.Enroll(cfg.CampaignID.String(), func(reason string) {
+		log.Warn("standalone voice mode: closing the Voice Session on an Idle Close policy breach", "reason", reason)
+		closeSession()
+	}); h != nil {
+		defer h.Release()
+		cfg.Activity = h.Mark
+		cfg.ConnectCycle = h.CycleStarted
+	}
+
+	err = wirenpc.RunFromDB(runCtx, cfg, pool, cipher)
+	// A cancelled runCtx with the OUTER ctx still live is this node's Idle Close, not
+	// a shutdown: RunFromDB returns nil there (runWithReconnect treats a cancelled
+	// ctx as a clean stop), and returning that nil would exit 0 as if SIGTERM had
+	// arrived. That is the honest outcome for a policy stop, so say so plainly
+	// rather than letting the exit code imply an operator asked for it.
+	if err == nil && runCtx.Err() != nil && ctx.Err() == nil {
+		log.Info("standalone voice mode: the Voice Session was closed by the Idle Close policy; exiting")
+	}
+	return err
 }
 
 // runVoiceWorker is the -mode voice claim-plane worker (#491, ADR-0057): instead
@@ -420,6 +451,12 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, false)
 	recapEngine, deps := vd.recapEngine, vd.deps
 
+	// Start this Voice Instance's Idle Close watchdog (ADR-0061). One goroutine per
+	// process, scoped to ctx so SIGTERM stops it before the drain; it returns at once
+	// when the policy arms no check, so a deployment with Idle Close off runs no
+	// ticker at all.
+	go vd.idleGuard.Run(ctx)
+
 	// NPC memory recall (#122): resolved once over the shared embeddings provider.
 	// An unavailable provider leaves recall off (loud-but-non-fatal), exactly as in
 	// the web/all boot.
@@ -514,6 +551,11 @@ type voiceDeps struct {
 	speakerResolver *speaker.Resolver
 	relay           *transcript.Relay
 	deps            session.Deps
+	// idleGuard is this Voice Instance's Idle Close watchdog (ADR-0061), already on
+	// deps.IdleGuard. It is surfaced separately because it needs a context the
+	// builder does not have: the caller starts its single goroutine with
+	// `go vd.idleGuard.Run(ctx)` against the same ctx that scopes the process.
+	idleGuard *idleclose.Guard
 }
 
 // buildVoiceDeps assembles the Manager's shared persistence collaborators — the
@@ -569,6 +611,14 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 	// gm_private (ADR-0008).
 	knowledgeAdapter := knowledge.New(store, store.PromptKG())
 
+	// This Voice Instance's Idle Close watchdog (ADR-0061). Its policy is read from
+	// the environment in the composition root; warnIdleClosePolicy surfaces a
+	// configuration that will surprise the operator (a window short enough to end a
+	// session over a coffee break, or the whole protection switched off).
+	idlePolicy := voiceIdleClosePolicy(os.Getenv)
+	warnIdleClosePolicy(idlePolicy, log)
+	idleGuard := idleclose.New(idlePolicy, log)
+
 	deps := session.Deps{
 		Registry:   sessions,
 		Transcript: relay,
@@ -585,6 +635,12 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 		// Process-wide cap on concurrent Voice Sessions (#488, ADR-0057 K).
 		// Default 1; raising it >1 is soak-gated (#493, DAVE).
 		MaxSessions: maxVoiceSessions(os.Getenv),
+		// Idle Close (ADR-0061): the watchdog that ends a Voice Session which has
+		// processed no audio for the Idle Close Window, churned through too many
+		// connect cycles, or is the quietest session on a Voice Instance over its
+		// resource ceiling. Built here so BOTH the -mode voice worker and the
+		// web/`all` boot get it from the same helper and cannot drift.
+		IdleGuard: idleGuard,
 		// Durable Usage Ledger (ADR-0054): attribution only; gating stays with the
 		// spend meter (ADR-0046).
 		Usage: store,
@@ -628,7 +684,7 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
 		}
 	}
-	return voiceDeps{recapEngine: recapEngine, speakerResolver: speakerResolver, relay: relay, deps: deps}
+	return voiceDeps{recapEngine: recapEngine, speakerResolver: speakerResolver, relay: relay, deps: deps, idleGuard: idleGuard}
 }
 
 // drainVoiceWorker runs the -mode voice worker to SIGTERM and then tears it down in
@@ -995,6 +1051,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// the boot gauge seed, and the assist engine.
 	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, dev)
 	recapEngine, speakerResolver, relay, deps := vd.recapEngine, vd.speakerResolver, vd.relay, vd.deps
+
+	// This process's Idle Close watchdog (ADR-0061), the same one the -mode voice
+	// worker starts. In `all` Mode the voice loop runs here, so the watchdog belongs
+	// here too; in web-only Mode no session ever starts, so it enrolls nothing.
+	go vd.idleGuard.Run(ctx)
 
 	// The on-demand campaign-creation assist Engine (#479) drafts NPC Personas
 	// and linked Knowledge Graph entries from a GM prompt — strictly on button
