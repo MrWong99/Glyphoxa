@@ -5,7 +5,10 @@
 # CGO (ADR-0034 amendment 2026-07-19) and must be paired with
 # `nolibopusfile`, so audible builds need pkg-config + libopus-dev and
 # CGO_ENABLED=1 (see CONTRIBUTING.md; the Dockerfile links it statically).
-# No target below uses the opus tag, so the export holds for all of them.
+# No target below uses the opus tag, but the test targets override the export
+# per-recipe anyway: `go test -race` requires cgo (issue #580), so they need a
+# host C toolchain (gcc) — while still linking no native libraries. `build`
+# keeps the pure-Go export and its static-link property.
 
 export CGO_ENABLED := 0
 
@@ -15,17 +18,19 @@ export CGO_ENABLED := 0
 build:
 	go build -o bin/glyphoxa ./cmd/glyphoxa
 
-# Run all tests with race detector
+# Run all tests with race detector. CGO_ENABLED=1 overrides the global pure-Go
+# export: -race requires cgo (issue #580). Mirrors CI's test job, which runs
+# `go test -race ./...` with CGO on.
 test:
-	go test -race -count=1 ./...
+	CGO_ENABLED=1 go test -race -count=1 ./...
 
 # Run tests with verbose output
 test-v:
-	go test -race -count=1 -v ./...
+	CGO_ENABLED=1 go test -race -count=1 -v ./...
 
 # Run tests with coverage
 test-cover:
-	go test -race -count=1 -coverprofile=coverage.out ./...
+	CGO_ENABLED=1 go test -race -count=1 -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out | tail -1
 	@echo "HTML report: go tool cover -html=coverage.out"
 

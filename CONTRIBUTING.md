@@ -7,7 +7,7 @@ you need to get started.
 
 ### Prerequisites
 
-- **Go 1.26+** — the default build is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries. Only **audible** builds (`-tags opus`) additionally need `gcc`, `pkg-config`, and `libopus-dev` — the outbound Opus encoder links libopus via CGO (ADR-0034 amendment 2026-07-19); DAVE and the Silero VAD stay pure Go
+- **Go 1.26+** — the default build is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries. Two exceptions: the **test** targets (`make test`, `make check`) need a host C toolchain (`gcc`) because the race detector requires cgo (`-race` — they still link no native libraries), and **audible** builds (`-tags opus`) additionally need `gcc`, `pkg-config`, and `libopus-dev` — the outbound Opus encoder links libopus via CGO (ADR-0034 amendment 2026-07-19); DAVE and the Silero VAD stay pure Go
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go binary embeds (see the SPA step below)
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs under `gen/` are generated, not committed
 
