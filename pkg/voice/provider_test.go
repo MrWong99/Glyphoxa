@@ -127,6 +127,24 @@ func TestSwitchingProvider(t *testing.T) {
 			t.Fatalf("got %v want ErrInterrupted", err)
 		}
 	})
+
+	t.Run("Close flips polls to sender-reaping silence frames", func(t *testing.T) {
+		// After Session.Close the transport is gone but disgo's sender keeps
+		// polling; the idle (nil, nil) would park it in its quiescent branch
+		// where it never touches the network — and so never exits (issue #579).
+		// Post-Close every poll must return a REAL frame, so the sender writes,
+		// observes the dead transport, and shuts itself down.
+		p := newTestSwitchingProvider()
+		if frame, err := p.ProvideOpusFrame(); err != nil || frame != nil {
+			t.Fatalf("pre-Close idle: got (%x, %v) want (nil, nil)", frame, err)
+		}
+		p.Close()
+		for range 3 {
+			if frame, err := p.ProvideOpusFrame(); err != nil || len(frame) == 0 {
+				t.Fatalf("post-Close: got (%x, %v) want a non-empty silence frame on every poll", frame, err)
+			}
+		}
+	})
 }
 
 // TestSwitchingProviderRace hammers concurrent swaps against a tight

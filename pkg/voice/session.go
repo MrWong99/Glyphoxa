@@ -173,8 +173,15 @@ func (s *Session) Close() error {
 		}
 
 		// conn.Close only tears down the gateway/UDP; it does not call our
-		// provider/receiver Close. Do that ourselves so Inbound closes and any
-		// straggler playback is retired, regardless of disgo's goroutine timing.
+		// provider/receiver Close — nor its own AudioSender's (issue #579). Do
+		// ours ourselves so Inbound closes and any straggler playback is
+		// retired, regardless of disgo's goroutine timing. The ORDER matters:
+		// closing the provider after the transport flips it into its
+		// sender-reaping state (see switchingProvider.Close) — the next 20ms
+		// poll hands disgo's sender a silence frame, the write on the dead
+		// transport fails terminally, and the sender goroutine exits instead
+		// of polling forever. The receiver needs no such poke: udp.Close
+		// unblocks its conn.Read with net.ErrClosed and it closes itself.
 		s.conn.Close(context.WithoutCancel(context.Background()))
 		s.provider.Close()
 		s.dispatcher.Close()
