@@ -299,7 +299,7 @@ func TestHardCap_EndsSessionCleanly(t *testing.T) {
 
 	// The hard-cap trip cancels the run ctx on a goroutine; wait for the session to
 	// end (the guard frees).
-	waitInactive(t, mgr)
+	waitInactive(t, mgr, store, vs.ID)
 
 	// The row closed ENDED (not failed) with the spend_cap_hard reason.
 	closed := store.session(vs.ID)
@@ -324,15 +324,21 @@ func TestHardCap_EndsSessionCleanly(t *testing.T) {
 	mgr.Shutdown()
 }
 
-// waitInactive polls until the manager reports no active session, or fails.
-func waitInactive(t *testing.T, mgr *session.Manager) {
+// waitInactive polls until the manager reports no active session AND the given
+// session's row has left 'running', or fails. AnyLive flips false the moment
+// the loop returns (as.ended is set under mu BEFORE the finalizers run), but
+// the terminal row write lands after, in the end path — so a caller asserting
+// on the row right after an AnyLive-only wait races the end write (the
+// "idle-closed row status = running" CI flake). Waiting for the row itself
+// makes the subsequent status/end_reason asserts deterministic.
+func waitInactive(t *testing.T, mgr *session.Manager, store *fakeStore, id uuid.UUID) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !mgr.AnyLive() {
+		if !mgr.AnyLive() && store.session(id).Status != storage.VoiceSessionRunning {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("session did not end within the deadline after the hard cap")
+	t.Fatal("session did not end (row still 'running') within the deadline")
 }
