@@ -851,6 +851,16 @@ func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, gui
 	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
 }
 
+func (stubProviderStore) SaveDiscordGuild(_ context.Context, _ uuid.UUID, guildID string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{GuildID: guildID}, nil
+}
+
+// SaveDefaultVoiceChannel: the stateless stub holds no binding (its
+// GetDeploymentConfig is ErrNotFound), so no guild is ever linked.
+func (stubProviderStore) SaveDefaultVoiceChannel(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
+}
+
 func (stubProviderStore) ReleaseDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
 	return storage.DeploymentConfig{}, storage.ErrNotFound
 }

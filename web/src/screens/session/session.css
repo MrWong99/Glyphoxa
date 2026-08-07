@@ -205,6 +205,19 @@
   gap: var(--spacing-sm);
 }
 
+/* The idle voice-channel picker beside the Start button: the Select plus the
+   "Set as default" affordance shown when the pick differs from the default. */
+.gx-session__channel {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+
+.gx-session__channel .gx-select-field {
+  min-width: 180px;
+}
+
 /* Live gateway connection sub-state beside the Live badge (Connecting…/Connected). */
 .gx-session__conn {
   color: var(--text-subtle);

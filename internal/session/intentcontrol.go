@@ -25,7 +25,7 @@ import (
 // IntentControlStore is the claim-plane + voice_sessions surface IntentControl
 // needs. *storage.Store satisfies it; tests use a fake.
 type IntentControlStore interface {
-	CreateVoiceSessionIntent(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSessionIntent, error)
+	CreateVoiceSessionIntent(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSessionIntent, error)
 	RequestVoiceSessionStop(ctx context.Context, id uuid.UUID) (storage.VoiceSessionIntent, error)
 	GetVoiceSessionIntent(ctx context.Context, id uuid.UUID) (storage.VoiceSessionIntent, error)
 	GetLiveVoiceSessionIntentForTenant(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSessionIntent, error)
@@ -116,18 +116,20 @@ func NewIntentControl(store IntentControlStore, log *slog.Logger, cfg IntentCont
 // plane until a worker drives it live (returning the loaded voice_sessions row),
 // it fails/dies (an error carrying the recorded last_error), or the Start budget
 // elapses (ErrIntentPending → the RPC's CodeUnavailable, the operator retries).
-// A duplicate live-per-tenant intent (storage.ErrIntentActive) surfaces as
+// voiceChannelID rides the intent row across the plane so the claiming worker
+// joins the picked channel; empty falls back to the Default Voice Channel. A
+// duplicate live-per-tenant intent (storage.ErrIntentActive) surfaces as
 // ErrSessionActive so the RPC maps it to CodeAlreadyExists exactly like the
 // in-process Manager's per-Tenant guard.
-func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
-	intent, err := c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+func (c *IntentControl) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error) {
+	intent, err := c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID, voiceChannelID)
 	if errors.Is(err, storage.ErrIntentActive) {
 		// Zero-worker escape (review item 4): the blocking intent may be a dead
 		// worker's claimed/live row that no tick will ever sweep. Reap it if its
 		// heartbeat is stale, then retry the create ONCE. A still-live row (fresh
 		// beat) or an in-flight pending Start is left alone → ErrSessionActive.
 		if reaped, rerr := c.reapBlockingIfExpired(ctx, tenantID); rerr == nil && reaped {
-			intent, err = c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+			intent, err = c.store.CreateVoiceSessionIntent(ctx, tenantID, campaignID, voiceChannelID)
 		}
 		if errors.Is(err, storage.ErrIntentActive) {
 			return storage.VoiceSession{}, ErrSessionActive
@@ -472,6 +474,26 @@ func (c *IntentControl) cancelPendingControl(id uuid.UUID) {
 	if _, err := c.store.CancelPendingVoiceSessionControl(dctx, id); err != nil {
 		c.log.Warn("intent control: cancel pending control", "control", id, "err", err)
 	}
+}
+
+// ActiveVoiceChannelID reports the explicit voice-channel pick the Tenant's
+// LIVE intent carried, the split-mode sibling of Manager.ActiveVoiceChannelID.
+// ok is false when no intent is live OR the live intent carried no pick (the
+// worker joined the Default Voice Channel) — either way the caller's fallback
+// to the stored default reads the right channel. Errors degrade to false (the
+// caller falls back; the members read is a soft feature).
+func (c *IntentControl) ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool) {
+	live, err := c.store.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrNotFound) {
+			c.log.Warn("intent control: active voice channel read", "tenant", tenantID, "err", err)
+		}
+		return "", false
+	}
+	if live.Status != storage.VoiceIntentLive || live.VoiceChannelID == "" {
+		return "", false
+	}
+	return live.VoiceChannelID, true
 }
 
 // MutedAgentIDs stays Manager-only (#491/#503 known gap): the web panel's muted

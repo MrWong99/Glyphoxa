@@ -222,7 +222,7 @@ func (l *ClaimLoop) tick(ctx context.Context) {
 // that finds no row (the reaper already marked it dead) stops the session it just
 // started (ADR-0006 — no running a session the plane believes dead).
 func (l *ClaimLoop) startClaimed(ctx context.Context, intent storage.VoiceSessionIntent) {
-	vs, err := l.mgr.Start(ctx, intent.TenantID, intent.CampaignID)
+	vs, err := l.mgr.Start(ctx, intent.TenantID, intent.CampaignID, intent.VoiceChannelID)
 	if err != nil {
 		// ErrSessionLimit should not occur (tick gates on HasCapacity), but finishing
 		// 'failed' rather than leaving the row 'claimed' guarantees no strand either

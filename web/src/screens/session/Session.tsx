@@ -5,12 +5,13 @@ import { Play, Square, Search, ScrollText, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 
-import { SessionService, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { SessionService, CampaignService, ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { VoiceSession, TranscriptLineMatch } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
@@ -208,6 +209,44 @@ export function Session() {
   const stop = useMutation(SessionService.method.stopSession, {
     onSuccess: () => void invalidate(),
     onError: onError("stop"),
+  });
+
+  // Voice-channel picker: the session joins the picked channel; the stored
+  // Default Voice Channel pre-selects it (default → first channel → none, the
+  // ShareHighlightDialog precedent). retry:false keeps it a soft feature — an
+  // unlinked guild / missing Bot token fails FailedPrecondition once and the
+  // screen simply renders no picker (Start then reports the same precondition
+  // with its actionable message). Fetched while idle: the pick is a START-time
+  // input, and a live session's channel can't change.
+  const channelsQ = useQuery(SessionService.method.listSessionVoiceChannels, {}, { retry: false, enabled: !active });
+  const channels = channelsQ.data?.channels ?? [];
+  const defaultChannelId = channelsQ.data?.defaultChannelId ?? "";
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null);
+  const selectedChannelId =
+    pickedChannelId ?? (defaultChannelId || channels[0]?.id || "");
+
+  // "Set as default" persists the current pick as the guild's Default Voice
+  // Channel (SaveDiscordSettings with only voice_channel_id on the wire — the
+  // guild stays untouched). Refresh the picker read so the default marker and
+  // the Configuration read both follow.
+  const invalidateChannels = () =>
+    queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: SessionService.method.listSessionVoiceChannels,
+        cardinality: "finite",
+      }),
+    });
+  const saveDefaultChannel = useMutation(ProviderService.method.saveDiscordSettings, {
+    onSuccess: () => {
+      void invalidateChannels();
+      void queryClient.invalidateQueries({
+        queryKey: createConnectQueryKey({
+          schema: ProviderService.method.listProviderConfigs,
+          cardinality: "finite",
+        }),
+      });
+    },
+    onError: (err: Error) => toast.error(`Couldn't save the default channel: ${err.message}`),
   });
 
   // The timer runs only while live, counting up from the running session's start.
@@ -412,14 +451,38 @@ export function Session() {
               Stop session
             </Button>
           ) : (
-            <Button
-              variant="primary"
-              iconStart={<Play size={15} />}
-              onClick={() => start.mutate({})}
-              disabled={start.isPending}
-            >
-              Start session
-            </Button>
+            <>
+              {channels.length > 0 && (
+                <div className="gx-session__channel" data-testid="channel-picker">
+                  <Select
+                    aria-label="Voice channel"
+                    placeholder="Voice channel…"
+                    options={channels.map((c) => ({ value: c.id, label: c.name }))}
+                    value={selectedChannelId || undefined}
+                    onValueChange={setPickedChannelId}
+                  />
+                  {selectedChannelId !== "" && selectedChannelId !== defaultChannelId && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => saveDefaultChannel.mutate({ voiceChannelId: selectedChannelId })}
+                      disabled={saveDefaultChannel.isPending}
+                      data-testid="set-default-channel"
+                    >
+                      Set as default
+                    </Button>
+                  )}
+                </div>
+              )}
+              <Button
+                variant="primary"
+                iconStart={<Play size={15} />}
+                onClick={() => start.mutate({ voiceChannelId: selectedChannelId })}
+                disabled={start.isPending}
+              >
+                Start session
+              </Button>
+            </>
           )}
         </div>
       </Card>

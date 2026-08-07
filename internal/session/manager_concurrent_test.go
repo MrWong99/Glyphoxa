@@ -32,11 +32,11 @@ func TestTwoTenants_TwoLiveSessions(t *testing.T) {
 	t1, t2 := uuid.New(), uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
 
-	vs1, err := mgr.Start(context.Background(), t1, c1)
+	vs1, err := mgr.Start(context.Background(), t1, c1, "")
 	if err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	vs2, err := mgr.Start(context.Background(), t2, c2)
+	vs2, err := mgr.Start(context.Background(), t2, c2, "")
 	if err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
@@ -67,11 +67,11 @@ func TestSameTenantSecondStart_ErrSessionActive(t *testing.T) {
 	mgr := concurrentManager(t, newFakeStore(), 4) // cap is not the limiter here
 	tenant := uuid.New()
 
-	if _, err := mgr.Start(context.Background(), tenant, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenant, uuid.New(), ""); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	// A different Campaign, same Tenant → ErrSessionActive (not ErrSessionLimit).
-	_, err := mgr.Start(context.Background(), tenant, uuid.New())
+	_, err := mgr.Start(context.Background(), tenant, uuid.New(), "")
 	if !errors.Is(err, session.ErrSessionActive) {
 		t.Fatalf("second Start (same tenant, other campaign) = %v, want ErrSessionActive", err)
 	}
@@ -84,13 +84,13 @@ func TestProcessCap_ThirdTenantErrSessionLimit(t *testing.T) {
 	mgr := concurrentManager(t, newFakeStore(), 2)
 	t1, t2, t3 := uuid.New(), uuid.New(), uuid.New()
 
-	if _, err := mgr.Start(context.Background(), t1, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t1, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), t2, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t2, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
-	_, err := mgr.Start(context.Background(), t3, uuid.New())
+	_, err := mgr.Start(context.Background(), t3, uuid.New(), "")
 	if !errors.Is(err, session.ErrSessionLimit) {
 		t.Fatalf("Start over cap = %v, want ErrSessionLimit", err)
 	}
@@ -105,7 +105,7 @@ func TestProcessCap_ThirdTenantErrSessionLimit(t *testing.T) {
 	if _, err := mgr.Stop(context.Background(), t1); err != nil {
 		t.Fatalf("Stop t1: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), t3, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t3, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t3 after a slot freed: %v", err)
 	}
 }
@@ -116,10 +116,10 @@ func TestProcessCap_ThirdTenantErrSessionLimit(t *testing.T) {
 // concurrency (#488 rollout note).
 func TestDefaultCapIsOne(t *testing.T) {
 	mgr := concurrentManager(t, newFakeStore(), 0) // 0 → clamped to 1
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrSessionLimit) {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); !errors.Is(err, session.ErrSessionLimit) {
 		t.Fatalf("second Tenant under default cap = %v, want ErrSessionLimit", err)
 	}
 }
@@ -132,11 +132,11 @@ func TestInterleavedStop_LeavesOtherSessionUntouched(t *testing.T) {
 	mgr := concurrentManager(t, store, 2)
 	t1, t2 := uuid.New(), uuid.New()
 
-	vs1, err := mgr.Start(context.Background(), t1, uuid.New())
+	vs1, err := mgr.Start(context.Background(), t1, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	vs2, err := mgr.Start(context.Background(), t2, uuid.New())
+	vs2, err := mgr.Start(context.Background(), t2, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestShutdownEndsAllSessions(t *testing.T) {
 	mgr := newManagerDeps(t, store, reRunnableRunner, true, session.Deps{MaxSessions: 3})
 	t1, t2, t3 := uuid.New(), uuid.New(), uuid.New()
 	for _, tn := range []uuid.UUID{t1, t2, t3} {
-		if _, err := mgr.Start(context.Background(), tn, uuid.New()); err != nil {
+		if _, err := mgr.Start(context.Background(), tn, uuid.New(), ""); err != nil {
 			t.Fatalf("Start %s: %v", tn, err)
 		}
 	}
@@ -186,7 +186,7 @@ func TestShutdownEndsAllSessions(t *testing.T) {
 			t.Errorf("session %s still active after Shutdown", tn)
 		}
 	}
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrManagerClosed) {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); !errors.Is(err, session.ErrManagerClosed) {
 		t.Fatalf("Start after Shutdown = %v, want ErrManagerClosed", err)
 	}
 }
@@ -208,10 +208,10 @@ func TestMuteIsolationPerTenant(t *testing.T) {
 
 	mgr := concurrentManager(t, store, 2)
 	t1, t2 := uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), t1, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t1, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), t2, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t2, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
 
@@ -244,10 +244,10 @@ func TestIsCampaignLive_ScansAllSessions(t *testing.T) {
 	t1, t2 := uuid.New(), uuid.New()
 	c1, c2, foreign := uuid.New(), uuid.New(), uuid.New()
 
-	if _, err := mgr.Start(context.Background(), t1, c1); err != nil {
+	if _, err := mgr.Start(context.Background(), t1, c1, ""); err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), t2, c2); err != nil {
+	if _, err := mgr.Start(context.Background(), t2, c2, ""); err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestSlowStart_DoesNotBlockOtherTenants(t *testing.T) {
 
 	// t1's Start blocks in its I/O phase (holding only a reservation, not mu).
 	startErr := make(chan error, 1)
-	go func() { _, err := mgr.Start(context.Background(), t1, uuid.New()); startErr <- err }()
+	go func() { _, err := mgr.Start(context.Background(), t1, uuid.New(), ""); startErr <- err }()
 	<-entered // t1 is now parked in GetDeploymentConfig; the one-shot gate is cleared
 
 	// While t1 is parked, the map-reading ops must NOT block. Run them on a deadline;
@@ -306,7 +306,7 @@ func TestSlowStart_DoesNotBlockOtherTenants(t *testing.T) {
 	}
 
 	// A second Tenant can even Start fully while t1 is still parked.
-	if _, err := mgr.Start(context.Background(), t2, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), t2, uuid.New(), ""); err != nil {
 		t.Fatalf("Start t2 while t1 parked: %v", err)
 	}
 
@@ -333,15 +333,15 @@ func TestReservationHoldsGuardsDuringSlowStart(t *testing.T) {
 
 	tenant := uuid.New()
 	startErr := make(chan error, 1)
-	go func() { _, err := mgr.Start(context.Background(), tenant, uuid.New()); startErr <- err }()
+	go func() { _, err := mgr.Start(context.Background(), tenant, uuid.New(), ""); startErr <- err }()
 	<-entered // the reservation is taken and the Start is parked in the store I/O
 
 	// Same Tenant → ErrSessionActive (the reservation blocks it).
-	if _, err := mgr.Start(context.Background(), tenant, uuid.New()); !errors.Is(err, session.ErrSessionActive) {
+	if _, err := mgr.Start(context.Background(), tenant, uuid.New(), ""); !errors.Is(err, session.ErrSessionActive) {
 		t.Fatalf("same-tenant Start during reservation = %v, want ErrSessionActive", err)
 	}
 	// A different Tenant → ErrSessionLimit (the reservation fills the cap-1 slot).
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrSessionLimit) {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); !errors.Is(err, session.ErrSessionLimit) {
 		t.Fatalf("other-tenant Start during reservation = %v, want ErrSessionLimit", err)
 	}
 
@@ -385,7 +385,7 @@ func TestEndWindow_MuteAndLiveRefused(t *testing.T) {
 	t.Cleanup(mgr.Shutdown)
 
 	tenant := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenant, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenant, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -453,10 +453,10 @@ func TestSpendMetersIndependentPerTenant(t *testing.T) {
 
 	t1, t2 := uuid.New(), uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), t1, c1); err != nil {
+	if _, err := mgr.Start(context.Background(), t1, c1, ""); err != nil {
 		t.Fatalf("Start t1: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), t2, c2); err != nil {
+	if _, err := mgr.Start(context.Background(), t2, c2, ""); err != nil {
 		t.Fatalf("Start t2: %v", err)
 	}
 	<-runner.ready

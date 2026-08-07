@@ -1965,10 +1965,13 @@ message SaveDiscordSettingsRequest {
   // stored token unchanged — lets the IDs be saved without re-entering the
   // secret. Write-only: never returned.
   optional string bot_token = 1;
-  // guild_id / voice_channel_id are the non-secret Discord IDs. Omit both (no
-  // presence) to leave the stored IDs unchanged — lets the token be replaced
-  // without clobbering the IDs (#142). When present they must be non-empty and
-  // sent together; a present-but-empty ID is rejected (mirrors bot_token).
+  // guild_id / voice_channel_id are the non-secret Discord IDs. Omit either (no
+  // presence) to leave its stored value unchanged — lets the token be replaced
+  // without clobbering the IDs (#142). A present-but-empty ID is rejected
+  // (mirrors bot_token). guild_id alone links the guild (guild-admin proof,
+  // ADR-0058), clearing the stored Default Voice Channel when the guild
+  // changes; voice_channel_id alone sets the Default Voice Channel and needs a
+  // linked guild first (else CodeFailedPrecondition).
   optional string guild_id = 2;
   optional string voice_channel_id = 3;
 }
@@ -2043,10 +2046,20 @@ service SessionService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   // StartSession launches the voice loop for the active campaign and returns the
-  // created running session. It fails with CodeFailedPrecondition when the
-  // Discord guild/channel are unconfigured, and CodeAlreadyExists when a session
-  // is already active. State-changing: auth + CSRF guard it.
+  // created running session. An optional voice_channel_id picks the voice channel
+  // THIS session joins; empty falls back to the guild's Default Voice Channel. It
+  // fails with CodeFailedPrecondition when the Discord guild is unlinked (or no
+  // channel resolves), and CodeAlreadyExists when a session is already active.
+  // State-changing: auth + CSRF guard it.
   rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  // ListSessionVoiceChannels lists the linked guild's voice channels for the
+  // Session screen's channel picker, plus the stored Default Voice Channel id so
+  // the picker pre-selects it. A read (NO_SIDE_EFFECTS). An unlinked guild is
+  // CodeFailedPrecondition ("link a Discord server first"); a missing saved Bot
+  // token is CodeFailedPrecondition too, mirroring ListShareChannels.
+  rpc ListSessionVoiceChannels(ListSessionVoiceChannelsRequest) returns (ListSessionVoiceChannelsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   // StopSession cancels the active voice loop and returns the ended session. It
   // fails with CodeFailedPrecondition when no session is active. State-changing.
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
@@ -2403,9 +2416,29 @@ message SetAllMuteResponse {
   repeated string muted_agent_ids = 1;
 }
 
-// StartSessionRequest is the (empty) request; the active campaign is resolved
-// server-side for the single operator.
-message StartSessionRequest {}
+// StartSessionRequest names the voice channel to join; the active campaign is
+// resolved server-side for the single operator.
+message StartSessionRequest {
+  // voice_channel_id is the Discord voice channel THIS session joins (a
+  // snowflake from ListSessionVoiceChannels). Empty falls back to the guild's
+  // stored Default Voice Channel; with neither set the start fails
+  // CodeFailedPrecondition.
+  string voice_channel_id = 1;
+}
+
+// ListSessionVoiceChannelsRequest is empty: the guild is the Tenant's linked
+// Discord server, resolved server-side (ADR-0039).
+message ListSessionVoiceChannelsRequest {}
+
+// ListSessionVoiceChannelsResponse carries the linked guild's voice channels
+// (type-2 GUILD_VOICE only, sorted by position then name) and the stored
+// Default Voice Channel id so the Session screen's picker pre-selects it.
+message ListSessionVoiceChannelsResponse {
+  // channels are the guild's voice channels a session may join.
+  repeated VoiceChannel channels = 1;
+  // default_channel_id is the guild's Default Voice Channel (empty = none set).
+  string default_channel_id = 2;
+}
 
 // StartSessionResponse carries the created running session.
 message StartSessionResponse {

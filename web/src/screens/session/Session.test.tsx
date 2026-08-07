@@ -15,6 +15,7 @@ vi.mock("sonner", () => ({
 import {
   SessionService,
   CampaignService,
+  ProviderService,
   VoiceSessionSchema,
   GetSessionResponseSchema,
   StartSessionResponseSchema,
@@ -29,6 +30,9 @@ import {
   PromoteHighlightResponseSchema,
   DeleteHighlightResponseSchema,
   GenerateRecapResponseSchema,
+  ListSessionVoiceChannelsResponseSchema,
+  VoiceChannelSchema,
+  SaveDiscordSettingsResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -1566,5 +1570,212 @@ describe("Session highlights strip (#309)", () => {
     renderScreen();
     await screen.findByText("Idle");
     expect(screen.queryByRole("heading", { name: /^Highlights$/ })).not.toBeInTheDocument();
+  });
+});
+
+// --- Voice-channel picker ---------------------------------------------------
+
+// channelTransport is an IDLE screen whose ListSessionVoiceChannels serves a
+// configurable channel list + stored Default Voice Channel (or throws, the
+// unlinked-guild case). Start flips the session Live (so the picker's wiring
+// into StartSessionRequest is observable end-to-end) and records each request's
+// voice_channel_id. ProviderService.saveDiscordSettings records the exact wire
+// fields ("Set as default" must carry voice_channel_id ONLY — guild untouched)
+// and persists the new default so the invalidated picker refetch reflects it.
+function channelTransport(opts: {
+  channels?: { id: string; name: string }[];
+  defaultChannelId?: string;
+  listError?: ConnectError;
+}) {
+  const state = { defaultChannelId: opts.defaultChannelId ?? "" };
+  const startRequests: string[] = [];
+  const saveRequests: { botToken?: string; guildId?: string; voiceChannelId?: string }[] = [];
+  let active = false;
+  let current: ReturnType<typeof create<typeof VoiceSessionSchema>> | undefined;
+
+  const transport = createRouterTransport(({ service }) => {
+    service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
+      getSession: () => create(GetSessionResponseSchema, { session: current, active }),
+      listSessionVoiceChannels: () => {
+        if (opts.listError) throw opts.listError;
+        return create(ListSessionVoiceChannelsResponseSchema, {
+          channels: (opts.channels ?? []).map((c) => create(VoiceChannelSchema, c)),
+          defaultChannelId: state.defaultChannelId,
+        });
+      },
+      startSession: (req) => {
+        startRequests.push(req.voiceChannelId);
+        current = create(VoiceSessionSchema, {
+          id: "vs1",
+          campaignId: "c1",
+          status: "running",
+          startedAt: timestampFromDate(new Date()),
+        });
+        active = true;
+        return create(StartSessionResponseSchema, { session: current });
+      },
+      stopSession: () => {
+        active = false;
+        current = undefined;
+        return create(StopSessionResponseSchema, {});
+      },
+    });
+    service(ProviderService, {
+      saveDiscordSettings: (req) => {
+        // Record the PRESENCE of each optional field as sent on the wire: the
+        // "Set as default" save must carry voice_channel_id only.
+        saveRequests.push({ botToken: req.botToken, guildId: req.guildId, voiceChannelId: req.voiceChannelId });
+        if (req.voiceChannelId !== undefined) state.defaultChannelId = req.voiceChannelId;
+        return create(SaveDiscordSettingsResponseSchema, {
+          guildId: "g1",
+          voiceChannelId: state.defaultChannelId,
+        });
+      },
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+  return { transport, startRequests, saveRequests };
+}
+
+const twoChannels = [
+  { id: "c-general", name: "General" },
+  { id: "c-tavern", name: "The Tavern" },
+];
+
+describe("Session voice-channel picker", () => {
+  it("renders the picker on the idle screen with the stored default pre-selected", async () => {
+    const { transport } = channelTransport({ channels: twoChannels, defaultChannelId: "c-tavern" });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+    expect(await screen.findByTestId("channel-picker")).toBeInTheDocument();
+    // The trigger shows the DEFAULT channel's name pre-selected (default wins
+    // over first-in-list).
+    const trigger = screen.getByRole("combobox", { name: "Voice channel" });
+    await waitFor(() => expect(trigger).toHaveTextContent("The Tavern"));
+    // The selection IS the stored default → no "Set as default" affordance.
+    expect(screen.queryByTestId("set-default-channel")).not.toBeInTheDocument();
+  });
+
+  it("Start sends the pre-selected default channel id in the StartSessionRequest", async () => {
+    const { transport, startRequests } = channelTransport({
+      channels: twoChannels,
+      defaultChannelId: "c-tavern",
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    await screen.findByTestId("channel-picker");
+    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+
+    await waitFor(() => expect(startRequests).toEqual(["c-tavern"]));
+    // The wired-through start still flips the screen Live (no regression).
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+  });
+
+  it("picking another channel sends ITS id on Start and offers Set as default", async () => {
+    const { transport, startRequests } = channelTransport({
+      channels: twoChannels,
+      defaultChannelId: "c-tavern",
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    await screen.findByTestId("channel-picker");
+
+    // Open the Radix Select (jsdom: keyboard open, the KnowledgePanel pattern)
+    // and pick the NON-default channel.
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Voice channel" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "General" }));
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Voice channel" })).toHaveTextContent("General"),
+    );
+
+    // The pick differs from the stored default → the affordance appears.
+    expect(await screen.findByTestId("set-default-channel")).toBeInTheDocument();
+
+    // Start joins the PICKED channel, not the stored default.
+    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+    await waitFor(() => expect(startRequests).toEqual(["c-general"]));
+  });
+
+  it("renders no picker and starts with an empty voice_channel_id when the channel list errors", async () => {
+    // The unlinked-guild / missing-token case: ListSessionVoiceChannels fails
+    // FailedPrecondition once (retry:false) and the picker is simply absent —
+    // Start still works, deferring the precondition to the server.
+    const { transport, startRequests } = channelTransport({
+      listError: new ConnectError("session: link a Discord server first", Code.FailedPrecondition),
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+    expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+    await waitFor(() => expect(startRequests).toEqual([""]));
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+  });
+
+  it("renders no picker when the guild has no voice channels", async () => {
+    const { transport, startRequests } = channelTransport({ channels: [] });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+    expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+    await waitFor(() => expect(startRequests).toEqual([""]));
+  });
+
+  it("Set as default saves voice_channel_id ONLY and disappears once the default matches", async () => {
+    // No stored default → the first channel is auto-picked, which DIFFERS from
+    // the (empty) default, so the affordance shows immediately.
+    const { transport, saveRequests } = channelTransport({ channels: twoChannels });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    await screen.findByTestId("channel-picker");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Voice channel" })).toHaveTextContent("General"),
+    );
+    fireEvent.click(await screen.findByTestId("set-default-channel"));
+
+    // The wire message carries voice_channel_id ONLY: guild_id and bot_token are
+    // ABSENT (their stored values must stay untouched).
+    await waitFor(() => expect(saveRequests).toHaveLength(1));
+    expect(saveRequests[0].voiceChannelId).toBe("c-general");
+    expect(saveRequests[0].guildId).toBeUndefined();
+    expect(saveRequests[0].botToken).toBeUndefined();
+
+    // Success invalidates the channel list → the refetched default now matches
+    // the selection, so the affordance goes away.
+    await waitFor(() => expect(screen.queryByTestId("set-default-channel")).not.toBeInTheDocument());
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalledWith(expect.stringMatching(/default channel/i));
   });
 });

@@ -111,6 +111,37 @@ func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid
 	return *f.dep, nil
 }
 
+// SaveDiscordGuild mirrors the guild-only upsert: the stored Default Voice
+// Channel survives a re-save of the SAME guild and is cleared when the guild
+// changes (it belonged to the old guild). Shares channelsErr/channelsCalls with
+// SaveDiscordChannels — both are binding writes.
+func (f *fakeProviderStore) SaveDiscordGuild(_ context.Context, tenantID uuid.UUID, guildID string) (storage.DeploymentConfig, error) {
+	f.channelsCalls++
+	if f.channelsErr != nil {
+		return storage.DeploymentConfig{}, f.channelsErr
+	}
+	if f.dep == nil {
+		f.dep = &storage.DeploymentConfig{TenantID: tenantID, CreatedAt: f.now()}
+	}
+	if f.dep.GuildID != guildID {
+		f.dep.VoiceChannelID = ""
+	}
+	f.dep.GuildID = guildID
+	f.dep.UpdatedAt = f.now()
+	return *f.dep, nil
+}
+
+// SaveDefaultVoiceChannel mirrors the storage guard: the Default Voice Channel
+// only sets against an already-linked guild; no binding is ErrNotFound.
+func (f *fakeProviderStore) SaveDefaultVoiceChannel(_ context.Context, _ uuid.UUID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	if f.dep == nil || f.dep.GuildID == "" {
+		return storage.DeploymentConfig{}, storage.ErrNotFound
+	}
+	f.dep.VoiceChannelID = voiceChannelID
+	f.dep.UpdatedAt = f.now()
+	return *f.dep, nil
+}
+
 // ReleaseDiscordGuild mirrors the storage compare-and-clear (#504): only a
 // matching tenant-held binding clears; anything else is ErrNotFound.
 func (f *fakeProviderStore) ReleaseDiscordGuild(_ context.Context, _ uuid.UUID, guildID string) (storage.DeploymentConfig, error) {
@@ -573,6 +604,9 @@ func TestProviderDiscordSettings_TokenOnlySaveKeepsIDs(t *testing.T) {
 // clear. Clearing the IDs is not a supported operation — an empty ID only ever
 // reaches the wire by accident (e.g. the form saving before the config load
 // resolves), and accepting it would reopen the silent-wipe this issue fixes.
+// The IDs no longer travel as a pair: emptiness is validated PER FIELD, and a
+// present-and-non-empty single ID is a supported partial save (see
+// TestProviderDiscordSettings_GuildOnlyAndChannelOnlySaves).
 func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
 	t.Parallel()
 	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
@@ -585,15 +619,20 @@ func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
 		t.Fatalf("save ids: %v", err)
 	}
 
-	for name, req := range map[string]*managementv1.SaveDiscordSettingsRequest{
-		"both empty":  {GuildId: strPtr(""), VoiceChannelId: strPtr("")},
-		"empty guild": {GuildId: strPtr(""), VoiceChannelId: strPtr("472093774421")},
-		"empty voice": {GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("")},
-		"guild only":  {GuildId: strPtr("472093001100")}, // partial presence = the other ID is empty
+	for name, tc := range map[string]struct {
+		req     *managementv1.SaveDiscordSettingsRequest
+		wantMsg string
+	}{
+		"both empty":  {&managementv1.SaveDiscordSettingsRequest{GuildId: strPtr(""), VoiceChannelId: strPtr("")}, "guild_id must not be empty when provided"},
+		"empty guild": {&managementv1.SaveDiscordSettingsRequest{GuildId: strPtr(""), VoiceChannelId: strPtr("472093774421")}, "guild_id must not be empty when provided"},
+		"empty voice": {&managementv1.SaveDiscordSettingsRequest{GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("")}, "voice_channel_id must not be empty when provided"},
 	} {
-		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(req))
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(tc.req))
 		if connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("%s: code = %v, want InvalidArgument", name, connect.CodeOf(err))
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
+			t.Errorf("%s: err = %v, want the per-field message %q", name, err, tc.wantMsg)
 		}
 	}
 
@@ -604,6 +643,78 @@ func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
 	}
 	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
 		t.Errorf("rejected save mutated ids: guild=%q voice=%q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+// TestProviderDiscordSettings_GuildOnlyAndChannelOnlySaves pins the new partial
+// contract: a guild-only save links the guild (admin proof still required — the
+// always-pass test stub stands in for a proven admin), a channel-only save sets
+// the Default Voice Channel against an already-linked guild, and a channel-only
+// save with NO linked guild is FailedPrecondition "link a Discord server first".
+// A guild CHANGE clears the stored Default Voice Channel (it belonged to the old
+// guild); a re-save of the same guild keeps it.
+func TestProviderDiscordSettings_GuildOnlyAndChannelOnlySaves(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Channel-only with no linked guild: FailedPrecondition.
+	unlinked, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	_, err := unlinked.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		VoiceChannelId: strPtr("472093774421"),
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("channel-only without guild code = %v (err %v), want FailedPrecondition", connect.CodeOf(err), err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "link a Discord server first") {
+		t.Errorf("channel-only without guild err = %v, want the link-first message", err)
+	}
+
+	// Guild-only save links the guild. The token save rides along once so the
+	// #504 proof's check-token ladder has a stored rung for the later
+	// token-less guild saves.
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	resp, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		BotToken: strPtr("test-discord-bot-token-3333"),
+		GuildId:  strPtr("472093001100"),
+	}))
+	if err != nil {
+		t.Fatalf("guild-only save: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "" {
+		t.Errorf("guild-only save = guild %q voice %q, want 472093001100 / empty", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+
+	// Channel-only save now sets the Default Voice Channel.
+	resp, err = client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		VoiceChannelId: strPtr("472093774421"),
+	}))
+	if err != nil {
+		t.Fatalf("channel-only save: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("channel-only save = guild %q voice %q, want both set", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+
+	// Re-saving the SAME guild keeps the stored Default Voice Channel.
+	resp, err = client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"),
+	}))
+	if err != nil {
+		t.Fatalf("same-guild re-save: %v", err)
+	}
+	if resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("same-guild re-save cleared voice channel: %q, want 472093774421", resp.Msg.GetVoiceChannelId())
+	}
+
+	// A guild CHANGE clears it.
+	resp, err = client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("999888777666"),
+	}))
+	if err != nil {
+		t.Fatalf("guild change: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "999888777666" || resp.Msg.GetVoiceChannelId() != "" {
+		t.Errorf("guild change = guild %q voice %q, want new guild / cleared voice", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
 	}
 }
 

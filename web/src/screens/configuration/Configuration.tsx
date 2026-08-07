@@ -89,11 +89,10 @@ export function Configuration() {
   // echoes the bound guild_id — the server compare-and-clears atomically.
   const releaseGuild = useMutation(ProviderService.method.releaseDiscordGuild, {
     onSuccess: () => {
-      // The binding is gone server-side: clear the local fields and drop the
+      // The binding is gone server-side: clear the local field and drop the
       // dirty guard so the refetch reseeds the (now empty) stored state.
       idsDirty.current = false;
       setGuildId("");
-      setVoiceChannelId("");
       setConfirmUnlink(false);
       invalidateList();
     },
@@ -102,35 +101,21 @@ export function Configuration() {
   // hands it to whoever binds next, so it must never ride a single misclick.
   const [confirmUnlink, setConfirmUnlink] = useState(false);
 
-  // Guild / Voice channel IDs are controlled, seeded from the RPC. A `dirty` ref
-  // guards the seed so a slow first load (or a post-save refetch) can never
-  // clobber what the operator is typing — once edited, the field is the source
-  // of truth.
+  // The Guild ID is controlled, seeded from the RPC. A `dirty` ref guards the
+  // seed so a slow first load (or a post-save refetch) can never clobber what
+  // the operator is typing — once edited, the field is the source of truth.
+  // The voice channel no longer lives on this screen: sessions pick their
+  // channel on the Session screen, where the Default Voice Channel is also set.
   const [guildId, setGuildId] = useState("");
-  const [voiceChannelId, setVoiceChannelId] = useState("");
   const idsDirty = useRef(false);
   useEffect(() => {
     if (config.data && !idsDirty.current) {
       setGuildId(config.data.guildId);
-      setVoiceChannelId(config.data.voiceChannelId);
     }
   }, [config.data]);
   const editGuildId = (v: string) => {
     idsDirty.current = true;
     setGuildId(v);
-  };
-  const editVoiceChannelId = (v: string) => {
-    idsDirty.current = true;
-    setVoiceChannelId(v);
-  };
-
-  // "Paste a Discord link" autofill (#101/#105): a channel Copy-Link fills both
-  // IDs locally; an invite link resolves server-side to a voice-channel picker.
-  // Either fill goes through the dirty-tracking edit path so a config refetch
-  // can't clobber it (raw setState would), and Save picks the values up.
-  const fillDiscordIds = (g: string, c: string) => {
-    editGuildId(g);
-    editVoiceChannelId(c);
   };
 
   return (
@@ -224,32 +209,25 @@ export function Configuration() {
               detail={config.data.integrationDetail}
             />
           )}
-          <DiscordLinkAutofill onFill={fillDiscordIds} />
+          <DiscordLinkAutofill onFill={editGuildId} />
           <div className="gx-discord__ids">
             <Input
               label="Guild ID"
               placeholder="e.g. 472093001100"
-              hint="The Discord server the bot serves."
+              hint="The Discord server the bot serves. Sessions pick their voice channel on the Session screen."
               value={guildId}
               onChange={(e) => editGuildId(e.target.value)}
-            />
-            <Input
-              label="Voice channel ID"
-              placeholder="472093774421"
-              hint="The channel sessions join."
-              value={voiceChannelId}
-              onChange={(e) => editVoiceChannelId(e.target.value)}
             />
           </div>
           <div className="gx-discord__save">
             <Button
               variant="primary"
               size="sm"
-              onClick={() => saveDiscordIds.mutate({ guildId, voiceChannelId })}
-              // Locked until BOTH IDs are non-empty: the server rejects
-              // present-but-empty IDs (#142), so a half-filled save must not be
+              onClick={() => saveDiscordIds.mutate({ guildId })}
+              // Locked until the ID is non-empty: the server rejects a
+              // present-but-empty ID (#142), so an empty save must not be
               // offered — clicking it used to fail with no visible trace.
-              disabled={saveDiscordIds.isPending || !guildId || !voiceChannelId}
+              disabled={saveDiscordIds.isPending || !guildId}
             >
               Save Discord settings
             </Button>

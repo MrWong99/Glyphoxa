@@ -120,7 +120,7 @@ func TestStart_NoCaps_ByteForByteToday(t *testing.T) {
 	spy := &usageSpy{}
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), spy)
 
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -150,7 +150,7 @@ func TestStart_WithCaps_GatesAndTees(t *testing.T) {
 	spy := &usageSpy{}
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), spy)
 
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -203,7 +203,7 @@ func TestStart_CapsLoadFails_NoStrandedRow(t *testing.T) {
 	runner := newReRunner()
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), &usageSpy{})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err == nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err == nil {
 		t.Fatal("Start must surface a non-NotFound caps-load failure")
 	}
 	if n := store.runningCount(); n != 0 {
@@ -215,7 +215,7 @@ func TestStart_CapsLoadFails_NoStrandedRow(t *testing.T) {
 	store.mu.Lock()
 	store.capsErr = nil
 	store.mu.Unlock()
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start retry after caps-load failure: %v", err)
 	}
 	if n := store.runningCount(); n != 1 {
@@ -232,7 +232,7 @@ func TestStart_CapsLoadNotFound_IsNoCaps(t *testing.T) {
 	runner := newReRunner()
 	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), &usageSpy{})
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start with ErrNotFound caps must succeed (no caps): %v", err)
 	}
 	<-runner.started
@@ -254,7 +254,7 @@ func TestSoftCap_SessionKeepsRunning(t *testing.T) {
 	events := collectSpendCaps(bus)
 	mgr := spendManager(t, store, runner.run, bus, &usageSpy{})
 
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -288,7 +288,7 @@ func TestHardCap_EndsSessionCleanly(t *testing.T) {
 	events := collectSpendCaps(bus)
 	mgr := spendManager(t, store, runner.run, bus, &usageSpy{})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestHardCap_EndsSessionCleanly(t *testing.T) {
 
 	// Guard freed: the SAME manager accepts a new Start (the reRunner tolerates the
 	// second run without re-signalling started).
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("second Start after hard-cap end must succeed, got %v", err)
 	}
 	mgr.Shutdown()

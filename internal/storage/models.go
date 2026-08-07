@@ -181,9 +181,13 @@ const (
 // HeartbeatAt / EndedAt track the claim lifecycle; LastError carries a fault's
 // readable cause. Mirrors the storage.Job shape (ADR-0049).
 type VoiceSessionIntent struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	CampaignID     uuid.UUID
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	CampaignID uuid.UUID
+	// VoiceChannelID is the voice channel the start explicitly picked ('' = use
+	// the guild's Default Voice Channel); the claiming worker passes it through
+	// to Manager.Start.
+	VoiceChannelID string
 	Status         VoiceSessionIntentStatus
 	InstanceID     string
 	VoiceSessionID uuid.NullUUID

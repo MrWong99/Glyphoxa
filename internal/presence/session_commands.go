@@ -50,7 +50,10 @@ type SessionStore interface {
 // surfaces share one active-session record and can never double-start or diverge
 // (AC4). *session.Manager satisfies it; tests use a fake.
 type VoiceControl interface {
-	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
+	// Start launches the voice loop; the empty voiceChannelID the slash command
+	// passes means "the guild's Default Voice Channel" (an explicit pick is a
+	// web-Session-screen affordance).
+	Start(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error)
 	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
 	// Active reports THIS Tenant's live Voice Session (S3, #488): the per-Tenant read
 	// replacing the process-wide Snapshot, so start/end/search resolve against only
@@ -140,7 +143,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 				return fmt.Errorf("presence: resolve active campaign: %w", err)
 			}
 
-			if _, err := voice.Start(ctx, c.TenantID, c.ID); err != nil {
+			if _, err := voice.Start(ctx, c.TenantID, c.ID, ""); err != nil {
 				if msg, ok := startErrorMessage(err); ok {
 					return ic.ReplyEphemeral(msg)
 				}

@@ -325,7 +325,7 @@ func TestStartStopLifecycle(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestStart_PassesCampaignIDToLoop(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -392,6 +392,82 @@ func TestStart_PassesCampaignIDToLoop(t *testing.T) {
 	if got := runner.cfg().CampaignID; got != campaignID {
 		t.Errorf("loop cfg CampaignID = %s, want selected campaign %s", got, campaignID)
 	}
+}
+
+// TestStart_VoiceChannelSelection pins the channel-resolution contract: an
+// explicit voiceChannelID overrides the stored Default Voice Channel in
+// cfg.Channel (and is what ActiveVoiceChannelID reports), an empty one falls
+// back to the default, and a linked guild with NO channel resolving either way
+// is ErrDiscordNotConfigured.
+func TestStart_VoiceChannelSelection(t *testing.T) {
+	t.Run("explicit pick overrides the default", func(t *testing.T) {
+		store := newFakeStore() // default channel 444555666
+		runner := newBlockingRunner()
+		mgr := newManager(t, store, runner.run, true)
+
+		tenantID := uuid.New()
+		if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), "777888999"); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		select {
+		case <-runner.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("loop runner never started")
+		}
+		if got := runner.cfg().Channel; got != "777888999" {
+			t.Errorf("loop cfg Channel = %q, want the explicit pick 777888999", got)
+		}
+		if got, ok := mgr.ActiveVoiceChannelID(tenantID); !ok || got != "777888999" {
+			t.Errorf("ActiveVoiceChannelID = %q,%v, want 777888999,true", got, ok)
+		}
+	})
+
+	t.Run("empty pick falls back to the default", func(t *testing.T) {
+		store := newFakeStore()
+		runner := newBlockingRunner()
+		mgr := newManager(t, store, runner.run, true)
+
+		if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		select {
+		case <-runner.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("loop runner never started")
+		}
+		if got := runner.cfg().Channel; got != "444555666" {
+			t.Errorf("loop cfg Channel = %q, want the stored default 444555666", got)
+		}
+	})
+
+	t.Run("explicit pick starts with no stored default", func(t *testing.T) {
+		store := newFakeStore()
+		store.dep = storage.DeploymentConfig{GuildID: "111222333"} // linked guild, no default channel
+		runner := newBlockingRunner()
+		mgr := newManager(t, store, runner.run, true)
+
+		if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "777888999"); err != nil {
+			t.Fatalf("Start with explicit channel and no default: %v", err)
+		}
+	})
+
+	t.Run("no pick and no default is unconfigured", func(t *testing.T) {
+		store := newFakeStore()
+		store.dep = storage.DeploymentConfig{GuildID: "111222333"}
+		mgr := newManager(t, store, newBlockingRunner().run, true)
+
+		_, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
+		if !errors.Is(err, session.ErrDiscordNotConfigured) {
+			t.Errorf("Start = %v, want ErrDiscordNotConfigured", err)
+		}
+	})
+
+	t.Run("idle tenant reports no active channel", func(t *testing.T) {
+		mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)
+		if got, ok := mgr.ActiveVoiceChannelID(uuid.New()); ok || got != "" {
+			t.Errorf("ActiveVoiceChannelID idle = %q,%v, want \"\",false", got, ok)
+		}
+	})
 }
 
 // TestStart_OverlaysGMSpeakerForTenant pins the per-Tenant Butler gate (#490):
@@ -418,7 +494,7 @@ func TestStart_OverlaysGMSpeakerForTenant(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true, deps)
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
@@ -459,12 +535,12 @@ func TestSecondStartRejected(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
 
-	_, err := mgr.Start(context.Background(), tenantID, campaignID)
+	_, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if !errors.Is(err, session.ErrSessionActive) {
 		t.Errorf("second Start = %v, want ErrSessionActive", err)
 	}
@@ -480,7 +556,7 @@ func TestStartRequiresDiscordConfig(t *testing.T) {
 	store.dep = storage.DeploymentConfig{} // no guild/channel
 	mgr := newManager(t, store, newBlockingRunner().run, true)
 
-	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrDiscordNotConfigured) {
 		t.Errorf("Start with no guild/channel = %v, want ErrDiscordNotConfigured", err)
 	}
@@ -508,7 +584,7 @@ func TestStartUsesSavedToken(t *testing.T) {
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
@@ -534,7 +610,7 @@ func TestStartFallsBackToEnvToken(t *testing.T) {
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _, _ = mgr.Stop(context.Background(), tenantID) })
@@ -556,7 +632,7 @@ func TestStartMissingToken(t *testing.T) {
 	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
-	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrDiscordTokenMissing) {
 		t.Errorf("Start with no token = %v, want ErrDiscordTokenMissing", err)
 	}
@@ -584,7 +660,7 @@ func TestStartUndecryptableToken(t *testing.T) {
 	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{})
 
-	_, err = mgr.Start(context.Background(), uuid.New(), uuid.New())
+	_, err = mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrDiscordTokenUndecryptable) {
 		t.Errorf("Start with undecryptable token = %v, want ErrDiscordTokenUndecryptable", err)
 	}
@@ -626,7 +702,7 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Transcript: fin})
 
 	tenantID := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -695,7 +771,7 @@ func TestManagerBeginsAndFinalizesHighlights(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Highlights: spy})
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -739,7 +815,7 @@ func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	mgr.SetEndTimeoutForTest(50 * time.Millisecond)
 
 	tenantID := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -778,7 +854,7 @@ func TestStopSurfacesEndWriteFailure(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -808,7 +884,7 @@ func TestStopWithoutActiveSession(t *testing.T) {
 // (web-only, ADR-0039: all-mode drives sessions in-process).
 func TestStartDisabledMode(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, false)
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrVoiceUnavailable) {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); !errors.Is(err, session.ErrVoiceUnavailable) {
 		t.Errorf("Start in disabled mode = %v, want ErrVoiceUnavailable", err)
 	}
 }
@@ -825,7 +901,7 @@ func TestStartAfterShutdownRefused(t *testing.T) {
 
 	mgr.Shutdown()
 
-	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrManagerClosed) {
 		t.Errorf("Start after Shutdown = %v, want ErrManagerClosed", err)
 	}
@@ -900,7 +976,7 @@ func TestShutdownIdempotentStopSafe(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -930,7 +1006,7 @@ func TestLoopExitClearsActive(t *testing.T) {
 	// A runner that returns immediately (loop ended by itself).
 	mgr := newManager(t, store, func(_ context.Context, _ wirenpc.Config) error { return nil }, true)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	// Wait for the self-exiting loop to End the session and clear active.
@@ -975,7 +1051,7 @@ func TestFatalLoopErrorRecordsFailed(t *testing.T) {
 	})
 	mgr := newManager(t, store, func(context.Context, wirenpc.Config) error { return fatal }, true)
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -998,7 +1074,7 @@ func TestFatalLoopErrorRecordsFailed(t *testing.T) {
 	if mgr.AnyLive() {
 		t.Error("still active after a fatal loop exit")
 	}
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Errorf("Start after a fatal failure = %v, want success (single-active guard freed)", err)
 	}
 	waitIdle(t, mgr) // let the second (also-fatal) loop unwind before the test ends
@@ -1014,7 +1090,7 @@ func TestPlainLoopErrorRecordsFailedLoopError(t *testing.T) {
 		return errors.New("silero: vad init failed")
 	}, true)
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1040,7 +1116,7 @@ func TestCancelledLoopEndsCleanNilReason(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true)
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -1100,7 +1176,7 @@ func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Chunker: flusher})
 
 	tenantID := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, uuid.New())
+	vs, err := mgr.Start(context.Background(), tenantID, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1132,7 +1208,7 @@ func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
 		session.Deps{Chunker: &fakeChunkFinalizer{store: store, err: errors.New("chunk writer wedged")}})
 
 	tenantID := uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -1169,13 +1245,13 @@ func TestStartReleasesReservationOnPanic(t *testing.T) {
 				t.Fatal("the injected store panic must propagate out of Start")
 			}
 		}()
-		_, _ = mgr.Start(context.Background(), tenantID, campaignID)
+		_, _ = mgr.Start(context.Background(), tenantID, campaignID, "")
 	}()
 
 	if !mgr.HasCapacity() {
 		t.Fatal("HasCapacity false after a recovered Start panic: the reservation leaked")
 	}
-	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
 		t.Fatalf("Start after the recovered panic = %v, want success (reservation released)", err)
 	}
 	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {

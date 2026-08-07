@@ -38,6 +38,10 @@ const CAMPAIGN_INVARIANT_READS: DescMethodUnary[] = [
   VoiceService.method.getProviderHealth,
   VoiceService.method.listModels,
   VoiceService.method.listVoices,
+  // The Session screen's voice-channel picker source: the linked guild's
+  // channels + the Default Voice Channel are Tenant-scoped (deployment config),
+  // identical across campaigns.
+  SessionService.method.listSessionVoiceChannels,
 ];
 
 // methodId renders a method descriptor as the "<service typeName>/<MethodName>"

@@ -31,7 +31,7 @@ func TestLiveSession_StaleAfterStopRefused(t *testing.T) {
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, bus := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	live := mgr.Live(tenantID)
@@ -85,7 +85,7 @@ func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, bus := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	live := mgr.Live(tenantID)
@@ -117,7 +117,7 @@ func TestLiveSession_MidOpRolloverRefused(t *testing.T) {
 
 	// Same window for SayAs: entry check passes, the session ends during the
 	// roster read, the publish-guarding revalidate must refuse.
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
@@ -149,14 +149,14 @@ func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
 	store := newFakeStore()
 	bart := seedAgents(store, 1)[0]
 	mgr, _ := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start 1: %v", err)
 	}
 	stale := mgr.Live(tenantID)
 	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
@@ -199,7 +199,7 @@ func TestRegistry_ResolveTracksManagerLifecycle(t *testing.T) {
 		wirenpc.Config{Token: "test-token", Bus: voiceevent.NewBus()}, nil, slog.New(slog.DiscardHandler), true,
 		session.Deps{Registry: reg})
 
-	started, err := mgr.Start(context.Background(), tenantID, uuid.New())
+	started, err := mgr.Start(context.Background(), tenantID, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -43,6 +43,11 @@ const userAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)"
 // excluded — a clip file goes to a text channel.
 const guildTextType = 0
 
+// guildVoiceType is Discord's channel type for a voice channel (GUILD_VOICE),
+// matching internal/discordinvite: the only type a Voice Session can join —
+// text (0), category (4), announcement (5), and stage (13) are excluded.
+const guildVoiceType = 2
+
 // MaxUploadBytes is the clip-size ceiling a share refuses above (#310 decision:
 // refuse, never re-encode). It is the Discord unboosted attachment floor (8 MiB),
 // a single deliberately conservative named constant so every layer — the RPC's
@@ -86,9 +91,29 @@ func ListTextChannels(ctx context.Context, token, guildID string, log *slog.Logg
 	return listTextChannels(ctx, token, guildID, "", log)
 }
 
+// ListVoiceChannels lists guildID's voice channels (type 2), sorted by position
+// then name — the Session screen's channel-picker source. Same call and error
+// posture as ListTextChannels; only the type filter differs.
+func ListVoiceChannels(ctx context.Context, token, guildID string, log *slog.Logger) ([]Channel, error) {
+	return listVoiceChannels(ctx, token, guildID, "", log)
+}
+
+// listVoiceChannels is ListVoiceChannels with a base-URL seam: "" means the
+// live Discord API, tests point it at a fake HTTP server.
+func listVoiceChannels(ctx context.Context, token, guildID, baseURL string, log *slog.Logger) ([]Channel, error) {
+	return listChannelsOfType(ctx, token, guildID, baseURL, guildVoiceType, log)
+}
+
 // listTextChannels is ListTextChannels with a base-URL seam: "" means the live
 // Discord API, tests point it at a fake HTTP server.
 func listTextChannels(ctx context.Context, token, guildID, baseURL string, log *slog.Logger) ([]Channel, error) {
+	return listChannelsOfType(ctx, token, guildID, baseURL, guildTextType, log)
+}
+
+// listChannelsOfType is the shared GET /guilds/{id}/channels read behind the
+// text and voice listers: one REST call, keep only channelType, sort by
+// position then name.
+func listChannelsOfType(ctx context.Context, token, guildID, baseURL string, channelType int, log *slog.Logger) ([]Channel, error) {
 	if token == "" {
 		return nil, errors.New("discordshare: empty bot token")
 	}
@@ -139,7 +164,7 @@ func listTextChannels(ctx context.Context, token, guildID, baseURL string, log *
 	}
 	kept := make([]positioned, 0, len(channels))
 	for _, c := range channels {
-		if c.Type != guildTextType {
+		if c.Type != channelType {
 			continue
 		}
 		kept = append(kept, positioned{ch: Channel{ID: c.ID, Name: c.Name}, pos: c.Position})
@@ -155,7 +180,7 @@ func listTextChannels(ctx context.Context, token, guildID, baseURL string, log *
 		out[i] = k.ch
 	}
 
-	log.Debug("listed Discord text channels", "guild", guildID, "textChannels", len(out))
+	log.Debug("listed Discord channels", "guild", guildID, "type", channelType, "channels", len(out))
 	return out, nil
 }
 
