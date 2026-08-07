@@ -423,6 +423,14 @@ func (s *ProviderServer) SaveDiscordSettings(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("voice_channel_id must not be empty when provided"))
 	}
+	// A present channel must be snowflake-shaped (the StartSession posture): this
+	// save makes the value DURABLE, so a channel name or pasted URL persisting
+	// here would break every later default-channel consumer (session starts, the
+	// Players-panel member read).
+	if hasChannel && !snowflakePattern.MatchString(req.Msg.GetVoiceChannelId()) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("voice_channel_id must be a Discord channel id"))
+	}
 	if req.Msg.BotToken != nil {
 		if s.cipher == nil {
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
@@ -444,6 +452,22 @@ func (s *ProviderServer) SaveDiscordSettings(
 	if hasGuild {
 		if err := s.proveGuildAdmin(ctx, tenantID, req.Msg.GetBotToken(), req.Msg.GetGuildId()); err != nil {
 			return nil, err
+		}
+	}
+
+	// A channel-only save needs an already-linked guild. Check BEFORE any write
+	// (a riding bot_token included) so a rejected request mutates nothing — the
+	// same pre-write posture as the proof above. SaveDefaultVoiceChannel's own
+	// linked-guild fence below stays as the racing-release backstop.
+	if hasChannel && !hasGuild {
+		dep, derr := s.store.GetDeploymentConfig(ctx, tenantID)
+		if derr != nil && !errors.Is(derr, storage.ErrNotFound) {
+			s.log.Error("SaveDiscordSettings: load deployment config failed", "err", derr)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		if dep.GuildID == "" {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("link a Discord server first"))
 		}
 	}
 

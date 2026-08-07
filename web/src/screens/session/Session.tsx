@@ -222,8 +222,12 @@ export function Session() {
   const channels = channelsQ.data?.channels ?? [];
   const defaultChannelId = channelsQ.data?.defaultChannelId ?? "";
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null);
+  // A stored default that is no longer among the guild's channels (deleted in
+  // Discord) must not ride a Start invisibly: fall back to the first listed
+  // channel, which the Select then actually shows.
+  const defaultInList = channels.some((c) => c.id === defaultChannelId);
   const selectedChannelId =
-    pickedChannelId ?? (defaultChannelId || channels[0]?.id || "");
+    pickedChannelId ?? ((defaultInList ? defaultChannelId : channels[0]?.id) || "");
 
   // "Set as default" persists the current pick as the guild's Default Voice
   // Channel (SaveDiscordSettings with only voice_channel_id on the wire — the
@@ -478,7 +482,12 @@ export function Session() {
                 variant="primary"
                 iconStart={<Play size={15} />}
                 onClick={() => start.mutate({ voiceChannelId: selectedChannelId })}
-                disabled={start.isPending}
+                // Held while the channel list is still loading: a click in that
+                // window would send no channel and fail on deployments with no
+                // stored default, even though a pre-selected channel was moments
+                // away. An errored/empty list re-enables (Start then reports the
+                // server's actionable precondition).
+                disabled={start.isPending || channelsQ.isLoading}
               >
                 Start session
               </Button>

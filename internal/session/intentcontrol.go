@@ -478,10 +478,15 @@ func (c *IntentControl) cancelPendingControl(id uuid.UUID) {
 
 // ActiveVoiceChannelID reports the explicit voice-channel pick the Tenant's
 // LIVE intent carried, the split-mode sibling of Manager.ActiveVoiceChannelID.
-// ok is false when no intent is live OR the live intent carried no pick (the
-// worker joined the Default Voice Channel) — either way the caller's fallback
-// to the stored default reads the right channel. Errors degrade to false (the
-// caller falls back; the members read is a soft feature).
+// ok is false when no intent is live or the live intent carried no pick — the
+// caller then falls back to the stored Default Voice Channel, which matches the
+// channel the worker joined UNLESS the default was re-saved mid-session (a
+// known soft-read imprecision: the intent row records only the explicit pick,
+// not the default it resolved to at claim time). Defensive today — the member
+// lister that consumes this seam is wired only where presence runs in-process
+// (the Manager path); it reads on a detached background ctx like the sibling
+// IsCampaignLive/AnyLive claim-plane reads, and errors degrade to false (the
+// members read is a soft feature).
 func (c *IntentControl) ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool) {
 	live, err := c.store.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID)
 	if err != nil {

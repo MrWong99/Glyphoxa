@@ -805,7 +805,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 
 	// Saving Discord settings busts it too.
 	if _, err := providerSrv.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: ptr("g1"), VoiceChannelId: ptr("c1"),
+		GuildId: ptr("111222333"), VoiceChannelId: ptr("444555666"),
 	})); err != nil {
 		t.Fatalf("SaveDiscordSettings: %v", err)
 	}

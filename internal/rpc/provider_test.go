@@ -646,6 +646,49 @@ func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
 	}
 }
 
+// TestProviderDiscordSettings_ChannelShapeAndNoWriteOnReject pins two guards on
+// the channel-only Default-Voice-Channel save: (a) a present voice_channel_id
+// must be snowflake-shaped — this save makes the value DURABLE, so a channel
+// name persisting would break every later default-channel consumer; (b) a
+// bot_token riding a channel-only save against an UNLINKED guild must not be
+// stored — the precondition rejects before any write ("a rejected request
+// mutates nothing").
+func TestProviderDiscordSettings_ChannelShapeAndNoWriteOnReject(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("non-snowflake channel is InvalidArgument", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client, _ := newProviderClient(t, store, testCipher(t))
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+			GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("general-voice"),
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("non-snowflake channel = %v, want InvalidArgument", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "must be a Discord channel id") {
+			t.Errorf("err = %v, want the channel-shape message", err)
+		}
+	})
+
+	t.Run("riding token is not stored when the channel-only save rejects", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client, _ := newProviderClient(t, store, testCipher(t))
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+			BotToken:       strPtr("test-discord-bot-token-9999"),
+			VoiceChannelId: strPtr("472093774421"),
+		}))
+		if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+			t.Fatalf("token+channel without guild = %v, want FailedPrecondition", err)
+		}
+		if store.dep != nil && store.dep.DiscordBotTokenLast4 != "" {
+			t.Errorf("rejected save stored the token (last4 %q); a rejected request must mutate nothing", store.dep.DiscordBotTokenLast4)
+		}
+	})
+}
+
 // TestProviderDiscordSettings_GuildOnlyAndChannelOnlySaves pins the new partial
 // contract: a guild-only save links the guild (admin proof still required — the
 // always-pass test stub stands in for a proven admin), a channel-only save sets

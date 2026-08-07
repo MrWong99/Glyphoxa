@@ -135,8 +135,12 @@ describe("Session", () => {
   it("reflects Idle → Live → Idle and resets the timer + shows the last summary", async () => {
     renderScreen();
 
-    // Idle → Live: Start flips the badge and swaps in the Stop button.
-    fireEvent.click(await screen.findByRole("button", { name: /start session/i }));
+    // Idle → Live: Start flips the badge and swaps in the Stop button. Start is
+    // held disabled while the channel list loads, so wait for it to enable
+    // (here the list read fails fast — the fakes serve no channels).
+    const startBtn = await screen.findByRole("button", { name: /start session/i });
+    await waitFor(() => expect(startBtn).toBeEnabled());
+    fireEvent.click(startBtn);
     expect(await screen.findByText("Live")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /stop session/i })).toBeInTheDocument();
 
@@ -1730,7 +1734,11 @@ describe("Session voice-channel picker", () => {
     expect(await screen.findByText("Idle")).toBeInTheDocument();
     expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+    // Start re-enables once the errored list read settles (the loading hold
+    // must not outlive the failure).
+    const startBtn = screen.getByRole("button", { name: /start session/i });
+    await waitFor(() => expect(startBtn).toBeEnabled());
+    fireEvent.click(startBtn);
     await waitFor(() => expect(startRequests).toEqual([""]));
     expect(await screen.findByText("Live")).toBeInTheDocument();
   });
@@ -1746,7 +1754,9 @@ describe("Session voice-channel picker", () => {
     expect(await screen.findByText("Idle")).toBeInTheDocument();
     expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /start session/i }));
+    const startBtn = screen.getByRole("button", { name: /start session/i });
+    await waitFor(() => expect(startBtn).toBeEnabled());
+    fireEvent.click(startBtn);
     await waitFor(() => expect(startRequests).toEqual([""]));
   });
 

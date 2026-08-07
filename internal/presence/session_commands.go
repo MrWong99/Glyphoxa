@@ -244,7 +244,7 @@ func startErrorMessage(err error) (string, bool) {
 		// once another Tenant's session ends.
 		return "The server is already running the maximum number of concurrent voice sessions — try again once one ends.", true
 	case errors.Is(err, session.ErrDiscordNotConfigured):
-		return "Discord isn't configured yet — set the Guild and voice channel on the web Configuration screen.", true
+		return "Discord isn't configured yet — link the Guild on the web Configuration screen, then pick a voice channel on the Session screen and save it as the default.", true
 	case errors.Is(err, session.ErrDiscordTokenMissing):
 		return "No Discord bot token is configured — add it on the web Configuration screen.", true
 	case errors.Is(err, session.ErrDiscordTokenUndecryptable):
