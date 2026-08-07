@@ -76,10 +76,10 @@ function mockBackend(
     // that the server's PermissionDenied proof message reaches the operator.
     discordSaveError?: string;
     discordSaveCode?: Code;
-    // boundGuild seeds an already-linked guild + voice channel, the state the
-    // #504 unlink control acts on. releaseCalls captures every
-    // ReleaseDiscordGuild request's guild_id; releaseError fails the release.
-    boundGuild?: { guildId: string; voiceChannelId: string };
+    // boundGuild seeds an already-linked guild, the state the #504 unlink
+    // control acts on. releaseCalls captures every ReleaseDiscordGuild
+    // request's guild_id; releaseError fails the release.
+    boundGuild?: { guildId: string };
     releaseCalls?: string[];
     releaseError?: string;
     // providerSaves captures every SaveProviderConfig request so tests can pin
@@ -95,8 +95,10 @@ function mockBackend(
     // client health the read surfaces (#489): "ok" / "waiting" / "failed" + detail.
     integrationState?: string;
     integrationDetail?: string;
-    // inviteResolve seeds the guild + voice channels ResolveGuildInvite returns
-    // for a pasted invite (#105). inviteError makes it fail instead.
+    // inviteResolve seeds the guild ResolveGuildInvite returns for a pasted
+    // invite (#105). voiceChannels still ride the wire (the RPC serves the
+    // Session screen too) but THIS screen only consumes the guild id/name.
+    // inviteError makes the resolve fail instead.
     inviteResolve?: { guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] };
     inviteError?: { code: Code; message: string };
     // inviteResolver, when set, computes the response PER code (and may return a
@@ -122,7 +124,6 @@ function mockBackend(
     gemini: opts.saved?.gemini,
     discord: opts.saved?.discord,
     guildId: opts.boundGuild?.guildId ?? "",
-    voiceChannelId: opts.boundGuild?.voiceChannelId ?? "",
     spendSoft: opts.spendCaps?.softUsd,
     spendHard: opts.spendCaps?.hardUsd,
   };
@@ -149,7 +150,6 @@ function mockBackend(
             cred("image", "gemini", state.gemini),
           ],
           guildId: state.guildId,
-          voiceChannelId: state.voiceChannelId,
           discordApplicationId: opts.discordApplicationId ?? "",
           integrationState: opts.integrationState ?? "",
           integrationDetail: opts.integrationDetail ?? "",
@@ -184,24 +184,26 @@ function mockBackend(
         opts.discordSaves?.push(req);
         if (opts.discordSaveError)
           throw new ConnectError(opts.discordSaveError, opts.discordSaveCode ?? Code.Internal);
-        // Presence semantics mirror the real server (#142): omitted IDs leave
-        // the stored ones untouched, and present-but-empty is REJECTED exactly
-        // like internal/rpc/provider.go — so a client that regresses into
-        // sending blank IDs fails loudly here instead of silently diverging.
-        const hasIDs = req.guildId !== undefined || req.voiceChannelId !== undefined;
-        if (hasIDs && (!req.guildId || !req.voiceChannelId)) {
+        // Presence semantics mirror the real server (#142): an omitted field
+        // leaves the stored value untouched, and present-but-empty is REJECTED
+        // per field exactly like internal/rpc/provider.go — so a client that
+        // regresses into sending blank IDs fails loudly here instead of
+        // silently diverging. (voice_channel_id still exists on the wire for
+        // the Session screen's Default Voice Channel; THIS screen never sends it.)
+        if (req.guildId !== undefined && req.guildId === "") {
+          throw new ConnectError("guild_id must not be empty when provided", Code.InvalidArgument);
+        }
+        if (req.voiceChannelId !== undefined && req.voiceChannelId === "") {
           throw new ConnectError(
-            "guild_id and voice_channel_id must both be non-empty when provided",
+            "voice_channel_id must not be empty when provided",
             Code.InvalidArgument,
           );
         }
         if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
         if (req.guildId !== undefined) state.guildId = req.guildId;
-        if (req.voiceChannelId !== undefined) state.voiceChannelId = req.voiceChannelId;
         return create(SaveDiscordSettingsResponseSchema, {
           credential: cred("discord", "discord", state.discord),
           guildId: state.guildId,
-          voiceChannelId: state.voiceChannelId,
         });
       },
       releaseDiscordGuild: (req) => {
@@ -215,8 +217,7 @@ function mockBackend(
           );
         }
         state.guildId = "";
-        state.voiceChannelId = "";
-        return create(ReleaseDiscordGuildResponseSchema, { guildId: "", voiceChannelId: "" });
+        return create(ReleaseDiscordGuildResponseSchema, { guildId: "" });
       },
       resolveGuildInvite: async (req) => {
         opts.inviteCodes?.push(req.inviteCode);
@@ -413,18 +414,23 @@ describe("Configuration", () => {
     expect(within(groqRow).queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("persists Guild ID and Voice channel ID", async () => {
-    renderScreen();
+  it("persists the Guild ID with a guild-only save (no voice channel on the wire)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
 
     const guild = await screen.findByLabelText("Guild ID");
-    const voice = screen.getByLabelText("Voice channel ID");
     fireEvent.change(guild, { target: { value: "472093001100" } });
-    fireEvent.change(voice, { target: { value: "472093774421" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
-    // Values survive the invalidation refetch (round-tripped through the RPC).
+    // The typed guild rides the wire ALONE: voice_channel_id has proto3
+    // presence, and this screen must never set it — sessions pick their
+    // channel on the Session screen.
+    await waitFor(() => expect(discordSaves).toHaveLength(1));
+    expect(discordSaves[0].guildId).toBe("472093001100");
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
+
+    // The value survives the invalidation refetch (round-tripped through the RPC).
     expect(await screen.findByDisplayValue("472093001100")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("472093774421")).toBeInTheDocument();
   });
 
   it("omits the guild/voice IDs from a token-only save (#142)", async () => {
@@ -447,30 +453,32 @@ describe("Configuration", () => {
     expect(discordSaves[0].voiceChannelId).toBeUndefined();
   });
 
-  it("disables the IDs save until both IDs are non-empty (#142)", async () => {
+  it("disables the IDs save until the Guild ID is non-empty (#142)", async () => {
     renderScreen();
 
-    // Fresh install: guild pasted, voice still blank. The server rejects
-    // present-but-empty IDs, so the client must not offer the save at all —
-    // a click here used to fail invisibly and leave nothing stored.
+    // Fresh install: nothing typed yet. The server rejects a present-but-empty
+    // ID, so the client must not offer the save at all — a click here used to
+    // fail invisibly and leave nothing stored.
     const guild = await screen.findByLabelText("Guild ID");
-    fireEvent.change(guild, { target: { value: "472093001100" } });
     const save = screen.getByRole("button", { name: /save discord settings/i });
     expect(save).toBeDisabled();
 
-    // Both filled -> the save unlocks.
-    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
+    // Guild ID filled -> the save unlocks.
+    fireEvent.change(guild, { target: { value: "472093001100" } });
     expect(save).toBeEnabled();
+
+    // Cleared again -> locked again.
+    fireEvent.change(guild, { target: { value: "" } });
+    expect(save).toBeDisabled();
   });
 
   it("surfaces a failed IDs save as a visible alert (#142)", async () => {
     renderScreen(mockBackend({ discordSaveError: "database is down" }));
 
-    // Both IDs filled, save offered — but the RPC fails. The rejection must
+    // Guild ID filled, save offered — but the RPC fails. The rejection must
     // leave visible evidence: nothing was stored, and a silent failure here
     // resurfaces later as an unrelated-looking session-start precondition error.
     fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
-    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
     const alert = await screen.findByRole("alert");
@@ -533,25 +541,26 @@ describe("Configuration", () => {
     expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
   });
 
-  it("autofills both ID fields from a pasted channel link with no network request (#101)", async () => {
+  it("autofills the Guild ID from a pasted channel link with no network request (#101)", async () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
-    renderScreen(mockBackend({ discordSaves }));
+    const inviteCodes: string[] = [];
+    renderScreen(mockBackend({ discordSaves, inviteCodes }));
 
     const paste = await screen.findByLabelText(/paste a discord link/i);
     fireEvent.change(paste, {
       target: { value: "https://discord.com/channels/472093001100472093/987654321098765432" },
     });
 
-    // Both snowflakes land in the (still editable) ID fields, purely client-side.
+    // The GUILD snowflake (not the channel's) lands in the still-editable
+    // Guild ID field, purely client-side.
     expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
-      "987654321098765432",
-    );
-    // Parsing issues NO save RPC — the autofill is local until the operator Saves.
+    // Parsing issues NO RPC — no save, no invite resolve; the autofill is
+    // local until the operator Saves.
     expect(discordSaves).toHaveLength(0);
+    expect(inviteCodes).toHaveLength(0);
   });
 
-  it("persists autofilled IDs through Save into the right wire fields and re-seeds them on reload (#101)", async () => {
+  it("persists the autofilled Guild ID through Save and re-seeds it on reload (#101)", async () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
     const transport = mockBackend({ discordSaves });
     const { unmount } = renderScreen(transport);
@@ -559,27 +568,24 @@ describe("Configuration", () => {
     fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
       target: { value: "discord.com/channels/472093001100472093/987654321098765432" },
     });
-    // The autofill marks the fields dirty, so Save picks up the pasted values.
+    // The autofill marks the field dirty, so Save picks up the pasted value.
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
-    // Pin the exact snowflake in the exact wire field: a guild/voice SWAP would
-    // still round-trip through the display, so a value-only check can't catch it.
+    // Pin the exact snowflake in the exact wire field: the GUILD id rides
+    // guild_id, and the channel snowflake from the link is NOT smuggled into
+    // voice_channel_id — that field stays off the wire entirely.
     await waitFor(() => expect(discordSaves).toHaveLength(1));
     expect(discordSaves[0].guildId).toBe("472093001100472093");
-    expect(discordSaves[0].voiceChannelId).toBe("987654321098765432");
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
 
-    // Reload (AC2): a fresh mount against the SAME stateful backend re-seeds both
-    // fields from what was persisted — the values survive the round-trip, and
-    // each lands back in its OWN field (guild in Guild ID, channel in Voice).
+    // Reload (AC2): a fresh mount against the SAME stateful backend re-seeds
+    // the field from what was persisted — the value survives the round-trip.
     unmount();
     renderScreen(transport);
     await waitFor(() =>
       expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(
         "472093001100472093",
       ),
-    );
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
-      "987654321098765432",
     );
   });
 
@@ -597,7 +603,6 @@ describe("Configuration", () => {
 
     // …and does not clobber what the operator already had.
     expect((guild as HTMLInputElement).value).toBe("existing-guild");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
   });
 
   it("tolerates scheme/subdomain/trailing-slash/query variants when autofilling (#101)", async () => {
@@ -609,16 +614,13 @@ describe("Configuration", () => {
     });
 
     expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
-      "987654321098765432",
-    );
     // A rejected paste's hint must not linger after a successful one.
     expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
   });
 });
 
-describe("Configuration invite picker (#105)", () => {
-  it("resolves a pasted invite to the guild's voice channels, sending the bare code", async () => {
+describe("Configuration invite autofill (#105)", () => {
+  it("resolves a pasted invite, sending the bare code, and auto-fills the Guild ID", async () => {
     const inviteCodes: string[] = [];
     renderScreen(
       mockBackend({
@@ -640,14 +642,19 @@ describe("Configuration invite picker (#105)", () => {
     // The BARE code crosses the wire — the SPA extracted it, not the whole URL.
     await waitFor(() => expect(inviteCodes).toEqual(["abc123"]));
 
-    // The guild header + exactly the returned voice channels (name + snowflake).
-    expect(await screen.findByText("The Keep")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /War Room/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Tavern/ })).toBeInTheDocument();
-    expect(screen.getByText("900")).toBeInTheDocument();
+    // On success the resolved guild id lands straight in the Guild ID field
+    // (no picker step — there is no channel picker anymore) and a confirmation
+    // line names the resolved guild.
+    const confirmation = await screen.findByTestId("resolved-guild");
+    expect(confirmation).toHaveTextContent("Guild ID filled from The Keep.");
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("111");
+    // The returned voice channels are NOT rendered — sessions pick their
+    // channel on the Session screen.
+    expect(screen.queryByRole("button", { name: /War Room/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Tavern/ })).not.toBeInTheDocument();
   });
 
-  it("fills both ID fields from a picked channel and persists them on Save", async () => {
+  it("fills the Guild ID from a resolved invite and persists it on Save", async () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
     renderScreen(
       mockBackend({
@@ -663,21 +670,17 @@ describe("Configuration invite picker (#105)", () => {
     fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
       target: { value: "discord.gg/abc123" },
     });
-    // Pick the channel from the resolved picker.
-    fireEvent.click(await screen.findByRole("button", { name: /War Room/ }));
 
-    // Both fields fill from the RESOLVED guild + the PICKED channel.
+    // The Guild ID fills from the RESOLVED guild once the confirmation lands.
+    await screen.findByTestId("resolved-guild");
     expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
-      "987654321098765432",
-    );
 
-    // Save carries BOTH exact snowflakes in their own wire fields (a swap would
-    // still round-trip through the display, so pin the exact field).
+    // Save carries the exact guild snowflake in guild_id and NOTHING in
+    // voice_channel_id — the resolved guild's channels never ride this save.
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
     await waitFor(() => expect(discordSaves).toHaveLength(1));
     expect(discordSaves[0].guildId).toBe("472093001100472093");
-    expect(discordSaves[0].voiceChannelId).toBe("987654321098765432");
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
   });
 
   it("renders a precondition failure verbatim with an add-bot hint, leaving fields unchanged", async () => {
@@ -702,9 +705,10 @@ describe("Configuration invite picker (#105)", () => {
     expect(screen.getByText(/at the foot of this card/i)).toBeInTheDocument();
     expect(screen.getByText(/then paste the invite again/i)).toBeInTheDocument();
 
-    // A failed resolve touches nothing the operator already had.
+    // A failed resolve touches nothing the operator already had, and no
+    // resolved-guild confirmation appears.
     expect((guild as HTMLInputElement).value).toBe("existing-guild");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+    expect(screen.queryByTestId("resolved-guild")).not.toBeInTheDocument();
   });
 
   it("renders a DISTINCT precondition message verbatim without the add-bot hint (no-token FP)", async () => {
@@ -754,9 +758,9 @@ describe("Configuration invite picker (#105)", () => {
   });
 
   it("ignores a late resolve for a superseded invite (latest-wins)", async () => {
-    // Paste invite A (slow), then invite B (fast). B's picker renders; A's LATE
-    // response must not swap it back — picking a channel then would fill the wrong
-    // guild's snowflake and Save would persist it.
+    // Paste invite A (slow), then invite B (fast). B fills the Guild ID and
+    // shows its confirmation; A's LATE response must not swap either back —
+    // it would fill the WRONG guild's snowflake and Save would persist it.
     let releaseA: (v: {
       guildId: string;
       guildName: string;
@@ -781,15 +785,19 @@ describe("Configuration invite picker (#105)", () => {
     fireEvent.change(paste, { target: { value: "discord.gg/slowaaa" } });
     await new Promise((r) => setTimeout(r, 500));
 
-    // B supersedes A and resolves immediately → B's picker wins.
+    // B supersedes A and resolves immediately → B's fill + confirmation win.
     fireEvent.change(paste, { target: { value: "discord.gg/fastbbb" } });
-    expect(await screen.findByText("Guild B")).toBeInTheDocument();
+    const confirmation = await screen.findByTestId("resolved-guild");
+    expect(confirmation).toHaveTextContent("Guild ID filled from Guild B.");
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("222");
 
-    // A's slow resolve lands late — the guard drops it, the picker stays B.
+    // A's slow resolve lands late — the guard drops it: the Guild ID stays
+    // B's and the confirmation still names Guild B.
     releaseA({ guildId: "111", guildName: "Guild A", voiceChannels: [] });
     await new Promise((r) => setTimeout(r, 50));
-    expect(screen.getByText("Guild B")).toBeInTheDocument();
-    expect(screen.queryByText("Guild A")).not.toBeInTheDocument();
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("222");
+    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Guild ID filled from Guild B.");
+    expect(screen.queryByText(/Guild A/)).not.toBeInTheDocument();
   });
 
   it("surfaces an invalid/expired invite inline, leaving fields unchanged", async () => {
@@ -808,10 +816,12 @@ describe("Configuration invite picker (#105)", () => {
 
     expect(await screen.findByText(/invalid or expired/i)).toBeInTheDocument();
     expect((guild as HTMLInputElement).value).toBe("existing-guild");
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+    expect(screen.queryByTestId("resolved-guild")).not.toBeInTheDocument();
   });
 
-  it("shows an empty-state line when the resolved guild has no voice channels", async () => {
+  it("fills the Guild ID even when the resolved guild has no voice channels", async () => {
+    // No channel list exists on this screen anymore, so a channel-less guild
+    // is not a dead end: the guild fill and confirmation happen regardless.
     renderScreen(
       mockBackend({
         inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] },
@@ -822,7 +832,9 @@ describe("Configuration invite picker (#105)", () => {
       target: { value: "discord.gg/abc123" },
     });
 
-    expect(await screen.findByText(/no voice channels in the keep/i)).toBeInTheDocument();
+    const confirmation = await screen.findByTestId("resolved-guild");
+    expect(confirmation).toHaveTextContent("Guild ID filled from The Keep.");
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("111");
   });
 });
 
@@ -1023,7 +1035,6 @@ describe("Configuration first-run (#267)", () => {
     );
 
     fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
-    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
     // The operator must see the server's actionable proof message, not a
@@ -1036,7 +1047,7 @@ describe("Configuration first-run (#267)", () => {
     const releaseCalls: string[] = [];
     renderScreen(
       mockBackend({
-        boundGuild: { guildId: "472093001100", voiceChannelId: "472093774421" },
+        boundGuild: { guildId: "472093001100" },
         releaseCalls,
       }),
     );
@@ -1049,11 +1060,10 @@ describe("Configuration first-run (#267)", () => {
     fireEvent.click(screen.getByRole("button", { name: /confirm unlink/i }));
     await waitFor(() => expect(releaseCalls).toEqual(["472093001100"]));
 
-    // The refetched config comes back unbound: fields empty, control gone.
+    // The refetched config comes back unbound: field empty, control gone.
     await waitFor(() =>
       expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(""),
     );
-    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
   });
 
@@ -1066,7 +1076,7 @@ describe("Configuration first-run (#267)", () => {
   it("surfaces a failed release as a visible alert (#504)", async () => {
     renderScreen(
       mockBackend({
-        boundGuild: { guildId: "472093001100", voiceChannelId: "472093774421" },
+        boundGuild: { guildId: "472093001100" },
         releaseError: "that Discord server is not the one currently linked; reload and try again",
       }),
     );

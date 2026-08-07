@@ -40,6 +40,7 @@ type fakeSessionManager struct {
 	spend            spend.Status // the live meter snapshot GetSession surfaces (#130)
 	startTenant      uuid.UUID    // the tenant id StartSession threaded into Start (#473 coherence)
 	startCampaign    uuid.UUID    // the campaign id StartSession resolved and passed to Start (#473 coherence)
+	startVoiceChan   string       // the explicit voice_channel_id StartSession passed to Start ("" = guild default)
 	// tenantID keys the fake's live session by Tenant (#488 review item 8): when set,
 	// Active/Stop/mute/spend match ONLY the passed tenant, so a test proves the handler
 	// forwards the auth-ctx tenant (a wrong/Nil tenant then misses). uuid.Nil = match
@@ -53,12 +54,13 @@ func (f *fakeSessionManager) matchesTenant(tenantID uuid.UUID) bool {
 	return f.tenantID == uuid.Nil || tenantID == f.tenantID
 }
 
-func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
+func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCalls++
 	f.startTenant = tenantID
 	f.startCampaign = campaignID
+	f.startVoiceChan = voiceChannelID
 	if f.startErr != nil {
 		return storage.VoiceSession{}, f.startErr
 	}
@@ -476,7 +478,7 @@ func TestSessionStartStopReflectsSnapshot(t *testing.T) {
 func activeMgr(t *testing.T, campaignID uuid.UUID, agentIDs ...string) *fakeSessionManager {
 	t.Helper()
 	mgr := &fakeSessionManager{campaignAgentIDs: agentIDs}
-	if _, err := mgr.Start(context.Background(), uuid.New(), campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), campaignID, ""); err != nil {
 		t.Fatalf("activate fake manager: %v", err)
 	}
 	return mgr

@@ -170,10 +170,11 @@ func TestUseForeignCampaignUUIDNotMatched(t *testing.T) {
 	}
 }
 
-// startCall records the (tenant, campaign) a Start was driven with.
+// startCall records the (tenant, campaign, voice channel) a Start was driven with.
 type startCall struct {
-	tenantID   uuid.UUID
-	campaignID uuid.UUID
+	tenantID       uuid.UUID
+	campaignID     uuid.UUID
+	voiceChannelID string
 }
 
 // fakeVoice is a configurable VoiceControl for the start/end command tests.
@@ -192,8 +193,8 @@ type fakeVoice struct {
 	stopCalled bool
 }
 
-func (f *fakeVoice) Start(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
-	f.started = &startCall{tenantID, campaignID}
+func (f *fakeVoice) Start(_ context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error) {
+	f.started = &startCall{tenantID, campaignID, voiceChannelID}
 	if f.startErr != nil {
 		return storage.VoiceSession{}, f.startErr
 	}
@@ -322,6 +323,9 @@ func TestStartSuccessUsesResolvedCampaign(t *testing.T) {
 
 	if voice.started == nil || voice.started.tenantID != lost.TenantID || voice.started.campaignID != lost.ID {
 		t.Fatalf("Start called with %+v, want tenant %s campaign %s", voice.started, lost.TenantID, lost.ID)
+	}
+	if voice.started.voiceChannelID != "" {
+		t.Errorf("Start voiceChannelID = %q, want \"\" (the guild's default voice channel)", voice.started.voiceChannelID)
 	}
 	if resp.deferred == nil {
 		t.Error("start did not Defer before the slow work")

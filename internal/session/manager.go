@@ -215,10 +215,15 @@ type LoopRunner func(ctx context.Context, cfg wirenpc.Config) error
 type activeSession struct {
 	campaignID uuid.UUID
 	tenantID   uuid.UUID
-	session    storage.VoiceSession
-	endErr     error
-	cancel     context.CancelFunc
-	done       chan struct{}
+	// channelID is the voice channel this session actually joined (the explicit
+	// Start pick or the Default Voice Channel it fell back to) — the read behind
+	// ActiveVoiceChannelID, so channel-scoped consumers (the Players panel member
+	// list) follow the session rather than the stored default.
+	channelID string
+	session   storage.VoiceSession
+	endErr    error
+	cancel    context.CancelFunc
+	done      chan struct{}
 	// bus is this session's OWN voiceevent.Bus (#487): the session-local reactors
 	// (orchestrator, barge, mute/tape wiring, detector, observe StageSubscriber)
 	// subscribe here, and every Manager control publish for this session
@@ -546,11 +551,15 @@ func (m *Manager) ReconcileOrphans(ctx context.Context) error {
 }
 
 // Start launches the live voice loop for a campaign and records a running
-// voice_sessions row. It sources the Discord guild/channel from the saved
-// deployment config (#72), rejects a second concurrent start (ErrSessionActive),
-// and returns the created row. The loop runs on a background context the Manager
-// cancels on Stop / Shutdown — it deliberately outlives the request ctx.
-func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
+// voice_sessions row. It sources the Discord guild from the saved deployment
+// config (#72); the joined voice channel is the caller's explicit
+// voiceChannelID when non-empty, else the guild's stored Default Voice Channel
+// (deployment_config.voice_channel_id) — neither resolving is
+// ErrDiscordNotConfigured. It rejects a second concurrent start
+// (ErrSessionActive) and returns the created row. The loop runs on a background
+// context the Manager cancels on Stop / Shutdown — it deliberately outlives the
+// request ctx.
+func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error) {
 	if !m.enabled {
 		return storage.VoiceSession{}, ErrVoiceUnavailable
 	}
@@ -605,7 +614,14 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return storage.VoiceSession{}, fmt.Errorf("session: load deployment config: %w", err)
 	}
-	if dep.GuildID == "" || dep.VoiceChannelID == "" {
+	// The joined channel is the caller's explicit pick when one rode the Start,
+	// else the guild's stored Default Voice Channel; neither resolving (or no
+	// linked guild) is the same unconfigured precondition as before.
+	channelID := voiceChannelID
+	if channelID == "" {
+		channelID = dep.VoiceChannelID
+	}
+	if dep.GuildID == "" || channelID == "" {
 		return storage.VoiceSession{}, ErrDiscordNotConfigured
 	}
 
@@ -672,7 +688,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	cfg := m.base
 	cfg.Token = token
 	cfg.Guild = dep.GuildID
-	cfg.Channel = dep.VoiceChannelID
+	cfg.Channel = channelID
 	// Carry the selected campaign into the loop (#323): the same id stamped onto the
 	// voice_sessions row (CreateVoiceSession above) drives RunFromDB's campaign-scoped
 	// roster/language load, so the voiced roster can never diverge from the bound
@@ -732,6 +748,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	as := &activeSession{
 		campaignID:  campaignID,
 		tenantID:    tenantID,
+		channelID:   channelID,
 		session:     vs,
 		cancel:      cancel,
 		done:        make(chan struct{}),
@@ -1183,6 +1200,22 @@ func (m *Manager) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSe
 		return storage.VoiceSession{}, false, nil
 	}
 	return as.session, true, nil
+}
+
+// ActiveVoiceChannelID reports the voice channel tenantID's live Voice Session
+// actually joined (the explicit Start pick or the Default Voice Channel it fell
+// back to). ok is false when the Tenant has no live session — the caller falls
+// back to the stored Default Voice Channel. It keeps channel-scoped consumers
+// (the Players panel member list) reading the SESSION's channel, which since
+// per-start selection may differ from the stored default.
+func (m *Manager) ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	as := m.active[tenantID]
+	if as == nil || as.ended {
+		return "", false
+	}
+	return as.channelID, true
 }
 
 // IsCampaignLive reports whether ANY live Voice Session across all Tenants is bound

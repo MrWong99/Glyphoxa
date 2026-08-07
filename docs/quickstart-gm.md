@@ -128,14 +128,18 @@ Two things to know:
 - If `DISCORD_OAUTH_CLIENT_ID` is unset the button is disabled with a note saying
   so — the link cannot be built.
 
-### 2c. Fill the Guild and voice-channel IDs
+### 2c. Fill the Guild ID
+
+The Configuration screen links the **Guild** only — the voice channel a session
+joins is picked on the **Session** screen (step 5), where a **Default Voice
+Channel** can also be saved.
 
 The **Paste a Discord link** field takes either format:
 
 | You paste | What happens |
 |---|---|
-| A **channel link** (`https://discord.com/channels/<guild>/<channel>`, from Discord's *Copy Link*) | Parsed in the browser, no network call. Both ID fields fill instantly. |
-| An **invite link** (`discord.gg/<code>` or `discord.com/invite/<code>`) | Parsed in the browser to a bare invite code, then resolved server-side (with the decrypted Bot token) to the Guild's voice channels. A **picker** lists them by name and snowflake; clicking one fills both ID fields. |
+| A **channel link** (`https://discord.com/channels/<guild>/<channel>`, from Discord's *Copy Link*) | Parsed in the browser, no network call. The Guild ID fills instantly. |
+| An **invite link** (`discord.gg/<code>` or `discord.com/invite/<code>`) | Parsed in the browser to a bare invite code, then resolved server-side (with the decrypted Bot token) to the Guild. The Guild ID fills and a confirmation names the resolved Guild. |
 
 Invite-resolution errors are specific:
 
@@ -146,16 +150,15 @@ Invite-resolution errors are specific:
 | A precondition message about the token | No Bot token is saved yet — do step 2a first. |
 | *Couldn't read that link…* | Not a Discord channel or invite link. |
 
-A failed resolve leaves the fields and any previously resolved picker untouched.
-Only voice channels are offered (stage channels are excluded).
+A failed resolve leaves the field and any previously resolved confirmation
+untouched.
 
-You can also type the two snowflakes directly into **Guild ID** and **Voice
-channel ID** (Discord → Settings → Advanced → Developer Mode, then right-click →
-Copy ID).
+You can also type the Guild snowflake directly into **Guild ID** (Discord →
+Settings → Advanced → Developer Mode, then right-click → Copy ID).
 
-Press **Save Discord settings**. The button stays disabled until *both* IDs are
-non-empty. Saving the token and saving the IDs are independent writes, so
-replacing the token never clobbers the IDs.
+Press **Save Discord settings**. The button stays disabled until the Guild ID is
+non-empty. Saving the token and saving the Guild are independent writes, so
+replacing the token never clobbers the Guild.
 
 When a Bot token and a Guild are both configured, the Bot registers its Slash
 Commands **per-Guild** at boot (and re-registers when you next save Discord
@@ -323,11 +326,15 @@ still cascades server-side.
 ## 5. Run a Voice Session
 
 Preconditions, all from above: Bot token saved, Bot authorized into the Guild
-(step 2b), Guild ID + Voice channel ID saved, Groq + ElevenLabs keys **Healthy**,
-running in `-mode all`.
+(step 2b), Guild ID saved, Groq + ElevenLabs keys **Healthy**, running in
+`-mode all`.
 
-Join the voice channel yourself in Discord first — the Bot joins the channel you
-configured, and it needs someone to talk to.
+The Session screen's idle card shows a **voice channel picker** listing the
+Guild's voice channels (stage channels are excluded). Pick the channel this
+session should join; **Set as default** saves the pick as the Guild's Default
+Voice Channel, which pre-selects the picker next time and is what
+`/glyphoxa start` joins. Join the voice channel yourself in Discord first — the
+Bot joins the channel you picked, and it needs someone to talk to.
 
 ### 5a. Start and stop
 

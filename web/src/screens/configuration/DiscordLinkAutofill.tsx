@@ -1,27 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { Link as LinkIcon } from "lucide-react";
+import { Link as LinkIcon, Check } from "lucide-react";
 
-import {
-  ProviderService,
-  type ResolveGuildInviteResponse,
-} from "@gen/glyphoxa/management/v1/management_pb";
+import { ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
 import { parseDiscordLink } from "@/lib/discordLink";
-import { InviteChannelPicker } from "./InviteChannelPicker";
 
 // DiscordLinkAutofill — the Configuration Discord card's "Paste a Discord link"
 // field (#101/#105, ADR-0047). It parses the paste client-side (no network) and
 // takes one of two paths:
-//   - a channel deep-link carries BOTH snowflakes, so it fills the two ID fields
-//     directly via onFill;
+//   - a channel deep-link carries the guild snowflake in the URL, so it fills
+//     the Guild ID field directly via onFill;
 //   - an invite link carries only a code, which it resolves server-side
-//     (ResolveGuildInvite, with the decrypted Bot token) to the guild's voice
-//     channels, then renders a picker; picking a channel fills the IDs via onFill.
-// onFill MUST be the Configuration screen's dirty-tracking edit path — a raw
-// setState would let a config refetch clobber the fill. A failed resolve leaves
-// the fields and any previously-resolved picker untouched.
+//     (ResolveGuildInvite, with the decrypted Bot token) to the guild, fills the
+//     Guild ID via onFill, and shows the resolved guild name as confirmation.
+// The voice channel is no longer picked here: sessions choose their channel on
+// the Session screen (where the Default Voice Channel is also set), so this
+// field only ever fills the guild. onFill MUST be the Configuration screen's
+// dirty-tracking edit path — a raw setState would let a config refetch clobber
+// the fill. A failed resolve leaves the field and any previously-resolved
+// confirmation untouched.
 
 // ADD_BOT_HINT points a not-a-member precondition failure back at the Add-Glyphoxa
 // action, which renders at the FOOT of this card (below the Save button) — so the
@@ -46,22 +45,23 @@ const RESOLVE_DEBOUNCE_MS = 400;
 export function DiscordLinkAutofill({
   onFill,
 }: {
-  onFill: (guildId: string, channelId: string) => void;
+  onFill: (guildId: string) => void;
 }) {
   const [link, setLink] = useState("");
   const [linkError, setLinkError] = useState<ReactNode>(null);
-  // The picker is held in local state, not read off the mutation's `data`: a
-  // later failed resolve must leave the previous picker standing (ADR-0047), and
-  // react-query clears `data` on the next mutate. onSuccess is the only writer.
-  const [picker, setPicker] = useState<ResolveGuildInviteResponse | null>(null);
+  // The resolved-guild confirmation is held in local state, not read off the
+  // mutation's `data`: a later failed resolve must leave the previous
+  // confirmation standing (ADR-0047), and react-query clears `data` on the next
+  // mutate. onSuccess is the only writer.
+  const [resolvedGuild, setResolvedGuild] = useState<string | null>(null);
 
   // currentCode is the invite code the input parses to RIGHT NOW — null when it
   // is empty, a channel link, or unparseable. Mutation callbacks land in
   // completion order, so a slow resolve for a superseded paste can arrive after a
   // newer one; the callbacks bail unless their request code still matches this
-  // ref (latest-wins, #245). Without it a stale success overwrites a newer picker
-  // (picking then fills the WRONG guild) or wipes a current parse error, and a
-  // stale error paints over a valid picker.
+  // ref (latest-wins, #245). Without it a stale success overwrites a newer fill
+  // (the WRONG guild) or wipes a current parse error, and a stale error paints
+  // over a valid confirmation.
   const currentCode = useRef<string | null>(null);
   // debounceTimer holds the pending resolve; every change clears it first, so a
   // burst of keystrokes collapses to one resolve of the final value (#245).
@@ -71,7 +71,8 @@ export function DiscordLinkAutofill({
   const resolve = useMutation(ProviderService.method.resolveGuildInvite, {
     onSuccess: (res, variables) => {
       if (variables.inviteCode !== currentCode.current) return; // superseded
-      setPicker(res);
+      onFill(res.guildId);
+      setResolvedGuild(res.guildName);
       setLinkError(null);
     },
     onError: (err, variables) => {
@@ -97,13 +98,13 @@ export function DiscordLinkAutofill({
       return;
     }
     if (parsed.kind === "channel") {
-      // Self-describing: both ids are in the URL, fill locally with no round-trip.
+      // Self-describing: the guild id is in the URL, fill locally with no round-trip.
       currentCode.current = null;
       setLinkError(null);
-      onFill(parsed.guildId, parsed.channelId);
+      onFill(parsed.guildId);
       return;
     }
-    // Invite: only the code is known; the guild + channels resolve server-side.
+    // Invite: only the code is known; the guild resolves server-side.
     // currentCode updates NOW (before the debounce) so a still-in-flight earlier
     // resolve is recognised as superseded when it lands.
     const code = parsed.code;
@@ -121,18 +122,16 @@ export function DiscordLinkAutofill({
         label="Paste a Discord link"
         placeholder="https://discord.com/channels/… or discord.gg/…"
         icon={<LinkIcon size={15} />}
-        hint="Paste a channel link to fill both IDs, or an invite link to pick a voice channel."
+        hint="Paste a channel or invite link to fill the Guild ID."
         error={linkError}
         value={link}
         onChange={(e) => onPaste(e.target.value)}
       />
       {resolve.isPending && <p className="gx-discord__resolving">Resolving invite…</p>}
-      {picker && (
-        <InviteChannelPicker
-          guildName={picker.guildName}
-          channels={picker.voiceChannels}
-          onPick={(channelId) => onFill(picker.guildId, channelId)}
-        />
+      {resolvedGuild && (
+        <p className="gx-discord__resolved" data-testid="resolved-guild">
+          <Check size={13} aria-hidden="true" /> Guild ID filled from {resolvedGuild}.
+        </p>
       )}
     </div>
   );

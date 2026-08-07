@@ -160,6 +160,61 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 	return d, nil
 }
 
+// SaveDiscordGuild upserts only the guild_id, leaving the Bot token untouched,
+// and returns the resulting row. The stored Default Voice Channel
+// (voice_channel_id) survives a re-save of the SAME guild but is cleared when
+// the guild changes — a channel snowflake belongs to one guild, so carrying it
+// across a re-bind would point sessions at a channel of the OLD guild. A
+// guild_id already bound by a DIFFERENT Tenant trips the first-registrar-wins
+// partial UNIQUE index (23505 on deployment_config_guild_owner) and yields
+// ErrGuildTaken, exactly like SaveDiscordChannels.
+func (s *Store) SaveDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (DeploymentConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`INSERT INTO deployment_config (tenant_id, guild_id)
+		 VALUES ($1, $2)
+		 ON CONFLICT (tenant_id) DO UPDATE
+		   SET guild_id = EXCLUDED.guild_id,
+		       voice_channel_id = CASE WHEN deployment_config.guild_id = EXCLUDED.guild_id
+		                               THEN deployment_config.voice_channel_id
+		                               ELSE '' END,
+		       updated_at = now()
+		 RETURNING `+deploymentConfigColumns,
+		tenantID, guildID)
+	d, err := scanDeploymentConfig(row)
+	if err != nil {
+		// The tenant_id conflict is absorbed by the upsert, so the only unique
+		// violation that can escape here is the guild-owner index.
+		if code, ok := pgErrCode(err); ok && code == "23505" {
+			return DeploymentConfig{}, ErrGuildTaken
+		}
+		return DeploymentConfig{}, fmt.Errorf("storage: save discord guild for tenant %s: %w", tenantID, err)
+	}
+	return d, nil
+}
+
+// SaveDefaultVoiceChannel stores the Tenant's Default Voice Channel — the
+// channel a session start falls back to when no explicit pick rides the
+// StartSession request. It requires a linked guild (a default channel is
+// meaningless without one, and the picker that offers channels needs the guild
+// anyway): no bound-guild row yields ErrNotFound, which the RPC maps to a
+// "link a Discord server first" precondition.
+func (s *Store) SaveDefaultVoiceChannel(ctx context.Context, tenantID uuid.UUID, voiceChannelID string) (DeploymentConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE deployment_config
+		    SET voice_channel_id = $2, updated_at = now()
+		  WHERE tenant_id = $1 AND guild_id <> ''
+		 RETURNING `+deploymentConfigColumns,
+		tenantID, voiceChannelID)
+	d, err := scanDeploymentConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeploymentConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentConfig{}, fmt.Errorf("storage: save default voice channel for tenant %s: %w", tenantID, err)
+	}
+	return d, nil
+}
+
 // ReleaseDiscordGuild frees a Tenant's bound guild (#504): an atomic
 // compare-and-clear — the caller echoes the guild_id it believes is bound, and
 // the row is cleared only when tenant AND guild match (no read-then-write race).

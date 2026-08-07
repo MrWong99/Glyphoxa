@@ -24,10 +24,11 @@ type DeploymentSharer struct {
 	cipher *crypto.Cipher
 	log    *slog.Logger
 
-	// listFn / postFn are seams so tests point the Discord calls at a fake server;
-	// they default to the live discordshare functions.
-	listFn func(ctx context.Context, token, guildID string, log *slog.Logger) ([]discordshare.Channel, error)
-	postFn func(ctx context.Context, token, channelID, caption, filename, contentType string, data []byte, log *slog.Logger) error
+	// listFn / listVoiceFn / postFn are seams so tests point the Discord calls at
+	// a fake server; they default to the live discordshare functions.
+	listFn      func(ctx context.Context, token, guildID string, log *slog.Logger) ([]discordshare.Channel, error)
+	listVoiceFn func(ctx context.Context, token, guildID string, log *slog.Logger) ([]discordshare.Channel, error)
+	postFn      func(ctx context.Context, token, channelID, caption, filename, contentType string, data []byte, log *slog.Logger) error
 }
 
 // deploymentReader is the narrow store surface DeploymentSharer needs; *storage.Store
@@ -44,11 +45,12 @@ func NewDeploymentSharer(deps deploymentReader, cipher *crypto.Cipher, log *slog
 		log = slog.Default()
 	}
 	return &DeploymentSharer{
-		deps:   deps,
-		cipher: cipher,
-		log:    log,
-		listFn: discordshare.ListTextChannels,
-		postFn: discordshare.PostFile,
+		deps:        deps,
+		cipher:      cipher,
+		log:         log,
+		listFn:      discordshare.ListTextChannels,
+		listVoiceFn: discordshare.ListVoiceChannels,
+		postFn:      discordshare.PostFile,
 	}
 }
 
@@ -85,6 +87,17 @@ func (d *DeploymentSharer) ListTextChannels(ctx context.Context) ([]discordshare
 		return nil, err
 	}
 	return d.listFn(ctx, token, guildID, d.log)
+}
+
+// ListVoiceChannels implements [VoiceChannelLister]: the linked guild's voice
+// channels for the Session screen's channel picker, resolved with the same
+// tenant-scoped token + guild read as the text-channel list.
+func (d *DeploymentSharer) ListVoiceChannels(ctx context.Context) ([]discordshare.Channel, error) {
+	token, guildID, err := d.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return d.listVoiceFn(ctx, token, guildID, d.log)
 }
 
 // PostClip implements [HighlightSharer].

@@ -37,7 +37,7 @@ func muteManager(t *testing.T, store session.Store) (*session.Manager, *voiceeve
 func startMuteSession(t *testing.T, mgr *session.Manager) (tenantID, campaignID uuid.UUID) {
 	t.Helper()
 	tenantID, campaignID = uuid.New(), uuid.New()
-	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
@@ -197,7 +197,7 @@ func TestStartResetsMuteSet(t *testing.T) {
 	bart := seedAgents(store, 1)[0]
 	bartID := bart.ID.String()
 	mgr, _ := muteManager(t, store)
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start 1: %v", err)
 	}
 	if _, err := mgr.SetAgentMute(context.Background(), tenantID, bartID, true); err != nil {
@@ -207,7 +207,7 @@ func TestStartResetsMuteSet(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	if _, err := mgr.Start(context.Background(), tenantID, uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)

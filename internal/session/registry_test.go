@@ -24,7 +24,7 @@ func startedManagerOnBus(t *testing.T, reg *session.Registry, bus *voiceevent.Bu
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "test-token", Bus: bus}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg})
 	tenantID := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *test
 	}
 	mgr := session.NewManager(store, runner, wirenpc.Config{Token: "test-token", Bus: procBus}, nil,
 		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg})
-	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestManager_EndWindowIsUnresolvable(t *testing.T) {
 		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg, Transcript: probe})
 
 	tenantID := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

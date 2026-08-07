@@ -18,7 +18,7 @@ import (
 // the parent row every voice_session_controls row hangs off.
 func seedControlIntent(t *testing.T, st *storage.Store, tenantID, campaignID uuid.UUID) storage.VoiceSessionIntent {
 	t.Helper()
-	intent, err := st.CreateVoiceSessionIntent(context.Background(), tenantID, campaignID)
+	intent, err := st.CreateVoiceSessionIntent(context.Background(), tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("create intent: %v", err)
 	}

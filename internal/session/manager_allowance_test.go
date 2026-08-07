@@ -51,7 +51,7 @@ func TestStart_AllowanceExhausted_Refused(t *testing.T) {
 	tenantID := uuid.New()
 	mgr := allowanceManager(t, store, newReRunner().run, voiceevent.NewBus(), chk)
 
-	_, err := mgr.Start(context.Background(), tenantID, uuid.New())
+	_, err := mgr.Start(context.Background(), tenantID, uuid.New(), "")
 	if !errors.Is(err, session.ErrAllowanceExhausted) {
 		t.Fatalf("Start = %v, want ErrAllowanceExhausted", err)
 	}
@@ -71,7 +71,7 @@ func TestStart_AllowanceReadError_FailsClosed(t *testing.T) {
 	chk := &fakeAllowance{err: errors.New("billing db down")}
 	mgr := allowanceManager(t, store, newReRunner().run, voiceevent.NewBus(), chk)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err == nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err == nil {
 		t.Fatal("Start must fail when the allowance read fails")
 	}
 	if n := store.runningCount(); n != 0 {
@@ -88,7 +88,7 @@ func TestStart_NoAllowance_ByteForByte(t *testing.T) {
 	chk := &fakeAllowance{} // IncludedUSD nil
 	mgr := allowanceManager(t, store, runner.run, voiceevent.NewBus(), chk)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -112,7 +112,7 @@ func TestAllowanceRemaining_TightensHardCap_EndsWithAllowanceReason(t *testing.T
 	events := collectSpendCaps(bus)
 	mgr := allowanceManager(t, store, runner.run, bus, chk)
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestTenantCapBelowAllowance_KeepsSpendCapReason(t *testing.T) {
 	runner := newReRunner()
 	mgr := allowanceManager(t, store, runner.run, voiceevent.NewBus(), chk)
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

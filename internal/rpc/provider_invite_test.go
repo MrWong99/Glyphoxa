@@ -54,6 +54,14 @@ func (f *fakeInviteStore) SaveDiscordChannels(context.Context, uuid.UUID, string
 	return storage.DeploymentConfig{}, nil
 }
 
+func (f *fakeInviteStore) SaveDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, nil
+}
+
+func (f *fakeInviteStore) SaveDefaultVoiceChannel(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, nil
+}
+
 func (f *fakeInviteStore) ReleaseDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
 	return storage.DeploymentConfig{}, storage.ErrNotFound
 }

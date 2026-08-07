@@ -24,7 +24,10 @@ import (
 // drives (ADR-0039). *session.Manager satisfies it; tests use a fake so the
 // handler is exercised without Discord.
 type SessionManager interface {
-	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
+	// Start launches the voice loop. voiceChannelID is the explicit channel THIS
+	// session joins; "" falls back to the guild's Default Voice Channel
+	// (deployment_config.voice_channel_id).
+	Start(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error)
 	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
 	// Active reports tenantID's live Voice Session (S3, #488): the per-Tenant read
 	// replacing the single-active Snapshot, so with N concurrent sessions this
@@ -129,6 +132,12 @@ type SessionServer struct {
 	sharer     HighlightSharer
 	replayer   HighlightReplayer
 	shareStore ShareChannelStore
+
+	// voiceChannels + deployments back ListSessionVoiceChannels (the Session
+	// screen's channel picker); wired via SetVoiceChannels after construction.
+	// Nil (unwired) makes it report CodeUnimplemented rather than panic.
+	voiceChannels VoiceChannelLister
+	deployments   deploymentReader
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)
@@ -209,14 +218,23 @@ func (s *SessionServer) GetSession(
 }
 
 // StartSession launches the voice loop for the active campaign and returns the
-// created running session.
+// created running session. An optional voice_channel_id picks the channel THIS
+// session joins; empty falls back to the guild's Default Voice Channel.
 func (s *SessionServer) StartSession(
 	ctx context.Context,
-	_ *connect.Request[managementv1.StartSessionRequest],
+	req *connect.Request[managementv1.StartSessionRequest],
 ) (*connect.Response[managementv1.StartSessionResponse], error) {
 	tenantID, err := s.tenant(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// A non-empty pick must at least be snowflake-shaped: an accidental
+	// non-id string (a channel NAME, a pasted URL) fails fast here instead of
+	// riding into the voice loop's Discord join.
+	voiceChannelID := req.Msg.GetVoiceChannelId()
+	if voiceChannelID != "" && !snowflakePattern.MatchString(voiceChannelID) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_channel_id must be a Discord channel id"))
 	}
 
 	campaign, err := s.startCampaign(ctx)
@@ -228,7 +246,7 @@ func (s *SessionServer) StartSession(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	vs, err := s.mgr.Start(ctx, tenantID, campaign.ID)
+	vs, err := s.mgr.Start(ctx, tenantID, campaign.ID, voiceChannelID)
 	if err != nil {
 		return nil, s.startError(err)
 	}
@@ -271,7 +289,7 @@ func (s *SessionServer) startError(err error) error {
 	case errors.Is(err, session.ErrSessionActive):
 		return connect.NewError(connect.CodeAlreadyExists, errors.New("a voice session is already active"))
 	case errors.Is(err, session.ErrDiscordNotConfigured):
-		return connect.NewError(connect.CodeFailedPrecondition, errors.New("the Discord guild/voice channel are not configured"))
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("no Discord voice channel resolved — link a Discord server in Configuration, then pick a voice channel"))
 	case errors.Is(err, session.ErrDiscordTokenMissing):
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("no Discord bot token is configured"))
 	case errors.Is(err, session.ErrDiscordTokenUndecryptable):

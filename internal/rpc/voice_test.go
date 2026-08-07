@@ -805,7 +805,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 
 	// Saving Discord settings busts it too.
 	if _, err := providerSrv.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: ptr("g1"), VoiceChannelId: ptr("c1"),
+		GuildId: ptr("111222333"), VoiceChannelId: ptr("444555666"),
 	})); err != nil {
 		t.Fatalf("SaveDiscordSettings: %v", err)
 	}
@@ -849,6 +849,16 @@ func (stubProviderStore) SaveDiscordBotToken(context.Context, uuid.UUID, []byte,
 
 func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
 	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
+}
+
+func (stubProviderStore) SaveDiscordGuild(_ context.Context, _ uuid.UUID, guildID string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{GuildID: guildID}, nil
+}
+
+// SaveDefaultVoiceChannel: the stateless stub holds no binding (its
+// GetDeploymentConfig is ErrNotFound), so no guild is ever linked.
+func (stubProviderStore) SaveDefaultVoiceChannel(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
 }
 
 func (stubProviderStore) ReleaseDiscordGuild(context.Context, uuid.UUID, string) (storage.DeploymentConfig, error) {

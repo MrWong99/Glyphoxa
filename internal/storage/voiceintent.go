@@ -26,29 +26,31 @@ import (
 var ErrIntentActive = errors.New("storage: a voice session intent is already active for this tenant")
 
 const voiceIntentColumns = `
-	id, tenant_id, campaign_id, status, instance_id, voice_session_id,
+	id, tenant_id, campaign_id, voice_channel_id, status, instance_id, voice_session_id,
 	stop_requested, last_error, created_at, claimed_at, heartbeat_at, ended_at`
 
 func scanVoiceSessionIntent(row pgx.Row) (VoiceSessionIntent, error) {
 	var v VoiceSessionIntent
 	err := row.Scan(
-		&v.ID, &v.TenantID, &v.CampaignID, &v.Status, &v.InstanceID, &v.VoiceSessionID,
+		&v.ID, &v.TenantID, &v.CampaignID, &v.VoiceChannelID, &v.Status, &v.InstanceID, &v.VoiceSessionID,
 		&v.StopRequested, &v.LastError, &v.CreatedAt, &v.ClaimedAt, &v.HeartbeatAt, &v.EndedAt,
 	)
 	return v, err
 }
 
 // CreateVoiceSessionIntent writes a 'pending' claim-plane row for a Tenant's
-// Campaign and returns it. A second create while the Tenant already has a
-// non-terminal (pending/claimed/live) intent trips the one-live-per-tenant
-// partial UNIQUE index (23505) and yields ErrIntentActive — the per-Tenant
-// single-active guard, now durable in the DB rather than the in-process Manager.
-func (s *Store) CreateVoiceSessionIntent(ctx context.Context, tenantID, campaignID uuid.UUID) (VoiceSessionIntent, error) {
+// Campaign and returns it. voiceChannelID carries the start's explicit
+// voice-channel pick across the plane; empty means the worker uses the guild's
+// Default Voice Channel. A second create while the Tenant already has a non-terminal
+// (pending/claimed/live) intent trips the one-live-per-tenant partial UNIQUE
+// index (23505) and yields ErrIntentActive — the per-Tenant single-active
+// guard, now durable in the DB rather than the in-process Manager.
+func (s *Store) CreateVoiceSessionIntent(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (VoiceSessionIntent, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO voice_session_intents (tenant_id, campaign_id)
-		 VALUES ($1, $2)
+		`INSERT INTO voice_session_intents (tenant_id, campaign_id, voice_channel_id)
+		 VALUES ($1, $2, $3)
 		 RETURNING `+voiceIntentColumns,
-		tenantID, campaignID)
+		tenantID, campaignID, voiceChannelID)
 	v, err := scanVoiceSessionIntent(row)
 	if err != nil {
 		if code, ok := pgErrCode(err); ok && code == "23505" {

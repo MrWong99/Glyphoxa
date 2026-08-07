@@ -44,6 +44,8 @@ type providerStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error)
 	SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error)
+	SaveDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (storage.DeploymentConfig, error)
+	SaveDefaultVoiceChannel(ctx context.Context, tenantID uuid.UUID, voiceChannelID string) (storage.DeploymentConfig, error)
 	// ReleaseDiscordGuild frees the Tenant's bound guild via an atomic
 	// compare-and-clear (#504): the echoed guild_id must match the binding.
 	ReleaseDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (storage.DeploymentConfig, error)
@@ -390,9 +392,13 @@ func (s *ProviderServer) saveModelOnly(
 
 // SaveDiscordSettings stores the Discord bot token (when present) and the
 // non-secret Guild / Voice channel IDs (when present). Every field has wire
-// presence: an omitted bot_token leaves the stored token untouched, and omitted
-// IDs leave the stored IDs untouched (#142) — so the token Save and the IDs
-// Save never clobber each other.
+// presence: an omitted bot_token leaves the stored token untouched, and an
+// omitted ID leaves ITS stored value untouched (#142) — so the token Save and
+// the ID saves never clobber each other. The IDs no longer travel as a pair:
+// guild_id alone links the guild (admin proof, clearing the Default Voice
+// Channel when the guild changes), voice_channel_id alone sets the Default
+// Voice Channel for an already-linked guild (the Session screen's "save as
+// default" affordance) — no linked guild is CodeFailedPrecondition.
 func (s *ProviderServer) SaveDiscordSettings(
 	ctx context.Context,
 	req *connect.Request[managementv1.SaveDiscordSettingsRequest],
@@ -405,11 +411,25 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// Validate the IDs before any write so a rejected request mutates nothing.
 	// Present-but-empty is REJECTED, not treated as a clear (mirrors bot_token's
 	// empty check): an empty ID only reaches the wire by accident — e.g. the form
-	// saving before the config load resolves — and clearing is unsupported (#142).
-	hasIDs := req.Msg.GuildId != nil || req.Msg.VoiceChannelId != nil
-	if hasIDs && (req.Msg.GetGuildId() == "" || req.Msg.GetVoiceChannelId() == "") {
+	// saving before the config load resolves — and clearing is unsupported (#142;
+	// the guild's release path is ReleaseDiscordGuild).
+	hasGuild := req.Msg.GuildId != nil
+	hasChannel := req.Msg.VoiceChannelId != nil
+	if hasGuild && req.Msg.GetGuildId() == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("guild_id and voice_channel_id must both be non-empty when provided"))
+			errors.New("guild_id must not be empty when provided"))
+	}
+	if hasChannel && req.Msg.GetVoiceChannelId() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("voice_channel_id must not be empty when provided"))
+	}
+	// A present channel must be snowflake-shaped (the StartSession posture): this
+	// save makes the value DURABLE, so a channel name or pasted URL persisting
+	// here would break every later default-channel consumer (session starts, the
+	// Players-panel member read).
+	if hasChannel && !snowflakePattern.MatchString(req.Msg.GetVoiceChannelId()) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("voice_channel_id must be a Discord channel id"))
 	}
 	if req.Msg.BotToken != nil {
 		if s.cipher == nil {
@@ -427,10 +447,27 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// modes with no self-host bypass. The proof runs BEFORE any write (the token
 	// save included), so a rejected request mutates nothing — and the
 	// ErrGuildTaken message below is only ever reachable by proven guild admins,
-	// closing the cross-tenant existence oracle.
-	if hasIDs {
+	// closing the cross-tenant existence oracle. A channel-only save needs no
+	// proof: the guild it defaults within was already proven at link time.
+	if hasGuild {
 		if err := s.proveGuildAdmin(ctx, tenantID, req.Msg.GetBotToken(), req.Msg.GetGuildId()); err != nil {
 			return nil, err
+		}
+	}
+
+	// A channel-only save needs an already-linked guild. Check BEFORE any write
+	// (a riding bot_token included) so a rejected request mutates nothing — the
+	// same pre-write posture as the proof above. SaveDefaultVoiceChannel's own
+	// linked-guild fence below stays as the racing-release backstop.
+	if hasChannel && !hasGuild {
+		dep, derr := s.store.GetDeploymentConfig(ctx, tenantID)
+		if derr != nil && !errors.Is(derr, storage.ErrNotFound) {
+			s.log.Error("SaveDiscordSettings: load deployment config failed", "err", derr)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		if dep.GuildID == "" {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("link a Discord server first"))
 		}
 	}
 
@@ -454,8 +491,23 @@ func (s *ProviderServer) SaveDiscordSettings(
 
 	// IDs only when present on the wire (mirrors the token's presence handling):
 	// a token-only save must never touch the stored IDs (#142).
-	if hasIDs {
+	switch {
+	case hasGuild && hasChannel:
 		dep, err = s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
+	case hasGuild:
+		// Guild-only link: the stored Default Voice Channel survives a re-save of
+		// the same guild and is cleared on a change (it belongs to the old guild).
+		dep, err = s.store.SaveDiscordGuild(ctx, tenantID, req.Msg.GetGuildId())
+	case hasChannel:
+		// Default-Voice-Channel-only save (the Session screen's "save as
+		// default"): needs an already-linked guild.
+		dep, err = s.store.SaveDefaultVoiceChannel(ctx, tenantID, req.Msg.GetVoiceChannelId())
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("link a Discord server first"))
+		}
+	}
+	if hasGuild || hasChannel {
 		if errors.Is(err, storage.ErrGuildTaken) {
 			// First-registrar-wins guild binding (#483) + the #504 proof above:
 			// only a PROVEN admin of the guild can even reach this message, so it

@@ -45,7 +45,7 @@ func (f *fakeControlStore) putSession(vs storage.VoiceSession) {
 	f.sessions[vs.ID] = vs
 }
 
-func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSessionIntent, error) {
+func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSessionIntent, error) {
 	f.fakeIntentStore.mu.Lock()
 	for _, i := range f.intents {
 		if i.TenantID == tenantID &&
@@ -55,7 +55,11 @@ func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID,
 		}
 	}
 	f.fakeIntentStore.mu.Unlock()
-	return *f.add(tenantID, campaignID), nil
+	intent := f.add(tenantID, campaignID)
+	f.fakeIntentStore.mu.Lock()
+	intent.VoiceChannelID = voiceChannelID
+	f.fakeIntentStore.mu.Unlock()
+	return *intent, nil
 }
 
 func (f *fakeControlStore) GetVoiceSessionIntent(_ context.Context, id uuid.UUID) (storage.VoiceSessionIntent, error) {
@@ -206,7 +210,7 @@ func newIntentControl(t *testing.T, store session.IntentControlStore) *session.I
 func TestIntentControl_StartTimesOutPending(t *testing.T) {
 	store := newFakeControlStore()
 	ctl := newIntentControl(t, store)
-	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrIntentPending) {
 		t.Fatalf("Start err = %v, want ErrIntentPending", err)
 	}
@@ -219,7 +223,7 @@ func TestIntentControl_StartDuplicateActive(t *testing.T) {
 	ctl := newIntentControl(t, store)
 	tenantID := uuid.New()
 	store.add(tenantID, uuid.New()) // a standing pending intent for the tenant
-	_, err := ctl.Start(context.Background(), tenantID, uuid.New())
+	_, err := ctl.Start(context.Background(), tenantID, uuid.New(), "")
 	if !errors.Is(err, session.ErrSessionActive) {
 		t.Fatalf("duplicate Start err = %v, want ErrSessionActive", err)
 	}
@@ -276,7 +280,7 @@ func TestIntentControl_EndToEndWithClaimLoop(t *testing.T) {
 		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 3 * time.Second, StopBudget: 3 * time.Second})
 
 	tenantID, campaignID := uuid.New(), uuid.New()
-	vs, err := ctl.Start(ctx, tenantID, campaignID)
+	vs, err := ctl.Start(ctx, tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("Start end-to-end: %v", err)
 	}
@@ -339,12 +343,12 @@ func TestIntentControl_StartCancelsPendingOnTimeout(t *testing.T) {
 		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: 20 * time.Millisecond, StopBudget: time.Second, Expiry: 30 * time.Second})
 	tenantID, campaignID := uuid.New(), uuid.New()
 
-	_, err := ctl.Start(context.Background(), tenantID, campaignID)
+	_, err := ctl.Start(context.Background(), tenantID, campaignID, "")
 	if !errors.Is(err, session.ErrIntentPending) {
 		t.Fatalf("Start err = %v, want ErrIntentPending", err)
 	}
 	// The pending intent was cancelled to 'done', so a fresh Start does not collide.
-	if _, err := ctl.Start(context.Background(), tenantID, campaignID); !errors.Is(err, session.ErrIntentPending) {
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID, ""); !errors.Is(err, session.ErrIntentPending) {
 		t.Fatalf("retry Start err = %v, want ErrIntentPending (no 23505 dead-end)", err)
 	}
 }
@@ -364,7 +368,7 @@ func TestIntentControl_StartCtxCancelCancelsIntent(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}()
-	if _, err := ctl.Start(ctx, tenantID, campaignID); !errors.Is(err, context.Canceled) {
+	if _, err := ctl.Start(ctx, tenantID, campaignID, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Start err = %v, want context.Canceled", err)
 	}
 
@@ -395,7 +399,7 @@ func TestIntentControl_StartPollErrorCancelsIntent(t *testing.T) {
 		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Minute, StopBudget: time.Second, Expiry: 30 * time.Second})
 	tenantID, campaignID := uuid.New(), uuid.New()
 
-	if _, err := ctl.Start(context.Background(), tenantID, campaignID); err == nil {
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID, ""); err == nil {
 		t.Fatal("Start err = nil, want poll error")
 	}
 
@@ -419,7 +423,7 @@ func TestIntentControl_StartCancelledOutcome(t *testing.T) {
 	}
 	ctl := session.NewIntentControl(store, slog.New(slog.DiscardHandler),
 		session.IntentControlConfig{Poll: time.Millisecond, StartBudget: time.Second, StopBudget: time.Second, Expiry: 30 * time.Second})
-	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrIntentCancelled) {
 		t.Fatalf("Start err = %v, want ErrIntentCancelled", err)
 	}
@@ -443,7 +447,7 @@ func TestIntentControl_ZeroWorkerReapsStaleBlocker(t *testing.T) {
 	}
 	store.markStaleHeartbeat(claimed.ID)
 
-	_, err := ctl.Start(context.Background(), tenantID, campaignID)
+	_, err := ctl.Start(context.Background(), tenantID, campaignID, "")
 	if !errors.Is(err, session.ErrIntentPending) {
 		t.Fatalf("Start err = %v, want ErrIntentPending (reaped then queued)", err)
 	}
@@ -471,7 +475,7 @@ func TestIntentControl_ZeroWorkerReapReconcilesOrphanedRow(t *testing.T) {
 	}
 	store.markStaleHeartbeat(claimed.ID)
 
-	if _, err := ctl.Start(context.Background(), tenantID, campaignID); !errors.Is(err, session.ErrIntentPending) {
+	if _, err := ctl.Start(context.Background(), tenantID, campaignID, ""); !errors.Is(err, session.ErrIntentPending) {
 		t.Fatalf("Start err = %v, want ErrIntentPending (reaped then queued)", err)
 	}
 	got, err := store.GetVoiceSession(context.Background(), vs.ID)
@@ -550,7 +554,7 @@ func TestIntentControl_StartMapsWorkerFailCode(t *testing.T) {
 	}
 	ctl := newIntentControl(t, store)
 
-	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New())
+	_, err := ctl.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if !errors.Is(err, session.ErrDiscordNotConfigured) {
 		t.Fatalf("Start err = %v, want the re-mapped session.ErrDiscordNotConfigured sentinel", err)
 	}

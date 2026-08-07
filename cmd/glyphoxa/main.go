@@ -1312,13 +1312,20 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			if !ok {
 				return nil, fmt.Errorf("resolve voice channel: no tenant in context")
 			}
-			dep, err := store.GetDeploymentConfig(ctx, tenantID)
-			if err != nil {
-				return nil, fmt.Errorf("resolve voice channel: %w", err)
+			// The LIVE session's actual channel first (a per-start pick may differ
+			// from the stored Default Voice Channel); the stored default is the
+			// idle fallback.
+			rawChannel, live := sessionCtl.ActiveVoiceChannelID(tenantID)
+			if !live {
+				dep, err := store.GetDeploymentConfig(ctx, tenantID)
+				if err != nil {
+					return nil, fmt.Errorf("resolve voice channel: %w", err)
+				}
+				rawChannel = dep.VoiceChannelID
 			}
-			channelID, err := snowflake.Parse(dep.VoiceChannelID)
+			channelID, err := snowflake.Parse(rawChannel)
 			if err != nil {
-				return nil, fmt.Errorf("parse voice channel id %q: %w", dep.VoiceChannelID, err)
+				return nil, fmt.Errorf("parse voice channel id %q: %w", rawChannel, err)
 			}
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
@@ -1462,7 +1469,7 @@ var plainMountPolicy = map[string]auth.TenantMode{
 // driven, -mode web of a split deployment) satisfy it, so managementMounts is
 // mode-agnostic — runWeb picks which one to pass.
 type sessionControl interface {
-	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
+	Start(ctx context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSession, error)
 	Stop(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, error)
 	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
 	SetAgentMute(ctx context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error)
@@ -1472,6 +1479,10 @@ type sessionControl interface {
 	IsCampaignLive(campaignID uuid.UUID) bool
 	AnyLive() bool
 	ReplayHighlight(ctx context.Context, tenantID uuid.UUID, clipKey string) error
+	// ActiveVoiceChannelID reports the channel the Tenant's LIVE session joined
+	// (per-start selection may differ from the stored Default Voice Channel);
+	// ok=false falls back to the deployment config's stored default.
+	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
 }
 
 func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
@@ -1614,7 +1625,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// guild from deployment_config via the cipher, then plain net/http Discord REST —
 	// ADR-0047) or replays it into the live voice channel (the session Manager). The
 	// Campaign's last-chosen channel is remembered through the store.
-	sessionSrv.SetSharing(rpc.NewDeploymentSharer(store, cipher, log), mgr, store)
+	deploymentSharer := rpc.NewDeploymentSharer(store, cipher, log)
+	sessionSrv.SetSharing(deploymentSharer, mgr, store)
+	// The Session screen's voice-channel picker (ListSessionVoiceChannels): the
+	// SAME sharer instance lists the linked guild's voice channels, and the store
+	// carries the linked guild + Default Voice Channel it pre-selects.
+	sessionSrv.SetVoiceChannels(deploymentSharer, store)
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a

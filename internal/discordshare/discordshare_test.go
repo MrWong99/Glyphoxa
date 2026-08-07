@@ -54,6 +54,47 @@ func TestListTextChannels_FiltersSortsAndAuthenticates(t *testing.T) {
 	}
 }
 
+// TestListVoiceChannels_FiltersSortsAndAuthenticates proves ListVoiceChannels
+// keeps only voice channels (type 2) — text (0), category (4), and stage (13)
+// are excluded — sorted by position then name, over the same authenticated
+// guild-channels GET as the text lister.
+func TestListVoiceChannels_FiltersSortsAndAuthenticates(t *testing.T) {
+	var gotAuth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `[
+			{"id":"20","type":2,"name":"War Room","position":2},
+			{"id":"30","type":0,"name":"general","position":0},
+			{"id":"10","type":2,"name":"Tavern","position":1},
+			{"id":"40","type":13,"name":"Stage","position":3},
+			{"id":"50","type":4,"name":"Category","position":4}
+		]`)
+	}))
+	defer srv.Close()
+
+	got, err := discordshare.ListVoiceChannelsAt(context.Background(), "tok", "guild123", srv.URL, nil)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if want := "Bot tok"; gotAuth != want {
+		t.Errorf("Authorization = %q, want %q", gotAuth, want)
+	}
+	if !strings.Contains(gotPath, "/guilds/guild123/channels") {
+		t.Errorf("path = %q, want .../guilds/guild123/channels", gotPath)
+	}
+	// Only the two voice channels, sorted by position (10 before 20).
+	if len(got) != 2 {
+		t.Fatalf("got %d channels, want 2 (%+v)", len(got), got)
+	}
+	if got[0].ID != "10" || got[0].Name != "Tavern" {
+		t.Errorf("first channel = %+v, want {10 Tavern}", got[0])
+	}
+	if got[1].ID != "20" || got[1].Name != "War Room" {
+		t.Errorf("second channel = %+v, want {20 War Room}", got[1])
+	}
+}
+
 // TestListTextChannels_ForbiddenIsReadable proves a 403 maps to the ErrNoAccess
 // sentinel (the Bot is not in the guild), not a raw HTTP error.
 func TestListTextChannels_ForbiddenIsReadable(t *testing.T) {

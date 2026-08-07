@@ -41,7 +41,7 @@ func TestCreateVoiceSessionIntent(t *testing.T) {
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	intent, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+	intent, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("create intent: %v", err)
 	}
@@ -51,21 +51,36 @@ func TestCreateVoiceSessionIntent(t *testing.T) {
 	if intent.TenantID != tenantID || intent.CampaignID != campaignID {
 		t.Fatalf("owning ids = (%s,%s), want (%s,%s)", intent.TenantID, intent.CampaignID, tenantID, campaignID)
 	}
+	if intent.VoiceChannelID != "" {
+		t.Fatalf("no-pick intent voice_channel_id = %q, want empty (guild default)", intent.VoiceChannelID)
+	}
 	if intent.InstanceID != "" || intent.ClaimedAt != nil || intent.HeartbeatAt != nil {
 		t.Fatalf("fresh intent should be unclaimed: %+v", intent)
 	}
 
 	// A second create for the SAME tenant while the first is non-terminal collides.
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID); !errors.Is(err, storage.ErrIntentActive) {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, ""); !errors.Is(err, storage.ErrIntentActive) {
 		t.Fatalf("duplicate create err = %v, want ErrIntentActive", err)
 	}
 
-	// Once the first finishes, the tenant can start again.
+	// Once the first finishes, the tenant can start again — and an explicit
+	// voice-channel pick round-trips through the row for the claiming worker.
 	if _, err := st.RequestVoiceSessionStop(ctx, intent.ID); err != nil {
 		t.Fatalf("stop pending intent: %v", err)
 	}
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID); err != nil {
+	picked, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, "777888999")
+	if err != nil {
 		t.Fatalf("create after prior done: %v", err)
+	}
+	if picked.VoiceChannelID != "777888999" {
+		t.Fatalf("picked intent voice_channel_id = %q, want 777888999", picked.VoiceChannelID)
+	}
+	got, err := st.GetVoiceSessionIntent(ctx, picked.ID)
+	if err != nil {
+		t.Fatalf("reload picked intent: %v", err)
+	}
+	if got.VoiceChannelID != "777888999" {
+		t.Fatalf("reloaded voice_channel_id = %q, want 777888999", got.VoiceChannelID)
 	}
 }
 
@@ -79,11 +94,11 @@ func TestConcurrentClaimersDistinctIntents(t *testing.T) {
 	st := storage.New(pool)
 	tenantB, campB := secondCampaign(t, pool)
 
-	iA, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA)
+	iA, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA, "")
 	if err != nil {
 		t.Fatalf("create A: %v", err)
 	}
-	iB, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB)
+	iB, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB, "")
 	if err != nil {
 		t.Fatalf("create B: %v", err)
 	}
@@ -133,7 +148,7 @@ func TestHeartbeatFencing(t *testing.T) {
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	intent, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+	intent, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -174,7 +189,7 @@ func TestReapMarksStaleDead(t *testing.T) {
 	tenantB, campB := secondCampaign(t, pool)
 
 	// Stale: claimed, then heartbeat forced into the past.
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA, ""); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
 	stale, err := st.ClaimVoiceSessionIntent(ctx, "dead-worker")
@@ -187,7 +202,7 @@ func TestReapMarksStaleDead(t *testing.T) {
 	}
 
 	// Fresh: claimed just now.
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB, ""); err != nil {
 		t.Fatalf("create B: %v", err)
 	}
 	fresh, err := st.ClaimVoiceSessionIntent(ctx, "live-worker")
@@ -229,7 +244,7 @@ func TestRequestStop(t *testing.T) {
 	tenantB, campB := secondCampaign(t, pool)
 
 	// pending → done directly.
-	pending, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA)
+	pending, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA, "")
 	if err != nil {
 		t.Fatalf("create pending: %v", err)
 	}
@@ -242,7 +257,7 @@ func TestRequestStop(t *testing.T) {
 	}
 
 	// live → flag only.
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB, ""); err != nil {
 		t.Fatalf("create live: %v", err)
 	}
 	claimed, err := st.ClaimVoiceSessionIntent(ctx, "worker-1")
@@ -283,7 +298,7 @@ func TestGetLiveVoiceSessionIntentForTenant(t *testing.T) {
 	if _, err := st.GetLiveVoiceSessionIntentForTenant(ctx, tenantID); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("idle tenant err = %v, want ErrNotFound", err)
 	}
-	created, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID)
+	created, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -316,7 +331,7 @@ func TestReconcileWorkerOrphanedScoping(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO voice_sessions (id, campaign_id, status) VALUES ($1,$2,'running')`, deadVS, campA); err != nil {
 		t.Fatalf("insert dead vs: %v", err)
 	}
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA, ""); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
 	deadClaim, err := st.ClaimVoiceSessionIntent(ctx, "dead-worker")
@@ -339,7 +354,7 @@ func TestReconcileWorkerOrphanedScoping(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO voice_sessions (id, campaign_id, status) VALUES ($1,$2,'running')`, liveVS, campB); err != nil {
 		t.Fatalf("insert live vs: %v", err)
 	}
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB, ""); err != nil {
 		t.Fatalf("create B: %v", err)
 	}
 	liveClaim, err := st.ClaimVoiceSessionIntent(ctx, "live-worker")
@@ -381,7 +396,7 @@ func TestFinishVoiceSessionIntent(t *testing.T) {
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	claimed, err := st.ClaimVoiceSessionIntent(ctx, "worker-1")
@@ -419,7 +434,7 @@ func TestReconcileWorkerOrphanedUnboundGap(t *testing.T) {
 
 	// The worker claims the intent and creates the session row, then crashes
 	// BEFORE MarkVoiceSessionIntentLive: intent 'claimed', row unbound.
-	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID); err != nil {
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantID, campaignID, ""); err != nil {
 		t.Fatalf("create intent: %v", err)
 	}
 	claim, err := st.ClaimVoiceSessionIntent(ctx, "gap-worker")

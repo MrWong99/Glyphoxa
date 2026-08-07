@@ -55,7 +55,7 @@ func TestIdleClose_EndsSessionCleanly(t *testing.T) {
 		Sweep:  time.Millisecond,
 	})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestIdleClose_EndsSessionCleanly(t *testing.T) {
 	if !runner.wasCancelled() {
 		t.Fatal("an Idle Close must cancel the run ctx; without it the voice loop keeps holding the Discord connection it was closed to release")
 	}
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("second Start after an Idle Close must succeed (the concurrency slot is freed), got %v", err)
 	}
 	mgr.Shutdown()
@@ -100,7 +100,7 @@ func TestIdleClose_WiresTheActivitySignalsOntoTheSessionConfig(t *testing.T) {
 	})
 	t.Cleanup(mgr.Shutdown)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -127,7 +127,7 @@ func TestIdleClose_UnwiredGuardLeavesTheLoopUntouched(t *testing.T) {
 	mgr := newManager(t, store, runner.run, true) // Deps.IdleGuard nil
 	t.Cleanup(mgr.Shutdown)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -150,7 +150,7 @@ func TestIdleClose_DisabledPolicyEnrollsNothing(t *testing.T) {
 	mgr, guard := idleGuardManager(t, store, runner.run, idleclose.Policy{}) // every check off
 	t.Cleanup(mgr.Shutdown)
 
-	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	<-runner.started
@@ -183,7 +183,7 @@ func TestIdleClose_ChurnEndsSessionWithItsOwnReason(t *testing.T) {
 		MaxCycles: 2,
 	})
 
-	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestIdleClose_StartRacingShutdownLeavesNoEnrollment(t *testing.T) {
 
 	started := make(chan error, 1)
 	go func() {
-		_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+		_, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), "")
 		started <- err
 	}()
 
@@ -259,7 +259,7 @@ func TestIdleClose_StoppedSessionIsNotClosedTwice(t *testing.T) {
 	t.Cleanup(mgr.Shutdown)
 
 	tenant := uuid.New()
-	vs, err := mgr.Start(context.Background(), tenant, uuid.New())
+	vs, err := mgr.Start(context.Background(), tenant, uuid.New(), "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
