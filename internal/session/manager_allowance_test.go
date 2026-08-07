@@ -119,7 +119,7 @@ func TestAllowanceRemaining_TightensHardCap_EndsWithAllowanceReason(t *testing.T
 	<-runner.started
 
 	bigGroqLLM(runner.cfg().StageMetrics)
-	waitInactive(t, mgr)
+	waitInactive(t, mgr, store, vs.ID)
 
 	closed := store.session(vs.ID)
 	if closed.Status != storage.VoiceSessionEnded {
@@ -151,7 +151,7 @@ func TestTenantCapBelowAllowance_KeepsSpendCapReason(t *testing.T) {
 	<-runner.started
 
 	bigGroqLLM(runner.cfg().StageMetrics)
-	waitInactive(t, mgr)
+	waitInactive(t, mgr, store, vs.ID)
 
 	closed := store.session(vs.ID)
 	if closed.EndReason == nil || *closed.EndReason != "spend_cap_hard: estimated spend crossed the hard cap" {

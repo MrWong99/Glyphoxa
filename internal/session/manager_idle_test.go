@@ -63,7 +63,7 @@ func TestIdleClose_EndsSessionCleanly(t *testing.T) {
 
 	// Nothing ever marks activity, so the watchdog closes the session on one of its
 	// next sweeps; the trip cancels the run ctx on a goroutine, like the hard cap.
-	waitInactive(t, mgr)
+	waitInactive(t, mgr, store, vs.ID)
 
 	closed := store.session(vs.ID)
 	if closed.Status != storage.VoiceSessionEnded {
@@ -193,7 +193,7 @@ func TestIdleClose_ChurnEndsSessionWithItsOwnReason(t *testing.T) {
 	for range 3 { // one past the ceiling
 		cycle()
 	}
-	waitInactive(t, mgr)
+	waitInactive(t, mgr, store, vs.ID)
 
 	closed := store.session(vs.ID)
 	if closed.Status != storage.VoiceSessionEnded {
