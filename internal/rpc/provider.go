@@ -431,6 +431,16 @@ func (s *ProviderServer) SaveDiscordSettings(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("voice_channel_id must be a Discord channel id"))
 	}
+	// The guild id likewise: SaveDiscordGuild clears the stored Default Voice
+	// Channel whenever the incoming guild differs BYTE-wise from the stored one,
+	// so a non-canonical variant of the same guild (stray whitespace, a pasted
+	// decoration) must never reach that comparison — and a non-canonical stored
+	// guild_id would also break the interaction router's string-equality lookup
+	// (GetTenantIDByGuildID).
+	if hasGuild && !snowflakePattern.MatchString(req.Msg.GetGuildId()) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("guild_id must be a Discord server id"))
+	}
 	if req.Msg.BotToken != nil {
 		if s.cipher == nil {
 			return nil, connect.NewError(connect.CodeFailedPrecondition,

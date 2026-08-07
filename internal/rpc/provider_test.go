@@ -672,6 +672,24 @@ func TestProviderDiscordSettings_ChannelShapeAndNoWriteOnReject(t *testing.T) {
 		}
 	})
 
+	t.Run("non-snowflake guild is InvalidArgument", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client, _ := newProviderClient(t, store, testCipher(t))
+		// A non-canonical guild value (whitespace, decoration) would compare
+		// unequal to the stored guild in SaveDiscordGuild's CASE and silently
+		// clear the Default Voice Channel — so it must be rejected pre-write.
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+			GuildId: strPtr(" 472093001100"),
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("non-snowflake guild = %v, want InvalidArgument", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "must be a Discord server id") {
+			t.Errorf("err = %v, want the guild-shape message", err)
+		}
+	})
+
 	t.Run("riding token is not stored when the channel-only save rejects", func(t *testing.T) {
 		t.Parallel()
 		store := newFakeProviderStore()

@@ -1626,6 +1626,11 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// ADR-0047) or replays it into the live voice channel (the session Manager). The
 	// Campaign's last-chosen channel is remembered through the store.
 	deploymentSharer := rpc.NewDeploymentSharer(store, cipher, log)
+	// The central Bot token is the sharer's fallback rung (ADR-0057): a
+	// central-token Tenant lists channels (the Session picker, the share
+	// dialog) with the SAME token its sessions run on — the ProviderServer
+	// guild-proof ladder precedent.
+	deploymentSharer.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
 	sessionSrv.SetSharing(deploymentSharer, mgr, store)
 	// The Session screen's voice-channel picker (ListSessionVoiceChannels): the
 	// SAME sharer instance lists the linked guild's voice channels, and the store
