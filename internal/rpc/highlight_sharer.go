@@ -11,6 +11,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 // DeploymentSharer is the production [HighlightSharer] (#310): it resolves the
@@ -23,6 +24,10 @@ type DeploymentSharer struct {
 	deps   deploymentReader
 	cipher *crypto.Cipher
 	log    *slog.Logger
+	// envToken is the deployment's central Bot token (env DISCORD_BOT_TOKEN),
+	// the fallback rung when the Tenant has no saved BYOK token (ADR-0057
+	// central Bot-token mode); wired via SetEnvBotToken. Empty = no fallback.
+	envToken string
 
 	// listFn / listVoiceFn / postFn are seams so tests point the Discord calls at
 	// a fake server; they default to the live discordshare functions.
@@ -54,37 +59,59 @@ func NewDeploymentSharer(deps deploymentReader, cipher *crypto.Cipher, log *slog
 	}
 }
 
-// resolve opens the request Tenant's saved Bot token and reads the guild id. An
-// unsaved token (no deployment row, empty last4, or no cipher) is
-// ErrNoDiscordToken; a missing Tenant in ctx is ErrNoDiscordToken too (the share
-// path is behind the auth stack, so this only guards a mis-wired test).
+// SetEnvBotToken hands the sharer the deployment's central Bot token (env
+// DISCORD_BOT_TOKEN) as the fallback rung of its token ladder, mirroring
+// ProviderServer.SetEnvBotToken. Without it a central-token Tenant (ADR-0057:
+// guild linked, no saved per-tenant token) could START sessions — Manager.Start
+// resolves the same ladder — but could not LIST channels, so the Session
+// screen's picker and the Highlight share dialog silently failed with "save a
+// Discord Bot token first" on exactly the deployments where saving one is not
+// required.
+func (d *DeploymentSharer) SetEnvBotToken(token string) {
+	d.envToken = token
+}
+
+// resolve resolves the request Tenant's Bot token under the SAME hybrid policy
+// a session start uses (#87, ADR-0057: the Tenant's resolved Bot) — the saved
+// BYOK token when one exists, else the deployment's central env token — and
+// reads the linked guild id. Neither token resolving is ErrNoDiscordToken
+// ("save a Discord Bot token first", now accurate: there is no env token
+// either). A REAL saved token that cannot be opened (no cipher, undecryptable)
+// stays a hard error, never a silent env fall-through (the wirenpc AC3
+// posture). A missing Tenant in ctx is ErrNoDiscordToken too (the path is
+// behind the auth stack, so this only guards a mis-wired test).
 func (d *DeploymentSharer) resolve(ctx context.Context) (token, guildID string, err error) {
 	tenantID, ok := auth.TenantID(ctx)
 	if !ok {
 		return "", "", ErrNoDiscordToken
 	}
 	dep, derr := d.deps.GetDeploymentConfig(ctx, tenantID)
-	if errors.Is(derr, storage.ErrNotFound) {
-		return "", "", ErrNoDiscordToken
-	}
-	if derr != nil {
+	if derr != nil && !errors.Is(derr, storage.ErrNotFound) {
 		return "", "", derr
 	}
-	if !isSaved(dep.DiscordBotTokenLast4) || d.cipher == nil {
+	// ErrNotFound leaves dep zero: an empty last4 resolves straight to the env
+	// token, exactly as a session start would for that Tenant.
+	tok, rerr := wirenpc.ResolveDiscordToken(d.cipher, dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext, d.envToken)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	if tok == "" {
 		return "", "", ErrNoDiscordToken
 	}
-	plain, oerr := d.cipher.Open(dep.DiscordBotTokenCiphertext)
-	if oerr != nil {
-		return "", "", oerr
-	}
-	return string(plain), dep.GuildID, nil
+	return tok, dep.GuildID, nil
 }
 
-// ListTextChannels implements [HighlightSharer].
+// ListTextChannels implements [HighlightSharer]. An unlinked guild is
+// [ErrNoGuildLinked] — with the env-token rung a token can resolve for a
+// Tenant that never linked a server, and "save a Discord Bot token first"
+// would be the wrong advice for that state.
 func (d *DeploymentSharer) ListTextChannels(ctx context.Context) ([]discordshare.Channel, error) {
 	token, guildID, err := d.resolve(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if guildID == "" {
+		return nil, ErrNoGuildLinked
 	}
 	return d.listFn(ctx, token, guildID, d.log)
 }
@@ -96,6 +123,9 @@ func (d *DeploymentSharer) ListVoiceChannels(ctx context.Context) ([]discordshar
 	token, guildID, err := d.resolve(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if guildID == "" {
+		return nil, ErrNoGuildLinked
 	}
 	return d.listVoiceFn(ctx, token, guildID, d.log)
 }

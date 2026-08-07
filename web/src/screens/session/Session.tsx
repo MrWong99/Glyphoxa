@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Play, Square, Search, ScrollText, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -213,14 +214,23 @@ export function Session() {
 
   // Voice-channel picker: the session joins the picked channel; the stored
   // Default Voice Channel pre-selects it (default → first channel → none, the
-  // ShareHighlightDialog precedent). retry:false keeps it a soft feature — an
-  // unlinked guild / missing Bot token fails FailedPrecondition once and the
-  // screen simply renders no picker (Start then reports the same precondition
-  // with its actionable message). Fetched while idle: the pick is a START-time
-  // input, and a live session's channel can't change.
+  // ShareHighlightDialog precedent). retry:false keeps it cheap — a
+  // precondition (unlinked guild / missing Bot token) fails once and its
+  // actionable message renders as an inline hint beside Start (silence here
+  // once dead-ended an operator: no picker, no clue why, and Start falling
+  // back to an empty default). Only an Unimplemented server (the RPC not
+  // deployed yet) stays silent — the pre-picker experience. Fetched while
+  // idle: the pick is a START-time input, and a live session's channel can't
+  // change.
   const channelsQ = useQuery(SessionService.method.listSessionVoiceChannels, {}, { retry: false, enabled: !active });
   const channels = channelsQ.data?.channels ?? [];
   const defaultChannelId = channelsQ.data?.defaultChannelId ?? "";
+  // The raw server message without the "[failed_precondition]" prefix; null
+  // when there is nothing to surface (loaded fine, or Unimplemented).
+  const channelsError =
+    channelsQ.error != null && ConnectError.from(channelsQ.error).code !== Code.Unimplemented
+      ? ConnectError.from(channelsQ.error).rawMessage
+      : null;
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null);
   // A stored default that is no longer among the guild's channels (deleted in
   // Discord) must not ride a Start invisibly: fall back to the first listed
@@ -477,6 +487,21 @@ export function Session() {
                     </Button>
                   )}
                 </div>
+              )}
+              {/* The picker's failure/empty states surface HERE, not as silence:
+                  the lister's precondition carries the operator's next step
+                  ("link a Discord server first" / "save a Discord Bot token
+                  first"), and hiding it once left Start dead-ending on an empty
+                  default with no visible cause. */}
+              {channelsError && (
+                <span className="gx-session__channel-hint" role="alert" data-testid="channel-hint">
+                  {channelsError}
+                </span>
+              )}
+              {channelsQ.isSuccess && channels.length === 0 && (
+                <span className="gx-session__channel-hint" data-testid="channel-hint">
+                  The linked Discord server has no voice channels.
+                </span>
               )}
               <Button
                 variant="primary"

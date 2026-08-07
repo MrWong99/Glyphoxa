@@ -72,6 +72,11 @@ func (s *SessionServer) ListSessionVoiceChannels(
 	if errors.Is(err, ErrNoDiscordToken) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("save a Discord Bot token first"))
 	}
+	if errors.Is(err, ErrNoGuildLinked) {
+		// Belt and braces: the deployment read above already answered this state;
+		// the lister's own guild fence covers a release racing between the two.
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))
+	}
 	if err != nil {
 		return nil, s.discordError("ListSessionVoiceChannels", err)
 	}

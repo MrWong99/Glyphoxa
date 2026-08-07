@@ -218,6 +218,19 @@
   min-width: 180px;
 }
 
+/* Inline picker hint beside Start: the channel lister's actionable
+   precondition ("link a Discord server first") or the empty-guild note. Text
+   weight only — a start precondition is a setup nudge, not a session fault,
+   so it stays lighter than the bordered .gx-session__failed banner. */
+.gx-session__channel-hint {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+.gx-session__channel-hint[role="alert"] {
+  color: var(--status-danger);
+}
+
 /* Live gateway connection sub-state beside the Live badge (Connecting…/Connected). */
 .gx-session__conn {
   color: var(--text-subtle);

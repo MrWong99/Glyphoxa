@@ -1718,12 +1718,15 @@ describe("Session voice-channel picker", () => {
     await waitFor(() => expect(startRequests).toEqual(["c-general"]));
   });
 
-  it("renders no picker and starts with an empty voice_channel_id when the channel list errors", async () => {
+  it("surfaces the lister's precondition as an inline hint and still starts with an empty voice_channel_id", async () => {
     // The unlinked-guild / missing-token case: ListSessionVoiceChannels fails
-    // FailedPrecondition once (retry:false) and the picker is simply absent —
-    // Start still works, deferring the precondition to the server.
+    // FailedPrecondition once (retry:false). The picker is absent but the
+    // server's actionable message renders as a visible hint beside Start —
+    // silence here once dead-ended an operator on a central-token deployment
+    // (no picker, no clue, Start falling back to an empty default). Start
+    // still works, deferring the precondition to the server.
     const { transport, startRequests } = channelTransport({
-      listError: new ConnectError("session: link a Discord server first", Code.FailedPrecondition),
+      listError: new ConnectError("link a Discord server first", Code.FailedPrecondition),
     });
     render(
       <Providers transport={transport} queryClient={makeQueryClient()}>
@@ -1732,6 +1735,9 @@ describe("Session voice-channel picker", () => {
     );
 
     expect(await screen.findByText("Idle")).toBeInTheDocument();
+    const hint = await screen.findByTestId("channel-hint");
+    expect(hint).toHaveTextContent("link a Discord server first");
+    expect(hint).toHaveAttribute("role", "alert");
     expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
 
     // Start re-enables once the errored list read settles (the loading hold
@@ -1743,7 +1749,29 @@ describe("Session voice-channel picker", () => {
     expect(await screen.findByText("Live")).toBeInTheDocument();
   });
 
-  it("renders no picker when the guild has no voice channels", async () => {
+  it("stays silent on an Unimplemented lister (server without the RPC)", async () => {
+    // The soft-feature posture survives for genuinely old servers only: no
+    // picker, no hint — the pre-picker experience.
+    const { transport, startRequests } = channelTransport({
+      listError: new ConnectError("voice channel listing is not enabled on this server", Code.Unimplemented),
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+    expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("channel-hint")).not.toBeInTheDocument();
+
+    const startBtn = screen.getByRole("button", { name: /start session/i });
+    await waitFor(() => expect(startBtn).toBeEnabled());
+    fireEvent.click(startBtn);
+    await waitFor(() => expect(startRequests).toEqual([""]));
+  });
+
+  it("notes an empty channel list instead of rendering nothing", async () => {
     const { transport, startRequests } = channelTransport({ channels: [] });
     render(
       <Providers transport={transport} queryClient={makeQueryClient()}>
@@ -1752,6 +1780,9 @@ describe("Session voice-channel picker", () => {
     );
 
     expect(await screen.findByText("Idle")).toBeInTheDocument();
+    const hint = await screen.findByTestId("channel-hint");
+    expect(hint).toHaveTextContent("The linked Discord server has no voice channels.");
+    expect(hint).not.toHaveAttribute("role", "alert");
     expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
 
     const startBtn = screen.getByRole("button", { name: /start session/i });

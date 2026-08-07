@@ -27,6 +27,13 @@ import (
 // Discord API failure (which is CodeUnavailable).
 var ErrNoDiscordToken = errors.New("rpc: no Discord bot token saved")
 
+// ErrNoGuildLinked is the sentinel the channel listers return when the Tenant
+// has no linked guild — distinct from ErrNoDiscordToken since the env-token
+// rung (ADR-0057 central Bot-token mode) means a token can resolve for a
+// Tenant that never linked a server. The RPCs map it to a readable
+// CodeFailedPrecondition ("link a Discord server first").
+var ErrNoGuildLinked = errors.New("rpc: no Discord guild linked")
+
 // captionMaxRunes bounds the message caption (the Highlight excerpt) so a long
 // excerpt cannot overrun Discord's 2000-char message limit; the headroom leaves
 // room for Discord's own formatting.
@@ -95,6 +102,9 @@ func (s *SessionServer) ListShareChannels(
 	channels, err := s.sharer.ListTextChannels(ctx)
 	if errors.Is(err, ErrNoDiscordToken) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("save a Discord Bot token first"))
+	}
+	if errors.Is(err, ErrNoGuildLinked) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))
 	}
 	if err != nil {
 		return nil, s.discordError("ListShareChannels", err)

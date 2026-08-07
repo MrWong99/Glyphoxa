@@ -17,6 +17,14 @@ func (d *DeploymentSharer) SetShareSeamsForTest(
 	d.postFn = post
 }
 
+// SetVoiceListSeamForTest overrides the voice-channel REST seam so a test
+// drives ListVoiceChannels against a fake instead of the live Discord API.
+func (d *DeploymentSharer) SetVoiceListSeamForTest(
+	list func(ctx context.Context, token, guildID string, log *slog.Logger) ([]discordshare.Channel, error),
+) {
+	d.listVoiceFn = list
+}
+
 // SetGuildProofForTest overrides the #504 guild-admin proof seam so unit tests
 // drive SaveDiscordSettings without dialing Discord, mirroring the resolveInvite
 // seam pattern.
