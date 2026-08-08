@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { LegalFooter } from "@/components/LegalFooter";
 import { isUnauthenticated } from "@/lib/connectError";
+import { useI18n } from "@/i18n";
 
 import "@/screens/login/login.css";
 
@@ -27,6 +28,7 @@ import "@/screens/login/login.css";
 const DEFAULT_TENANT = "default";
 
 export function CreateTenant() {
+  const { t } = useI18n();
   const navigate = useNavigate();
   // retry off so a 401 (deep link with no session) bounces to /login
   // immediately rather than after react-query's default backoff.
@@ -51,7 +53,7 @@ export function CreateTenant() {
       <div className="gx-login">
         <div className="gx-login__card">
           <p className="gx-login__error" role="alert">
-            Couldn&apos;t load your account. Please reload to try again.
+            {t("auth.onboardingLoadError")}
           </p>
         </div>
       </div>
@@ -59,12 +61,13 @@ export function CreateTenant() {
   }
 
   // Loading, or mid-redirect after a 401.
-  return <div className="gx-auth-boot" aria-busy="true" aria-label="Loading" />;
+  return <div className="gx-auth-boot" aria-busy="true" aria-label={t("common.loading")} />;
 }
 
 // NameTenantCard is only mounted once GetCurrentUser has resolved, so the
 // field's local state can seed straight from the pre-provisioned Tenant name.
 function NameTenantCard({ initialName }: { initialName: string }) {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [name, setName] = useState(initialName);
@@ -106,12 +109,12 @@ function NameTenantCard({ initialName }: { initialName: string }) {
         <span className="gx-login__sigil">
           <Dices size={24} />
         </span>
-        <h1 className="gx-login__wordmark gx-gradient-text">Welcome to Glyphoxa</h1>
-        <p className="gx-login__lede">Your table is ready — give it a name.</p>
+        <h1 className="gx-login__wordmark gx-gradient-text">{t("auth.onboardingTitle")}</h1>
+        <p className="gx-login__lede">{t("auth.onboardingLede")}</p>
 
         <div className="gx-login__field">
           <Input
-            label="Name your table"
+            label={t("auth.onboardingNameLabel")}
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={rename.isPending}
@@ -122,15 +125,15 @@ function NameTenantCard({ initialName }: { initialName: string }) {
 
         {rename.isError && (
           <p className="gx-login__error" role="alert">
-            Couldn&apos;t save the name — you can rename your table later, or try again now.
+            {t("auth.onboardingSaveError")}
           </p>
         )}
 
         <Button type="submit" variant="primary" size="lg" block disabled={!canSubmit}>
-          {rename.isPending ? "Saving…" : "Save and continue"}
+          {rename.isPending ? t("common.saving") : t("auth.onboardingSaveContinue")}
         </Button>
         <Button type="button" variant="ghost" block onClick={goToApp} disabled={rename.isPending}>
-          Skip for now
+          {t("auth.onboardingSkip")}
         </Button>
       </form>
 

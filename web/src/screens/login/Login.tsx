@@ -5,6 +5,8 @@ import { useQuery } from "@connectrpc/connect-query";
 import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { LegalFooter } from "@/components/LegalFooter";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { useI18n } from "@/i18n";
 
 import "./login.css";
 
@@ -43,6 +45,7 @@ export function Login({
   /** The server-side #518 gate bounced an unacknowledged open-mode OAuth start here. */
   aupRequired?: boolean;
 }) {
+  const { t } = useI18n();
   const { data, status } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
   const [accepted, setAccepted] = useState(false);
@@ -62,20 +65,18 @@ export function Login({
         </span>
         <h1 className="gx-login__wordmark gx-gradient-text">Glyphoxa</h1>
         <p className="gx-login__lede">
-          {open
-            ? "Sign in with Discord — your first sign-in creates your own table."
-            : "Sign in to run your table."}
+          {open ? t("auth.ledeOpen") : t("auth.ledeAllowlist")}
         </p>
 
         {notAuthorized && (
           <p className="gx-login__error" role="alert">
-            This Discord account isn&apos;t authorized for this deployment.
+            {t("auth.notAuthorized")}
           </p>
         )}
 
         {aupRequired && (
           <p className="gx-login__error" role="alert">
-            Please accept the Nutzungsbedingungen below before signing in.
+            {t("auth.aupRequired")}
           </p>
         )}
 
@@ -87,9 +88,15 @@ export function Login({
               checked={accepted}
               onChange={(e) => setAccepted(e.target.checked)}
             />
+            {/* The sentence is split around the two document links; the
+                documents' German proper names stay verbatim in both display
+                languages — they are the titles of the authored pages (#518). */}
             <span>
-              I agree to the <a href="/terms">Nutzungsbedingungen</a> and have read the{" "}
-              <a href="/privacy">Datenschutzerklärung</a>.
+              {t("auth.consentPre")}
+              <a href="/terms">Nutzungsbedingungen</a>
+              {t("auth.consentMid")}
+              <a href="/privacy">Datenschutzerklärung</a>
+              {t("auth.consentPost")}
             </span>
           </label>
         )}
@@ -103,28 +110,31 @@ export function Login({
             checkbox is enforced, not just rendered. */}
         {blocked ? (
           <Button variant="primary" size="lg" block disabled>
-            Continue with Discord
+            {t("auth.continueDiscord")}
           </Button>
         ) : (
           <a
             className="gx-btn gx-btn--primary gx-btn--lg gx-btn--block"
             href={open ? "/auth/discord/login?aup=1" : "/auth/discord/login"}
           >
-            Continue with Discord
+            {t("auth.continueDiscord")}
           </a>
         )}
 
         <div className="gx-login__soon">
           <Button variant="secondary" block disabled>
-            Continue with Google · coming soon
+            {t("auth.continueGoogleSoon")}
           </Button>
           <Button variant="secondary" block disabled>
-            Continue with GitHub · coming soon
+            {t("auth.continueGithubSoon")}
           </Button>
         </div>
       </div>
 
       <LegalFooter />
+      {/* The display-language picker sits with the legal footer, OUTSIDE the
+          session: a German visitor must be able to switch before signing in. */}
+      <LanguageSwitcher />
     </div>
   );
 }

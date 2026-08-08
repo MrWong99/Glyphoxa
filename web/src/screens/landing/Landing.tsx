@@ -1,6 +1,8 @@
 import { Dices, Mic, ScrollText, Sparkles, KeyRound } from "lucide-react";
 
 import { LegalFooter } from "@/components/LegalFooter";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { useI18n, type MessageKey } from "@/i18n";
 
 import "./landing.css";
 
@@ -27,44 +29,33 @@ import "./landing.css";
 //
 // The screenshots are placeholders until #263's captures land; each frame keeps
 // its caption so the layout (and the honesty of the caption) is already right.
+//
+// Copy lives in the i18n catalog (auth.* fragment); this module stores only
+// MessageKeys, never translated strings, so the display language can change
+// after mount without stale module-level state.
 
-type Feature = { icon: typeof Mic; title: string; body: string };
+type Feature = { icon: typeof Mic; titleKey: MessageKey; bodyKey: MessageKey };
 
 const FEATURES: Feature[] = [
-  {
-    icon: Mic,
-    title: "NPCs that talk back",
-    body: "Your Agents join the Discord voice channel, hear the table, and answer out loud in their own voice — addressed by name, or by whoever the scene is pointing at.",
-  },
-  {
-    icon: ScrollText,
-    title: "The session, written down",
-    body: "Every session is transcribed and searchable afterwards, and the table's own history feeds back into what the NPCs remember.",
-  },
-  {
-    icon: Sparkles,
-    title: "Run by the GM, not by the bot",
-    body: "You write the personas, mute an NPC mid-scene, put words in their mouth with /say, and steer the next reply with a directive. Audio recording is opt-in, per player.",
-  },
-  {
-    icon: KeyRound,
-    title: "Your keys, your data",
-    body: "Bring your own provider keys and the usage is yours alone. Everything lives in one Postgres database on the operator's own server, and deleting a campaign removes all of it.",
-  },
+  { icon: Mic, titleKey: "auth.featureVoiceTitle", bodyKey: "auth.featureVoiceBody" },
+  { icon: ScrollText, titleKey: "auth.featureTranscriptTitle", bodyKey: "auth.featureTranscriptBody" },
+  { icon: Sparkles, titleKey: "auth.featureGmTitle", bodyKey: "auth.featureGmBody" },
+  { icon: KeyRound, titleKey: "auth.featureKeysTitle", bodyKey: "auth.featureKeysBody" },
 ];
 
 // Screenshot slots. src stays null until #263's captures land; the frame then
 // renders the image in place of the placeholder with no layout change.
-type Shot = { caption: string; src: string | null };
+type Shot = { captionKey: MessageKey; src: string | null };
 
 const SHOTS: Shot[] = [
-  { caption: "The live session screen: transcript, who is speaking, spend so far.", src: null },
-  { caption: "An Agent's persona and voice, in the campaign editor.", src: null },
-  { caption: "The campaign's knowledge graph, built from play.", src: null },
-  { caption: "Provider keys and spend caps, per tenant.", src: null },
+  { captionKey: "auth.shotSessionCaption", src: null },
+  { captionKey: "auth.shotPersonaCaption", src: null },
+  { captionKey: "auth.shotWikiCaption", src: null },
+  { captionKey: "auth.shotKeysCaption", src: null },
 ];
 
 export function Landing({ open = false }: { open?: boolean }) {
+  const { t } = useI18n();
   return (
     <div className="gx-landing">
       <header className="gx-landing__bar">
@@ -74,92 +65,82 @@ export function Landing({ open = false }: { open?: boolean }) {
           </span>
           <span className="gx-gradient-text">Glyphoxa</span>
         </span>
-        <a className="gx-btn gx-btn--secondary" href="/login">
-          Sign in
-        </a>
+        {/* The language picker rides in the header next to the sign-in CTA so a
+            German visitor can switch BEFORE any session exists. Inline flex
+            because the bar's stylesheet only lays out its two edge slots. */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+          <LanguageSwitcher />
+          <a className="gx-btn gx-btn--secondary" href="/login">
+            {t("auth.landingSignIn")}
+          </a>
+        </span>
       </header>
 
       <section className="gx-landing__hero">
         <h1 className="gx-landing__headline">
-          Give your <span className="gx-gradient-text">NPCs a voice</span> at the table
+          {t("auth.landingHeadlinePre")}
+          <span className="gx-gradient-text">{t("auth.landingHeadlineAccent")}</span>
+          {t("auth.landingHeadlinePost")}
         </h1>
-        <p className="gx-landing__lede">
-          Glyphoxa is a self-hosted companion for tabletop RPGs played over Discord. It
-          voices your campaign&apos;s characters in the voice channel, keeps the transcript,
-          and remembers what happened — while the GM stays in charge of all of it.
-        </p>
+        <p className="gx-landing__lede">{t("auth.landingLede")}</p>
         <div className="gx-landing__cta">
           <a className="gx-btn gx-btn--primary gx-btn--lg" href="/login">
-            {open ? "Start with Discord" : "Sign in with Discord"}
+            {open ? t("auth.landingCtaOpen") : t("auth.landingCtaSignIn")}
           </a>
           <span className="gx-landing__cta-note">
-            {open
-              ? "Free while in beta · sign in with the Discord account you play on"
-              : "Sign in with the Discord account you play on"}
+            {open ? t("auth.landingCtaNoteOpen") : t("auth.landingCtaNote")}
           </span>
         </div>
       </section>
 
-      <section className="gx-landing__features" aria-label="What Glyphoxa does">
-        {FEATURES.map(({ icon: Icon, title, body }) => (
-          <article key={title} className="gx-landing__feature">
+      <section className="gx-landing__features" aria-label={t("auth.landingFeaturesAria")}>
+        {FEATURES.map(({ icon: Icon, titleKey, bodyKey }) => (
+          <article key={titleKey} className="gx-landing__feature">
             <span className="gx-landing__feature-icon">
               <Icon size={18} />
             </span>
-            <h2>{title}</h2>
-            <p>{body}</p>
+            <h2>{t(titleKey)}</h2>
+            <p>{t(bodyKey)}</p>
           </article>
         ))}
       </section>
 
-      <section className="gx-landing__shots" aria-label="Screenshots">
+      <section className="gx-landing__shots" aria-label={t("auth.landingShotsAria")}>
         {SHOTS.map((shot) => (
-          <figure key={shot.caption} className="gx-landing__shot">
+          <figure key={shot.captionKey} className="gx-landing__shot">
             {shot.src ? (
-              <img src={shot.src} alt={shot.caption} loading="lazy" />
+              <img src={shot.src} alt={t(shot.captionKey)} loading="lazy" />
             ) : (
               <div className="gx-landing__shot-placeholder" role="presentation" />
             )}
-            <figcaption>{shot.caption}</figcaption>
+            <figcaption>{t(shot.captionKey)}</figcaption>
           </figure>
         ))}
       </section>
 
       {open && (
         <section className="gx-landing__beta" aria-labelledby="beta-heading">
-          <h2 id="beta-heading">How the free beta works</h2>
+          <h2 id="beta-heading">{t("auth.betaHeading")}</h2>
           <div className="gx-landing__plans">
             <article className="gx-landing__plan">
-              <h3>Try it on us</h3>
-              <p>
-                New tables start with a small monthly allowance of provider usage paid for
-                by this instance. No card, nothing to cancel. When the allowance is used
-                up, the voice features pause until the next month — or ask the operator to
-                move you to the free bring-your-own-keys plan.
-              </p>
+              <h3>{t("auth.betaTrialTitle")}</h3>
+              <p>{t("auth.betaTrialBody")}</p>
             </article>
             <article className="gx-landing__plan">
-              <h3>Then bring your own keys</h3>
-              <p>
-                For real campaigns, add your own provider keys (speech, language model,
-                images) in the settings and ask to be moved to the BYOK plan. Usage is
-                then billed to you by those providers, and this instance charges nothing
-                on top.
-              </p>
+              <h3>{t("auth.betaByokTitle")}</h3>
+              <p>{t("auth.betaByokBody")}</p>
             </article>
           </div>
-          <p className="gx-landing__beta-note">
-            This is an open beta on a small self-hosted server: expect rough edges and the
-            occasional restart, and keep your own notes on anything you would hate to
-            lose.
-          </p>
+          <p className="gx-landing__beta-note">{t("auth.betaNote")}</p>
         </section>
       )}
 
+      {/* Split around the link: the Datenschutzerklärung's German proper name
+          stays verbatim in both display languages (#518). */}
       <p className="gx-landing__beta-note">
-        Sessions are transcribed — the bot says so in the voice channel before it starts —
-        and audio recording is opt-in per player. Details in the{" "}
-        <a href="/privacy">Datenschutzerklärung</a>.
+        {t("auth.transcribedNotePre")}
+        <a href="/privacy">Datenschutzerklärung</a>
+        {t("auth.transcribedNotePost")}
       </p>
 
       <LegalFooter />

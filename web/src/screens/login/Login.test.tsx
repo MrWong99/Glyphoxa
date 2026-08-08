@@ -64,7 +64,7 @@ describe("Login", () => {
     const banner = screen.getByRole("alert");
     // Mode-neutral and non-leaky: the same redirect covers an allowlist miss
     // AND an open-mode suspension, so the copy names neither cause.
-    expect(banner).toHaveTextContent(/isn't authorized for this deployment/i);
+    expect(banner).toHaveTextContent(/isn't authorized here/i);
     expect(banner).not.toHaveTextContent(/allowlist|suspend/i);
     // The Discord link stays available so the operator can retry with the right account.
     expect(screen.getByRole("link", { name: /continue with discord/i })).toBeInTheDocument();
