@@ -6,6 +6,7 @@ import { Plus, Trash2, X } from "lucide-react";
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
 
 // Saved session prep boards (#543): a named, ordered shortlist of entries the GM
@@ -42,6 +43,7 @@ export function invalidateBoards(queryClient: ReturnType<typeof useQueryClient>)
  * the GM is answering "is tonight's session about this?", not filling in a form.
  */
 export function NodeBoards({ nodeID }: { nodeID: string }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const boardsQuery = useQuery(CampaignService.method.listBoards, {});
   const boards = boardsQuery.data?.boards ?? [];
@@ -54,10 +56,8 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
 
   return (
     <div className="gx-field gx-kg-tags">
-      <span className="gx-field__label">Boards</span>
-      <span className="gx-field__hint">
-        Shortlists for a session. They never reach an NPC's prompt.
-      </span>
+      <span className="gx-field__label">{t("campaign.boardsLabel")}</span>
+      <span className="gx-field__hint">{t("campaign.boardsHint")}</span>
       <ul className="gx-kg-tags__list">
         {boards.map((b) => {
           const on = b.nodeIds.includes(nodeID);
@@ -88,7 +88,7 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
       </ul>
       {update.isError && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          Couldn't update the board: {update.error.message}
+          {t("campaign.boardUpdateError", { message: update.error.message })}
         </span>
       )}
     </div>
@@ -96,6 +96,7 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
 }
 
 export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => void }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const boardsQuery = useQuery(CampaignService.method.listBoards, {});
   const nodesQuery = useQuery(CampaignService.method.listNodes, {});
@@ -116,11 +117,11 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
   const boards = boardsQuery.data?.boards ?? [];
 
   return (
-    <section className="gx-boards" aria-label="Prep boards">
+    <section className="gx-boards" aria-label={t("campaign.boardsAria")}>
       <div className="gx-boards__new">
         <Input
-          aria-label="New board name"
-          placeholder="tonight: the harbour heist"
+          aria-label={t("campaign.newBoardAria")}
+          placeholder={t("campaign.newBoardPlaceholder")}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
@@ -140,15 +141,12 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
             setNewName("");
           }}
         >
-          Add board
+          {t("campaign.addBoard")}
         </Button>
       </div>
 
       {boards.length === 0 ? (
-        <p className="gx-kg-empty">
-          No boards yet. Make one for tonight and the entries you need are one click away during
-          play.
-        </p>
+        <p className="gx-kg-empty">{t("campaign.boardsEmpty")}</p>
       ) : (
         boards.map((b) => (
           <div key={b.id} className="gx-boards__board">
@@ -157,14 +155,14 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
               <button
                 type="button"
                 className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-                aria-label={`Delete board ${b.name}`}
+                aria-label={t("campaign.deleteBoardAria", { name: b.name })}
                 onClick={() => deleteBoard.mutate({ id: b.id })}
               >
                 <Trash2 size={13} />
               </button>
             </div>
             {b.nodeIds.length === 0 ? (
-              <p className="gx-field__hint">Empty — add entries from the Knowledge tab.</p>
+              <p className="gx-field__hint">{t("campaign.boardEmpty")}</p>
             ) : (
               <ul className="gx-boards__list">
                 {b.nodeIds.map((id) => {
@@ -178,12 +176,15 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
                         style={{ color: meta.color, background: alphaBg(meta.color) }}
                         onClick={() => onOpenNode?.(id)}
                       >
-                        {node?.name ?? "(deleted entry)"}
+                        {node?.name ?? t("campaign.deletedEntry")}
                       </button>
                       <button
                         type="button"
                         className="gx-kg-iconbtn"
-                        aria-label={`Remove ${node?.name ?? "entry"} from ${b.name}`}
+                        aria-label={t("campaign.removeFromBoardAria", {
+                          name: node?.name ?? t("campaign.entryWord"),
+                          board: b.name,
+                        })}
                         onClick={() =>
                           updateBoard.mutate({
                             id: b.id,

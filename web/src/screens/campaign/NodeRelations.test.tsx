@@ -168,14 +168,14 @@ describe("NodeRelations", () => {
     });
 
     await screen.findByText("Barrow");
-    const out = screen.getByRole("region", { name: /outgoing relations/i });
+    const out = screen.getByRole("region", { name: /outgoing connections/i });
     expect(within(out).getByText("Barrow")).toBeInTheDocument();
-    expect(within(out).getByText("resides_in")).toBeInTheDocument();
+    expect(within(out).getByText("lives in")).toBeInTheDocument();
 
-    const inc = screen.getByRole("region", { name: /incoming relations/i });
+    const inc = screen.getByRole("region", { name: /incoming connections/i });
     expect(within(inc).getByText("Cyra")).toBeInTheDocument();
     // Incoming rows are context-only: no delete affordance.
-    expect(within(inc).queryByRole("button", { name: /delete relation/i })).toBeNull();
+    expect(within(inc).queryByRole("button", { name: /delete connection/i })).toBeNull();
   });
 
   it("creates a relation with the chosen type and target", async () => {
@@ -183,10 +183,10 @@ describe("NodeRelations", () => {
       node: npcNode,
       others: [locNode],
     });
-    await screen.findByRole("button", { name: /add relation/i });
+    await screen.findByRole("button", { name: /add connection/i });
 
-    fireEvent.click(screen.getByRole("button", { name: /add relation/i }));
-    await pick("Relation", "resides_in");
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+    await pick("Connection", "lives in");
     await pick("Target entry", "Barrow");
     fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
@@ -213,8 +213,8 @@ describe("NodeRelations", () => {
     await screen.findByText("Barrow");
 
     // The row's X opens a confirm dialog naming the relation; no RPC yet.
-    fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent(/resides_in/i);
+    fireEvent.click(screen.getByRole("button", { name: /delete connection/i }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(/lives in/i);
     expect(deleteCalls).toHaveLength(0);
 
     await confirmInDialog();
@@ -238,7 +238,7 @@ describe("NodeRelations", () => {
     });
     await screen.findByText("Barrow");
 
-    fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete connection/i }));
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
 
@@ -261,7 +261,7 @@ describe("NodeRelations", () => {
   it("hides the Voiced by select for a non-NPC node", async () => {
     renderRelations(locNode, { node: locNode });
     // The relations section still renders (its header appears), but no agent link.
-    await screen.findByRole("button", { name: /add relation/i });
+    await screen.findByRole("button", { name: /add connection/i });
     expect(screen.queryByRole("combobox", { name: /voiced by/i })).toBeNull();
   });
 
@@ -308,7 +308,7 @@ describe("NodeRelations", () => {
     });
     await screen.findByText("Barrow");
 
-    fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete connection/i }));
     await confirmInDialog();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't delete/i);

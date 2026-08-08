@@ -171,6 +171,14 @@ function renderScreen() {
   return { npcs, previewCalls, grants };
 }
 
+// The Tools section and the addressing switch live inside a closed-by-default
+// AdvancedCard whose body is unmounted while closed — every assertion against
+// them must open the card first. The editor remounts (keyed) when the selected
+// agent changes, so the card must be re-opened after each selection change.
+function openAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: /advanced: tools & addressing/i }));
+}
+
 // scopedTransport serves a single scope-supporting Tool (remember_knowledge)
 // whose grant state mutates in-closure and records every UpdateToolGrant call, so
 // a test can prove what the grant Switch versus the Save-scope button actually
@@ -216,9 +224,10 @@ describe("Campaign", () => {
 
   it("locks the Butler: Address-Only is forced on and its switch is disabled", async () => {
     renderScreen();
-    // Select the Butler.
+    // Select the Butler; the addressing switch sits in the advanced card.
     fireEvent.click(await screen.findByText("Glyphoxa"));
-    const sw = screen.getByLabelText(/address only/i);
+    openAdvanced();
+    const sw = screen.getByLabelText(/only answers when called by name/i);
     expect(sw).toBeDisabled();
     expect(sw).toBeChecked();
     // The Butler is not deletable.
@@ -354,12 +363,13 @@ describe("Campaign", () => {
     expect(await screen.findByText("Bart")).toBeInTheDocument();
   });
 
-  it("exposes a fourth Proposals tab that mounts the review panel (#300)", async () => {
+  it("exposes a fourth Suggestions tab that mounts the review panel (#300)", async () => {
     renderScreen();
     expect(await screen.findByText("Bart")).toBeInTheDocument();
 
-    // Switch to Proposals — the panel mounts on its own ListKnowledgeProposals RPC.
-    fireEvent.click(screen.getByRole("tab", { name: "Proposals" }));
+    // Switch to Suggestions (the simplified name for Knowledge Proposals) — the
+    // panel mounts on its own ListKnowledgeProposals RPC.
+    fireEvent.click(screen.getByRole("tab", { name: "Suggestions" }));
     expect(await screen.findByText(/No pending suggestions/i)).toBeInTheDocument();
     // The roster (Cast) is no longer mounted.
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
@@ -404,17 +414,21 @@ describe("Campaign", () => {
     renderScreen();
     // Bart (npc-1) is dice-ungranted; the toggle renders unchecked.
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
     const dice = await screen.findByLabelText("dice");
     expect(dice).not.toBeChecked();
 
-    // The Butler (butler-1) is dice-granted; its toggle renders checked.
+    // The Butler (butler-1) is dice-granted; its toggle renders checked. The
+    // editor remounted on selection, so the advanced card is closed again.
     fireEvent.click(screen.getByText("Glyphoxa"));
+    openAdvanced();
     expect(await screen.findByLabelText("dice")).toBeChecked();
   });
 
   it("toggles a grant on and it persists across a reload (#117 AC2)", async () => {
     const { grants } = renderScreen();
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
     const dice = await screen.findByLabelText("dice");
     expect(dice).not.toBeChecked();
 
@@ -458,6 +472,7 @@ describe("Campaign", () => {
       </Providers>,
     );
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
     const dice = await screen.findByLabelText("dice");
     fireEvent.click(dice);
 
@@ -508,6 +523,7 @@ describe("Campaign", () => {
       </Providers>,
     );
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
 
     // dice supports no scope → no scope field; remember_knowledge does → one shows.
     await screen.findByLabelText("dice");
@@ -554,8 +570,8 @@ describe("Campaign", () => {
     fireEvent.click(await screen.findByText("New NPC"));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Jule Brandt" } });
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "" } });
-    fireEvent.change(screen.getByLabelText("Draft with your LLM"), { target: { value: "a stern harbourmaster" } });
-    fireEvent.click(screen.getByRole("button", { name: /generate persona/i }));
+    fireEvent.change(screen.getByLabelText("Draft with AI"), { target: { value: "a stern harbourmaster" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate draft/i }));
 
     // The RPC carried the live form values — including the cleared title, whose
     // presence tells the server NOT to fall back to the stored one.
@@ -563,7 +579,9 @@ describe("Campaign", () => {
     expect(seen[0]).toEqual({ name: "Jule Brandt", title: "" });
     // The draft landed in the persona field for review (still unsaved).
     await waitFor(() =>
-      expect((screen.getByLabelText("Persona") as HTMLTextAreaElement).value).toBe("**Du bist Jule Brandt**"),
+      expect((screen.getByLabelText("Personality & backstory") as HTMLTextAreaElement).value).toBe(
+        "**Du bist Jule Brandt**",
+      ),
     );
   });
 
@@ -575,6 +593,7 @@ describe("Campaign", () => {
       </Providers>,
     );
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
     const scope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
     expect(scope.value).toBe('{"scope":"self"}');
 
@@ -597,6 +616,7 @@ describe("Campaign", () => {
       </Providers>,
     );
     fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
     const sw = await screen.findByLabelText("remember_knowledge");
     expect(sw).toBeChecked();
 

@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Card } from "@/components/ui/Card";
 import { invalidateProposalReview } from "./knowledgeCache";
 import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from "./proposalParts";
@@ -20,6 +21,7 @@ import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from 
 // same proposal through the same widgets and the same RPCs.
 
 export function ProposalsPanel() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.listKnowledgeProposals, {});
   const proposals = data?.proposals ?? [];
@@ -35,17 +37,13 @@ export function ProposalsPanel() {
   if (status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load suggestions: {error.message}
+        {t("knowledge.loadSuggestionsError", { message: error.message })}
       </p>
     );
   }
 
   if (proposals.length === 0) {
-    return (
-      <p className="gx-kg-empty">
-        No pending suggestions. Agents with the remember grant will file them here.
-      </p>
-    );
+    return <p className="gx-kg-empty">{t("knowledge.noSuggestions")}</p>;
   }
 
   return (

@@ -1,5 +1,6 @@
 import { EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent, GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import type { MessageKey } from "@/i18n";
 
 // Roster prep derivations (#544): where each cast NPC sits in the world, and
 // whether it is actually ready to speak.
@@ -13,7 +14,13 @@ import type { Agent, GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/ma
 /** One readiness check, with the thing that fixes it. */
 export type Check = {
   key: string;
-  label: string;
+  /**
+   * The check's display label as a MESSAGE KEY (plus interpolation params) —
+   * this module runs outside React, so it never bakes a translated string into
+   * derived state; RosterPrep translates at render time.
+   */
+  labelKey: MessageKey;
+  labelParams?: { n: number };
   ok: boolean;
   /**
    * Where the GM goes to satisfy it — `agent` opens the Agent editor, `entry`
@@ -57,7 +64,11 @@ export type RosterGroup = {
   entries: RosterEntry[];
 };
 
-/** UNPLACED_TITLE names the catch-all group. It is explicit rather than hidden. */
+/**
+ * UNPLACED_TITLE is the catch-all group's sentinel key. It is explicit rather
+ * than hidden. RosterPrep renders it through the message catalog (the English
+ * copy matches this constant); every other group title is a Node name (data).
+ */
 export const UNPLACED_TITLE = "Not placed in the world";
 
 /**
@@ -137,12 +148,12 @@ export function rosterPrep(
 
 function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[] {
   return [
-    { key: "persona", label: "Persona written", ok: agent.persona.trim() !== "", fix: "agent" },
-    { key: "voice", label: "Voice configured", ok: agent.voice !== "", fix: "agent" },
-    { key: "link", label: "Wiki entry linked", ok: node !== null, fix: "link" },
+    { key: "persona", labelKey: "campaign.checkPersona", ok: agent.persona.trim() !== "", fix: "agent" },
+    { key: "voice", labelKey: "campaign.checkVoice", ok: agent.voice !== "", fix: "agent" },
+    { key: "link", labelKey: "campaign.checkLink", ok: node !== null, fix: "link" },
     {
       key: "content",
-      label: "Entry has content",
+      labelKey: "campaign.checkContent",
       // The ADR-0008 auto-node starts empty; either facts or prose counts.
       ok: node !== null && (node.bodyLen > 0 || node.publicAspectCount > 0),
       fix: "entry",
@@ -151,15 +162,10 @@ function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[]
       key: "facts",
       // The figure the voice loop will actually inject, from the same renderer
       // (#535) — content on the entry does not guarantee the NPC receives it.
-      label: r ? `${r.factCount} facts in reach` : "Facts in reach",
+      labelKey: r ? "campaign.checkFactsCount" : "campaign.checkFacts",
+      labelParams: r ? { n: r.factCount } : undefined,
       ok: (r?.factCount ?? 0) > 0,
       fix: "entry",
     },
   ];
-}
-
-/** lastSpokeLabel renders the "last spoke" prep signal, which is context, not a check. */
-export function lastSpokeLabel(r?: Readiness): string {
-  if (!r?.lastSpokeAt) return "never spoken";
-  return `last spoke ${r.lastSpokeAt.toLocaleDateString()}`;
 }

@@ -5,17 +5,18 @@ import { ArrowRight, ArrowLeft, Pencil, X, Plus, Link as LinkIcon } from "lucide
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node as PbNode, Edge as PbEdge } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import {
-  DISPOSITION_OPTIONS,
-  EDGE_LABEL,
-  EDGE_OPTIONS,
   MAX_EDGE_NOTE_RUNES,
   TYPE_META as NODE_TYPE_META,
+  dispositionOptions,
+  edgeLabel,
+  edgeOptions,
 } from "./knowledgeVocab";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 
@@ -23,7 +24,7 @@ function typeMeta(t: NodeType) {
   return NODE_TYPE_META[t] ?? NODE_TYPE_META[NodeType.NOTE];
 }
 
-// NodeRelations (#132) is the editor card's "Relations · N" section on the live
+// NodeRelations (#132) is the editor card's "Connections · N" section on the live
 // CampaignService edge RPCs (ADR-0008 v1.0 + 2026-07-04 amendment). Edges are
 // strictly one-way, so outgoing and incoming are listed SEPARATELY: outgoing are
 // editable here; incoming are shown dimmed for context and edited from the other
@@ -36,6 +37,7 @@ function typeMeta(t: NodeType) {
 const AGENT_NONE = "__none__";
 
 export function NodeRelations({ node }: { node: PbNode }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const isNPC = node.nodeType === NodeType.NPC;
 
@@ -60,10 +62,10 @@ export function NodeRelations({ node }: { node: PbNode }) {
   const castOptions = useMemo(() => {
     const cast = (rosterQuery.data?.roster ?? []).filter((a) => a.role === "character");
     return [
-      { value: AGENT_NONE, label: "— None —" },
+      { value: AGENT_NONE, label: t("knowledge.noneOption") },
       ...cast.map((a) => ({ value: a.id, label: a.name })),
     ];
-  }, [rosterQuery.data]);
+  }, [rosterQuery.data, t]);
 
   // Creating or deleting an Edge here changes what the GRAPH draws too (#534), so
   // this drops every read of the same data rather than just this node's edges.
@@ -127,33 +129,31 @@ export function NodeRelations({ node }: { node: PbNode }) {
       {isNPC && (
         <div className="gx-field gx-kg-voicedby">
           <Select
-            label="Voiced by"
+            label={t("knowledge.voicedByLabel")}
             options={castOptions}
             value={linkedAgentId ? linkedAgentId : AGENT_NONE}
             onValueChange={(v) =>
               setNodeAgent.mutate({ nodeId: node.id, agentId: v === AGENT_NONE ? "" : v })
             }
-            placeholder="— None —"
+            placeholder={t("knowledge.noneOption")}
           />
-          <span className="gx-field__hint">
-            Optional. Links this entry to a cast NPC — it then knows its own entry and its relations.
-          </span>
+          <span className="gx-field__hint">{t("knowledge.voicedByHint")}</span>
           {setNodeAgent.isError && (
             <span className="gx-editor__status gx-editor__status--error" role="alert">
-              Couldn't link agent: {setNodeAgent.error.message}
+              {t("knowledge.linkAgentError", { message: setNodeAgent.error.message })}
             </span>
           )}
         </div>
       )}
 
       <div className="gx-kg-relations__bar">
-        <h3 className="gx-overline">Relations · {count}</h3>
+        <h3 className="gx-overline">{t("knowledge.connectionsHeading", { n: count })}</h3>
         <Button
           variant="ghost"
           iconStart={<Plus size={13} />}
           onClick={() => setAdding((a) => !a)}
         >
-          Add relation
+          {t("knowledge.addConnection")}
         </Button>
       </div>
 
@@ -161,41 +161,39 @@ export function NodeRelations({ node }: { node: PbNode }) {
         <div className="gx-kg-relations__add">
           <div className="gx-kg-relations__addgrid">
             <Select
-              label="Relation"
-              options={EDGE_OPTIONS}
+              label={t("knowledge.connectionLabel")}
+              options={edgeOptions(t)}
               value={relType}
               onValueChange={setRelType}
-              placeholder="Relation…"
+              placeholder={t("knowledge.connectionPlaceholder")}
             />
             <Select
-              label="Target entry"
+              label={t("knowledge.targetEntryLabel")}
               options={targetOptions}
               value={target}
               onValueChange={setTarget}
-              placeholder="Which entry?"
+              placeholder={t("knowledge.targetEntryPlaceholder")}
             />
           </div>
-          <span className="gx-field__hint">
-            Relations are typed: resides_in points at a Location, member_of at a Faction.
-          </span>
+          <span className="gx-field__hint">{t("knowledge.connectionTypedHint")}</span>
           <div className="gx-kg-relations__addactions">
             <Button
               variant="primary"
               onClick={submitEdge}
               disabled={relType === "" || target === "" || createEdge.isPending}
             >
-              Add
+              {t("knowledge.add")}
             </Button>
             {createEdge.isError && (
               <span className="gx-editor__status gx-editor__status--error" role="alert">
-                Couldn't add: {createEdge.error.message}
+                {t("knowledge.addConnectionError", { message: createEdge.error.message })}
               </span>
             )}
           </div>
         </div>
       )}
 
-      <section className="gx-kg-relations__list" aria-label="Outgoing relations">
+      <section className="gx-kg-relations__list" aria-label={t("knowledge.outgoingConnectionsAria")}>
         {outgoing.map((e) => (
           <OutgoingRow
             key={e.id}
@@ -207,28 +205,31 @@ export function NodeRelations({ node }: { node: PbNode }) {
             saving={updateDetails.isPending && updateDetails.variables?.id === e.id}
             saveError={
               updateDetails.isError && updateDetails.variables?.id === e.id
-                ? `Couldn't save: ${updateDetails.error.message}`
+                ? t("common.couldntSave", { message: updateDetails.error.message })
                 : null
             }
             saved={savedEdgeID === e.id}
           />
         ))}
-        {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
+        {outgoing.length === 0 && (
+          <p className="gx-kg-relations__empty">{t("knowledge.noOutgoingConnections")}</p>
+        )}
         {deleteEdge.isError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            Couldn't delete relation: {deleteEdge.error.message}
+            {t("knowledge.deleteConnectionError", { message: deleteEdge.error.message })}
           </span>
         )}
       </section>
 
       {incoming.length > 0 && (
-        <section className="gx-kg-relations__list gx-kg-relations__list--incoming" aria-label="Incoming relations">
+        <section
+          className="gx-kg-relations__list gx-kg-relations__list--incoming"
+          aria-label={t("knowledge.incomingConnectionsAria")}
+        >
           {incoming.map((e) => (
             <IncomingRow key={e.id} edge={e} />
           ))}
-          <p className="gx-kg-relations__hint">
-            Relations are one-way. Incoming ones are shown for context and edited from the other entry.
-          </p>
+          <p className="gx-kg-relations__hint">{t("knowledge.oneWayHint")}</p>
         </section>
       )}
 
@@ -238,17 +239,17 @@ export function NodeRelations({ node }: { node: PbNode }) {
           onOpenChange={(open) => {
             if (!open) setConfirmEdge(null);
           }}
-          title="Delete this relation?"
+          title={t("knowledge.deleteConnectionTitle")}
           description={
             <>
-              Removes the{" "}
+              {t("knowledge.deleteConnectionBefore")}
               <strong>
-                {EDGE_LABEL.get(confirmEdge.edgeType) ?? ""} → {confirmEdge.toNodeName}
-              </strong>{" "}
-              relationship. This can't be undone.
+                {edgeLabel(t, confirmEdge.edgeType)} → {confirmEdge.toNodeName}
+              </strong>
+              {t("knowledge.deleteConnectionAfter")}
             </>
           }
-          confirmLabel="Delete relation"
+          confirmLabel={t("knowledge.deleteConnection")}
           onConfirm={() => {
             deleteEdge.mutate({ id: confirmEdge.id });
             setConfirmEdge(null);
@@ -274,8 +275,9 @@ function OutgoingRow({
   saveError: string | null;
   saved: boolean;
 }) {
+  const { t } = useI18n();
   const meta = typeMeta(edge.toNodeType);
-  const label = EDGE_LABEL.get(edge.edgeType) ?? "";
+  const label = edgeLabel(t, edge.edgeType);
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState(edge.note);
   const [disposition, setDisposition] = useState(String(edge.disposition));
@@ -288,7 +290,7 @@ function OutgoingRow({
       <span className="gx-kg-edge__type">{label}</span>
       <span className="gx-kg-edge__target">{edge.toNodeName}</span>
       <Badge size="sm" style={{ color: meta.color, background: `${meta.color}24` }}>
-        {meta.label}
+        {t(meta.labelKey)}
       </Badge>
       {/* The relation's texture, collapsed. "Knows and despises" is the
           difference between a flat NPC and a live one — but most relations are
@@ -296,7 +298,7 @@ function OutgoingRow({
       <button
         type="button"
         className="gx-kg-iconbtn"
-        aria-label={`Edit what ${label} ${edge.toNodeName} is like`}
+        aria-label={t("knowledge.editConnectionAria", { relation: label, target: edge.toNodeName })}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
@@ -305,7 +307,7 @@ function OutgoingRow({
       <button
         type="button"
         className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-        aria-label={`Delete relation ${label} ${edge.toNodeName}`}
+        aria-label={t("knowledge.deleteConnectionAria", { relation: label, target: edge.toNodeName })}
         onClick={onDelete}
       >
         <X size={13} />
@@ -314,15 +316,15 @@ function OutgoingRow({
       {open && (
         <div className="gx-kg-edge__details">
           <Input
-            label="What it's like"
-            placeholder="owes you money since the siege"
+            label={t("knowledge.connectionNoteLabel")}
+            placeholder={t("knowledge.connectionNotePlaceholder")}
             value={note}
             maxLength={MAX_EDGE_NOTE_RUNES}
             onChange={(e) => setNote(e.target.value)}
           />
           <Select
-            label="How you feel"
-            options={DISPOSITION_OPTIONS}
+            label={t("knowledge.dispositionSelectLabel")}
+            options={dispositionOptions(t)}
             value={disposition}
             onValueChange={setDisposition}
           />
@@ -332,7 +334,7 @@ function OutgoingRow({
             disabled={saving}
             onClick={() => onSaveDetails(note.trim(), Number(disposition))}
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? t("common.saving") : t("common.save")}
           </Button>
           {/* The editor stays OPEN until the save actually lands. Closing on click
               and never rendering the failure told the GM their note was saved when
@@ -349,18 +351,19 @@ function OutgoingRow({
 }
 
 function IncomingRow({ edge }: { edge: PbEdge }) {
+  const { t } = useI18n();
   const meta = typeMeta(edge.fromNodeType);
-  const label = EDGE_LABEL.get(edge.edgeType) ?? "";
+  const label = edgeLabel(t, edge.edgeType);
   return (
     <div className="gx-kg-edge gx-kg-edge--incoming">
       <ArrowLeft size={13} className="gx-kg-edge__dir" aria-hidden />
       <span className="gx-kg-edge__type">{label}</span>
       <span className="gx-kg-edge__target">{edge.fromNodeName}</span>
       <Badge size="sm" style={{ color: meta.color, background: `${meta.color}24` }}>
-        {meta.label}
+        {t(meta.labelKey)}
       </Badge>
       <span className="gx-kg-edge__incoming">
-        <LinkIcon size={11} /> incoming
+        <LinkIcon size={11} /> {t("knowledge.incomingTag")}
       </span>
     </div>
   );

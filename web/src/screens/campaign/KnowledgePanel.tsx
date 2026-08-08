@@ -22,6 +22,7 @@ import {
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { DraftEdge, DraftNode, Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Input } from "@/components/ui/Input";
@@ -36,7 +37,7 @@ import { NodeBoards } from "./PrepBoards";
 import { KnowledgeGraph } from "./graph/KnowledgeGraph";
 import { WorldHealthPanel } from "./graph/WorldHealthPanel";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
-import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "./knowledgeVocab";
+import { TYPE_META, TYPE_ORDER, alphaBg, edgeLabel, metaOf } from "./knowledgeVocab";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
 // on the live CampaignService node RPCs (ADR-0008 v1.0). An "entry" is the
@@ -46,12 +47,9 @@ import { EDGE_LABEL as EDGE_TYPE_LABEL, TYPE_META, TYPE_ORDER, alphaBg, metaOf }
 // entries are injected into NPC prompts; a gm_private entry never reaches the
 // table. Type-filter chips + fulltext search arrive in #131.
 
-const TYPE_OPTIONS = TYPE_ORDER.map((t) => ({ value: String(t), label: TYPE_META[t].label }));
-const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
-
-// ViewMode is the Knowledge tab's [ List | Graph ] switch (#534). The List mode
-// is unchanged — the graph is an ADDITIONAL way to read the same wiki, not a
-// replacement, and the editor rail is shared by both.
+// ViewMode is the Knowledge tab's [ List | Relationship map ] switch (#534). The
+// List mode is unchanged — the map is an ADDITIONAL way to read the same wiki,
+// not a replacement, and the editor rail is shared by both.
 type ViewMode = "list" | "graph" | "health";
 
 export function KnowledgePanel({
@@ -69,6 +67,7 @@ export function KnowledgePanel({
   /** Hands a cast Agent back to the Cast tab, where its fix lives. */
   onOpenCast?: (agentID: string) => void;
 } = {}) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
@@ -197,7 +196,7 @@ export function KnowledgePanel({
   if (status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load knowledge entries: {error.message}
+        {t("knowledge.loadEntriesError", { message: error.message })}
       </p>
     );
   }
@@ -226,9 +225,9 @@ export function KnowledgePanel({
       ? createNode.error.message
       : null;
   const editorError = saveError
-    ? `Couldn't save: ${saveError}`
+    ? t("common.couldntSave", { message: saveError })
     : deleteNode.isError
-      ? `Couldn't delete: ${deleteNode.error.message}`
+      ? t("knowledge.deleteError", { message: deleteNode.error.message })
       : null;
 
   // Clicking a graph node opens the SAME editor the list opens (#534): the graph
@@ -241,14 +240,14 @@ export function KnowledgePanel({
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
-        <div className="gx-kg-modes" role="group" aria-label="View mode">
+        <div className="gx-kg-modes" role="group" aria-label={t("knowledge.viewModeAria")}>
           <button
             type="button"
             className="gx-kg-chip"
             aria-pressed={mode === "list"}
             onClick={() => setMode("list")}
           >
-            <Rows3 size={13} /> List
+            <Rows3 size={13} /> {t("knowledge.viewList")}
           </button>
           <button
             type="button"
@@ -256,7 +255,7 @@ export function KnowledgePanel({
             aria-pressed={mode === "graph"}
             onClick={() => setMode("graph")}
           >
-            <Network size={13} /> Graph
+            <Network size={13} /> {t("knowledge.viewMap")}
           </button>
           <button
             type="button"
@@ -264,12 +263,12 @@ export function KnowledgePanel({
             aria-pressed={mode === "health"}
             onClick={() => setMode("health")}
           >
-            <Stethoscope size={13} /> Health
+            <Stethoscope size={13} /> {t("knowledge.viewCheckup")}
           </button>
         </div>
 
         {tagIndex.vocabulary.length > 0 && (
-          <div className="gx-kg-graph__chips" role="group" aria-label="Filter by tag">
+          <div className="gx-kg-graph__chips" role="group" aria-label={t("knowledge.filterByTagAria")}>
             {tagIndex.vocabulary.map((tag) => (
               <button
                 key={tag}
@@ -297,7 +296,7 @@ export function KnowledgePanel({
             <div className="gx-skeleton" data-testid="kg-graph-loading" />
           ) : graphQuery.isError ? (
             <p className="gx-campaign__error" role="alert">
-              Could not load the graph: {graphQuery.error.message}
+              {t("knowledge.loadMapError", { message: graphQuery.error.message })}
             </p>
           ) : mode === "health" ? (
             <WorldHealthPanel
@@ -320,22 +319,22 @@ export function KnowledgePanel({
             <KnowledgeDraftCard state={draftState} onStateChange={setDraftState} onApplied={invalidate} />
             <Input
               type="search"
-              aria-label="Search entries"
+              aria-label={t("knowledge.searchAria")}
               icon={<Search size={15} />}
-              placeholder="Search the wiki — names and content"
+              placeholder={t("knowledge.searchPlaceholder")}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="gx-kg-search"
             />
             {searchFailed ? (
               <p className="gx-campaign__error" role="alert">
-                Couldn't search: {searchQuery.error?.message}
+                {t("knowledge.searchError", { message: searchQuery.error?.message ?? "" })}
               </p>
             ) : (
               <>
                 {groups.map((g) => (
-                  <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
-                    <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+                  <section key={g.type} className="gx-kg-group" aria-label={t(metaOf(g.type).labelKey)}>
+                    <h3 className="gx-kg-group__title">{t(metaOf(g.type).labelKey)}</h3>
                     {g.items.map((n) => (
                       <KnowledgeCard
                         key={n.id}
@@ -349,11 +348,9 @@ export function KnowledgePanel({
                 ))}
                 {nodes.length === 0 &&
                   (searching ? (
-                    <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+                    <p className="gx-kg-empty">{t("knowledge.noMatches", { query: debounced.trim() })}</p>
                   ) : (
-                    <p className="gx-kg-empty">
-                      No entries yet. Add what the world knows and your NPCs will speak to it.
-                    </p>
+                    <p className="gx-kg-empty">{t("knowledge.emptyList")}</p>
                   ))}
               </>
             )}
@@ -431,6 +428,7 @@ function KnowledgeDraftCard({
   onStateChange: (s: DraftState) => void;
   onApplied: () => void;
 }) {
+  const { t } = useI18n();
   const { open, prompt, draft } = state;
   const setOpen = (v: boolean) => onStateChange({ ...state, open: v });
   const setPrompt = (v: string) => onStateChange({ ...state, prompt: v });
@@ -492,9 +490,13 @@ function KnowledgeDraftCard({
       onStateChange({ open: false, prompt: "", draft: null });
       setError(null);
       toast.success(
-        `Added ${res.nodes.length} entr${res.nodes.length === 1 ? "y" : "ies"}` +
+        (res.nodes.length === 1
+          ? t("knowledge.draftAddedOne")
+          : t("knowledge.draftAddedMany", { n: res.nodes.length })) +
           (res.edgesCreated > 0
-            ? ` and ${res.edgesCreated} relationship${res.edgesCreated === 1 ? "" : "s"}`
+            ? res.edgesCreated === 1
+              ? t("knowledge.draftAddedConnectionsOne")
+              : t("knowledge.draftAddedConnectionsMany", { n: res.edgesCreated })
             : ""),
       );
     } catch (err) {
@@ -510,7 +512,7 @@ function KnowledgeDraftCard({
         className="gx-kg-draft-open"
         onClick={() => setOpen(true)}
       >
-        Generate entries with your LLM…
+        {t("knowledge.draftOpen")}
       </Button>
     );
   }
@@ -519,12 +521,12 @@ function KnowledgeDraftCard({
     <Card accent className="gx-kg-draft">
       <div className="gx-kg-editor__bar">
         <h2 className="gx-kg-editor__title">
-          <Sparkles size={15} /> Generate entries
+          <Sparkles size={15} /> {t("knowledge.draftTitle")}
         </h2>
         <button
           type="button"
           className="gx-kg-iconbtn"
-          aria-label="Close generator"
+          aria-label={t("knowledge.draftCloseAria")}
           onClick={() => {
             onStateChange({ open: false, prompt: "", draft: null });
             setError(null);
@@ -538,7 +540,7 @@ function KnowledgeDraftCard({
         <>
           <div className="gx-field">
             <label className="gx-field__label" htmlFor="gx-kg-draft-prompt">
-              What should be drafted?
+              {t("knowledge.draftPromptLabel")}
             </label>
             <textarea
               id="gx-kg-draft-prompt"
@@ -546,12 +548,9 @@ function KnowledgeDraftCard({
               rows={3}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="e.g. The thieves' guild of Saltmarsh — its leader, hideout, prized relic and rival faction"
+              placeholder={t("knowledge.draftPromptPlaceholder")}
             />
-            <span className="gx-field__hint">
-              Your configured LLM drafts linked entries from this. Nothing is saved until you review
-              and apply the draft.
-            </span>
+            <span className="gx-field__hint">{t("knowledge.draftPromptHint")}</span>
           </div>
           <div className="gx-kg-editor__actions">
             <Button
@@ -560,20 +559,18 @@ function KnowledgeDraftCard({
               onClick={() => void runGenerate()}
               disabled={!prompt.trim() || generate.isPending}
             >
-              {generate.isPending ? "Drafting…" : "Generate draft"}
+              {generate.isPending ? t("knowledge.draftGenerating") : t("knowledge.draftGenerate")}
             </Button>
             {error && (
               <span className="gx-editor__status gx-editor__status--error" role="alert">
-                Couldn't generate: {error}
+                {t("knowledge.draftGenerateError", { message: error })}
               </span>
             )}
           </div>
         </>
       ) : (
         <>
-          <span className="gx-field__hint">
-            A draft — nothing is saved yet. Remove what doesn't fit, then apply.
-          </span>
+          <span className="gx-field__hint">{t("knowledge.draftReviewHint")}</span>
           <ul className="gx-kg-draft__nodes">
             {draft.nodes.map((n, i) => {
               const meta = metaOf(n.nodeType);
@@ -593,11 +590,11 @@ function KnowledgeDraftCard({
                         size="sm"
                         style={{ color: meta.color, background: alphaBg(meta.color) }}
                       >
-                        {meta.label}
+                        {t(meta.labelKey)}
                       </Badge>
                       {n.gmPrivate && (
                         <Badge variant="neutral" size="sm">
-                          <EyeOff size={11} /> GM private
+                          <EyeOff size={11} /> {t("knowledge.gmOnlyBadge")}
                         </Badge>
                       )}
                     </div>
@@ -606,7 +603,7 @@ function KnowledgeDraftCard({
                   <button
                     type="button"
                     className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-                    aria-label={`Remove ${n.name} from the draft`}
+                    aria-label={t("knowledge.draftRemoveEntryAria", { name: n.name })}
                     onClick={() => removeNode(i)}
                   >
                     <X size={14} />
@@ -621,12 +618,12 @@ function KnowledgeDraftCard({
                 <li key={i} className="gx-kg-draft__edge">
                   <span className="gx-kg-draft__edge-text">
                     {draft.nodes[e.fromIndex]?.name} →{" "}
-                    <em>{EDGE_TYPE_LABEL.get(e.edgeType) ?? ""}</em> → {draft.nodes[e.toIndex]?.name}
+                    <em>{edgeLabel(t, e.edgeType)}</em> → {draft.nodes[e.toIndex]?.name}
                   </span>
                   <button
                     type="button"
                     className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-                    aria-label="Remove this relation from the draft"
+                    aria-label={t("knowledge.draftRemoveConnectionAria")}
                     onClick={() => removeEdge(i)}
                   >
                     <X size={13} />
@@ -643,16 +640,22 @@ function KnowledgeDraftCard({
               disabled={apply.isPending || draft.nodes.length === 0}
             >
               {apply.isPending
-                ? "Adding…"
-                : `Add ${draft.nodes.length} entr${draft.nodes.length === 1 ? "y" : "ies"}` +
-                  (draft.edges.length > 0 ? ` + ${draft.edges.length} relation${draft.edges.length === 1 ? "" : "s"}` : "")}
+                ? t("knowledge.draftApplying")
+                : (draft.nodes.length === 1
+                    ? t("knowledge.draftApplyOne")
+                    : t("knowledge.draftApplyMany", { n: draft.nodes.length })) +
+                  (draft.edges.length > 0
+                    ? draft.edges.length === 1
+                      ? t("knowledge.draftApplyConnectionsOne")
+                      : t("knowledge.draftApplyConnectionsMany", { n: draft.edges.length })
+                    : "")}
             </Button>
             <Button variant="ghost" onClick={reset} disabled={apply.isPending}>
-              Discard draft
+              {t("knowledge.draftDiscard")}
             </Button>
             {error && (
               <span className="gx-editor__status gx-editor__status--error" role="alert">
-                Couldn't apply: {error}
+                {t("knowledge.draftApplyError", { message: error })}
               </span>
             )}
           </div>
@@ -664,7 +667,7 @@ function KnowledgeDraftCard({
 
 // NodeDeleteConfirm is the delete gate for one entry. Mounted only while a delete
 // is pending confirmation, it fetches the node's edges so the dialog can name how
-// many relationships the cascade (ADR-0008 ON DELETE CASCADE) will take with it.
+// many connections the cascade (ADR-0008 ON DELETE CASCADE) will take with it.
 // The count must never be IMPLIED — while the fetch is in flight a raw 0 would
 // falsely promise "no cascade", so the dialog says "counting…" and holds the
 // confirm disabled until the real count lands; a failed fetch says so plainly
@@ -678,6 +681,7 @@ function NodeDeleteConfirm({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   // retry:false so a failed count settles into isError at once — this query
   // blocks a modal, so backing off silently for seconds would leave "counting…"
   // stuck and the confirm disabled. Fail fast and say so.
@@ -691,17 +695,20 @@ function NodeDeleteConfirm({
 
   let cascade: ReactNode;
   if (edgesQuery.isPending) {
-    cascade = <> Counting its relationships…</>;
+    cascade = <> {t("knowledge.deleteCounting")}</>;
   } else if (edgesQuery.isError) {
-    cascade = <> Its relationships couldn't be counted, but any it has will be deleted too.</>;
+    cascade = <> {t("knowledge.deleteCountFailed")}</>;
   } else if (edgeCount > 0) {
     cascade = (
       <>
-        {" This also deletes its "}
+        {" "}
+        {t("knowledge.deleteCascadeBefore")}
         <strong>
-          {edgeCount} relationship{edgeCount === 1 ? "" : "s"}
+          {edgeCount === 1
+            ? t("knowledge.connectionCountOne")
+            : t("knowledge.connectionCountMany", { n: edgeCount })}
         </strong>
-        .
+        {t("knowledge.deleteCascadeAfter")}
       </>
     );
   } else {
@@ -714,14 +721,14 @@ function NodeDeleteConfirm({
       onOpenChange={(open) => {
         if (!open) onCancel();
       }}
-      title={`Delete “${node.name}”?`}
+      title={t("knowledge.deleteEntryTitle", { name: node.name })}
       description={
         <>
-          This permanently deletes this entry. Hard delete — this can't be undone.
+          {t("knowledge.deleteEntryBody")}
           {cascade}
         </>
       }
-      confirmLabel="Delete entry"
+      confirmLabel={t("knowledge.deleteEntry")}
       // Don't let the operator confirm against an unknown count; a fetch failure
       // is not a reason to block the delete itself.
       confirmDisabled={edgesQuery.isPending}
@@ -731,7 +738,7 @@ function NodeDeleteConfirm({
 }
 
 // KnowledgeCard renders one entry: a type-colored icon tile, the name, a
-// type-colored badge, a "GM private" badge (EyeOff) when private, a one-line body
+// type-colored badge, a "GM-only" badge (EyeOff) when private, a one-line body
 // snippet, and edit/delete affordances.
 function KnowledgeCard({
   node,
@@ -744,6 +751,7 @@ function KnowledgeCard({
   onDelete: () => void;
   deleting: boolean;
 }) {
+  const { t } = useI18n();
   const meta = metaOf(node.nodeType);
   return (
     <Card className="gx-kg-card">
@@ -762,11 +770,11 @@ function KnowledgeCard({
             className="gx-kg-card__type"
             style={{ color: meta.color, background: alphaBg(meta.color) }}
           >
-            {meta.label}
+            {t(meta.labelKey)}
           </Badge>
           {node.gmPrivate && (
             <Badge variant="neutral" size="sm">
-              <EyeOff size={11} /> GM private
+              <EyeOff size={11} /> {t("knowledge.gmOnlyBadge")}
             </Badge>
           )}
           {/* The entry-type badge above is inline-styled because its colour is per-type
@@ -775,7 +783,7 @@ function KnowledgeCard({
               already paints exactly this: --gold on a 14% gold wash. */}
           {node.agentId !== "" && (
             <Badge variant="gold" size="sm" className="gx-kg-card__linked">
-              <LinkIcon size={11} /> Linked agent
+              <LinkIcon size={11} /> {t("knowledge.voicedBadge")}
             </Badge>
           )}
         </div>
@@ -785,7 +793,7 @@ function KnowledgeCard({
         <button
           type="button"
           className="gx-kg-iconbtn"
-          aria-label={`Edit ${node.name}`}
+          aria-label={t("knowledge.editEntryAria", { name: node.name })}
           onClick={onEdit}
         >
           <Pencil size={14} />
@@ -793,7 +801,7 @@ function KnowledgeCard({
         <button
           type="button"
           className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-          aria-label={`Delete ${node.name}`}
+          aria-label={t("knowledge.deleteNamedEntryAria", { name: node.name })}
           onClick={onDelete}
           disabled={deleting}
         >
@@ -846,6 +854,7 @@ function NodeAspects({
   onChange: (rows: AspectRow[]) => void;
   disabled: boolean;
 }) {
+  const { t } = useI18n();
   const patch = (uid: number, next: Partial<AspectRow>) =>
     onChange(rows.map((r) => (r.uid === uid ? { ...r, ...next } : r)));
   const remove = (uid: number) => onChange(rows.filter((r) => r.uid !== uid));
@@ -859,25 +868,23 @@ function NodeAspects({
 
   return (
     <div className="gx-field gx-kg-aspects">
-      <span className="gx-field__label">Facts</span>
-      <span className="gx-field__hint">
-        Each fact hides on its own — an entry can be public and still keep a secret.
-      </span>
+      <span className="gx-field__label">{t("knowledge.factsLabel")}</span>
+      <span className="gx-field__hint">{t("knowledge.factsHint")}</span>
       <ul className="gx-kg-aspects__list">
         {rows.map((row, i) => (
           <li key={row.uid} className="gx-kg-aspect" data-private={row.gmPrivate || undefined}>
             <div className="gx-kg-aspect__fields">
               <Input
-                aria-label={`Fact ${i + 1} label`}
-                placeholder="Role"
+                aria-label={t("knowledge.factKeyAria", { n: i + 1 })}
+                placeholder={t("knowledge.factKeyPlaceholder")}
                 className="gx-kg-aspect__key"
                 value={row.key}
                 disabled={disabled}
                 onChange={(e) => patch(row.uid, { key: e.target.value })}
               />
               <Input
-                aria-label={`Fact ${i + 1} text`}
-                placeholder="Runs the Rusty Anchor"
+                aria-label={t("knowledge.factTextAria", { n: i + 1 })}
+                placeholder={t("knowledge.factTextPlaceholder")}
                 className="gx-kg-aspect__value"
                 value={row.value}
                 disabled={disabled}
@@ -888,7 +895,7 @@ function NodeAspects({
               <button
                 type="button"
                 className="gx-kg-iconbtn"
-                aria-label={`Move fact ${i + 1} up`}
+                aria-label={t("knowledge.factMoveUpAria", { n: i + 1 })}
                 disabled={disabled || i === 0}
                 onClick={() => move(i, -1)}
               >
@@ -897,7 +904,7 @@ function NodeAspects({
               <button
                 type="button"
                 className="gx-kg-iconbtn"
-                aria-label={`Move fact ${i + 1} down`}
+                aria-label={t("knowledge.factMoveDownAria", { n: i + 1 })}
                 disabled={disabled || i === rows.length - 1}
                 onClick={() => move(i, 1)}
               >
@@ -907,7 +914,9 @@ function NodeAspects({
                 type="button"
                 className="gx-kg-iconbtn"
                 aria-label={
-                  row.gmPrivate ? `Make fact ${i + 1} public` : `Make fact ${i + 1} GM private`
+                  row.gmPrivate
+                    ? t("knowledge.factMakePublicAria", { n: i + 1 })
+                    : t("knowledge.factMakeGmOnlyAria", { n: i + 1 })
                 }
                 aria-pressed={row.gmPrivate}
                 disabled={disabled}
@@ -918,7 +927,7 @@ function NodeAspects({
               <button
                 type="button"
                 className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-                aria-label={`Remove fact ${i + 1}`}
+                aria-label={t("knowledge.factRemoveAria", { n: i + 1 })}
                 disabled={disabled}
                 onClick={() => remove(row.uid)}
               >
@@ -934,7 +943,7 @@ function NodeAspects({
         disabled={disabled}
         onClick={() => onChange([...rows, newAspectRow()])}
       >
-        Add fact
+        {t("knowledge.addFact")}
       </Button>
     </div>
   );
@@ -965,7 +974,7 @@ function toWireAspects(rows: AspectRow[]) {
 }
 
 // EntryEditor is the sticky editor card. In create mode it offers the Type select
-// (all seven types) plus Name/Content/GM-private; in edit mode the type is fixed
+// (all seven types) plus Name/Content/GM-only; in edit mode the type is fixed
 // (immutable, ADR-0008) so the select is disabled, and a delete button + Cancel
 // appear. Remounting on a key change (editing id) resets its fields.
 function EntryEditor({
@@ -983,6 +992,7 @@ function EntryEditor({
   onDelete?: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const isEdit = node != null;
   const [nodeType, setNodeType] = useState<NodeType>(node?.nodeType ?? NodeType.NOTE);
   const [name, setName] = useState(node?.name ?? "");
@@ -994,6 +1004,11 @@ function EntryEditor({
   const [knownAspectIds] = useState<string[]>(
     () => (node?.aspects ?? []).map((a) => a.id).filter((id) => id !== ""),
   );
+
+  // The type vocabulary, in the display language. Built at render (not at module
+  // load) so a language switch re-labels the options without a reload.
+  const typeOptions = TYPE_ORDER.map((v) => ({ value: String(v), label: t(TYPE_META[v].labelKey) }));
+  const typeHint = TYPE_ORDER.map((v) => t(TYPE_META[v].labelKey)).join(" · ");
 
   const reset = () => {
     setNodeType(NodeType.NOTE);
@@ -1010,12 +1025,14 @@ function EntryEditor({
   return (
     <Card accent className="gx-kg-editor">
       <div className="gx-kg-editor__bar">
-        <h2 className="gx-kg-editor__title">{isEdit ? "Edit entry" : "Add entry"}</h2>
+        <h2 className="gx-kg-editor__title">
+          {isEdit ? t("knowledge.editEntryTitle") : t("knowledge.addEntryTitle")}
+        </h2>
         {isEdit && onDelete && (
           <button
             type="button"
             className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-            aria-label="Delete entry"
+            aria-label={t("knowledge.deleteEntry")}
             onClick={onDelete}
             disabled={pending}
           >
@@ -1026,22 +1043,27 @@ function EntryEditor({
 
       <div className="gx-field">
         <Select
-          label="Type"
-          options={TYPE_OPTIONS}
+          label={t("knowledge.typeLabel")}
+          options={typeOptions}
           value={String(nodeType)}
           onValueChange={(v) => setNodeType(Number(v) as NodeType)}
           disabled={isEdit}
         />
-        <span className="gx-field__hint">{TYPE_HINT}</span>
+        <span className="gx-field__hint">{typeHint}</span>
       </div>
 
-      <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="What is it called?" />
+      <Input
+        label={t("knowledge.nameLabel")}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder={t("knowledge.namePlaceholder")}
+      />
 
       <NodeAspects rows={aspects} onChange={setAspects} disabled={pending} />
 
       <div className="gx-field">
         <label className="gx-field__label" htmlFor="gx-kg-body">
-          Content
+          {t("knowledge.contentLabel")}
         </label>
         <textarea
           id="gx-kg-body"
@@ -1050,20 +1072,16 @@ function EntryEditor({
           value={body}
           onChange={(e) => setBody(e.target.value)}
         />
-        <span className="gx-field__hint">
-          What the world knows. Public entries are injected into NPC prompts.
-        </span>
+        <span className="gx-field__hint">{t("knowledge.contentHint")}</span>
       </div>
 
       <div className="gx-kg-editor__switch">
         <Switch
-          label="GM private — never enters an NPC's prompt"
+          label={t("knowledge.gmOnlySwitch")}
           checked={gmPrivate}
           onCheckedChange={setGmPrivate}
         />
-        <span className="gx-field__hint">
-          Private entries stay searchable for you and never reach the table.
-        </span>
+        <span className="gx-field__hint">{t("knowledge.gmOnlyHint")}</span>
       </div>
 
       {isEdit && node && <NodeTags nodeID={node.id} />}
@@ -1078,11 +1096,11 @@ function EntryEditor({
           onClick={submit}
           disabled={pending || name.trim() === ""}
         >
-          {pending ? "Saving…" : isEdit ? "Save entry" : "Add entry"}
+          {pending ? t("common.saving") : isEdit ? t("knowledge.saveEntry") : t("knowledge.addEntryTitle")}
         </Button>
         {isEdit && (
           <Button variant="ghost" onClick={onCancel} disabled={pending}>
-            Cancel
+            {t("common.cancel")}
           </Button>
         )}
         {error && (

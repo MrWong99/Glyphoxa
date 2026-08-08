@@ -225,7 +225,7 @@ describe("KnowledgePanel", () => {
     await screen.findByText("The sealed vault");
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Hidden cult" } });
-    fireEvent.click(screen.getByLabelText(/gm private/i));
+    fireEvent.click(screen.getByLabelText(/gm-only/i));
     fireEvent.click(screen.getByRole("button", { name: /add entry/i }));
 
     expect(await screen.findByText("Hidden cult")).toBeInTheDocument();
@@ -245,7 +245,7 @@ describe("KnowledgePanel", () => {
     expect(screen.getByRole("combobox", { name: "Type" })).toBeDisabled();
 
     fireEvent.change(name, { target: { value: "The opened vault" } });
-    fireEvent.click(screen.getByLabelText(/gm private/i));
+    fireEvent.click(screen.getByLabelText(/gm-only/i));
     fireEvent.click(screen.getByRole("button", { name: /save entry/i }));
 
     expect(await screen.findByText("The opened vault")).toBeInTheDocument();
@@ -309,7 +309,7 @@ describe("KnowledgePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
     const dialog = await screen.findByRole("alertdialog");
     // Two outgoing + one incoming = three cascade edges.
-    await waitFor(() => expect(dialog).toHaveTextContent(/3 relationship/i));
+    await waitFor(() => expect(dialog).toHaveTextContent(/3 connection/i));
   });
 
   it("deletes from the editor's delete button, after confirming", async () => {
@@ -351,7 +351,7 @@ describe("KnowledgePanel", () => {
     const dialog = await screen.findByRole("alertdialog");
     // Counting…, and the destructive button is held disabled so nobody confirms
     // against an as-yet-unknown (would-read-0) count.
-    expect(dialog).toHaveTextContent(/counting its relationships/i);
+    expect(dialog).toHaveTextContent(/counting its connections/i);
     const confirm = within(dialog).getByRole("button", { name: /delete entry/i });
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
@@ -467,7 +467,7 @@ describe("KnowledgePanel", () => {
       }),
     ]);
     expect(await screen.findByText("Secret pact")).toBeInTheDocument();
-    expect(screen.getByText("GM private")).toBeInTheDocument();
+    expect(screen.getByText("GM-only")).toBeInTheDocument();
   });
 
   it("marks an agent-linked NPC entry with a Linked agent badge (#132)", async () => {
@@ -481,7 +481,7 @@ describe("KnowledgePanel", () => {
       }),
     ]);
     expect(await screen.findByText("Bart")).toBeInTheDocument();
-    expect(screen.getByText("Linked agent")).toBeInTheDocument();
+    expect(screen.getByText("Voiced")).toBeInTheDocument();
   });
 
   it("authors, reorders and privately marks aspects, sending them on create (#542)", async () => {
@@ -506,7 +506,7 @@ describe("KnowledgePanel", () => {
 
     // Only the second fact is GM-only — the entry itself stays public. That split
     // is the whole point of #542.
-    fireEvent.click(screen.getByRole("button", { name: "Make fact 2 GM private" }));
+    fireEvent.click(screen.getByRole("button", { name: "Make fact 2 GM-only" }));
     expect(screen.getByRole("button", { name: "Make fact 2 public" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -589,7 +589,7 @@ describe("KnowledgePanel", () => {
     // List mode is the default and is untouched by this slice.
     expect(await screen.findByText("An innkeeper.")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Graph/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Relationship map/ }));
     expect(await screen.findByLabelText("Bart (NPC)")).toBeInTheDocument();
     // The search box belongs to the list view and should not linger over the graph.
     expect(screen.queryByLabelText("Search entries")).not.toBeInTheDocument();
@@ -608,7 +608,7 @@ describe("KnowledgePanel", () => {
         body: "An innkeeper.",
       }),
     ]);
-    fireEvent.click(await screen.findByRole("button", { name: /Graph/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Relationship map/ }));
     fireEvent.click(await screen.findByLabelText("Bart (NPC)"));
 
     // The editor rail switched into edit mode for that entry — no second editor.
@@ -618,14 +618,14 @@ describe("KnowledgePanel", () => {
 
   it("keeps an unapplied generated draft across a List/Graph switch (#534)", async () => {
     renderPanel([]);
-    fireEvent.click(await screen.findByRole("button", { name: /Generate entries with your LLM/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generate entries with AI/ }));
     fireEvent.change(screen.getByLabelText("What should be drafted?"), {
       target: { value: "the harbour heist" },
     });
 
     // Toggling views must not discard the prompt — the draft it produces is a paid
     // LLM call the GM has not reviewed yet.
-    fireEvent.click(screen.getByRole("button", { name: /Graph/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Relationship map/ }));
     fireEvent.click(await screen.findByRole("button", { name: /List/ }));
 
     expect(await screen.findByLabelText("What should be drafted?")).toHaveValue(

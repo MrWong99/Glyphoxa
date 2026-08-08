@@ -1,5 +1,6 @@
 import { EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent, GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import type { MessageKey } from "@/i18n";
 
 // World-health derivations (#536). Every one of these is computed from the graph
 // payload the Knowledge tab already holds — no new storage, and no extra read.
@@ -21,15 +22,20 @@ export type Finding = {
   agentID?: string;
   name: string;
   nodeType: NodeType;
-  /** Extra context for the row, when the name alone does not explain the problem. */
-  detail?: string;
+  /**
+   * Extra context for the row, when the name alone does not explain the problem.
+   * A message KEY, translated by the rendering surface — this module is not a
+   * component and must never bake a translated string into its output.
+   */
+  detail?: MessageKey;
 };
 
 export type HealthCategory = {
   key: string;
-  title: string;
-  /** Why this matters at the table — the row is useless without the consequence. */
-  why: string;
+  /** Message key for the category heading; translated at render time. */
+  title: MessageKey;
+  /** Why this matters at the table — the row is useless without the consequence. Message key. */
+  why: MessageKey;
   findings: Finding[];
 };
 
@@ -50,7 +56,7 @@ export function worldHealth(
     degree.set(e.toNodeId, (degree.get(e.toNodeId) ?? 0) + 1);
     if (e.edgeType === EdgeType.PARTICIPATED_IN) incomingParticipation.add(e.toNodeId);
   }
-  const finding = (n: GraphNode, detail?: string): Finding => ({
+  const finding = (n: GraphNode, detail?: MessageKey): Finding => ({
     nodeID: n.id,
     name: n.name,
     nodeType: n.nodeType,
@@ -58,7 +64,7 @@ export function worldHealth(
   });
 
   const categories: HealthCategory[] = [];
-  const push = (key: string, title: string, why: string, findings: Finding[]) => {
+  const push = (key: string, title: MessageKey, why: MessageKey, findings: Finding[]) => {
     if (findings.length > 0) categories.push({ key, title, why, findings });
   };
 
@@ -67,25 +73,25 @@ export function worldHealth(
   // is not an orphan in the sense that matters.
   push(
     "orphans",
-    "Unconnected entries",
-    "No relations, so no NPC can ever reach them through the neighbour walk — they only reach the table if an NPC is linked to them directly.",
+    "knowledge.healthOrphansTitle",
+    "knowledge.healthOrphansWhy",
     nodes.filter((n) => (degree.get(n.id) ?? 0) === 0 && n.agentId === "").map((n) => finding(n)),
   );
 
   // The ADR-0008 second-amendment auto-node: created empty, never filled.
   push(
     "empty-voiced",
-    "Voiced NPCs with nothing to say",
-    "These have an Agent and a voice, but their entry is empty — so they will improvise instead of speaking to your world.",
+    "knowledge.healthEmptyVoicedTitle",
+    "knowledge.healthEmptyVoicedWhy",
     nodes
       .filter((n) => n.agentId !== "" && n.bodyLen === 0 && n.publicAspectCount === 0)
-      .map((n) => finding(n, "entry has no facts and no content")),
+      .map((n) => finding(n, "knowledge.healthEmptyVoicedDetail")),
   );
 
   push(
     "unlinked-npcs",
-    "NPC entries with no voice",
-    "Written up but not voiced by any Agent. Fine if deliberate — a reminder if not.",
+    "knowledge.healthUnvoicedTitle",
+    "knowledge.healthUnvoicedWhy",
     nodes
       .filter((n) => n.nodeType === NodeType.NPC && n.agentId === "")
       .map((n) => finding(n)),
@@ -93,8 +99,8 @@ export function worldHealth(
 
   push(
     "dangling-threads",
-    "Plot threads nobody is in",
-    "Nothing participates_in them, so no NPC's context connects to them.",
+    "knowledge.healthThreadsTitle",
+    "knowledge.healthThreadsWhy",
     nodes
       .filter((n) => n.nodeType === NodeType.PLOT_THREAD && !incomingParticipation.has(n.id))
       .map((n) => finding(n)),
@@ -107,14 +113,14 @@ export function worldHealth(
   if (unlinkedCast.length > 0) {
     categories.push({
       key: "cast-without-entry",
-      title: "Cast with no wiki entry",
-      why: "Their world knowledge is empty by construction — the fact read is keyed by Agent, with no campaign-wide fallback.",
+      title: "knowledge.healthCastTitle",
+      why: "knowledge.healthCastWhy",
       findings: unlinkedCast.map((a) => ({
         nodeID: "",
         agentID: a.id,
         name: a.name,
         nodeType: NodeType.NPC,
-        detail: "link an NPC entry to this Agent",
+        detail: "knowledge.healthCastDetail",
       })),
     });
   }

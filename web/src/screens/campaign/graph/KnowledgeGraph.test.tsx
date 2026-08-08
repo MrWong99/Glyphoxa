@@ -118,16 +118,16 @@ describe("KnowledgeGraph", () => {
   // NPCs see — dashed here, gone entirely in table view.
   it("draws gm_private nodes dashed and labels them as private", () => {
     renderGraph();
-    const secret = node("The bribe (Note), GM private");
+    const secret = node("The bribe (Note), GM-only");
     expect(secret.querySelector("circle")).toHaveAttribute("stroke-dasharray");
     expect(node("Bart (NPC)").querySelector("circle")).not.toHaveAttribute("stroke-dasharray");
   });
 
   it("table view removes gm_private nodes entirely", () => {
     renderGraph();
-    expect(screen.queryByLabelText("The bribe (Note), GM private")).toBeInTheDocument();
+    expect(screen.queryByLabelText("The bribe (Note), GM-only")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Table view" }));
-    expect(screen.queryByLabelText("The bribe (Note), GM private")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("The bribe (Note), GM-only")).not.toBeInTheDocument();
     expect(node("Bart (NPC)")).toBeInTheDocument();
   });
 
@@ -141,8 +141,8 @@ describe("KnowledgeGraph", () => {
 
   it("a relation chip hides the relation but keeps its endpoints", () => {
     renderGraph();
-    const chips = screen.getByRole("group", { name: "Filter by relation" });
-    fireEvent.click(within(chips).getByRole("button", { name: "resides_in" }));
+    const chips = screen.getByRole("group", { name: "Filter by connection" });
+    fireEvent.click(within(chips).getByRole("button", { name: "lives in" }));
     expect(document.querySelectorAll('.gx-kg-graph__edge[data-relation="resides_in"]')).toHaveLength(
       0,
     );
@@ -179,11 +179,11 @@ describe("KnowledgeGraph", () => {
     fireEvent.mouseDown(node("Bart (NPC)"));
     fireEvent.mouseUp(node("Smugglers (Faction)"));
 
-    const picker = await screen.findByRole("dialog", { name: "Create relationship" });
+    const picker = await screen.findByRole("dialog", { name: "Create connection" });
     expect(picker).toHaveTextContent("Bart");
     expect(picker).toHaveTextContent("Smugglers");
 
-    fireEvent.click(screen.getByRole("button", { name: "Create relationship" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create connection" }));
     await waitFor(() => expect(createCalls).toHaveLength(1));
     expect(createCalls[0].fromNodeId).toBe("bart");
     expect(createCalls[0].toNodeId).toBe("guild");
@@ -196,7 +196,7 @@ describe("KnowledgeGraph", () => {
     renderGraph();
     fireEvent.mouseDown(node("Bart (NPC)"));
     fireEvent.mouseUp(node("Bart (NPC)"));
-    expect(screen.queryByRole("dialog", { name: "Create relationship" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Create connection" })).not.toBeInTheDocument();
   });
 
   it("shows an empty state when every type is filtered out", () => {

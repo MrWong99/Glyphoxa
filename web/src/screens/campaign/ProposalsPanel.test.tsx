@@ -118,7 +118,7 @@ describe("ProposalsPanel", () => {
     expect(screen.getByText("Bart")).toBeInTheDocument();
     expect(screen.getByText(/He fears the dark\./)).toBeInTheDocument();
     // Edge: Subject —relation→ Target.
-    expect(screen.getByText(/resides_in/)).toBeInTheDocument();
+    expect(screen.getByText(/lives in/)).toBeInTheDocument();
     expect(screen.getByText("The Inn")).toBeInTheDocument();
     // Node: New Faction: Name + body.
     expect(screen.getByText(/New Faction:/)).toBeInTheDocument();
@@ -128,16 +128,16 @@ describe("ProposalsPanel", () => {
 
   it("renders an unreadable proposal so the GM can still reject it", async () => {
     renderPanel([unreadableProposal]);
-    expect(await screen.findByText(/Unreadable proposal/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Unreadable suggestion/i)).toBeInTheDocument();
     // The Reject action is still present.
-    expect(screen.getByRole("button", { name: /reject/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeInTheDocument();
   });
 
   it("approves a proposal, removing it from the queue", async () => {
     const { approveCalls } = renderPanel([factProposal]);
     await screen.findByText("Bart");
 
-    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add to wiki/i }));
 
     await waitFor(() => expect(screen.queryByText("Bart")).not.toBeInTheDocument());
     expect(approveCalls).toHaveLength(1);
@@ -153,7 +153,7 @@ describe("ProposalsPanel", () => {
     });
     await screen.findByText("Bart");
 
-    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add to wiki/i }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/no wiki entry named "Bart"/);
@@ -165,12 +165,12 @@ describe("ProposalsPanel", () => {
     const { rejectCalls } = renderPanel([factProposal]);
     await screen.findByText("Bart");
 
-    fireEvent.click(screen.getByRole("button", { name: /reject/i }));
+    fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
     // A confirm dialog gates the reject (no RPC yet).
     const dialog = await screen.findByRole("alertdialog");
     expect(rejectCalls).toHaveLength(0);
 
-    fireEvent.click(within(dialog).getByRole("button", { name: /reject suggestion/i }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /dismiss suggestion/i }));
     await waitFor(() => expect(screen.queryByText("Bart")).not.toBeInTheDocument());
     expect(rejectCalls).toHaveLength(1);
     expect(rejectCalls[0].id).toBe("p-fact");

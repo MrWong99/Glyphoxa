@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
 
 // The Maps tab (#538, ADR-0060): world Maps with Knowledge Graph Nodes pinned onto
@@ -31,6 +32,7 @@ const mapImageURL = (map: PbMap) =>
 const DRAG_SLOP_PX = 4;
 
 export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => void }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listMaps, {});
   // The Location entries a generated map can be seeded from (#541).
@@ -60,7 +62,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
   if (listQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load maps: {listQuery.error.message}
+        {t("campaign.mapsLoadError", { message: listQuery.error.message })}
       </p>
     );
   }
@@ -77,7 +79,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
             onClick={() => setOpenID(m.id)}
           >
             {m.name}
-            {m.gmPrivate && <EyeOff size={11} aria-label="GM private" />}
+            {m.gmPrivate && <EyeOff size={11} aria-label={t("campaign.mapGmPrivateAria")} />}
           </button>
         ))}
         <NewMapButton
@@ -101,9 +103,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
           onOpenNode={onOpenNode}
         />
       ) : (
-        <p className="gx-kg-empty">
-          No maps yet. Upload one and your world gets a place for everything in it.
-        </p>
+        <p className="gx-kg-empty">{t("campaign.mapsEmpty")}</p>
       )}
     </div>
   );
@@ -121,6 +121,7 @@ function MapView({
   onChanged: () => void;
   onOpenNode?: (nodeID: string) => void;
 }) {
+  const { t } = useI18n();
   const viewQuery = useQuery(CampaignService.method.getMapView, { id: mapID });
   const queryClient = useQueryClient();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -166,7 +167,7 @@ function MapView({
   if (viewQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not open the map: {viewQuery.error.message}
+        {t("campaign.mapOpenError", { message: viewQuery.error.message })}
       </p>
     );
   }
@@ -188,7 +189,7 @@ function MapView({
     <div className="gx-maps__view">
       {/* Breadcrumb, farthest ancestor first — the chain reads outside-in. */}
       {view.breadcrumb.length > 0 && (
-        <nav className="gx-maps__crumbs" aria-label="Map breadcrumb">
+        <nav className="gx-maps__crumbs" aria-label={t("campaign.mapBreadcrumbAria")}>
           {[...view.breadcrumb].reverse().map((a) => (
             <span key={a.id}>
               <button type="button" className="gx-maps__crumb" onClick={() => onNavigate(a.id)}>
@@ -202,15 +203,15 @@ function MapView({
       )}
 
       <div className="gx-maps__tools">
-        <button type="button" className="gx-kg-chip" aria-label="Zoom in" onClick={() => setZoom((z) => Math.min(z * 1.4, 8))}>
+        <button type="button" className="gx-kg-chip" aria-label={t("campaign.zoomIn")} onClick={() => setZoom((z) => Math.min(z * 1.4, 8))}>
           +
         </button>
-        <button type="button" className="gx-kg-chip" aria-label="Zoom out" onClick={() => setZoom((z) => Math.max(z / 1.4, 1))}>
+        <button type="button" className="gx-kg-chip" aria-label={t("campaign.zoomOut")} onClick={() => setZoom((z) => Math.max(z / 1.4, 1))}>
           −
         </button>
         {zoom !== 1 && (
           <Button variant="ghost" size="sm" onClick={() => setZoom(1)}>
-            Fit
+            {t("campaign.zoomFit")}
           </Button>
         )}
         <Button
@@ -219,9 +220,9 @@ function MapView({
           iconStart={<Trash2 size={13} />}
           onClick={() => setConfirmDelete(true)}
         >
-          Delete map
+          {t("campaign.deleteMap")}
         </Button>
-        {placing && <span className="gx-maps__hint">Click the map to place “{placing.name}”.</span>}
+        {placing && <span className="gx-maps__hint">{t("campaign.placingHint", { name: placing.name })}</span>}
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
             {error}
@@ -235,7 +236,7 @@ function MapView({
           className="gx-maps__surface"
           style={{ transform: `scale(${zoom})`, aspectRatio: `${map.widthPx} / ${map.heightPx}` }}
           role="application"
-          aria-label={`${map.name} map`}
+          aria-label={t("campaign.mapSurfaceAria", { name: map.name })}
           onMouseMove={(ev) => {
             if (!drag) return;
             const far =
@@ -278,10 +279,10 @@ function MapView({
               this says what actually happened and what fixes it. Pins still draw on
               top, at their normalized coordinates — they are the part that survived. */}
           {map.hasImage ? (
-            <img className="gx-maps__image" src={mapImageURL(map)} alt={`${map.name} map`} draggable={false} />
+            <img className="gx-maps__image" src={mapImageURL(map)} alt={t("campaign.mapSurfaceAria", { name: map.name })} draggable={false} />
           ) : (
-            <div className="gx-maps__image gx-maps__image--missing" role="img" aria-label={`${map.name} has no image`}>
-              <span>No image — this map was restored from a bundle that carried none.</span>
+            <div className="gx-maps__image gx-maps__image--missing" role="img" aria-label={t("campaign.mapNoImageAria", { name: map.name })}>
+              <span>{t("campaign.mapNoImage")}</span>
             </div>
           )}
           {view.pins.map((pin) => (
@@ -308,7 +309,7 @@ function MapView({
 
       {view.children.length > 0 && (
         <div className="gx-maps__children">
-          <span className="gx-field__label">Inside this map</span>
+          <span className="gx-field__label">{t("campaign.mapChildren")}</span>
           {view.children.map((child) => (
             <button key={child.id} type="button" className="gx-kg-chip" onClick={() => onNavigate(child.id)}>
               {child.name}
@@ -323,7 +324,7 @@ function MapView({
           gesture is untouched, which is what keeps "suggest, never place" true. */}
       <div className="gx-maps__tray">
         <div className="gx-maps__tray-head">
-          <span className="gx-field__label">Not on this map yet</span>
+          <span className="gx-field__label">{t("campaign.trayTitle")}</span>
           {view.unpinned.length > 0 && map.anchorNodeId !== "" && (
             <Button
               variant="ghost"
@@ -332,7 +333,7 @@ function MapView({
               disabled={suggest.isPending}
               onClick={() => suggest.mutate({ mapId: map.id })}
             >
-              {suggest.isPending ? "Reading the entry…" : "Suggest pins"}
+              {suggest.isPending ? t("campaign.suggestPending") : t("campaign.suggestPlacements")}
             </Button>
           )}
         </div>
@@ -342,13 +343,10 @@ function MapView({
           </span>
         )}
         {suggested.size > 0 && (
-          <span className="gx-field__hint">
-            Highlighted entries look like they belong here. Click one, then click the map to place it
-            — nothing moves until you do.
-          </span>
+          <span className="gx-field__hint">{t("campaign.suggestHint")}</span>
         )}
         {view.unpinned.length === 0 ? (
-          <span className="gx-field__hint">Everything placeable is already pinned here.</span>
+          <span className="gx-field__hint">{t("campaign.trayAllPlaced")}</span>
         ) : (
           <ul className="gx-maps__tray-list">
             {view.unpinned.map((n) => {
@@ -361,7 +359,7 @@ function MapView({
                     aria-pressed={placing?.id === n.id}
                     data-suggested={suggested.has(n.id) || undefined}
                     aria-label={
-                      suggested.has(n.id) ? `${n.name} — suggested for this map` : undefined
+                      suggested.has(n.id) ? t("campaign.suggestedAria", { name: n.name }) : undefined
                     }
                     style={{ color: meta.color, background: alphaBg(meta.color) }}
                     onClick={() => setPlacing((p) => (p?.id === n.id ? null : n))}
@@ -381,15 +379,13 @@ function MapView({
           onOpenChange={(open) => {
             if (!open) setConfirmDelete(false);
           }}
-          title={`Delete “${map.name}”?`}
+          title={t("campaign.deleteMapTitle", { name: map.name })}
           description={
-            <>
-              This permanently deletes the map and its {view.pins.length} pin
-              {view.pins.length === 1 ? "" : "s"}, along with the image. The entries themselves are
-              untouched — only their positions here are lost. This can't be undone.
-            </>
+            view.pins.length === 1
+              ? t("campaign.deleteMapDescOne")
+              : t("campaign.deleteMapDescMany", { n: view.pins.length })
           }
-          confirmLabel="Delete map"
+          confirmLabel={t("campaign.deleteMap")}
           onConfirm={() => {
             deleteMap.mutate({ id: map.id });
             setConfirmDelete(false);
@@ -417,6 +413,7 @@ function PinGlyph({
   onOpen: () => void;
   onRemove: () => void;
 }) {
+  const { t } = useI18n();
   const meta = metaOf(pin.nodeType);
   const label = pin.labelOverride || pin.nodeName;
   // A pin is withheld from players by its OWN flag or its entry's — knowing
@@ -432,7 +429,11 @@ function PinGlyph({
         type="button"
         className="gx-maps__pin-dot"
         style={{ color: meta.color, background: alphaBg(meta.color), borderColor: meta.color }}
-        aria-label={`${label} (${meta.label})${hidden ? ", hidden from players" : ""}`}
+        aria-label={
+          hidden
+            ? t("campaign.pinAriaHidden", { name: label, type: t(meta.labelKey) })
+            : t("campaign.pinAria", { name: label, type: t(meta.labelKey) })
+        }
         onMouseDown={onGrab}
         onClick={onOpen}
       />
@@ -440,7 +441,7 @@ function PinGlyph({
       <button
         type="button"
         className="gx-maps__pin-remove"
-        aria-label={`Unpin ${label}`}
+        aria-label={t("campaign.unpinAria", { name: label })}
         onClick={onRemove}
       >
         ×
@@ -469,6 +470,7 @@ function NewMapButton({
   /** Location entries, for seeding a generated map from the wiki. */
   nodes: PbNode[];
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [parentID, setParentID] = useState("");
@@ -555,7 +557,10 @@ function NewMapButton({
           : null;
     if (!source) return;
     try {
-      const dims = await imageDimensions(new Blob([source.bytes as BlobPart], { type: source.contentType }));
+      const dims = await imageDimensions(
+        new Blob([source.bytes as BlobPart], { type: source.contentType }),
+        t("campaign.mapImageUnreadable"),
+      );
       const res = await create.mutateAsync({
         name: name.trim(),
         imageBytes: source.bytes,
@@ -579,7 +584,7 @@ function NewMapButton({
   if (!open) {
     return (
       <Button variant="secondary" size="sm" iconStart={<Upload size={13} />} onClick={() => setOpen(true)}>
-        Add map
+        {t("campaign.addMap")}
       </Button>
     );
   }
@@ -587,40 +592,40 @@ function NewMapButton({
   const locations = nodes.filter((n) => n.nodeType === NodeType.LOCATION);
 
   return (
-    <div className="gx-maps__new" role="dialog" aria-label="Add map">
-      <div className="gx-maps__modes" role="group" aria-label="Image source">
+    <div className="gx-maps__new" role="dialog" aria-label={t("campaign.addMap")}>
+      <div className="gx-maps__modes" role="group" aria-label={t("campaign.imageSourceAria")}>
         <button
           type="button"
           className="gx-kg-chip"
-          aria-label="Upload an image"
+          aria-label={t("campaign.uploadAria")}
           aria-pressed={mode === "upload"}
           onClick={() => {
             setMode("upload");
             dropDraft();
           }}
         >
-          <Upload size={12} /> Upload
+          <Upload size={12} /> {t("campaign.uploadChip")}
         </button>
         <button
           type="button"
           className="gx-kg-chip"
-          aria-label="Generate an image"
+          aria-label={t("campaign.generateAria")}
           aria-pressed={mode === "generate"}
           onClick={() => {
             setMode("generate");
             setFile(null);
           }}
         >
-          <Sparkles size={12} /> Generate
+          <Sparkles size={12} /> {t("campaign.generateChip")}
         </button>
       </div>
 
-      <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Saltmarsh" />
+      <Input label={t("campaign.nameLabel")} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("campaign.mapNamePlaceholder")} />
 
       {mode === "upload" ? (
         <div className="gx-field">
           <label className="gx-field__label" htmlFor="gx-map-file">
-            Image
+            {t("campaign.imageLabel")}
           </label>
           <input
             id="gx-map-file"
@@ -633,36 +638,31 @@ function NewMapButton({
         <>
           <div className="gx-field">
             <label className="gx-field__label" htmlFor="gx-map-prompt">
-              What should the map show?
+              {t("campaign.promptLabel")}
             </label>
-            <span className="gx-field__hint">
-              Costs a generation each time. Nothing is saved until you press Add map.
-            </span>
+            <span className="gx-field__hint">{t("campaign.promptHint")}</span>
             <textarea
               id="gx-map-prompt"
               className="gx-input gx-maps__prompt"
               rows={3}
               value={prompt}
-              placeholder="a damp fishing town around a grey estuary, docks to the south"
+              placeholder={t("campaign.promptPlaceholder")}
               onChange={(e) => setPrompt(e.target.value)}
             />
           </div>
           {locations.length > 0 && (
             <div className="gx-field">
               <label className="gx-field__label" htmlFor="gx-map-anchor">
-                Base on entry
+                {t("campaign.anchorLabel")}
               </label>
-              <span className="gx-field__hint">
-                Folds that entry&apos;s public description and what resides in it into the prompt, so
-                the picture matches the wiki.
-              </span>
+              <span className="gx-field__hint">{t("campaign.anchorHint")}</span>
               <select
                 id="gx-map-anchor"
                 className="gx-input"
                 value={anchorID}
                 onChange={(e) => setAnchorID(e.target.value)}
               >
-                <option value="">— Prompt only —</option>
+                <option value="">{t("campaign.anchorNone")}</option>
                 {locations.map((n) => (
                   <option key={n.id} value={n.id}>
                     {n.name}
@@ -679,17 +679,21 @@ function NewMapButton({
               disabled={generate.isPending || prompt.trim() === ""}
               onClick={() => void runGenerate()}
             >
-              {generate.isPending ? "Generating…" : draft ? "Regenerate" : "Generate"}
+              {generate.isPending
+                ? t("campaign.generatePending")
+                : draft
+                  ? t("campaign.regenerate")
+                  : t("campaign.generateChip")}
             </Button>
             {draft && (
               <Button variant="ghost" size="sm" onClick={dropDraft} disabled={generate.isPending}>
-                Discard
+                {t("campaign.discardDraft")}
               </Button>
             )}
           </div>
           {draft && (
             <div className="gx-maps__draft">
-              <img className="gx-maps__draft-img" src={draft.url} alt="Generated map draft" />
+              <img className="gx-maps__draft-img" src={draft.url} alt={t("campaign.draftAlt")} />
             </div>
           )}
         </>
@@ -697,7 +701,7 @@ function NewMapButton({
       {maps.length > 0 && (
         <div className="gx-field">
           <label className="gx-field__label" htmlFor="gx-map-parent">
-            Inside
+            {t("campaign.parentLabel")}
           </label>
           <select
             id="gx-map-parent"
@@ -705,7 +709,7 @@ function NewMapButton({
             value={parentID}
             onChange={(e) => setParentID(e.target.value)}
           >
-            <option value="">— Top level —</option>
+            <option value="">{t("campaign.parentNone")}</option>
             {maps.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -714,7 +718,7 @@ function NewMapButton({
           </select>
         </div>
       )}
-      <Switch label="GM private — never shown to players" checked={gmPrivate} onCheckedChange={setGmPrivate} />
+      <Switch label={t("campaign.mapGmPrivateLabel")} checked={gmPrivate} onCheckedChange={setGmPrivate} />
       <div className="gx-kg-editor__actions">
         <Button
           variant="primary"
@@ -725,10 +729,10 @@ function NewMapButton({
           }
           onClick={() => void submit()}
         >
-          {create.isPending ? "Saving…" : "Add map"}
+          {create.isPending ? t("common.saving") : t("campaign.addMap")}
         </Button>
         <Button variant="ghost" onClick={reset} disabled={create.isPending}>
-          Cancel
+          {t("common.cancel")}
         </Button>
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
@@ -745,8 +749,11 @@ function NewMapButton({
  *
  * Takes a Blob rather than a File so it serves both doors: an uploaded File and
  * the generated bytes (#541), which never were a file.
+ *
+ * The failure message is passed in (pre-translated by the caller) because this
+ * helper runs outside React and must not bake in a display-language string.
  */
-function imageDimensions(file: Blob): Promise<{ width: number; height: number }> {
+function imageDimensions(file: Blob, unreadableMessage: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -756,7 +763,7 @@ function imageDimensions(file: Blob): Promise<{ width: number; height: number }>
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error("that file could not be read as an image"));
+      reject(new Error(unreadableMessage));
     };
     img.src = url;
   });

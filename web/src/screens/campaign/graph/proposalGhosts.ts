@@ -1,5 +1,6 @@
 import { EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphNode, KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
+import type { MessageKey, MsgParams } from "@/i18n";
 
 import type { Layout } from "./layout";
 
@@ -22,6 +23,14 @@ import type { Layout } from "./layout";
 // the graph view — stable across renders.
 
 /**
+ * A user-facing reason, carried as a message KEY plus params rather than a baked
+ * string: this module is not a component, so the rendering surface translates it
+ * with t(reason.key, reason.params) at render time (spec rule: never bake a
+ * translated string into non-component state).
+ */
+export type ReasonMsg = { key: MessageKey; params?: MsgParams };
+
+/**
  * An endpoint a proposal names, resolved against the campaign.
  *
  * `ghost` is a name that no Node carries YET but that another pending proposal in
@@ -32,7 +41,7 @@ import type { Layout } from "./layout";
 export type Anchor =
   | { at: "node"; id: string }
   | { at: "ghost"; name: string }
-  | { at: "unknown"; name: string; reason: string };
+  | { at: "unknown"; name: string; reason: ReasonMsg };
 
 /** The proposed write, resolved. `unreadable` is a proposal whose payload did not parse. */
 export type ResolvedWrite =
@@ -96,11 +105,11 @@ export function resolveProposals(
     // find something similarly named.
     if (id) {
       if (byID.has(id)) return { at: "node", id };
-      return { at: "unknown", name, reason: "the entry this was filed against is gone" };
+      return { at: "unknown", name, reason: { key: "knowledge.reasonEntryGone" } };
     }
     const key = name.trim().toLowerCase();
     if (!key) {
-      return { at: "unknown", name, reason: "the suggestion names no entry" };
+      return { at: "unknown", name, reason: { key: "knowledge.reasonNoName" } };
     }
     const candidates = byName.get(key) ?? [];
     if (candidates.length === 1) return { at: "node", id: candidates[0].id };
@@ -110,11 +119,11 @@ export function resolveProposals(
       return {
         at: "unknown",
         name,
-        reason: `${candidates.length} entries are called "${name}" — rename one first`,
+        reason: { key: "knowledge.reasonAmbiguousName", params: { count: candidates.length, name } },
       };
     }
     if (proposedNames.has(key)) return { at: "ghost", name };
-    return { at: "unknown", name, reason: `no entry called "${name}" yet` };
+    return { at: "unknown", name, reason: { key: "knowledge.reasonNoEntryYet", params: { name } } };
   };
 
   return proposals.map((p): ResolvedProposal => {
@@ -186,7 +195,7 @@ export type FactMark = {
 };
 
 /** A proposal that could not be drawn, and why. It is listed, never dropped. */
-export type UnplacedProposal = { proposal: ResolvedProposal; reason: string };
+export type UnplacedProposal = { proposal: ResolvedProposal; reason: ReasonMsg };
 
 export type PlacedProposals = {
   ghostNodes: GhostNode[];
@@ -332,14 +341,16 @@ export function placeProposals(
   });
 
   // Pass 2: everything that hangs off a position.
-  const locate = (a: Anchor): { x: number; y: number } | { miss: string } => {
+  const locate = (a: Anchor): { x: number; y: number } | { miss: ReasonMsg } => {
     if (a.at === "unknown") return { miss: a.reason };
     if (a.at === "ghost") {
       const g = ghostByName.get(a.name.trim().toLowerCase());
-      return g ? { x: g.x, y: g.y } : { miss: `"${a.name}" is only a suggestion itself` };
+      return g
+        ? { x: g.x, y: g.y }
+        : { miss: { key: "knowledge.reasonGhostOnly", params: { name: a.name } } };
     }
     const at = pos.get(a.id);
-    return at ?? { miss: "the entry it points at is filtered out of this view" };
+    return at ?? { miss: { key: "knowledge.reasonFilteredOut" } };
   };
 
   for (const r of resolved) {
@@ -347,7 +358,7 @@ export function placeProposals(
       case "node":
         break; // placed above
       case "unreadable":
-        unplaced.push({ proposal: r, reason: "the suggestion's payload could not be read" });
+        unplaced.push({ proposal: r, reason: { key: "knowledge.reasonUnreadable" } });
         break;
       case "fact": {
         const at = locate(r.write.anchor);

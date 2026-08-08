@@ -156,7 +156,7 @@ describe("proposals on the graph", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Suggested fact from Bart/ }));
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
 
     await waitFor(() => expect(approve).toHaveBeenCalled());
     expect(approve.mock.calls[0][0].id).toBe("p-fact");
@@ -170,9 +170,9 @@ describe("proposals on the graph", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Suggested fact from Bart/ }));
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Reject" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Dismiss" }));
     expect(reject).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole("button", { name: "Reject suggestion" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss suggestion" }));
     await waitFor(() => expect(reject).toHaveBeenCalled());
   });
 
@@ -183,7 +183,7 @@ describe("proposals on the graph", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /Suggested new entry/ }));
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
     await waitFor(() => expect(approve).toHaveBeenCalled());
 
     // THE POINT. Approving lands a new Node, so the next payload is bigger — and
@@ -213,7 +213,7 @@ describe("proposals on the graph", () => {
 
     fireEvent.click(ghost);
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
     await waitFor(() => expect(approve).toHaveBeenCalled());
 
     withNodes([
@@ -238,7 +238,7 @@ describe("proposals on the graph", () => {
     expect(strip).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Glyphoxa:.*Smugglers/ }));
     const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
-    expect(within(dialog).getByText(/Approving will be refused/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/can't be added to the wiki yet/)).toBeInTheDocument();
   });
 
   it("the suggestions toggle takes every ghost off the canvas", async () => {

@@ -6,8 +6,9 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import {
-  lastSpokeLabel,
+  UNPLACED_TITLE,
   rosterPrep,
   type Check as ReadinessCheck,
   type Readiness,
@@ -35,6 +36,7 @@ export function RosterPrep({
   /** Opens the Knowledge tab, where the "Voiced by" link control lives. */
   onOpenKnowledge: () => void;
 }) {
+  const { t, lang } = useI18n();
   // Two reads on top of the roster the screen already has — one graph, one batch
   // readiness. Not a per-NPC RPC storm on a screen opened before every session.
   const graphQuery = useQuery(CampaignService.method.getKnowledgeGraph, {});
@@ -69,19 +71,31 @@ export function RosterPrep({
   if (graphQuery.isError || readyQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load the world: {(graphQuery.error ?? readyQuery.error)?.message}
+        {t("campaign.prepLoadError", { message: (graphQuery.error ?? readyQuery.error)?.message ?? "" })}
       </p>
     );
   }
   if (groups.length === 0) {
-    return <p className="gx-roster__empty">No NPCs yet — the readiness view fills in as you add them.</p>;
+    return <p className="gx-roster__empty">{t("campaign.prepEmpty")}</p>;
   }
 
+  // The "last spoke" prep signal is context, not a check. Rendered here (not in
+  // the pure helper) because the date format and copy follow the display
+  // language, which only the React layer knows.
+  const spokeLabel = (r?: Readiness) =>
+    r?.lastSpokeAt
+      ? t("campaign.prepLastSpoke", { date: r.lastSpokeAt.toLocaleDateString(lang) })
+      : t("campaign.prepNeverSpoke");
+
   return (
-    <div className="gx-prep" aria-label="NPC readiness">
-      {groups.map((g) => (
-        <section key={g.key} className="gx-prep__group" aria-label={g.title}>
-          <h4 className="gx-prep__title">{g.title}</h4>
+    <div className="gx-prep" aria-label={t("campaign.prepAria")}>
+      {groups.map((g) => {
+        // Named groups carry a Node name (data); only the unplaced catch-all is
+        // ours to translate — the helper hands back its sentinel key.
+        const title = g.title === UNPLACED_TITLE ? t("campaign.prepUnplacedTitle") : g.title;
+        return (
+        <section key={g.key} className="gx-prep__group" aria-label={title}>
+          <h4 className="gx-prep__title">{title}</h4>
           {g.entries.map((e) => (
             <div key={`${g.key}-${e.agent.id}`} className="gx-prep__row" data-ready={e.ready || undefined}>
               <button
@@ -93,7 +107,7 @@ export function RosterPrep({
               </button>
               {e.exempt ? (
                 // Listed, not graded — see rosterPrep's Butler note.
-                <span className="gx-prep__exempt">Butler — always ready</span>
+                <span className="gx-prep__exempt">{t("campaign.prepButlerExempt")}</span>
               ) : (
                 <>
                   <div className="gx-prep__checks">
@@ -113,13 +127,14 @@ export function RosterPrep({
                       />
                     ))}
                   </div>
-                  <span className="gx-prep__spoke">{lastSpokeLabel(e.readiness)}</span>
+                  <span className="gx-prep__spoke">{spokeLabel(e.readiness)}</span>
                 </>
               )}
             </div>
           ))}
         </section>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -136,10 +151,17 @@ function ReadinessMark({
   agentName: string;
   onFix: () => void;
 }) {
+  const { t } = useI18n();
+  // The helper hands back a message key + params; the string exists only here.
+  const label = t(check.labelKey, check.labelParams);
   if (check.ok) {
     return (
-      <span className="gx-prep__mark" data-ok aria-label={`${agentName}: ${check.label} — done`}>
-        <Check size={12} aria-hidden /> {check.label}
+      <span
+        className="gx-prep__mark"
+        data-ok
+        aria-label={t("campaign.checkDoneAria", { agent: agentName, check: label })}
+      >
+        <Check size={12} aria-hidden /> {label}
       </span>
     );
   }
@@ -147,10 +169,10 @@ function ReadinessMark({
     <button
       type="button"
       className="gx-prep__mark"
-      aria-label={`${agentName}: ${check.label} — missing, fix it`}
+      aria-label={t("campaign.checkMissingAria", { agent: agentName, check: label })}
       onClick={onFix}
     >
-      <X size={12} aria-hidden /> {check.label}
+      <X size={12} aria-hidden /> {label}
     </button>
   );
 }

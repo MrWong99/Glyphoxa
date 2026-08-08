@@ -346,7 +346,7 @@ describe("generated maps", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Saltmarsh/ }));
     await screen.findByRole("application", { name: /Saltmarsh map/ });
 
-    fireEvent.click(screen.getByRole("button", { name: /Suggest pins/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Suggest placements/ }));
     await waitFor(() => expect(suggestMapPins).toHaveBeenCalled());
 
     // The suggestion is a HIGHLIGHT on the entry that was already in the tray.

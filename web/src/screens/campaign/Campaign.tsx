@@ -13,6 +13,8 @@ import { Combobox } from "@/components/ui/Combobox";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
+import { AdvancedCard } from "@/components/ui/AdvancedCard";
+import { useI18n } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
@@ -45,6 +47,7 @@ function isButler(a: Agent): boolean {
 }
 
 export function Campaign() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.getCampaignRoster, {});
   const roster = useMemo(() => data?.roster ?? [], [data]);
@@ -107,8 +110,8 @@ export function Campaign() {
     <div className="gx-campaign-screen">
       <header className="gx-campaign-screen__header">
         <div className="gx-campaign-screen__title-row">
-          <h1>{campaign?.name ?? "Campaign"}</h1>
-          <div className="gx-seg" role="tablist" aria-label="Campaign view">
+          <h1>{campaign?.name ?? t("campaign.fallbackTitle")}</h1>
+          <div className="gx-seg" role="tablist" aria-label={t("campaign.viewTablist")}>
             <button
               type="button"
               role="tab"
@@ -116,8 +119,10 @@ export function Campaign() {
               data-active={view === "cast" ? "true" : undefined}
               onClick={() => setView("cast")}
             >
-              Cast
+              {t("campaign.tabCast")}
             </button>
+            {/* The internal "Knowledge Graph" never faces the GM — the tab reads
+                "World wiki" (the copy-simplification glossary). */}
             <button
               type="button"
               role="tab"
@@ -125,7 +130,7 @@ export function Campaign() {
               data-active={view === "knowledge" ? "true" : undefined}
               onClick={() => setView("knowledge")}
             >
-              Knowledge
+              {t("campaign.tabWiki")}
             </button>
             <button
               type="button"
@@ -134,7 +139,7 @@ export function Campaign() {
               data-active={view === "maps" ? "true" : undefined}
               onClick={() => setView("maps")}
             >
-              Maps
+              {t("campaign.tabMaps")}
             </button>
             <button
               type="button"
@@ -143,8 +148,10 @@ export function Campaign() {
               data-active={view === "players" ? "true" : undefined}
               onClick={() => setView("players")}
             >
-              Players
+              {t("campaign.tabPlayers")}
             </button>
+            {/* "Knowledge Proposals" simplifies to "Suggestions" for the same
+                reason the graph became a wiki: GMs, not developers. */}
             <button
               type="button"
               role="tab"
@@ -152,7 +159,7 @@ export function Campaign() {
               data-active={view === "proposals" ? "true" : undefined}
               onClick={() => setView("proposals")}
             >
-              Proposals
+              {t("campaign.tabSuggestions")}
             </button>
           </div>
         </div>
@@ -160,12 +167,12 @@ export function Campaign() {
           {campaign?.system && <span className="gx-campaign-screen__system">{campaign.system}</span>}
           <span className="gx-campaign-screen__lede">
             {view === "knowledge"
-              ? "What the world knows. Public entries prime your NPCs; GM-private ones stay yours."
+              ? t("campaign.ledeWiki")
               : view === "players"
-                ? "Bind each Discord User to their Character so the transcript names their voice."
+                ? t("campaign.ledePlayers")
                 : view === "proposals"
-                  ? "What your NPCs want to remember. Approve to make it canon, or reject."
-                  : "One Butler is required; add as many NPCs as your table needs."}
+                  ? t("campaign.ledeSuggestions")
+                  : t("campaign.ledeCast")}
           </span>
         </div>
       </header>
@@ -195,18 +202,18 @@ export function Campaign() {
         <div className="gx-skeleton" data-testid="roster-loading" />
       ) : status === "error" ? (
         <p className="gx-campaign__error" role="alert">
-          Could not load the campaign: {error.message}
+          {t("campaign.loadError", { message: error.message })}
         </p>
       ) : (
         <>
-        <div className="gx-kg-modes" role="group" aria-label="Cast view">
+        <div className="gx-kg-modes" role="group" aria-label={t("campaign.castViewGroup")}>
           <button
             type="button"
             className="gx-kg-chip"
             aria-pressed={castMode === "edit"}
             onClick={() => setCastMode("edit")}
           >
-            Roster
+            {t("campaign.castRoster")}
           </button>
           <button
             type="button"
@@ -214,7 +221,7 @@ export function Campaign() {
             aria-pressed={castMode === "prep"}
             onClick={() => setCastMode("prep")}
           >
-            Session prep
+            {t("campaign.castPrep")}
           </button>
         </div>
         {castMode === "prep" ? (
@@ -258,12 +265,12 @@ export function Campaign() {
               </span>
               {isButler(a) ? (
                 <Badge variant="gold" size="sm" dot>
-                  <Lock size={11} /> Butler
+                  <Lock size={11} /> {t("campaign.badgeButler")}
                 </Badge>
               ) : (
                 a.addressOnly && (
                   <Badge variant="neutral" size="sm">
-                    Address only
+                    {t("campaign.badgeAddressOnly")}
                   </Badge>
                 )
               )}
@@ -275,16 +282,16 @@ export function Campaign() {
             className="gx-roster__add"
             disabled={createAgent.isPending}
             onClick={() =>
-              createAgent.mutate({ name: "New NPC", title: "", persona: "", voice: "", addressOnly: false })
+              // The placeholder NAME is persisted, so it is created in the GM's
+              // display language — the roster shows what they will rename anyway.
+              createAgent.mutate({ name: t("campaign.newNpcName"), title: "", persona: "", voice: "", addressOnly: false })
             }
           >
-            <Plus size={15} /> Add NPC
+            <Plus size={15} /> {t("campaign.addNpc")}
           </button>
 
           {npcs.length === 0 && (
-            <p className="gx-roster__empty">
-              No NPCs yet. The Butler can run a session alone, or add your first NPC above.
-            </p>
+            <p className="gx-roster__empty">{t("campaign.rosterEmpty")}</p>
           )}
         </div>
 
@@ -327,6 +334,7 @@ function AgentEditor({
   onDelete?: () => void;
   deleting: boolean;
 }) {
+  const { t } = useI18n();
   const butler = isButler(agent);
   const [name, setName] = useState(agent.name);
   const [title, setTitle] = useState(agent.title);
@@ -337,9 +345,9 @@ function AgentEditor({
   const update = useMutation(CampaignService.method.updateAgent, {
     onSuccess: () => {
       onSaved();
-      toast.success(`Saved ${name || agent.name}`);
+      toast.success(t("campaign.savedAgent", { name: name || agent.name }));
     },
-    onError: (err) => toast.error(`Couldn't save: ${err.message}`),
+    onError: (err) => toast.error(t("common.couldntSave", { message: err.message })),
   });
   const preview = useMutation(VoiceService.method.previewVoice);
 
@@ -406,25 +414,26 @@ function AgentEditor({
         <div className="gx-editor__head-meta">
           {butler ? (
             <Badge variant="gold" size="sm" dot>
-              <Sparkles size={11} /> Required
+              <Sparkles size={11} /> {t("campaign.badgeRequired")}
             </Badge>
           ) : (
             <Badge variant="neutral" size="sm">
-              NPC
+              {t("campaign.badgeNpc")}
             </Badge>
           )}
-          <span className="gx-editor__role">{butler ? "Butler · role locked" : "Character NPC"}</span>
+          <span className="gx-editor__role">{butler ? t("campaign.roleButler") : t("campaign.roleNpc")}</span>
         </div>
       </div>
 
       <div className="gx-editor__grid">
-        <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} />
-        <Input label="Title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Role subtitle" />
+        <Input label={t("campaign.nameLabel")} value={name} onChange={(e) => setName(e.target.value)} />
+        <Input label={t("campaign.titleLabel")} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("campaign.titlePlaceholder")} />
       </div>
 
       <div className="gx-field">
+        {/* The wire field is still `persona`; the GM sees plain language. */}
         <label className="gx-field__label" htmlFor="gx-persona">
-          Persona
+          {t("campaign.personaLabel")}
         </label>
         <textarea
           id="gx-persona"
@@ -433,16 +442,14 @@ function AgentEditor({
           value={persona}
           onChange={(e) => setPersona(e.target.value)}
         />
-        <span className="gx-field__hint">
-          Personality, backstory and speech style — injected into the prompt.
-        </span>
+        <span className="gx-field__hint">{t("campaign.personaHint")}</span>
         {!butler && (
           <div className="gx-editor__draft">
             <Input
-              label="Draft with your LLM"
+              label={t("campaign.draftLabel")}
               value={draftPrompt}
               onChange={(e) => setDraftPrompt(e.target.value)}
-              placeholder="Short description — e.g. a grumpy dwarven blacksmith who secretly writes poetry"
+              placeholder={t("campaign.draftPlaceholder")}
             />
             <Button
               variant="secondary"
@@ -451,30 +458,27 @@ function AgentEditor({
               onClick={() => void draftPersona()}
               disabled={!draftPrompt.trim() || generate.isPending}
             >
-              {generate.isPending ? "Drafting…" : "Generate persona"}
+              {generate.isPending ? t("campaign.draftPending") : t("campaign.draftGenerate")}
             </Button>
             {draftError && (
               <span className="gx-editor__status gx-editor__status--error" role="alert">
-                Couldn't generate: {draftError}
+                {t("campaign.draftError", { message: draftError })}
               </span>
             )}
-            <span className="gx-field__hint gx-editor__draft-hint">
-              Runs only when you press Generate. The draft replaces the Persona field above — review
-              and save to keep it.
-            </span>
+            <span className="gx-field__hint gx-editor__draft-hint">{t("campaign.draftHint")}</span>
           </div>
         )}
       </div>
 
       <div className="gx-editor__voice">
         <Combobox
-          label="Voice"
+          label={t("campaign.voiceLabel")}
           options={voiceOpts}
           value={voice || undefined}
           onValueChange={setVoice}
-          placeholder="Pick a voice…"
-          searchPlaceholder="Search voices…"
-          emptyText="No matching voices"
+          placeholder={t("campaign.voicePlaceholder")}
+          searchPlaceholder={t("campaign.voiceSearch")}
+          emptyText={t("campaign.voiceEmpty")}
         />
         <Button
           variant="secondary"
@@ -483,34 +487,39 @@ function AgentEditor({
           onClick={() => void playPreview()}
           disabled={!voice || preview.isPending}
         >
-          Preview voice
+          {t("campaign.voicePreview")}
         </Button>
         {previewError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            Couldn't preview: {previewError}
+            {t("campaign.voicePreviewError", { message: previewError })}
           </span>
         )}
       </div>
 
-      <div className="gx-editor__switch">
-        <Switch
-          label="Address only — waits to be named"
-          checked={butler ? true : addressOnly}
-          onCheckedChange={setAddressOnly}
-          disabled={butler}
-        />
-        <span className="gx-field__hint">
-          {butler
-            ? "The Butler always waits to be named; it never answers ambient table talk."
-            : "When on, this NPC only replies when addressed by name."}
-        </span>
-      </div>
+      {/* Tool grants and the addressing switch are power-user territory: the
+          everyday fields (name, title, personality, voice) stay in view, and
+          these fold into one closed-by-default card at the end of the form.
+          The body unmounts while closed, so the grants query only fires once a
+          GM actually opens it. */}
+      <AdvancedCard title={t("campaign.advancedAgentTitle")} hint={t("campaign.advancedAgentHint")}>
+        <ToolGrants agentId={agent.id} />
 
-      <ToolGrants agentId={agent.id} />
+        <div className="gx-editor__switch">
+          <Switch
+            label={t("campaign.addressOnlyLabel")}
+            checked={butler ? true : addressOnly}
+            onCheckedChange={setAddressOnly}
+            disabled={butler}
+          />
+          <span className="gx-field__hint">
+            {butler ? t("campaign.addressOnlyButlerHint") : t("campaign.addressOnlyNpcHint")}
+          </span>
+        </div>
+      </AdvancedCard>
 
       <div className="gx-editor__actions">
         <Button variant="primary" onClick={save} disabled={update.isPending}>
-          {update.isPending ? "Saving…" : "Save changes"}
+          {update.isPending ? t("common.saving") : t("common.saveChanges")}
         </Button>
         {onDelete && (
           <Button
@@ -519,7 +528,7 @@ function AgentEditor({
             onClick={onDelete}
             disabled={deleting}
           >
-            Delete NPC
+            {t("campaign.deleteNpc")}
           </Button>
         )}
         {/* Deterministic, accessible save cue — independent of the toast portal so
@@ -527,10 +536,10 @@ function AgentEditor({
         <span className="gx-editor__status" aria-live="polite">
           {update.isError ? (
             <span className="gx-editor__status--error" role="alert">
-              Couldn't save: {update.error.message}
+              {t("common.couldntSave", { message: update.error.message })}
             </span>
           ) : update.isSuccess ? (
-            "Saved"
+            t("campaign.savedStatus")
           ) : (
             ""
           )}
@@ -547,6 +556,7 @@ function AgentEditor({
 // server's built-in Registry exposes (dice today, ADR-0028); the LLM is only ever
 // shown granted Tools (ADR-0029), and a change hydrates into the NEXT session.
 function ToolGrants({ agentId }: { agentId: string }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data, status } = useQuery(CampaignService.method.listToolGrants, { agentId });
   const grants = data?.grants ?? [];
@@ -561,14 +571,12 @@ function ToolGrants({ agentId }: { agentId: string }) {
 
   return (
     <div className="gx-editor__tools">
-      <span className="gx-field__label">Tools</span>
-      <span className="gx-field__hint">
-        Grant the Tools this agent may use. Changes take effect in the next session.
-      </span>
+      <span className="gx-field__label">{t("campaign.toolsLabel")}</span>
+      <span className="gx-field__hint">{t("campaign.toolsHint")}</span>
       {status === "pending" ? (
         <div className="gx-skeleton" data-testid="tools-loading" />
       ) : grants.length === 0 ? (
-        <span className="gx-field__hint">No tools available.</span>
+        <span className="gx-field__hint">{t("campaign.toolsNone")}</span>
       ) : (
         grants.map((g) => <ToolRow key={g.toolName} agentId={agentId} grant={g} onChanged={invalidateGrants} />)
       )}
@@ -590,11 +598,13 @@ function ToolRow({
   grant: ToolGrant;
   onChanged: () => void;
 }) {
+  const { t } = useI18n();
   const [scope, setScope] = useState(grant.config);
 
   const update = useMutation(CampaignService.method.updateToolGrant, {
     onSuccess: () => onChanged(),
-    onError: (err) => toast.error(`Couldn't update ${grant.toolName}: ${err.message}`),
+    onError: (err) =>
+      toast.error(t("campaign.toolUpdateError", { tool: grant.toolName, message: err.message })),
   });
 
   // The grant Switch never carries the local scope draft (#215): turning a grant
@@ -624,14 +634,15 @@ function ToolRow({
           not, so it renders no scope editor (#117). */}
       {grant.supportsScope && grant.granted && (
         <div className="gx-editor__tool-scope">
+          {/* toolName is a wire value and stays untranslated inside the label. */}
           <Input
-            label={`${grant.toolName} scope`}
+            label={t("campaign.toolScopeLabel", { tool: grant.toolName })}
             value={scope}
             onChange={(e) => setScope(e.target.value)}
             placeholder='{"scope":"self"}'
           />
           <Button variant="secondary" size="sm" onClick={saveScope} disabled={update.isPending}>
-            Save scope
+            {t("campaign.toolScopeSave")}
           </Button>
         </div>
       )}
