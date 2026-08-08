@@ -483,6 +483,22 @@ tests:
       - isNotNullOrEmpty:
           path: spec.template.spec.containers[0].resources.limits.memory
 
+  - it: pins GOMAXPROCS to the container's CPU limit
+    # #586 secondary finding: Go's own container-awareness covers cgroup v2
+    # only, so the chart pins the scheduler width explicitly via the Downward
+    # API — otherwise the runtime schedules across every node CPU and gets
+    # throttled hard against limits.cpu.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                containerName: web
+                resource: limits.cpu
+                divisor: "1"
+
   - it: hardens the web container's securityContext by default
     asserts:
       - equal:

@@ -420,6 +420,19 @@ tests:
       - isNotNullOrEmpty:
           path: spec.template.spec.containers[0].resources.limits.memory
 
+  - it: pins GOMAXPROCS to the container's CPU limit
+    # #586 secondary finding; see the web deployment test's identical entry.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMAXPROCS
+            valueFrom:
+              resourceFieldRef:
+                containerName: voice
+                resource: limits.cpu
+                divisor: "1"
+
   - it: hardens the voice container's securityContext by default
     # The image runs as USER 65532 (#31); the container locks down further —
     # non-root, no privilege escalation, a read-only rootfs (the k3d e2e proved

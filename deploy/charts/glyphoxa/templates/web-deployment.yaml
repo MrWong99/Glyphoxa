@@ -110,6 +110,19 @@ spec:
             - -metrics-addr
             - {{ $metricsAddr | quote }}
           env:
+            # Pin the Go scheduler to the container's CPU limit (#586 secondary
+            # finding): the runtime's own container-awareness (Go ≥ 1.25) reads
+            # cgroup v2 only, and on hosts where it does not apply the process
+            # schedules across every node CPU and is throttled hard against
+            # limits.cpu (71k+ throttled periods observed). The Downward API
+            # value follows the limit wherever it is resized; divisor 1 rounds
+            # a fractional limit up.
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: web
+                  resource: limits.cpu
+                  divisor: "1"
             # The DB the Connect handlers read/write and /readyz pings. Same key
             # the migrate/seed hooks used, so the host can never drift.
             - name: GLYPHOXA_DATABASE_URL
