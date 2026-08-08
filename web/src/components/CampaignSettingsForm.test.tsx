@@ -86,14 +86,19 @@ async function openLanguageSelect() {
   return screen.getByRole("listbox");
 }
 
+// The Highlight-recording switch lives behind the closed-by-default
+// AdvancedCard, whose body isn't mounted until the disclosure is opened.
+const openAdvanced = () =>
+  fireEvent.click(screen.getByRole("button", { name: /advanced settings/i }));
+
 describe("CampaignSettingsForm", () => {
   it("prefills the fields from the campaign prop and shows the Voice Session hint", () => {
     renderForm({ campaign: makeCampaign({ name: "Curse of Strahd", system: "D&D 5e", language: "en" }) });
 
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Curse of Strahd");
-    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("D&D 5e");
-    // The language change deferral notice (mutates nothing now; next Voice Session).
-    expect(screen.getByText(/next Voice Session/i)).toBeInTheDocument();
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
+    // The language change deferral notice (mutates nothing now; next voice session).
+    expect(screen.getByText(/next voice session/i)).toBeInTheDocument();
   });
 
   it("offers the registered languages as the language options", async () => {
@@ -156,7 +161,7 @@ describe("CampaignSettingsForm", () => {
 
   it("suggests three systems via a datalist", () => {
     renderForm();
-    const input = screen.getByLabelText("System") as HTMLInputElement;
+    const input = screen.getByLabelText("Game system") as HTMLInputElement;
     const listId = input.getAttribute("list");
     expect(listId).toBeTruthy();
     const datalist = document.getElementById(listId!);
@@ -202,22 +207,32 @@ describe("CampaignSettingsForm", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
-  // Rollover tape (#412, ADR-0051): the Campaign-level GM opt-in that arms
-  // consent-gated capture. Default OFF, round-trips through UpdateCampaign
-  // like the other fields.
-  it("prefills the Rollover tape toggle from the campaign prop", () => {
+  // Highlight recording (the rollover tape, #412, ADR-0051): the Campaign-level
+  // GM opt-in that arms consent-gated capture. Default OFF, round-trips through
+  // UpdateCampaign like the other fields — but its switch sits inside the
+  // closed-by-default AdvancedCard, so every test opens the disclosure first.
+  it("prefills the Highlight recording toggle from the campaign prop", () => {
     renderForm({ campaign: makeCampaign({ tapeArmed: true }) });
-    expect(screen.getByRole("switch", { name: /rollover tape/i })).toBeChecked();
+    openAdvanced();
+    expect(screen.getByRole("switch", { name: /highlight recording/i })).toBeChecked();
   });
 
-  it("explains the consent flow and next-session effectiveness", () => {
+  it("explains the consent gating and next-session effectiveness in plain language", () => {
     renderForm();
-    // The real Discord disclosure buttons are labeled "Consent" / "Revoke"
-    // (internal/wirenpc/tapedisclosure.go), so the copy must match them.
-    expect(screen.getByText(/consent\/revoke/i)).toBeInTheDocument();
-    expect(screen.getByText(/next session start/i)).toBeInTheDocument();
-    // No GM/operator auto-consent (triage decision) — the GM must press Consent too.
-    expect(screen.getByText(/gm must press consent/i)).toBeInTheDocument();
+    openAdvanced();
+    // The simplified hint keeps the three facts a GM must know: a consent
+    // message is posted in the voice channel, only consenting speakers are
+    // recorded, and the change applies from the next session.
+    expect(screen.getByText(/consent message.*voice channel/i)).toBeInTheDocument();
+    expect(screen.getByText(/only speakers who consent are recorded/i)).toBeInTheDocument();
+    expect(screen.getByText(/applies from the next session/i)).toBeInTheDocument();
+  });
+
+  it("keeps the Highlight recording switch out of the tree while the advanced card is closed", () => {
+    // The AdvancedCard unmounts its body when closed — collapsed settings are
+    // out of the accessibility tree, not merely hidden.
+    renderForm();
+    expect(screen.queryByRole("switch", { name: /highlight recording/i })).not.toBeInTheDocument();
   });
 
   it("round-trips the tape-armed field through UpdateCampaign when toggled on", async () => {
@@ -228,7 +243,8 @@ describe("CampaignSettingsForm", () => {
       mockBackend({ languages: ["de", "en"], updated }),
     );
 
-    fireEvent.click(screen.getByRole("switch", { name: /rollover tape/i }));
+    openAdvanced();
+    fireEvent.click(screen.getByRole("switch", { name: /highlight recording/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));

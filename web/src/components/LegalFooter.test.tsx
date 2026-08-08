@@ -21,7 +21,9 @@ describe("LegalFooter", () => {
 
   it("is a labelled landmark so it is reachable by assistive tech", () => {
     render(<LegalFooter />);
-    expect(screen.getByRole("navigation", { name: "Rechtliches" })).toBeInTheDocument();
+    // The landmark label is localized (English under test); the link texts stay
+    // the German legal proper nouns in every display language.
+    expect(screen.getByRole("navigation", { name: "Legal" })).toBeInTheDocument();
   });
 
   it("keeps its own class when the caller adds one", () => {

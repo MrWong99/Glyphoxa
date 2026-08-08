@@ -272,7 +272,7 @@ describe("Configuration", () => {
     // Four secret slots start unsaved → four Key-needed badges (discord, groq,
     // elevenlabs, gemini).
     expect(await screen.findAllByText(/key needed/i)).toHaveLength(4);
-    expect(screen.queryByText(/healthy/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/working/i)).not.toBeInTheDocument();
   });
 
   it("surfaces a failed Discord integration to the tenant (#489)", async () => {
@@ -282,7 +282,7 @@ describe("Configuration", () => {
         integrationDetail: "invalid_bot_token: gateway rejected identify (close 4004)",
       }),
     );
-    const badge = await screen.findByText(/discord integration failed/i);
+    const badge = await screen.findByText(/discord connection failed/i);
     expect(badge).toBeInTheDocument();
     expect(badge).toHaveAttribute("title", expect.stringContaining("invalid_bot_token"));
   });
@@ -291,7 +291,7 @@ describe("Configuration", () => {
     renderScreen();
     // Default mock leaves integrationState empty → nothing rendered.
     await screen.findByText(CAMPAIGN.name);
-    expect(screen.queryByText(/discord integration failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/discord connection failed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
   });
 
@@ -303,7 +303,7 @@ describe("Configuration", () => {
     const geminiInput = await screen.findByLabelText("Gemini key");
     const geminiRow = geminiInput.closest(".gx-provider-row") as HTMLElement;
     expect(within(geminiRow).getByText("Gemini")).toBeInTheDocument();
-    expect(within(geminiRow).getByText("Image")).toBeInTheDocument();
+    expect(within(geminiRow).getByText("Images")).toBeInTheDocument();
 
     fireEvent.change(geminiInput, { target: { value: "gm-secret-abcd" } });
     fireEvent.click(within(geminiRow).getByRole("button", { name: "Save" }));
@@ -330,7 +330,7 @@ describe("Configuration", () => {
     // Replace and a Healthy badge — derived from key-presence, never the secret.
     expect(await within(groqRow).findByText("••••••••")).toBeInTheDocument();
     expect(within(groqRow).getByRole("button", { name: /replace/i })).toBeInTheDocument();
-    expect(within(groqRow).getByText(/healthy/i)).toBeInTheDocument();
+    expect(within(groqRow).getByText(/working/i)).toBeInTheDocument();
     // The plaintext key never appears in the DOM.
     expect(screen.queryByText(/test-groq-secret-eeee/)).not.toBeInTheDocument();
   });
@@ -418,7 +418,7 @@ describe("Configuration", () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
     renderScreen(mockBackend({ discordSaves }));
 
-    const guild = await screen.findByLabelText("Guild ID");
+    const guild = await screen.findByLabelText("Server ID");
     fireEvent.change(guild, { target: { value: "472093001100" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
@@ -459,7 +459,7 @@ describe("Configuration", () => {
     // Fresh install: nothing typed yet. The server rejects a present-but-empty
     // ID, so the client must not offer the save at all — a click here used to
     // fail invisibly and leave nothing stored.
-    const guild = await screen.findByLabelText("Guild ID");
+    const guild = await screen.findByLabelText("Server ID");
     const save = screen.getByRole("button", { name: /save discord settings/i });
     expect(save).toBeDisabled();
 
@@ -478,7 +478,7 @@ describe("Configuration", () => {
     // Guild ID filled, save offered — but the RPC fails. The rejection must
     // leave visible evidence: nothing was stored, and a silent failure here
     // resurfaces later as an unrelated-looking session-start precondition error.
-    fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
+    fireEvent.change(await screen.findByLabelText("Server ID"), { target: { value: "472093001100" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
     const alert = await screen.findByRole("alert");
@@ -503,7 +503,7 @@ describe("Configuration", () => {
     );
     // ElevenLabs is saved → renders presence-Healthy instantly, then the async
     // health RPC downgrades it to Degraded.
-    const degraded = await screen.findByText(/degraded/i);
+    const degraded = await screen.findByText(/having trouble/i);
     const row = degraded.closest(".gx-provider-row") as HTMLElement;
     expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
   });
@@ -553,7 +553,7 @@ describe("Configuration", () => {
 
     // The GUILD snowflake (not the channel's) lands in the still-editable
     // Guild ID field, purely client-side.
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
     // Parsing issues NO RPC — no save, no invite resolve; the autofill is
     // local until the operator Saves.
     expect(discordSaves).toHaveLength(0);
@@ -583,7 +583,7 @@ describe("Configuration", () => {
     unmount();
     renderScreen(transport);
     await waitFor(() =>
-      expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(
+      expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe(
         "472093001100472093",
       ),
     );
@@ -593,7 +593,7 @@ describe("Configuration", () => {
     renderScreen();
 
     // Operator already has a Guild ID typed in.
-    const guild = await screen.findByLabelText("Guild ID");
+    const guild = await screen.findByLabelText("Server ID");
     fireEvent.change(guild, { target: { value: "existing-guild" } });
 
     // A paste that is not a channel deep-link surfaces a hint…
@@ -613,7 +613,7 @@ describe("Configuration", () => {
       target: { value: "ptb.discord.com/channels/472093001100472093/987654321098765432/?jump=1" },
     });
 
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
     // A rejected paste's hint must not linger after a successful one.
     expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
   });
@@ -646,8 +646,8 @@ describe("Configuration invite autofill (#105)", () => {
     // (no picker step — there is no channel picker anymore) and a confirmation
     // line names the resolved guild.
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Guild ID filled from The Keep.");
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("111");
+    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep.");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
     // The returned voice channels are NOT rendered — sessions pick their
     // channel on the Session screen.
     expect(screen.queryByRole("button", { name: /War Room/ })).not.toBeInTheDocument();
@@ -673,7 +673,7 @@ describe("Configuration invite autofill (#105)", () => {
 
     // The Guild ID fills from the RESOLVED guild once the confirmation lands.
     await screen.findByTestId("resolved-guild");
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
 
     // Save carries the exact guild snowflake in guild_id and NOTHING in
     // voice_channel_id — the resolved guild's channels never ride this save.
@@ -690,7 +690,7 @@ describe("Configuration invite autofill (#105)", () => {
       }),
     );
 
-    const guild = await screen.findByLabelText("Guild ID");
+    const guild = await screen.findByLabelText("Server ID");
     fireEvent.change(guild, { target: { value: "existing-guild" } });
 
     fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
@@ -788,15 +788,15 @@ describe("Configuration invite autofill (#105)", () => {
     // B supersedes A and resolves immediately → B's fill + confirmation win.
     fireEvent.change(paste, { target: { value: "discord.gg/fastbbb" } });
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Guild ID filled from Guild B.");
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("222");
+    expect(confirmation).toHaveTextContent("Server ID filled in from Guild B.");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
 
     // A's slow resolve lands late — the guard drops it: the Guild ID stays
     // B's and the confirmation still names Guild B.
     releaseA({ guildId: "111", guildName: "Guild A", voiceChannels: [] });
     await new Promise((r) => setTimeout(r, 50));
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("222");
-    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Guild ID filled from Guild B.");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
+    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Server ID filled in from Guild B.");
     expect(screen.queryByText(/Guild A/)).not.toBeInTheDocument();
   });
 
@@ -807,7 +807,7 @@ describe("Configuration invite autofill (#105)", () => {
       }),
     );
 
-    const guild = await screen.findByLabelText("Guild ID");
+    const guild = await screen.findByLabelText("Server ID");
     fireEvent.change(guild, { target: { value: "existing-guild" } });
 
     fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
@@ -833,8 +833,8 @@ describe("Configuration invite autofill (#105)", () => {
     });
 
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Guild ID filled from The Keep.");
-    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("111");
+    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep.");
+    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
   });
 });
 
@@ -889,15 +889,19 @@ describe("Configuration spend caps (#130)", () => {
     const spendSaves: SetSpendCapsRequest[] = [];
     renderScreen(mockBackend({ spendCaps: { softUsd: 5, hardUsd: 10 }, spendSaves }));
 
-    const soft = (await screen.findByLabelText("Soft cap (USD)")) as HTMLInputElement;
-    const hard = screen.getByLabelText("Hard cap (USD)") as HTMLInputElement;
+    // The editor lives behind the closed-by-default "Spending limits"
+    // AdvancedCard — open it first (the body isn't rendered while closed).
+    fireEvent.click(await screen.findByRole("button", { name: /spending limits/i }));
+
+    const soft = (await screen.findByLabelText("Soft limit (USD)")) as HTMLInputElement;
+    const hard = screen.getByLabelText("Hard limit (USD)") as HTMLInputElement;
     await waitFor(() => expect(soft.value).toBe("5"));
     expect(hard.value).toBe("10");
 
     // Raise the soft cap and clear the hard cap.
     fireEvent.change(soft, { target: { value: "7" } });
     fireEvent.change(hard, { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: /save spend caps/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save spending limits/i }));
 
     await waitFor(() => expect(spendSaves).toHaveLength(1));
     // A blank field is omitted (undefined) so the server clears it; 7 is sent.
@@ -908,9 +912,12 @@ describe("Configuration spend caps (#130)", () => {
   it("surfaces a server rejection (hard < soft) inline", async () => {
     renderScreen(mockBackend({ spendSaves: [] }));
 
-    fireEvent.change(await screen.findByLabelText("Soft cap (USD)"), { target: { value: "10" } });
-    fireEvent.change(screen.getByLabelText("Hard cap (USD)"), { target: { value: "5" } });
-    fireEvent.click(screen.getByRole("button", { name: /save spend caps/i }));
+    // Open the "Spending limits" AdvancedCard to mount the editor.
+    fireEvent.click(await screen.findByRole("button", { name: /spending limits/i }));
+
+    fireEvent.change(await screen.findByLabelText("Soft limit (USD)"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Hard limit (USD)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: /save spending limits/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't save/i);
   });
@@ -977,8 +984,8 @@ describe("Configuration first-run (#267)", () => {
 
     // The create CTA — pre-filled with the seed defaults — stands in for the card.
     expect(await screen.findByText(/create your first campaign/i)).toBeInTheDocument();
-    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("dnd5e");
-    expect((screen.getByLabelText("Language") as HTMLInputElement).value).toBe("en");
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("dnd5e");
+    expect((screen.getByLabelText("Spoken language") as HTMLInputElement).value).toBe("en");
     // …and the old error card is gone.
     expect(screen.queryByText(/could not load the active campaign/i)).not.toBeInTheDocument();
   });
@@ -1034,7 +1041,7 @@ describe("Configuration first-run (#267)", () => {
       }),
     );
 
-    fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
+    fireEvent.change(await screen.findByLabelText("Server ID"), { target: { value: "472093001100" } });
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
     // The operator must see the server's actionable proof message, not a
@@ -1062,14 +1069,14 @@ describe("Configuration first-run (#267)", () => {
 
     // The refetched config comes back unbound: field empty, control gone.
     await waitFor(() =>
-      expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(""),
+      expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe(""),
     );
     expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
   });
 
   it("offers no unlink control while no guild is bound (#504)", async () => {
     renderScreen();
-    await screen.findByLabelText("Guild ID");
+    await screen.findByLabelText("Server ID");
     expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
   });
 

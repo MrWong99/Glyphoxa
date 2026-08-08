@@ -9,7 +9,9 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
+import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { useI18n, type Lang } from "@/i18n";
 
 import "./createCampaignForm.css";
 
@@ -33,12 +35,14 @@ import "./createCampaignForm.css";
 const SYSTEM_SUGGESTIONS = ["D&D 5e", "Pathfinder 2e", "Call of Cthulhu"];
 const SYSTEM_DATALIST_ID = "gx-system-suggestions";
 
-// languageLabel renders a code as "<English name> (<code>)" via Intl, falling
-// back to the bare code when the runtime can't name it — so the option list
-// stays readable without a hardcoded language table.
-function languageLabel(code: string): string {
+// languageLabel renders a code as "<name in the display language> (<code>)" via
+// Intl, falling back to the bare code when the runtime can't name it — so the
+// option list stays readable without a hardcoded language table, and follows
+// the operator's display language rather than always naming languages in
+// English.
+function languageLabel(lang: Lang, code: string): string {
   try {
-    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(code);
+    const name = new Intl.DisplayNames([lang], { type: "language" }).of(code);
     return name && name !== code ? `${name} (${code})` : code;
   } catch {
     return code;
@@ -54,6 +58,7 @@ export function CampaignSettingsForm({
   onSaved: () => void;
   onCancel: () => void;
 }) {
+  const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const [name, setName] = useState(campaign.name);
   const [system, setSystem] = useState(campaign.system);
@@ -67,7 +72,7 @@ export function CampaignSettingsForm({
   const langQ = useQuery(CampaignService.method.listSupportedLanguages, {}, { retry: false });
   const supported = langQ.data?.languages ?? [];
 
-  const options = supported.map((code) => ({ value: code, label: languageLabel(code) }));
+  const options = supported.map((code) => ({ value: code, label: languageLabel(lang, code) }));
   // A stored language with no registered encoder still rides here as an extra
   // option so the SELECT can't silently coerce it to a supported one on save.
   // Only claim "(unsupported)" once the registry has actually LOADED — while the
@@ -80,8 +85,8 @@ export function CampaignSettingsForm({
     options.push({
       value: campaign.language,
       label: registryKnows
-        ? `${languageLabel(campaign.language)} (unsupported)`
-        : languageLabel(campaign.language),
+        ? t("components.languageUnsupported", { label: languageLabel(lang, campaign.language) })
+        : languageLabel(lang, campaign.language),
     });
   }
 
@@ -102,7 +107,8 @@ export function CampaignSettingsForm({
       void invalidateActiveCampaignScopedQueries(queryClient);
       onSaved();
     },
-    onError: (err) => toast.error(`Couldn't save campaign settings: ${err.message}`),
+    onError: (err) =>
+      toast.error(t("components.couldntSaveCampaignSettings", { message: err.message })),
   });
 
   const canSubmit = name.trim() !== "" && !update.isPending;
@@ -117,20 +123,20 @@ export function CampaignSettingsForm({
   return (
     <form className="gx-campaign-create" onSubmit={submit}>
       <Input
-        label="Name"
+        label={t("components.nameLabel")}
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="e.g. The Sunless Citadel"
+        placeholder={t("components.namePlaceholder")}
         disabled={update.isPending}
         required
       />
       <div className="gx-campaign-create__row">
         <Input
-          label="System"
+          label={t("components.gameSystemLabel")}
           value={system}
           onChange={(e) => setSystem(e.target.value)}
           list={SYSTEM_DATALIST_ID}
-          hint="Free-text — e.g. D&D 5e, Pathfinder 2e"
+          hint={t("components.settingsSystemHint")}
           disabled={update.isPending}
         />
         <datalist id={SYSTEM_DATALIST_ID}>
@@ -139,48 +145,52 @@ export function CampaignSettingsForm({
           ))}
         </datalist>
         <div className="gx-campaign-create__lang">
+          {/* "Spoken language" — the language the group PLAYS in (drives STT/TTS),
+              deliberately distinct from the web tier's display-language picker. */}
           <Select
-            label="Language"
+            label={t("components.spokenLanguageLabel")}
             options={options}
             value={language}
             onValueChange={setLanguage}
             disabled={update.isPending}
           />
-          <span className="gx-field__hint">Takes effect on the next Voice Session.</span>
+          <span className="gx-field__hint">{t("components.spokenLanguageHint")}</span>
           {langQ.isError && (
             <span className="gx-field__hint gx-field__hint--error" role="alert">
-              Couldn&apos;t load the language choices: {langQ.error.message}
+              {t("components.couldntLoadLanguages", { message: langQ.error.message })}
             </span>
           )}
         </div>
       </div>
-      <div className="gx-campaign-create__row">
+      {/* Highlight recording (the rollover tape, #412/ADR-0051) lives behind the
+          advanced disclosure: consent-gated capture is a power-user opt-in most
+          groups never touch, so it must not crowd the everyday name/system/
+          language fields. */}
+      <AdvancedCard>
         <div className="gx-field">
           <Switch
             id="gx-tape-armed"
             checked={tapeArmed}
             onCheckedChange={setTapeArmed}
-            label="Rollover tape"
+            label={t("components.highlightRecordingLabel")}
             disabled={update.isPending}
           />
-          <span className="gx-field__hint">
-            When armed, a consent message with Consent/Revoke buttons is posted in
-            the voice channel&apos;s chat at session start; only consenting
-            speakers are taped — the GM must press Consent too, there is no
-            auto-consent. Takes effect at the next session start.
-          </span>
+          {/* The consent semantics (Discord Consent/Revoke buttons, no GM
+              auto-consent) live in internal/wirenpc/tapedisclosure.go; the hint
+              keeps only what a GM must know up front. */}
+          <span className="gx-field__hint">{t("components.highlightRecordingHint")}</span>
         </div>
-      </div>
+      </AdvancedCard>
       <div className="gx-campaign-create__actions">
         <Button type="submit" variant="primary" disabled={!canSubmit}>
-          {update.isPending ? "Saving…" : "Save changes"}
+          {update.isPending ? t("common.saving") : t("common.saveChanges")}
         </Button>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={update.isPending}>
-          Cancel
+          {t("common.cancel")}
         </Button>
         {update.error && (
           <span className="gx-campaign-create__error" role="alert">
-            Couldn&apos;t save: {update.error.message}
+            {t("common.couldntSave", { message: update.error.message })}
           </span>
         )}
       </div>

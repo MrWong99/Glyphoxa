@@ -9,6 +9,7 @@ import {
   invalidateActiveCampaignScopedQueries,
   watchVoiceSessionEnd,
 } from "@/lib/campaignCache";
+import { useI18n } from "@/i18n";
 import { isNotFound } from "@/lib/connectError";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { Badge } from "@/components/ui/Badge";
@@ -38,6 +39,7 @@ import "./campaignSwitcher.css";
 type Panel = "closed" | "list" | "create" | "edit";
 
 export function CampaignSwitcher() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [panel, setPanel] = useState<Panel>("closed");
   const open = panel !== "closed";
@@ -101,7 +103,7 @@ export function CampaignSwitcher() {
       void invalidateActiveCampaignScopedQueries(queryClient);
       close();
     },
-    onError: (err) => toast.error(`Couldn't switch campaign: ${err.message}`),
+    onError: (err) => toast.error(t("components.couldntSwitchCampaign", { message: err.message })),
   });
   const switching = setActive.isPending;
 
@@ -132,10 +134,10 @@ export function CampaignSwitcher() {
   const triggerLabel = activeCampaign
     ? activeCampaign.name
     : firstRun
-      ? "Create your first campaign"
+      ? t("components.createFirstCampaign")
       : activeQ.isPending
         ? null
-        : "Select campaign";
+        : t("components.selectCampaign");
 
   return (
     <div className="gx-campaign-switcher" ref={wrapRef}>
@@ -148,10 +150,10 @@ export function CampaignSwitcher() {
         // while the loading/first-run states keep a stable, meaningful name.
         aria-label={
           firstRun
-            ? "Create your first campaign"
+            ? t("components.createFirstCampaign")
             : activeCampaign
-              ? `Switch campaign — active: ${activeCampaign.name}`
-              : "Switch campaign"
+              ? t("components.switchCampaignActive", { name: activeCampaign.name })
+              : t("components.switchCampaign")
         }
         data-testid="campaign-switcher-trigger"
         data-firstrun={firstRun || undefined}
@@ -161,7 +163,9 @@ export function CampaignSwitcher() {
           <Swords size={15} />
         </span>
         <span className="gx-campaign-switcher__label">
-          <span className="gx-overline gx-campaign-switcher__overline">Campaign</span>
+          <span className="gx-overline gx-campaign-switcher__overline">
+            {t("components.campaignOverline")}
+          </span>
           {triggerLabel === null ? (
             <span className="gx-skeleton" data-testid="campaign-switcher-loading" />
           ) : (
@@ -183,7 +187,7 @@ export function CampaignSwitcher() {
         >
           {panel === "create" ? (
             <div className="gx-campaign-switcher__create">
-              <div className="gx-campaign-switcher__create-head">New campaign</div>
+              <div className="gx-campaign-switcher__create-head">{t("components.newCampaign")}</div>
               <CreateCampaignForm
                 onSubmit={createFlow.submit}
                 pending={createFlow.pending}
@@ -199,7 +203,7 @@ export function CampaignSwitcher() {
             // Active Campaign. It shares the create form's classes and, like a
             // create, returns to the list on save or cancel.
             <div className="gx-campaign-switcher__create">
-              <div className="gx-campaign-switcher__create-head">Campaign settings</div>
+              <div className="gx-campaign-switcher__create-head">{t("components.campaignSettings")}</div>
               <CampaignSettingsForm
                 campaign={activeCampaign}
                 onSaved={() => setPanel("list")}
@@ -213,7 +217,11 @@ export function CampaignSwitcher() {
                   announced role matches the actual behaviour. The Active Campaign's
                   row carries aria-current; clicking it just closes the panel — no
                   RPC, no sweep, nothing to re-select. */}
-              <ul className="gx-campaign-switcher__list" role="group" aria-label="Campaigns">
+              <ul
+                className="gx-campaign-switcher__list"
+                role="group"
+                aria-label={t("components.campaignsGroupLabel")}
+              >
                 {campaigns.map((c) => {
                   const isActive = c.id === activeId;
                   // An archived campaign can't be switched to (it is excluded from
@@ -240,7 +248,7 @@ export function CampaignSwitcher() {
                         </span>
                         {isArchived && (
                           <Badge variant="neutral" size="sm">
-                            Archived
+                            {t("components.archivedBadge")}
                           </Badge>
                         )}
                         {isActive && <Check size={14} />}
@@ -255,12 +263,12 @@ export function CampaignSwitcher() {
 
               {listQ.isError && (
                 <p className="gx-campaign__error gx-campaign-switcher__error" role="alert">
-                  Couldn&apos;t load campaigns: {listQ.error.message}
+                  {t("components.couldntLoadCampaigns", { message: listQ.error.message })}
                 </p>
               )}
 
               <button type="button" className="gx-campaign-switcher__new" onClick={enterCreate}>
-                <Plus size={15} /> New campaign
+                <Plus size={15} /> {t("components.newCampaign")}
               </button>
 
               {/* Restore a campaign from an exported bundle (#294). It mints a new
@@ -278,7 +286,7 @@ export function CampaignSwitcher() {
                 onClick={() => setPanel("edit")}
                 disabled={!activeCampaign}
               >
-                <Settings size={15} /> Campaign settings
+                <Settings size={15} /> {t("components.campaignSettings")}
               </button>
 
               {/* Show-archived toggle (#269): folds archived campaigns into the
@@ -289,7 +297,7 @@ export function CampaignSwitcher() {
                 aria-pressed={showArchived}
                 onClick={() => setShowArchived((v) => !v)}
               >
-                {showArchived ? "Hide archived" : "Show archived"}
+                {showArchived ? t("components.hideArchived") : t("components.showArchived")}
               </button>
             </>
           )}
@@ -300,7 +308,7 @@ export function CampaignSwitcher() {
               unchanged trigger and read as a silent failure. */}
           {sessionLive && (
             <p className="gx-campaign-switcher__notice" role="note">
-              A Voice Session is live — switching takes effect after it ends.
+              {t("components.sessionLiveNotice")}
             </p>
           )}
           {/* A safety notice that silently vanishes is worse than a hedge: if the
@@ -308,8 +316,7 @@ export function CampaignSwitcher() {
               the switch is immediate. */}
           {sessionQ.isError && (
             <p className="gx-campaign-switcher__notice" role="note">
-              Couldn&apos;t check for a live Voice Session — a switch may take effect only after it
-              ends.
+              {t("components.sessionCheckFailedNotice")}
             </p>
           )}
         </div>

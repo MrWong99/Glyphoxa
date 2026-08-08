@@ -8,6 +8,7 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { useI18n } from "@/i18n";
 
 import "./createCampaignForm.css";
 
@@ -45,6 +46,7 @@ export type CreateCampaignError = { phase: "create" | "activate"; error: Error }
 // late rejection would be completely silent (mirrors the AgentEditor's paired
 // toast + inline-status idiom).
 export function useCreateCampaign(onCreated?: () => void) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
 
   // The flow's imperative spine (#267 review). A double-click lands both clicks
@@ -70,7 +72,7 @@ export function useCreateCampaign(onCreated?: () => void) {
     },
     onError: (err) => {
       flow.current = "idle"; // retryable — as a pure activation, via createdId
-      toast.error(`Created the campaign, but couldn't switch to it: ${err.message}`);
+      toast.error(t("components.createdCampaignCouldntSwitchToast", { message: err.message }));
     },
     // The sweep runs on SETTLED, not just success: even a failed activation must
     // refetch resolution truth. On first run the just-created campaign already
@@ -97,7 +99,7 @@ export function useCreateCampaign(onCreated?: () => void) {
     },
     onError: (err) => {
       flow.current = "idle"; // retryable — nothing was created
-      toast.error(`Couldn't create the campaign: ${err.message}`);
+      toast.error(t("components.couldntCreateCampaignToast", { message: err.message }));
     },
   });
 
@@ -139,7 +141,7 @@ export function CreateCampaignForm({
   onSubmit,
   pending,
   error,
-  submitLabel = "Create campaign",
+  submitLabel,
   onCancel,
   autoFocusName = false,
 }: {
@@ -150,6 +152,7 @@ export function CreateCampaignForm({
   onCancel?: () => void;
   autoFocusName?: boolean;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [system, setSystem] = useState(SEED_SYSTEM);
   const [language, setLanguage] = useState(SEED_LANGUAGE);
@@ -173,44 +176,48 @@ export function CreateCampaignForm({
   return (
     <form className="gx-campaign-create" onSubmit={submit}>
       <Input
-        label="Name"
+        label={t("components.nameLabel")}
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="e.g. The Sunless Citadel"
+        placeholder={t("components.namePlaceholder")}
         autoFocus={autoFocusName}
         disabled={locked}
         required
       />
       <div className="gx-campaign-create__row">
         <Input
-          label="System"
+          label={t("components.gameSystemLabel")}
           value={system}
           onChange={(e) => setSystem(e.target.value)}
-          hint="Free-text — e.g. dnd5e, pf2e"
+          hint={t("components.createSystemHint")}
           disabled={locked}
         />
         <Input
-          label="Language"
+          label={t("components.spokenLanguageLabel")}
           value={language}
           onChange={(e) => setLanguage(e.target.value)}
-          hint="BCP-47 tag — e.g. en, de"
+          hint={t("components.createLanguageHint")}
           disabled={locked}
         />
       </div>
       <div className="gx-campaign-create__actions">
         <Button type="submit" variant="primary" disabled={!canSubmit}>
-          {pending ? "Saving…" : activateFailed ? "Retry activation" : submitLabel}
+          {pending
+            ? t("common.saving")
+            : activateFailed
+              ? t("components.retryActivation")
+              : (submitLabel ?? t("components.createCampaign"))}
         </Button>
         {onCancel && (
           <Button type="button" variant="ghost" onClick={onCancel} disabled={pending}>
-            Cancel
+            {t("common.cancel")}
           </Button>
         )}
         {error && (
           <span className="gx-campaign-create__error" role="alert">
             {activateFailed
-              ? `Created it, but couldn't switch to it: ${error.error.message}`
-              : `Couldn't create: ${error.error.message}`}
+              ? t("components.createdCouldntSwitchInline", { message: error.error.message })
+              : t("components.couldntCreateInline", { message: error.error.message })}
           </span>
         )}
       </div>

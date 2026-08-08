@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
+import { useI18n } from "@/i18n";
 
 // PlayerBindForm is the shared Character bind form (#279): name, aliases, and the
 // mandatory Discord User binding. It is reused verbatim by the Campaign Players
@@ -51,6 +52,7 @@ export function PlayerBindForm({
   onCancel?: () => void;
   onDelete?: () => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState(initial?.name ?? "");
   const [aliases, setAliases] = useState<string[]>(initial?.aliases ?? []);
   const [aliasDraft, setAliasDraft] = useState("");
@@ -93,13 +95,18 @@ export function PlayerBindForm({
 
   return (
     <div className="gx-playerform">
-      <Input label="Character name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Who does the Player play?" />
+      <Input
+        label={t("components.characterNameLabel")}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder={t("components.characterNamePlaceholder")}
+      />
 
       {/* Aliases editor — alternate names Address Detection also matches, mirroring
           the Cast panel's alias set. Chips remove on click; the draft input adds on
           Enter or the Add button. */}
       <div className="gx-field">
-        <span className="gx-field__label">Aliases</span>
+        <span className="gx-field__label">{t("components.aliasesLabel")}</span>
         {aliases.length > 0 && (
           <div className="gx-playerform__aliases">
             {aliases.map((a) => (
@@ -108,7 +115,7 @@ export function PlayerBindForm({
                 <button
                   type="button"
                   className="gx-playerform__alias-remove"
-                  aria-label={`Remove alias ${a}`}
+                  aria-label={t("components.removeAlias", { alias: a })}
                   onClick={() => removeAlias(a)}
                 >
                   <X size={11} />
@@ -119,7 +126,7 @@ export function PlayerBindForm({
         )}
         <div className="gx-playerform__alias-add">
           <Input
-            aria-label="Add alias"
+            aria-label={t("components.addAliasLabel")}
             value={aliasDraft}
             onChange={(e) => setAliasDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -128,10 +135,10 @@ export function PlayerBindForm({
                 addAlias();
               }
             }}
-            placeholder="Add an alias…"
+            placeholder={t("components.addAliasPlaceholder")}
           />
           <Button variant="secondary" size="sm" iconStart={<Plus size={13} />} onClick={addAlias} disabled={aliasDraft.trim() === ""}>
-            Add
+            {t("components.add")}
           </Button>
         </div>
       </div>
@@ -140,13 +147,15 @@ export function PlayerBindForm({
           current voice-channel members; the free-text field is the always-present
           fallback (digits-only). */}
       <div className="gx-field" ref={pickerRef}>
-        <span className="gx-field__label">Discord User</span>
+        <span className="gx-field__label">{t("components.discordUserLabel")}</span>
         <div className="gx-playerform__bind">
           <Input
-            aria-label="Discord user ID"
+            aria-label={t("components.discordUserIdLabel")}
             value={discordUserId}
             onChange={(e) => setDiscordUserId(e.target.value)}
-            placeholder="Discord user ID (snowflake)"
+            // "snowflake" is Discord-internals jargon — the visible copy says
+            // "numbers only"; the wire rule (isSnowflake) is unchanged.
+            placeholder={t("components.discordUserIdPlaceholder")}
             aria-invalid={idInvalid || undefined}
             inputMode="numeric"
           />
@@ -160,10 +169,14 @@ export function PlayerBindForm({
                 onClick={() => setPickerOpen((o) => !o)}
                 aria-expanded={pickerOpen}
               >
-                From voice
+                {t("components.fromVoice")}
               </Button>
               {pickerOpen && (
-                <ul className="gx-playerform__picker" role="listbox" aria-label="Voice channel members">
+                <ul
+                  className="gx-playerform__picker"
+                  role="listbox"
+                  aria-label={t("components.voiceChannelMembers")}
+                >
                   {members.map((m) => (
                     <li key={m.discordUserId}>
                       <button
@@ -185,29 +198,29 @@ export function PlayerBindForm({
         </div>
         {idInvalid ? (
           <span className="gx-field__hint gx-field__hint--error" role="alert">
-            A Discord user ID is digits only.
+            {t("components.discordUserIdDigitsOnly")}
           </span>
         ) : (
           <span className="gx-field__hint">
             {boundMember
-              ? `Binds to ${boundMember.displayName}.`
-              : "Pick a voice-channel member, or paste a Discord user ID."}
+              ? t("components.bindsTo", { name: boundMember.displayName })
+              : t("components.bindHint")}
           </span>
         )}
       </div>
 
       <div className="gx-playerform__actions">
         <Button variant="primary" onClick={submit} disabled={!canSubmit}>
-          {pending ? "Saving…" : submitLabel}
+          {pending ? t("common.saving") : submitLabel}
         </Button>
         {onCancel && (
           <Button variant="ghost" onClick={onCancel} disabled={pending}>
-            Cancel
+            {t("common.cancel")}
           </Button>
         )}
         {onDelete && (
           <Button variant="danger" iconStart={<Trash2 size={14} />} onClick={onDelete} disabled={pending}>
-            Delete
+            {t("common.delete")}
           </Button>
         )}
         {error && (

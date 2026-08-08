@@ -5,6 +5,7 @@ import { Link as LinkIcon, Check } from "lucide-react";
 
 import { ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
+import { useI18n, type TFunc } from "@/i18n";
 import { parseDiscordLink } from "@/lib/discordLink";
 
 // DiscordLinkAutofill — the Configuration Discord card's "Paste a Discord link"
@@ -22,14 +23,12 @@ import { parseDiscordLink } from "@/lib/discordLink";
 // the fill. A failed resolve leaves the field and any previously-resolved
 // confirmation untouched.
 
-// ADD_BOT_HINT points a not-a-member precondition failure back at the Add-Glyphoxa
-// action, which renders at the FOOT of this card (below the Save button) — so the
-// direction word must match its placement. It is appended ONLY to the not-a-member
-// message; the no-token precondition ("save the token first") is already complete
-// guidance and adding "add the Bot" there would be wrong (the token, not
-// membership, is what's missing).
-const ADD_BOT_HINT =
-  "Use the Add Glyphoxa to your server button at the foot of this card, then paste the invite again.";
+// config.addBotHint points a not-a-member precondition failure back at the
+// Add-Glyphoxa action, which renders at the FOOT of this card (below the Save
+// button) — so the direction word must match its placement. It is appended ONLY
+// to the not-a-member message; the no-token precondition ("save the token
+// first") is already complete guidance and adding "add the Bot" there would be
+// wrong (the token, not membership, is what's missing).
 
 // NOT_A_MEMBER_MARK picks the not-a-member precondition out of the two messages
 // that share the FailedPrecondition code (ADR-0047): only that one earns the
@@ -47,6 +46,7 @@ export function DiscordLinkAutofill({
 }: {
   onFill: (guildId: string) => void;
 }) {
+  const { t } = useI18n();
   const [link, setLink] = useState("");
   const [linkError, setLinkError] = useState<ReactNode>(null);
   // The resolved-guild confirmation is held in local state, not read off the
@@ -77,7 +77,7 @@ export function DiscordLinkAutofill({
     },
     onError: (err, variables) => {
       if (variables.inviteCode !== currentCode.current) return; // superseded
-      setLinkError(inviteErrorMessage(err));
+      setLinkError(inviteErrorMessage(err, t));
     },
   });
 
@@ -94,7 +94,7 @@ export function DiscordLinkAutofill({
     const parsed = parseDiscordLink(value);
     if (!parsed) {
       currentCode.current = null;
-      setLinkError("Couldn't read that link — paste a Discord channel or invite link.");
+      setLinkError(t("config.linkUnreadable"));
       return;
     }
     if (parsed.kind === "channel") {
@@ -119,18 +119,21 @@ export function DiscordLinkAutofill({
   return (
     <div className="gx-discord__link">
       <Input
-        label="Paste a Discord link"
-        placeholder="https://discord.com/channels/… or discord.gg/…"
+        label={t("config.linkPasteLabel")}
+        placeholder={t("config.linkPastePlaceholder")}
         icon={<LinkIcon size={15} />}
-        hint="Paste a channel or invite link to fill the Guild ID."
+        hint={t("config.linkPasteHint")}
         error={linkError}
         value={link}
         onChange={(e) => onPaste(e.target.value)}
       />
-      {resolve.isPending && <p className="gx-discord__resolving">Resolving invite…</p>}
+      {resolve.isPending && (
+        <p className="gx-discord__resolving">{t("config.resolvingInvite")}</p>
+      )}
       {resolvedGuild && (
         <p className="gx-discord__resolved" data-testid="resolved-guild">
-          <Check size={13} aria-hidden="true" /> Guild ID filled from {resolvedGuild}.
+          <Check size={13} aria-hidden="true" />{" "}
+          {t("config.serverIdFilledFrom", { guild: resolvedGuild })}
         </p>
       )}
     </div>
@@ -142,22 +145,23 @@ export function DiscordLinkAutofill({
 // message verbatim (no-token vs not-a-member share the code and differ only by
 // message, ADR-0047). The add-bot hint is appended ONLY to the not-a-member
 // message — the no-token message stands alone as its own complete guidance.
-function inviteErrorMessage(err: unknown): ReactNode {
+// `t` rides in from the component so the copy follows the display language.
+function inviteErrorMessage(err: unknown, t: TFunc): ReactNode {
   const code = err instanceof ConnectError ? err.code : undefined;
   const raw =
     err instanceof ConnectError ? err.rawMessage : err instanceof Error ? err.message : String(err);
   if (code === Code.NotFound) {
-    return "That invite looks invalid or expired.";
+    return t("config.inviteInvalid");
   }
   if (code === Code.FailedPrecondition) {
     if (NOT_A_MEMBER_MARK.test(raw)) {
       return (
         <>
-          <span>{raw}</span> <span>{ADD_BOT_HINT}</span>
+          <span>{raw}</span> <span>{t("config.addBotHint")}</span>
         </>
       );
     }
     return <span>{raw}</span>;
   }
-  return "Couldn't resolve that invite. Please try again.";
+  return t("config.inviteFailed");
 }

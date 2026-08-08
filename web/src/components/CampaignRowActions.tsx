@@ -7,6 +7,7 @@ import { Archive, ArchiveRestore, Download, MoreHorizontal, Trash2 } from "lucid
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { useI18n } from "@/i18n";
 import { fetchCampaignExport, downloadBlob } from "@/lib/download";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -41,6 +42,7 @@ type MenuPos = { top: number; right: number; flipUp: boolean };
 const MENU_HEIGHT_ESTIMATE = 128;
 
 export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -128,7 +130,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       downloadBlob(blob, filename);
       setMenuOpen(false);
     } catch (err) {
-      toast.error(`Couldn't export campaign: ${(err as Error).message}`);
+      toast.error(t("components.couldntExportCampaign", { message: (err as Error).message }));
     } finally {
       setExporting(false);
     }
@@ -139,7 +141,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       setMenuOpen(false);
       refreshAfterChange();
     },
-    onError: (err) => toast.error(`Couldn't archive campaign: ${err.message}`),
+    onError: (err) => toast.error(t("components.couldntArchiveCampaign", { message: err.message })),
   });
 
   const unarchive = useMutation(CampaignService.method.unarchiveCampaign, {
@@ -147,7 +149,8 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       setMenuOpen(false);
       refreshAfterChange();
     },
-    onError: (err) => toast.error(`Couldn't unarchive campaign: ${err.message}`),
+    onError: (err) =>
+      toast.error(t("components.couldntUnarchiveCampaign", { message: err.message })),
   });
 
   const del = useMutation(CampaignService.method.deleteCampaign, {
@@ -156,7 +159,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       setMenuOpen(false);
       refreshAfterChange();
     },
-    onError: (err) => toast.error(`Couldn't delete campaign: ${err.message}`),
+    onError: (err) => toast.error(t("components.couldntDeleteCampaign", { message: err.message })),
   });
 
   return (
@@ -171,8 +174,8 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
         // button's accessible name (which carries the campaign name); the campaign
         // is identified by the row it sits in, and by the menu items + confirm
         // dialog once opened.
-        aria-label="Campaign actions"
-        title={`Actions for ${campaign.name}`}
+        aria-label={t("components.campaignActions")}
+        title={t("components.campaignActionsFor", { name: campaign.name })}
         onClick={() => setMenuOpen((o) => !o)}
       >
         <MoreHorizontal size={15} />
@@ -203,7 +206,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
               disabled={exporting}
               onClick={() => void runExport()}
             >
-              <Download size={14} /> {exporting ? "Exporting…" : "Export"}
+              <Download size={14} /> {exporting ? t("components.exporting") : t("components.exportCampaign")}
             </button>
             {campaign.archived ? (
               <>
@@ -214,7 +217,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
                   disabled={unarchive.isPending}
                   onClick={() => unarchive.mutate({ id: campaign.id })}
                 >
-                  <ArchiveRestore size={14} /> Unarchive
+                  <ArchiveRestore size={14} /> {t("components.unarchive")}
                 </button>
                 <button
                   type="button"
@@ -225,7 +228,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
                     setConfirmOpen(true);
                   }}
                 >
-                  <Trash2 size={14} /> Delete…
+                  <Trash2 size={14} /> {t("components.deleteEllipsis")}
                 </button>
               </>
             ) : (
@@ -236,7 +239,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
                 disabled={archive.isPending}
                 onClick={() => archive.mutate({ id: campaign.id })}
               >
-                <Archive size={14} /> Archive
+                <Archive size={14} /> {t("components.archive")}
               </button>
             )}
           </div>,
@@ -246,11 +249,11 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={`Delete “${campaign.name}”?`}
-        description="This permanently deletes the campaign and all of its Agents, Knowledge Graph, transcripts, and Voice Sessions. This cannot be undone."
-        confirmLabel="Delete campaign"
+        title={t("components.deleteCampaignTitle", { name: campaign.name })}
+        description={t("components.deleteCampaignDescription")}
+        confirmLabel={t("components.deleteCampaignConfirm")}
         confirmText={campaign.name}
-        confirmTextLabel={`Type the campaign name to confirm`}
+        confirmTextLabel={t("components.typeCampaignNameToConfirm")}
         confirmDisabled={del.isPending}
         onConfirm={() => del.mutate({ id: campaign.id })}
       />

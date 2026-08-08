@@ -3,6 +3,7 @@ import { Command, defaultFilter } from "cmdk";
 import { ChevronDown, Check, Search } from "lucide-react";
 
 import { usePopoverDismiss } from "./usePopoverDismiss";
+import { useI18n } from "@/i18n";
 
 // Combobox — a filterable, height-bounded picker for large/growing option lists
 // (the live ElevenLabs voice catalog, #88 slice 2). The plain Radix Select can't
@@ -31,9 +32,9 @@ export function Combobox({
   value,
   onValueChange,
   disabled = false,
-  placeholder = "Select…",
-  searchPlaceholder = "Search…",
-  emptyText = "No matches",
+  placeholder,
+  searchPlaceholder,
+  emptyText,
   allowCustom = false,
   id,
   "aria-label": ariaLabel,
@@ -53,11 +54,19 @@ export function Combobox({
   id?: string;
   "aria-label"?: string;
 }) {
+  const { t } = useI18n();
   const generatedId = useId();
   const fid = id || generatedId;
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  // The defaults resolve here rather than in the parameter list: a default
+  // parameter can't call hooks, and the translated fallbacks must follow the
+  // live display language. An explicit prop still wins.
+  const placeholderText = placeholder ?? t("components.selectPlaceholder");
+  const searchPlaceholderText = searchPlaceholder ?? t("components.searchPlaceholder");
+  const emptyTextResolved = emptyText ?? t("components.noMatches");
 
   const selected = options.find((o) => o.value === value);
   // With allowCustom a saved value may not appear in the catalog (free-text
@@ -112,7 +121,7 @@ export function Combobox({
           onClick={() => setOpen((o) => !o)}
         >
           <span className={triggerLabel ? "gx-combobox__value" : "gx-combobox__placeholder"}>
-            {triggerLabel ?? placeholder}
+            {triggerLabel ?? placeholderText}
           </span>
           <ChevronDown size={14} className="gx-select-chevron" />
         </button>
@@ -121,14 +130,14 @@ export function Combobox({
           <div className="gx-select__content gx-combobox__content">
             <Command
               className="gx-combobox__command"
-              label={ariaLabel || label || "Options"}
+              label={ariaLabel || label || t("components.comboboxOptionsLabel")}
               filter={labelOnlyFilter}
             >
               <div className="gx-combobox__search">
                 <Search size={14} className="gx-combobox__search-icon" />
                 <Command.Input
                   className="gx-combobox__input"
-                  placeholder={searchPlaceholder}
+                  placeholder={searchPlaceholderText}
                   value={search}
                   onValueChange={setSearch}
                   autoFocus
@@ -136,7 +145,7 @@ export function Combobox({
               </div>
               <Command.List className="gx-combobox__list">
                 {!customItem && (
-                  <Command.Empty className="gx-combobox__empty">{emptyText}</Command.Empty>
+                  <Command.Empty className="gx-combobox__empty">{emptyTextResolved}</Command.Empty>
                 )}
                 {customItem && (
                   <Command.Item
@@ -149,9 +158,7 @@ export function Combobox({
                     className="gx-select__item gx-combobox__item"
                     onSelect={() => pick(customText)}
                   >
-                    <span>
-                      Use &quot;{customText}&quot;
-                    </span>
+                    <span>{t("components.useCustomValue", { text: customText })}</span>
                   </Command.Item>
                 )}
                 {options.map((o) => (
