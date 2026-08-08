@@ -1063,3 +1063,56 @@ textarea.gx-input {
   gap: var(--spacing-sm);
   margin-top: var(--spacing-sm);
 }
+
+/* ===================== Advanced disclosure card (AdvancedCard.tsx) ======
+ * Closed-by-default card hiding power-user settings; the whole header row is
+ * the toggle button.
+ */
+.gx-advanced__toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-default);
+}
+.gx-advanced__chevron {
+  align-self: center;
+  flex: 0 0 auto;
+  color: var(--text-subtle);
+  transition: transform 120ms ease;
+}
+.gx-advanced__chevron[data-open] {
+  transform: rotate(90deg);
+}
+.gx-advanced__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+.gx-advanced__hint {
+  font-size: 12px;
+  color: var(--text-subtle);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-advanced__body {
+  padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+/* Display-language picker in the topbar (i18n). */
+.gx-topbar__lang .gx-select {
+  min-width: 108px;
+  padding: 6px 10px;
+  font-size: 12px;
+}

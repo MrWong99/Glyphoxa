@@ -8,7 +8,7 @@ import {
   GraphNodeSchema,
   NodeType,
 } from "@gen/glyphoxa/management/v1/management_pb";
-import { UNPLACED_TITLE, lastSpokeLabel, rosterPrep, type Readiness } from "./rosterPrep";
+import { UNPLACED_TITLE, rosterPrep, type Readiness } from "./rosterPrep";
 
 const ready = (o: Partial<Readiness> = {}): Readiness => ({
   linked: true,
@@ -80,9 +80,11 @@ describe("rosterPrep", () => {
 
     const reaching = rosterPrep(configured, nodes, [], new Map([["a1", ready({ factCount: 4 })]]));
     expect(reaching[0].entries[0].ready).toBe(true);
-    expect(reaching[0].entries[0].checks.find((c) => c.key === "facts")?.label).toBe(
-      "4 facts in reach",
-    );
+    // Labels are message keys + params (translated at render); the count rides
+    // as the interpolation param.
+    const facts = reaching[0].entries[0].checks.find((c) => c.key === "facts");
+    expect(facts?.labelKey).toBe("campaign.checkFactsCount");
+    expect(facts?.labelParams).toEqual({ n: 4 });
 
     const starved = rosterPrep(configured, nodes, [], new Map([["a1", ready({ factCount: 0 })]]));
     expect(starved[0].entries[0].ready).toBe(false);
@@ -97,9 +99,10 @@ describe("rosterPrep", () => {
       [],
       new Map([["a1", ready({ lastSpokeAt: at })]]),
     );
+    // The "last spoke" copy itself renders in RosterPrep (display-language +
+    // locale date formatting live in the React layer) — the derivation's job is
+    // carrying the timestamp through.
     expect(groups[0].entries[0].readiness?.lastSpokeAt).toEqual(at);
-    expect(lastSpokeLabel(groups[0].entries[0].readiness)).toMatch(/last spoke/);
-    expect(lastSpokeLabel(undefined)).toBe("never spoken");
   });
 
   it("names each missing piece separately", () => {

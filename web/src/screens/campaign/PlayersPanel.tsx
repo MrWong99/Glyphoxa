@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
+import { useI18n } from "@/i18n";
 
 // PlayersPanel (#279) is the Campaign screen's third view: the campaign's Player
 // Characters, each bound to a Discord User, with a bind form to create a Character
@@ -28,6 +29,7 @@ function subtitleFor(character: Character, byId: Map<string, DiscordVoiceMember>
 }
 
 export function PlayersPanel() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listCharacters, {});
   const characters = useMemo(() => listQuery.data?.characters ?? [], [listQuery.data]);
@@ -94,7 +96,7 @@ export function PlayersPanel() {
   if (listQuery.status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        Could not load players: {listQuery.error.message}
+        {t("campaign.playersLoadError", { message: listQuery.error.message })}
       </p>
     );
   }
@@ -103,9 +105,9 @@ export function PlayersPanel() {
     <div className="gx-roster-layout">
       <div className="gx-players">
         <div className="gx-players__head">
-          <span className="gx-overline">Players · {characters.length}</span>
+          <span className="gx-overline">{t("campaign.playersCount", { n: characters.length })}</span>
           <Button variant="secondary" size="sm" iconStart={<UserPlus size={14} />} onClick={startCreate}>
-            Add player
+            {t("campaign.addPlayer")}
           </Button>
         </div>
 
@@ -124,12 +126,12 @@ export function PlayersPanel() {
             </span>
             {c.linkedUserId !== "" ? (
               <Badge variant="gold" size="sm">
-                Linked
+                {t("campaign.badgeLinked")}
               </Badge>
             ) : (
               !membersById.has(c.discordUserId) && (
                 <Badge variant="neutral" size="sm">
-                  Discord ID
+                  {t("campaign.badgeDiscordId")}
                 </Badge>
               )
             )}
@@ -137,9 +139,7 @@ export function PlayersPanel() {
         ))}
 
         {characters.length === 0 && (
-          <p className="gx-players__empty">
-            No players yet. Add a Character and bind it to a Discord User so their voice is named.
-          </p>
+          <p className="gx-players__empty">{t("campaign.playersEmpty")}</p>
         )}
       </div>
 
@@ -147,15 +147,19 @@ export function PlayersPanel() {
         <Card accent className="gx-editor">
           <div className="gx-editor__head">
             <Badge variant="neutral" size="sm">
-              <Plus size={11} /> New player
+              <Plus size={11} /> {t("campaign.newPlayerBadge")}
             </Badge>
-            <span className="gx-editor__role">Bind a Discord User to a Character</span>
+            <span className="gx-editor__role">{t("campaign.newPlayerRole")}</span>
           </div>
           <PlayerBindForm
             members={members}
-            submitLabel="Create player"
+            submitLabel={t("campaign.createPlayer")}
             pending={createCharacter.isPending}
-            error={createCharacter.isError ? `Couldn't create: ${createCharacter.error.message}` : null}
+            error={
+              createCharacter.isError
+                ? t("campaign.couldntCreate", { message: createCharacter.error.message })
+                : null
+            }
             onSubmit={submitCreate}
             onCancel={() => setCreating(false)}
           />
@@ -166,30 +170,34 @@ export function PlayersPanel() {
             <Avatar name={subtitleFor(editing, membersById)} src={membersById.get(editing.discordUserId)?.avatarUrl || null} size="lg" />
             <div className="gx-editor__head-meta">
               <Badge variant="neutral" size="sm">
-                Player
+                {t("campaign.badgePlayer")}
               </Badge>
-              <span className="gx-editor__role">Reassign the Discord User or delete the Character</span>
+              <span className="gx-editor__role">{t("campaign.editPlayerRole")}</span>
             </div>
           </div>
           <PlayerBindForm
             key={editing.id}
             initial={{ name: editing.name, aliases: editing.aliases, discordUserId: editing.discordUserId }}
             members={members}
-            submitLabel="Save changes"
+            submitLabel={t("common.saveChanges")}
             pending={updateCharacter.isPending}
-            error={updateCharacter.isError ? `Couldn't save: ${updateCharacter.error.message}` : null}
+            error={
+              updateCharacter.isError
+                ? t("common.couldntSave", { message: updateCharacter.error.message })
+                : null
+            }
             onSubmit={submitEdit}
             onDelete={() => setConfirmDelete(editing)}
           />
           {updateCharacter.isSuccess && !updateCharacter.isPending && (
             <span className="gx-editor__status" aria-live="polite">
-              Saved
+              {t("campaign.savedStatus")}
             </span>
           )}
         </Card>
       ) : (
         <Card className="gx-players__prompt">
-          <p>Select a player to reassign or delete, or add a new one.</p>
+          <p>{t("campaign.playersPrompt")}</p>
         </Card>
       )}
 
@@ -199,9 +207,9 @@ export function PlayersPanel() {
           onOpenChange={(open) => {
             if (!open) setConfirmDelete(null);
           }}
-          title={`Delete “${confirmDelete.name}”?`}
-          description="This removes the Character and its Discord binding. To keep the Player but map them to a different Discord User, reassign instead of deleting."
-          confirmLabel="Delete player"
+          title={t("campaign.deletePlayerTitle", { name: confirmDelete.name })}
+          description={t("campaign.deletePlayerDesc")}
+          confirmLabel={t("campaign.deletePlayerConfirm")}
           onConfirm={() => {
             deleteCharacter.mutate({ id: confirmDelete.id });
             setConfirmDelete(null);

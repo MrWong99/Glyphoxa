@@ -3,6 +3,7 @@ import { useQuery } from "@connectrpc/connect-query";
 import { useNavigate } from "@tanstack/react-router";
 
 import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Landing } from "./Landing";
 
 // What the ROOT path serves (#521).
@@ -36,6 +37,7 @@ const DEFAULT_TENANT = "default";
 const PROBE_GRACE_MS = 2500;
 
 export function RootEntry() {
+  const { t } = useI18n();
   const navigate = useNavigate();
   // retry off so an unauthenticated visitor sees the landing page immediately
   // rather than after react-query's default backoff.
@@ -61,7 +63,7 @@ export function RootEntry() {
   }, [signedIn, navigate]);
 
   if ((status === "pending" && !graceOver) || signedIn) {
-    return <div className="gx-auth-boot" aria-busy="true" aria-label="Loading" />;
+    return <div className="gx-auth-boot" aria-busy="true" aria-label={t("common.loading")} />;
   }
   return <Landing open={open} />;
 }

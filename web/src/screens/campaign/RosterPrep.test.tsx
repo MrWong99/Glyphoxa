@@ -70,7 +70,7 @@ describe("RosterPrep", () => {
     renderPrep();
     expect(await screen.findByRole("button", { name: "Glyphoxa" })).toBeInTheDocument();
     expect(screen.getByText("Butler — always ready")).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Glyphoxa: Persona written/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Glyphoxa: Personality written/)).not.toBeInTheDocument();
   });
 
   it("shows the fact count the voice loop will actually inject", async () => {

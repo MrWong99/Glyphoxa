@@ -12,6 +12,7 @@ import {
   type ProviderHealth,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
+import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
@@ -19,12 +20,13 @@ import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
 import { isNotFound } from "@/lib/connectError";
+import { useI18n } from "@/i18n";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
 
 import "./configuration.css";
 
-// The Configuration screen (the design's "Providers" screen). The campaign
+// The Configuration screen (the design's "Setup" screen). The campaign
 // header reads LIVE GetActiveCampaign; the credential rows drive the write-only
 // BYOK flow (#68, ADR-0004/0039): each secret is sealed server-side and never
 // read back — the screen shows a masked value + Replace. The status badge starts
@@ -34,11 +36,13 @@ import "./configuration.css";
 
 // The three secret slots the screen holds, keyed by their wire `provider`. Each
 // renders a SecretRow; Groq/ElevenLabs save via SaveProviderConfig, the Discord
-// bot token via SaveDiscordSettings.
+// bot token via SaveDiscordSettings. `label` is the product name (never
+// translated); `kind` is a MessageKey translated at render, so the overline
+// speaks the user's language ("AI model", never the internal "LLM").
 const BYOK_SLOTS = [
-  { provider: "groq", label: "Groq", kind: "LLM", icon: <BrainCircuit size={19} />, placeholder: "Paste your Groq API key" },
-  { provider: "elevenlabs", label: "ElevenLabs", kind: "Speech", icon: <AudioLines size={19} />, placeholder: "Paste your ElevenLabs API key" },
-  { provider: "gemini", label: "Gemini", kind: "Image", icon: <ImagePlus size={19} />, placeholder: "Paste your Gemini API key" },
+  { provider: "groq", label: "Groq", kind: "config.kindAiModel", icon: <BrainCircuit size={19} /> },
+  { provider: "elevenlabs", label: "ElevenLabs", kind: "config.kindVoiceSpeech", icon: <AudioLines size={19} /> },
+  { provider: "gemini", label: "Gemini", kind: "config.kindImages", icon: <ImagePlus size={19} /> },
 ] as const;
 
 function credentialFor(creds: ProviderCredential[], provider: string): ProviderCredential | undefined {
@@ -50,6 +54,7 @@ function healthFor(health: ProviderHealth[], provider: string): ProviderHealth |
 }
 
 export function Configuration() {
+  const { t } = useI18n();
   // retry:false so a fresh, unseeded install's CodeNotFound settles at once into
   // the first-run create flow rather than backing off through three retries first.
   const { data, status, error } = useQuery(
@@ -120,8 +125,8 @@ export function Configuration() {
 
   return (
     <div className="gx-providers">
-      <h1>Providers</h1>
-      <p className="gx-providers__lede">Swap any engine with a config change — not a rewrite.</p>
+      <h1>{t("config.title")}</h1>
+      <p className="gx-providers__lede">{t("config.lede")}</p>
 
       {/* Active campaign — LIVE GetActiveCampaign (ADR-0039). Data-first: React
           Query retains the last data through a failed background refetch, so an
@@ -134,15 +139,15 @@ export function Configuration() {
           <div className="gx-campaign">
             <Avatar name={campaign.name} size="lg" />
             <div className="gx-campaign__meta">
-              <span className="gx-overline">Active campaign</span>
+              <span className="gx-overline">{t("config.activeCampaign")}</span>
               <span className="gx-campaign__name">{campaign.name}</span>
               <div className="gx-campaign__attrs">
                 <span className="gx-campaign__attr">
-                  System
+                  {t("config.campaignSystem")}
                   <span className="gx-campaign__attr-value">{campaign.system}</span>
                 </span>
                 <span className="gx-campaign__attr">
-                  Language
+                  {t("common.language")}
                   <span className="gx-campaign__attr-value">{campaign.language}</span>
                 </span>
               </div>
@@ -153,29 +158,29 @@ export function Configuration() {
         ) : status === "error" ? (
           <div className="gx-campaign">
             <p className="gx-campaign__error" role="alert">
-              Could not load the active campaign: {error.message}
+              {t("config.couldntLoadCampaign", { message: error.message })}
             </p>
           </div>
         ) : (
           <div className="gx-campaign">
             <div className="gx-campaign__meta" data-testid="campaign-loading">
-              <span className="gx-overline">Active campaign</span>
+              <span className="gx-overline">{t("config.activeCampaign")}</span>
               <span className="gx-skeleton" />
             </div>
           </div>
         )}
       </Card>
 
-      {/* Provider keys — write-only BYOK (ADR-0004) */}
-      <h2 className="gx-section-title">Provider keys</h2>
+      {/* AI service keys — write-only BYOK (ADR-0004) */}
+      <h2 className="gx-section-title">{t("config.aiServiceKeysTitle")}</h2>
       <div className="gx-providers__list">
         {BYOK_SLOTS.map((slot) => (
           <SecretRow
             key={slot.provider}
             icon={slot.icon}
-            kind={slot.kind}
+            kind={t(slot.kind)}
             name={slot.label}
-            placeholder={slot.placeholder}
+            placeholder={t("config.pasteApiKey", { name: slot.label })}
             credential={credentialFor(creds, slot.provider)}
             health={healthFor(health, slot.provider)}
             // Groq's model combobox lists the live catalog with free-text entry
@@ -188,14 +193,14 @@ export function Configuration() {
       </div>
 
       {/* Discord connection — Bot token (secret) + non-secret Guild / Voice IDs */}
-      <h2 className="gx-section-title">Discord connection</h2>
+      <h2 className="gx-section-title">{t("config.discordTitle")}</h2>
       <Card>
         <div className="gx-discord">
           <SecretRow
             icon={<MessagesSquare size={19} />}
-            kind="Bot"
-            name="Bot token"
-            placeholder="Paste the Discord bot token"
+            kind={t("config.kindBot")}
+            name={t("config.botTokenName")}
+            placeholder={t("config.pasteBotToken")}
             credential={credentialFor(creds, "discord")}
             health={healthFor(health, "discord")}
             // Token-only save: the ID fields stay OFF the wire (they have proto3
@@ -212,9 +217,10 @@ export function Configuration() {
           <DiscordLinkAutofill onFill={editGuildId} />
           <div className="gx-discord__ids">
             <Input
-              label="Guild ID"
-              placeholder="e.g. 472093001100"
-              hint="The Discord server the bot serves. Sessions pick their voice channel on the Session screen."
+              // The wire field stays guild_id; users only ever see "Server ID".
+              label={t("config.serverIdLabel")}
+              placeholder={t("config.serverIdPlaceholder")}
+              hint={t("config.serverIdHint")}
               value={guildId}
               onChange={(e) => editGuildId(e.target.value)}
             />
@@ -229,14 +235,14 @@ export function Configuration() {
               // offered — clicking it used to fail with no visible trace.
               disabled={saveDiscordIds.isPending || !guildId}
             >
-              Save Discord settings
+              {t("config.saveDiscordSettings")}
             </Button>
             {/* Inline failure cue, mirroring the SecretRow save-error treatment:
                 a rejected save must leave visible evidence the IDs were NOT
                 stored, or it resurfaces as a session-start failure (#142). */}
             {saveDiscordIds.isError && (
               <span className="gx-discord__error" role="alert">
-                Couldn&apos;t save: {saveDiscordIds.error.message}
+                {t("common.couldntSave", { message: saveDiscordIds.error.message })}
               </span>
             )}
           </div>
@@ -248,30 +254,27 @@ export function Configuration() {
             <div className="gx-discord__unlink">
               {confirmUnlink ? (
                 <>
-                  <span className="gx-discord__unlink-note">
-                    Unlink this Discord server? Sessions stop working until a server is linked
-                    again, and another tenant can then link it.
-                  </span>
+                  <span className="gx-discord__unlink-note">{t("config.unlinkNote")}</span>
                   <Button
                     variant="danger"
                     size="sm"
                     disabled={releaseGuild.isPending}
                     onClick={() => releaseGuild.mutate({ guildId: config.data.guildId })}
                   >
-                    Confirm unlink
+                    {t("config.confirmUnlink")}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
-                    Cancel
+                    {t("common.cancel")}
                   </Button>
                 </>
               ) : (
                 <Button variant="secondary" size="sm" onClick={() => setConfirmUnlink(true)}>
-                  Unlink server
+                  {t("config.unlinkServer")}
                 </Button>
               )}
               {releaseGuild.isError && (
                 <span className="gx-discord__error" role="alert">
-                  Couldn&apos;t unlink: {releaseGuild.error.message}
+                  {t("config.couldntUnlink", { message: releaseGuild.error.message })}
                 </span>
               )}
             </div>
@@ -285,9 +288,13 @@ export function Configuration() {
         </div>
       </Card>
 
-      {/* Per-session spend caps (#130, ADR-0046) */}
-      <h2 className="gx-section-title">Spend caps</h2>
-      <SpendCapsCard />
+      {/* Per-session spend caps (#130, ADR-0046), shown as "Spending limits".
+          Tucked behind a closed-by-default AdvancedCard: optional cost
+          guardrails most groups never touch, so no section heading of its own —
+          the card title carries it. */}
+      <AdvancedCard title={t("config.spendingLimitsTitle")} hint={t("config.spendingLimitsHint")}>
+        <SpendCapsCard />
+      </AdvancedCard>
     </div>
   );
 }
@@ -298,14 +305,13 @@ export function Configuration() {
 // and the sweep re-resolves GetActiveCampaign so this card swaps itself for the
 // live header — no reload, no `glyphoxa seed`.
 function FirstCampaignCTA() {
+  const { t } = useI18n();
   const create = useCreateCampaign();
   return (
     <div className="gx-first-campaign">
-      <span className="gx-overline">Active campaign</span>
-      <h2 className="gx-first-campaign__title">Create your first campaign</h2>
-      <p className="gx-first-campaign__lede">
-        No campaign yet. Create one to get started — its Butler is set up for you automatically.
-      </p>
+      <span className="gx-overline">{t("config.activeCampaign")}</span>
+      <h2 className="gx-first-campaign__title">{t("config.firstCampaignTitle")}</h2>
+      <p className="gx-first-campaign__lede">{t("config.firstCampaignLede")}</p>
       <CreateCampaignForm onSubmit={create.submit} pending={create.pending} error={create.error} autoFocusName />
     </div>
   );
@@ -318,6 +324,7 @@ function FirstCampaignCTA() {
 // hard < soft => rejected) and caps snapshot at the NEXT session start. The `dirty`
 // ref guards the seed so a slow load / post-save refetch can't clobber typing.
 function SpendCapsCard() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const capsQuery = useQuery(ProviderService.method.getSpendCaps, {});
   const invalidate = () =>
@@ -352,77 +359,75 @@ function SpendCapsCard() {
     return t === "" ? undefined : Number(t);
   };
 
+  // No Card wrapper of its own: the section now lives inside the "Spending
+  // limits" AdvancedCard, whose body already provides the card chrome.
   return (
-    <Card>
-      <div className="gx-spendcaps">
-        <p className="gx-spendcaps__lede">
-          Stop a Voice Session when its estimated provider spend crosses a limit. Figures are estimates,
-          not billed amounts. Leave a field blank to disable that cap; changes apply to the next session.
-        </p>
-        <div className="gx-spendcaps__inputs">
-          <Input
-            label="Soft cap (USD)"
-            type="number"
-            min="0"
-            step="0.01"
-            placeholder="e.g. 5.00"
-            hint="No new Agent turns once crossed; in-flight replies finish."
-            value={soft}
-            onChange={(e) => editSoft(e.target.value)}
-          />
-          <Input
-            label="Hard cap (USD)"
-            type="number"
-            min="0"
-            step="0.01"
-            placeholder="e.g. 10.00"
-            hint="Ends the session cleanly. Must be ≥ the soft cap."
-            value={hard}
-            onChange={(e) => editHard(e.target.value)}
-          />
-        </div>
-        <div className="gx-spendcaps__save">
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={save.isPending}
-            onClick={() => save.mutate({ softUsd: parse(soft), hardUsd: parse(hard) })}
-          >
-            Save spend caps
-          </Button>
-          {save.isError && (
-            <span className="gx-spendcaps__error" role="alert">
-              Couldn&apos;t save: {save.error.message}
-            </span>
-          )}
-        </div>
+    <div className="gx-spendcaps">
+      <p className="gx-spendcaps__lede">{t("config.spendCapsLede")}</p>
+      <div className="gx-spendcaps__inputs">
+        <Input
+          label={t("config.softLimitLabel")}
+          type="number"
+          min="0"
+          step="0.01"
+          placeholder={t("config.softLimitPlaceholder")}
+          hint={t("config.softLimitHint")}
+          value={soft}
+          onChange={(e) => editSoft(e.target.value)}
+        />
+        <Input
+          label={t("config.hardLimitLabel")}
+          type="number"
+          min="0"
+          step="0.01"
+          placeholder={t("config.hardLimitPlaceholder")}
+          hint={t("config.hardLimitHint")}
+          value={hard}
+          onChange={(e) => editHard(e.target.value)}
+        />
       </div>
-    </Card>
+      <div className="gx-spendcaps__save">
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={save.isPending}
+          onClick={() => save.mutate({ softUsd: parse(soft), hardUsd: parse(hard) })}
+        >
+          {t("config.saveSpendingLimits")}
+        </Button>
+        {save.isError && (
+          <span className="gx-spendcaps__error" role="alert">
+            {t("common.couldntSave", { message: save.error.message })}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 
 // HealthBadge renders the status dot. An unsaved slot is "Key needed" (presence).
-// A saved slot shows "Healthy" instantly (presence) and downgrades to "Degraded"
-// only once GetProviderHealth reports a failed test-call (#70) — the page never
-// waits on the live call.
+// A saved slot shows "Working" instantly (presence) and downgrades to "Having
+// trouble" only once GetProviderHealth reports a failed test-call (#70) — the
+// page never waits on the live call.
 function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealth }) {
+  const { t } = useI18n();
   if (!saved) {
     return (
       <Badge variant="warning" dot size="sm">
-        Key needed
+        {t("config.badgeKeyNeeded")}
       </Badge>
     );
   }
   if (health?.status === HealthStatus.DEGRADED) {
     return (
       <Badge variant="danger" dot size="sm" title={health.detail || undefined}>
-        Degraded
+        {t("config.badgeDegraded")}
       </Badge>
     );
   }
   return (
     <Badge variant="success" dot size="sm">
-      Healthy
+      {t("config.badgeWorking")}
     </Badge>
   );
 }
@@ -432,19 +437,20 @@ function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealt
 // or "failed" (the token was rejected terminally — revoked/invalid) with a
 // human detail. Empty state (web-only mode, no standing presence) renders nothing.
 function IntegrationBadge({ state, detail }: { state: string; detail: string }) {
+  const { t } = useI18n();
   if (state === "" || state === "waiting") {
     return null;
   }
   if (state === "failed") {
     return (
       <Badge variant="danger" dot size="sm" title={detail || undefined}>
-        Discord integration failed
+        {t("config.discordIntegrationFailed")}
       </Badge>
     );
   }
   return (
     <Badge variant="success" dot size="sm">
-      Bot connected
+      {t("config.botConnected")}
     </Badge>
   );
 }
@@ -473,6 +479,7 @@ function SecretRow({
   models?: string[];
   onSave: (secret: string, model?: string) => Promise<unknown>;
 }) {
+  const { t } = useI18n();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -531,7 +538,9 @@ function SecretRow({
           <div className="gx-overline">{kind}</div>
           <div className="gx-provider-row__name">{name}</div>
           {health?.botTag && (
-            <div className="gx-provider-row__tag">Connected as {health.botTag}</div>
+            <div className="gx-provider-row__tag">
+              {t("config.connectedAs", { tag: health.botTag })}
+            </div>
           )}
         </div>
 
@@ -541,17 +550,17 @@ function SecretRow({
         {models && (
           <div className="gx-provider-row__model">
             <Combobox
-              aria-label={`${name} model`}
+              aria-label={t("config.modelAria", { name })}
               options={models.map((m) => ({ value: m, label: m }))}
               value={selectedModel}
               onValueChange={setModel}
-              placeholder="Model…"
-              searchPlaceholder="Search or type a model id…"
+              placeholder={t("config.modelPlaceholder")}
+              searchPlaceholder={t("config.modelSearchPlaceholder")}
               allowCustom
             />
             {modelDirty && (
               <Button variant="secondary" size="sm" disabled={busy} onClick={handleSaveModel}>
-                Save model
+                {t("config.saveModel")}
               </Button>
             )}
           </div>
@@ -560,7 +569,7 @@ function SecretRow({
         <div className="gx-secret">
           {masked ? (
             <div className="gx-secret__saved">
-              <span className="gx-secret__mask" aria-label={`${name} saved`}>
+              <span className="gx-secret__mask" aria-label={t("config.secretSavedAria", { name })}>
                 ••••••••
               </span>
               <Button
@@ -573,7 +582,7 @@ function SecretRow({
                   setSaveError(null); // fresh edit starts without a stale cue
                 }}
               >
-                Replace
+                {t("config.replace")}
               </Button>
             </div>
           ) : (
@@ -581,12 +590,12 @@ function SecretRow({
               <Input
                 type="password"
                 placeholder={placeholder}
-                aria-label={`${name} key`}
+                aria-label={t("config.secretKeyAria", { name })}
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
               />
               <Button variant="primary" size="sm" onClick={handleSave} disabled={!value || busy}>
-                Save
+                {t("common.save")}
               </Button>
               {editing && saved && (
                 <Button
@@ -600,7 +609,7 @@ function SecretRow({
                     setSaveError(null);
                   }}
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
               )}
             </div>
@@ -608,7 +617,7 @@ function SecretRow({
           {/* Inline failure cue, mirroring the agent editor's save status (#94). */}
           {saveError && (
             <span className="gx-secret__error" role="alert">
-              Couldn't save: {saveError}
+              {t("common.couldntSave", { message: saveError })}
             </span>
           )}
         </div>

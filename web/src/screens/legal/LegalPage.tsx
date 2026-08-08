@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Dices } from "lucide-react";
 
 import { LegalFooter } from "@/components/LegalFooter";
+import { useI18n } from "@/i18n";
 import { OPERATOR, isPlaceholder, operatorTodos } from "./operator";
 
 import "./legal.css";
@@ -24,6 +25,10 @@ export function LegalPage({
   lede?: string;
   children: ReactNode;
 }) {
+  // Only the page CHROME localizes; the documents themselves (title, lede,
+  // body, and the operator TODO banner below) are authored German legal text
+  // and stay verbatim regardless of the display language.
+  const { t } = useI18n();
   const todos = operatorTodos();
 
   return (
@@ -50,7 +55,7 @@ export function LegalPage({
         )}
 
         <p className="gx-legal__updated">
-          Stand: <OperatorValue value={OPERATOR.lastUpdated} />
+          {t("auth.legalUpdatedLabel")} <OperatorValue value={OPERATOR.lastUpdated} />
         </p>
 
         {children}

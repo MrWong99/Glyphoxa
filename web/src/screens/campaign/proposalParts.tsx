@@ -6,14 +6,15 @@ import { Check, Sparkles, X } from "lucide-react";
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n, type TFunc } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { failedPreconditionMessage } from "@/lib/connectError";
-import { DISPOSITION_LABEL, EDGE_LABEL, metaOf } from "./knowledgeVocab";
+import { DISPOSITION_LABEL, edgeLabel, metaOf } from "./knowledgeVocab";
 
-// The pieces of a Knowledge Proposal review, shared by the queue (ProposalsPanel)
-// and the graph overlay (#537).
+// The pieces of a Knowledge Proposal review — a "suggestion" in the GM-facing
+// copy — shared by the queue (ProposalsPanel) and the graph overlay (#537).
 //
 // They live here rather than in the panel because the graph reviews the SAME
 // proposal through the SAME RPCs — ADR-0052's rule is that nothing enters the KG
@@ -30,25 +31,27 @@ export function fmtWhen(p: KnowledgeProposal): string {
   });
 }
 
-function nodeTypeLabel(t: NodeType): string {
-  return metaOf(t).label;
+function nodeTypeLabel(t: TFunc, nt: NodeType): string {
+  return t(metaOf(nt).labelKey);
 }
 
 /** KindBadge labels the proposal's kind, or "Unreadable" when the write is unset. */
 export function KindBadge({ proposal }: { proposal: KnowledgeProposal }) {
+  const { t } = useI18n();
   const kind = proposal.write.case;
-  if (kind === "fact") return <Badge size="sm">Fact</Badge>;
-  if (kind === "edge") return <Badge size="sm">Relationship</Badge>;
-  if (kind === "node") return <Badge size="sm">New entry</Badge>;
+  if (kind === "fact") return <Badge size="sm">{t("knowledge.kindFact")}</Badge>;
+  if (kind === "edge") return <Badge size="sm">{t("knowledge.kindConnection")}</Badge>;
+  if (kind === "node") return <Badge size="sm">{t("knowledge.kindNewEntry")}</Badge>;
   return (
     <Badge variant="neutral" size="sm">
-      Unreadable
+      {t("knowledge.kindUnreadable")}
     </Badge>
   );
 }
 
 /** ProposalWrite renders the human form of the proposed write per kind. */
 export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
+  const { t } = useI18n();
   const w = proposal.write;
   switch (w.case) {
     case "fact":
@@ -70,12 +73,15 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
       // content, which is the one thing the review queue exists to prevent (#546).
       return (
         <span>
-          <strong>{w.value.subject}</strong> —{EDGE_LABEL.get(w.value.relation) ?? ""}→{" "}
+          <strong>{w.value.subject}</strong> —{edgeLabel(t, w.value.relation)}→{" "}
           <strong>{w.value.target}</strong>
           {(w.value.note || w.value.disposition !== 0) && (
             <span className="gx-proposal-card__body">
               {" — "}
-              {DISPOSITION_LABEL.get(w.value.disposition) ?? ""}
+              {(() => {
+                const key = DISPOSITION_LABEL.get(w.value.disposition);
+                return key ? t(key) : "";
+              })()}
               {w.value.note && w.value.disposition !== 0 ? ", " : ""}
               {/* Newlines are collapsed: a proposal is one clause, and a note that
                   can open a new line can forge a section header in the prompt. */}
@@ -87,12 +93,13 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
     case "node":
       return (
         <span>
-          New {nodeTypeLabel(w.value.nodeType)}: <strong>{w.value.name}</strong>
+          {t("knowledge.proposalNewNode", { type: nodeTypeLabel(t, w.value.nodeType) })}{" "}
+          <strong>{w.value.name}</strong>
           {w.value.body && <span className="gx-proposal-card__body"> — {w.value.body}</span>}
         </span>
       );
     default:
-      return <span className="gx-proposal-card__unreadable">Unreadable proposal</span>;
+      return <span className="gx-proposal-card__unreadable">{t("knowledge.unreadableSuggestion")}</span>;
   }
 }
 
@@ -102,6 +109,7 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
  * duplicate. A skeleton shows while loading; "No similar entries." when none.
  */
 export function SimilarHint({ proposalId }: { proposalId: string }) {
+  const { t } = useI18n();
   // Truly lazy: the similarity RPC embeds the subject (a provider call), so it
   // fires ONLY after the GM opts in — never on mount for every card (that would
   // fan N concurrent Embed calls across the whole queue).
@@ -115,7 +123,7 @@ export function SimilarHint({ proposalId }: { proposalId: string }) {
   if (!show) {
     return (
       <button type="button" className="gx-proposal-card__similar-btn" onClick={() => setShow(true)}>
-        <Sparkles size={12} /> Show similar entries
+        <Sparkles size={12} /> {t("knowledge.showSimilar")}
       </button>
     );
   }
@@ -132,17 +140,17 @@ export function SimilarHint({ proposalId }: { proposalId: string }) {
   return (
     <div className="gx-proposal-card__similar">
       <span className="gx-proposal-card__similar-title">
-        <Sparkles size={12} /> Similar existing entries
+        <Sparkles size={12} /> {t("knowledge.similarTitle")}
       </span>
       {nodes.length === 0 ? (
-        <span className="gx-proposal-card__similar-empty">No similar entries.</span>
+        <span className="gx-proposal-card__similar-empty">{t("knowledge.similarEmpty")}</span>
       ) : (
         <ul className="gx-proposal-card__similar-list">
           {nodes.map((n) => (
             <li key={n.id}>
               <span className="gx-proposal-card__similar-name">{n.name}</span>
               <Badge size="sm" variant="neutral">
-                {nodeTypeLabel(n.nodeType)}
+                {nodeTypeLabel(t, n.nodeType)}
               </Badge>
             </li>
           ))}
@@ -153,8 +161,8 @@ export function SimilarHint({ proposalId }: { proposalId: string }) {
 }
 
 /**
- * ProposalActions is the Approve / Reject pair, with the reject confirmation and
- * the inline failure line.
+ * ProposalActions is the Add-to-wiki / Dismiss pair, with the dismiss confirmation
+ * and the inline failure line.
  *
  * `onApproved` fires BEFORE the caches drop, and receives nothing but the fact that
  * this proposal landed — the graph uses that moment to remember where the ghost was
@@ -171,6 +179,7 @@ export function ProposalActions({
   onApproved?: () => void;
   onReviewed: () => void;
 }) {
+  const { t } = useI18n();
   const [confirmReject, setConfirmReject] = useState(false);
 
   const approve = useMutation(CampaignService.method.approveKnowledgeProposal, {
@@ -190,9 +199,9 @@ export function ProposalActions({
   const inlineError = blockedReason
     ? blockedReason
     : approve.isError
-      ? `Couldn't approve: ${approve.error.message}`
+      ? t("knowledge.addToWikiError", { message: approve.error.message })
       : reject.isError
-        ? `Couldn't reject: ${reject.error.message}`
+        ? t("knowledge.dismissError", { message: reject.error.message })
         : null;
 
   const pending = approve.isPending || reject.isPending;
@@ -206,7 +215,7 @@ export function ProposalActions({
         onClick={() => approve.mutate({ id: proposalID })}
         disabled={pending}
       >
-        Approve
+        {t("knowledge.addToWiki")}
       </Button>
       <Button
         variant="danger"
@@ -215,7 +224,7 @@ export function ProposalActions({
         onClick={() => setConfirmReject(true)}
         disabled={pending}
       >
-        Reject
+        {t("knowledge.dismiss")}
       </Button>
       {inlineError && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
@@ -229,9 +238,9 @@ export function ProposalActions({
           onOpenChange={(open) => {
             if (!open) setConfirmReject(false);
           }}
-          title="Reject this suggestion?"
-          description="The suggestion is dropped and never becomes canon. This can't be undone."
-          confirmLabel="Reject suggestion"
+          title={t("knowledge.dismissTitle")}
+          description={t("knowledge.dismissBody")}
+          confirmLabel={t("knowledge.dismissConfirm")}
           onConfirm={() => {
             reject.mutate({ id: proposalID });
             setConfirmReject(false);

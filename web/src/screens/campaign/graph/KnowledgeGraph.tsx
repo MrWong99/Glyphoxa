@@ -5,9 +5,18 @@ import { Sparkles } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n, type TFunc } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
-import { EDGE_TYPES, TYPE_META, TYPE_ORDER, alphaBg, metaOf } from "../knowledgeVocab";
+import {
+  DISPOSITION_LABEL,
+  EDGE_TYPES,
+  EDGE_WIRE,
+  TYPE_META,
+  TYPE_ORDER,
+  alphaBg,
+  metaOf,
+} from "../knowledgeVocab";
 import { invalidateProposalReview } from "../knowledgeCache";
 import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from "../proposalParts";
 import { AgentLensBar, useAgentLens } from "./AgentLens";
@@ -16,12 +25,12 @@ import type { Pin } from "./layout";
 import { placeProposals, resolveProposals } from "./proposalGhosts";
 import type { ResolvedProposal } from "./proposalGhosts";
 
-// The Graph view (#534, ADR-0008 amendment "no graph viz" reversal). Edges were
-// authorable through NodeRelations' dropdown pair and then never displayed
-// anywhere — so the GM could not see the structure they built, which both hid
-// errors and quietly discouraged building edges at all. Edges are exactly what
-// AgentNodeFacts walks to fill an NPC's Hot Context, so that invisibility
-// degraded every NPC silently.
+// The Graph view (#534, ADR-0008 amendment "no graph viz" reversal) — shown to
+// the GM as the "Relationship map". Edges were authorable through NodeRelations'
+// dropdown pair and then never displayed anywhere — so the GM could not see the
+// structure they built, which both hid errors and quietly discouraged building
+// edges at all. Edges are exactly what AgentNodeFacts walks to fill an NPC's Hot
+// Context, so that invisibility degraded every NPC silently.
 //
 // Rendered as SVG rather than canvas: it stays inside the ADR-0017 token/CSS
 // vocabulary, the 7-type palette transfers unchanged from the list view, and it
@@ -57,6 +66,7 @@ export function KnowledgeGraph({
   onSelectNode: (id: string) => void;
   onGraphChanged: () => void;
 }) {
+  const { t } = useI18n();
   const [types, setTypes] = useState<ReadonlySet<NodeType>>(() => new Set(TYPE_ORDER));
   const [relations, setRelations] = useState<ReadonlySet<EdgeType>>(
     () => new Set(EDGE_TYPES.map((e) => e.value)),
@@ -234,25 +244,29 @@ export function KnowledgeGraph({
       <AgentLensBar agentID={lensAgentID} onAgentChange={setLensAgentID} lens={lens} />
 
       <div className="gx-kg-graph__filters">
-        <div className="gx-kg-graph__chips" role="group" aria-label="Filter by type">
-          {TYPE_ORDER.map((t) => {
-            const meta = TYPE_META[t];
-            const on = types.has(t);
+        <div className="gx-kg-graph__chips" role="group" aria-label={t("knowledge.filterByTypeAria")}>
+          {TYPE_ORDER.map((ty) => {
+            const meta = TYPE_META[ty];
+            const on = types.has(ty);
             return (
               <button
-                key={t}
+                key={ty}
                 type="button"
                 className="gx-kg-chip"
                 aria-pressed={on}
-                onClick={() => setTypes((s) => toggle(s, t))}
+                onClick={() => setTypes((s) => toggle(s, ty))}
                 style={on ? { color: meta.color, background: alphaBg(meta.color) } : undefined}
               >
-                {meta.label}
+                {t(meta.labelKey)}
               </button>
             );
           })}
         </div>
-        <div className="gx-kg-graph__chips" role="group" aria-label="Filter by relation">
+        <div
+          className="gx-kg-graph__chips"
+          role="group"
+          aria-label={t("knowledge.filterByConnectionAria")}
+        >
           {EDGE_TYPES.map((e) => (
             <button
               key={e.value}
@@ -261,7 +275,7 @@ export function KnowledgeGraph({
               aria-pressed={relations.has(e.value)}
               onClick={() => setRelations((s) => toggle(s, e.value))}
             >
-              {e.label}
+              {t(e.labelKey)}
             </button>
           ))}
         </div>
@@ -272,7 +286,7 @@ export function KnowledgeGraph({
             aria-pressed={hidePrivate}
             onClick={() => setHidePrivate((v) => !v)}
           >
-            Table view
+            {t("knowledge.tableView")}
           </button>
           {resolved.length > 0 && !hidePrivate && (
             <button
@@ -284,13 +298,13 @@ export function KnowledgeGraph({
                 setReviewID(null);
               }}
             >
-              <Sparkles size={12} /> Suggestions ({resolved.length})
+              <Sparkles size={12} /> {t("knowledge.suggestionsToggle", { n: resolved.length })}
             </button>
           )}
           <button
             type="button"
             className="gx-kg-chip"
-            aria-label="Zoom in"
+            aria-label={t("knowledge.zoomInAria")}
             onClick={() => setZoom((z) => Math.min(z * 1.5, 12))}
           >
             +
@@ -298,7 +312,7 @@ export function KnowledgeGraph({
           <button
             type="button"
             className="gx-kg-chip"
-            aria-label="Zoom out"
+            aria-label={t("knowledge.zoomOutAria")}
             onClick={() => setZoom((z) => Math.max(z / 1.5, 1))}
           >
             −
@@ -312,17 +326,19 @@ export function KnowledgeGraph({
                 setPan({ x: 0, y: 0 });
               }}
             >
-              Fit
+              {t("knowledge.fit")}
             </Button>
           )}
           {/* Positions are sticky across edits so a review never reshuffles the
               GM's mental map. This is the deliberate way to ask for a fresh one. */}
           <Button variant="ghost" size="sm" onClick={() => setLayoutEpoch((n) => n + 1)}>
-            Re-arrange
+            {t("knowledge.rearrange")}
           </Button>
           {focusID && (
             <>
-              <span className="gx-kg-graph__focus">Focused on {nodeName(focusID)}</span>
+              <span className="gx-kg-graph__focus">
+                {t("knowledge.focusedOn", { name: nodeName(focusID) })}
+              </span>
               {FOCUS_DEPTHS.map((d) => (
                 <button
                   key={d}
@@ -331,11 +347,11 @@ export function KnowledgeGraph({
                   aria-pressed={focusDepth === d}
                   onClick={() => setFocusDepth(d)}
                 >
-                  Depth {d}
+                  {t("knowledge.depth", { n: d })}
                 </button>
               ))}
               <Button variant="ghost" size="sm" onClick={() => setFocusID(null)}>
-                Clear focus
+                {t("knowledge.clearFocus")}
               </Button>
             </>
           )}
@@ -350,14 +366,14 @@ export function KnowledgeGraph({
       {laid.nodes.length === 0 && placed.ghostNodes.length === 0 ? (
         <p className="gx-kg-empty">
           {resolved.length > 0 && !proposalsVisible
-            ? "Nothing to draw here. Suggestions are hidden in table view."
-            : "Nothing to draw — every entry is filtered out. Turn a type chip back on."}
+            ? t("knowledge.mapEmptySuggestionsHidden")
+            : t("knowledge.mapEmptyFiltered")}
         </p>
       ) : (
         <svg
           className="gx-kg-graph__canvas"
           role="img"
-          aria-label={`Knowledge graph: ${laid.nodes.length} entries, ${laid.edges.length} relationships`}
+          aria-label={t("knowledge.mapAria", { n: laid.nodes.length, m: laid.edges.length })}
           viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
           onMouseDown={(ev) => {
             // Only a press on the canvas ITSELF starts a pan; a press on a node
@@ -392,7 +408,7 @@ export function KnowledgeGraph({
               <line
                 key={e.edge.id}
                 className="gx-kg-graph__edge"
-                data-relation={EDGE_LABEL.get(e.edge.edgeType) ?? ""}
+                data-relation={EDGE_WIRE.get(e.edge.edgeType) ?? ""}
                 // Disposition drives the colour (#546): a graph of bare `knows`
                 // lines says nothing about how the world feels about itself.
                 data-disposition={e.edge.disposition !== 0 ? e.edge.disposition : undefined}
@@ -402,7 +418,7 @@ export function KnowledgeGraph({
                 y2={e.y2}
               >
                 {(e.edge.note !== "" || e.edge.disposition !== 0) && (
-                  <title>{edgeTooltip(e.edge)}</title>
+                  <title>{edgeTooltip(t, e.edge)}</title>
                 )}
               </line>
             ))}
@@ -419,7 +435,7 @@ export function KnowledgeGraph({
                   y2={g.y2}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Suggested relationship from ${g.agentName} — review`}
+                  aria-label={t("knowledge.suggestedConnectionAria", { agent: g.agentName })}
                   onClick={() => setReviewID(g.proposalID)}
                   onKeyDown={(ev) => {
                     if (ev.key === "Enter" || ev.key === " ") {
@@ -460,10 +476,10 @@ export function KnowledgeGraph({
                   role="button"
                   tabIndex={0}
                   aria-label={
-                    `${p.node.name} (${meta.label})` +
-                    (p.node.gmPrivate ? ", GM private" : "") +
-                    (ghosted ? `, hidden from ${active?.agentName}` : "") +
-                    (dropped ? `, dropped from ${active?.agentName}'s prompt — over budget` : "")
+                    `${p.node.name} (${t(meta.labelKey)})` +
+                    (p.node.gmPrivate ? t("knowledge.ariaGmOnly") : "") +
+                    (ghosted ? t("knowledge.ariaHiddenFrom", { agent: active?.agentName ?? "" }) : "") +
+                    (dropped ? t("knowledge.ariaDropped", { agent: active?.agentName ?? "" }) : "")
                   }
                   transform={`translate(${p.x} ${p.y})`}
                   onMouseDown={() => setDragFrom(p.node.id)}
@@ -496,8 +512,8 @@ export function KnowledgeGraph({
                   {(ghosted || dropped) && (
                     <title>
                       {ghosted
-                        ? `Hidden from ${active?.agentName} — this entry is GM private`
-                        : `Dropped from ${active?.agentName}'s prompt — the facts block is full`}
+                        ? t("knowledge.tooltipHiddenFrom", { agent: active?.agentName ?? "" })
+                        : t("knowledge.tooltipDropped", { agent: active?.agentName ?? "" })}
                     </title>
                   )}
                   <circle
@@ -542,7 +558,7 @@ export function KnowledgeGraph({
                 transform={`translate(${m.x} ${m.y})`}
                 role="button"
                 tabIndex={0}
-                aria-label={`Suggested fact from ${m.agentName} — review`}
+                aria-label={t("knowledge.suggestedFactAria", { agent: m.agentName })}
                 onClick={() => setReviewID(m.proposalID)}
                 onKeyDown={(ev) => {
                   if (ev.key === "Enter" || ev.key === " ") {
@@ -551,7 +567,7 @@ export function KnowledgeGraph({
                   }
                 }}
               >
-                <title>{`${m.agentName} suggests a fact here`}</title>
+                <title>{t("knowledge.suggestedFactTitle", { agent: m.agentName })}</title>
                 <circle r={LAYOUT.nodeRadius + 7} />
                 {/* A 1.5px dashed ring is not a click target. */}
                 <circle className="gx-kg-graph__fact-hit" r={LAYOUT.nodeRadius + 7} />
@@ -568,7 +584,11 @@ export function KnowledgeGraph({
                   transform={`translate(${g.x} ${g.y})`}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Suggested new entry ${g.name} (${meta.label}) from ${g.agentName} — review`}
+                  aria-label={t("knowledge.suggestedEntryAria", {
+                    name: g.name,
+                    type: t(meta.labelKey),
+                    agent: g.agentName,
+                  })}
                   onClick={() => setReviewID(g.proposalID)}
                   onKeyDown={(ev) => {
                     if (ev.key === "Enter" || ev.key === " ") {
@@ -577,7 +597,7 @@ export function KnowledgeGraph({
                     }
                   }}
                 >
-                  <title>{`${g.agentName} suggests creating ${g.name}`}</title>
+                  <title>{t("knowledge.suggestedEntryTitle", { agent: g.agentName, name: g.name })}</title>
                   <circle r={LAYOUT.nodeRadius} stroke={meta.color} />
                   <text className="gx-kg-graph__label" x={LAYOUT.nodeRadius + 4} y={4}>
                     {g.name}
@@ -595,8 +615,9 @@ export function KnowledgeGraph({
       {proposalsVisible && placed.unplaced.length > 0 && (
         <details className="gx-kg-graph__unplaced">
           <summary>
-            {placed.unplaced.length} suggestion{placed.unplaced.length === 1 ? "" : "s"} can&apos;t be
-            drawn here
+            {placed.unplaced.length === 1
+              ? t("knowledge.unplacedOne")
+              : t("knowledge.unplacedMany", { n: placed.unplaced.length })}
           </summary>
           <ul>
             {placed.unplaced.map((u) => (
@@ -606,7 +627,7 @@ export function KnowledgeGraph({
                 <button type="button" className="gx-kg-chip" onClick={() => setReviewID(u.proposal.id)}>
                   {u.proposal.agentName}: <ProposalWrite proposal={u.proposal.proposal} />
                 </button>
-                <span className="gx-kg-graph__unplaced-why">{u.reason}</span>
+                <span className="gx-kg-graph__unplaced-why">{t(u.reason.key, u.reason.params)}</span>
               </li>
             ))}
           </ul>
@@ -653,21 +674,13 @@ export function KnowledgeGraph({
   );
 }
 
-const EDGE_LABEL = new Map<EdgeType, string>(EDGE_TYPES.map((e) => [e.value, e.label]));
-
-/** DISPOSITION_LABEL names the -2..+2 scale in words the GM chose it by. */
-export const DISPOSITION_LABEL: Record<number, string> = {
-  [-2]: "hostile",
-  [-1]: "wary",
-  0: "neutral",
-  1: "warm",
-  2: "devoted",
-};
-
 // edgeTooltip is what hovering a relation says: its feeling, and the GM's note.
-function edgeTooltip(edge: GraphEdge): string {
+function edgeTooltip(t: TFunc, edge: GraphEdge): string {
   const parts: string[] = [];
-  if (edge.disposition !== 0) parts.push(DISPOSITION_LABEL[edge.disposition] ?? "");
+  if (edge.disposition !== 0) {
+    const key = DISPOSITION_LABEL.get(edge.disposition);
+    parts.push(key ? t(key) : "");
+  }
   if (edge.note !== "") parts.push(edge.note);
   return parts.filter(Boolean).join(" — ");
 }
@@ -690,6 +703,7 @@ function ProposalReview({
   onApproved: () => void;
   onReviewed: () => void;
 }) {
+  const { t } = useI18n();
   // The card renders BELOW the canvas, and the canvas is up to 720px tall — so on
   // an ordinary screen clicking a ghost opened a card the GM could not see, which
   // reads as "clicking did nothing". Found by using it, not by a test.
@@ -708,7 +722,12 @@ function ProposalReview({
         : undefined;
 
   return (
-    <div className="gx-kg-graph__review" role="dialog" aria-label="Review suggestion" ref={card}>
+    <div
+      className="gx-kg-graph__review"
+      role="dialog"
+      aria-label={t("knowledge.reviewSuggestionAria")}
+      ref={card}
+    >
       <div className="gx-proposal-card__head">
         {/* WHO proposed is most of the judgement: a Character NPC may only propose
             on its own linked Node, the Butler campaign-wide. */}
@@ -723,7 +742,9 @@ function ProposalReview({
 
       {unresolved && unresolved.at === "unknown" && (
         <p className="gx-editor__status gx-editor__status--error" role="alert">
-          Approving will be refused: {unresolved.reason}.
+          {t("knowledge.approveWillFail", {
+            reason: t(unresolved.reason.key, unresolved.reason.params),
+          })}
         </p>
       )}
 
@@ -735,7 +756,7 @@ function ProposalReview({
       <ProposalActions proposalID={resolved.id} onApproved={onApproved} onReviewed={onReviewed} />
 
       <Button variant="ghost" size="sm" onClick={onClose}>
-        Close
+        {t("common.close")}
       </Button>
     </div>
   );
@@ -761,24 +782,25 @@ function RelationPicker({
   onPick: (edgeType: EdgeType) => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const [edgeType, setEdgeType] = useState<EdgeType>(EDGE_TYPES[0].value);
   return (
-    <div className="gx-kg-graph__picker" role="dialog" aria-label="Create relationship">
+    <div className="gx-kg-graph__picker" role="dialog" aria-label={t("knowledge.createConnection")}>
       <p className="gx-kg-graph__picker-text">
         <strong>{fromName}</strong> → <strong>{toName}</strong>
       </p>
       <Select
-        label="Relation"
-        options={EDGE_TYPES.map((e) => ({ value: String(e.value), label: e.label }))}
+        label={t("knowledge.connectionLabel")}
+        options={EDGE_TYPES.map((e) => ({ value: String(e.value), label: t(e.labelKey) }))}
         value={String(edgeType)}
         onValueChange={(v) => setEdgeType(Number(v) as EdgeType)}
       />
       <div className="gx-kg-editor__actions">
         <Button variant="primary" disabled={pending} onClick={() => onPick(edgeType)}>
-          {pending ? "Linking…" : "Create relationship"}
+          {pending ? t("knowledge.linking") : t("knowledge.createConnection")}
         </Button>
         <Button variant="ghost" onClick={onCancel} disabled={pending}>
-          Cancel
+          {t("common.cancel")}
         </Button>
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">

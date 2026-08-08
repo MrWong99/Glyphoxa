@@ -107,7 +107,7 @@ describe("VoicePanel (#211)", () => {
     expect(screen.getByText("Greta")).toBeInTheDocument();
     // The count is over the VOICEABLE Character NPCs only; the Address-Only Butler
     // is never voiced, so it is not in the denominator (2, not 3).
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 2 voicing");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 2 speaking");
   });
 
   it("disables every control when no Voice Session is live", async () => {
@@ -117,7 +117,7 @@ describe("VoicePanel (#211)", () => {
     // Mute-all + every per-Agent toggle disabled; count reads 0 while idle.
     expect(screen.getByRole("button", { name: /unmute all/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /mute bart/i })).toBeDisabled();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voicing");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 speaking");
   });
 
   it("mutes an Agent on click, dimming its row and dropping the count", async () => {
@@ -131,7 +131,7 @@ describe("VoicePanel (#211)", () => {
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
     // The mutation patched the shared cache, so the count reflects the mute.
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voicing"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 speaking"));
     // The toggle now offers to unmute Bart.
     expect(screen.getByRole("button", { name: /unmute bart/i })).toBeInTheDocument();
   });
@@ -141,10 +141,11 @@ describe("VoicePanel (#211)", () => {
     await screen.findByText("Butler");
     const butlerRow = screen.getByText("Butler").closest('[data-testid="voice-row"]') as HTMLElement;
     // The Butler is never voiced, so its row carries neither a Mute nor an Unmute
-    // control (no swallowed CodeNotFound) and reads as address-only, not "voicing".
+    // control (no swallowed CodeNotFound) and reads as answers-when-called, not
+    // "Speaking" (the plain-language rewrite of the internal "address-only").
     expect(within(butlerRow).queryByRole("button")).toBeNull();
-    expect(within(butlerRow).getByText(/address-only/i)).toBeInTheDocument();
-    expect(within(butlerRow).queryByText("Voicing")).toBeNull();
+    expect(within(butlerRow).getByText(/answers when called/i)).toBeInTheDocument();
+    expect(within(butlerRow).queryByText("Speaking")).toBeNull();
   });
 
   it("flips the mute-all button label between Mute all and Unmute all", async () => {
@@ -157,7 +158,7 @@ describe("VoicePanel (#211)", () => {
 
     // Now everyone is muted → Unmute all.
     expect(await screen.findByRole("button", { name: /unmute all/i })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voicing"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 speaking"));
   });
 
   it("flips a row from an SSE mute frame without a reload (AC5)", async () => {
@@ -178,6 +179,6 @@ describe("VoicePanel (#211)", () => {
 
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voicing");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 speaking");
   });
 });

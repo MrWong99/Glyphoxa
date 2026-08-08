@@ -30,8 +30,8 @@ describe("AddBotLink", () => {
 
   it("states adding the bot is a separate, prerequisite step", () => {
     render(<AddBotLink applicationId="123" />);
-    // Copy must distinguish this from saving the IDs and mark it a prerequisite.
-    expect(screen.getByText(/separate step from saving the ids/i)).toBeInTheDocument();
+    // Copy must distinguish this from saving the Server ID and mark it a prerequisite.
+    expect(screen.getByText(/separate step from saving the server id/i)).toBeInTheDocument();
     expect(screen.getByText(/before a voice session can join/i)).toBeInTheDocument();
   });
 

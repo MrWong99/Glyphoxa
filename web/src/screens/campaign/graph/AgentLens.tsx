@@ -3,6 +3,7 @@ import { useQuery } from "@connectrpc/connect-query";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Select } from "@/components/ui/Select";
 import { egoNetwork } from "./layout";
 
@@ -60,6 +61,7 @@ export type LensState = {
  * would draw the graph one frame behind the GM's choice.
  */
 export function useAgentLens(agentID: string, nodes: GraphNode[], edges: GraphEdge[]) {
+  const { t } = useI18n();
   const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {});
   // Only Character NPCs: the Butler is Address-Only and has no linked Node by
   // design (ADR-0009), so there is nothing to lens.
@@ -110,10 +112,10 @@ export function useAgentLens(agentID: string, nodes: GraphNode[], edges: GraphEd
 
   const options = useMemo(
     () => [
-      { value: LENS_NONE, label: "— No lens —" },
+      { value: LENS_NONE, label: t("knowledge.noneOption") },
       ...cast.map((a) => ({ value: a.id, label: a.name })),
     ],
-    [cast],
+    [cast, t],
   );
 
   return {
@@ -135,62 +137,67 @@ export function AgentLensBar({
   onAgentChange: (id: string) => void;
   lens: ReturnType<typeof useAgentLens>;
 }) {
+  const { t } = useI18n();
   const { state, options, agentName, pending, error } = lens;
   return (
     <div className="gx-kg-lens">
       <Select
-        label="Show what an NPC knows"
+        label={t("knowledge.lensLabel")}
         options={options}
         value={agentID === "" ? LENS_NONE : agentID}
         onValueChange={(v) => onAgentChange(v === LENS_NONE ? "" : v)}
       />
 
-      {pending && <span className="gx-field__hint">Reading {agentName}'s neighbourhood…</span>}
+      {pending && (
+        <span className="gx-field__hint">{t("knowledge.lensPending", { name: agentName })}</span>
+      )}
 
       {error && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          Couldn't read what {agentName} knows: {error}
+          {t("knowledge.lensError", { name: agentName, message: error })}
         </span>
       )}
 
       {state && !state.linked && (
         <p className="gx-kg-lens__empty" role="status">
-          <strong>{agentName}</strong> is not linked to a wiki entry, so nothing is injected into
-          its prompts. Link an NPC entry to it and its neighbourhood becomes its world knowledge.
+          {/* The name sits OUTSIDE the translated string so it can carry <strong>;
+              both languages read naturally with the name first. */}
+          <strong>{agentName}</strong>
+          {t("knowledge.lensUnlinked")}
         </p>
       )}
 
       {state?.linked && (
         <div className="gx-kg-lens__budget" role="status">
           <span className="gx-kg-lens__meter">
-            ≈{state.chars.toLocaleString()} / {state.maxChars.toLocaleString()} chars ·{" "}
-            {state.factCount} / {state.maxFacts} facts
+            {t("knowledge.lensMeter", {
+              chars: state.chars.toLocaleString(),
+              maxChars: state.maxChars.toLocaleString(),
+              facts: state.factCount,
+              maxFacts: state.maxFacts,
+            })}
           </span>
           {state.truncated && (
             <span className="gx-kg-lens__truncated">
-              Truncated — {state.lens?.droppedIDs.size} entr
-              {state.lens?.droppedIDs.size === 1 ? "y" : "ies"} did not fit and are dropped from
-              every prompt. Shorten entries, or narrow this NPC's relations.
+              {(state.lens?.droppedIDs.size ?? 0) === 1
+                ? t("knowledge.lensTruncatedOne")
+                : t("knowledge.lensTruncatedMany", { n: state.lens?.droppedIDs.size ?? 0 })}
             </span>
           )}
           {state.clipped && (
             <span className="gx-kg-lens__truncated">
-              This entry has more relations than the prompt read looks at (
-              {state.maxNeighbours}). The rest never reach {agentName} at all — prune its
-              relations rather than its text.
+              {t("knowledge.lensClipped", { name: agentName, max: state.maxNeighbours })}
             </span>
           )}
           {state.factCount === 0 && (
-            <span className="gx-kg-lens__truncated">
-              Nothing to say — this entry has no content and no public neighbours.
-            </span>
+            <span className="gx-kg-lens__truncated">{t("knowledge.lensNothing")}</span>
           )}
 
           {/* The actual block. Everything above is a summary OF this; without it the
               GM still cannot read what their NPC will be told. */}
           {state.facts.length > 0 && (
             <details className="gx-kg-lens__facts">
-              <summary>What {agentName} will be told</summary>
+              <summary>{t("knowledge.lensFactsSummary", { name: agentName })}</summary>
               <pre className="gx-kg-lens__block">{state.facts.join("\n\n")}</pre>
             </details>
           )}

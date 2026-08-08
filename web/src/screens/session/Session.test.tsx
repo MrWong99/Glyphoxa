@@ -868,8 +868,8 @@ describe("Session spend cap (#130)", () => {
       </Providers>,
     );
     const badge = await screen.findByTestId("spend-cap");
-    expect(badge).toHaveTextContent(/soft spend cap reached/i);
-    expect(badge).toHaveTextContent(/no new agent turns/i);
+    expect(badge).toHaveTextContent(/soft spending limit reached/i);
+    expect(badge).toHaveTextContent(/no new ai replies/i);
     expect(badge).toHaveTextContent("$3.21");
     expect(badge).toHaveTextContent(/estimated/i);
   });
@@ -881,7 +881,7 @@ describe("Session spend cap (#130)", () => {
       </Providers>,
     );
     const badge = await screen.findByTestId("spend-cap");
-    expect(badge).toHaveTextContent(/hard spend cap reached/i);
+    expect(badge).toHaveTextContent(/hard spending limit reached/i);
     expect(badge).toHaveTextContent("$10.00");
   });
 
@@ -1215,8 +1215,9 @@ const recapStartISO = "2026-07-08T20:15:00Z";
 
 // recapStampLabel replicates the screen's formatStamp for the covered session, so
 // the label assertion is timezone-consistent with the render (both run in this env).
+// The screen formats in the display language's locale — "en" without a provider.
 function recapStampLabel(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
+  return new Date(iso).toLocaleString("en", {
     month: "short",
     day: "numeric",
     hour: "2-digit",

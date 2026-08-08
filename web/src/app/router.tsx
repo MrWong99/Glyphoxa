@@ -8,6 +8,7 @@ import {
 
 import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
+import { useI18n } from "@/i18n";
 import { Login } from "@/screens/login/Login";
 import { CreateTenant } from "@/screens/onboarding/CreateTenant";
 import { Configuration } from "@/screens/configuration/Configuration";
@@ -124,6 +125,9 @@ const screenRoute = createRoute({
   path: "$screen",
   component: function Screen() {
     const { screen } = screenRoute.useParams();
+    // useI18n is called unconditionally (hook rules) even though only the
+    // notFound branch renders localized copy of its own.
+    const { t } = useI18n();
     switch (screen) {
       case "configuration":
         return <Configuration />;
@@ -132,7 +136,7 @@ const screenRoute = createRoute({
       case "session":
         return <Session />;
       default:
-        return <Placeholder title="Not found" />;
+        return <Placeholder title={t("auth.notFoundTitle")} />;
     }
   },
 });

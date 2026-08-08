@@ -59,7 +59,7 @@ describe("loginRoute ?error=not_authorized contract", () => {
   it("renders the not-authorized banner for /login?error=not_authorized", async () => {
     renderAt("/login?error=not_authorized");
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /isn't authorized for this deployment/i,
+      /isn't authorized here/i,
     );
   });
 

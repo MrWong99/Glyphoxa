@@ -7,6 +7,7 @@ import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Avatar } from "./ui/Avatar";
+import { useI18n } from "@/i18n";
 
 // SidebarUser is the app-shell footer identity (ADR-0016 / ADR-0039): it renders
 // the real signed-in operator (name / role / avatar) the AuthGate resolved,
@@ -14,6 +15,7 @@ import { Avatar } from "./ui/Avatar";
 // calls AuthService.Logout, which deletes the server-side session row and clears
 // the cookies; on success it drops the cached queries and routes to /login.
 export function SidebarUser({ user }: { user: User }) {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -34,7 +36,7 @@ export function SidebarUser({ user }: { user: User }) {
       <button
         type="button"
         className="gx-sidebar__logout"
-        aria-label="Log out"
+        aria-label={t("components.logOut")}
         onClick={() => logout.mutate({})}
         disabled={logout.isPending}
         style={{

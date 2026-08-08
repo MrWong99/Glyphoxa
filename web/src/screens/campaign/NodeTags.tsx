@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 import { Input } from "@/components/ui/Input";
 
 // Free-form tags on an entry (#543).
@@ -27,6 +28,7 @@ export function invalidateTags(queryClient: ReturnType<typeof useQueryClient>): 
 }
 
 export function NodeTags({ nodeID }: { nodeID: string }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const tagsQuery = useQuery(CampaignService.method.getCampaignTags, {});
   const [draft, setDraft] = useState("");
@@ -80,10 +82,8 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
 
   return (
     <div className="gx-field gx-kg-tags">
-      <span className="gx-field__label">Tags</span>
-      <span className="gx-field__hint">
-        Your own labels for finding things. They never reach an NPC's prompt.
-      </span>
+      <span className="gx-field__label">{t("knowledge.tagsLabel")}</span>
+      <span className="gx-field__hint">{t("knowledge.tagsHint")}</span>
 
       {mine.length > 0 && (
         <ul className="gx-kg-tags__list">
@@ -94,7 +94,7 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
                 <button
                   type="button"
                   className="gx-kg-tags__remove"
-                  aria-label={`Remove tag ${tag}`}
+                  aria-label={t("knowledge.removeTagAria", { tag })}
                   disabled={save.isPending}
                   onClick={() => setTags(mine.filter((t) => t !== tag))}
                 >
@@ -107,8 +107,8 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
       )}
 
       <Input
-        aria-label="Add a tag"
-        placeholder="seafaring, act two, needs a voice…"
+        aria-label={t("knowledge.addTagAria")}
+        placeholder={t("knowledge.tagsPlaceholder")}
         list="gx-kg-tag-vocabulary"
         value={draft}
         disabled={save.isPending}
@@ -131,7 +131,7 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
 
       {save.isError && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          Couldn't save tags: {save.error.message}
+          {t("knowledge.saveTagsError", { message: save.error.message })}
         </span>
       )}
     </div>

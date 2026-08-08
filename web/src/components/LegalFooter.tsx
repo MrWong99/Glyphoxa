@@ -1,5 +1,7 @@
 import "./legalFooter.css";
 
+import { useI18n } from "@/i18n";
+
 // The legal footer (#518): Impressum, Datenschutzerklärung and
 // Nutzungsbedingungen, reachable from EVERY screen — including the ones a
 // visitor sees before signing in (login, signup) — because that is exactly
@@ -13,9 +15,13 @@ import "./legalFooter.css";
 // no loss.
 
 export function LegalFooter({ className }: { className?: string }) {
+  const { t } = useI18n();
   return (
     <footer className={className ? `gx-legalfooter ${className}` : "gx-legalfooter"}>
-      <nav aria-label="Rechtliches">
+      {/* Only the landmark label is localized. The link texts are the German
+          legal documents' proper nouns (Impressum / Datenschutz /
+          Nutzungsbedingungen) and stay verbatim in every display language. */}
+      <nav aria-label={t("components.legalNavLabel")}>
         <a href="/imprint">Impressum</a>
         <a href="/privacy">Datenschutz</a>
         <a href="/terms">Nutzungsbedingungen</a>

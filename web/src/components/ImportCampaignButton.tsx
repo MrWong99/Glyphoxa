@@ -8,16 +8,19 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { importCampaignBundle, type ImportSummary } from "@/lib/download";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useI18n, type TFunc } from "@/i18n";
 
 import "./importCampaignButton.css";
 
 // droppedRefsNote phrases the dropped-participant-refs caveat (singular/plural).
 // Shared by the success dialog note and the unmount-proof warning toast so they
-// never drift. Import still SUCCEEDED — this is a caveat, never an error.
-function droppedRefsNote(n: number): string {
+// never drift. Import still SUCCEEDED — this is a caveat, never an error. Takes
+// the caller's `t` so the string resolves at render/toast time — never baked
+// into module state.
+function droppedRefsNote(t: TFunc, n: number): string {
   return n === 1
-    ? "1 participant reference could not be mapped and was dropped."
-    : `${n} participant references could not be mapped and were dropped.`;
+    ? t("components.importDroppedRefOne")
+    : t("components.importDroppedRefMany", { n });
 }
 
 // ImportCampaignButton — the campaign-restore affordance in the switcher's
@@ -38,6 +41,7 @@ function droppedRefsNote(n: number): string {
 // fetch exposes no upload progress, so the pending state is a disabled/"Importing…"
 // affordance rather than a percentage bar.
 export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -63,7 +67,7 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
       setSummary(null);
       onSwitched?.();
     },
-    onError: (err) => toast.error(`Imported it, but couldn't switch to it: ${err.message}`),
+    onError: (err) => toast.error(t("components.importedCouldntSwitch", { message: err.message })),
   });
 
   // Opening the native file picker; the input is reset on each open so re-picking
@@ -101,19 +105,19 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
       // switches to it — listCampaigns is sweep-invariant, so invalidate it now.
       void invalidateList();
       setSummary(result);
-      toast.success(`Imported “${result.name}”`);
+      toast.success(t("components.importedTitle", { name: result.name }));
       // The dropped-refs caveat rides its OWN warning toast, not only the success
       // dialog: an Escape/outside-click between the confirm dialog closing and the
       // success dialog opening can unmount this component (see runImport note
       // above), taking the dialog's note with it. The toast is the unmount-proof
       // channel — warning styling (richColors), since the import still succeeded.
       if (result.droppedParticipantRefs > 0) {
-        toast.warning(droppedRefsNote(result.droppedParticipantRefs));
+        toast.warning(droppedRefsNote(t, result.droppedParticipantRefs));
       }
     } catch (err) {
       const message = (err as Error).message;
       setError(message);
-      toast.error(`Couldn't import campaign: ${message}`);
+      toast.error(t("components.couldntImportCampaign", { message }));
     } finally {
       setBusy(false);
     }
@@ -138,7 +142,7 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         onClick={openPicker}
         disabled={busy}
       >
-        <Upload size={15} /> {busy ? "Importing…" : "Import campaign"}
+        <Upload size={15} /> {busy ? t("components.importing") : t("components.importCampaign")}
       </button>
 
       {/* fetch exposes no upload progress, so a failure shows here as a persistent
@@ -156,15 +160,19 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         onOpenChange={(o) => {
           if (!o) setPendingFile(null);
         }}
-        title="Import campaign?"
+        title={t("components.importConfirmTitle")}
         description={
+          // The filename is JSX (<strong>), so the sentence is split into
+          // before/after keys around it — both halves stay natural in each
+          // language because the German phrasing keeps the same shape.
           <span className="gx-import-campaign__file">
-            Create a new campaign from <strong>{pendingFile?.name}</strong>. Nothing existing is
-            overwritten.
+            {t("components.importConfirmBefore")}
+            <strong>{pendingFile?.name}</strong>
+            {t("components.importConfirmAfter")}
           </span>
         }
-        confirmLabel="Import"
-        cancelLabel="Cancel"
+        confirmLabel={t("components.importConfirmAction")}
+        cancelLabel={t("common.cancel")}
         confirmDisabled={busy}
         destructive={false}
         onConfirm={() => {
@@ -180,24 +188,24 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         onOpenChange={(o) => {
           if (!o) setSummary(null);
         }}
-        title={summary ? `Imported “${summary.name}”` : ""}
+        title={summary ? t("components.importedTitle", { name: summary.name }) : ""}
         description={
           summary ? (
             <span className="gx-import-campaign__success">
-              “{summary.name}” was imported as a new campaign — switch to it now?
+              {t("components.importedSwitchPrompt", { name: summary.name })}
               {summary.droppedParticipantRefs > 0 && (
                 // Import SUCCEEDED — some chunk participant refs mapped to no
                 // imported agent/character and were dropped (#381/#388). A caveat,
                 // not an error: warning styling, and the campaign is fully usable.
                 <span className="gx-import-campaign__warning" role="status">
-                  {droppedRefsNote(summary.droppedParticipantRefs)}
+                  {droppedRefsNote(t, summary.droppedParticipantRefs)}
                 </span>
               )}
             </span>
           ) : undefined
         }
-        confirmLabel="Switch"
-        cancelLabel="Not now"
+        confirmLabel={t("components.importSwitch")}
+        cancelLabel={t("components.importNotNow")}
         confirmDisabled={setActive.isPending}
         destructive={false}
         onConfirm={() => summary && setActive.mutate({ campaignId: summary.campaignId })}

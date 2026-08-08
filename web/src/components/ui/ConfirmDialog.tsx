@@ -3,6 +3,7 @@ import * as RAlert from "@radix-ui/react-alert-dialog";
 
 import { Button } from "./Button";
 import { Input } from "./Input";
+import { useI18n } from "@/i18n";
 
 // ConfirmDialog — a modal confirmation gate on a Radix AlertDialog (ADR-0017:
 // Radix backs the accessibility-heavy primitives). Built for destructive actions
@@ -22,8 +23,8 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
-  confirmLabel = "Delete",
-  cancelLabel = "Cancel",
+  confirmLabel,
+  cancelLabel,
   onConfirm,
   confirmDisabled = false,
   destructive = true,
@@ -44,7 +45,14 @@ export function ConfirmDialog({
   // confirmTextLabel labels the confirmation field; defaults to a generic prompt.
   confirmTextLabel?: ReactNode;
 }) {
+  const { t } = useI18n();
   const [typed, setTyped] = useState("");
+
+  // Default labels resolve here, not in the parameter list — a default
+  // parameter can't call hooks, and the fallbacks must follow the live display
+  // language. An explicit prop still wins.
+  const confirmLabelText = confirmLabel ?? t("common.delete");
+  const cancelLabelText = cancelLabel ?? t("common.cancel");
 
   // Reset the typed value whenever the dialog is closed — keyed on `open` rather
   // than the Radix onOpenChange callback so it fires for BOTH close paths: the
@@ -71,7 +79,7 @@ export function ConfirmDialog({
           )}
           {confirmText !== undefined && (
             <Input
-              label={confirmTextLabel ?? `Type “${confirmText}” to confirm`}
+              label={confirmTextLabel ?? t("components.typeToConfirm", { text: confirmText })}
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               autoComplete="off"
@@ -81,7 +89,7 @@ export function ConfirmDialog({
           )}
           <div className="gx-confirm__actions">
             <RAlert.Cancel asChild>
-              <Button variant="ghost">{cancelLabel}</Button>
+              <Button variant="ghost">{cancelLabelText}</Button>
             </RAlert.Cancel>
             <RAlert.Action asChild>
               <Button
@@ -89,7 +97,7 @@ export function ConfirmDialog({
                 onClick={onConfirm}
                 disabled={disabled}
               >
-                {confirmLabel}
+                {confirmLabelText}
               </Button>
             </RAlert.Action>
           </div>

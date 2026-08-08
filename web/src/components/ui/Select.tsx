@@ -2,6 +2,8 @@ import { useId } from "react";
 import * as RSelect from "@radix-ui/react-select";
 import { ChevronDown, Check } from "lucide-react";
 
+import { useI18n } from "@/i18n";
+
 // Select — ported from the handoff components/forms/Select.jsx onto a Radix
 // Select (ADR-0017: Radix backs the accessibility-heavy primitives). The trigger
 // keeps .gx-select + the field wrapper/label keep the handoff class names; the
@@ -20,7 +22,7 @@ export function Select({
   defaultValue,
   onValueChange,
   disabled = false,
-  placeholder = "Select…",
+  placeholder,
   id,
   "aria-label": ariaLabel,
 }: {
@@ -34,9 +36,15 @@ export function Select({
   id?: string;
   "aria-label"?: string;
 }) {
+  const { t } = useI18n();
   const generatedId = useId();
   const fid = id || generatedId;
   const opts = options.map(norm);
+
+  // The default resolves here rather than in the parameter list: a default
+  // parameter can't call hooks, and the translated fallback must follow the
+  // live display language. An explicit placeholder prop still wins.
+  const placeholderText = placeholder ?? t("components.selectPlaceholder");
 
   return (
     <div className="gx-select-field">
@@ -52,7 +60,7 @@ export function Select({
         disabled={disabled}
       >
         <RSelect.Trigger className="gx-select" id={fid} aria-label={ariaLabel || label || undefined}>
-          <RSelect.Value placeholder={placeholder} />
+          <RSelect.Value placeholder={placeholderText} />
           <RSelect.Icon className="gx-select-chevron" asChild>
             <ChevronDown size={14} />
           </RSelect.Icon>

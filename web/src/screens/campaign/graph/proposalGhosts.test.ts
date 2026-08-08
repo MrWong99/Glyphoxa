@@ -78,7 +78,8 @@ describe("resolveProposals", () => {
     if (r.write.kind !== "fact") throw new Error("expected a fact");
     expect(r.write.anchor.at).toBe("unknown");
     if (r.write.anchor.at !== "unknown") return;
-    expect(r.write.anchor.reason).toMatch(/gone/);
+    // Reasons are message keys + params now, translated by the rendering surface.
+    expect(r.write.anchor.reason.key).toBe("knowledge.reasonEntryGone");
   });
 
   it("refuses to guess between two entries with the same name", () => {
@@ -92,7 +93,8 @@ describe("resolveProposals", () => {
     // one would silently file the fact on the wrong entry.
     expect(r.write.anchor.at).toBe("unknown");
     if (r.write.anchor.at !== "unknown") return;
-    expect(r.write.anchor.reason).toMatch(/2 entries/);
+    expect(r.write.anchor.reason.key).toBe("knowledge.reasonAmbiguousName");
+    expect(r.write.anchor.reason.params?.count).toBe(2);
   });
 
   it("refuses a case-insensitive collision even when one match is exact-case", () => {
@@ -107,7 +109,7 @@ describe("resolveProposals", () => {
     // cannot land — a promise the GM then watches fail.
     expect(r.write.anchor.at).toBe("unknown");
     if (r.write.anchor.at !== "unknown") return;
-    expect(r.write.anchor.reason).toMatch(/rename one/);
+    expect(r.write.anchor.reason.key).toBe("knowledge.reasonAmbiguousName");
   });
 
   it("an id that names nothing never falls back to a same-named entry", () => {
@@ -136,7 +138,9 @@ describe("resolveProposals", () => {
     if (r.write.kind !== "edge") throw new Error("expected an edge");
     expect(r.write.to.at).toBe("unknown");
     if (r.write.to.at !== "unknown") return;
-    expect(r.write.to.reason).toMatch(/Atlantis/);
+    // The unknown name rides along as a param, so the rendered copy names it.
+    expect(r.write.to.reason.key).toBe("knowledge.reasonNoEntryYet");
+    expect(r.write.to.reason.params?.name).toBe("Atlantis");
   });
 
   it("an unparseable proposal survives as unreadable rather than being dropped", () => {
@@ -239,7 +243,7 @@ describe("placeProposals", () => {
     // Both are reachable, with a reason — a proposal that vanishes from the graph
     // AND has no other surface is a proposal the GM can never review.
     expect(placed.unplaced).toHaveLength(2);
-    for (const u of placed.unplaced) expect(u.reason).toBeTruthy();
+    for (const u of placed.unplaced) expect(u.reason.key).toBeTruthy();
   });
 
   it("a resolvable entry that is filtered out of the view says so", () => {
@@ -253,7 +257,7 @@ describe("placeProposals", () => {
     const resolved = resolveProposals([factProposal()], NODES);
     const placed = placeProposals(resolved, withoutBart);
     expect(placed.unplaced).toHaveLength(1);
-    expect(placed.unplaced[0].reason).toMatch(/filtered out/);
+    expect(placed.unplaced[0].reason.key).toBe("knowledge.reasonFilteredOut");
   });
 
   it("ghosts keep their spot when another proposal leaves the queue", () => {

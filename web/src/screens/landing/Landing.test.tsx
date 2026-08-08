@@ -117,7 +117,7 @@ describe("landing copy", () => {
     render(<Landing open />);
     const doc = document.body.textContent ?? "";
     expect(doc).toMatch(/small monthly allowance/i);
-    expect(doc).toMatch(/your own provider keys/i);
+    expect(doc).toMatch(/your own AI service keys/i);
     // Honest about what the beta is (#258's copy policy): no card, rough edges,
     // and the transcription disclosure players will meet in Discord.
     expect(doc).toMatch(/no card/i);

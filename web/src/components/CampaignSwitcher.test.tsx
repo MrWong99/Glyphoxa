@@ -286,8 +286,8 @@ describe("CampaignSwitcher", () => {
 
     // The form seeds System/Language with the seeder's defaults.
     const name = await screen.findByLabelText("Name");
-    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("dnd5e");
-    expect((screen.getByLabelText("Language") as HTMLInputElement).value).toBe("en");
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("dnd5e");
+    expect((screen.getByLabelText("Spoken language") as HTMLInputElement).value).toBe("en");
 
     fireEvent.change(name, { target: { value: "Gamma Saga" } });
     fireEvent.click(screen.getByRole("button", { name: /^create campaign$/i }));
@@ -528,7 +528,7 @@ describe("CampaignSwitcher", () => {
     // submitted values, and an edit here would be silently discarded by the
     // activation retry (rename is #268's slice).
     expect(screen.getByLabelText("Name")).toBeDisabled();
-    expect(screen.getByLabelText("System")).toBeDisabled();
+    expect(screen.getByLabelText("Game system")).toBeDisabled();
 
     // Retrying re-runs ONLY the activation — it must not mint a second campaign.
     fireEvent.click(screen.getByRole("button", { name: /retry activation/i }));
@@ -551,8 +551,8 @@ describe("CampaignSwitcher", () => {
     // seeded from the resolved Active Campaign.
     fireEvent.click(await screen.findByRole("button", { name: /campaign settings/i }));
     expect(((await screen.findByLabelText("Name")) as HTMLInputElement).value).toBe("Alpha Quest");
-    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("D&D 5e");
-    expect(screen.getByText(/next Voice Session/i)).toBeInTheDocument();
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
+    expect(screen.getByText(/next voice session/i)).toBeInTheDocument();
   });
 
   it("saves a rename and refreshes the picker list (#268, ADR-0018)", async () => {

@@ -10,6 +10,7 @@ import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useI18n } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
 import { useHighlights } from "./useHighlights";
 
@@ -38,6 +39,7 @@ export function HighlightsStrip({
   // for #310's Share button, kept a slot here so this slice ships no share UI.
   renderActions?: (h: Highlight) => ReactNode;
 }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const query = useHighlights(sessionId, live);
   const highlights = query.data?.highlights ?? [];
@@ -60,12 +62,12 @@ export function HighlightsStrip({
 
   const promote = useMutation(SessionService.method.promoteHighlight, {
     onSuccess: () => invalidate(),
-    onError: (err: Error) => toast.error(`Couldn't promote the highlight: ${err.message}`),
+    onError: (err: Error) => toast.error(t("session.couldntPromote", { message: err.message })),
   });
 
   const remove = useMutation(SessionService.method.deleteHighlight, {
     onSuccess: () => invalidate(),
-    onError: (err: Error) => toast.error(`Couldn't delete the highlight: ${err.message}`),
+    onError: (err: Error) => toast.error(t("session.couldntDelete", { message: err.message })),
   });
 
   // No rendered session (fresh install, never started) — there is nothing to list,
@@ -84,7 +86,7 @@ export function HighlightsStrip({
   if (query.isError && !query.data) {
     return (
       <p className="gx-highlights__error" role="alert">
-        Couldn't load the highlights: {query.error.message}
+        {t("session.couldntLoadHighlights", { message: query.error.message })}
       </p>
     );
   }
@@ -99,19 +101,17 @@ export function HighlightsStrip({
   // a cached-empty list + failed refetch doesn't read as a clean, settled empty.
   const staleNotice = query.isError ? (
     <p className="gx-highlights__stale" role="alert" data-testid="highlights-stale-error">
-      Couldn't refresh the highlights — showing the last loaded set.
+      {t("session.couldntRefreshHighlights")}
     </p>
   ) : null;
 
   if (highlights.length === 0) {
+    // "Rollover tape" is internal vocabulary — users see "Highlight recording"
+    // (glossary), matching the renamed switch in Campaign settings.
     return (
       <>
         {staleNotice}
-        <p className="gx-highlights__empty">
-          No highlights yet — epic moments appear here when the rollover tape is armed
-          and consented. To arm it, open the campaign menu in the top bar, choose
-          Campaign settings, and enable &ldquo;Rollover tape&rdquo;.
-        </p>
+        <p className="gx-highlights__empty">{t("session.noHighlights")}</p>
       </>
     );
   }
@@ -124,17 +124,17 @@ export function HighlightsStrip({
         const isCandidate = h.status === "candidate";
         const range = `${clipClock(h.startsAt)}–${clipClock(h.endsAt)}`;
         // A short, speakable label for the otherwise-anonymous native controls.
-        const clipLabel = `Clip: ${h.excerpt.slice(0, 40)}`;
+        const clipLabel = t("session.clipLabel", { excerpt: h.excerpt.slice(0, 40) });
         return (
           <li key={h.id} className="gx-highlight" data-highlight-id={h.id}>
             <div className="gx-highlight__head">
               {isCandidate ? (
                 <Badge variant="neutral" size="sm">
-                  Candidate — auto-deletes in 7 days
+                  {t("session.candidateBadge")}
                 </Badge>
               ) : (
                 <Badge variant="live" size="sm">
-                  Promoted
+                  {t("session.promotedBadge")}
                 </Badge>
               )}
               <time className="gx-highlight__clock">{range}</time>
@@ -166,18 +166,18 @@ export function HighlightsStrip({
                   onClick={() => promote.mutate({ id: h.id })}
                   disabled={promote.isPending}
                 >
-                  Promote
+                  {t("session.promote")}
                 </Button>
               )}
               <Button
                 variant="ghost"
                 size="sm"
                 iconStart={<Trash2 size={14} />}
-                aria-label={`Delete highlight ${range}`}
+                aria-label={t("session.deleteHighlightAria", { range })}
                 onClick={() => setConfirming(h)}
                 disabled={remove.isPending}
               >
-                Delete
+                {t("common.delete")}
               </Button>
               {renderActions?.(h)}
             </div>
@@ -191,9 +191,9 @@ export function HighlightsStrip({
           onOpenChange={(open) => {
             if (!open) setConfirming(null);
           }}
-          title="Delete this highlight?"
-          description="This permanently deletes the highlight and its clip. This can't be undone."
-          confirmLabel="Delete highlight"
+          title={t("session.deleteHighlightTitle")}
+          description={t("session.deleteHighlightDescription")}
+          confirmLabel={t("session.deleteHighlightConfirm")}
           onConfirm={() => {
             remove.mutate({ id: confirming.id });
             setConfirming(null);

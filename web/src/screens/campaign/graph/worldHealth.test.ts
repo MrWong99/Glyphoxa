@@ -8,6 +8,7 @@ import {
   GraphNodeSchema,
   NodeType,
 } from "@gen/glyphoxa/management/v1/management_pb";
+import { en } from "@/i18n";
 import { worldHealth } from "./worldHealth";
 
 type NodeInit = Parameters<typeof create<typeof GraphNodeSchema>>[1];
@@ -152,9 +153,11 @@ describe("worldHealth", () => {
       "orphans",
       "unlinked-npcs",
     ]);
+    // title/why are message KEYS now — resolve them through the English catalog
+    // so this still proves real rendered copy, not just a non-empty key string.
     for (const c of cats) {
-      expect(c.why.length, `${c.key} has no stated consequence`).toBeGreaterThan(20);
-      expect(c.title.length, `${c.key} has no title`).toBeGreaterThan(0);
+      expect(en[c.why].length, `${c.key} has no stated consequence`).toBeGreaterThan(20);
+      expect(en[c.title].length, `${c.key} has no title`).toBeGreaterThan(0);
     }
   });
 

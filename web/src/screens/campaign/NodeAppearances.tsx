@@ -3,6 +3,7 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { MessageSquare } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { useI18n } from "@/i18n";
 
 // Where an entry was mentioned in play (#545, ADR-0008 amendment).
 //
@@ -28,6 +29,7 @@ export function NodeAppearances({
   /** Deep-link to the exact Transcript Line on the Session screen. */
   onOpenLine?: (sessionID: string, lineID: string) => void;
 }) {
+  const { t } = useI18n();
   const { data, status } = useQuery(CampaignService.method.listNodeAppearances, { nodeId: nodeID });
 
   if (status === "pending") {
@@ -43,12 +45,10 @@ export function NodeAppearances({
   return (
     <div className="gx-field gx-kg-appearances">
       <span className="gx-field__label">
-        <MessageSquare size={12} /> Mentioned at the table
+        <MessageSquare size={12} /> {t("knowledge.mentionedLabel")}
       </span>
       {rows.length === 0 ? (
-        <span className="gx-field__hint">
-          Not mentioned yet. Sessions are indexed when they end.
-        </span>
+        <span className="gx-field__hint">{t("knowledge.mentionedEmpty")}</span>
       ) : (
         <ul className="gx-kg-appearances__list">
           {rows.map((a) => {
@@ -59,7 +59,11 @@ export function NodeAppearances({
                   type="button"
                   className="gx-kg-appearances__row"
                   onClick={() => onOpenLine?.(a.voiceSessionId, a.lineId)}
-                  aria-label={`${a.who} at ${at ? fmtWhen(at) : "an unknown time"}: ${a.text}`}
+                  aria-label={t("knowledge.mentionAria", {
+                    who: a.who,
+                    when: at ? fmtWhen(at) : t("knowledge.unknownTime"),
+                    text: a.text,
+                  })}
                 >
                   <span className="gx-kg-appearances__who" data-kind={a.kind}>
                     {a.who}

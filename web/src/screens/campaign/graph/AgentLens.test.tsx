@@ -206,7 +206,7 @@ describe("agent-knowledge lens", () => {
     expect(dropped.querySelector(".gx-kg-graph__overflow")).toBeTruthy();
     expect(dropped.querySelector(".gx-kg-graph__slash")).toBeFalsy();
     // And each carries a tooltip naming its own fix.
-    expect(ghost.querySelector("title")?.textContent).toMatch(/GM private/);
+    expect(ghost.querySelector("title")?.textContent).toMatch(/GM-only/);
     expect(dropped.querySelector("title")?.textContent).toMatch(/facts block is full/);
   });
 
@@ -217,7 +217,7 @@ describe("agent-knowledge lens", () => {
     renderWithLens({ neighbourhoodClipped: true, maxNeighbours: 50 });
     await pickBart();
     expect(
-      await screen.findByText(/more relations than the prompt read looks at/),
+      await screen.findByText(/more connections than/),
     ).toBeInTheDocument();
   });
 
