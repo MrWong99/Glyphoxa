@@ -19,9 +19,15 @@ import (
 // implies a native toolchain; it still selects real encryption over the stub
 // (dave_stub.go) whose DaveOption is a no-op and [DaveAvailable] false, so
 // tests and tooling keep building without pulling in the MLS stack.
+// The factory is wrapped in [WrapDaveSessionCreate] so every session reports
+// Ready once closed (or on a never-E2EE channel): disgo gates its per-session
+// audio sender AND receiver goroutines on DAVE().Ready(), and both of their
+// only exit paths (the net.ErrClosed read, the #581 provider poke) sit behind
+// that gate — an unready session at teardown otherwise strands the receiver's
+// non-blocking poll loop spinning at a full core forever (#586).
 func DaveOption() bot.ConfigOpt {
 	return bot.WithVoiceManagerConfigOpts(
-		voice.WithDaveSessionCreateFunc(davesession.CreateFunc()),
+		voice.WithDaveSessionCreateFunc(WrapDaveSessionCreate(davesession.CreateFunc())),
 	)
 }
 
