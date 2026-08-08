@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
+	"os"
 	"time"
 )
 
@@ -61,6 +63,22 @@ func MountObservability(mux *http.ServeMux, rec *PrometheusRecorder, ready Readi
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
+	// Runtime profiling (#586): /debug/pprof on the observability listener,
+	// opt-in via GLYPHOXA_PPROF=1. The 2-core spin investigation stalled on this
+	// port 404ing /debug/pprof — no goroutine or CPU profile could be captured
+	// from the live pod — so the endpoints are mountable without a rebuild, but
+	// stay OFF by default: profiles expose internals (goroutine stacks carry
+	// argument values) and /debug/pprof/profile burns CPU on demand, which is
+	// nothing an always-on unauthenticated port should offer. The metrics port
+	// is cluster-internal (ADR-0032 keeps it off the public web port), so the
+	// env gate is the operator's deliberate switch, not a security boundary.
+	if os.Getenv("GLYPHOXA_PPROF") == "1" {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 	// Readiness: gate traffic on the dependency probe (a DB ping).
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if ready == nil {
