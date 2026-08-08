@@ -118,6 +118,14 @@ spec:
             - -metrics-addr
             - {{ $metricsAddr | quote }}
           env:
+            # Pin the Go scheduler to the container's CPU limit (#586 secondary
+            # finding); see the web deployment's identical entry for the why.
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: voice
+                  resource: limits.cpu
+                  divisor: "1"
             # The in-cluster Postgres Service URL: RunFromDB loads the seeded NPC
             # from it and /readyz pings through it. Same key the migrate/seed
             # hooks used, so the host can never drift.
