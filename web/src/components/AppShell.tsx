@@ -9,6 +9,8 @@ import { Button } from "./ui/Button";
 import { SidebarUser } from "./SidebarUser";
 import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
+import { LanguageSwitcher } from "./LanguageSwitcher";
+import { useI18n, type MessageKey } from "@/i18n";
 
 // The persistent app shell — sidebar + topbar — ported from the handoff
 // ui_kits/glyphoxa-web/shell.jsx (its inline styles lifted onto .gx-shell* /
@@ -18,15 +20,16 @@ import { CampaignSwitcher } from "./CampaignSwitcher";
 // pass-through slug. The sidebar user footer now shows the real signed-in
 // operator (ADR-0016), passed in by the AuthGate that wraps the shell.
 
-type NavItem = { to: string; label: string; icon: ReactNode; title: string };
+type NavItem = { to: string; label: MessageKey; icon: ReactNode; title: MessageKey };
 
 const NAV: NavItem[] = [
-  { to: "configuration", label: "Configuration", icon: <Settings size={18} />, title: "Providers" },
-  { to: "campaign", label: "Campaign", icon: <Swords size={18} />, title: "Campaign" },
-  { to: "session", label: "Session", icon: <ScrollText size={18} />, title: "Session" },
+  { to: "configuration", label: "shell.navSetup", icon: <Settings size={18} />, title: "shell.titleSetup" },
+  { to: "campaign", label: "shell.navCampaign", icon: <Swords size={18} />, title: "shell.titleCampaign" },
+  { to: "session", label: "shell.navSession", icon: <ScrollText size={18} />, title: "shell.titleSession" },
 ];
 
 export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
+  const { t } = useI18n();
   const { screen } = useParams({ strict: false }) as { screen?: string };
   const active = NAV.find((n) => n.to === screen);
 
@@ -67,7 +70,7 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
               activeProps={{ "data-active": "true" }}
             >
               {item.icon}
-              {item.label}
+              {t(item.label)}
             </Link>
           ))}
         </nav>
@@ -81,19 +84,22 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
             variant="ghost"
             size="sm"
             className="gx-topbar__toggle"
-            aria-label="Toggle sidebar"
+            aria-label={t("shell.toggleSidebar")}
             aria-expanded={!collapsed}
-            title="Toggle sidebar"
+            title={t("shell.toggleSidebar")}
             onClick={() => setCollapsed((c) => !c)}
             iconStart={<PanelLeft size={18} />}
           />
           <div className="gx-topbar__divider" />
           <div className="gx-topbar__titles">
-            <div className="gx-topbar__title">{active?.title ?? "Glyphoxa"}</div>
+            <div className="gx-topbar__title">{active ? t(active.title) : "Glyphoxa"}</div>
           </div>
           {/* The Active-Campaign switcher lives on every screen (#266a): the
               titles' flex:1 pushes it to the topbar's right edge. */}
           <CampaignSwitcher />
+          {/* Display-language picker — on every screen so a German group can
+              switch before they've learned the UI. */}
+          <LanguageSwitcher className="gx-topbar__lang" />
         </header>
 
         <main className="gx-content">

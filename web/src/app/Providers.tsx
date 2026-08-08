@@ -3,9 +3,13 @@ import { TransportProvider } from "@connectrpc/connect-query";
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import type { Transport } from "@connectrpc/connect";
 
-// Wraps the app in the Connect transport + one root QueryClient (ADR-0018).
-// Both are injectable so the vitest render test can swap a router transport for
-// the live one and a fresh QueryClient per test (no shared cache, no network).
+import { I18nProvider } from "@/i18n";
+
+// Wraps the app in the Connect transport + one root QueryClient (ADR-0018),
+// plus the display-language provider. Transport and QueryClient are injectable
+// so the vitest render test can swap a router transport for the live one and a
+// fresh QueryClient per test (no shared cache, no network); i18n needs no
+// injection — its context DEFAULT is already a working English catalog.
 export function Providers({
   transport,
   queryClient,
@@ -17,7 +21,9 @@ export function Providers({
 }) {
   return (
     <TransportProvider transport={transport}>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <I18nProvider>{children}</I18nProvider>
+      </QueryClientProvider>
     </TransportProvider>
   );
 }
