@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
+import { useI18n } from "@/i18n";
 
 // NEW_TARGET is the sentinel Character-select value for "create a new Character"
 // (Radix Select forbids an empty item value).
@@ -24,6 +25,7 @@ const NEW_TARGET = "__new__";
 // speaker's next Line; this component's job stops at the RPC round-trip.
 
 export function SessionBindAffordance() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   // targetId is the existing Character being reassigned, or NEW_TARGET for a new
@@ -67,18 +69,19 @@ export function SessionBindAffordance() {
   const createCharacter = useMutation(CampaignService.method.createCharacter, {
     onSuccess: () => {
       void invalidateCharacters();
-      toast.success("Bound the player — their next line is named.");
+      toast.success(t("session.boundPlayer"));
       close();
     },
-    onError: (err: Error) => toast.error(`Couldn't bind the player: ${err.message}`),
+    onError: (err: Error) => toast.error(t("session.couldntBindPlayer", { message: err.message })),
   });
   const updateCharacter = useMutation(CampaignService.method.updateCharacter, {
     onSuccess: () => {
       void invalidateCharacters();
-      toast.success("Reassigned the Character — their next line is named.");
+      toast.success(t("session.reassignedCharacter"));
       close();
     },
-    onError: (err: Error) => toast.error(`Couldn't reassign the Character: ${err.message}`),
+    onError: (err: Error) =>
+      toast.error(t("session.couldntReassignCharacter", { message: err.message })),
   });
 
   const pending = createCharacter.isPending || updateCharacter.isPending;
@@ -101,7 +104,7 @@ export function SessionBindAffordance() {
           onClick={() => setOpen(true)}
           data-testid="bind-player-open"
         >
-          Bind a player
+          {t("session.bindPlayer")}
         </Button>
       </div>
     );
@@ -109,14 +112,14 @@ export function SessionBindAffordance() {
 
   return (
     <Card accent className="gx-session__bind-form">
-      <span className="gx-overline">Bind a player</span>
+      <span className="gx-overline">{t("session.bindPlayer")}</span>
       {characters.length > 0 && (
         <Select
-          label="Character"
+          label={t("session.character")}
           value={targetId}
           onValueChange={setTargetId}
           options={[
-            { value: NEW_TARGET, label: "New Character" },
+            { value: NEW_TARGET, label: t("session.newCharacter") },
             ...characters.map((c) => ({ value: c.id, label: c.name })),
           ]}
         />
@@ -125,13 +128,13 @@ export function SessionBindAffordance() {
         key={targetId}
         initial={target ? { name: target.name, aliases: target.aliases, discordUserId: target.discordUserId } : undefined}
         members={members}
-        submitLabel={target ? "Reassign" : "Create & bind"}
+        submitLabel={target ? t("session.reassign") : t("session.createAndBind")}
         pending={pending}
         error={
           createCharacter.isError
-            ? `Couldn't bind: ${createCharacter.error.message}`
+            ? t("session.couldntBind", { message: createCharacter.error.message })
             : updateCharacter.isError
-              ? `Couldn't reassign: ${updateCharacter.error.message}`
+              ? t("session.couldntReassign", { message: updateCharacter.error.message })
               : null
         }
         onSubmit={submit}

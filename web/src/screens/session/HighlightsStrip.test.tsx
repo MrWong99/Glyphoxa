@@ -196,13 +196,14 @@ describe("HighlightsStrip (#309)", () => {
   });
 
   it("points the empty state at the top-bar campaign menu to arm the tape (#412)", async () => {
-    // The Rollover tape toggle lives ONLY in the topbar CampaignSwitcher edit
-    // panel, not on the Campaign roster screen — so the copy names that real
-    // location honestly instead of an href to a screen that lacks the toggle.
+    // The Highlight-recording toggle (internally the rollover tape) lives ONLY in
+    // the topbar CampaignSwitcher edit panel, not on the Campaign roster screen —
+    // so the copy names that real location honestly instead of an href to a
+    // screen that lacks the toggle.
     renderStrip([]);
     await screen.findByText(/campaign menu in the top bar/i);
     expect(screen.getByText(/Campaign settings/i)).toBeInTheDocument();
-    expect(screen.getByText(/Rollover tape/i)).toBeInTheDocument();
+    expect(screen.getByText(/Highlight recording/i)).toBeInTheDocument();
     // No misleading link to the roster screen.
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });

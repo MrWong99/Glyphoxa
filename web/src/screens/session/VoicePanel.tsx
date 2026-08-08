@@ -5,6 +5,7 @@ import { Volume2, VolumeX } from "lucide-react";
 import { SessionService, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
 import { Avatar } from "@/components/ui/Avatar";
+import { useI18n } from "@/i18n";
 import { useMuteCache } from "./muteCache";
 
 // The Voice control panel (#211): the Session screen's right rail listing every
@@ -28,6 +29,7 @@ function isButler(a: Agent): boolean {
 }
 
 export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: string[] }) {
+  const { t } = useI18n();
   const { replace } = useMuteCache();
   const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {});
   const roster = useMemo(() => rosterQuery.data?.roster ?? [], [rosterQuery.data]);
@@ -56,12 +58,12 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
   const pending = setAgentMute.isPending || setAllMute.isPending;
 
   return (
-    <aside className="gx-voice-panel" aria-label="Voice control">
+    <aside className="gx-voice-panel" aria-label={t("session.voiceControl")}>
       <div className="gx-voice-panel__head">
-        <span className="gx-overline">Voice control</span>
-        <h2 className="gx-voice-panel__title">NPC voices</h2>
+        <span className="gx-overline">{t("session.voiceControl")}</span>
+        <h2 className="gx-voice-panel__title">{t("session.npcVoices")}</h2>
         <p className="gx-voice-panel__count" data-testid="voicing-count">
-          {voicing} of {total} voicing
+          {t("session.voicingCount", { voicing, total })}
         </p>
       </div>
 
@@ -72,7 +74,7 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
         onClick={() => setAllMute.mutate({ muted: anyVoicing })}
       >
         {anyVoicing ? <VolumeX size={15} /> : <Volume2 size={15} />}
-        {anyVoicing ? "Mute all" : "Unmute all"}
+        {anyVoicing ? t("session.muteAll") : t("session.unmuteAll")}
       </button>
 
       <ul className="gx-voice-panel__rows">
@@ -82,7 +84,12 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
           // The Butler is Address-Only: it never voices, so it carries a neutral
           // state and no mute toggle (muting it would hit ErrAgentNotInCampaign →
           // a silently swallowed CodeNotFound), while Character NPCs toggle mute.
-          const state = butler ? "Butler · address-only" : isMuted ? "Muted" : "Voicing";
+          // "address-only" is internal vocabulary — users see plain language.
+          const state = butler
+            ? t("session.butlerState")
+            : isMuted
+              ? t("session.stateMuted")
+              : t("session.stateSpeaking");
           return (
             <li key={a.id} className="gx-voice-row" data-muted={isMuted || undefined} data-testid="voice-row">
               {butler ? (
@@ -100,7 +107,11 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
                   className="gx-voice-row__toggle"
                   data-muted={isMuted || undefined}
                   disabled={!active || pending}
-                  aria-label={isMuted ? `Unmute ${a.name}` : `Mute ${a.name}`}
+                  aria-label={
+                    isMuted
+                      ? t("session.unmuteAgent", { name: a.name })
+                      : t("session.muteAgent", { name: a.name })
+                  }
                   onClick={() => setAgentMute.mutate({ agentId: a.id, muted: !isMuted })}
                 >
                   {isMuted ? <Volume2 size={15} /> : <VolumeX size={15} />}
@@ -111,9 +122,7 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
         })}
       </ul>
 
-      <p className="gx-voice-panel__hint">
-        Muted NPCs stay in the scene but won&apos;t speak aloud. Unmute any voice mid-session.
-      </p>
+      <p className="gx-voice-panel__hint">{t("session.mutedHint")}</p>
     </aside>
   );
 }

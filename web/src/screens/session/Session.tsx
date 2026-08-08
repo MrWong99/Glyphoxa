@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
@@ -79,16 +80,17 @@ function useElapsed(startMs: number | null): number {
   return elapsed;
 }
 
-// connectionLabel renders the live gateway connection sub-state beside the Live
+// connectionLabelKey picks the live gateway connection sub-state beside the Live
 // badge during a normal start (#123): "Connecting…" then "Connected". A failed
 // state is rendered as its own badge + reason, not here, so this returns null for
-// it (and for the pre-first-transition undefined).
-function connectionLabel(state: string | undefined): string | null {
+// it (and for the pre-first-transition undefined). Returns a MessageKey — the
+// caller translates at render time, so no baked-in language (i18n rule 5).
+function connectionLabelKey(state: string | undefined): MessageKey | null {
   switch (state) {
     case "connecting":
-      return "Connecting…";
+      return "session.connecting";
     case "connected":
-      return "Connected";
+      return "session.connected";
     default:
       return null;
   }
@@ -101,9 +103,9 @@ function formatUsd(usd: number): string {
 }
 
 // formatStamp renders a session's started_at instant as a short "Mon D, HH:MM"
-// stamp for the past-session picker label.
-function formatStamp(d: Date): string {
-  return d.toLocaleString(undefined, {
+// stamp for the past-session picker label, in the display language's locale.
+function formatStamp(d: Date, lang: Lang): string {
+  return d.toLocaleString(lang, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -113,16 +115,18 @@ function formatStamp(d: Date): string {
 
 // sessionOption renders one past-session picker row's label: its start stamp plus
 // its line count — or "live" for the still-running session, whose line_count is 0
-// until it closes (#270).
-function sessionOption(vs: VoiceSession): string {
+// until it closes (#270). t/lang are threaded from the calling component so the
+// label follows the display language (module-level helpers hold no translation).
+function sessionOption(vs: VoiceSession, t: TFunc, lang: Lang): string {
   const startedMs = tsMs(vs.startedAt);
-  const when = startedMs != null ? formatStamp(new Date(startedMs)) : "—";
-  const count = vs.status === "running" ? "live" : `${vs.lineCount} lines`;
+  const when = startedMs != null ? formatStamp(new Date(startedMs), lang) : "—";
+  const count =
+    vs.status === "running" ? t("session.pickerLive") : t("session.pickerLines", { n: vs.lineCount });
   return `${when} · ${count}`;
 }
 
 // lastSummary renders the idle "Last session ended …" line from an ended session.
-function lastSummary(session: VoiceSession): string {
+function lastSummary(session: VoiceSession, t: TFunc): string {
   const endedMs = tsMs(session.endedAt);
   const startedMs = tsMs(session.startedAt);
   const ended = endedMs != null ? new Date(endedMs) : null;
@@ -131,15 +135,19 @@ function lastSummary(session: VoiceSession): string {
     ? `${String(ended.getHours()).padStart(2, "0")}:${String(ended.getMinutes()).padStart(2, "0")}`
     : "—";
 
-  let duration = "0h 0m";
+  let h = 0;
+  let m = 0;
   if (endedMs != null && startedMs != null) {
     const minutes = Math.max(0, Math.round((endedMs - startedMs) / 60000));
-    duration = `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    h = Math.floor(minutes / 60);
+    m = minutes % 60;
   }
-  return `Last session ended ${when} · ${duration} · ${session.lineCount} lines transcribed.`;
+  const duration = t("session.durationHm", { h, m });
+  return t("session.lastSummary", { when, duration, n: session.lineCount });
 }
 
 export function Session() {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
   // retry:false matches every other observer of this shared cache entry (the
@@ -196,8 +204,9 @@ export function Session() {
   // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
   // sonner) and invalidate — a Stop that hits "no active session" means the
   // loop already died server-side, and the refetch snaps the badge off Live.
-  const onError = (verb: string) => (err: Error) => {
-    toast.error(`Couldn't ${verb} the session: ${err.message}`);
+  // The server's message stays verbatim, interpolated into the localized template.
+  const onError = (key: MessageKey) => (err: Error) => {
+    toast.error(t(key, { message: err.message }));
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {
@@ -205,11 +214,11 @@ export function Session() {
       void invalidate();
       void invalidateSessions();
     },
-    onError: onError("start"),
+    onError: onError("session.couldntStart"),
   });
   const stop = useMutation(SessionService.method.stopSession, {
     onSuccess: () => void invalidate(),
-    onError: onError("stop"),
+    onError: onError("session.couldntStop"),
   });
 
   // Voice-channel picker: the session joins the picked channel; the stored
@@ -260,7 +269,8 @@ export function Session() {
         }),
       });
     },
-    onError: (err: Error) => toast.error(`Couldn't save the default channel: ${err.message}`),
+    onError: (err: Error) =>
+      toast.error(t("session.couldntSaveDefaultChannel", { message: err.message })),
   });
 
   // The timer runs only while live, counting up from the running session's start.
@@ -282,7 +292,7 @@ export function Session() {
   const liveFailed = active && transcript.connection === "failed";
   const failed = sessionFailed || liveFailed;
   const failureReason = sessionFailed ? session?.endReason : transcript.connectionDetail;
-  const connectingLabel = active && !failed ? connectionLabel(transcript.connection) : null;
+  const connectingKey = active && !failed ? connectionLabelKey(transcript.connection) : null;
 
   // Transcript search deep-link (#120, extended by #270): clicking a search hit
   // highlights (and, where supported, scrolls to) that line. When the hit is on
@@ -371,10 +381,12 @@ export function Session() {
     if (snapshotFailed) {
       toast.error(
         viewingPast
-          ? "Couldn't load that session's transcript. It may be unavailable — try again."
-          : "Couldn't load the session transcript. It may be unavailable — reload to try again.",
+          ? t("session.transcriptLoadFailedPastToast")
+          : t("session.transcriptLoadFailedCurrent"),
       );
     }
+    // t is stable per language; re-toasting on a language switch would be noise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshotFailed, viewingPast]);
 
   // Recap (#274, epic #252): the operator regenerates a Butler-flavoured recap of a
@@ -388,7 +400,7 @@ export function Session() {
   // under a different session. A failure surfaces as a toast (ADR-0017: sonner).
   const [recapResult, setRecapResult] = useState<{ startedMs: number | null; text: string } | null>(null);
   const generateRecap = useMutation(SessionService.method.generateRecap, {
-    onError: (err: Error) => toast.error(`Couldn't generate the recap: ${err.message}`),
+    onError: (err: Error) => toast.error(t("session.couldntGenerateRecap", { message: err.message })),
   });
   // The rendered session the operator is looking at RIGHT NOW, tracked in a ref so
   // the async onSuccess below can compare against it — a ~2min recap may resolve
@@ -426,27 +438,27 @@ export function Session() {
       <div className="gx-session__main">
       <header className="gx-session__header">
         {campaignName && <span className="gx-overline">{campaignName}</span>}
-        <h1>Voice session</h1>
+        <h1>{t("session.title")}</h1>
       </header>
 
       <Card accent className="gx-session__control">
         <div className="gx-session__status">
           {failed ? (
             <Badge variant="danger" dot>
-              Failed
+              {t("session.statusFailed")}
             </Badge>
           ) : active ? (
             <Badge variant="live" dot pulse>
-              Live
+              {t("session.statusLive")}
             </Badge>
           ) : (
             <Badge variant="neutral" dot>
-              Idle
+              {t("session.statusIdle")}
             </Badge>
           )}
-          {connectingLabel && (
+          {connectingKey && (
             <span className="gx-session__conn" data-testid="connection-state">
-              {connectingLabel}
+              {t(connectingKey)}
             </span>
           )}
           <span className="gx-session__timer" data-testid="elapsed">
@@ -462,15 +474,15 @@ export function Session() {
               onClick={() => stop.mutate({})}
               disabled={stop.isPending}
             >
-              Stop session
+              {t("session.stopSession")}
             </Button>
           ) : (
             <>
               {channels.length > 0 && (
                 <div className="gx-session__channel" data-testid="channel-picker">
                   <Select
-                    aria-label="Voice channel"
-                    placeholder="Voice channel…"
+                    aria-label={t("session.voiceChannel")}
+                    placeholder={t("session.voiceChannelPlaceholder")}
                     options={channels.map((c) => ({ value: c.id, label: c.name }))}
                     value={selectedChannelId || undefined}
                     onValueChange={setPickedChannelId}
@@ -483,7 +495,7 @@ export function Session() {
                       disabled={saveDefaultChannel.isPending}
                       data-testid="set-default-channel"
                     >
-                      Set as default
+                      {t("session.setAsDefault")}
                     </Button>
                   )}
                 </div>
@@ -500,7 +512,7 @@ export function Session() {
               )}
               {channelsQ.isSuccess && channels.length === 0 && (
                 <span className="gx-session__channel-hint" data-testid="channel-hint">
-                  The linked Discord server has no voice channels.
+                  {t("session.noVoiceChannels")}
                 </span>
               )}
               <Button
@@ -514,7 +526,7 @@ export function Session() {
                 // server's actionable precondition).
                 disabled={start.isPending || channelsQ.isLoading}
               >
-                Start session
+                {t("session.startSession")}
               </Button>
             </>
           )}
@@ -527,22 +539,24 @@ export function Session() {
 
       {failed && (
         <div className="gx-session__failed" role="alert" data-testid="connection-failed">
-          {failureReason ? `Voice connection failed: ${failureReason}` : "Voice connection failed."}
+          {/* The end reason / connection detail is a server string — verbatim,
+              interpolated into the localized template (i18n rule 3). */}
+          {failureReason
+            ? t("session.connectionFailedReason", { reason: failureReason })
+            : t("session.connectionFailed")}
         </div>
       )}
 
       {(spendCapState === "soft" || spendCapState === "hard") && (
         <div className="gx-session__spendcap" role="alert" data-testid="spend-cap">
-          {spendCapState === "hard"
-            ? "Hard spend cap reached — the session is ending."
-            : "Soft spend cap reached — no new Agent turns (in-flight replies finish)."}{" "}
-          Estimated spend {formatUsd(estimatedSpendUsd)} (estimated).
+          {spendCapState === "hard" ? t("session.spendCapHard") : t("session.spendCapSoft")}{" "}
+          {t("session.spendEstimate", { usd: formatUsd(estimatedSpendUsd) })}
         </div>
       )}
 
       {!active && session && session.status === "ended" && (
         <div className="gx-session__last">
-          <span className="gx-session__last-text">{lastSummary(session)}</span>
+          <span className="gx-session__last-text">{lastSummary(session, t)}</span>
           {/* The latest-card Recap covers the idle ended session; hidden while
               browsing a past one, whose own Recap button lives in the picker view
               (so only one Recap button is ever on screen). */}
@@ -555,7 +569,7 @@ export function Session() {
               disabled={generateRecap.isPending}
               data-testid="recap-button"
             >
-              Recap
+              {t("session.recap")}
             </Button>
           )}
         </div>
@@ -563,7 +577,7 @@ export function Session() {
 
       <section className="gx-session__transcript">
         <h2 className="gx-section-title">
-          {active && !viewingPast ? "Live transcript" : "Session transcript"}
+          {active && !viewingPast ? t("session.liveTranscript") : t("session.sessionTranscript")}
         </h2>
         {pastSessions.length > 0 && (
           <SessionPicker
@@ -584,7 +598,7 @@ export function Session() {
               disabled={generateRecap.isPending}
               data-testid="recap-button"
             >
-              Recap
+              {t("session.recap")}
             </Button>
           </div>
         )}
@@ -594,16 +608,16 @@ export function Session() {
           {snapshotFailed ? (
             <p className="gx-session__transcript-empty" role="alert" data-testid="snapshot-error">
               {viewingPast
-                ? "Couldn't load this session's transcript. It may be unavailable — pick another session or try again."
-                : "Couldn't load the session transcript. It may be unavailable — reload to try again."}
+                ? t("session.transcriptLoadFailedPastInline")
+                : t("session.transcriptLoadFailedCurrent")}
             </p>
           ) : !hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
               {active && !viewingPast
-                ? "Listening… transcript lines will appear here."
+                ? t("session.listening")
                 : viewingPast
-                  ? "This session has no transcript lines."
-                  : "Start a session to capture the table's voice transcript."}
+                  ? t("session.noTranscriptLines")
+                  : t("session.startToCapture")}
             </p>
           ) : (
             <ol className="gx-transcript">
@@ -647,7 +661,7 @@ export function Session() {
           session; the whole section stays out when there is no session at all. */}
       {renderedSessionId && (
         <section className="gx-session__highlights">
-          <h2 className="gx-section-title">Highlights</h2>
+          <h2 className="gx-section-title">{t("session.highlightsTitle")}</h2>
           <HighlightsStrip
             sessionId={renderedSessionId}
             live={active && !viewingPast}
@@ -665,7 +679,7 @@ export function Session() {
           tab, because at the table the board IS the session, and the alternative
           is scrolling a wiki mid-scene. */}
       <section className="gx-session__boards">
-        <h2 className="gx-section-title">Tonight's board</h2>
+        <h2 className="gx-section-title">{t("session.boardTitle")}</h2>
         {/* No onOpenNode: at the table the board is a REFERENCE — the names and
             the order — not a way to start editing the wiki mid-scene. */}
         <PrepBoards />
@@ -696,9 +710,10 @@ function SessionPicker({
   onPick: (id: string) => void;
   onBackToCurrent: () => void;
 }) {
+  const { t, lang } = useI18n();
   return (
     <div className="gx-session__picker" data-testid="session-picker">
-      <span className="gx-session__picker-label">Sessions</span>
+      <span className="gx-session__picker-label">{t("session.pickerLabel")}</span>
       <ul className="gx-session__picker-list">
         {sessions.map((vs) => (
           <li key={vs.id}>
@@ -708,14 +723,14 @@ function SessionPicker({
               aria-pressed={vs.id === renderedSessionId}
               onClick={() => onPick(vs.id)}
             >
-              {sessionOption(vs)}
+              {sessionOption(vs, t, lang)}
             </button>
           </li>
         ))}
       </ul>
       {viewingPast && (
         <button type="button" className="gx-session__picker-back" onClick={onBackToCurrent}>
-          Back to current session
+          {t("session.backToCurrent")}
         </button>
       )}
     </div>
@@ -735,19 +750,20 @@ function RecapView({
   pending: boolean;
   result: { startedMs: number | null; text: string } | null;
 }) {
+  const { t, lang } = useI18n();
   if (pending) {
     return (
       <div className="gx-session__recap-pending" role="status" data-testid="recap-pending">
         <Loader2 size={15} className="gx-spin" aria-hidden="true" />
-        <span>Generating recap…</span>
+        <span>{t("session.generatingRecap")}</span>
       </div>
     );
   }
   if (!result) return null;
-  const label = result.startedMs != null ? formatStamp(new Date(result.startedMs)) : "—";
+  const label = result.startedMs != null ? formatStamp(new Date(result.startedMs), lang) : "—";
   return (
     <Card className="gx-session__recap" data-testid="recap-result">
-      <div className="gx-session__recap-label">Recap · session of {label}</div>
+      <div className="gx-session__recap-label">{t("session.recapLabel", { stamp: label })}</div>
       <p className="gx-session__recap-text">{result.text}</p>
     </Card>
   );
@@ -764,6 +780,7 @@ function RecapView({
 // to that session's transcript and jumps there once it loads (#270, AC4). Line ids
 // restart per session, so onOpen always carries the hit's session id too.
 function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: string) => void }) {
+  const { t } = useI18n();
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   useEffect(() => {
@@ -787,9 +804,9 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
     <div className="gx-tsearch">
       <Input
         type="search"
-        aria-label="Search the transcript"
+        aria-label={t("session.searchTranscript")}
         icon={<Search size={15} />}
-        placeholder="Search the transcript — speakers and text"
+        placeholder={t("session.searchPlaceholder")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="gx-tsearch__input"
@@ -797,7 +814,7 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
       {searching &&
         (searchQuery.isError ? (
           <p className="gx-session__transcript-empty" role="alert">
-            Couldn't search the transcript: {searchQuery.error?.message}
+            {t("session.couldntSearch", { message: searchQuery.error?.message ?? "" })}
           </p>
         ) : lines.length > 0 ? (
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">
@@ -819,7 +836,9 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
             ))}
           </ul>
         ) : (
-          !searchQuery.isPending && <p className="gx-tsearch__empty">No lines match “{trimmed}”.</p>
+          !searchQuery.isPending && (
+            <p className="gx-tsearch__empty">{t("session.noLinesMatch", { query: trimmed })}</p>
+          )
         ))}
     </div>
   );

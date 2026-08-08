@@ -7,6 +7,7 @@ import { SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
+import { useI18n } from "@/i18n";
 
 // ShareHighlightDialog is the GM's Discord-delivery surface for ONE promoted
 // Session Highlight (#310, Epic 8, ADR-0051 GM-only sharing). It offers the three
@@ -27,6 +28,7 @@ export function ShareHighlightDialog({
   highlight: Highlight;
   sessionLive: boolean;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [channelId, setChannelId] = useState("");
 
@@ -49,20 +51,20 @@ export function ShareHighlightDialog({
 
   const share = useMutation(SessionService.method.shareHighlight, {
     onSuccess: () => setOpen(false),
-    onError: (err: Error) => toast.error(`Couldn't share the highlight: ${err.message}`),
+    onError: (err: Error) => toast.error(t("session.couldntShare", { message: err.message })),
   });
 
   const postToChannel = () => {
     share.mutate(
       { id: highlight.id, mode: { case: "textChannelId", value: channelId } },
-      { onSuccess: () => toast.success("Posted the highlight to Discord.") },
+      { onSuccess: () => toast.success(t("session.postedToDiscord")) },
     );
   };
 
   const replayInVoice = () => {
     share.mutate(
       { id: highlight.id, mode: { case: "voiceReplay", value: true } },
-      { onSuccess: () => toast.success("Replaying the highlight in voice.") },
+      { onSuccess: () => toast.success(t("session.replayingInVoice")) },
     );
   };
 
@@ -74,13 +76,13 @@ export function ShareHighlightDialog({
         iconStart={<Share2 size={14} />}
         onClick={() => setOpen(true)}
       >
-        Share
+        {t("session.share")}
       </Button>
     );
   }
 
   return (
-    <div className="gx-highlight-share" role="group" aria-label="Share this highlight">
+    <div className="gx-highlight-share" role="group" aria-label={t("session.shareGroupLabel")}>
       {channels.isError ? (
         <p className="gx-highlight-share__error" role="alert">
           {channels.error.message}
@@ -88,8 +90,8 @@ export function ShareHighlightDialog({
       ) : (
         <div className="gx-highlight-share__channel">
           <Select
-            aria-label="Discord channel"
-            placeholder={channels.isPending ? "Loading channels…" : "Pick a channel…"}
+            aria-label={t("session.discordChannel")}
+            placeholder={channels.isPending ? t("session.loadingChannels") : t("session.pickChannel")}
             options={(channels.data?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` }))}
             value={channelId || undefined}
             onValueChange={setChannelId}
@@ -102,7 +104,7 @@ export function ShareHighlightDialog({
             onClick={postToChannel}
             disabled={channelId === "" || share.isPending}
           >
-            Post to channel
+            {t("session.postToChannel")}
           </Button>
         </div>
       )}
@@ -115,10 +117,10 @@ export function ShareHighlightDialog({
           onClick={replayInVoice}
           disabled={!sessionLive || share.isPending}
         >
-          Replay in voice
+          {t("session.replayInVoice")}
         </Button>
         {!sessionLive && (
-          <span className="gx-highlight-share__hint">Start a Voice Session to replay.</span>
+          <span className="gx-highlight-share__hint">{t("session.replayHint")}</span>
         )}
       </div>
 
@@ -127,11 +129,11 @@ export function ShareHighlightDialog({
         href={`/api/v1/highlights/${highlight.id}/clip`}
         download="highlight.wav"
       >
-        <Download size={14} aria-hidden="true" /> Download
+        <Download size={14} aria-hidden="true" /> {t("session.download")}
       </a>
 
       <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
-        Close
+        {t("common.close")}
       </Button>
     </div>
   );
