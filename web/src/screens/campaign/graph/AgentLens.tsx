@@ -137,7 +137,7 @@ export function AgentLensBar({
   onAgentChange: (id: string) => void;
   lens: ReturnType<typeof useAgentLens>;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { state, options, agentName, pending, error } = lens;
   return (
     <div className="gx-kg-lens">
@@ -170,9 +170,11 @@ export function AgentLensBar({
       {state?.linked && (
         <div className="gx-kg-lens__budget" role="status">
           <span className="gx-kg-lens__meter">
+            {/* Grouped in the DISPLAY language, not the browser's: the budget reads
+                "1.234" beside German copy and "1,234" beside English. */}
             {t("knowledge.lensMeter", {
-              chars: state.chars.toLocaleString(),
-              maxChars: state.maxChars.toLocaleString(),
+              chars: state.chars.toLocaleString(lang),
+              maxChars: state.maxChars.toLocaleString(lang),
               facts: state.factCount,
               maxFacts: state.maxFacts,
             })}

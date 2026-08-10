@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -59,5 +59,23 @@ describe("NodeAppearances", () => {
   it("says so plainly when an entry has not come up yet", async () => {
     renderAppearances([]);
     expect(await screen.findByText(/Not mentioned yet/)).toBeInTheDocument();
+  });
+
+  it("stamps each mention in the display language, not the browser's locale", async () => {
+    // The expectations are computed from Intl rather than spelled out: the CI
+    // runner's timezone is not the author's, so a literal clock would be a
+    // flake. What is asserted is the LOCALE the stamp follows.
+    const at = new Date("2026-08-01T20:15:00Z");
+    const fmt = (lang: string) =>
+      at.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
+
+    renderAppearances([MENTION]);
+    expect(await screen.findByText(fmt("en"))).toBeInTheDocument();
+
+    cleanup();
+    localStorage.setItem("gx-lang", "de");
+    renderAppearances([MENTION]);
+    expect(await screen.findByText(fmt("de"))).toBeInTheDocument();
+    localStorage.clear();
   });
 });

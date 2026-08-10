@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -128,6 +128,21 @@ describe("HighlightsStrip (#309)", () => {
     expect(audio).toHaveAttribute("src", "/api/v1/highlights/h1/clip");
     expect(audio).toHaveAttribute("controls");
     expect(audio).toHaveAttribute("preload", "none");
+  });
+
+  it("formats the score in the display language, not the browser's", async () => {
+    renderStrip([candidate()]);
+    // jsdom reports en-US, so the default render is the English decimal point.
+    expect(await screen.findByText("8.5")).toBeInTheDocument();
+
+    cleanup();
+    // A German operator reads a German decimal comma. The stored choice — not
+    // navigator.language — is what the number has to follow, or the score reads
+    // as foreign punctuation beside German copy.
+    localStorage.setItem("gx-lang", "de");
+    renderStrip([candidate()]);
+    expect(await screen.findByText("8,5")).toBeInTheDocument();
+    localStorage.clear();
   });
 
   it("shows a candidate's purge hint badge and a Promote action", async () => {

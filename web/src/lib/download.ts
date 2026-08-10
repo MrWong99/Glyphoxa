@@ -64,6 +64,16 @@ function filenameFromDisposition(header: string | null): string {
   return match ? decodeURIComponent(match[1]) : FALLBACK_FILENAME;
 }
 
+// bodylessFailure names a non-OK response that carried no message of its own — a
+// proxy 502/504 is the everyday case. It is deliberately the language-NEUTRAL
+// "HTTP 502" and not a sentence: this module runs outside React and holds no
+// translation, and the callers already wrap it in a localized template ("Couldn't
+// export campaign: {message}"), so a sentence here would be both untranslated and
+// redundant with the one around it.
+function bodylessFailure(status: number): string {
+  return `HTTP ${status}`;
+}
+
 // fetchCampaignExport downloads a campaign's bundle. Returns the blob plus the
 // server-chosen filename (from Content-Disposition). A non-OK response throws the
 // server's plain-text error so the caller can surface it in a toast.
@@ -73,7 +83,7 @@ export async function fetchCampaignExport(
   const res = await fetch(`/api/v1/campaigns/${campaignId}/export`);
   if (!res.ok) {
     const text = (await res.text()).trim();
-    throw new Error(text || `Export failed (${res.status})`);
+    throw new Error(text || bodylessFailure(res.status));
   }
   const blob = await res.blob();
   return { blob, filename: filenameFromDisposition(res.headers.get("Content-Disposition")) };
@@ -99,7 +109,7 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     // the body ONCE as text and prefer its JSON error field when it parses, else
     // fall back to the raw text — so BOTH shapes surface cleanly (AC: oversized).
     const text = (await res.text()).trim();
-    let message = text || `Import failed (${res.status})`;
+    let message = text || bodylessFailure(res.status);
     try {
       const body = JSON.parse(text) as { error?: string };
       if (body?.error) message = body.error;

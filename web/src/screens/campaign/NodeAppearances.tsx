@@ -3,7 +3,7 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { MessageSquare } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import { useI18n } from "@/i18n";
+import { useI18n, type Lang } from "@/i18n";
 
 // Where an entry was mentioned in play (#545, ADR-0008 amendment).
 //
@@ -17,8 +17,11 @@ import { useI18n } from "@/i18n";
 // following anything, and follows the link only when they want the scene around
 // it.
 
-function fmtWhen(at: Date): string {
-  return at.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+// The stamp follows the DISPLAY language, not the browser's: a German operator on
+// an English-locale machine reads "1. Aug. 2026, 20:15", not "Aug 1, 2026, 8:15 PM".
+// lang is threaded from the component — this helper holds no translation.
+function fmtWhen(at: Date, lang: Lang): string {
+  return at.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
 }
 
 export function NodeAppearances({
@@ -29,7 +32,7 @@ export function NodeAppearances({
   /** Deep-link to the exact Transcript Line on the Session screen. */
   onOpenLine?: (sessionID: string, lineID: string) => void;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { data, status } = useQuery(CampaignService.method.listNodeAppearances, { nodeId: nodeID });
 
   if (status === "pending") {
@@ -61,7 +64,7 @@ export function NodeAppearances({
                   onClick={() => onOpenLine?.(a.voiceSessionId, a.lineId)}
                   aria-label={t("knowledge.mentionAria", {
                     who: a.who,
-                    when: at ? fmtWhen(at) : t("knowledge.unknownTime"),
+                    when: at ? fmtWhen(at, lang) : t("knowledge.unknownTime"),
                     text: a.text,
                   })}
                 >
@@ -69,7 +72,7 @@ export function NodeAppearances({
                     {a.who}
                   </span>
                   <span className="gx-kg-appearances__text">{a.text}</span>
-                  {at && <span className="gx-kg-appearances__when">{fmtWhen(at)}</span>}
+                  {at && <span className="gx-kg-appearances__when">{fmtWhen(at, lang)}</span>}
                 </button>
               </li>
             );

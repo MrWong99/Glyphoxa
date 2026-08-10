@@ -96,10 +96,18 @@ function connectionLabelKey(state: string | undefined): MessageKey | null {
   }
 }
 
-// formatUsd renders a USD estimate as $X.XX (#130). Always paired with an
-// "(estimated)" label at the call site — it is an approximate figure, not a bill.
-function formatUsd(usd: number): string {
-  return `$${usd.toFixed(2)}`;
+// formatUsd renders a USD estimate as a currency amount (#130). Always paired
+// with an "(estimated)" label at the call site — it is an approximate figure, not
+// a bill. The CURRENCY stays USD (that is what the providers bill in); only its
+// presentation follows the display language, so a German operator reads
+// "3,21 $" rather than "$3.21".
+function formatUsd(usd: number, lang: Lang): string {
+  try {
+    return new Intl.NumberFormat(lang, { style: "currency", currency: "USD" }).format(usd);
+  } catch {
+    // A runtime without the currency data still owes the operator a figure.
+    return `$${usd.toFixed(2)}`;
+  }
 }
 
 // formatStamp renders a session's started_at instant as a short "Mon D, HH:MM"
@@ -126,13 +134,15 @@ function sessionOption(vs: VoiceSession, t: TFunc, lang: Lang): string {
 }
 
 // lastSummary renders the idle "Last session ended …" line from an ended session.
-function lastSummary(session: VoiceSession, t: TFunc): string {
+// The clock follows the display language rather than a hand-rolled 24-hour stamp,
+// so an English reader gets "09:00 PM" where a German one gets "21:00".
+function lastSummary(session: VoiceSession, t: TFunc, lang: Lang): string {
   const endedMs = tsMs(session.endedAt);
   const startedMs = tsMs(session.startedAt);
   const ended = endedMs != null ? new Date(endedMs) : null;
 
   const when = ended
-    ? `${String(ended.getHours()).padStart(2, "0")}:${String(ended.getMinutes()).padStart(2, "0")}`
+    ? ended.toLocaleTimeString(lang, { hour: "2-digit", minute: "2-digit" })
     : "—";
 
   let h = 0;
@@ -147,7 +157,7 @@ function lastSummary(session: VoiceSession, t: TFunc): string {
 }
 
 export function Session() {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
   // retry:false matches every other observer of this shared cache entry (the
@@ -550,13 +560,13 @@ export function Session() {
       {(spendCapState === "soft" || spendCapState === "hard") && (
         <div className="gx-session__spendcap" role="alert" data-testid="spend-cap">
           {spendCapState === "hard" ? t("session.spendCapHard") : t("session.spendCapSoft")}{" "}
-          {t("session.spendEstimate", { usd: formatUsd(estimatedSpendUsd) })}
+          {t("session.spendEstimate", { usd: formatUsd(estimatedSpendUsd, lang) })}
         </div>
       )}
 
       {!active && session && session.status === "ended" && (
         <div className="gx-session__last">
-          <span className="gx-session__last-text">{lastSummary(session, t)}</span>
+          <span className="gx-session__last-text">{lastSummary(session, t, lang)}</span>
           {/* The latest-card Recap covers the idle ended session; hidden while
               browsing a past one, whose own Recap button lives in the picker view
               (so only one Recap button is ever on screen). */}

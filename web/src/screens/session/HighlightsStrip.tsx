@@ -10,7 +10,7 @@ import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { useI18n } from "@/i18n";
+import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
 import { useHighlights } from "./useHighlights";
 
@@ -19,6 +19,13 @@ import { useHighlights } from "./useHighlights";
 function clipClock(ts: Highlight["startsAt"]): string {
   const ms = ts ? Number(timestampMs(ts)) : null;
   return ms == null ? "" : formatClock(new Date(ms).toISOString());
+}
+
+// fmtScore renders the classifier's score to one decimal in the DISPLAY language:
+// a German operator reads "8,5", not "8.5". The clock range above it is a
+// wall-clock HH:MM:SS and stays language-neutral by design.
+function fmtScore(score: number, lang: Lang): string {
+  return score.toLocaleString(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 // HighlightsStrip is the Session screen's highlight-replay surface (#309, Epic 8):
@@ -39,7 +46,7 @@ export function HighlightsStrip({
   // for #310's Share button, kept a slot here so this slice ships no share UI.
   renderActions?: (h: Highlight) => ReactNode;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const query = useHighlights(sessionId, live);
   const highlights = query.data?.highlights ?? [];
@@ -138,7 +145,7 @@ export function HighlightsStrip({
                 </Badge>
               )}
               <time className="gx-highlight__clock">{range}</time>
-              <span className="gx-highlight__score">{h.score.toFixed(1)}</span>
+              <span className="gx-highlight__score">{fmtScore(h.score, lang)}</span>
             </div>
             <blockquote className="gx-highlight__excerpt">{h.excerpt}</blockquote>
             <p className="gx-highlight__reason">{h.reason}</p>

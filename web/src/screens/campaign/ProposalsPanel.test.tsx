@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, within, waitFor } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -124,6 +124,23 @@ describe("ProposalsPanel", () => {
     expect(screen.getByText(/New Faction:/)).toBeInTheDocument();
     expect(screen.getByText("Zhentarim")).toBeInTheDocument();
     expect(screen.getByText(/A shadow network\./)).toBeInTheDocument();
+  });
+
+  it("stamps a suggestion in the display language, not the browser's locale", async () => {
+    // Computed from Intl, not spelled out: the runner's timezone is not the
+    // author's, so a literal clock would flake. The LOCALE is what is asserted.
+    const at = new Date("2026-07-11T10:00:00Z");
+    const fmt = (lang: string) =>
+      at.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
+
+    renderPanel([factProposal]);
+    expect(await screen.findByText(fmt("en"))).toBeInTheDocument();
+
+    cleanup();
+    localStorage.setItem("gx-lang", "de");
+    renderPanel([factProposal]);
+    expect(await screen.findByText(fmt("de"))).toBeInTheDocument();
+    localStorage.clear();
   });
 
   it("renders an unreadable proposal so the GM can still reject it", async () => {

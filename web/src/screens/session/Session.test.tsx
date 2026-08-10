@@ -874,6 +874,21 @@ describe("Session spend cap (#130)", () => {
     expect(badge).toHaveTextContent(/estimated/i);
   });
 
+  it("renders the estimate in the display language, keeping the currency USD", async () => {
+    // The providers bill in USD whatever the operator reads the console in — the
+    // AMOUNT is localized, the currency is not converted.
+    localStorage.setItem("gx-lang", "de");
+    render(
+      <Providers transport={spendCapTransport("soft", 3.21)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    const badge = await screen.findByTestId("spend-cap");
+    expect(badge).toHaveTextContent(/Geschätzte Ausgaben/);
+    expect(badge).toHaveTextContent("3,21 $");
+    localStorage.clear();
+  });
+
   it("renders the hard spend-cap badge when the hard cap is crossed", async () => {
     render(
       <Providers transport={spendCapTransport("hard", 10)} queryClient={makeQueryClient()}>

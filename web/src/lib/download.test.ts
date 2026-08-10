@@ -95,6 +95,17 @@ describe("fetchCampaignExport", () => {
     await expect(fetchCampaignExport("missing")).rejects.toThrow(/campaign not found/);
     vi.unstubAllGlobals();
   });
+
+  it("falls back to a language-NEUTRAL status on a bodyless failure", async () => {
+    // A proxy 502 carries no message of its own. This module runs outside React
+    // and holds no translation, and the caller already wraps whatever it throws
+    // in a localized template ("Couldn't export campaign: {message}") — so the
+    // fallback must be a bare status, never an English sentence that would ride
+    // untranslated into a German toast.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 502 })));
+    await expect(fetchCampaignExport("camp-1")).rejects.toThrow(/^HTTP 502$/);
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("importCampaignBundle", () => {
@@ -221,7 +232,7 @@ describe("importCampaignBundle", () => {
 
   it("throws the server's PLAIN-TEXT message on a 413 oversized response", async () => {
     // ServeImport's MaxBytesReader 413 is http.Error plain text, NOT JSON — the
-    // client must surface it verbatim, not a generic "Import failed (413)".
+    // client must surface it verbatim, not a generic "HTTP 413".
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -234,6 +245,12 @@ describe("importCampaignBundle", () => {
     await expect(importCampaignBundle(bundleFile())).rejects.toThrow(
       /bundle exceeds maximum upload size/,
     );
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to a language-NEUTRAL status on a bodyless failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 504 })));
+    await expect(importCampaignBundle(bundleFile())).rejects.toThrow(/^HTTP 504$/);
     vi.unstubAllGlobals();
   });
 });
