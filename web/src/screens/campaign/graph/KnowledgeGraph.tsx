@@ -703,7 +703,7 @@ function ProposalReview({
   onApproved: () => void;
   onReviewed: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   // The card renders BELOW the canvas, and the canvas is up to 720px tall — so on
   // an ordinary screen clicking a ghost opened a card the GM could not see, which
   // reads as "clicking did nothing". Found by using it, not by a test.
@@ -732,7 +732,7 @@ function ProposalReview({
         {/* WHO proposed is most of the judgement: a Character NPC may only propose
             on its own linked Node, the Butler campaign-wide. */}
         <span className="gx-proposal-card__author">{resolved.agentName}</span>
-        <span className="gx-proposal-card__when">{fmtWhen(resolved.proposal)}</span>
+        <span className="gx-proposal-card__when">{fmtWhen(resolved.proposal, lang)}</span>
         <KindBadge proposal={resolved.proposal} />
       </div>
 

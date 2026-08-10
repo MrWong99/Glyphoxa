@@ -64,11 +64,12 @@ function ProposalCard({
   proposal: KnowledgeProposal;
   onReviewed: () => void;
 }) {
+  const { lang } = useI18n();
   return (
     <Card className="gx-proposal-card">
       <div className="gx-proposal-card__head">
         <span className="gx-proposal-card__author">{proposal.authoringAgentName}</span>
-        <span className="gx-proposal-card__when">{fmtWhen(proposal)}</span>
+        <span className="gx-proposal-card__when">{fmtWhen(proposal, lang)}</span>
         <KindBadge proposal={proposal} />
       </div>
 

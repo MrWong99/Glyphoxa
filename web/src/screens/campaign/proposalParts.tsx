@@ -6,7 +6,7 @@ import { Check, Sparkles, X } from "lucide-react";
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { KnowledgeProposal } from "@gen/glyphoxa/management/v1/management_pb";
-import { useI18n, type TFunc } from "@/i18n";
+import { useI18n, type Lang, type TFunc } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -22,10 +22,15 @@ import { DISPOSITION_LABEL, edgeLabel, metaOf } from "./knowledgeVocab";
 // says, or one of them quietly dropping the similarity hint, would be exactly the
 // kind of drift that rule exists to prevent.
 
-/** The proposal's timestamp, in the operator's locale. */
-export function fmtWhen(p: KnowledgeProposal): string {
+/**
+ * The proposal's timestamp, in the DISPLAY language's locale — the same language
+ * the rest of the review card speaks, rather than whatever the browser is set to.
+ * lang is threaded from the calling component; this module-level helper holds no
+ * translation of its own.
+ */
+export function fmtWhen(p: KnowledgeProposal, lang: Lang): string {
   if (!p.createdAt) return "";
-  return timestampDate(p.createdAt).toLocaleString(undefined, {
+  return timestampDate(p.createdAt).toLocaleString(lang, {
     dateStyle: "medium",
     timeStyle: "short",
   });
