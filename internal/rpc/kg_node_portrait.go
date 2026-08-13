@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -69,9 +70,11 @@ func (s *nodePortraits) GenerateNodePortrait(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid entry id"))
 	}
 	// The prompt is OPTIONAL here (the entry's own prose is the prompt), unlike
-	// the map flow where the GM's words are the only material.
+	// the map flow where the GM's words are the only material. The cap counts
+	// RUNES, matching the prompt builder's own cut — len() would reject a
+	// multibyte prompt well inside the documented limit.
 	prompt := strings.TrimSpace(req.Msg.GetPrompt())
-	if len(prompt) > maxPortraitPromptChars {
+	if utf8.RuneCountInString(prompt) > maxPortraitPromptChars {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is too long"))
 	}
 

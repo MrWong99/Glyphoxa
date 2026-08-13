@@ -760,7 +760,15 @@ function KnowledgeCard({
           footprint, so the list rhythm is unchanged. alt is empty: the name is
           right beside it, and a repeated name per row is screen-reader noise. */}
       {node.hasPortrait ? (
-        <img className="gx-kg-card__portrait" src={portraitURL(node)} alt="" />
+        // lazy/async: a big campaign renders many cards, and each portrait is an
+        // authenticated blob read server-side — off-screen rows must not stampede.
+        <img
+          className="gx-kg-card__portrait"
+          src={portraitURL(node)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+        />
       ) : (
         <span
           className="gx-kg-card__icon"

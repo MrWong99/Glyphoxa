@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -69,7 +70,9 @@ func (s *campaignMaps) GenerateMapImage(
 	if prompt == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt must not be empty"))
 	}
-	if len(prompt) > maxMapPromptChars {
+	// RUNES, matching mapgen's own cut (#590 review): len() would reject a
+	// multibyte prompt well inside the documented limit.
+	if utf8.RuneCountInString(prompt) > maxMapPromptChars {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is too long"))
 	}
 	anchor, err := optionalUUID(req.Msg.GetAnchorNodeId(), "anchor entry id")

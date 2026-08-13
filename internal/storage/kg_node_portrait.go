@@ -30,9 +30,15 @@ import (
 // write miss its stale-guard and re-embed next pass (#300) — correct, merely a
 // re-run.
 func (s *Store) SetNodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID, blobKey string) (KGNode, string, error) {
+	// FOR UPDATE in the CTE (#590 review): under READ COMMITTED a plain CTE read
+	// takes the statement snapshot, so two racing writes would both report the
+	// SAME old key — one blob deleted twice, the other leaked permanently (no
+	// row, sweep, or reconciliation ever names it again). The row lock makes the
+	// second writer's CTE wait and re-read the first writer's key.
 	row := s.db.QueryRow(ctx,
 		`WITH old AS (
-		     SELECT portrait_blob_key FROM kg_node WHERE id = $1 AND campaign_id = $2
+		     SELECT portrait_blob_key FROM kg_node
+		      WHERE id = $1 AND campaign_id = $2 FOR UPDATE
 		 )
 		 UPDATE kg_node SET portrait_blob_key = $3, updated_at = now()
 		  WHERE id = $1 AND campaign_id = $2
