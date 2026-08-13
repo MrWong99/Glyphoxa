@@ -50,6 +50,10 @@ type KGNode struct {
 	AgentID   uuid.NullUUID
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// PortraitBlobKey names the Node's portrait bytes in the blob seam (#590);
+	// empty means no portrait. Written only by SetNodePortrait — the editor
+	// mutations never touch it, so a save cannot drop a portrait.
+	PortraitBlobKey string
 	// Aspects is the Node's ordered per-fact visibility layer (#542, ADR-0008 third
 	// amendment), populated only by the reads that project it. A PROMPT-FACING read
 	// returns public Aspects ONLY — the exclusion lives in the read's SQL, so this
@@ -76,13 +80,13 @@ type NewKGNode struct {
 }
 
 const kgNodeColumns = `
-	id, campaign_id, node_type, name, body, gm_private, agent_id, created_at, updated_at`
+	id, campaign_id, node_type, name, body, gm_private, agent_id, created_at, updated_at, portrait_blob_key`
 
 func scanKGNode(row pgx.Row) (KGNode, error) {
 	var n KGNode
 	err := row.Scan(
 		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
-		&n.CreatedAt, &n.UpdatedAt,
+		&n.CreatedAt, &n.UpdatedAt, &n.PortraitBlobKey,
 	)
 	return n, err
 }
@@ -108,7 +112,7 @@ func scanKGNodeAspects(row pgx.Row) (KGNode, error) {
 	var aspects []byte
 	err := row.Scan(
 		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
-		&n.CreatedAt, &n.UpdatedAt, &aspects,
+		&n.CreatedAt, &n.UpdatedAt, &n.PortraitBlobKey, &aspects,
 	)
 	if err != nil {
 		return n, err
@@ -189,15 +193,21 @@ func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) 
 // not deleted and yields ErrNotFound — a cross-campaign delete is refused. A
 // missing id likewise yields ErrNotFound so the RPC can distinguish "gone" from
 // "never existed".
-func (s *Store) DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM kg_node WHERE id = $1 AND campaign_id = $2`, id, campaignID)
-	if err != nil {
-		return fmt.Errorf("storage: delete kg node %s: %w", id, err)
+//
+// It returns the deleted Node's portrait blob key (” when it had none) so the
+// caller can release the bytes through the seam (#590, ADR-0048) — after the
+// DELETE, nothing in the database names them, mirroring DeleteMap.
+func (s *Store) DeleteNode(ctx context.Context, campaignID, id uuid.UUID) (portraitBlobKey string, err error) {
+	row := s.db.QueryRow(ctx,
+		`DELETE FROM kg_node WHERE id = $1 AND campaign_id = $2 RETURNING portrait_blob_key`,
+		id, campaignID)
+	if err := row.Scan(&portraitBlobKey); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("storage: delete kg node %s: %w", id, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return portraitBlobKey, nil
 }
 
 // MapSeedContext returns the PUBLIC material a generated map's prompt may be
@@ -305,7 +315,7 @@ const kgFactsCap = 50
 // Node columns from `kg_node n` joined to a ranked CTE — the bare list would be
 // ambiguous.
 const kgNodeColumnsN = `
-	n.id, n.campaign_id, n.node_type, n.name, n.body, n.gm_private, n.agent_id, n.created_at, n.updated_at`
+	n.id, n.campaign_id, n.node_type, n.name, n.body, n.gm_private, n.agent_id, n.created_at, n.updated_at, n.portrait_blob_key`
 
 // AgentNodeFacts returns the edge-aware Hot Context fact set for a Character NPC
 // Agent (#133, ADR-0008 amendment): the Agent's own linked Node plus its
@@ -394,7 +404,7 @@ func scanKGNodeFact(row pgx.Row) (KGNode, error) {
 	var aspects []byte
 	err := row.Scan(
 		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
-		&n.CreatedAt, &n.UpdatedAt, &aspects, &n.RelationNote, &n.RelationDisposition,
+		&n.CreatedAt, &n.UpdatedAt, &n.PortraitBlobKey, &aspects, &n.RelationNote, &n.RelationDisposition,
 	)
 	if err != nil {
 		return n, err

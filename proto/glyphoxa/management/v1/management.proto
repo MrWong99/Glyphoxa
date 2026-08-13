@@ -251,6 +251,29 @@ service CampaignService {
   // DeletePin unpins a Node from a Map.
   rpc DeletePin(DeletePinRequest) returns (DeletePinResponse);
 
+  // ── Node portraits (#590) ─────────────────────────────────────────────────
+  // An entry's portrait rides the blob seam and is fetched over a plain HTTP
+  // mount (GET /api/v1/knowledge/nodes/{id}/portrait), never through these unary
+  // calls; a SAVED portrait's bytes travel once, on apply.
+
+  // GenerateNodePortrait draws a portrait draft for one entry from its public
+  // prose and facts, plus the GM's optional extra direction, and returns the
+  // DRAFT bytes (#590). Like GenerateMapImage it writes nothing — no row, no
+  // blob, no job — so a discarded draft leaves no trace; saving is the ordinary
+  // SetNodePortrait call with the returned bytes.
+  //
+  // It spends money, so it is a mutation (CSRF-guarded) despite storing nothing,
+  // exactly like GenerateMapImage.
+  rpc GenerateNodePortrait(GenerateNodePortraitRequest) returns (GenerateNodePortraitResponse);
+
+  // SetNodePortrait applies portrait bytes — generated or uploaded, one door for
+  // both — to an entry. The bytes are written to the blob seam FIRST, so the row
+  // never references missing bytes; a replaced portrait's old bytes are released.
+  rpc SetNodePortrait(SetNodePortraitRequest) returns (SetNodePortraitResponse);
+
+  // ClearNodePortrait removes an entry's portrait and releases its bytes.
+  rpc ClearNodePortrait(ClearNodePortraitRequest) returns (ClearNodePortraitResponse);
+
   // GetRosterReadiness returns, for every cast Agent at once, the prep signals
   // the roster dashboard grades on (#544): the SAME fact-preview seam #535 uses,
   // plus when each last spoke. ONE call for the whole roster — a per-NPC preview
@@ -1151,6 +1174,11 @@ message Node {
   // aspects is the node's ordered per-fact visibility layer (#542). On a GM read
   // it carries private aspects too; a prompt-facing read never returns them.
   repeated NodeAspect aspects = 10;
+  // has_portrait reports whether this entry HAS a portrait to fetch from
+  // GET /api/v1/knowledge/nodes/{id}/portrait (#590). The client needs to be
+  // told, because the alternative is requesting an image that isn't there and
+  // rendering the browser's broken-image glyph.
+  bool has_portrait = 11;
 }
 
 // CreateNodeRequest is the Knowledge panel's "Add entry" payload. The campaign is
@@ -1237,6 +1265,61 @@ message SearchNodesResponse {
   // nodes are the matching Knowledge Graph Nodes, ranked by relevance; gm_private
   // Nodes are included (GM-facing search).
   repeated Node nodes = 1;
+}
+
+// GenerateNodePortraitRequest asks for a portrait draft of one entry (#590).
+message GenerateNodePortraitRequest {
+  // node_id is the entry to portray; its PUBLIC prose and facts seed the
+  // prompt. A gm_private entry is refused (CodeNotFound) — a secret has no
+  // public depiction to generate, though the GM may still upload one.
+  string node_id = 1;
+  // prompt is the GM's optional extra direction ("weathered, mid-laugh").
+  // Empty is fine: the entry's own prose is the prompt.
+  string prompt = 2;
+}
+
+// GenerateNodePortraitResponse carries DRAFT bytes. They are not stored
+// anywhere: the GM previews them and either applies them through
+// SetNodePortrait or discards them.
+message GenerateNodePortraitResponse {
+  // image_bytes is the generated image.
+  bytes image_bytes = 1;
+  // content_type is its media type, for SetNodePortrait and for the preview.
+  string content_type = 2;
+  // model is what generated it, so the GM knows what they are paying for.
+  string model = 3;
+  // prompt is the FULLY COMPOSED prompt, not just what the GM typed — the
+  // entry's wiki prose is folded in, and the GM should be able to see what was
+  // actually asked for.
+  string prompt = 4;
+}
+
+// SetNodePortraitRequest applies portrait bytes — generated or uploaded — to an
+// entry. One door for both sources.
+message SetNodePortraitRequest {
+  // node_id is the entry the portrait attaches to.
+  string node_id = 1;
+  // image_bytes is the portrait image; empty is rejected.
+  bytes image_bytes = 2;
+  // content_type is its media type; must be image/*.
+  string content_type = 3;
+}
+
+// SetNodePortraitResponse carries the updated Node (has_portrait now true, and
+// updated_at is the fresh portrait-URL cache validator).
+message SetNodePortraitResponse {
+  Node node = 1;
+}
+
+// ClearNodePortraitRequest removes an entry's portrait.
+message ClearNodePortraitRequest {
+  // node_id is the entry whose portrait is removed.
+  string node_id = 1;
+}
+
+// ClearNodePortraitResponse carries the updated Node (has_portrait now false).
+message ClearNodePortraitResponse {
+  Node node = 1;
 }
 
 // GeneratePersonaRequest is the Agent editor's "Generate persona" payload

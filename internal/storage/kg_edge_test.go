@@ -160,7 +160,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	}
 
 	// Deleting Aldric cascades the remaining incident Edge (Cyra knows Aldric).
-	if err := st.DeleteNode(ctx, campaignID, aldric.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, aldric.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	outC, inC, err := st.NodeEdges(ctx, campaignID, cyra.ID)

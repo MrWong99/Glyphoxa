@@ -62,6 +62,7 @@ type campaignArchiveStore interface {
 type CampaignBlobSweeper interface {
 	CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
 	CampaignMapImageKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
+	CampaignPortraitKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
 	DeleteBlob(ctx context.Context, key string) error
 }
 
@@ -183,6 +184,12 @@ func (s *campaignArchive) DeleteCampaign(
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 		blobKeys = append(blobKeys, mapKeys...)
+		portraitKeys, err := s.campaignBlobs.CampaignPortraitKeys(ctx, id)
+		if err != nil {
+			slog.Default().Error("DeleteCampaign: list portrait keys failed", "campaign_id", id, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		blobKeys = append(blobKeys, portraitKeys...)
 	}
 
 	// The blob sweep is a DURABLE job enqueued in the delete's OWN transaction

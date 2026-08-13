@@ -361,7 +361,7 @@ func TestNodeTags(t *testing.T) {
 	}
 
 	// Deleting the entry takes its tags with it.
-	if err := st.DeleteNode(ctx, campaignID, bart.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, bart.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	left, err := st.CampaignTags(ctx, campaignID)
@@ -419,7 +419,7 @@ func TestPrepBoards(t *testing.T) {
 
 	// Deleting an ENTRY removes it from the board — a board row pointing at
 	// nothing is not a reminder.
-	if err := st.DeleteNode(ctx, campaignID, b.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, b.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	boards, _ = st.ListBoards(ctx, campaignID)

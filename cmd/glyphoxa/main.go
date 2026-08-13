@@ -40,7 +40,9 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/mixdown"
+	"github.com/MrWong99/Glyphoxa/internal/nodeportrait"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/portraitgen"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
@@ -1432,6 +1434,10 @@ func (s campaignBlobSweeper) CampaignMapImageKeys(ctx context.Context, campaignI
 	return s.store.ListCampaignMapBlobKeys(ctx, campaignID)
 }
 
+func (s campaignBlobSweeper) CampaignPortraitKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
+	return s.store.ListCampaignPortraitKeys(ctx, campaignID)
+}
+
 func (s campaignBlobSweeper) DeleteBlob(ctx context.Context, key string) error {
 	return s.blobs.Delete(ctx, key)
 }
@@ -1448,12 +1454,13 @@ func (s campaignBlobSweeper) DeleteBlob(ctx context.Context, key string) error {
 var plainMountPolicy = map[string]auth.TenantMode{
 	// The SSE relay + snapshot and the byte streams (clip/image/export) all
 	// need the caller's Tenant to scope their reads (#439): session AND tenant.
-	"GET /api/v1/sessions/{id}/events":  auth.TenantRequired,
-	"GET /api/v1/sessions/{id}":         auth.TenantRequired,
-	"GET /api/v1/highlights/{id}/clip":  auth.TenantRequired,
-	"GET /api/v1/highlights/{id}/image": auth.TenantRequired,
-	"GET /api/v1/maps/{id}/image":       auth.TenantRequired,
-	"GET /api/v1/campaigns/{id}/export": auth.TenantRequired,
+	"GET /api/v1/sessions/{id}/events":          auth.TenantRequired,
+	"GET /api/v1/sessions/{id}":                 auth.TenantRequired,
+	"GET /api/v1/highlights/{id}/clip":          auth.TenantRequired,
+	"GET /api/v1/highlights/{id}/image":         auth.TenantRequired,
+	"GET /api/v1/maps/{id}/image":               auth.TenantRequired,
+	"GET /api/v1/knowledge/nodes/{id}/portrait": auth.TenantRequired,
+	"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
 	// TenantNone: ServeImport resolves the tenant off the session itself
 	// (#291); the POST method already makes the guard demand the CSRF pair.
 	"POST /api/v1/campaigns/import": auth.TenantNone,
@@ -1566,6 +1573,10 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		WithTextCaller(assistEngine)
 	campaignSrv.SetMapGenerator(mapEngine)
 	campaignSrv.SetMapPinSuggester(mapEngine)
+	// Generated Node portraits (#590): the third image-seam consumer, sharing the
+	// SAME factory closure as Highlight enrichment and mapgen (ADR-0039 — one
+	// place for the hybrid key policy).
+	campaignSrv.SetPortraitGenerator(portraitgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log))
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
@@ -1649,6 +1660,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Campaign Map images (#538, ADR-0060): the second blob owner after Highlights,
 	// serving bytes over the same guarded plain-mount posture.
 	mapImages := worldmap.NewImageServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
+	// Node portraits (#590): the third blob owner's byte route, same guarded
+	// plain-mount posture as the Highlight clip/image and Map image serves.
+	portraits := nodeportrait.NewServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
 
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
@@ -1684,6 +1698,8 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Campaign Map images (#538, ADR-0060) — the second blob owner's byte route,
 		// same posture as the Highlight clip/image mounts.
 		"GET /api/v1/maps/{id}/image": http.HandlerFunc(mapImages.ServeImage),
+		// Node portraits (#590) — the third blob owner's byte route, same posture.
+		"GET /api/v1/knowledge/nodes/{id}/portrait": http.HandlerFunc(portraits.ServePortrait),
 		// Campaign bundle export (#290): streamed gzip download, operator-gated,
 		// session AND tenant (#439) — a foreign-tenant campaign id is 404.
 		"GET /api/v1/campaigns/{id}/export": http.HandlerFunc(bundleHandler.ServeExport),

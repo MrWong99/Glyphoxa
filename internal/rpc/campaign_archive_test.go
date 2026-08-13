@@ -162,10 +162,11 @@ func TestDeleteCampaign_HappyPath(t *testing.T) {
 // fakeClipSweeper records the blob sweep a campaign hard delete runs, per owning
 // kind so a test can tell which lister was consulted.
 type fakeClipSweeper struct {
-	keys    []string
-	mapKeys []string
-	deleted []string
-	listErr error
+	keys         []string
+	mapKeys      []string
+	portraitKeys []string
+	deleted      []string
+	listErr      error
 }
 
 func (f *fakeClipSweeper) CampaignClipKeys(context.Context, uuid.UUID) ([]string, error) {
@@ -180,6 +181,13 @@ func (f *fakeClipSweeper) CampaignMapImageKeys(context.Context, uuid.UUID) ([]st
 		return nil, f.listErr
 	}
 	return f.mapKeys, nil
+}
+
+func (f *fakeClipSweeper) CampaignPortraitKeys(context.Context, uuid.UUID) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.portraitKeys, nil
 }
 
 func (f *fakeClipSweeper) DeleteBlob(_ context.Context, key string) error {

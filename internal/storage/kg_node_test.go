@@ -138,7 +138,7 @@ func TestKGNodeDelete(t *testing.T) {
 		t.Fatalf("CreateNode: %v", err)
 	}
 
-	if err := st.DeleteNode(ctx, campaignID, created.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, created.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	nodes, err := st.ListNodes(ctx, campaignID)
@@ -149,10 +149,10 @@ func TestKGNodeDelete(t *testing.T) {
 		t.Errorf("node not deleted: %+v", nodes)
 	}
 
-	if err := st.DeleteNode(ctx, campaignID, created.ID); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.DeleteNode(ctx, campaignID, created.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("second DeleteNode err = %v, want ErrNotFound", err)
 	}
-	if err := st.DeleteNode(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.DeleteNode(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteNode unknown id err = %v, want ErrNotFound", err)
 	}
 }
@@ -211,7 +211,7 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 	}
 
 	// Delete the Location; only the (private) Faction remains.
-	if err := st.DeleteNode(ctx, campaignID, loc.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, loc.ID); err != nil {
 		t.Fatalf("DeleteNode location: %v", err)
 	}
 	all, err := st.ListNodes(ctx, campaignID)
@@ -253,7 +253,7 @@ func TestKGNodeMutationsAreCampaignScoped(t *testing.T) {
 		t.Fatalf("cross-campaign UpdateNode = %v, want ErrNotFound", err)
 	}
 	// Delete scoped to campaign B must refuse and leave the row.
-	if err := st.DeleteNode(ctx, campaignB, node.ID); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.DeleteNode(ctx, campaignB, node.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("cross-campaign DeleteNode = %v, want ErrNotFound", err)
 	}
 

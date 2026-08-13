@@ -611,18 +611,19 @@ func (f *fakeKGNodeStore) UpdateNode(_ context.Context, u storage.KGNodeUpdate) 
 	return storage.KGNode{}, storage.ErrNotFound
 }
 
-func (f *fakeKGNodeStore) DeleteNode(_ context.Context, campaignID, id uuid.UUID) error {
+func (f *fakeKGNodeStore) DeleteNode(_ context.Context, campaignID, id uuid.UUID) (string, error) {
 	f.deleteNodeCampaign = campaignID
 	if f.nodeDeleteErr != nil {
-		return f.nodeDeleteErr
+		return "", f.nodeDeleteErr
 	}
 	for i := range f.nodes {
 		if f.nodes[i].ID == id {
+			key := f.nodes[i].PortraitBlobKey
 			f.nodes = append(f.nodes[:i], f.nodes[i+1:]...)
-			return nil
+			return key, nil
 		}
 	}
-	return storage.ErrNotFound
+	return "", storage.ErrNotFound
 }
 
 func (f *fakeKGNodeStore) SearchNodes(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
