@@ -171,7 +171,7 @@ export function Session({
 } = {}) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
-  const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
+  const { data, isPending: sessionPending } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
   // retry:false matches every other observer of this shared cache entry (the
   // topbar switcher, Configuration): a fresh install's CodeNotFound settles at
   // once whichever observer triggers the fetch, instead of retry semantics
@@ -424,6 +424,12 @@ export function Session({
       if (dlLine || dlHighlight) onDeepLinkHandled?.();
       return;
     }
+    // Wait for getSession to settle (#591 review): before currentId is known, a
+    // deep link to the LIVE session would compare against null and view it as
+    // an explicit past session — a flash of past-session UI and a redundant
+    // snapshot fetch. The params persist until handled, so this re-runs once
+    // the read settles (success or error) and applies exactly once.
+    if (sessionPending) return;
     if (dlLine) {
       openHit(dlSession, dlLine);
     } else {
@@ -433,10 +439,11 @@ export function Session({
       setFocusHighlight({ sessionId: dlSession, highlightId: dlHighlight });
     }
     onDeepLinkHandled?.();
-    // The params are the triggers; the handlers are stable seams. currentId is
-    // deliberately NOT a trigger: re-running on its load would double-apply.
+    // The params (+ the settle gate) are the triggers; the handlers are stable
+    // seams. currentId is deliberately NOT a trigger: re-running on a later
+    // session change would double-apply.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dlSession, dlLine, dlHighlight]);
+  }, [dlSession, dlLine, dlHighlight, sessionPending]);
 
   // Failed transcript snapshot (#270 finding 4, extended to the current session):
   // a DB-backed snapshot fetch that errors must NOT masquerade as the empty state —

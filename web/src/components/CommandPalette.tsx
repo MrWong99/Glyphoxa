@@ -63,10 +63,12 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
 
   // Ctrl/Cmd+K toggles anywhere in the app (the palette mounts in AppShell, so
   // "anywhere" is every authenticated screen). preventDefault beats the
-  // browser's own address-bar focus shortcut.
+  // browser's own address-bar focus shortcut. The chord is EXACT — no
+  // shift/alt — so Ctrl+Shift+K (Firefox's web console) and friends stay the
+  // browser's (#591 review).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setOpen((o) => !o);
       }

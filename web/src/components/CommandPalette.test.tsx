@@ -136,6 +136,14 @@ describe("CommandPalette (#591)", () => {
     expect(screen.getByTestId("command-palette")).toBeInTheDocument();
   });
 
+  it("leaves modified chords to the browser (Ctrl+Shift+K stays the devtools console)", () => {
+    renderPalette();
+    fireEvent.keyDown(document, { key: "K", ctrlKey: true, shiftKey: true });
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true, altKey: true });
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+  });
+
   it("searches all three sources (debounced) and renders the grouped results", async () => {
     const calls: string[] = [];
     renderPalette(searchTransport({ calls }));

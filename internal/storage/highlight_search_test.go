@@ -12,8 +12,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// seedHighlight inserts one highlight row with the given status and text.
-func seedHighlight(t *testing.T, st *storage.Store, tenantID, campaignID, vsID uuid.UUID, status, excerpt, reason string, startsAt time.Time) uuid.UUID {
+// seedSearchHighlight inserts one highlight row with the given status and text.
+func seedSearchHighlight(t *testing.T, st *storage.Store, tenantID, campaignID, vsID uuid.UUID, status, excerpt, reason string, startsAt time.Time) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if err := st.CreateHighlight(context.Background(), storage.Highlight{
@@ -45,12 +45,12 @@ func TestSearchPromotedHighlights(t *testing.T) {
 
 	// Promoted rows: the term in the excerpt (weight A) must outrank the term
 	// only in the reason (weight B).
-	inExcerpt := seedHighlight(t, st, tenantID, campaignID, vs.ID,
+	inExcerpt := seedSearchHighlight(t, st, tenantID, campaignID, vs.ID,
 		storage.HighlightPromoted, "the dragon hoard negotiation", "table erupted", at)
-	inReason := seedHighlight(t, st, tenantID, campaignID, vs.ID,
+	inReason := seedSearchHighlight(t, st, tenantID, campaignID, vs.ID,
 		storage.HighlightPromoted, "an unrelated moment", "everyone chanted dragon dragon", at.Add(time.Minute))
 	// A matching CANDIDATE must never surface (GM curation stays private).
-	seedHighlight(t, st, tenantID, campaignID, vs.ID,
+	seedSearchHighlight(t, st, tenantID, campaignID, vs.ID,
 		storage.HighlightCandidate, "the dragon candidate moment", "pending review", at.Add(2*time.Minute))
 
 	got, err := st.SearchPromotedHighlights(ctx, tenantID, campaignID, "dragon", 10)
@@ -77,7 +77,7 @@ func TestSearchPromotedHighlights(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVoiceSession (other): %v", err)
 	}
-	seedHighlight(t, st, tenantID, otherCampaign, otherVS.ID,
+	seedSearchHighlight(t, st, tenantID, otherCampaign, otherVS.ID,
 		storage.HighlightPromoted, "the dragon hoard negotiation", "identical text", at)
 
 	got, err = st.SearchPromotedHighlights(ctx, tenantID, campaignID, "dragon", 10)

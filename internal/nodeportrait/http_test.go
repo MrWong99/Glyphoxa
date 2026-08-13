@@ -143,6 +143,14 @@ func TestPortrait_ServesTheBytes(t *testing.T) {
 	if lm := rr.Header().Get("Last-Modified"); lm == "" {
 		t.Error("no Last-Modified — updated_at is the cache validator and must be served")
 	}
+	// User-supplied bytes served same-origin never execute (#591 review): the
+	// declared type is pinned and a scriptable document is CSP-neutered.
+	if v := rr.Header().Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", v)
+	}
+	if v := rr.Header().Get("Content-Security-Policy"); v == "" {
+		t.Error("no Content-Security-Policy on a user-content byte response")
+	}
 }
 
 // TestPortrait_ANodeWithNoPortraitIs404: most Nodes carry no portrait, and

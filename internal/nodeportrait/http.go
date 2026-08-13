@@ -47,7 +47,10 @@ type Server struct {
 }
 
 // NewServer wraps the portrait store, the blob seam and the Active-Campaign
-// resolver. A nil resolver disables campaign scoping (tenant-only).
+// resolver. A nil resolver FAILS CLOSED: with no way to resolve a campaign,
+// every request answers 404 (resolveCampaign reports no campaign) — there is
+// no tenant-only serving mode (#591 review: the doc used to promise one the
+// code never had).
 func NewServer(store PortraitStore, blobs blob.Store, resolve CampaignResolver, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
@@ -132,6 +135,13 @@ func (s *Server) ServePortrait(w http.ResponseWriter, req *http.Request) {
 	if meta.ContentType != "" {
 		w.Header().Set("Content-Type", meta.ContentType)
 	}
+	// Defence in depth for user-supplied bytes served same-origin (#591 review):
+	// uploads are allowlisted to raster types, but a blob stored before that
+	// allowlist (or through any future writer) must still never execute. nosniff
+	// pins the declared type; the CSP neuters a scriptable document (SVG) if one
+	// is ever opened directly.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	// A portrait is immutable for a given row version: a replace writes a NEW
 	// blob key. updated_at is therefore a sound validator and lets the browser
 	// cache the image across list re-renders.

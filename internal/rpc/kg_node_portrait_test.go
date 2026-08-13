@@ -248,6 +248,12 @@ func TestSetNodePortrait_RejectsNonImagesBeforeTheSeam(t *testing.T) {
 		"not an image": {
 			NodeId: node.ID.String(), ImageBytes: []byte("<svg onload=alert(1)>"), ContentType: "text/html",
 		},
+		// image/* is not enough (#591 review): SVG is scriptable, and the portrait
+		// mount serves the stored type same-origin — accepting it would be stored
+		// XSS. The allowlist is raster-only.
+		"scriptable svg": {
+			NodeId: node.ID.String(), ImageBytes: []byte("<svg onload=alert(1)/>"), ContentType: "image/svg+xml",
+		},
 	} {
 		_, err := client.SetNodePortrait(context.Background(), connect.NewRequest(req))
 		if connect.CodeOf(err) != connect.CodeInvalidArgument {
