@@ -40,6 +40,18 @@ session and does not belong to any running session's meter. Its metering posture
 This is additive: the live-session meter, caps, gate, and `SpendCapReached`
 mechanics are unchanged.
 
+## Amendment (2026-08-13, #592 Butler planning chat)
+
+The Butler planning chat (ADR-0062) is the second off-session LLM consumer
+after Recap, and it extends the posture above in one respect: each chat
+exchange builds the same caps-free `spend.NewMeter(spend.Caps{}, …)` teed via
+`observe.TeeUsage` and is **metered per exchange with Tenant attribution**,
+but — unlike Recap — it **is gated**: the ADR-0055 monthly allowance gate is
+checked before each exchange on platform keys. That gate is ADR-0055's
+mechanism reading the Usage Ledger, not this ADR's live cap: the soft/hard-cap
+mechanics, `AllowTurn`, and `SpendCapReached` remain exclusively the running
+Voice Session's concern, unchanged.
+
 ## Relationship to other ADRs
 
 ADR-0004 (amendment is the spec this implements), ADR-0045 (usage capture points), ADR-0043 (close seam + end_reason prefixes), ADR-0032 (no session labels), ADR-0020/0014/0039 (event + SSE + screen surface).
