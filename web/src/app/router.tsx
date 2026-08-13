@@ -4,6 +4,7 @@ import {
   createRouter,
   redirect,
   Outlet,
+  useNavigate,
 } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/AppShell";
@@ -118,23 +119,59 @@ const tenantIndexRoute = createRoute({
   },
 });
 
+// ScreenSearch is the deep-link vocabulary the command palette navigates with
+// (#591): the Campaign screen consumes view+node (open the Knowledge panel on
+// an entry), the Session screen consumes session+line (view a Voice Session and
+// jump to a transcript Line — the pair, never the line alone: line ids restart
+// per session) and session+highlight (scroll the Highlights strip to a row).
+// Screens consume the params once and then STRIP them (replace, no history
+// entry), so a later palette jump with the same target re-fires and a copied
+// URL acts once instead of pinning the screen.
+export type ScreenSearch = {
+  view?: string;
+  node?: string;
+  session?: string;
+  line?: string;
+  highlight?: string;
+};
+
+const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+
 // /t/:tenantSlug/:screen — selects the active screen. Configuration and Campaign
 // are live on their RPCs; Session renders a styled placeholder.
 const screenRoute = createRoute({
   getParentRoute: () => tenantRoute,
   path: "$screen",
+  validateSearch: (search: Record<string, unknown>): ScreenSearch => ({
+    view: str(search.view),
+    node: str(search.node),
+    session: str(search.session),
+    line: str(search.line),
+    highlight: str(search.highlight),
+  }),
   component: function Screen() {
-    const { screen } = screenRoute.useParams();
+    const { screen, tenantSlug } = screenRoute.useParams();
+    const search = screenRoute.useSearch();
+    const navigate = useNavigate();
     // useI18n is called unconditionally (hook rules) even though only the
     // notFound branch renders localized copy of its own.
     const { t } = useI18n();
+    // Consume-then-strip: the screen applies the deep link, then this replaces
+    // the URL without the params so the state isn't sticky (see ScreenSearch).
+    const clearDeepLink = () =>
+      void navigate({
+        to: "/t/$tenantSlug/$screen",
+        params: { tenantSlug, screen },
+        search: {},
+        replace: true,
+      });
     switch (screen) {
       case "configuration":
         return <Configuration />;
       case "campaign":
-        return <Campaign />;
+        return <Campaign deepLink={search} onDeepLinkHandled={clearDeepLink} />;
       case "session":
-        return <Session />;
+        return <Session deepLink={search} onDeepLinkHandled={clearDeepLink} />;
       default:
         return <Placeholder title={t("auth.notFoundTitle")} />;
     }

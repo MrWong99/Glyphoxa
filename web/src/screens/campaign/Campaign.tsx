@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -46,7 +46,18 @@ function isButler(a: Agent): boolean {
   return a.role === "butler";
 }
 
-export function Campaign() {
+// CampaignDeepLink is the palette's arrival vocabulary (#591): view selects a
+// sub-view, node opens the Knowledge panel focused on that entry. Both optional;
+// the route strips the params after onDeepLinkHandled so nothing is sticky.
+export type CampaignDeepLink = { view?: string; node?: string };
+
+export function Campaign({
+  deepLink,
+  onDeepLinkHandled,
+}: {
+  deepLink?: CampaignDeepLink;
+  onDeepLinkHandled?: () => void;
+} = {}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.getCampaignRoster, {});
@@ -75,6 +86,31 @@ export function Campaign() {
   // The entry a readiness mark asked to open, handed to the Knowledge panel so
   // "Entry has content" lands ON that entry instead of dumping the GM on the list.
   const [focusNodeID, setFocusNodeID] = useState<string | null>(null);
+
+  // Palette deep link (#591): ?node=… opens the Knowledge panel focused on that
+  // entry (the RosterPrep onOpenNode path — KnowledgePanel resolves the id once
+  // its list loads); a bare ?view=… just selects the sub-view. Consumed once,
+  // then onDeepLinkHandled strips the params so the URL doesn't pin the view.
+  const dlView = deepLink?.view;
+  const dlNode = deepLink?.node;
+  useEffect(() => {
+    if (!dlView && !dlNode) return;
+    if (dlNode) {
+      setFocusNodeID(dlNode);
+      setView("knowledge");
+    } else if (
+      dlView === "cast" ||
+      dlView === "knowledge" ||
+      dlView === "maps" ||
+      dlView === "players" ||
+      dlView === "proposals"
+    ) {
+      setView(dlView);
+    }
+    onDeepLinkHandled?.();
+    // onDeepLinkHandled is a stable route-level callback; the params are the triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlView, dlNode]);
 
   // Creating a Character NPC auto-creates its wiki entry, and deleting one
   // unlinks that entry (ADR-0008 second amendment) — both are Knowledge Graph

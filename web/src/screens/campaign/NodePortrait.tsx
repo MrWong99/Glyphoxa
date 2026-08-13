@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
+import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { ImagePlus, Sparkles, Trash2 } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
@@ -18,9 +19,11 @@ import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 /** portraitURL builds the plain-mount image URL. updatedAt is the server's cache
  * validator: an applied portrait bumps it, so the browser refetches exactly when
- * the picture actually changed. */
+ * the picture actually changed. Millisecond grain (#591 review): whole seconds
+ * let two applies inside one second share a URL — the browser then revalidates
+ * against an unchanged same-second Last-Modified and keeps the stale image. */
 export const portraitURL = (node: Node) =>
-  `/api/v1/knowledge/nodes/${node.id}/portrait?v=${node.updatedAt ? Number(node.updatedAt.seconds) : 0}`;
+  `/api/v1/knowledge/nodes/${node.id}/portrait?v=${node.updatedAt ? Number(timestampMs(node.updatedAt)) : 0}`;
 
 export function NodePortrait({ node }: { node: Node }) {
   const { t } = useI18n();

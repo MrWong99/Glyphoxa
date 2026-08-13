@@ -13,6 +13,7 @@ import * as common from "./messages/common";
 import * as components from "./messages/components";
 import * as configuration from "./messages/configuration";
 import * as knowledge from "./messages/knowledge";
+import * as palette from "./messages/palette";
 import * as session from "./messages/session";
 import * as shell from "./messages/shell";
 
@@ -30,6 +31,7 @@ export const en = {
   ...configuration.en,
   ...campaign.en,
   ...knowledge.en,
+  ...palette.en,
   ...session.en,
   ...auth.en,
 } as const;
@@ -46,6 +48,7 @@ const de: Record<MessageKey, string> = {
   ...configuration.de,
   ...campaign.de,
   ...knowledge.de,
+  ...palette.de,
   ...session.de,
   ...auth.de,
 };

@@ -68,6 +68,22 @@ var sttPricePerHour = map[observe.Provider]float64{
 	observe.ProviderElevenLabs: 0.40,
 }
 
+// embeddingPricePerMTok are the known per-1M-token embeddings rates (USD),
+// keyed by provider alone — v1.0's only embeddings provider is local Ollama
+// (ADR-0011), which costs nothing per call; the OpenAI slot gets its own entry
+// when that adapter lands (ADR-0004). ESTIMATES, consumed by the campaign
+// search query-embed pricing (#591).
+var embeddingPricePerMTok = map[observe.Provider]float64{
+	// Ollama runs the deployment's own hardware — no per-token vendor charge.
+	observe.ProviderOllama: 0.0,
+}
+
+// defaultEmbeddingPerMTok is the conservative fallback for an unknown embeddings
+// provider: above OpenAI's text-embedding-3-large (~$0.13 / 1M tokens, captured
+// 2026-08-13) so an unpriced provider over-estimates, matching the LLM/TTS/STT
+// fallback posture. ESTIMATE.
+const defaultEmbeddingPerMTok = 0.25
+
 // Conservative fallbacks for an unknown price key: high enough that an unpriced
 // provider/model over-estimates rather than running unbounded under a cap. All
 // ESTIMATES.
@@ -103,6 +119,22 @@ func EstimateTTSUSD(provider observe.Provider, chars int) float64 {
 func EstimateSTTUSD(provider observe.Provider, d time.Duration) float64 {
 	usd, _ := sttCostUSD(provider, d)
 	return usd
+}
+
+// EstimateEmbeddingUSD estimates the USD cost of tokens submitted to an
+// embeddings provider — the campaign search query-embed pricing (#591). It is a
+// direct estimate rather than a Meter capture point: the ADR-0045 usage trio
+// (LLM/TTS/STT) carries no embeddings kind, ADR-0046 caps are live-session-only
+// (a palette query is never cap-gated), and the off-session ledger flush is the
+// #592 ADR's open decision — so the caller logs this figure, PriceOnly-style,
+// and nothing else consumes it yet. An unknown provider uses the conservative
+// default (over-estimates, mirroring the other price fallbacks).
+func EstimateEmbeddingUSD(provider observe.Provider, tokens int) float64 {
+	p, ok := embeddingPricePerMTok[provider]
+	if !ok {
+		p = defaultEmbeddingPerMTok
+	}
+	return float64(tokens) / 1e6 * p
 }
 
 // llmCostUSD estimates the USD cost of one completion's tokens. known is false

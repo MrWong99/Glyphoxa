@@ -2170,6 +2170,30 @@ service SessionService {
   rpc SearchTranscriptLines(SearchTranscriptLinesRequest) returns (SearchTranscriptLinesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // SearchTranscripts is the Campaign-wide transcript search behind the Ctrl+K
+  // palette (#591): semantic ANN over the Transcript Chunk embeddings (ADR-0011)
+  // when an embeddings provider is wired — the query embedding is priced and
+  // logged, never cap-gated (the mapgen off-session posture, ADR-0045/0046) —
+  // degrading to the keyword Line search (the SearchTranscriptLines query path)
+  // when none is, or when the embed fails; semantic=false lets the palette say so
+  // honestly instead of silently changing meaning. The Campaign is resolved
+  // server-side exactly like SearchTranscriptLines — never a client-supplied id.
+  // An empty/whitespace query is CodeInvalidArgument; no Active Campaign yields
+  // an empty result (never-run state, not an error). It is a read
+  // (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc SearchTranscripts(SearchTranscriptsRequest) returns (SearchTranscriptsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SearchHighlights returns the Active Campaign's PROMOTED Highlights whose
+  // excerpt or reason matches the query, ranked by relevance (#591). Candidates
+  // are deliberately excluded: a Highlight Candidate is not yet a Highlight
+  // (CONTEXT.md) and GM curation stays inside the session-end review (ADR-0051).
+  // Tenant- AND Campaign-scoped server-side like every Highlight read. An
+  // empty/whitespace query is CodeInvalidArgument; no Active Campaign yields an
+  // empty result. It is a read (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc SearchHighlights(SearchHighlightsRequest) returns (SearchHighlightsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   // ListSessions returns the operator's past Voice Sessions for the resolved
   // Active Campaign, newest-first (started_at DESC, id DESC), capped at a fixed
   // server limit (#270). It backs the Session screen's past-session picker: the
@@ -2424,6 +2448,78 @@ message SearchTranscriptLinesRequest {
 message SearchTranscriptLinesResponse {
   // lines are the matching transcript Lines, ranked by relevance.
   repeated TranscriptLineMatch lines = 1;
+}
+
+// SearchTranscriptsRequest carries the raw palette query; the Campaign is
+// resolved server-side (#591). An empty/whitespace query is CodeInvalidArgument.
+message SearchTranscriptsRequest {
+  // query is the raw search text: semantic mode embeds it, the keyword degrade
+  // path tsquery-sanitizes it.
+  string query = 1;
+}
+
+// TranscriptSearchHit is one Campaign transcript search hit (#591): the snippet
+// to render plus the {session, line} pair the web deep-links with. Relay line
+// ids RESTART per session ("u:<n>"/"a:<turn>"), so the PAIR is the key — never
+// the line id alone.
+message TranscriptSearchHit {
+  // voice_session_id is the Voice Session the hit belongs to.
+  string voice_session_id = 1;
+  // line_id anchors the hit in the Session screen's transcript. For a semantic
+  // chunk hit it is the first Line at/after the chunk's start; empty when no
+  // Line resolves (the palette then opens the session unscrolled).
+  string line_id = 2;
+  // who is the keyword hit's speaker display name; empty for a semantic chunk
+  // hit (a chunk spans speakers — its snippet carries the names inline).
+  string who = 3;
+  // kind is gm|player|npc|butler for a keyword hit; empty for a chunk hit.
+  string kind = 4;
+  // at is the hit's session-date context: the Line's timestamp (keyword) or the
+  // chunk's started_at (semantic).
+  google.protobuf.Timestamp at = 5;
+  // snippet is the matched text, truncated server-side: the Line's text
+  // (keyword) or the chunk's joined utterances (semantic).
+  string snippet = 6;
+}
+
+// SearchTranscriptsResponse carries the hits plus which strategy served them.
+message SearchTranscriptsResponse {
+  // semantic is true when the hits came from the embeddings ANN over Transcript
+  // Chunks; false when the search degraded to the keyword Line path (no
+  // embeddings provider wired, or the embed failed) — the palette surfaces the
+  // degraded mode honestly rather than silently changing meaning (#591).
+  bool semantic = 1;
+  // hits are the matches, best-first (ANN distance or ts_rank).
+  repeated TranscriptSearchHit hits = 2;
+}
+
+// SearchHighlightsRequest carries the raw palette query; the Campaign is
+// resolved server-side (#591). An empty/whitespace query is CodeInvalidArgument.
+message SearchHighlightsRequest {
+  // query is the raw keyword search over promoted Highlights' excerpt + reason.
+  string query = 1;
+}
+
+// HighlightSearchHit is one promoted-Highlight search hit (#591): enough to
+// render a palette row and deep-link (session + highlight id) without a
+// follow-up fetch.
+message HighlightSearchHit {
+  // id is the Highlight's UUID.
+  string id = 1;
+  // voice_session_id is the Voice Session the Highlight was clipped from.
+  string voice_session_id = 2;
+  // excerpt is the caption-worthy transcript text of the moment.
+  string excerpt = 3;
+  // reason is the classifier's one-line justification.
+  string reason = 4;
+  // starts_at is when the moment happened — the session-date context.
+  google.protobuf.Timestamp starts_at = 5;
+}
+
+// SearchHighlightsResponse carries the matching promoted Highlights in rank order.
+message SearchHighlightsResponse {
+  // hits are the matches, ranked by relevance then newest-first.
+  repeated HighlightSearchHit hits = 1;
 }
 
 // VoiceSession is the wire view of a voice_sessions row (#72): the Bot's
