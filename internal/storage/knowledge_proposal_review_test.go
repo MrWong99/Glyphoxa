@@ -500,7 +500,7 @@ func TestApproveFactSubjectDeletedBeforeApprove(t *testing.T) {
 	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
 		V: kgvocab.ProposalWriteVersion, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
 	})
-	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 
@@ -953,7 +953,7 @@ func TestDeleteNodeCascadesAspects(t *testing.T) {
 
 	node := mkNode(t, st, campaignID, storage.KGNodeNote, "Doomed")
 	setAspects(t, st, campaignID, node.ID, storage.NewKGNodeAspect{Key: "Note", Value: "about to vanish"})
-	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	if got := nodeAspects(t, st, campaignID, node.ID); len(got) != 0 {

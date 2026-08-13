@@ -87,7 +87,7 @@ func TestMapPinLifecycle(t *testing.T) {
 
 	// Deleting the Node removes its Pins — a position with nothing at it is not
 	// information.
-	if err := st.DeleteNode(ctx, campaignID, inn.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, inn.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	for _, m := range []storage.CampaignMap{city, tavern} {
@@ -347,7 +347,7 @@ func TestMapAnchorNodeDelete(t *testing.T) {
 	}
 
 	// Deleting the anchor Node must succeed, not fail on a NOT NULL campaign_id.
-	if err := st.DeleteNode(ctx, campaignID, town.ID); err != nil {
+	if _, err := st.DeleteNode(ctx, campaignID, town.ID); err != nil {
 		t.Fatalf("DeleteNode on an anchored map: %v", err)
 	}
 

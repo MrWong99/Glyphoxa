@@ -122,6 +122,28 @@ export const en = {
   "knowledge.saveEntry": "Save entry",
   "knowledge.deleteError": "Couldn't delete: {message}",
 
+  // ---- Portrait (#590) ----
+  "knowledge.portraitLabel": "Portrait",
+  "knowledge.portraitHint": "A picture for this entry — generated from its own prose, or uploaded.",
+  "knowledge.portraitPrivateHint":
+    "GM-only entries can't seed a generated portrait — upload a picture instead.",
+  "knowledge.portraitAlt": "Portrait of {name}",
+  "knowledge.portraitPromptLabel": "Extra direction (optional)",
+  "knowledge.portraitPromptPlaceholder": "e.g. mid-laugh, holding a tankard",
+  "knowledge.portraitPromptHint":
+    "Each run costs one image generation. Nothing is saved until you press Use portrait.",
+  "knowledge.generatePortrait": "Generate portrait",
+  "knowledge.generatePortraitPending": "Generating…",
+  "knowledge.regeneratePortrait": "Regenerate",
+  "knowledge.portraitDraftAlt": "Generated portrait draft",
+  "knowledge.applyPortrait": "Use portrait",
+  "knowledge.discardPortraitDraft": "Discard",
+  "knowledge.uploadPortrait": "Upload",
+  "knowledge.uploadPortraitAria": "Upload a portrait image",
+  "knowledge.removePortrait": "Remove",
+  "knowledge.generatePortraitError": "Couldn't generate: {message}",
+  "knowledge.portraitError": "Couldn't update the portrait: {message}",
+
   // ---- Connections (relations editor) ----
   "knowledge.voicedByLabel": "Voiced by",
   "knowledge.noneOption": "— None —",
@@ -396,6 +418,29 @@ export const de: Record<keyof typeof en, string> = {
     "Nur-für-GM-Einträge bleiben für dich durchsuchbar und erreichen nie den Spieltisch.",
   "knowledge.saveEntry": "Eintrag speichern",
   "knowledge.deleteError": "Löschen fehlgeschlagen: {message}",
+
+  // ---- Portrait (#590) ----
+  "knowledge.portraitLabel": "Porträt",
+  "knowledge.portraitHint":
+    "Ein Bild für diesen Eintrag — aus seinem eigenen Text generiert oder hochgeladen.",
+  "knowledge.portraitPrivateHint":
+    "Nur-SL-Einträge können kein generiertes Porträt speisen — lade stattdessen ein Bild hoch.",
+  "knowledge.portraitAlt": "Porträt von {name}",
+  "knowledge.portraitPromptLabel": "Zusätzliche Wünsche (optional)",
+  "knowledge.portraitPromptPlaceholder": "z. B. lachend, mit einem Humpen",
+  "knowledge.portraitPromptHint":
+    "Jeder Lauf kostet eine Bildgenerierung. Gespeichert wird erst mit „Porträt übernehmen“.",
+  "knowledge.generatePortrait": "Porträt generieren",
+  "knowledge.generatePortraitPending": "Generiere …",
+  "knowledge.regeneratePortrait": "Neu generieren",
+  "knowledge.portraitDraftAlt": "Generierter Porträt-Entwurf",
+  "knowledge.applyPortrait": "Porträt übernehmen",
+  "knowledge.discardPortraitDraft": "Verwerfen",
+  "knowledge.uploadPortrait": "Hochladen",
+  "knowledge.uploadPortraitAria": "Ein Porträtbild hochladen",
+  "knowledge.removePortrait": "Entfernen",
+  "knowledge.generatePortraitError": "Generieren fehlgeschlagen: {message}",
+  "knowledge.portraitError": "Porträt konnte nicht aktualisiert werden: {message}",
 
   "knowledge.voicedByLabel": "Gesprochen von",
   "knowledge.noneOption": "— Niemand —",

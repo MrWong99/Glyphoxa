@@ -45,6 +45,7 @@ type CampaignServer struct {
 	*agentRoster
 	*characterRoster
 	*kgNodes
+	*nodePortraits
 	*kgEdges
 	*kgGraph
 	*kgAppearances
@@ -76,6 +77,9 @@ type CampaignStores struct {
 	Characters characterStore
 	// KGNodes backs the Knowledge Graph Node CRUD + wiki search (#126, #131).
 	KGNodes kgNodeStore
+	// Portraits backs the Node portrait apply/clear surface (#590); the drafting
+	// engine itself is wired separately via SetPortraitGenerator.
+	Portraits nodePortraitStore
 	// KGEdges backs the Knowledge Graph Edge CRUD + the voiced-by link (#132).
 	KGEdges kgEdgeStore
 	// KGGraph backs the whole-graph read the Graph view renders (#534).
@@ -115,6 +119,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		Agents:        s,
 		Characters:    s,
 		KGNodes:       s,
+		Portraits:     s,
 		KGEdges:       s,
 		KGGraph:       s,
 		KGAppearances: s,
@@ -140,6 +145,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		agentRoster:        &agentRoster{store: stores.Agents, active: active},
 		characterRoster:    &characterRoster{store: stores.Characters, active: active},
 		kgNodes:            &kgNodes{store: stores.KGNodes, active: active},
+		nodePortraits:      &nodePortraits{store: stores.Portraits, active: active, tenant: auth.TenantID},
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
 		kgGraph:            &kgGraph{store: stores.KGGraph, active: active},
 		kgAppearances:      &kgAppearances{store: stores.KGAppearances, active: active},
@@ -155,12 +161,16 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 // compile-time assertion that CampaignServer satisfies the generated handler.
 var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 
-// SetBlobs wires the blob seam Map images ride (ADR-0048, #538). It is a
-// post-construction hook like SetSessions/SetAssist because the seam is built by
-// the composition root alongside the store, and a nil seam simply makes the map
-// WRITE paths report unavailable — the read paths never touch it.
+// SetBlobs wires the blob seam Map images and Node portraits ride (ADR-0048,
+// #538, #590). It is a post-construction hook like SetSessions/SetAssist
+// because the seam is built by the composition root alongside the store, and a
+// nil seam simply makes the WRITE paths report unavailable — the read paths
+// never touch it. The node-delete path also releases the deleted entry's
+// portrait bytes through it.
 func (s *CampaignServer) SetBlobs(blobs blob.Store) {
-	s.blobs = blobs
+	s.campaignMaps.blobs = blobs
+	s.nodePortraits.blobs = blobs
+	s.kgNodes.blobs = blobs
 }
 
 // SetSessions wires the live Voice Session source the Active Campaign resolution
@@ -216,13 +226,19 @@ func (s *CampaignServer) SetEmbedder(e Embedder) {
 // before serving; nil leaves GenerateMapImage / SuggestMapPins reporting
 // CodeUnavailable, which is the honest answer for a deployment with no image
 // provider — the Maps tab still uploads.
-func (s *CampaignServer) SetMapGenerator(g MapGenerator) { s.gen = g }
+func (s *CampaignServer) SetMapGenerator(g MapGenerator) { s.campaignMaps.gen = g }
 
 // SetMapPinSuggester wires the "which entries belong on this map" engine (#541).
 // Separate from SetMapGenerator because they need different providers — an image
 // model and a text model — and a deployment can legitimately have one and not the
 // other.
 func (s *CampaignServer) SetMapPinSuggester(g MapPinSuggester) { s.suggest = g }
+
+// SetPortraitGenerator wires the generated-portrait engine (#590). Called once
+// at boot before serving; nil leaves GenerateNodePortrait reporting
+// CodeUnavailable, which is the honest answer for a deployment with no image
+// provider — portraits still upload.
+func (s *CampaignServer) SetPortraitGenerator(g PortraitGenerator) { s.nodePortraits.gen = g }
 
 // SetCampaignBlobSweeper wires the blob sweep the campaign hard delete runs
 // (#308/#538): Highlight clips and Map images alike. Called once at boot before

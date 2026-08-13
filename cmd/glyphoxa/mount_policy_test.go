@@ -25,9 +25,12 @@ func TestPlainMountPolicy(t *testing.T) {
 		// Campaign Map images (#538, ADR-0060) — the second blob owner's byte route.
 		// TenantRequired like every other byte mount: the handler re-reads the
 		// injected tenant to scope its row load, and a session-only gate would 401.
-		"GET /api/v1/maps/{id}/image":       auth.TenantRequired,
-		"GET /api/v1/campaigns/{id}/export": auth.TenantRequired,
-		"POST /api/v1/campaigns/import":     auth.TenantNone,
+		"GET /api/v1/maps/{id}/image": auth.TenantRequired,
+		// Node portraits (#590) — the third blob owner's byte route, same posture
+		// for the same reason.
+		"GET /api/v1/knowledge/nodes/{id}/portrait": auth.TenantRequired,
+		"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
+		"POST /api/v1/campaigns/import":             auth.TenantNone,
 	}
 	if !maps.Equal(plainMountPolicy, want) {
 		t.Fatalf("plainMountPolicy drifted from the pinned #446 table:\n got  %v\n want %v\n"+

@@ -30,6 +30,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { NodePortrait, portraitURL } from "./NodePortrait";
 import { NodeRelations } from "./NodeRelations";
 import { NodeTags } from "./NodeTags";
 import { NodeAppearances } from "./NodeAppearances";
@@ -755,13 +756,28 @@ function KnowledgeCard({
   const meta = metaOf(node.nodeType);
   return (
     <Card className="gx-kg-card">
-      <span
-        className="gx-kg-card__icon"
-        style={{ color: meta.color, background: alphaBg(meta.color) }}
-        aria-hidden
-      >
-        <meta.Icon size={16} />
-      </span>
+      {/* The portrait replaces the type-icon tile when one exists (#590) — same
+          footprint, so the list rhythm is unchanged. alt is empty: the name is
+          right beside it, and a repeated name per row is screen-reader noise. */}
+      {node.hasPortrait ? (
+        // lazy/async: a big campaign renders many cards, and each portrait is an
+        // authenticated blob read server-side — off-screen rows must not stampede.
+        <img
+          className="gx-kg-card__portrait"
+          src={portraitURL(node)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+        />
+      ) : (
+        <span
+          className="gx-kg-card__icon"
+          style={{ color: meta.color, background: alphaBg(meta.color) }}
+          aria-hidden
+        >
+          <meta.Icon size={16} />
+        </span>
+      )}
       <div className="gx-kg-card__meta">
         <div className="gx-kg-card__head">
           <span className="gx-kg-card__name">{node.name}</span>
@@ -1084,6 +1100,7 @@ function EntryEditor({
         <span className="gx-field__hint">{t("knowledge.gmOnlyHint")}</span>
       </div>
 
+      {isEdit && node && <NodePortrait node={node} />}
       {isEdit && node && <NodeTags nodeID={node.id} />}
       {isEdit && node && <NodeBoards nodeID={node.id} />}
       {isEdit && node && <NodeAppearances nodeID={node.id} />}

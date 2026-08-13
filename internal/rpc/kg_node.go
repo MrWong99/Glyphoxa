@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
@@ -23,6 +24,10 @@ import (
 type kgNodes struct {
 	store  kgNodeStore
 	active *activeCampaignSource
+	// blobs releases a deleted Node's portrait bytes (#590, ADR-0048: deletion
+	// goes through the seam, not FK cascade). Nil-safe: a composition without
+	// the seam merely leaves reclaimable bytes behind.
+	blobs blob.Store
 }
 
 // kgNodeStore is the narrow KG-Node surface the module needs (#126, #131);
@@ -32,7 +37,9 @@ type kgNodeStore interface {
 	CreateNode(ctx context.Context, n storage.NewKGNode) (storage.KGNode, error)
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
-	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
+	// DeleteNode returns the deleted Node's portrait blob key ('' when it had
+	// none) so the handler can release the bytes through the seam (#590).
+	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) (portraitBlobKey string, err error)
 	// SearchNodes is the ranked fulltext wiki search (#131).
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 	// CreateNodeWithAspects and UpdateNodeWithAspects save a Node and its Aspects
@@ -255,15 +262,24 @@ func (s *kgNodes) DeleteNode(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	switch err := s.store.DeleteNode(ctx, c.ID, id); {
-	case err == nil:
-		return connect.NewResponse(&managementv1.DeleteNodeResponse{}), nil
+	portraitKey, err := s.store.DeleteNode(ctx, c.ID, id)
+	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
-	default:
+	case err != nil:
 		slog.Default().Error("DeleteNode: store delete failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
+	// A failed blob delete leaves reclaimable bytes, not a broken entry — a
+	// warning, not a failed request the GM would retry against an already-gone
+	// row. An empty key names no bytes, and deleting "" is ErrInvalidKey — a
+	// warning about leaked bytes that never existed (the DeleteMap posture).
+	if s.blobs != nil && portraitKey != "" {
+		if derr := s.blobs.Delete(ctx, portraitKey); derr != nil {
+			slog.Default().Warn("DeleteNode: could not drop portrait blob", "key", portraitKey, "err", derr)
+		}
+	}
+	return connect.NewResponse(&managementv1.DeleteNodeResponse{}), nil
 }
 
 // searchNodesLimit caps a wiki search result set (#131). It is a fixed server
@@ -317,6 +333,9 @@ func toProtoNode(n storage.KGNode) *managementv1.Node {
 		GmPrivate:  n.GMPrivate,
 		CreatedAt:  timestamppb.New(n.CreatedAt),
 		UpdatedAt:  timestamppb.New(n.UpdatedAt),
+		// The key IS the picture's existence (#590): it is minted only when bytes
+		// are written, so an empty one means there is no portrait to fetch.
+		HasPortrait: n.PortraitBlobKey != "",
 	}
 	if n.AgentID.Valid {
 		pn.AgentId = n.AgentID.UUID.String()
