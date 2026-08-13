@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -178,6 +179,31 @@ func (s *Store) SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID,
 		return nil, fmt.Errorf("storage: search transcript lines for campaign %s: %w", campaignID, err)
 	}
 	return out, nil
+}
+
+// FirstLineIDAtOrAfter returns the line_id of a Voice Session's earliest
+// Transcript Line at or after the given time — the deep-link anchor a semantic
+// Transcript Chunk search hit resolves to (#591): a chunk is the 3–6-utterance
+// retrieval grain (ADR-0011) with no line identity of its own, so the palette
+// anchors on the first Line the chunk's window covers. Ordered by (ts, seq) so
+// two Lines sharing a timestamp resolve deterministically. No Line at/after the
+// time (a chunk flushed after the last persisted Line) is ErrNotFound — the
+// caller renders the hit without a scroll target, not an error.
+func (s *Store) FirstLineIDAtOrAfter(ctx context.Context, voiceSessionID uuid.UUID, at time.Time) (string, error) {
+	var lineID string
+	err := s.db.QueryRow(ctx,
+		`SELECT line_id
+		   FROM transcript_line
+		  WHERE voice_session_id = $1 AND ts >= $2
+		  ORDER BY ts, seq
+		  LIMIT 1`, voiceSessionID, at).Scan(&lineID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("storage: first line at-or-after for session %s: %w", voiceSessionID, err)
+	}
+	return lineID, nil
 }
 
 // AgentLastSpoke is one Agent's most recent committed Transcript Line (#544).

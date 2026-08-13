@@ -156,7 +156,19 @@ function lastSummary(session: VoiceSession, t: TFunc, lang: Lang): string {
   return t("session.lastSummary", { when, duration, n: session.lineCount });
 }
 
-export function Session() {
+// SessionDeepLink is the palette's arrival vocabulary (#591): session+line
+// views a Voice Session and jumps to a transcript Line (always the PAIR — line
+// ids restart per session); session+highlight scrolls the Highlights strip to a
+// row. The route strips the params after onDeepLinkHandled.
+export type SessionDeepLink = { session?: string; line?: string; highlight?: string };
+
+export function Session({
+  deepLink,
+  onDeepLinkHandled,
+}: {
+  deepLink?: SessionDeepLink;
+  onDeepLinkHandled?: () => void;
+} = {}) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
@@ -347,13 +359,24 @@ export function Session() {
     }
   }, [pendingJump, renderedSessionId, renderedLineIds]);
 
+  // Pending highlight focus (#591): a palette Highlight hit navigates here with
+  // {session, highlight}; once the strip renders THAT session's rows it scrolls
+  // to the highlight and reports back. Keyed on session like pendingJump —
+  // highlight ids are globally unique, but the strip only lists one session.
+  const [focusHighlight, setFocusHighlight] = useState<{
+    sessionId: string;
+    highlightId: string;
+  } | null>(null);
+
   // viewSession is the ONE navigation seam: switching the viewed session ALWAYS
   // drops any queued cross-session jump, so a manual pick never inherits a stale
   // pendingJump from an earlier search click (which would surprise-scroll once that
   // session's snapshot loads, #270 finding 3). Passing null returns to current/live.
+  // The pending highlight focus is state of the same kind and drops with it.
   const viewSession = (id: string | null) => {
     setViewedId(id);
     setPendingJump(null);
+    setFocusHighlight(null);
   };
 
   // Active-Campaign switch reset (#270 finding 1): the topbar switcher sweeps the
@@ -361,10 +384,16 @@ export function Session() {
   // getSession for the NEW campaign — but viewedId/pendingJump are local state the
   // sweep can't see, so without this the PREVIOUS campaign's past session keeps
   // rendering under the new campaign's header ("silently serving the previous
-  // campaign's data" — the worst failure mode). Reset the view whenever the resolved
-  // Active Campaign id changes so a switch always lands on the new campaign's default.
+  // campaign's data" — the worst failure mode). Reset the view when the resolved
+  // Active Campaign id CHANGES from one campaign to another. The initial
+  // null→id arrival (a cold getActiveCampaign load) is deliberately not a
+  // switch: resetting there would clobber a palette deep link applied on mount
+  // (#591) for no gain — on load there is no previous campaign's state to shed.
+  const prevCampaignRef = useRef<string | null>(null);
   useEffect(() => {
-    viewSession(null);
+    const prev = prevCampaignRef.current;
+    prevCampaignRef.current = activeCampaignId;
+    if (prev != null && prev !== activeCampaignId) viewSession(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCampaignId]);
 
@@ -379,6 +408,35 @@ export function Session() {
     setViewedId(sessionId === currentId ? null : sessionId);
     setPendingJump({ sessionId, lineId });
   };
+
+  // Palette deep link (#591): {session, line} rides the existing openHit seam
+  // (same-session jump or cross-session pending jump); {session, highlight}
+  // views the session and queues the strip scroll; a bare {session} just views
+  // it. A hit with no line (a semantic chunk that resolved no anchor) opens the
+  // session unscrolled — exactly the honest fallback the RPC documents. The
+  // params are consumed once; onDeepLinkHandled strips them from the URL.
+  const dlSession = deepLink?.session;
+  const dlLine = deepLink?.line;
+  const dlHighlight = deepLink?.highlight;
+  useEffect(() => {
+    if (!dlSession) {
+      // line/highlight are meaningless without their session half; strip strays.
+      if (dlLine || dlHighlight) onDeepLinkHandled?.();
+      return;
+    }
+    if (dlLine) {
+      openHit(dlSession, dlLine);
+    } else {
+      viewSession(dlSession === currentId ? null : dlSession);
+    }
+    if (dlHighlight) {
+      setFocusHighlight({ sessionId: dlSession, highlightId: dlHighlight });
+    }
+    onDeepLinkHandled?.();
+    // The params are the triggers; the handlers are stable seams. currentId is
+    // deliberately NOT a trigger: re-running on its load would double-apply.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlSession, dlLine, dlHighlight]);
 
   // Failed transcript snapshot (#270 finding 4, extended to the current session):
   // a DB-backed snapshot fetch that errors must NOT masquerade as the empty state —
@@ -675,6 +733,12 @@ export function Session() {
           <HighlightsStrip
             sessionId={renderedSessionId}
             live={active && !viewingPast}
+            focusHighlightId={
+              focusHighlight && focusHighlight.sessionId === renderedSessionId
+                ? focusHighlight.highlightId
+                : null
+            }
+            onFocusHandled={() => setFocusHighlight(null)}
             renderActions={(h) =>
               h.status === "promoted" ? (
                 <ShareHighlightDialog highlight={h} sessionLive={active} />

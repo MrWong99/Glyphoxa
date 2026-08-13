@@ -9,6 +9,7 @@ import { Button } from "./ui/Button";
 import { SidebarUser } from "./SidebarUser";
 import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
+import { CommandPalette } from "./CommandPalette";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { useI18n, type MessageKey } from "@/i18n";
 
@@ -111,6 +112,13 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
             in a settings page. */}
         <LegalFooter />
       </div>
+
+      {/* Ctrl+K campaign search (#591). Mounted in the shell like the Toaster —
+          the global-overlay convention — so it is reachable from every
+          authenticated screen and never renders for an unauthenticated visitor
+          (the shell sits inside the AuthGate). Closed it renders nothing and
+          fires no RPCs, so screen tests stay clean. */}
+      <CommandPalette tenantSlug={tenantSlug} />
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
           in Providers, so the screen unit tests that render without the shell get a

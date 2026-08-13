@@ -47,6 +47,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/recall"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/speaker"
@@ -1095,11 +1096,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// review surface's similarity hint (#300) can share the SAME resolved provider:
 	// nil (an unsupported provider or a config-read error) leaves the hint on its
 	// fulltext fallback, exactly as the backfill worker stalls loudly.
+	// embedModel travels with it: the campaign search engine (#591) attributes
+	// its query-embed spend estimate to the resolved (provider, model) pair.
 	var embedProvider embeddings.Provider
+	var embedModel string
 	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
 		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
 	} else {
 		embedProvider = provider
+		embedModel = model
 		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
 		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
 		// making the chunks returnable by embedding-filtered retrieval. It needs only
@@ -1332,7 +1337,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1492,7 +1497,7 @@ type sessionControl interface {
 	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
 }
 
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1647,6 +1652,18 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// SAME sharer instance lists the linked guild's voice channels, and the store
 	// carries the linked guild + Default Voice Channel it pre-selects.
 	sessionSrv.SetVoiceChannels(deploymentSharer, store)
+	// Campaign search (#591): the Ctrl+K palette's SearchTranscripts /
+	// SearchHighlights engine — one engine, shaped for its second consumer, the
+	// Butler planning chat's tool belt (#592). The semantic transcript tier
+	// shares the SAME resolved embeddings provider as the backfill worker and
+	// recall; without one (or on any embed failure) the engine degrades to the
+	// keyword Line search and says so on the wire. v1.0's only embeddings
+	// provider is local Ollama (ADR-0011), hence the fixed spend label.
+	searchEngine := search.New(store, log)
+	if embedProvider != nil {
+		searchEngine.SetEmbedder(embedProvider, observe.ProviderOllama, embedModel)
+	}
+	sessionSrv.SetSearch(searchEngine)
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a

@@ -637,3 +637,47 @@ describe("Campaign", () => {
     expect(onCall.config).toBe("");
   });
 });
+
+describe("Campaign palette deep link (#591)", () => {
+  it("opens the linked sub-view and reports the params handled", async () => {
+    const { transport } = mockTransport();
+    const handled = vi.fn();
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign deepLink={{ view: "players" }} onDeepLinkHandled={handled} />
+      </Providers>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /players/i })).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(handled).toHaveBeenCalledTimes(1);
+  });
+
+  it("a node deep link opens the Knowledge panel focused on that entry", async () => {
+    const { transport } = mockTransport();
+    const handled = vi.fn();
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign deepLink={{ node: "some-node-id" }} onDeepLinkHandled={handled} />
+      </Providers>,
+    );
+    // The Knowledge tab takes over (the focusNodeID hand-off to the panel is the
+    // RosterPrep onOpenNode path, resolved once the panel's list loads).
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /world wiki/i })).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(handled).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unknown view value is ignored (params still handled, default view stays)", async () => {
+    const { transport } = mockTransport();
+    const handled = vi.fn();
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign deepLink={{ view: "nonsense" }} onDeepLinkHandled={handled} />
+      </Providers>,
+    );
+    await waitFor(() => expect(handled).toHaveBeenCalled());
+    expect(screen.getByRole("tab", { name: /cast/i })).toHaveAttribute("aria-selected", "true");
+  });
+});

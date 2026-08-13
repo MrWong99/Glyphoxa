@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
@@ -39,17 +39,39 @@ export function HighlightsStrip({
   sessionId,
   live,
   renderActions,
+  focusHighlightId = null,
+  onFocusHandled,
 }: {
   sessionId: string | undefined;
   live: boolean;
   // renderActions is a per-row action slot the Session screen can fill — reserved
   // for #310's Share button, kept a slot here so this slice ships no share UI.
   renderActions?: (h: Highlight) => ReactNode;
+  // focusHighlightId scrolls the strip to that row once it renders — the palette
+  // deep link (#591), the KnowledgePanel focusNodeID pattern: the strip owns the
+  // "my data has landed" moment, so the scroll waits here, not in the parent. It
+  // no-ops until the row is present and reports back via onFocusHandled.
+  focusHighlightId?: string | null;
+  onFocusHandled?: () => void;
 }) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const query = useHighlights(sessionId, live);
   const highlights = query.data?.highlights ?? [];
+
+  useEffect(() => {
+    if (!focusHighlightId) return;
+    if (!highlights.some((h) => h.id === focusHighlightId)) return; // wait for the row
+    const el = document.querySelector(`[data-highlight-id="${focusHighlightId}"]`);
+    try {
+      (el as HTMLElement | null)?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    } catch {
+      // jsdom / older browsers: scrollIntoView is a no-op; the focus still resolves.
+    }
+    onFocusHandled?.();
+    // highlights is the "row landed" trigger; onFocusHandled is a stable seam.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusHighlightId, highlights]);
 
   // The Highlight a delete has been requested for; drives the confirm dialog.
   // Deletion cascades the clip through the blob seam (ADR-0051/0048) and is

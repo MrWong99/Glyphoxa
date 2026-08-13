@@ -101,7 +101,12 @@ function mockTransport(
 
 function renderStrip(
   seed: Highlight[],
-  props: { sessionId?: string; live?: boolean } = {},
+  props: {
+    sessionId?: string;
+    live?: boolean;
+    focusHighlightId?: string | null;
+    onFocusHandled?: () => void;
+  } = {},
   opts?: {
     failList?: boolean;
     failListAfter?: number;
@@ -112,7 +117,12 @@ function renderStrip(
   const ctx = mockTransport(seed, opts);
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
-      <HighlightsStrip sessionId={props.sessionId ?? "vs1"} live={props.live ?? false} />
+      <HighlightsStrip
+        sessionId={props.sessionId ?? "vs1"}
+        live={props.live ?? false}
+        focusHighlightId={props.focusHighlightId}
+        onFocusHandled={props.onFocusHandled}
+      />
     </Providers>,
   );
   return ctx;
@@ -291,5 +301,23 @@ describe("HighlightsStrip (#309)", () => {
         vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't delete/i.test(String(m))),
       ).toBe(true),
     );
+  });
+
+  it("resolves a palette focus once the row renders, and not for an absent id (#591)", async () => {
+    // The focused row is present: the strip scrolls (a no-op in jsdom) and
+    // reports back exactly once so the parent clears the pending focus.
+    const handled = vi.fn();
+    renderStrip([promoted()], { focusHighlightId: "h2", onFocusHandled: handled });
+    expect(await screen.findByText(/the dragon spoke my true name/i)).toBeInTheDocument();
+    await waitFor(() => expect(handled).toHaveBeenCalled());
+
+    cleanup();
+
+    // An id the rendered session doesn't contain must NOT resolve — the focus
+    // stays pending (the parent keeps it until the right session renders).
+    const notHandled = vi.fn();
+    renderStrip([promoted()], { focusHighlightId: "h-missing", onFocusHandled: notHandled });
+    expect(await screen.findByText(/the dragon spoke my true name/i)).toBeInTheDocument();
+    expect(notHandled).not.toHaveBeenCalled();
   });
 });

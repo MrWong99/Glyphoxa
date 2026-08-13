@@ -80,6 +80,10 @@ const (
 	ProviderGemini     Provider = "gemini"
 	ProviderAnthropic  Provider = "anthropic"
 	ProviderGroq       Provider = "groq"
+	// ProviderOllama is the local embeddings default (ADR-0011); it reaches the
+	// spend estimate path (#591 query-embed pricing), not a Prometheus series —
+	// the ADR-0045 usage trio carries no embeddings kind.
+	ProviderOllama Provider = "ollama"
 )
 
 // Stage is the bounded stage label on the provider-call counters (which stage of

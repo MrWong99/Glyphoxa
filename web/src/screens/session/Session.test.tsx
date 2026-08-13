@@ -1038,6 +1038,45 @@ describe("Session past-session picker (#270)", () => {
   });
 });
 
+describe("Session palette deep link (#591)", () => {
+  beforeEach(pickerFetch);
+
+  it("views the linked session, jumps to the linked line, and reports the params handled", async () => {
+    const handled = vi.fn();
+    render(
+      <Providers transport={pickerTransport()} queryClient={makeQueryClient()}>
+        <Session deepLink={{ session: "vsOld", line: "a:t1" }} onDeepLinkHandled={handled} />
+      </Providers>,
+    );
+
+    // The deep-linked OLDER session's transcript renders (not the latest), and
+    // the linked line carries the highlight marker once its snapshot lands.
+    expect(await screen.findByText("old second line")).toBeInTheDocument();
+    expect(screen.queryByText("latest first line")).not.toBeInTheDocument();
+    await waitFor(() => {
+      const line = document.querySelector('[data-line-id="a:t1"]');
+      expect(line).not.toBeNull();
+      expect(line).toHaveAttribute("data-highlighted", "true");
+    });
+    // The route strips the params exactly once.
+    expect(handled).toHaveBeenCalledTimes(1);
+  });
+
+  it("strips stray line/highlight params that arrive without their session half", async () => {
+    const handled = vi.fn();
+    render(
+      <Providers transport={pickerTransport()} queryClient={makeQueryClient()}>
+        <Session deepLink={{ line: "u:1" }} onDeepLinkHandled={handled} />
+      </Providers>,
+    );
+    // The default (latest) session renders unaffected; the stray param is shed.
+    expect(await screen.findByText("latest first line")).toBeInTheDocument();
+    expect(handled).toHaveBeenCalled();
+    const line = document.querySelector('[data-line-id="u:1"]');
+    expect(line).not.toHaveAttribute("data-highlighted");
+  });
+});
+
 // livePickerTransport is a LIVE session whose ListSessions also carries the running
 // row (labelled "live") plus a past one, to guard AC5: the live feed stays default.
 function livePickerTransport() {

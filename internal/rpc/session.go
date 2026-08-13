@@ -15,6 +15,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
+	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -138,6 +139,11 @@ type SessionServer struct {
 	// Nil (unwired) makes it report CodeUnimplemented rather than panic.
 	voiceChannels VoiceChannelLister
 	deployments   deploymentReader
+
+	// search backs the Ctrl+K campaign palette's SearchTranscripts /
+	// SearchHighlights RPCs (#591); wired via SetSearch after construction. Nil
+	// (unwired) makes them report CodeUnimplemented rather than panic.
+	search *search.Engine
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)
