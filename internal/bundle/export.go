@@ -152,6 +152,10 @@ func Export(ctx context.Context, st ExportStore, campaignID uuid.UUID, opts Expo
 	if err != nil {
 		return nil, err
 	}
+	bThreads, err := exportPlanningThreads(ctx, st, campaignID)
+	if err != nil {
+		return nil, err
+	}
 
 	var history *History
 	if opts.IncludeHistory {
@@ -165,16 +169,17 @@ func Export(ctx context.Context, st ExportStore, campaignID uuid.UUID, opts Expo
 		FormatVersion: FormatVersion,
 		ExportedAt:    time.Now().UTC(),
 		Campaign: Campaign{
-			Name:       campaign.Name,
-			System:     campaign.System,
-			Language:   campaign.Language,
-			Agents:     bAgents,
-			Nodes:      bNodes,
-			Edges:      bEdges,
-			Characters: bChars,
-			Maps:       bMaps,
-			Boards:     bBoards,
-			History:    history,
+			Name:            campaign.Name,
+			System:          campaign.System,
+			Language:        campaign.Language,
+			Agents:          bAgents,
+			Nodes:           bNodes,
+			Edges:           bEdges,
+			Characters:      bChars,
+			Maps:            bMaps,
+			Boards:          bBoards,
+			PlanningThreads: bThreads,
+			History:         history,
 		},
 	}, nil
 }
@@ -360,6 +365,39 @@ func exportMaps(ctx context.Context, st ExportStore, campaignID uuid.UUID, withI
 			})
 		}
 		out = append(out, bm)
+	}
+	return out, nil
+}
+
+// exportPlanningThreads serializes the Butler planning chat's threads (#592,
+// ADR-0062) with their prose messages nested, in ListPlanningThreads' order and
+// seq order respectively. A message carries role+content ONLY — no ids, no
+// timestamps: nothing cross-references a thread, and seq is re-derived on
+// import by replaying the messages in order.
+//
+// Unconditional, like Boards: a planning thread is the GM's prep content, not a
+// record of play, so it does not ride the History flag. Prose only by
+// construction — tool-call intermediates are never persisted (ADR-0062), so
+// there is nothing secret-shaped here to gate.
+func exportPlanningThreads(ctx context.Context, st ExportStore, campaignID uuid.UUID) ([]PlanningThread, error) {
+	threads, err := st.ListPlanningThreads(ctx, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("bundle: export: list planning threads: %w", err)
+	}
+	if len(threads) == 0 {
+		return nil, nil
+	}
+	out := make([]PlanningThread, 0, len(threads))
+	for _, th := range threads {
+		bt := PlanningThread{Title: th.Title}
+		msgs, err := st.ListPlanningMessages(ctx, campaignID, th.ID)
+		if err != nil {
+			return nil, fmt.Errorf("bundle: export: list planning messages for thread %s: %w", th.ID, err)
+		}
+		for _, m := range msgs {
+			bt.Messages = append(bt.Messages, PlanningMessage{Role: m.Role, Content: m.Content})
+		}
+		out = append(out, bt)
 	}
 	return out, nil
 }

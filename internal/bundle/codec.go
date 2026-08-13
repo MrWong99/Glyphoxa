@@ -19,7 +19,11 @@ import (
 // OMITEMPTY addition, so a v1 bundle is a valid v2 bundle with those sections
 // absent — which is why [CheckVersion] accepts v1 rather than rejecting it. A
 // backup format that refuses last year's backup is not a backup format.
-const FormatVersion = 2
+//
+// v3 (#592, ADR-0062) added the planning_threads section — the Butler planning
+// chat's conversations, prose only. Same omitempty discipline: a v1 or v2
+// bundle is a valid v3 bundle with the section absent.
+const FormatVersion = 3
 
 // MinSupportedVersion is the oldest format this build can import.
 const MinSupportedVersion = 1

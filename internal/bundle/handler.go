@@ -126,11 +126,15 @@ type importResponse struct {
 	// The v2 sections (#547). Reporting only the v1 counts would make a successful
 	// import of maps, boards and aspects LOOK like they were dropped — the exact
 	// silent-omission genre this slice exists to close.
-	Aspects                int `json:"aspects"`
-	Tags                   int `json:"tags"`
-	Maps                   int `json:"maps"`
-	Pins                   int `json:"pins"`
-	Boards                 int `json:"boards"`
+	Aspects int `json:"aspects"`
+	Tags    int `json:"tags"`
+	Maps    int `json:"maps"`
+	Pins    int `json:"pins"`
+	Boards  int `json:"boards"`
+	// The v3 section (#592): the Butler planning chat's threads and prose turns,
+	// counted for the same silent-omission reason as the v2 counters above.
+	PlanningThreads        int `json:"planning_threads"`
+	PlanningMessages       int `json:"planning_messages"`
 	Sessions               int `json:"sessions"`
 	Lines                  int `json:"lines"`
 	Chunks                 int `json:"chunks"`
@@ -216,6 +220,8 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		Maps:                   res.Maps,
 		Pins:                   res.Pins,
 		Boards:                 res.Boards,
+		PlanningThreads:        res.PlanningThreads,
+		PlanningMessages:       res.PlanningMessages,
 		Appearances:            res.Appearances,
 		Sessions:               res.Sessions,
 		Lines:                  res.Lines,

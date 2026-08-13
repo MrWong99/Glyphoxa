@@ -57,6 +57,11 @@ type ExportStore interface {
 	CampaignTags(ctx context.Context, campaignID uuid.UUID) ([]storage.TaggedNode, error)
 	ListBoards(ctx context.Context, campaignID uuid.UUID) ([]storage.KGBoard, error)
 	ListSessionAppearances(ctx context.Context, sessionID uuid.UUID) ([]storage.SessionAppearance, error)
+	// The Butler planning chat (#592, ADR-0062). Stable orders an adapter must
+	// reproduce: ListPlanningThreads (updated_at DESC, id); ListPlanningMessages
+	// (seq — the append order the exchange loop wrote under).
+	ListPlanningThreads(ctx context.Context, campaignID uuid.UUID) ([]storage.PlanningThread, error)
+	ListPlanningMessages(ctx context.Context, campaignID, threadID uuid.UUID) ([]storage.PlanningMessage, error)
 	// ReadMapImage fetches a Map's bytes THROUGH THE BLOB SEAM (ADR-0048) — the
 	// one read on this interface that is not SQL. It is here rather than on a
 	// separate seam so the secrets-exclusion property stays visible in one place:
@@ -120,6 +125,13 @@ type ImportStore interface {
 	CreateBoard(ctx context.Context, campaignID uuid.UUID, name string) (storage.KGBoard, error)
 	UpdateBoard(ctx context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error
 	RecordNodeAppearances(ctx context.Context, rows []storage.NodeAppearance) error
+	// The Butler planning chat (#592, ADR-0062). AppendPlanningMessage derives
+	// seq itself (max+1 under the thread's UNIQUE key), so the importer replays
+	// messages IN ORDER and never carries a seq of its own; both calls flatten
+	// into the ambient import transaction like every neighbor (AppendPlanningMessage
+	// opens a nested InTx in storage — the flatten contract on [TxRunner] covers it).
+	CreatePlanningThread(ctx context.Context, campaignID uuid.UUID, title string) (storage.PlanningThread, error)
+	AppendPlanningMessage(ctx context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error)
 }
 
 // MapImageWriter is the OPTIONAL blob half of an import (#547, ADR-0048): a
