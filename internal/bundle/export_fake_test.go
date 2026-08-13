@@ -125,6 +125,23 @@ func seedFakeCampaign(t *testing.T, f *fakeStore) (campaignID, bartID uuid.UUID)
 	}); err != nil {
 		t.Fatalf("CreateCharacter: %v", err)
 	}
+	// #592: a planning thread with both roles, plus an untitled empty one so the
+	// auto-title-pending state round-trips too.
+	thread, err := f.CreatePlanningThread(ctx, campaignID, "session 12 prep")
+	if err != nil {
+		t.Fatalf("CreatePlanningThread: %v", err)
+	}
+	if _, err := f.AppendPlanningMessage(ctx, campaignID, thread.ID,
+		storage.PlanningRoleUser, "What loose ends did the harbour heist leave?"); err != nil {
+		t.Fatalf("AppendPlanningMessage user: %v", err)
+	}
+	if _, err := f.AppendPlanningMessage(ctx, campaignID, thread.ID,
+		storage.PlanningRoleAssistant, "Three: the ledger, the tide charts, and Bart's debt."); err != nil {
+		t.Fatalf("AppendPlanningMessage assistant: %v", err)
+	}
+	if _, err := f.CreatePlanningThread(ctx, campaignID, ""); err != nil {
+		t.Fatalf("CreatePlanningThread empty: %v", err)
+	}
 
 	started := time.Date(2026, 4, 20, 19, 0, 0, 0, time.UTC)
 	ended := started.Add(2 * time.Hour)

@@ -58,8 +58,11 @@ type providerStore interface {
 // byokSlot is one Bring-Your-Own-Key provider the Configuration screen saves. A
 // provider can back several Components — ElevenLabs powers STT + TTS from one
 // key (ADR-0004) — so saving it upserts every listed Component; the first is the
-// display Component on the wire.
+// display Component on the wire. slot is the wire id the save names: empty
+// means the slot IS the provider (every pre-0062 slot); the planning-chat slot
+// (#592) names itself "chat" so the same provider can back two slots.
 type byokSlot struct {
+	slot       string
 	provider   string
 	components []storage.Component
 }
@@ -75,11 +78,24 @@ var byokSlots = []byokSlot{
 	// BYOK slot + health check, even though Gemini already appears in the LLM
 	// matrix — the image key is managed on its own Configuration row.
 	{provider: "gemini", components: []storage.Component{storage.ComponentImage}},
+	// The Butler planning chat's LLM (#592, ADR-0062): a distinct slot + row
+	// (component chat_llm) so chat can run a quality-over-latency model while
+	// the voice loop keeps its ADR-0036 selection — the gemini-image precedent
+	// of the same provider on its own Configuration row.
+	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}},
 }
 
-func slotFor(provider string) (byokSlot, bool) {
+// wireID is the id a save names this slot by: slot when set, else provider.
+func (s byokSlot) wireID() string {
+	if s.slot != "" {
+		return s.slot
+	}
+	return s.provider
+}
+
+func slotFor(wireID string) (byokSlot, bool) {
 	for _, s := range byokSlots {
-		if s.provider == provider {
+		if s.wireID() == wireID {
 			return s, true
 		}
 	}
@@ -232,12 +248,14 @@ func (s *ProviderServer) ListProviderConfigs(
 		s.log.Error("ListProviderConfigs: list provider_config failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	// Index by provider, keeping the most-recently-updated row (ElevenLabs has
-	// two rows — stt + tts — sharing one key; either represents the slot).
-	byProvider := make(map[string]storage.ProviderConfig, len(configs))
+	// Index by Component: each slot is represented by its FIRST component's row
+	// (ElevenLabs' stt/tts rows share one key, so either represents the slot),
+	// and keying by component — not provider — keeps the two groq-backed slots
+	// (llm vs chat_llm, #592) from shadowing each other.
+	byComponent := make(map[storage.Component]storage.ProviderConfig, len(configs))
 	for _, c := range configs {
-		if cur, ok := byProvider[c.Provider]; !ok || c.UpdatedAt.After(cur.UpdatedAt) {
-			byProvider[c.Provider] = c
+		if cur, ok := byComponent[c.Component]; !ok || c.UpdatedAt.After(cur.UpdatedAt) {
+			byComponent[c.Component] = c
 		}
 	}
 
@@ -250,7 +268,7 @@ func (s *ProviderServer) ListProviderConfigs(
 
 	creds := []*managementv1.ProviderCredential{discordCredential(dep)}
 	for _, slot := range byokSlots {
-		creds = append(creds, providerCredential(string(slot.components[0]), slot.provider, byProvider[slot.provider]))
+		creds = append(creds, providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]]))
 	}
 
 	// Per-tenant Discord integration health (#489): the standing client's state
@@ -281,10 +299,17 @@ func (s *ProviderServer) SaveProviderConfig(
 		return nil, err
 	}
 
-	slot, ok := slotFor(req.Msg.GetProvider())
+	// The slot id is the explicit slot field when set (#592: the "chat" slot
+	// shares provider "groq" with the llm slot), else the provider itself —
+	// every pre-0062 client sends only the provider.
+	slotID := req.Msg.GetSlot()
+	if slotID == "" {
+		slotID = req.Msg.GetProvider()
+	}
+	slot, ok := slotFor(slotID)
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("unknown provider %q", req.Msg.GetProvider()))
+			fmt.Errorf("unknown provider %q", slotID))
 	}
 	secret := req.Msg.GetSecret()
 	if secret == "" {

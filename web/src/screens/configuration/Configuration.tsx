@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { MessagesSquare, BrainCircuit, AudioLines, ImagePlus, RefreshCw } from "lucide-react";
+import {
+  MessagesSquare,
+  MessageCircle,
+  BrainCircuit,
+  AudioLines,
+  ImagePlus,
+  RefreshCw,
+} from "lucide-react";
 
 import {
   CampaignService,
@@ -20,7 +27,7 @@ import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
 import { isNotFound } from "@/lib/connectError";
-import { useI18n } from "@/i18n";
+import { useI18n, type MessageKey } from "@/i18n";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
 
@@ -34,19 +41,87 @@ import "./configuration.css";
 // a real test-call (ElevenLabs /v1/voices, a Groq ping, a live Discord login that
 // resolves the bot tag) flips it Healthy → Degraded without blocking page load.
 
-// The three secret slots the screen holds, keyed by their wire `provider`. Each
-// renders a SecretRow; Groq/ElevenLabs save via SaveProviderConfig, the Discord
-// bot token via SaveDiscordSettings. `label` is the product name (never
-// translated); `kind` is a MessageKey translated at render, so the overline
-// speaks the user's language ("AI model", never the internal "LLM").
-const BYOK_SLOTS = [
-  { provider: "groq", label: "Groq", kind: "config.kindAiModel", icon: <BrainCircuit size={19} /> },
-  { provider: "elevenlabs", label: "ElevenLabs", kind: "config.kindVoiceSpeech", icon: <AudioLines size={19} /> },
-  { provider: "gemini", label: "Gemini", kind: "config.kindImages", icon: <ImagePlus size={19} /> },
-] as const;
+// The BYOK secret slots the screen holds. Each renders a SecretRow;
+// Groq/ElevenLabs/Gemini save via SaveProviderConfig, the Discord bot token via
+// SaveDiscordSettings. `label` is the product name (never translated); an
+// optional `nameKey` overrides the displayed name with localized copy (the
+// chat slot, whose name is a feature, not a product). `kind` is a MessageKey
+// translated at render, so the overline speaks the user's language ("AI
+// model", never the internal "LLM").
+//
+// `slot` is SaveProviderConfigRequest.slot — empty means the slot IS the
+// provider (every pre-0062 slot); the planning-chat slot saves as slot "chat"
+// with provider "groq" (#592, ADR-0062). `component` is the credential's
+// primary Component label, unique per slot (discord, llm, tts, image,
+// chat_llm) — the row's credential lookup keys on it, because two slots can
+// now share one provider.
+type ByokSlot = {
+  provider: string;
+  slot: string;
+  component: string;
+  label: string;
+  nameKey?: MessageKey;
+  descriptionKey?: MessageKey;
+  kind: MessageKey;
+  icon: ReactNode;
+  /** Renders the Groq model combobox (the live catalog + free text, #227). */
+  models?: boolean;
+  /**
+   * Suppresses the row's health badge. The chat slot sets it: the shared groq
+   * probe tests the VOICE-LLM credential, not the chat_llm key, so its verdict
+   * could contradict this row's actual state. A dedicated chat_llm probe is a
+   * follow-up; until then no badge beats a wrong one.
+   */
+  hideHealth?: boolean;
+};
+const BYOK_SLOTS: readonly ByokSlot[] = [
+  {
+    provider: "groq",
+    slot: "",
+    component: "llm",
+    label: "Groq",
+    kind: "config.kindAiModel",
+    icon: <BrainCircuit size={19} />,
+    models: true,
+  },
+  {
+    provider: "elevenlabs",
+    slot: "",
+    component: "tts",
+    label: "ElevenLabs",
+    kind: "config.kindVoiceSpeech",
+    icon: <AudioLines size={19} />,
+  },
+  {
+    provider: "gemini",
+    slot: "",
+    component: "image",
+    label: "Gemini",
+    kind: "config.kindImages",
+    icon: <ImagePlus size={19} />,
+  },
+  // The chat-scoped model slot (ADR-0062): a second selection on the same Groq
+  // key surface, chosen for quality over latency, so upgrading the planning
+  // chat can never re-price or slow the live voice loop.
+  {
+    provider: "groq",
+    slot: "chat",
+    component: "chat_llm",
+    label: "Groq",
+    nameKey: "chat.configSlotName",
+    descriptionKey: "chat.configSlotDesc",
+    kind: "config.kindAiModel",
+    icon: <MessageCircle size={19} />,
+    models: true,
+    hideHealth: true,
+  },
+];
 
-function credentialFor(creds: ProviderCredential[], provider: string): ProviderCredential | undefined {
-  return creds.find((c) => c.provider === provider);
+// Rows key their credential on `component`, not `provider`: since the chat
+// slot (#592) two slots share provider "groq", but every slot's primary
+// component is unique.
+function credentialFor(creds: ProviderCredential[], component: string): ProviderCredential | undefined {
+  return creds.find((c) => c.component === component);
 }
 
 function healthFor(health: ProviderHealth[], provider: string): ProviderHealth | undefined {
@@ -176,18 +251,26 @@ export function Configuration() {
       <div className="gx-providers__list">
         {BYOK_SLOTS.map((slot) => (
           <SecretRow
-            key={slot.provider}
+            key={slot.component}
             icon={slot.icon}
             kind={t(slot.kind)}
-            name={slot.label}
+            name={slot.nameKey ? t(slot.nameKey) : slot.label}
+            description={slot.descriptionKey ? t(slot.descriptionKey) : undefined}
+            // The paste prompt names the PRODUCT whose key it wants, even when
+            // the row's display name is a feature ("Planning chat (Groq)").
             placeholder={t("config.pasteApiKey", { name: slot.label })}
-            credential={credentialFor(creds, slot.provider)}
-            health={healthFor(health, slot.provider)}
-            // Groq's model combobox lists the live catalog with free-text entry
+            credential={credentialFor(creds, slot.component)}
+            // The probe result is per-provider; a hideHealth slot renders no
+            // badge at all (see ByokSlot.hideHealth), so it gets none passed.
+            health={slot.hideHealth ? undefined : healthFor(health, slot.provider)}
+            hideHealth={slot.hideHealth}
+            // Groq-backed rows list the live model catalog with free-text entry
             // (#227); the chosen model rides along when the key is saved, or
             // alone via the model-only save once a key exists.
-            models={slot.provider === "groq" ? models : undefined}
-            onSave={(secret, model) => saveProvider.mutateAsync({ provider: slot.provider, secret, model })}
+            models={slot.models ? models : undefined}
+            onSave={(secret, model) =>
+              saveProvider.mutateAsync({ provider: slot.provider, secret, model, slot: slot.slot })
+            }
           />
         ))}
       </div>
@@ -464,19 +547,29 @@ function SecretRow({
   icon,
   kind,
   name,
+  description,
   placeholder,
   credential,
   health,
   models,
+  hideHealth = false,
   onSave,
 }: {
   icon: ReactNode;
   kind: string;
   name: string;
+  /** Optional one-liner under the name (the chat slot's "voice stays untouched"). */
+  description?: string;
   placeholder: string;
   credential?: ProviderCredential;
   health?: ProviderHealth;
   models?: string[];
+  /**
+   * Renders the row without ANY health badge (chat slot): the shared groq
+   * probe tests the voice-LLM credential, whose verdict can contradict this
+   * row's chat_llm key. A dedicated chat_llm probe is a follow-up.
+   */
+  hideHealth?: boolean;
   onSave: (secret: string, model?: string) => Promise<unknown>;
 }) {
   const { t } = useI18n();
@@ -537,6 +630,7 @@ function SecretRow({
         <div className="gx-provider-row__meta">
           <div className="gx-overline">{kind}</div>
           <div className="gx-provider-row__name">{name}</div>
+          {description && <div className="gx-provider-row__desc">{description}</div>}
           {health?.botTag && (
             <div className="gx-provider-row__tag">
               {t("config.connectedAs", { tag: health.botTag })}
@@ -622,7 +716,7 @@ function SecretRow({
           )}
         </div>
 
-        <HealthBadge saved={saved} health={health} />
+        {!hideHealth && <HealthBadge saved={saved} health={health} />}
       </div>
     </Card>
   );

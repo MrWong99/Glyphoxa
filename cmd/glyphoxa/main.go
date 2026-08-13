@@ -42,6 +42,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/mixdown"
 	"github.com/MrWong99/Glyphoxa/internal/nodeportrait"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/planchat"
 	"github.com/MrWong99/Glyphoxa/internal/portraitgen"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -1666,6 +1667,25 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	sessionSrv.SetSearch(searchEngine)
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
+	// Butler planning chat (#592, ADR-0062): the ChatService — thread CRUD plus
+	// the streaming exchange, the first server-streaming RPC on the stack (whose
+	// policy interceptor gates streams since this slice). The engine reuses the
+	// #591 search engine as its tool belt, the knowledge adapters for
+	// proposal-mediated writes and recap (campaign-stamped per exchange — no
+	// Voice Session involved), and the ADR-0055 posture wiring: the platform-key
+	// entitlement plus — in open admission mode — the monthly allowance gate
+	// checked before each exchange.
+	chatKnowledge := knowledge.New(store, store.PromptKG())
+	chatRecap := knowledge.NewRecap(recapEngine, store)
+	chatOpts := []planchat.Option{planchat.WithKeyEntitlement(keyEnt)}
+	if a := allowanceForMode(admission, store); a != nil {
+		chatOpts = append(chatOpts, planchat.WithAllowance(a))
+	}
+	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, metrics, log, chatOpts...)
+	chatSrv := rpc.NewChatServer(store, log)
+	chatSrv.SetEngine(chatEngine)
+	chatPath, chatHandler := chatSrv.Handler(stack.HandlerOptions()...)
+
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
 	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated
 	// via the guarded mount table. Tenant-scoped row load + blob.Get +
@@ -1747,6 +1767,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
 		web.APIMount(sessionPath, sessionHandler),
+		web.APIMount(chatPath, chatHandler),
 	}
 	for _, g := range guarded {
 		mounts = append(mounts, web.Mount{Path: g.Pattern, Handler: g.Handler})

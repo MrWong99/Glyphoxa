@@ -226,14 +226,14 @@ func (s *Store) listCampaigns(ctx context.Context, query string, args ...any) ([
 
 const agentColumns = `
 	id, campaign_id, agent_role, name, title, persona, voice,
-	voice_provider_config_id, llm_provider_config_id,
+	voice_provider_config_id, llm_provider_config_id, chat_llm_provider_config_id,
 	address_only, speaker_color, aliases, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
 	err := row.Scan(
 		&a.ID, &a.CampaignID, &a.Role, &a.Name, &a.Title, &a.Persona, &a.Voice,
-		&a.VoiceProviderConfigID, &a.LLMProviderConfigID,
+		&a.VoiceProviderConfigID, &a.LLMProviderConfigID, &a.ChatLLMProviderConfigID,
 		&a.AddressOnly, &a.SpeakerColor, &a.Aliases, &a.CreatedAt, &a.UpdatedAt,
 	)
 	return a, err

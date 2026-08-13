@@ -27,16 +27,20 @@ type ImportResult struct {
 	CampaignID uuid.UUID
 	Name       string
 	// AgentIDs remaps bundle agent ref -> minted id (Butler ref -> the merged row).
-	AgentIDs               map[string]uuid.UUID
-	Agents                 int
-	Nodes                  int
-	Edges                  int
-	Characters             int
-	Aspects                int
-	Tags                   int
-	Maps                   int
-	Pins                   int
-	Boards                 int
+	AgentIDs   map[string]uuid.UUID
+	Agents     int
+	Nodes      int
+	Edges      int
+	Characters int
+	Aspects    int
+	Tags       int
+	Maps       int
+	Pins       int
+	Boards     int
+	// PlanningThreads and PlanningMessages count the Butler planning chat's
+	// imported conversations and their prose turns (#592, ADR-0062).
+	PlanningThreads        int
+	PlanningMessages       int
 	Sessions               int
 	Lines                  int
 	Chunks                 int
@@ -285,6 +289,10 @@ func importInTx(
 		return err
 	}
 
+	if err := importPlanningThreads(ctx, tx, campaignID, b, res); err != nil {
+		return err
+	}
+
 	if err := importHistory(ctx, tx, campaignID, b, nodeIDs, res); err != nil {
 		return err
 	}
@@ -467,6 +475,42 @@ func importBoards(
 			return fmt.Errorf("bundle: import: board %q entries: %w", bd.Name, err)
 		}
 		res.Boards++
+	}
+	return nil
+}
+
+// importPlanningThreads recreates the Butler planning chat's conversations
+// (#592, ADR-0062): each thread is created with its title, then its messages
+// are appended IN ORDER — AppendPlanningMessage derives seq itself (max+1), so
+// replaying bundle order reproduces the thread's seq order exactly and the
+// bundle never carries a seq to get wrong. No remap is involved: nothing
+// cross-references a thread.
+//
+// A role outside the two-value chat vocabulary ('user' / 'assistant') is a
+// hard error that rolls the whole import back — the same all-or-nothing
+// discipline as an unknown ref. Letting it through would only defer the
+// failure to the role CHECK constraint (migration 00053) with a worse message,
+// and a hand-edited bundle inventing a third role is not a conversation this
+// build can honestly restore.
+func importPlanningThreads(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b *Bundle, res *ImportResult) error {
+	for i := range b.Campaign.PlanningThreads {
+		pt := &b.Campaign.PlanningThreads[i]
+		created, err := tx.CreatePlanningThread(ctx, campaignID, pt.Title)
+		if err != nil {
+			return fmt.Errorf("bundle: import: create planning thread %q: %w", pt.Title, err)
+		}
+		res.PlanningThreads++
+		for j := range pt.Messages {
+			m := &pt.Messages[j]
+			if m.Role != storage.PlanningRoleUser && m.Role != storage.PlanningRoleAssistant {
+				return fmt.Errorf("bundle: import: planning thread %q message %d has invalid role %q (want %q or %q)",
+					pt.Title, j, m.Role, storage.PlanningRoleUser, storage.PlanningRoleAssistant)
+			}
+			if _, err := tx.AppendPlanningMessage(ctx, campaignID, created.ID, m.Role, m.Content); err != nil {
+				return fmt.Errorf("bundle: import: planning thread %q message %d: %w", pt.Title, j, err)
+			}
+			res.PlanningMessages++
+		}
 	}
 	return nil
 }

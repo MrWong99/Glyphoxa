@@ -2,11 +2,13 @@ package bundle_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // Bundle coverage for the world epic #533 added (#547).
@@ -76,8 +78,36 @@ func TestExport_CarriesEverythingTheEpicAdded(t *testing.T) {
 	if len(b.Campaign.Boards) == 0 || len(b.Campaign.Boards[0].NodeIDs) == 0 {
 		t.Errorf("boards were dropped: %+v", b.Campaign.Boards)
 	}
+	// v3 (#592): planning threads export UNCONDITIONALLY — this is a SETUP-shaped
+	// assertion even though the fixture asked for history, and the dedicated
+	// no-flag check lives in TestExport_PlanningThreadsAreNotHistoryGated.
+	if len(b.Campaign.PlanningThreads) != 2 {
+		t.Fatalf("planning threads = %d, want 2", len(b.Campaign.PlanningThreads))
+	}
+	prep := b.Campaign.PlanningThreads[0]
+	if prep.Title != "session 12 prep" || len(prep.Messages) != 2 {
+		t.Fatalf("planning thread = %+v, want the titled two-message thread", prep)
+	}
+	if prep.Messages[0].Role != "user" || prep.Messages[1].Role != "assistant" ||
+		prep.Messages[0].Content == "" || prep.Messages[1].Content == "" {
+		t.Errorf("planning messages lost role/content: %+v", prep.Messages)
+	}
 	if b.FormatVersion != bundle.FormatVersion {
 		t.Errorf("format_version = %d", b.FormatVersion)
+	}
+}
+
+// TestExport_PlanningThreadsAreNotHistoryGated: a planning thread is the GM's
+// prep content (#592, ADR-0062), not a record of play, so it travels in the
+// DEFAULT setup export — unlike sessions, which stay behind the flag.
+func TestExport_PlanningThreadsAreNotHistoryGated(t *testing.T) {
+	t.Parallel()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
+	if b.Campaign.History != nil {
+		t.Fatal("a setup export carried history")
+	}
+	if len(b.Campaign.PlanningThreads) != 2 {
+		t.Errorf("planning threads = %d in a setup export, want 2 (unconditional)", len(b.Campaign.PlanningThreads))
 	}
 }
 
@@ -234,10 +264,12 @@ func TestImport_AcceptsAV1Bundle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
-	// Strip everything v2 added and label it v1, exactly as an old export would.
+	// Strip everything v2 (and v3) added and label it v1, exactly as an old
+	// export would.
 	b.FormatVersion = 1
 	b.Campaign.Maps = nil
 	b.Campaign.Boards = nil
+	b.Campaign.PlanningThreads = nil
 	for i := range b.Campaign.Nodes {
 		b.Campaign.Nodes[i].Aspects = nil
 		b.Campaign.Nodes[i].Tags = nil
@@ -254,8 +286,102 @@ func TestImport_AcceptsAV1Bundle(t *testing.T) {
 	if res.Nodes == 0 {
 		t.Error("the v1 bundle imported nothing")
 	}
-	if res.Maps != 0 || res.Aspects != 0 {
-		t.Errorf("a v1 bundle produced v2 rows: %+v", res)
+	if res.Maps != 0 || res.Aspects != 0 || res.PlanningThreads != 0 {
+		t.Errorf("a v1 bundle produced v2/v3 rows: %+v", res)
+	}
+}
+
+// TestImport_AcceptsAV2Bundle: the v3 bump must not orphan v2 backups either.
+// planning_threads is omitempty, so a v2 bundle IS a valid v3 bundle with the
+// section absent — the same range-accept discipline the v2 bump established.
+func TestImport_AcceptsAV2Bundle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
+	// Strip what v3 added and label it v2, exactly as a v2 export would look.
+	b.FormatVersion = 2
+	b.Campaign.PlanningThreads = nil
+
+	res, err := bundle.Import(ctx, newFakeStore(), uuid.New(), b)
+	if err != nil {
+		t.Fatalf("a v2 bundle must still import: %v", err)
+	}
+	if res.Nodes == 0 || res.Maps == 0 {
+		t.Errorf("the v2 bundle lost its v2 sections: %+v", res)
+	}
+	if res.PlanningThreads != 0 || res.PlanningMessages != 0 {
+		t.Errorf("a v2 bundle produced v3 rows: %+v", res)
+	}
+}
+
+// TestImport_PlanningThreadsRoundTrip (#592): threads with their messages
+// survive export→import on the fake — titles kept, messages replayed in order
+// with seq re-derived from 1, roles and content verbatim, counts reported.
+func TestImport_PlanningThreadsRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
+
+	dst := newFakeStore()
+	res, err := bundle.Import(ctx, dst, uuid.New(), b)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if res.PlanningThreads != 2 || res.PlanningMessages != 2 {
+		t.Fatalf("planning counts = %d threads / %d messages, want 2/2", res.PlanningThreads, res.PlanningMessages)
+	}
+
+	threads, err := dst.ListPlanningThreads(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListPlanningThreads: %v", err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("imported threads = %d, want 2", len(threads))
+	}
+	var prep *storage.PlanningThread
+	for i := range threads {
+		if threads[i].Title == "session 12 prep" {
+			prep = &threads[i]
+		}
+	}
+	if prep == nil {
+		t.Fatal("the titled thread lost its title")
+	}
+	msgs, err := dst.ListPlanningMessages(ctx, res.CampaignID, prep.ID)
+	if err != nil {
+		t.Fatalf("ListPlanningMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("imported messages = %d, want 2", len(msgs))
+	}
+	// Seq is RE-DERIVED on import, not carried: replaying bundle order must
+	// yield a dense 1..n under the destination's own counter.
+	if msgs[0].Seq != 1 || msgs[1].Seq != 2 {
+		t.Errorf("seqs = %d,%d, want re-derived 1,2", msgs[0].Seq, msgs[1].Seq)
+	}
+	if msgs[0].Role != storage.PlanningRoleUser || msgs[1].Role != storage.PlanningRoleAssistant {
+		t.Errorf("roles = %q,%q, want user,assistant in order", msgs[0].Role, msgs[1].Role)
+	}
+	if msgs[0].Content != "What loose ends did the harbour heist leave?" {
+		t.Errorf("content = %q, want verbatim", msgs[0].Content)
+	}
+}
+
+// TestImport_InvalidPlanningRoleIsFatal: the two-value chat vocabulary is a
+// hard gate — a bundle inventing a third role fails the WHOLE import (the
+// all-or-nothing discipline), with an error naming the thread and role.
+func TestImport_InvalidPlanningRoleIsFatal(t *testing.T) {
+	t.Parallel()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{})
+	b.Campaign.PlanningThreads[0].Messages[1].Role = "system"
+
+	dst := newFakeStore()
+	_, err := bundle.Import(context.Background(), dst, uuid.New(), b)
+	if err == nil {
+		t.Fatal("an invalid planning role must fail the import")
+	}
+	if !strings.Contains(err.Error(), `invalid role "system"`) {
+		t.Errorf("err = %v, want it to name the invalid role", err)
 	}
 }
 

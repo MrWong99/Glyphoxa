@@ -1,0 +1,238 @@
+/* Planning panel (#592, ADR-0062): thread rail + Butler chat pane.
+   Mirrors the campaign screen's two-column rhythm (gx-roster-layout) and
+   speaks only gx- tokens. */
+
+.gx-planning {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .gx-planning {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Thread rail ─────────────────────────────────────────────────────────── */
+
+.gx-planning__threads {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+
+.gx-planning__new {
+  align-self: stretch;
+}
+
+/* The role="list" wrapper around only the ThreadRows (the create button and
+   loading/error states above it are not list items). */
+.gx-planning__thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+
+.gx-planning__thread {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.gx-planning__thread:hover {
+  background: var(--surface-card-hover);
+}
+
+.gx-planning__thread[data-active="true"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--glow-arcane-soft);
+}
+
+.gx-planning__thread-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  color: var(--text-default);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gx-planning__thread-title {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-planning__thread-when {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+.gx-planning__thread-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.gx-planning__rename {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── Chat pane ───────────────────────────────────────────────────────────── */
+
+.gx-planning__chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-planning__messages {
+  list-style: none;
+  margin: 0;
+  padding: var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-height: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.gx-planning__msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 78%;
+}
+
+.gx-planning__msg[data-role="user"] {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.gx-planning__msg[data-role="assistant"] {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.gx-planning__bubble {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-md);
+  font-size: var(--body-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gx-planning__msg[data-role="user"] .gx-planning__bubble {
+  background: var(--surface-raised, var(--surface-card-hover));
+  border: 1px solid var(--border-strong);
+}
+
+.gx-planning__msg[data-role="assistant"] .gx-planning__bubble {
+  background: var(--surface-card-hover);
+  border: 1px solid var(--border-subtle);
+}
+
+.gx-planning__msg[data-pending="true"] .gx-planning__bubble {
+  opacity: 0.92;
+}
+
+.gx-planning__when {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+.gx-planning__notice-item {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-planning__tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+/* Tool-activity chip — same visual family as gx-kg-chip, non-interactive. */
+.gx-planning__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--spacing-xs);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm, var(--body-xs));
+}
+
+.gx-planning__chip[data-error="true"] {
+  color: var(--status-danger);
+  border-color: currentColor;
+}
+
+.gx-planning__working {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  font-style: italic;
+}
+
+.gx-planning__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+.gx-planning__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid var(--status-danger);
+  border-radius: var(--radius-md);
+  color: var(--status-danger);
+  font-size: var(--body-sm);
+}
+
+/* ── Composer ────────────────────────────────────────────────────────────── */
+
+.gx-planning__composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-sm);
+}
+
+.gx-planning__input {
+  flex: 1 1 auto;
+  resize: vertical;
+}
+
+.gx-planning__hint {
+  align-self: flex-end;
+}

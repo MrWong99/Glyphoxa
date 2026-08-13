@@ -44,6 +44,12 @@ func fullBundle() *Bundle {
 			Characters: []Character{
 				{Name: "Frodo", Aliases: []string{"Mr. Underhill"}, DiscordUserID: "123"},
 			},
+			PlanningThreads: []PlanningThread{
+				{Title: "session prep", Messages: []PlanningMessage{
+					{Role: "user", Content: "What did we leave hanging?"},
+					{Role: "assistant", Content: "The cellar door."},
+				}},
+			},
 			History: &History{
 				Sessions: []Session{
 					{
@@ -121,13 +127,13 @@ func TestCheckVersionErrors(t *testing.T) {
 }
 
 func TestDecodeNewerVersionMessage(t *testing.T) {
-	raw := []byte(`{"format_version":3,"exported_at":"2026-07-10T20:00:00Z","campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
+	raw := []byte(`{"format_version":4,"exported_at":"2026-07-10T20:00:00Z","campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
 	_, err := Decode(bytes.NewReader(raw))
 	if !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("want ErrNewerFormat, got %v", err)
 	}
 	msg := err.Error()
-	if !bytes.Contains([]byte(msg), []byte("3")) || !bytes.Contains([]byte(msg), []byte("2")) {
+	if !bytes.Contains([]byte(msg), []byte("4")) || !bytes.Contains([]byte(msg), []byte("3")) {
 		t.Fatalf("message must mention both versions, got %q", msg)
 	}
 }
@@ -153,22 +159,22 @@ func TestDecodeOlderVersionStillImports(t *testing.T) {
 	if b.FormatVersion != 1 {
 		t.Errorf("format_version = %d, want the bundle's own", b.FormatVersion)
 	}
-	if len(b.Campaign.Maps) != 0 || len(b.Campaign.Boards) != 0 {
-		t.Error("a v1 bundle should carry no v2 sections")
+	if len(b.Campaign.Maps) != 0 || len(b.Campaign.Boards) != 0 || len(b.Campaign.PlanningThreads) != 0 {
+		t.Error("a v1 bundle should carry no v2/v3 sections")
 	}
 }
 
 func TestDecodeNewerVersionWithNewFieldStillRefused(t *testing.T) {
-	// A real v3 bundle adds fields unknown to this v2 build. The version gate
+	// A real v4 bundle adds fields unknown to this v3 build. The version gate
 	// must fire BEFORE strict unknown-field decoding, so an old build tells the
 	// operator "format is newer", not a cryptic unknown-field error.
-	raw := []byte(`{"format_version":3,"exported_at":"2026-07-10T20:00:00Z","new_v3_section":{"x":1},"campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
+	raw := []byte(`{"format_version":4,"exported_at":"2026-07-10T20:00:00Z","new_v4_section":{"x":1},"campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
 	_, err := Decode(bytes.NewReader(raw))
 	if !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("want ErrNewerFormat, got %v", err)
 	}
 	msg := err.Error()
-	if !bytes.Contains([]byte(msg), []byte("3")) || !bytes.Contains([]byte(msg), []byte("2")) {
+	if !bytes.Contains([]byte(msg), []byte("4")) || !bytes.Contains([]byte(msg), []byte("3")) {
 		t.Fatalf("message must mention both versions, got %q", msg)
 	}
 }

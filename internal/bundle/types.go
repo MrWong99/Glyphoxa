@@ -38,8 +38,13 @@ type Campaign struct {
 	// orphan.
 	Maps []Map `json:"maps,omitempty"`
 	// Boards are the GM's session shortlists (#543). They reference Node ref keys.
-	Boards  []Board  `json:"boards,omitempty"`
-	History *History `json:"history,omitempty"`
+	Boards []Board `json:"boards,omitempty"`
+	// PlanningThreads are the Butler planning chat's conversations (#592,
+	// ADR-0062). They export UNCONDITIONALLY, like Boards: a thread is the GM's
+	// prep content — prose only, no tool-call intermediates — not a transcript of
+	// play, so it does not ride the History flag.
+	PlanningThreads []PlanningThread `json:"planning_threads,omitempty"`
+	History         *History         `json:"history,omitempty"`
 }
 
 // Agent is an NPC or the Butler. Voice is opaque JSON minus provider bindings.
@@ -130,6 +135,23 @@ type Pin struct {
 type Board struct {
 	Name    string   `json:"name"`
 	NodeIDs []string `json:"node_ids,omitempty"`
+}
+
+// PlanningThread is one Butler planning chat conversation with its Messages
+// nested (#592, ADR-0062): a Message has no meaning apart from its thread — the
+// Map.Pins rationale — so nesting keeps a hand-written bundle from producing an
+// orphan. There is no ref key: nothing cross-references a thread.
+type PlanningThread struct {
+	Title    string            `json:"title,omitempty"`
+	Messages []PlanningMessage `json:"messages,omitempty"`
+}
+
+// PlanningMessage is one prose turn of a PlanningThread: role ('user' or
+// 'assistant') and content only. No ids and no timestamps travel — seq is
+// re-derived on import from message order.
+type PlanningMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 // Character is a player character. DiscordUserID is kept verbatim (ADR-0053 §6).

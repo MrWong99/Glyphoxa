@@ -998,6 +998,84 @@ func TestPGRoundTrip_V2SectionsSurviveRealConstraints(t *testing.T) {
 	}
 }
 
+// TestPGRoundTrip_PlanningThreadsSurviveRealConstraints is the v3 (#592,
+// ADR-0062) sibling of the v2 test above, against a REAL Postgres: the
+// composite planning FKs, the role CHECK, and the seq derivation (max+1 under
+// the UNIQUE (thread_id, seq) key) are actually enforced there. It seeds a
+// thread through the real writer, exports WITHOUT any flag (threads are
+// unconditional), imports into a fresh tenant, and asserts the conversation
+// replays verbatim with seq re-derived densely from 1.
+func TestPGRoundTrip_PlanningThreadsSurviveRealConstraints(t *testing.T) {
+	ctx := context.Background()
+	src, cid, _ := seededCampaign(t)
+
+	thread, err := src.CreatePlanningThread(ctx, cid, "session 12 prep")
+	if err != nil {
+		t.Fatalf("CreatePlanningThread: %v", err)
+	}
+	if _, err := src.AppendPlanningMessage(ctx, cid, thread.ID,
+		storage.PlanningRoleUser, "What loose ends did the harbour heist leave?"); err != nil {
+		t.Fatalf("AppendPlanningMessage user: %v", err)
+	}
+	if _, err := src.AppendPlanningMessage(ctx, cid, thread.ID,
+		storage.PlanningRoleAssistant, "Three: the ledger, the tide charts, and Bart's debt."); err != nil {
+		t.Fatalf("AppendPlanningMessage assistant: %v", err)
+	}
+	if _, err := src.CreatePlanningThread(ctx, cid, ""); err != nil {
+		t.Fatalf("CreatePlanningThread empty: %v", err)
+	}
+
+	// No flags: planning threads are the GM's prep content and travel in the
+	// DEFAULT setup export, unlike history.
+	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, cid, bundle.ExportOptions{})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(b.Campaign.PlanningThreads) != 2 {
+		t.Fatalf("exported planning threads = %d, want 2", len(b.Campaign.PlanningThreads))
+	}
+
+	dst, tid := freshTenant(t)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.PlanningThreads != 2 || res.PlanningMessages != 2 {
+		t.Fatalf("planning counts = %d threads / %d messages, want 2/2", res.PlanningThreads, res.PlanningMessages)
+	}
+
+	threads, err := dst.ListPlanningThreads(ctx, res.CampaignID)
+	if err != nil {
+		t.Fatalf("ListPlanningThreads: %v", err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("imported threads = %d, want 2", len(threads))
+	}
+	var prep *storage.PlanningThread
+	for i := range threads {
+		if threads[i].Title == "session 12 prep" {
+			prep = &threads[i]
+		}
+	}
+	if prep == nil {
+		t.Fatal("the titled thread lost its title")
+	}
+	msgs, err := dst.ListPlanningMessages(ctx, res.CampaignID, prep.ID)
+	if err != nil {
+		t.Fatalf("ListPlanningMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Seq != 1 || msgs[1].Seq != 2 {
+		t.Fatalf("messages = %+v, want two with seq re-derived 1,2", msgs)
+	}
+	if msgs[0].Role != storage.PlanningRoleUser || msgs[1].Role != storage.PlanningRoleAssistant {
+		t.Errorf("roles = %q,%q, want user,assistant in order", msgs[0].Role, msgs[1].Role)
+	}
+	if msgs[0].Content != "What loose ends did the harbour heist leave?" ||
+		msgs[1].Content != "Three: the ledger, the tide charts, and Bart's debt." {
+		t.Errorf("content not verbatim: %+v", msgs)
+	}
+}
+
 func mapInCampaign(t *testing.T, st *storage.Store, id, campaignID uuid.UUID) bool {
 	t.Helper()
 	maps, err := st.ListMaps(context.Background(), campaignID)

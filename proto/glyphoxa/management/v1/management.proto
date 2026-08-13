@@ -2034,6 +2034,11 @@ message SaveProviderConfigRequest {
   // model is the selected model id (optional; free-text — it need not appear
   // in the ListModels catalog, #227).
   string model = 3;
+  // slot names the BYOK slot when it differs from the provider (#592): the
+  // planning-chat LLM slot saves as slot "chat" with provider "groq", so the
+  // same provider can back two slots. Empty means the slot IS the provider
+  // (every pre-0062 slot).
+  string slot = 4;
 }
 
 // SaveProviderConfigResponse returns the saved key's masked metadata.
@@ -2861,4 +2866,173 @@ message ListDiscordVoiceMembersRequest {}
 message ListDiscordVoiceMembersResponse {
   // members are the Discord Users currently in the voice channel.
   repeated DiscordVoiceMember members = 1;
+}
+
+// ChatService is the Butler planning chat (#592, ADR-0062): the Campaign's
+// Butler reachable as a GM-only chat from the Campaign screen, with persisted
+// planning threads. Every RPC resolves the tenant server-side (ADR-0039) and
+// scopes the campaign_id it is given to that tenant — an id outside it is
+// CodeNotFound. GM-only posture: the web tier has a single principal today
+// (the operator, ADR-0055 interim — same posture as SessionService's search
+// RPCs); the operator IS the GM, so the auth stack is the gate.
+service ChatService {
+  // ListPlanningThreads returns the campaign's planning threads, most recently
+  // touched first. A read (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListPlanningThreads(ListPlanningThreadsRequest) returns (ListPlanningThreadsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetPlanningThread returns one thread with its messages in order.
+  rpc GetPlanningThread(GetPlanningThreadRequest) returns (GetPlanningThreadResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreatePlanningThread creates an empty thread. title may be empty — the
+  // first exchange auto-fills it from the first user message. State-changing:
+  // the auth + CSRF interceptors guard it.
+  rpc CreatePlanningThread(CreatePlanningThreadRequest) returns (CreatePlanningThreadResponse);
+
+  // RenamePlanningThread sets a thread's title. An unknown thread is
+  // CodeNotFound; an empty title is CodeInvalidArgument. State-changing.
+  rpc RenamePlanningThread(RenamePlanningThreadRequest) returns (RenamePlanningThreadResponse);
+
+  // DeletePlanningThread removes a thread and its messages. An unknown thread
+  // is CodeNotFound. State-changing.
+  rpc DeletePlanningThread(DeletePlanningThreadRequest) returns (DeletePlanningThreadResponse);
+
+  // PlanningExchange runs one chat exchange against the Butler and streams the
+  // reply: the user message is persisted first (crash-safe), then the frames
+  // carry prose deltas and tool-call activity as they happen, and a final
+  // done frame carries the persisted assistant message. The whole exchange is
+  // metered per ADR-0062 (caps-free meter, Usage Ledger flush per exchange);
+  // on platform keys the ADR-0055 monthly allowance gate is checked BEFORE the
+  // exchange starts and a refusal is CodeResourceExhausted — a clear in-chat
+  // refusal, never a silent drop. A missing provider entitlement is
+  // CodeFailedPrecondition (save a key, ADR-0054); upstream provider failures
+  // are CodeUnavailable. State-changing: the auth + CSRF interceptors guard
+  // it (the policy runs on the stream's request headers).
+  rpc PlanningExchange(PlanningExchangeRequest) returns (stream PlanningExchangeResponse);
+}
+
+// PlanningThread is one persisted Butler planning chat conversation (ADR-0062).
+message PlanningThread {
+  string id = 1;
+  string campaign_id = 2;
+  // title is the display name; auto-filled from the first user message when
+  // the GM did not name the thread.
+  string title = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// PlanningMessage is one prose turn of a planning thread. Tool-call
+// intermediates are not persisted (ADR-0062) and so never appear here.
+message PlanningMessage {
+  string id = 1;
+  // role is 'user' or 'assistant'.
+  string role = 2;
+  string content = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// ListPlanningThreadsRequest scopes the list to one campaign (tenant-checked
+// server-side).
+message ListPlanningThreadsRequest {
+  string campaign_id = 1;
+}
+
+// ListPlanningThreadsResponse carries the threads, most recently touched first.
+message ListPlanningThreadsResponse {
+  repeated PlanningThread threads = 1;
+}
+
+// GetPlanningThreadRequest names one thread within its campaign.
+message GetPlanningThreadRequest {
+  string campaign_id = 1;
+  string thread_id = 2;
+}
+
+// GetPlanningThreadResponse carries the thread and its messages in seq order.
+message GetPlanningThreadResponse {
+  PlanningThread thread = 1;
+  repeated PlanningMessage messages = 2;
+}
+
+// CreatePlanningThreadRequest creates a thread in the campaign; title may be
+// empty.
+message CreatePlanningThreadRequest {
+  string campaign_id = 1;
+  string title = 2;
+}
+
+// CreatePlanningThreadResponse carries the created thread.
+message CreatePlanningThreadResponse {
+  PlanningThread thread = 1;
+}
+
+// RenamePlanningThreadRequest sets a thread's title (required non-empty).
+message RenamePlanningThreadRequest {
+  string campaign_id = 1;
+  string thread_id = 2;
+  string title = 3;
+}
+
+// RenamePlanningThreadResponse carries the updated thread.
+message RenamePlanningThreadResponse {
+  PlanningThread thread = 1;
+}
+
+// DeletePlanningThreadRequest removes one thread.
+message DeletePlanningThreadRequest {
+  string campaign_id = 1;
+  string thread_id = 2;
+}
+
+// DeletePlanningThreadResponse is empty.
+message DeletePlanningThreadResponse {}
+
+// PlanningExchangeRequest is one user message into a thread.
+message PlanningExchangeRequest {
+  string campaign_id = 1;
+  string thread_id = 2;
+  // message is the GM's chat message (required non-empty, bounded server-side).
+  string message = 3;
+}
+
+// PlanningExchangeResponse is one server-stream frame of a chat exchange: prose
+// deltas and tool activity as they happen, then exactly one done frame on
+// success. A failed exchange ends the stream with a Connect error instead of
+// a done frame.
+message PlanningExchangeResponse {
+  oneof frame {
+    // text is the next prose delta of the Butler's reply.
+    PlanningTextDelta text = 1;
+    // tool reports one executed tool call (fired after execution).
+    PlanningToolActivity tool = 2;
+    // done closes a successful exchange.
+    PlanningExchangeDone done = 3;
+  }
+}
+
+// PlanningTextDelta is a prose fragment of the streaming reply.
+message PlanningTextDelta {
+  string delta = 1;
+}
+
+// PlanningToolActivity reports one executed tool call so the UI can show what
+// the Butler consulted. Only the tool name and outcome are on the wire — the
+// arguments and results stay server-side.
+message PlanningToolActivity {
+  // tool_name is the executed Tool's name (e.g. "search_transcripts").
+  string tool_name = 1;
+  // is_error is true when the execution returned an error result.
+  bool is_error = 2;
+}
+
+// PlanningExchangeDone closes a successful exchange with the persisted rows:
+// the assistant's full reply and the thread (whose title may have been
+// auto-filled by this exchange).
+message PlanningExchangeDone {
+  PlanningMessage assistant_message = 1;
+  PlanningThread thread = 2;
 }

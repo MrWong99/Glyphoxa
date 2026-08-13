@@ -58,6 +58,10 @@ type fakeStore struct {
 	appearances []storage.NodeAppearance
 	images      map[string][]byte
 	imageTypes  map[string]string
+
+	// The Butler planning chat #592 added.
+	threads      []storage.PlanningThread
+	planningMsgs map[uuid.UUID][]storage.PlanningMessage
 	// deletedImages records the rollback path's cleanup so a test can prove a
 	// failed import does not strand bytes.
 	deletedImages []string
@@ -74,10 +78,11 @@ var (
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		tags:       map[uuid.UUID][]string{},
-		pins:       map[uuid.UUID][]storage.MapPin{},
-		images:     map[string][]byte{},
-		imageTypes: map[string]string{},
+		tags:         map[uuid.UUID][]string{},
+		pins:         map[uuid.UUID][]storage.MapPin{},
+		images:       map[string][]byte{},
+		imageTypes:   map[string]string{},
+		planningMsgs: map[uuid.UUID][]storage.PlanningMessage{},
 	}
 }
 
@@ -289,6 +294,77 @@ func (f *fakeStore) RecordNodeAppearances(_ context.Context, rows []storage.Node
 		}
 	}
 	return nil
+}
+
+// ── #592: the Butler planning chat ──────────────────────────────────────────
+//
+// Same discipline as the #547 block above: the composite FK is enforced by
+// hand (a message appended to a thread outside the campaign is ErrNotFound),
+// the role CHECK from migration 00053 is refused like the real INSERT's
+// constraint, and AppendPlanningMessage derives seq as max+1 exactly as the
+// real writer does — the seam contract the importer's in-order replay rides on.
+
+func (f *fakeStore) ListPlanningThreads(_ context.Context, campaignID uuid.UUID) ([]storage.PlanningThread, error) {
+	var out []storage.PlanningThread
+	for _, th := range f.threads {
+		if th.CampaignID == campaignID {
+			out = append(out, th)
+		}
+	}
+	// Insertion order — a deterministic stand-in for the real (updated_at DESC,
+	// id) read: every row one import writes shares the transaction's now(), so
+	// the real tie-break is random-UUID order (see the type comment).
+	return out, nil
+}
+
+func (f *fakeStore) CreatePlanningThread(_ context.Context, campaignID uuid.UUID, title string) (storage.PlanningThread, error) {
+	th := storage.PlanningThread{ID: uuid.New(), CampaignID: campaignID, Title: title}
+	f.threads = append(f.threads, th)
+	return th, nil
+}
+
+func (f *fakeStore) ListPlanningMessages(_ context.Context, campaignID, threadID uuid.UUID) ([]storage.PlanningMessage, error) {
+	// Like the real read: an unknown thread yields an empty slice, not an error.
+	if !f.threadInCampaign(threadID, campaignID) {
+		return nil, nil
+	}
+	out := append([]storage.PlanningMessage(nil), f.planningMsgs[threadID]...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out, nil
+}
+
+func (f *fakeStore) AppendPlanningMessage(_ context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error) {
+	// The composite FK: an unknown thread, or one outside the campaign, is
+	// storage.ErrNotFound — never a silent insert.
+	if !f.threadInCampaign(threadID, campaignID) {
+		return storage.PlanningMessage{}, storage.ErrNotFound
+	}
+	// The role CHECK (migration 00053) — the importer validates first, so this
+	// firing means a caller bypassed that gate.
+	if role != storage.PlanningRoleUser && role != storage.PlanningRoleAssistant {
+		return storage.PlanningMessage{}, fmt.Errorf("fake: planning_message_role_check: %q", role)
+	}
+	var maxSeq int64
+	for _, m := range f.planningMsgs[threadID] {
+		if m.Seq > maxSeq {
+			maxSeq = m.Seq
+		}
+	}
+	m := storage.PlanningMessage{
+		ID: uuid.New(), ThreadID: threadID, CampaignID: campaignID,
+		Seq: maxSeq + 1, Role: role, Content: content,
+	}
+	f.planningMsgs[threadID] = append(f.planningMsgs[threadID], m)
+	return m, nil
+}
+
+func (f *fakeStore) threadInCampaign(id, campaignID uuid.UUID) bool {
+	for _, th := range f.threads {
+		if th.ID == id && th.CampaignID == campaignID {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeStore) lineExists(sessionID uuid.UUID, lineID string) bool {

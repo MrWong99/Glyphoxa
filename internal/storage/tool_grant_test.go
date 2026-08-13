@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -70,12 +71,14 @@ func TestButlerKnowledgeGrantBackfillIdempotent(t *testing.T) {
 		t.Fatalf("GetButler: %v", err)
 	}
 
-	// Re-run the migration's backfill statements: they must be no-ops now.
+	// Re-run the backfill statements in their post-00053 idempotent form: the
+	// unique key gained the grant surface (#592), so the conflict target names
+	// all three columns now. They must be no-ops.
 	for _, tool := range []string{"transcript_search", "kg_query", "recap"} {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO tool_agent_grant (agent_id, tool_name)
 			 SELECT id, $1 FROM agents WHERE agent_role = 'butler'
-			 ON CONFLICT (agent_id, tool_name) DO NOTHING`, tool); err != nil {
+			 ON CONFLICT (agent_id, tool_name, surface) DO NOTHING`, tool); err != nil {
 			t.Fatalf("re-run backfill %q: %v", tool, err)
 		}
 	}
@@ -333,9 +336,13 @@ func TestBackfillGrantsExistingButler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
-	butler, err := st.GetButler(ctx, campaignID)
-	if err != nil {
-		t.Fatalf("GetButler at v12: %v", err)
+	// Raw reads throughout: the schema is pinned mid-history here, so the
+	// CURRENT storage readers (agents' 00053 chat column, tool_agent_grant's
+	// 00053 surface column) cannot run against it.
+	var butlerID uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM agents WHERE campaign_id = $1 AND agent_role = 'butler'`, campaignID).Scan(&butlerID); err != nil {
+		t.Fatalf("read butler id at v12: %v", err)
 	}
 
 	// Apply 00013: creates the table, extends the trigger, AND backfills the
@@ -344,16 +351,41 @@ func TestBackfillGrantsExistingButler(t *testing.T) {
 		t.Fatalf("migrate up to 00013: %v", err)
 	}
 
-	grants, err := st.ListToolGrants(ctx, butler.ID)
+	rows, err := pool.Query(ctx,
+		`SELECT tool_name, config FROM tool_agent_grant WHERE agent_id = $1 ORDER BY tool_name`, butlerID)
 	if err != nil {
-		t.Fatalf("ListToolGrants after backfill: %v", err)
+		t.Fatalf("list grants after backfill: %v", err)
 	}
-	if len(grants) != 1 || grants[0].ToolName != "dice" {
+	grants, err := scanNameConfigRows(rows)
+	if err != nil {
+		t.Fatalf("scan grants: %v", err)
+	}
+	if len(grants) != 1 || grants[0].name != "dice" {
 		t.Fatalf("pre-existing Butler has grants %+v after backfill, want exactly [dice]", grants)
 	}
-	if grants[0].Config != nil {
-		t.Errorf("backfilled dice grant config = %q, want nil", grants[0].Config)
+	if grants[0].config != nil {
+		t.Errorf("backfilled dice grant config = %q, want nil", grants[0].config)
 	}
+}
+
+// nameConfig is a version-pinned grant row read (tool_name + config only —
+// columns that exist at every schema version the backfill tests visit).
+type nameConfig struct {
+	name   string
+	config []byte
+}
+
+func scanNameConfigRows(rows pgx.Rows) ([]nameConfig, error) {
+	defer rows.Close()
+	var out []nameConfig
+	for rows.Next() {
+		var nc nameConfig
+		if err := rows.Scan(&nc.name, &nc.config); err != nil {
+			return nil, err
+		}
+		out = append(out, nc)
+	}
+	return out, rows.Err()
 }
 
 // TestBackfillGrantsKnowledgeToolsExistingButler covers the 00025 backfill in
@@ -388,9 +420,12 @@ func TestBackfillGrantsKnowledgeToolsExistingButler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
-	butler, err := st.GetButler(ctx, campaignID)
-	if err != nil {
-		t.Fatalf("GetButler at v24: %v", err)
+	// Raw reads throughout: the schema is pinned mid-history here (see the v12
+	// test above for the rationale).
+	var butlerID uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM agents WHERE campaign_id = $1 AND agent_role = 'butler'`, campaignID).Scan(&butlerID); err != nil {
+		t.Fatalf("read butler id at v24: %v", err)
 	}
 
 	// Apply 00025: extends the trigger AND backfills the pre-existing Butler.
@@ -398,13 +433,18 @@ func TestBackfillGrantsKnowledgeToolsExistingButler(t *testing.T) {
 		t.Fatalf("migrate up to 00025: %v", err)
 	}
 
-	grants, err := st.ListToolGrants(ctx, butler.ID)
+	rows, err := pool.Query(ctx,
+		`SELECT tool_name, config FROM tool_agent_grant WHERE agent_id = $1 ORDER BY tool_name`, butlerID)
 	if err != nil {
-		t.Fatalf("ListToolGrants after backfill: %v", err)
+		t.Fatalf("list grants after backfill: %v", err)
+	}
+	grants, err := scanNameConfigRows(rows)
+	if err != nil {
+		t.Fatalf("scan grants: %v", err)
 	}
 	names := map[string]bool{}
 	for _, g := range grants {
-		names[g.ToolName] = true
+		names[g.name] = true
 	}
 	for _, want := range []string{"dice", "transcript_search", "kg_query"} {
 		if !names[want] {

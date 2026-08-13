@@ -107,15 +107,45 @@ func New(store Store, kg PromptKG) *Adapter {
 	return &Adapter{store: store, kg: kg}
 }
 
-// activeCampaign resolves the Campaign the current turn's Voice Session scopes reads
-// to, from the run context's [session.Identity] (#488), or ErrNoActiveSession when
-// the ctx carries none (a Tool called outside a live turn).
+// campaignKey is the unexported ctx key [WithCampaign]'s explicit override
+// travels under, so no other package can collide with or forge it.
+type campaignKey struct{}
+
+// WithCampaign stamps an EXPLICIT Campaign scope onto ctx for the knowledge
+// adapters — the off-session path (#592, ADR-0062): the Butler planning chat
+// runs the same proposal-mediated write and recap tools with no Voice Session
+// to resolve a Campaign from, so its exchange stamps the campaign it already
+// authorized. It is set by the chat engine from server state, never from LLM
+// arguments (ADR-0029), and it takes precedence over a [session.Identity] —
+// though the two never coexist in practice (an exchange ctx is not a turn ctx).
+func WithCampaign(ctx context.Context, campaignID uuid.UUID) context.Context {
+	return context.WithValue(ctx, campaignKey{}, campaignID)
+}
+
+// campaignFromContext resolves the Campaign a knowledge read/write scopes to:
+// the [WithCampaign] explicit override first (the off-session chat path), else
+// the run context's [session.Identity] (#488 — the live voice path). ok=false
+// means neither is present (a Tool called outside both surfaces).
+func campaignFromContext(ctx context.Context) (uuid.UUID, bool) {
+	if id, ok := ctx.Value(campaignKey{}).(uuid.UUID); ok && id != uuid.Nil {
+		return id, true
+	}
+	if id, ok := session.FromContext(ctx); ok {
+		return id.CampaignID, true
+	}
+	return uuid.Nil, false
+}
+
+// activeCampaign resolves the Campaign the current call scopes to — the
+// [WithCampaign] override or the live Voice Session ([campaignFromContext]) —
+// or ErrNoActiveSession when the ctx carries neither (a Tool called outside a
+// live turn or a chat exchange).
 func (a *Adapter) activeCampaign(ctx context.Context) (uuid.UUID, error) {
-	id, ok := session.FromContext(ctx)
+	id, ok := campaignFromContext(ctx)
 	if !ok {
 		return uuid.Nil, ErrNoActiveSession
 	}
-	return id.CampaignID, nil
+	return id, nil
 }
 
 // SearchTranscript implements [tool.TranscriptSearcher]. It searches the active
