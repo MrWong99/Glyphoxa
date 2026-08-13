@@ -30,19 +30,26 @@ import (
 // write miss its stale-guard and re-embed next pass (#300) — correct, merely a
 // re-run.
 func (s *Store) SetNodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID, blobKey string) (KGNode, string, error) {
-	// FOR UPDATE in the CTE (#590 review): under READ COMMITTED a plain CTE read
-	// takes the statement snapshot, so two racing writes would both report the
-	// SAME old key — one blob deleted twice, the other leaked permanently (no
-	// row, sweep, or reconciliation ever names it again). The row lock makes the
-	// second writer's CTE wait and re-read the first writer's key.
+	// The locked subquery in FROM (#590 review) is load-bearing twice over.
+	// Against a RACE: under READ COMMITTED a plain snapshot read would hand two
+	// racing writes the SAME old key — one blob deleted twice, the other leaked
+	// permanently (no row, sweep, or reconciliation ever names it again); FOR
+	// UPDATE makes the second writer wait and re-read the first writer's key.
+	// And against ORDERING: the lock must sit in FROM, where it is evaluated as
+	// the update's join input — a `WITH old AS (SELECT … FOR UPDATE)` referenced
+	// from RETURNING runs AFTER the same command updated the row, and Postgres
+	// skips locking a self-updated tuple, so `old` came back empty every time
+	// (the CI integration suite caught exactly that).
+	// The subquery's columns are aliased so every unqualified name in RETURNING
+	// still resolves to kg_node alone.
 	row := s.db.QueryRow(ctx,
-		`WITH old AS (
-		     SELECT portrait_blob_key FROM kg_node
-		      WHERE id = $1 AND campaign_id = $2 FOR UPDATE
-		 )
-		 UPDATE kg_node SET portrait_blob_key = $3, updated_at = now()
-		  WHERE id = $1 AND campaign_id = $2
-		 RETURNING `+kgNodeColumnsAspects(false)+`, (SELECT portrait_blob_key FROM old)`,
+		`UPDATE kg_node SET portrait_blob_key = $3, updated_at = now()
+		   FROM (SELECT id AS locked_id, portrait_blob_key AS old_key
+		           FROM kg_node
+		          WHERE id = $1 AND campaign_id = $2
+		            FOR UPDATE) old
+		  WHERE kg_node.id = old.locked_id
+		 RETURNING `+kgNodeColumnsAspects(false)+`, old.old_key`,
 		nodeID, campaignID, blobKey)
 
 	var n KGNode
