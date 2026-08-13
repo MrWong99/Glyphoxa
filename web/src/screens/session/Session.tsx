@@ -14,7 +14,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
-import { useSessionEvents, formatClock } from "./useSessionEvents";
+import { InlineMarkdown, Markdown } from "@/components/ui/Markdown";
+import { useSessionEvents, formatClock, type LineKind } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
 import { HighlightsStrip } from "./HighlightsStrip";
@@ -49,6 +50,18 @@ export const SESSION_REFETCH_MS = 5000;
 // pinned by a unit test.
 export function sessionRefetchInterval(query: { state: { data?: { active?: boolean } } }): number | false {
   return query.state.data?.active ? SESSION_REFETCH_MS : false;
+}
+
+// lineText renders one transcript line's text: Agent lines (npc/butler) are
+// model output and get INLINE markdown — a leaked **emphasis** formats instead
+// of showing raw asterisks, while block structure (headings, lists) stays
+// literal because a spoken line is one sentence-grain row, not a document.
+// Human lines (gm/player) are STT output and stay verbatim: markdown is
+// disabled there so a spoken "asterisk" transcribed as * can never reformat a
+// player's words. Shared by the live transcript and the search-hit rows —
+// both render the same lines, so they must not diverge.
+function lineText(kind: LineKind | string, text: string) {
+  return kind === "npc" || kind === "butler" ? <InlineMarkdown text={text} /> : text;
 }
 
 // tsMs converts a protobuf Timestamp to epoch milliseconds, or null when unset.
@@ -712,7 +725,7 @@ export function Session({
                     </span>
                   )}
                   <time className="gx-line__ts">{formatClock(line.ts)}</time>
-                  <span className="gx-line__text">{line.text}</span>
+                  <span className="gx-line__text">{lineText(line.kind, line.text)}</span>
                 </li>
               ))}
               {showTyping && (
@@ -845,7 +858,9 @@ function RecapView({
   return (
     <Card className="gx-session__recap" data-testid="recap-result">
       <div className="gx-session__recap-label">{t("session.recapLabel", { stamp: label })}</div>
-      <p className="gx-session__recap-text">{result.text}</p>
+      {/* Recap prose is Butler output — rendered as markdown like the planning
+          chat's bubbles. The gx-md root resets this class's pre-wrap. */}
+      <Markdown text={result.text} className="gx-session__recap-text" />
     </Card>
   );
 }
@@ -911,7 +926,7 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
                     </span>
                   )}
                   <time className="gx-line__ts">{matchClock(m.ts)}</time>
-                  <span className="gx-tsearch__text">{m.text}</span>
+                  <span className="gx-tsearch__text">{lineText(m.kind, m.text)}</span>
                 </button>
               </li>
             ))}

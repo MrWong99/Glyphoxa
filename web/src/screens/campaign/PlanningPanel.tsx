@@ -12,6 +12,7 @@ import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v
 import { useI18n, type Lang, type MessageKey } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Markdown } from "@/components/ui/Markdown";
 
 import "./planning.css";
 
@@ -322,7 +323,12 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                 className="gx-planning__msg"
                 data-role={m.role === "user" ? "user" : "assistant"}
               >
-                <div className="gx-planning__bubble">{m.content}</div>
+                {/* Butler replies are markdown and render as such; the GM's own
+                    messages stay verbatim pre-wrapped text — formatting what a
+                    user typed would silently alter their words. */}
+                <div className="gx-planning__bubble">
+                  {m.role === "user" ? m.content : <Markdown text={m.content} />}
+                </div>
                 {when && <span className="gx-planning__when">{when}</span>}
               </li>
             );
@@ -352,7 +358,12 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
               )}
               {activeStream.reply !== "" ? (
                 <li className="gx-planning__msg" data-role="assistant" data-pending="true">
-                  <div className="gx-planning__bubble">{activeStream.reply}</div>
+                  {/* The streamed reply renders markdown mid-stream too: a
+                      re-parse per delta is cheap at chat size, and a raw-text
+                      flash that reformats on the done frame would be worse. */}
+                  <div className="gx-planning__bubble">
+                    <Markdown text={activeStream.reply} />
+                  </div>
                 </li>
               ) : activeStream.errorKey === null ? (
                 <li className="gx-planning__notice-item">

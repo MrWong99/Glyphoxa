@@ -241,6 +241,37 @@ describe("Session reload of an ended session (#74)", () => {
     // No live stream is opened for an ended session.
     expect(MockEventSource.last()).toBeUndefined();
   });
+
+  it("renders leaked markdown inline on Agent lines but keeps human lines verbatim", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          lines: [
+            { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "I said **loudly** hello" },
+            { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "Beware the **red** dragon." },
+          ],
+          status: "idle",
+          typing: { active: false, label: "" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={endedTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // The Agent (npc) line's emphasis renders as a real <strong>…
+    await screen.findByText("Idle");
+    await waitFor(() =>
+      expect(document.querySelector('[data-line-id="a:t1"] .gx-line__text strong')?.textContent).toBe("red"),
+    );
+    // …while the human (player) line — STT output — stays literal: markdown is
+    // disabled there so transcribed asterisks can never reformat spoken words.
+    expect(screen.getByText("I said **loudly** hello")).toBeInTheDocument();
+    expect(document.querySelector('[data-line-id="u:1"] .gx-line__text strong')).toBeNull();
+  });
 });
 
 // deadSessionTransport models issue #144's failure scenario: the loop died

@@ -4,6 +4,7 @@ import { MessageSquare } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n, type Lang } from "@/i18n";
+import { stripMarkdown } from "@/components/ui/Markdown";
 
 // Where an entry was mentioned in play (#545, ADR-0008 amendment).
 //
@@ -56,6 +57,10 @@ export function NodeAppearances({
         <ul className="gx-kg-appearances__list">
           {rows.map((a) => {
             const at = a.at ? timestampDate(a.at) : null;
+            // An Agent line's text can carry leaked markdown; this one-line
+            // quote row can't render it, so flatten (also for the aria label —
+            // a screen reader should not hear "star star").
+            const text = stripMarkdown(a.text);
             return (
               <li key={`${a.voiceSessionId}:${a.lineId}`}>
                 <button
@@ -65,13 +70,13 @@ export function NodeAppearances({
                   aria-label={t("knowledge.mentionAria", {
                     who: a.who,
                     when: at ? fmtWhen(at, lang) : t("knowledge.unknownTime"),
-                    text: a.text,
+                    text,
                   })}
                 >
                   <span className="gx-kg-appearances__who" data-kind={a.kind}>
                     {a.who}
                   </span>
-                  <span className="gx-kg-appearances__text">{a.text}</span>
+                  <span className="gx-kg-appearances__text">{text}</span>
                   {at && <span className="gx-kg-appearances__when">{fmtWhen(at, lang)}</span>}
                 </button>
               </li>
