@@ -684,6 +684,30 @@ func WithLanguage(lang string) EngineOption {
 	}
 }
 
+// NewToolProvider exposes the battle-tested [llm.Provider] → [tool.Provider]
+// bridge (retry policy, ADR-0044/0045 metering rules, tool-syntax fallback,
+// stream-drain discipline) for consumers that drive a [tool.Loop] directly
+// instead of through the voice [Engine] — the Butler planning chat (#592,
+// ADR-0062) is the first. The returned provider implements
+// [tool.StreamingProvider], so [tool.Loop.RunStream] streams prose deltas
+// through it. Options are the same as [NewEngine]'s ([WithMetrics],
+// [WithRetry]); the voice-only dice gate and invented-roll guard live on the
+// Engine, not here.
+func NewToolProvider(provider llm.Provider, model string, maxTokens int, opts ...EngineOption) tool.StreamingProvider {
+	cfg := engineConfig{rec: observe.Discard{}}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return providerAdapter{
+		provider:  provider,
+		model:     model,
+		maxTokens: maxTokens,
+		rec:       cfg.rec,
+		provName:  cfg.provName,
+		retry:     cfg.retry,
+	}
+}
+
 // NewEngine builds an [Engine] over a streaming [llm.Provider] and the Agent's
 // tool grants. model/maxTokens are the per-Agent LLM config used for every
 // generation step. provider and grants must be non-nil ([tool.NewLoop] panics

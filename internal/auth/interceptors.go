@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"connectrpc.com/connect"
 )
@@ -29,24 +30,69 @@ import (
 // tenant-agnostic, so a resolve failure proceeds tenantless (logged) and each
 // handler fails on its own terms — unlike the byte mounts (mounts.go), which
 // declare [TenantRequired].
-func NewPolicyInterceptor(p *Policy, public ...string) connect.UnaryInterceptorFunc {
+//
+// It is a full [connect.Interceptor], not a UnaryInterceptorFunc: a
+// UnaryInterceptorFunc's WrapStreamingHandler is a PASS-THROUGH, so mounting a
+// server-streaming procedure (the #592 chat exchange is the first) on a
+// unary-only stack would serve it with NO session, CSRF, or tenant check. The
+// streaming wrap runs the identical policy evaluation on the stream's request
+// headers; a Connect stream open is an HTTP POST, so the CSRF double-submit
+// check applies to it exactly as to a unary mutation.
+func NewPolicyInterceptor(p *Policy, public ...string) connect.Interceptor {
 	publicSet := make(map[string]struct{}, len(public))
 	for _, proc := range public {
 		publicSet[proc] = struct{}{}
 	}
-	return func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			_, isPublic := publicSet[req.Spec().Procedure]
-			v := p.Evaluate(ctx, InputFromHeader(req.Header()), Check{
-				Public: isPublic,
-				CSRF:   req.Spec().IdempotencyLevel != connect.IdempotencyNoSideEffects,
-				Tenant: TenantOptional,
-			})
-			if v.Deny != DenyNone {
-				return nil, denialError(v.Deny)
-			}
-			return next(v.Context(ctx), req)
+	return policyInterceptor{p: p, public: publicSet}
+}
+
+// policyInterceptor is [NewPolicyInterceptor]'s value: one shared [Policy]
+// evaluation mapped onto both Connect call shapes.
+type policyInterceptor struct {
+	p      *Policy
+	public map[string]struct{}
+}
+
+// evaluate runs the shared policy for one procedure against its request
+// headers, returning the verdict the two wraps enforce identically.
+func (i policyInterceptor) evaluate(ctx context.Context, procedure string, header http.Header, idem connect.IdempotencyLevel) Verdict {
+	_, isPublic := i.public[procedure]
+	return i.p.Evaluate(ctx, InputFromHeader(header), Check{
+		Public: isPublic,
+		CSRF:   idem != connect.IdempotencyNoSideEffects,
+		Tenant: TenantOptional,
+	})
+}
+
+// WrapUnary implements [connect.Interceptor] for unary calls — the behavior
+// every management RPC has always had.
+func (i policyInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		v := i.evaluate(ctx, req.Spec().Procedure, req.Header(), req.Spec().IdempotencyLevel)
+		if v.Deny != DenyNone {
+			return nil, denialError(v.Deny)
 		}
+		return next(v.Context(ctx), req)
+	}
+}
+
+// WrapStreamingClient implements [connect.Interceptor]. The policy gates the
+// SERVER side; this process's outbound Connect clients (none today) pass
+// through untouched.
+func (i policyInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+// WrapStreamingHandler implements [connect.Interceptor]: the same policy
+// evaluation as WrapUnary, on the stream's request headers, before the handler
+// sees the stream.
+func (i policyInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		v := i.evaluate(ctx, conn.Spec().Procedure, conn.RequestHeader(), conn.Spec().IdempotencyLevel)
+		if v.Deny != DenyNone {
+			return denialError(v.Deny)
+		}
+		return next(v.Context(ctx), conn)
 	}
 }
 

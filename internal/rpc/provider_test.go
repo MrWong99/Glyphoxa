@@ -277,6 +277,17 @@ func credByProvider(creds []*managementv1.ProviderCredential, provider string) *
 	return nil
 }
 
+// credByComponent finds a slot by its wire component — the unambiguous key now
+// that two slots share provider "groq" (#592: llm vs chat_llm).
+func credByComponent(creds []*managementv1.ProviderCredential, component string) *managementv1.ProviderCredential {
+	for _, c := range creds {
+		if c.GetComponent() == component {
+			return c
+		}
+	}
+	return nil
+}
+
 // TestProviderList_DiscordApplicationID pins #110: the configured Discord
 // application (client) id — the same app that backs operator login (ADR-0016) —
 // is exposed on the read so the SPA composes the bot-authorization URL without
@@ -317,8 +328,8 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	creds := resp.Msg.GetCredentials()
-	if len(creds) != 4 {
-		t.Fatalf("credentials = %d, want 4 (discord, groq, elevenlabs, gemini)", len(creds))
+	if len(creds) != 5 {
+		t.Fatalf("credentials = %d, want 5 (discord, groq, elevenlabs, gemini, chat)", len(creds))
 	}
 	for _, want := range []string{"discord", "groq", "elevenlabs", "gemini"} {
 		c := credByProvider(creds, want)
@@ -328,6 +339,18 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 		if c.GetEverSaved() || c.GetShowMasked() || c.GetLast4() != "" {
 			t.Errorf("%s should be key-needed on an empty store: %+v", want, c)
 		}
+	}
+	// The planning-chat slot (#592) shares provider "groq" with the llm slot, so
+	// it is identified by its component on the wire.
+	chat := credByComponent(creds, "chat_llm")
+	if chat == nil {
+		t.Fatalf("missing planning-chat credential slot (component chat_llm)")
+	}
+	if chat.GetProvider() != "groq" {
+		t.Errorf("chat slot provider = %q, want groq", chat.GetProvider())
+	}
+	if chat.GetEverSaved() || chat.GetShowMasked() || chat.GetLast4() != "" {
+		t.Errorf("chat slot should be key-needed on an empty store: %+v", chat)
 	}
 	if resp.Msg.GetGuildId() != "" || resp.Msg.GetVoiceChannelId() != "" {
 		t.Errorf("guild/voice should be empty: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())

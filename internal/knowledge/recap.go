@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/recap"
-	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
@@ -91,11 +90,11 @@ func NewRecap(eng RecapEngine, store RecapStore) *RecapAdapter {
 // let an empty row through). The recap prose is returned verbatim for the Tool to
 // relay.
 func (a *RecapAdapter) RecapLastSessions(ctx context.Context, n int) (string, error) {
-	id, ok := session.FromContext(ctx)
+	campaignID, ok := campaignFromContext(ctx)
 	if !ok {
 		return "", ErrNoActiveSession
 	}
-	sessions, err := a.store.ListVoiceSessions(ctx, id.CampaignID, recapListLimit)
+	sessions, err := a.store.ListVoiceSessions(ctx, campaignID, recapListLimit)
 	if err != nil {
 		return "", fmt.Errorf("knowledge: list voice sessions for recap: %w", err)
 	}

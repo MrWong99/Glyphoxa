@@ -28,6 +28,12 @@ const (
 	// ComponentImage is AI image generation (#311, Epic 8, ADR-0004 amendment):
 	// the enum value the 00028 migration adds. Gemini is its v1 provider.
 	ComponentImage Component = "image"
+	// ComponentChatLLM is the tenant-level chat-scoped LLM slot (#592,
+	// ADR-0062): the Butler planning chat's resolution ladder reads it between
+	// the Butler's own chat slot and the voice 'llm' config, so chat can run a
+	// quality-over-latency model without re-pricing the live voice loop. The
+	// 00053 migration adds the enum value.
+	ComponentChatLLM Component = "chat_llm"
 )
 
 // Tenant is the top-level isolation boundary.
@@ -218,6 +224,13 @@ type Agent struct {
 	// May be null; resolving a tenant default when null is a #6 concern (the
 	// schema has no is_default marker yet, so no fallback is wired here).
 	LLMProviderConfigID uuid.NullUUID
+	// ChatLLMProviderConfigID is the Butler's chat-scoped LLM slot (ADR-0062):
+	// the planning chat resolves it FIRST, so upgrading chat quality never
+	// touches the voice loop's LLMProviderConfigID. May be null (the ladder
+	// falls back to the tenant 'chat_llm' then 'llm' Provider Config). Written
+	// by no editor surface in v1 — UpdateAgent deliberately leaves the column
+	// alone, mirroring how it preserves fields the editor never sees.
+	ChatLLMProviderConfigID uuid.NullUUID
 	// AddressOnly: reachable only by explicit name/alias (ADR-0024). Butler true.
 	AddressOnly bool
 	// SpeakerColor is a server-assigned palette SLOT (not a colour value): the web
@@ -237,13 +250,30 @@ type Agent struct {
 // differently per Agent. It reaches the Tool handler at execution time and is
 // enforced there, never by the LLM.
 type ToolGrant struct {
-	ID        uuid.UUID
-	AgentID   uuid.UUID
-	ToolName  string
+	ID       uuid.UUID
+	AgentID  uuid.UUID
+	ToolName string
+	// Surface is which Agent surface the grant arms (#592, ADR-0062): chat
+	// Tool Grants are separate rows beside the voice grants, so granting the
+	// Butler a chat tool never widens what it may call in voice (ADR-0029).
+	Surface   GrantSurface
 	Config    json.RawMessage
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// GrantSurface is the Agent surface a Tool Grant arms (#592, ADR-0062): the
+// live voice loop and the Butler planning chat hydrate DISJOINT grant rows, so
+// the two surfaces cannot leak tools into each other.
+type GrantSurface string
+
+const (
+	// GrantSurfaceVoice arms the live voice loop — the pre-0062 meaning of
+	// every grant row, and the column default.
+	GrantSurfaceVoice GrantSurface = "voice"
+	// GrantSurfaceChat arms the Butler planning chat's tool belt (ADR-0062).
+	GrantSurfaceChat GrantSurface = "chat"
+)
 
 // User is a human operator authenticated via Discord OAuth (ADR-0016). The
 // Discord snowflake is the stable identity key; Name/Avatar are display-only and
