@@ -169,6 +169,15 @@
   margin: 0;
 }
 
+/* One-liner under a slot's name (the chat slot's "voice stays untouched",
+   ADR-0062) — same quiet treatment as the bot tag. */
+.gx-provider-row__desc {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+  margin-top: 2px;
+  max-width: 26rem;
+}
+
 /* Resolved Discord bot tag from the live gateway login (#70), under the name. */
 .gx-provider-row__tag {
   font-size: var(--body-xs);

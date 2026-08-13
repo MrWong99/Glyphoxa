@@ -269,8 +269,10 @@ describe("Configuration", () => {
 
   it("shows a Key-needed badge for each unsaved credential", async () => {
     renderScreen();
-    // Four secret slots start unsaved → four Key-needed badges (discord, groq,
-    // elevenlabs, gemini).
+    // Four Key-needed badges (discord, groq, elevenlabs, gemini). The
+    // planning-chat slot (#592/ADR-0062) renders NO health badge: the shared
+    // groq probe tests the voice-LLM credential, not the chat_llm key, and a
+    // dedicated chat_llm probe is a follow-up.
     expect(await screen.findAllByText(/key needed/i)).toHaveLength(4);
     expect(screen.queryByText(/working/i)).not.toBeInTheDocument();
   });

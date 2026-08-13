@@ -9,6 +9,7 @@ import {
 
 import * as auth from "./messages/auth";
 import * as campaign from "./messages/campaign";
+import * as chat from "./messages/chat";
 import * as common from "./messages/common";
 import * as components from "./messages/components";
 import * as configuration from "./messages/configuration";
@@ -30,6 +31,7 @@ export const en = {
   ...components.en,
   ...configuration.en,
   ...campaign.en,
+  ...chat.en,
   ...knowledge.en,
   ...palette.en,
   ...session.en,
@@ -47,6 +49,7 @@ const de: Record<MessageKey, string> = {
   ...components.de,
   ...configuration.de,
   ...campaign.de,
+  ...chat.de,
   ...knowledge.de,
   ...palette.de,
   ...session.de,

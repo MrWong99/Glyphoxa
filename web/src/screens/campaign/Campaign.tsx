@@ -22,6 +22,7 @@ import { MapsPanel } from "./MapsPanel";
 import { PlayersPanel } from "./PlayersPanel";
 import { RosterPrep } from "./RosterPrep";
 import { ProposalsPanel } from "./ProposalsPanel";
+import { PlanningPanel } from "./PlanningPanel";
 
 import "./campaign.css";
 
@@ -78,7 +79,9 @@ export function Campaign({
   // Cast (roster editor), Knowledge (KG entries), or Players (Character ↔ Discord
   // User bindings, #279) — the design's seg-control beside the title. Cast is the
   // default so the roster is what loads first (#71).
-  const [view, setView] = useState<"cast" | "knowledge" | "maps" | "players" | "proposals">("cast");
+  const [view, setView] = useState<
+    "cast" | "knowledge" | "maps" | "players" | "proposals" | "planning"
+  >("cast");
   // Within Cast: the editor (default), or the prep readiness view (#544). The
   // editor stays the default because adding and shaping NPCs is the common act;
   // readiness is what you check before a session.
@@ -103,7 +106,8 @@ export function Campaign({
       dlView === "knowledge" ||
       dlView === "maps" ||
       dlView === "players" ||
-      dlView === "proposals"
+      dlView === "proposals" ||
+      dlView === "planning"
     ) {
       setView(dlView);
     }
@@ -197,6 +201,16 @@ export function Campaign({
             >
               {t("campaign.tabSuggestions")}
             </button>
+            {/* Butler planning chat (#592, ADR-0062). */}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "planning"}
+              data-active={view === "planning" ? "true" : undefined}
+              onClick={() => setView("planning")}
+            >
+              {t("chat.tabPlanning")}
+            </button>
           </div>
         </div>
         <div className="gx-campaign-screen__sub">
@@ -208,7 +222,9 @@ export function Campaign({
                 ? t("campaign.ledePlayers")
                 : view === "proposals"
                   ? t("campaign.ledeSuggestions")
-                  : t("campaign.ledeCast")}
+                  : view === "planning"
+                    ? t("chat.ledePlanning")
+                    : t("campaign.ledeCast")}
           </span>
         </div>
       </header>
@@ -234,6 +250,18 @@ export function Campaign({
         <PlayersPanel />
       ) : view === "proposals" ? (
         <ProposalsPanel />
+      ) : view === "planning" ? (
+        // The ChatService RPCs are campaign-scoped (ADR-0062), so the panel
+        // waits for the roster read to hand it the campaign id.
+        campaign ? (
+          <PlanningPanel campaignId={campaign.id} />
+        ) : status === "error" ? (
+          <p className="gx-campaign__error" role="alert">
+            {t("campaign.loadError", { message: error.message })}
+          </p>
+        ) : (
+          <div className="gx-skeleton" data-testid="planning-loading" />
+        )
       ) : status === "pending" ? (
         <div className="gx-skeleton" data-testid="roster-loading" />
       ) : status === "error" ? (

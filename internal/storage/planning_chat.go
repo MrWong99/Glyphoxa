@@ -184,56 +184,46 @@ func (s *Store) ListPlanningMessages(ctx context.Context, campaignID, threadID u
 	return out, nil
 }
 
-// appendMessageAttempts bounds the seq-race retry in AppendPlanningMessage. The
-// chat surface is GM-only and effectively single-writer per thread, so a
-// collision is a rarity, not a steady state; two retries cover a concurrent
-// pair without hiding a systematic bug behind an unbounded loop.
-const appendMessageAttempts = 3
-
 // AppendPlanningMessage appends one prose turn at the thread's next seq and
-// bumps the thread's updated_at (the thread list orders by it). The seq is
-// computed as max+1 in the INSERT; the UNIQUE (thread_id, seq) key turns a
-// concurrent append into a retry rather than a duplicate. An unknown thread
-// (or one outside the campaign) yields ErrNotFound via the composite FK.
+// bumps the thread's updated_at (the thread list orders by it). The thread row
+// is locked (FOR UPDATE) inside the transaction first, which both yields a
+// clean ErrNotFound for an unknown/foreign thread — BEFORE the seq computation
+// can trip the UNIQUE (thread_id, seq) index on a cross-campaign probe — and
+// serializes concurrent appends to the same thread so max+1 never collides.
 func (s *Store) AppendPlanningMessage(ctx context.Context, campaignID, threadID uuid.UUID, role, content string) (PlanningMessage, error) {
-	var lastErr error
-	for attempt := 0; attempt < appendMessageAttempts; attempt++ {
-		var m PlanningMessage
-		err := s.InTx(ctx, func(tx *Store) error {
-			row := tx.db.QueryRow(ctx,
-				`INSERT INTO planning_message (thread_id, campaign_id, seq, role, content)
-				 VALUES ($1, $2,
-				         (SELECT COALESCE(MAX(seq), 0) + 1 FROM planning_message
-				           WHERE thread_id = $1 AND campaign_id = $2),
-				         $3, $4)
-				 RETURNING `+planningMessageColumns,
-				threadID, campaignID, role, content)
-			var err error
-			if m, err = scanPlanningMessage(row); err != nil {
-				return err
-			}
-			_, err = tx.db.Exec(ctx,
-				`UPDATE planning_thread SET updated_at = now()
-				  WHERE id = $1 AND campaign_id = $2`, threadID, campaignID)
-			return err
-		})
-		switch {
-		case err == nil:
-			return m, nil
-		case isPGError(err, pgForeignKeyViolation):
-			return PlanningMessage{}, ErrNotFound
-		case isPGError(err, pgUniqueViolation):
-			lastErr = err // a concurrent append took our seq; retry
-			continue
-		default:
-			return PlanningMessage{}, fmt.Errorf("storage: append planning message: %w", err)
+	var m PlanningMessage
+	err := s.InTx(ctx, func(tx *Store) error {
+		var one int
+		err := tx.db.QueryRow(ctx,
+			`SELECT 1 FROM planning_thread WHERE id = $1 AND campaign_id = $2 FOR UPDATE`,
+			threadID, campaignID).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
 		}
+		if err != nil {
+			return err
+		}
+		row := tx.db.QueryRow(ctx,
+			`INSERT INTO planning_message (thread_id, campaign_id, seq, role, content)
+			 VALUES ($1, $2,
+			         (SELECT COALESCE(MAX(seq), 0) + 1 FROM planning_message
+			           WHERE thread_id = $1),
+			         $3, $4)
+			 RETURNING `+planningMessageColumns,
+			threadID, campaignID, role, content)
+		if m, err = scanPlanningMessage(row); err != nil {
+			return err
+		}
+		_, err = tx.db.Exec(ctx,
+			`UPDATE planning_thread SET updated_at = now()
+			  WHERE id = $1 AND campaign_id = $2`, threadID, campaignID)
+		return err
+	})
+	if errors.Is(err, ErrNotFound) {
+		return PlanningMessage{}, ErrNotFound
 	}
-	return PlanningMessage{}, fmt.Errorf("storage: append planning message: seq contention persisted: %w", lastErr)
-}
-
-// isPGError reports whether err carries the given SQLSTATE code.
-func isPGError(err error, code string) bool {
-	got, ok := pgErrCode(err)
-	return ok && got == code
+	if err != nil {
+		return PlanningMessage{}, fmt.Errorf("storage: append planning message: %w", err)
+	}
+	return m, nil
 }

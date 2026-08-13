@@ -67,12 +67,15 @@ func TestMigration00016_RepairsVoiceDrift(t *testing.T) {
 		t.Fatalf("migrate up to 00016: %v", err)
 	}
 
-	// The drift row is now the canonical shape the pipeline reads.
-	drift, err := st.GetAgent(ctx, driftID)
-	if err != nil {
-		t.Fatalf("GetAgent(drift): %v", err)
+	// The drift row is now the canonical shape the pipeline reads. Read the
+	// column directly: the schema is pinned at 00016 here, so the CURRENT
+	// storage readers (whose column list includes later additions, e.g. 00053's
+	// chat_llm_provider_config_id) cannot run against it.
+	var driftVoice []byte
+	if err := pool.QueryRow(ctx, `SELECT voice FROM agents WHERE id = $1`, driftID).Scan(&driftVoice); err != nil {
+		t.Fatalf("read voice(drift): %v", err)
 	}
-	v, err := storage.VoiceFromJSON(drift.Voice)
+	v, err := storage.VoiceFromJSON(driftVoice)
 	if err != nil {
 		t.Fatalf("VoiceFromJSON(drift): %v", err)
 	}
@@ -97,11 +100,11 @@ func TestMigration00016_RepairsVoiceDrift(t *testing.T) {
 	}
 
 	// The {} no-voice row is untouched.
-	empty, err := st.GetAgent(ctx, emptyID)
-	if err != nil {
-		t.Fatalf("GetAgent(empty): %v", err)
+	var emptyVoice []byte
+	if err := pool.QueryRow(ctx, `SELECT voice FROM agents WHERE id = $1`, emptyID).Scan(&emptyVoice); err != nil {
+		t.Fatalf("read voice(empty): %v", err)
 	}
-	if got := string(empty.Voice); got != "{}" {
+	if got := string(emptyVoice); got != "{}" {
 		t.Errorf("no-voice row = %q, want it left as {}", got)
 	}
 }
