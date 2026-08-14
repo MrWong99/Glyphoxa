@@ -1116,3 +1116,84 @@ textarea.gx-input {
   padding: 6px 10px;
   font-size: 12px;
 }
+
+/* ===================== Markdown (components/ui/Markdown.tsx) ============ */
+/* LLM-authored prose: planning-chat bubbles, recap cards, transcript lines.
+ * The root resets white-space to normal so the renderer can sit inside
+ * containers that pre-wrap plain text (chat bubbles); code blocks re-apply
+ * their own wrapping. Spacing is deliberately tighter than base.css prose —
+ * these fragments render inside bubbles and cards, not article pages. */
+.gx-md {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.gx-md > :first-child {
+  margin-top: 0;
+}
+.gx-md > :last-child {
+  margin-bottom: 0;
+}
+.gx-md__p {
+  margin: 0 0 var(--spacing-sm);
+  text-wrap: pretty;
+}
+/* Model-chosen heading levels scale visually only (no real hN — see the
+ * component); levels 3+ share one size so deep outlines stay calm. */
+.gx-md__heading {
+  margin: var(--spacing-sm) 0 var(--spacing-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  line-height: var(--body-line-tight);
+}
+.gx-md__heading[data-level="1"] {
+  font-size: 1.15em;
+}
+.gx-md__heading[data-level="2"] {
+  font-size: 1.08em;
+}
+.gx-md__list {
+  margin: 0 0 var(--spacing-sm);
+  padding-left: 1.4em;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gx-md__list .gx-md__list {
+  margin: 2px 0 0;
+}
+.gx-md__code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--surface-raised, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
+.gx-md__pre {
+  margin: 0 0 var(--spacing-sm);
+  padding: var(--spacing-sm);
+  background: var(--surface-inset, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+.gx-md__pre code {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  /* pre-wrap: a bubble is narrow and a horizontal scrollbar inside one is
+   * worse than wrapped code. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gx-md__quote {
+  margin: 0 0 var(--spacing-sm);
+  padding-left: var(--spacing-sm);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+}
+.gx-md__hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--spacing-sm) 0;
+}

@@ -10,6 +10,7 @@ import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n, type Lang, type TFunc } from "@/i18n";
 import { metaOf, alphaBg } from "@/screens/campaign/knowledgeVocab";
+import { stripMarkdown } from "@/components/ui/Markdown";
 
 import "./commandPalette.css";
 
@@ -210,7 +211,10 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
                           </span>
                           <span className="gx-palette__item-body">
                             <span className="gx-palette__item-title">{lead}</span>
-                            <span className="gx-palette__snippet">{h.snippet}</span>
+                            {/* Transcript snippets include Agent speech, which
+                                can leak markdown; a one-line palette row can't
+                                render it, so flatten. */}
+                            <span className="gx-palette__snippet">{stripMarkdown(h.snippet)}</span>
                           </span>
                           {h.who !== "" && when != null && (
                             <span className="gx-palette__item-meta">{when}</span>
@@ -234,8 +238,14 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
                           <Sparkles size={13} />
                         </span>
                         <span className="gx-palette__item-body">
-                          <span className="gx-palette__item-title">{h.excerpt}</span>
-                          {h.reason !== "" && <span className="gx-palette__snippet">{h.reason}</span>}
+                          {/* Same flattening as the transcript snippets above:
+                              the excerpt can quote Agent speech and the reason
+                              is classifier output — both markdown-prone, and a
+                              one-line row can't render it. */}
+                          <span className="gx-palette__item-title">{stripMarkdown(h.excerpt)}</span>
+                          {h.reason !== "" && (
+                            <span className="gx-palette__snippet">{stripMarkdown(h.reason)}</span>
+                          )}
                         </span>
                         <span className="gx-palette__item-meta">{stamp(h.startsAt, lang)}</span>
                       </Command.Item>

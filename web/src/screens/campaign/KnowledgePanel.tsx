@@ -30,6 +30,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { stripMarkdown } from "@/components/ui/Markdown";
 import { NodePortrait, portraitURL } from "./NodePortrait";
 import { NodeRelations } from "./NodeRelations";
 import { NodeTags } from "./NodeTags";
@@ -599,7 +600,10 @@ function KnowledgeDraftCard({
                         </Badge>
                       )}
                     </div>
-                    {n.body && <span className="gx-kg-card__snippet">{n.body}</span>}
+                    {/* Bodies may be markdown (GM-written or an approved Butler
+                        proposal); a one-line ellipsized preview can't render it,
+                        so flatten instead of leaking raw ** markers. */}
+                    {n.body && <span className="gx-kg-card__snippet">{stripMarkdown(n.body)}</span>}
                   </div>
                   <button
                     type="button"
@@ -803,7 +807,8 @@ function KnowledgeCard({
             </Badge>
           )}
         </div>
-        {node.body && <span className="gx-kg-card__snippet">{node.body}</span>}
+        {/* Flattened like the list card above — same one-line preview rule. */}
+        {node.body && <span className="gx-kg-card__snippet">{stripMarkdown(node.body)}</span>}
       </div>
       <div className="gx-kg-card__actions">
         <button

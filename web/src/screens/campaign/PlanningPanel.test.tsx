@@ -159,4 +159,23 @@ describe("PlanningPanel", () => {
     expect(await screen.findByText("Start with the docks.")).toBeInTheDocument();
     await waitFor(() => expect(input).not.toBeDisabled());
   });
+
+  it("renders Butler replies as markdown but keeps the GM's own words verbatim", async () => {
+    recentMessages[0].content = "Is **this** rendered?";
+    recentMessages[1].content = "The keeper is **definitely** a smuggler.";
+    try {
+      renderPanel();
+      await screen.findByText(/a smuggler/);
+
+      // Assistant bubble: the emphasis renders as a real <strong>.
+      const strong = document.querySelector('[data-role="assistant"] .gx-planning__bubble strong');
+      expect(strong?.textContent).toBe("definitely");
+      // User bubble: the GM's markdown-looking input stays literal text.
+      expect(screen.getByText("Is **this** rendered?")).toBeInTheDocument();
+      expect(document.querySelector('[data-role="user"] .gx-planning__bubble strong')).toBeNull();
+    } finally {
+      recentMessages[0].content = "What did the players learn at the lighthouse?";
+      recentMessages[1].content = "They learned the keeper is a smuggler.";
+    }
+  });
 });
