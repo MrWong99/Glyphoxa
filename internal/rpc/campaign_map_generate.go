@@ -80,7 +80,7 @@ func (s *campaignMaps) GenerateMapImage(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	c, err := s.resolveCampaign(ctx, "GenerateMapImage")
+	c, err := s.active.campaignFor(ctx, "GenerateMapImage")
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (s *campaignMaps) SuggestMapPins(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid map id"))
 	}
-	c, err := s.resolveCampaign(ctx, "SuggestMapPins")
+	c, err := s.active.campaignFor(ctx, "SuggestMapPins")
 	if err != nil {
 		return nil, err
 	}

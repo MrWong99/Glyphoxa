@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, EyeOff, Plus, Sparkles, Trash2, Upload } from "lucide-react";
 
@@ -10,6 +10,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { errorMessage } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
 
@@ -44,18 +46,11 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
 
   // Both reads of the same data: the map list and any open map view.
   const invalidate = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listMaps,
-        cardinality: "finite",
-      }),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.getMapView,
-        cardinality: "finite",
-      }),
-    });
+    void invalidateMethodQueries(
+      queryClient,
+      CampaignService.method.listMaps,
+      CampaignService.method.getMapView,
+    );
   };
 
   if (listQuery.isPending) return <div className="gx-skeleton" data-testid="maps-loading" />;
@@ -148,15 +143,10 @@ function MapView({
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.getMapView,
-        cardinality: "finite",
-      }),
-    });
+    void invalidateMethodQueries(queryClient, CampaignService.method.getMapView);
     onChanged();
   };
-  const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const fail = (e: unknown) => setError(errorMessage(e));
 
   const createPin = useMutation(CampaignService.method.createPin, { onSuccess: refresh, onError: fail });
   const updatePin = useMutation(CampaignService.method.updatePin, { onSuccess: refresh, onError: fail });
@@ -521,7 +511,7 @@ function NewMapButton({
       draftURL.current = url;
       setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -577,7 +567,7 @@ function NewMapButton({
       reset();
       if (res.map) onCreated(res.map.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 

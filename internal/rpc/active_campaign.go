@@ -3,7 +3,9 @@ package rpc
 import (
 	"context"
 	"errors"
+	"log/slog"
 
+	"connectrpc.com/connect"
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
@@ -104,6 +106,27 @@ type activeCampaignSource struct {
 // selection → most-recent fallback, #222).
 func (a *activeCampaignSource) resolve(ctx context.Context) (storage.Campaign, error) {
 	return resolveActiveCampaign(ctx, a.live, a.store)
+}
+
+// campaignFor resolves the operator's Active Campaign and maps the two failure
+// shapes onto the connect errors every handler returns for them: no resolvable
+// campaign → CodeNotFound "no active campaign", anything else → a logged
+// CodeInternal. op names the RPC for the log line ("CreateNode"); logArgs are
+// extra slog key/value pairs. The returned error is ready to hand back to
+// connect as-is, so a handler reduces to
+//
+//	c, err := s.active.campaignFor(ctx, "CreateNode")
+//	if err != nil { return nil, err }
+func (a *activeCampaignSource) campaignFor(ctx context.Context, op string, logArgs ...any) (storage.Campaign, error) {
+	c, err := a.resolve(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error(op+": get active campaign failed", append(logArgs, "err", err)...)
+		return storage.Campaign{}, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return c, nil
 }
 
 // isCampaignLive reports whether campaignID is currently voicing in ANY session

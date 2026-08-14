@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Play, Square, Search, ScrollText, Loader2 } from "lucide-react";
@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { InlineMarkdown, Markdown } from "@/components/ui/Markdown";
 import { useSessionEvents, formatClock, type LineKind } from "./useSessionEvents";
@@ -216,25 +217,14 @@ export function Session({
   const spendCapState = active ? data?.spendCapState : undefined;
   const estimatedSpendUsd = data?.estimatedSpendUsd ?? 0;
 
-  const invalidate = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: SessionService.method.getSession,
-        cardinality: "finite",
-      }),
-    });
+  const invalidate = () => invalidateMethodQueries(queryClient, SessionService.method.getSession);
 
   // The past-session picker list goes stale on a Start: the new running row must
   // appear (labelled "live") without waiting for a window refocus. Stop's stale is
   // covered by the end-sweep (campaignCache watchVoiceSessionEnd), but Start has no
   // such trigger, so refresh listSessions on a successful Start (#270).
   const invalidateSessions = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: SessionService.method.listSessions,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, SessionService.method.listSessions);
 
   // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
   // sonner) and invalidate — a Stop that hits "no active session" means the
@@ -288,21 +278,11 @@ export function Session({
   // guild stays untouched). Refresh the picker read so the default marker and
   // the Configuration read both follow.
   const invalidateChannels = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: SessionService.method.listSessionVoiceChannels,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, SessionService.method.listSessionVoiceChannels);
   const saveDefaultChannel = useMutation(ProviderService.method.saveDiscordSettings, {
     onSuccess: () => {
       void invalidateChannels();
-      void queryClient.invalidateQueries({
-        queryKey: createConnectQueryKey({
-          schema: ProviderService.method.listProviderConfigs,
-          cardinality: "finite",
-        }),
-      });
+      void invalidateMethodQueries(queryClient, ProviderService.method.listProviderConfigs);
     },
     onError: (err: Error) =>
       toast.error(t("session.couldntSaveDefaultChannel", { message: err.message })),

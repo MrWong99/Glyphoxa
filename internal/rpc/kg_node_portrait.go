@@ -78,7 +78,7 @@ func (s *nodePortraits) GenerateNodePortrait(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is too long"))
 	}
 
-	c, err := s.resolveCampaign(ctx, "GenerateNodePortrait")
+	c, err := s.active.campaignFor(ctx, "GenerateNodePortrait")
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (s *nodePortraits) SetNodePortrait(
 	if s.blobs == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("portraits are unavailable in this mode"))
 	}
-	c, err := s.resolveCampaign(ctx, "SetNodePortrait")
+	c, err := s.active.campaignFor(ctx, "SetNodePortrait")
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (s *nodePortraits) ClearNodePortrait(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid entry id"))
 	}
-	c, err := s.resolveCampaign(ctx, "ClearNodePortrait")
+	c, err := s.active.campaignFor(ctx, "ClearNodePortrait")
 	if err != nil {
 		return nil, err
 	}
@@ -211,19 +211,6 @@ func (s *nodePortraits) ClearNodePortrait(
 		}
 	}
 	return connect.NewResponse(&managementv1.ClearNodePortraitResponse{Node: toProtoNode(updated)}), nil
-}
-
-// resolveCampaign is the shared active-campaign resolution + error mapping.
-func (s *nodePortraits) resolveCampaign(ctx context.Context, op string) (storage.Campaign, error) {
-	c, err := s.active.resolve(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error(op+": get active campaign failed", "err", err)
-		return storage.Campaign{}, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	return c, nil
 }
 
 func (s *nodePortraits) tenantID(ctx context.Context) (uuid.UUID, bool) {

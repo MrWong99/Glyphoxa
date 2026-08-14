@@ -56,13 +56,9 @@ func (s *agentRoster) GetCampaignRoster(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignRosterRequest],
 ) (*connect.Response[managementv1.GetCampaignRosterResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GetCampaignRoster")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GetCampaignRoster: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	butler, err := s.store.GetButler(ctx, c.ID)
@@ -103,13 +99,9 @@ func (s *agentRoster) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
 ) (*connect.Response[managementv1.CreateAgentResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "CreateAgent")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("CreateAgent: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	m := req.Msg
@@ -155,13 +147,9 @@ func (s *agentRoster) UpdateAgent(
 	// Resolve the active campaign the SAME live-first way the roster/create paths do
 	// (#222/#229) — its language seeds a first-save voice default (#224). Reusing the
 	// unified resolver avoids a second, divergent campaign-resolution path.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "UpdateAgent", "agent_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("UpdateAgent: get active campaign failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	// Read the current row so applyVoiceSelection can preserve the persisted voice
 	// tuning the editor never sees (ProviderID/Language/Settings); GetAgent also
@@ -231,13 +219,9 @@ func (s *agentRoster) DeleteAgent(
 	// DELETE matches (id, campaign_id), so an Agent in another campaign is never
 	// removable through this session — it reads back as CodeNotFound, and the Butler
 	// guard still fires for the active campaign's own Butler.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "DeleteAgent", "agent_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("DeleteAgent: get active campaign failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	switch err := s.store.DeleteAgent(ctx, c.ID, id); {

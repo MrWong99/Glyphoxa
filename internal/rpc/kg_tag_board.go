@@ -48,7 +48,7 @@ func (s *kgOrganize) GetCampaignTags(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignTagsRequest],
 ) (*connect.Response[managementv1.GetCampaignTagsResponse], error) {
-	c, err := s.campaign(ctx, "GetCampaignTags")
+	c, err := s.active.campaignFor(ctx, "GetCampaignTags")
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (s *kgOrganize) SetNodeTags(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid entry id"))
 	}
-	c, err := s.campaign(ctx, "SetNodeTags")
+	c, err := s.active.campaignFor(ctx, "SetNodeTags")
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (s *kgOrganize) RenameTag(
 	if from == "" || to == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("both tag names are required"))
 	}
-	c, err := s.campaign(ctx, "RenameTag")
+	c, err := s.active.campaignFor(ctx, "RenameTag")
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func (s *kgOrganize) ListBoards(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListBoardsRequest],
 ) (*connect.Response[managementv1.ListBoardsResponse], error) {
-	c, err := s.campaign(ctx, "ListBoards")
+	c, err := s.active.campaignFor(ctx, "ListBoards")
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func (s *kgOrganize) CreateBoard(
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
-	c, err := s.campaign(ctx, "CreateBoard")
+	c, err := s.active.campaignFor(ctx, "CreateBoard")
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func (s *kgOrganize) UpdateBoard(
 		nodeIDs = append(nodeIDs, nid)
 	}
 
-	c, err := s.campaign(ctx, "UpdateBoard")
+	c, err := s.active.campaignFor(ctx, "UpdateBoard")
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func (s *kgOrganize) DeleteBoard(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid board id"))
 	}
-	c, err := s.campaign(ctx, "DeleteBoard")
+	c, err := s.active.campaignFor(ctx, "DeleteBoard")
 	if err != nil {
 		return nil, err
 	}
@@ -242,18 +242,6 @@ func (s *kgOrganize) DeleteBoard(
 		slog.Default().Error("DeleteBoard: store delete failed", "board_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-}
-
-func (s *kgOrganize) campaign(ctx context.Context, op string) (storage.Campaign, error) {
-	c, err := s.active.resolve(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error(op+": get active campaign failed", "err", err)
-		return storage.Campaign{}, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	return c, nil
 }
 
 func toProtoBoard(b storage.KGBoard) *managementv1.Board {

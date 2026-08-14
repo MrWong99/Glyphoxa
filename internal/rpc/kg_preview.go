@@ -65,13 +65,9 @@ func (s *kgPreview) GetAgentFactPreview(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GetAgentFactPreview")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GetAgentFactPreview: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	// Campaign scoping FIRST: AgentNodeFacts is keyed by Agent ALONE, so without this
@@ -151,13 +147,9 @@ func (s *kgPreview) GetRosterReadiness(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetRosterReadinessRequest],
 ) (*connect.Response[managementv1.GetRosterReadinessResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GetRosterReadiness")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GetRosterReadiness: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	agents, err := s.store.ListAgents(ctx, c.ID)

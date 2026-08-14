@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { Sparkles, Trash2 } from "lucide-react";
@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { stripMarkdown } from "@/components/ui/Markdown";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
 import { useHighlights } from "./useHighlights";
@@ -83,12 +84,7 @@ export function HighlightsStrip({
   // — never a hand-patch. No input key = prefix match across every session's
   // cached ListHighlights.
   const invalidate = () =>
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: SessionService.method.listHighlights,
-        cardinality: "finite",
-      }),
-    });
+    void invalidateMethodQueries(queryClient, SessionService.method.listHighlights);
 
   const promote = useMutation(SessionService.method.promoteHighlight, {
     onSuccess: () => invalidate(),

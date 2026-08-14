@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
 import { Input } from "@/components/ui/Input";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 
 // Free-form tags on an entry (#543).
 //
@@ -18,13 +19,8 @@ import { Input } from "@/components/ui/Input";
 // context.
 
 /** invalidateTags drops the one campaign-wide tag read every surface derives from. */
-export function invalidateTags(queryClient: ReturnType<typeof useQueryClient>): void {
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.getCampaignTags,
-      cardinality: "finite",
-    }),
-  });
+function invalidateTags(queryClient: ReturnType<typeof useQueryClient>): void {
+  void invalidateMethodQueries(queryClient, CampaignService.method.getCampaignTags);
 }
 
 export function NodeTags({ nodeID }: { nodeID: string }) {
