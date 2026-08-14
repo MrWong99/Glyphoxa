@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang } from "@/i18n";
 
 import "./createCampaignForm.css";
@@ -94,12 +95,7 @@ export function CampaignSettingsForm({
   // skips it — a name/system edit must invalidate it explicitly or the switcher's
   // picker keeps showing the stale name/system.
   const invalidateList = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCampaigns,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
 
   const update = useMutation(CampaignService.method.updateCampaign, {
     onSuccess: () => {

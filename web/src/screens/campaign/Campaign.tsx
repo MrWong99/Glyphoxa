@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Lock, Plus, Sparkles, Trash2, Volume2 } from "lucide-react";
@@ -16,6 +16,8 @@ import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { useI18n } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
+import { errorMessage } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { MapsPanel } from "./MapsPanel";
@@ -121,12 +123,7 @@ export function Campaign({
   // writes, so a roster mutation must drop the KG reads too. Without this the
   // Health panel pairs a fresh roster with a stale graph and invents findings.
   const invalidateRoster = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.getCampaignRoster,
-        cardinality: "finite",
-      }),
-    });
+    void invalidateMethodQueries(queryClient, CampaignService.method.getCampaignRoster);
     invalidateKnowledgeReads(queryClient);
   };
 
@@ -431,7 +428,7 @@ function AgentEditor({
       const res = await generate.mutateAsync({ agentId: agent.id, prompt: draftPrompt, name, title });
       setPersona(res.persona);
     } catch (err) {
-      setDraftError(err instanceof Error ? err.message : String(err));
+      setDraftError(errorMessage(err));
     }
   };
 
@@ -455,7 +452,7 @@ function AgentEditor({
       const res = await preview.mutateAsync({ voiceId: voice, text: "" });
       await playAudioBlob(res.audio, res.mimeType);
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : String(err));
+      setPreviewError(errorMessage(err));
     }
   };
 
@@ -626,12 +623,7 @@ function ToolGrants({ agentId }: { agentId: string }) {
   const grants = data?.grants ?? [];
 
   const invalidateGrants = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listToolGrants,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listToolGrants);
 
   return (
     <div className="gx-editor__tools">

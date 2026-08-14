@@ -119,13 +119,9 @@ func (s *kgNodes) CreateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "CreateNode")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("CreateNode: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	aspects, err := toStorageAspects(m.GetAspects())
@@ -156,13 +152,9 @@ func (s *kgNodes) ListNodes(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListNodesRequest],
 ) (*connect.Response[managementv1.ListNodesResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListNodes")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListNodes: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	nodes, err := s.store.ListNodes(ctx, c.ID)
@@ -171,10 +163,7 @@ func (s *kgNodes) ListNodes(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.Node, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, toProtoNode(n))
-	}
+	out := mapSlice(nodes, toProtoNode)
 	return connect.NewResponse(&managementv1.ListNodesResponse{Nodes: out}), nil
 }
 
@@ -197,13 +186,9 @@ func (s *kgNodes) UpdateNode(
 	// Resolve the active campaign and scope the write to it (#342): the store's
 	// UPDATE matches (id, campaign_id), so a Node in another campaign is never
 	// mutable through this session — it reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "UpdateNode", "node_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("UpdateNode: get active campaign failed", "node_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	aspects, err := toStorageAspects(m.GetAspects())
@@ -253,13 +238,9 @@ func (s *kgNodes) DeleteNode(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so a Node in another campaign is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "DeleteNode", "node_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("DeleteNode: get active campaign failed", "node_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	portraitKey, err := s.store.DeleteNode(ctx, c.ID, id)
@@ -299,13 +280,9 @@ func (s *kgNodes) SearchNodes(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "SearchNodes")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("SearchNodes: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	nodes, err := s.store.SearchNodes(ctx, c.ID, req.Msg.GetQuery(), searchNodesLimit)
@@ -314,10 +291,7 @@ func (s *kgNodes) SearchNodes(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.Node, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, toProtoNode(n))
-	}
+	out := mapSlice(nodes, toProtoNode)
 	return connect.NewResponse(&managementv1.SearchNodesResponse{Nodes: out}), nil
 }
 

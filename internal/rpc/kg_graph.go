@@ -49,13 +49,9 @@ func (s *kgGraph) GetKnowledgeGraph(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetKnowledgeGraphRequest],
 ) (*connect.Response[managementv1.GetKnowledgeGraphResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GetKnowledgeGraph")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GetKnowledgeGraph: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	nodes, err := s.store.ListGraphNodes(ctx, c.ID)
@@ -127,13 +123,9 @@ func (s *kgGraph) FindDuplicateEntries(
 	ctx context.Context,
 	_ *connect.Request[managementv1.FindDuplicateEntriesRequest],
 ) (*connect.Response[managementv1.FindDuplicateEntriesResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "FindDuplicateEntries")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("FindDuplicateEntries: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	pairs, err := s.store.SimilarNodePairs(ctx, c.ID, duplicateSimilarityFloor, duplicatePairLimit)

@@ -48,13 +48,9 @@ func (s *kgAppearances) ListNodeAppearances(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid entry id"))
 	}
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListNodeAppearances")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListNodeAppearances: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	hits, err := s.store.ListNodeAppearances(ctx, c.ID, nodeID, storage.MaxAppearances)
 	if err != nil {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey, useTransport } from "@connectrpc/connect-query";
+import { useQuery, useMutation, useTransport } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { createClient, Code, ConnectError } from "@connectrpc/connect";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
@@ -9,6 +9,7 @@ import { Check, MessageSquarePlus, Pencil, SendHorizontal, Trash2, X } from "luc
 
 import { ChatService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v1/management_pb";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang, type MessageKey } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -96,19 +97,9 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   );
 
   const invalidateThreads = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: ChatService.method.listPlanningThreads,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, ChatService.method.listPlanningThreads);
   const invalidateThread = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: ChatService.method.getPlanningThread,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, ChatService.method.getPlanningThread);
 
   const createThread = useMutation(ChatService.method.createPlanningThread, {
     onSuccess: (res) => {

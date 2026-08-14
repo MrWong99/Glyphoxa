@@ -64,7 +64,7 @@ func (s *campaignMaps) ListMaps(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListMapsRequest],
 ) (*connect.Response[managementv1.ListMapsResponse], error) {
-	c, err := s.resolveCampaign(ctx, "ListMaps")
+	c, err := s.active.campaignFor(ctx, "ListMaps")
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (s *campaignMaps) GetMapView(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid map id"))
 	}
-	c, err := s.resolveCampaign(ctx, "GetMapView")
+	c, err := s.active.campaignFor(ctx, "GetMapView")
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (s *campaignMaps) CreateMap(
 	if s.blobs == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("map images are unavailable in this mode"))
 	}
-	c, err := s.resolveCampaign(ctx, "CreateMap")
+	c, err := s.active.campaignFor(ctx, "CreateMap")
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func (s *campaignMaps) UpdateMap(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	c, err := s.resolveCampaign(ctx, "UpdateMap")
+	c, err := s.active.campaignFor(ctx, "UpdateMap")
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +305,7 @@ func (s *campaignMaps) ReplaceMapImage(
 	if s.blobs == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("map images are unavailable in this mode"))
 	}
-	c, err := s.resolveCampaign(ctx, "ReplaceMapImage")
+	c, err := s.active.campaignFor(ctx, "ReplaceMapImage")
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +366,7 @@ func (s *campaignMaps) DeleteMap(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid map id"))
 	}
-	c, err := s.resolveCampaign(ctx, "DeleteMap")
+	c, err := s.active.campaignFor(ctx, "DeleteMap")
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +408,7 @@ func (s *campaignMaps) CreatePin(
 	if err := validateCoords(m.GetX(), m.GetY()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	c, err := s.resolveCampaign(ctx, "CreatePin")
+	c, err := s.active.campaignFor(ctx, "CreatePin")
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ func (s *campaignMaps) UpdatePin(
 	if err := validateCoords(m.GetX(), m.GetY()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	c, err := s.resolveCampaign(ctx, "UpdatePin")
+	c, err := s.active.campaignFor(ctx, "UpdatePin")
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +476,7 @@ func (s *campaignMaps) DeletePin(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid pin id"))
 	}
-	c, err := s.resolveCampaign(ctx, "DeletePin")
+	c, err := s.active.campaignFor(ctx, "DeletePin")
 	if err != nil {
 		return nil, err
 	}
@@ -489,19 +489,6 @@ func (s *campaignMaps) DeletePin(
 		slog.Default().Error("DeletePin: store delete failed", "pin_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-}
-
-// resolveCampaign is the shared active-campaign resolution + error mapping.
-func (s *campaignMaps) resolveCampaign(ctx context.Context, op string) (storage.Campaign, error) {
-	c, err := s.active.resolve(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error(op+": get active campaign failed", "err", err)
-		return storage.Campaign{}, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	return c, nil
 }
 
 func (s *campaignMaps) tenantID(ctx context.Context) (uuid.UUID, bool) {

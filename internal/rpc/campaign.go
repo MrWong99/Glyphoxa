@@ -9,8 +9,6 @@ package rpc
 
 import (
 	"context"
-	"errors"
-	"log/slog"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -289,15 +287,12 @@ func (s *campaignManagement) GetActiveCampaign(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetActiveCampaignRequest],
 ) (*connect.Response[managementv1.GetActiveCampaignResponse], error) {
-	c, err := s.active.resolve(ctx)
+	// campaignFor logs the raw cause server-side and returns a generic message:
+	// the storage error can wrap query/DSN detail that should not reach an RPC
+	// client.
+	c, err := s.active.campaignFor(ctx, "GetActiveCampaign")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		// Log the raw cause server-side and return a generic message: the storage
-		// error can wrap query/DSN detail that should not reach an RPC client.
-		slog.Default().Error("GetActiveCampaign: storage read failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	return connect.NewResponse(&managementv1.GetActiveCampaignResponse{
 		Campaign: toProtoCampaign(c),

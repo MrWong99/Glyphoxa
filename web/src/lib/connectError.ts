@@ -23,6 +23,14 @@ export function failedPreconditionMessage(error: unknown): string | null {
   return ce.code === Code.FailedPrecondition ? ce.rawMessage : null;
 }
 
+// errorMessage renders any thrown value as a display string: an Error's message
+// (a ConnectError keeps its "[code] …" prefix), anything else via String().
+// The one home for the `instanceof Error` narrowing the mutation error handlers
+// used to each hand-roll.
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // isNotFound reports the server's CodeNotFound. The campaign surfaces use it as
 // the "no campaign exists yet" signal (#267): GetActiveCampaign fails with
 // CodeNotFound exactly when the Tenant has zero campaigns (resolution otherwise

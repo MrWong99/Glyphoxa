@@ -127,10 +127,7 @@ func (s *ChatServer) ListPlanningThreads(
 		s.log.Error("ListPlanningThreads: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	out := make([]*managementv1.PlanningThread, 0, len(threads))
-	for _, t := range threads {
-		out = append(out, toProtoPlanningThread(t))
-	}
+	out := mapSlice(threads, toProtoPlanningThread)
 	return connect.NewResponse(&managementv1.ListPlanningThreadsResponse{Threads: out}), nil
 }
 
@@ -160,10 +157,7 @@ func (s *ChatServer) GetPlanningThread(
 		s.log.Error("GetPlanningThread: list messages failed", "thread_id", threadID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	out := make([]*managementv1.PlanningMessage, 0, len(messages))
-	for _, m := range messages {
-		out = append(out, toProtoPlanningMessage(m))
-	}
+	out := mapSlice(messages, toProtoPlanningMessage)
 	return connect.NewResponse(&managementv1.GetPlanningThreadResponse{
 		Thread:   toProtoPlanningThread(thread),
 		Messages: out,

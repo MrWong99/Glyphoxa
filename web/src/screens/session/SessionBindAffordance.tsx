@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { UserPlus } from "lucide-react";
 import { toast } from "sonner";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 // NEW_TARGET is the sentinel Character-select value for "create a new Character"
@@ -54,12 +55,7 @@ export function SessionBindAffordance() {
   const target = characters.find((c) => c.id === targetId) ?? null;
 
   const invalidateCharacters = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCharacters,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listCharacters);
 
   const close = () => {
     setOpen(false);

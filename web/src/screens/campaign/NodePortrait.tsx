@@ -6,6 +6,7 @@ import { ImagePlus, Sparkles, Trash2 } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
@@ -71,7 +72,7 @@ export function NodePortrait({ node }: { node: Node }) {
       draftURL.current = url;
       setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
     } catch (e) {
-      setError(t("knowledge.generatePortraitError", { message: (e as Error).message }));
+      setError(t("knowledge.generatePortraitError", { message: errorMessage(e) }));
     }
   };
 
@@ -83,7 +84,7 @@ export function NodePortrait({ node }: { node: Node }) {
       setPrompt("");
       invalidate();
     } catch (e) {
-      setError(t("knowledge.portraitError", { message: (e as Error).message }));
+      setError(t("knowledge.portraitError", { message: errorMessage(e) }));
     }
   };
 
@@ -97,7 +98,7 @@ export function NodePortrait({ node }: { node: Node }) {
       await clear.mutateAsync({ nodeId: node.id });
       invalidate();
     } catch (e) {
-      setError(t("knowledge.portraitError", { message: (e as Error).message }));
+      setError(t("knowledge.portraitError", { message: errorMessage(e) }));
     }
   };
 

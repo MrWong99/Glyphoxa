@@ -115,13 +115,9 @@ func (s *campaignAssist) GeneratePersona(
 		return nil, perr
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GeneratePersona")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GeneratePersona: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -176,13 +172,9 @@ func (s *campaignAssist) GenerateKnowledge(
 		return nil, perr
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "GenerateKnowledge")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("GenerateKnowledge: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	draft, err := s.engine.GenerateKnowledge(ctx, c, prompt)
@@ -255,13 +247,9 @@ func (s *campaignAssist) ApplyGeneratedKnowledge(
 		edges[i] = storage.KnowledgeDraftEdge{FromIndex: from, ToIndex: to, Type: edgeType}
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ApplyGeneratedKnowledge")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ApplyGeneratedKnowledge: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	created, createdEdges, err := s.store.ApplyKnowledgeDraft(ctx, c.ID, nodes, edges)

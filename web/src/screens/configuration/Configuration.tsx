@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   MessagesSquare,
@@ -26,7 +26,8 @@ import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
-import { isNotFound } from "@/lib/connectError";
+import { errorMessage, isNotFound } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type MessageKey } from "@/i18n";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
@@ -141,9 +142,7 @@ export function Configuration() {
 
   const queryClient = useQueryClient();
   const invalidateList = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({ schema: ProviderService.method.listProviderConfigs, cardinality: "finite" }),
-    });
+    invalidateMethodQueries(queryClient, ProviderService.method.listProviderConfigs);
 
   const config = useQuery(ProviderService.method.listProviderConfigs, {});
   const creds = config.data?.credentials ?? [];
@@ -410,10 +409,7 @@ function SpendCapsCard() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const capsQuery = useQuery(ProviderService.method.getSpendCaps, {});
-  const invalidate = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({ schema: ProviderService.method.getSpendCaps, cardinality: "finite" }),
-    });
+  const invalidate = () => invalidateMethodQueries(queryClient, ProviderService.method.getSpendCaps);
   const save = useMutation(ProviderService.method.setSpendCaps, { onSuccess: invalidate });
 
   const [soft, setSoft] = useState("");
@@ -600,7 +596,7 @@ function SecretRow({
       await onSave("", selectedModel);
       setModel(undefined); // the refreshed credential now carries it
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : String(err));
+      setSaveError(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -617,7 +613,7 @@ function SecretRow({
     } catch (err) {
       // A rejected save (e.g. FailedPrecondition when the sealing secret is
       // unset) must leave visible evidence — the key was NOT stored (#154).
-      setSaveError(err instanceof Error ? err.message : String(err));
+      setSaveError(errorMessage(err));
     } finally {
       setBusy(false);
     }

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Upload } from "lucide-react";
@@ -7,6 +7,8 @@ import { Upload } from "lucide-react";
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { importCampaignBundle, type ImportSummary } from "@/lib/download";
+import { errorMessage } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useI18n, type TFunc } from "@/i18n";
 
@@ -54,12 +56,7 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
   const [error, setError] = useState<string | null>(null);
 
   const invalidateList = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCampaigns,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
 
   const setActive = useMutation(CampaignService.method.setActiveCampaign, {
     onSuccess: () => {
@@ -115,7 +112,7 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         toast.warning(droppedRefsNote(t, result.droppedParticipantRefs));
       }
     } catch (err) {
-      const message = (err as Error).message;
+      const message = errorMessage(err);
       setError(message);
       toast.error(t("components.couldntImportCampaign", { message }));
     } finally {

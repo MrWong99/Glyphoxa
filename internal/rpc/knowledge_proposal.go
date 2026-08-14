@@ -75,13 +75,9 @@ func (s *knowledgeProposals) ListKnowledgeProposals(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListKnowledgeProposalsRequest],
 ) (*connect.Response[managementv1.ListKnowledgeProposalsResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListKnowledgeProposals")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListKnowledgeProposals: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	proposals, err := s.store.ListPendingKnowledgeProposals(ctx, c.ID)
@@ -90,10 +86,7 @@ func (s *knowledgeProposals) ListKnowledgeProposals(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.KnowledgeProposal, 0, len(proposals))
-	for _, p := range proposals {
-		out = append(out, toProtoKnowledgeProposal(p))
-	}
+	out := mapSlice(proposals, toProtoKnowledgeProposal)
 	return connect.NewResponse(&managementv1.ListKnowledgeProposalsResponse{Proposals: out}), nil
 }
 
@@ -110,13 +103,9 @@ func (s *knowledgeProposals) ApproveKnowledgeProposal(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ApproveKnowledgeProposal")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ApproveKnowledgeProposal: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	switch err := s.store.ApproveKnowledgeProposal(ctx, c.ID, id); {
@@ -146,13 +135,9 @@ func (s *knowledgeProposals) RejectKnowledgeProposal(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "RejectKnowledgeProposal")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("RejectKnowledgeProposal: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	switch err := s.store.RejectKnowledgeProposal(ctx, c.ID, id); {
@@ -182,13 +167,9 @@ func (s *knowledgeProposals) ListSimilarKnowledge(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListSimilarKnowledge")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListSimilarKnowledge: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	p, err := s.store.GetPendingKnowledgeProposal(ctx, c.ID, id)
@@ -208,10 +189,7 @@ func (s *knowledgeProposals) ListSimilarKnowledge(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.Node, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, toProtoNode(n))
-	}
+	out := mapSlice(nodes, toProtoNode)
 	return connect.NewResponse(&managementv1.ListSimilarKnowledgeResponse{Nodes: out}), nil
 }
 

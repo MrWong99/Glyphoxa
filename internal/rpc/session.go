@@ -470,10 +470,7 @@ func (s *SessionServer) SearchTranscriptLines(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.TranscriptLineMatch, 0, len(lines))
-	for _, l := range lines {
-		out = append(out, toProtoTranscriptLineMatch(l))
-	}
+	out := mapSlice(lines, toProtoTranscriptLineMatch)
 	return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{Lines: out}), nil
 }
 
@@ -506,10 +503,7 @@ func (s *SessionServer) ListSessions(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.VoiceSession, 0, len(sessions))
-	for _, vs := range sessions {
-		out = append(out, toProtoVoiceSession(vs))
-	}
+	out := mapSlice(sessions, toProtoVoiceSession)
 	return connect.NewResponse(&managementv1.ListSessionsResponse{Sessions: out}), nil
 }
 

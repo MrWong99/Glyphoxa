@@ -61,13 +61,9 @@ func (s *kgEdges) UpdateEdgeDetails(
 			fmt.Errorf("note is too long (max %d characters)", kgvocab.MaxEdgeNoteRunes))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "UpdateEdgeDetails")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("UpdateEdgeDetails: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	updated, err := s.store.UpdateEdgeDetails(ctx, c.ID, id, note, int(m.GetDisposition()))
@@ -106,13 +102,9 @@ func (s *kgEdges) CreateEdge(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("edge type must be specified"))
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "CreateEdge")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("CreateEdge: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	created, err := s.store.CreateEdge(ctx, storage.NewKGEdge{
@@ -146,13 +138,9 @@ func (s *kgEdges) DeleteEdge(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so an Edge in another campaign is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "DeleteEdge", "edge_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("DeleteEdge: get active campaign failed", "edge_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	switch err := s.store.DeleteEdge(ctx, c.ID, id); {
 	case err == nil:
@@ -180,13 +168,9 @@ func (s *kgEdges) ListNodeEdges(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
 	}
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListNodeEdges", "node_id", nodeID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListNodeEdges: get active campaign failed", "node_id", nodeID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	outgoing, incoming, err := s.store.NodeEdges(ctx, c.ID, nodeID)
 	if err != nil {
@@ -230,13 +214,9 @@ func (s *kgEdges) SetNodeAgent(
 	// so another campaign's Node is never re-voiced nor unlinked through this
 	// session — and a link's Agent must also belong to the active campaign. A
 	// cross-campaign Node/Agent reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "SetNodeAgent", "node_id", nodeID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("SetNodeAgent: get active campaign failed", "node_id", nodeID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	updated, err := s.store.SetNodeAgent(ctx, c.ID, nodeID, agentID)
@@ -257,11 +237,7 @@ func (s *kgEdges) SetNodeAgent(
 
 // toProtoEdges maps a slice of joined Edges onto the wire type.
 func toProtoEdges(edges []storage.KGEdgeWithNodes) []*managementv1.Edge {
-	out := make([]*managementv1.Edge, 0, len(edges))
-	for _, e := range edges {
-		out = append(out, toProtoEdgeWithNodes(e))
-	}
-	return out
+	return mapSlice(edges, toProtoEdgeWithNodes)
 }
 
 // toProtoEdge maps a bare storage.KGEdge onto its wire representation (no joined

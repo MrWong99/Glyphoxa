@@ -60,13 +60,9 @@ func (s *toolGrants) ListToolGrants(
 	// cross-campaign (or deleted, issue #215) target as CodeNotFound — a clean
 	// missing-Agent instead of a fabricated full-catalog-ungranted list — mirroring
 	// the sibling UpdateToolGrant write guard.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListToolGrants", "agent_id", agentID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListToolGrants: get active campaign failed", "agent_id", agentID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	if err := s.requireAgentInCampaign(ctx, c.ID, agentID); err != nil {
 		return nil, err
@@ -107,13 +103,9 @@ func (s *toolGrants) UpdateToolGrant(
 	// campaign A could grant/revoke Tools on campaign B's Agent (incl. B's Butler).
 	// The scoped check refuses a cross-campaign target as CodeNotFound before any
 	// write — and still maps a deleted Agent to CodeNotFound (issue #215).
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "UpdateToolGrant", "agent_id", agentID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("UpdateToolGrant: get active campaign failed", "agent_id", agentID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	if err := s.requireAgentInCampaign(ctx, c.ID, agentID); err != nil {
 		return nil, err

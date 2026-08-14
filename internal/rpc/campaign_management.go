@@ -43,10 +43,7 @@ func (s *campaignManagement) ListCampaigns(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.Campaign, 0, len(campaigns))
-	for _, c := range campaigns {
-		out = append(out, toProtoCampaign(c))
-	}
+	out := mapSlice(campaigns, toProtoCampaign)
 	return connect.NewResponse(&managementv1.ListCampaignsResponse{Campaigns: out}), nil
 }
 
@@ -198,13 +195,9 @@ func (s *campaignManagement) SetActiveCampaign(
 
 	// Return the resolved Active Campaign via the one shared live-first policy, so
 	// this surface agrees with GetActiveCampaign/GetCampaignRoster/ListNodes (#222).
-	resolved, err := s.active.resolve(ctx)
+	resolved, err := s.active.campaignFor(ctx, "SetActiveCampaign")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("SetActiveCampaign: resolve active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 	return connect.NewResponse(&managementv1.SetActiveCampaignResponse{Campaign: toProtoCampaign(resolved)}), nil
 }

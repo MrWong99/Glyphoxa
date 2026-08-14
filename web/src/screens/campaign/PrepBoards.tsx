@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, X } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
 
@@ -21,13 +22,8 @@ import { alphaBg, metaOf } from "./knowledgeVocab";
 // leaves every entry untouched.
 
 /** invalidateBoards drops the one board read every surface derives from. */
-export function invalidateBoards(queryClient: ReturnType<typeof useQueryClient>): void {
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.listBoards,
-      cardinality: "finite",
-    }),
-  });
+function invalidateBoards(queryClient: ReturnType<typeof useQueryClient>): void {
+  void invalidateMethodQueries(queryClient, CampaignService.method.listBoards);
 }
 
 /**

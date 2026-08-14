@@ -292,10 +292,7 @@ func (s *VoiceServer) ListVoices(
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("voice catalog is unavailable"))
 	}
 
-	out := make([]*managementv1.Voice, 0, len(voices))
-	for _, v := range voices {
-		out = append(out, toProtoVoice(v))
-	}
+	out := mapSlice(voices, toProtoVoice)
 	return connect.NewResponse(&managementv1.ListVoicesResponse{Voices: out}), nil
 }
 

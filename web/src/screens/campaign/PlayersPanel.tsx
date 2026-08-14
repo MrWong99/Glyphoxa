@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, UserPlus } from "lucide-react";
 
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 // PlayersPanel (#279) is the Campaign screen's third view: the campaign's Player
@@ -51,12 +52,7 @@ export function PlayersPanel() {
   const editing = characters.find((c) => c.id === editingId) ?? null;
 
   const invalidateCharacters = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCharacters,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listCharacters);
 
   const createCharacter = useMutation(CampaignService.method.createCharacter, {
     onSuccess: (res) => {

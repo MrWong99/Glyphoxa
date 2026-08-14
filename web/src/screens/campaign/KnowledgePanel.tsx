@@ -22,6 +22,7 @@ import {
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { DraftEdge, DraftNode, Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -455,7 +456,7 @@ function KnowledgeDraftCard({
       const res = await generate.mutateAsync({ prompt });
       setDraft({ nodes: res.nodes, edges: res.edges });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -502,7 +503,7 @@ function KnowledgeDraftCard({
             : ""),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 

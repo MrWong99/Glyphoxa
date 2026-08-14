@@ -67,13 +67,9 @@ func (s *characterRoster) ListCharacters(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListCharactersRequest],
 ) (*connect.Response[managementv1.ListCharactersResponse], error) {
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "ListCharacters")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("ListCharacters: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	chars, err := s.store.ListCharacters(ctx, c.ID)
@@ -82,10 +78,7 @@ func (s *characterRoster) ListCharacters(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := make([]*managementv1.Character, 0, len(chars))
-	for _, ch := range chars {
-		out = append(out, toProtoCharacter(ch))
-	}
+	out := mapSlice(chars, toProtoCharacter)
 	return connect.NewResponse(&managementv1.ListCharactersResponse{Characters: out}), nil
 }
 
@@ -104,13 +97,9 @@ func (s *characterRoster) CreateCharacter(
 		return nil, err
 	}
 
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "CreateCharacter")
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("CreateCharacter: get active campaign failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	aliases := m.GetAliases()
@@ -163,13 +152,9 @@ func (s *characterRoster) UpdateCharacter(
 	// Resolve the active campaign and scope the write to it (#342): the store's
 	// UPDATE matches (id, campaign_id), so a Character in another campaign is never
 	// mutable through this operator's session — it reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "UpdateCharacter", "character_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("UpdateCharacter: get active campaign failed", "character_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	updated, err := s.store.UpdateCharacter(ctx, storage.CharacterUpdate{
@@ -211,13 +196,9 @@ func (s *characterRoster) DeleteCharacter(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so another campaign's Character is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.active.resolve(ctx)
+	c, err := s.active.campaignFor(ctx, "DeleteCharacter", "character_id", id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
-		}
-		slog.Default().Error("DeleteCharacter: get active campaign failed", "character_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, err
 	}
 
 	switch err := s.store.DeleteCharacter(ctx, c.ID, id); {

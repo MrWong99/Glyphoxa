@@ -1,7 +1,7 @@
-import { createConnectQueryKey } from "@connectrpc/connect-query";
 import type { QueryClient } from "@tanstack/react-query";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 
 // One invalidation for every read of the Knowledge Graph (#534).
 //
@@ -20,65 +20,25 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 // of small refetches on a single-operator tier; under-invalidating shows the GM a
 // world that does not match their own last edit, which reads as a bug in the graph
 // rather than a stale cache.
-//
-// Each key is built WITHOUT an input so it prefix-matches every cached variant
-// (every search string, every node id).
 export function invalidateKnowledgeReads(queryClient: QueryClient): void {
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.listNodes,
-      cardinality: "finite",
-    }),
-  });
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.searchNodes,
-      cardinality: "finite",
-    }),
-  });
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.listNodeEdges,
-      cardinality: "finite",
-    }),
-  });
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.getKnowledgeGraph,
-      cardinality: "finite",
-    }),
-  });
-  // Tags and boards REFERENCE nodes, and a node delete cascades their rows away
-  // server-side. Leaving these two out left a deleted entry's tag in the campaign
-  // vocabulary (click the chip, get an empty list, which reads as a broken filter)
-  // and "(deleted entry)" sitting on a board — the exact "a world that does not
-  // match your own last edit" this helper exists to prevent.
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.getCampaignTags,
-      cardinality: "finite",
-    }),
-  });
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.listBoards,
-      cardinality: "finite",
-    }),
-  });
-  // Derived from the same nodes and edges: an edit that changes what an NPC knows
-  // must not leave the lens and the readiness marks describing the old world.
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.getAgentFactPreview,
-      cardinality: "finite",
-    }),
-  });
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.getRosterReadiness,
-      cardinality: "finite",
-    }),
-  });
+  void invalidateMethodQueries(
+    queryClient,
+    CampaignService.method.listNodes,
+    CampaignService.method.searchNodes,
+    CampaignService.method.listNodeEdges,
+    CampaignService.method.getKnowledgeGraph,
+    // Tags and boards REFERENCE nodes, and a node delete cascades their rows away
+    // server-side. Leaving these two out left a deleted entry's tag in the campaign
+    // vocabulary (click the chip, get an empty list, which reads as a broken filter)
+    // and "(deleted entry)" sitting on a board — the exact "a world that does not
+    // match your own last edit" this helper exists to prevent.
+    CampaignService.method.getCampaignTags,
+    CampaignService.method.listBoards,
+    // Derived from the same nodes and edges: an edit that changes what an NPC knows
+    // must not leave the lens and the readiness marks describing the old world.
+    CampaignService.method.getAgentFactPreview,
+    CampaignService.method.getRosterReadiness,
+  );
 }
 
 /**
@@ -90,11 +50,6 @@ export function invalidateKnowledgeReads(queryClient: QueryClient): void {
  * this module exists to prevent, so both call this one helper.
  */
 export function invalidateProposalReview(queryClient: QueryClient): void {
-  void queryClient.invalidateQueries({
-    queryKey: createConnectQueryKey({
-      schema: CampaignService.method.listKnowledgeProposals,
-      cardinality: "finite",
-    }),
-  });
+  void invalidateMethodQueries(queryClient, CampaignService.method.listKnowledgeProposals);
   invalidateKnowledgeReads(queryClient);
 }

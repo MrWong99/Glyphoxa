@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Archive, ArchiveRestore, Download, MoreHorizontal, Trash2 } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { errorMessage } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 import { fetchCampaignExport, downloadBlob } from "@/lib/download";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
@@ -109,12 +111,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
   // omitted so React Query matches all listCampaigns entries by prefix), plus the
   // Active-Campaign scoped sweep so a screen on the affected campaign re-resolves.
   const refreshAfterChange = () => {
-    void queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCampaigns,
-        cardinality: "finite",
-      }),
-    });
+    void invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
     void invalidateActiveCampaignScopedQueries(queryClient);
   };
 
@@ -130,7 +127,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       downloadBlob(blob, filename);
       setMenuOpen(false);
     } catch (err) {
-      toast.error(t("components.couldntExportCampaign", { message: (err as Error).message }));
+      toast.error(t("components.couldntExportCampaign", { message: errorMessage(err) }));
     } finally {
       setExporting(false);
     }

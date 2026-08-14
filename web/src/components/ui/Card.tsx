@@ -1,7 +1,7 @@
-import type { HTMLAttributes, ReactNode } from "react";
+import type { HTMLAttributes } from "react";
 
-// Card + header/title/body — ported from the handoff components/core/Card.jsx
-// onto the .gx-card class vocabulary. The arcane panel on the ink-card surface.
+// Card + body — ported from the handoff components/core/Card.jsx onto the
+// .gx-card class vocabulary. The arcane panel on the ink-card surface.
 
 export function Card({
   interactive = false,
@@ -31,26 +31,6 @@ export function Card({
     <div className={cls} {...props}>
       {children}
     </div>
-  );
-}
-
-export function CardHeader({ className = "", children, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return (
-    <div className={"gx-card__header " + className} {...props}>
-      {children}
-    </div>
-  );
-}
-
-export function CardTitle({
-  className = "",
-  children,
-  ...props
-}: HTMLAttributes<HTMLHeadingElement> & { children?: ReactNode }) {
-  return (
-    <h3 className={"gx-card__title " + className} {...props}>
-      {children}
-    </h3>
   );
 }
 

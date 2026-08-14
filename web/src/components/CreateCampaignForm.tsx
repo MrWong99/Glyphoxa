@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -8,6 +8,7 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 import "./createCampaignForm.css";
@@ -58,12 +59,7 @@ export function useCreateCampaign(onCreated?: () => void) {
   const createdId = useRef<string | undefined>(undefined);
 
   const invalidateList = () =>
-    queryClient.invalidateQueries({
-      queryKey: createConnectQueryKey({
-        schema: CampaignService.method.listCampaigns,
-        cardinality: "finite",
-      }),
-    });
+    invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
 
   const setActive = useMutation(CampaignService.method.setActiveCampaign, {
     onSuccess: () => {

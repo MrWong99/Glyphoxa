@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Dices } from "lucide-react";
-import { useMutation, useQuery, createConnectQueryKey } from "@connectrpc/connect-query";
+import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { LegalFooter } from "@/components/LegalFooter";
 import { isUnauthenticated } from "@/lib/connectError";
+import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 import "@/screens/login/login.css";
@@ -85,12 +86,7 @@ function NameTenantCard({ initialName }: { initialName: string }) {
       // Drop the cached probe so the identity (incl. tenantName) is fresh for
       // whichever surface reads it next — nothing renders tenantName today, so
       // this keeps the cache honest rather than serving a known consumer.
-      void queryClient.invalidateQueries({
-        queryKey: createConnectQueryKey({
-          schema: AuthService.method.getCurrentUser,
-          cardinality: "finite",
-        }),
-      });
+      void invalidateMethodQueries(queryClient, AuthService.method.getCurrentUser);
       goToApp();
     },
   });

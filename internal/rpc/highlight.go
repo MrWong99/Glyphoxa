@@ -146,10 +146,7 @@ func (s *SessionServer) ListHighlights(
 		s.log.Error("ListHighlights: store list failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	out := make([]*managementv1.Highlight, 0, len(rows))
-	for _, h := range rows {
-		out = append(out, toProtoHighlight(h))
-	}
+	out := mapSlice(rows, toProtoHighlight)
 	return connect.NewResponse(&managementv1.ListHighlightsResponse{Highlights: out}), nil
 }
 
