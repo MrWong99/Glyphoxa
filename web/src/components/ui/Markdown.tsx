@@ -29,17 +29,20 @@ import { Fragment, type ReactNode } from "react";
 // marker never half-matches as italic, and a [label](url) only counts as a
 // link when the url is explicit http(s) — which is also the whole URL-scheme
 // safety story: a javascript: or data: href can never get through the regex.
-// The _italic_ variant requires word boundaries so snake_case_identifiers in
-// prose never italicize.
+// Both underscore variants (__bold__ / _italic_) require word boundaries so
+// snake_case_identifiers and DOUBLE__UNDERSCORE__NAMES in prose never format.
+// The href admits one level of balanced parentheses — Wikipedia-style
+// `…/Rust_(programming_language)` URLs are common LLM output — while the
+// markdown link's own closing `)` still terminates it.
 const INLINE = new RegExp(
   [
     "(?<codeTick>`+)(?<code>[^`][\\s\\S]*?)\\k<codeTick>",
     "\\*\\*(?<bold>[^\\s*][\\s\\S]*?)\\*\\*",
-    "__(?<boldU>[^\\s_][\\s\\S]*?)__",
+    "\\b__(?<boldU>[^\\s_][\\s\\S]*?)__\\b",
     "~~(?<strike>[^\\s~][\\s\\S]*?)~~",
     "\\*(?<em>[^\\s*][\\s\\S]*?)\\*",
     "\\b_(?<emU>[^\\s_][\\s\\S]*?)_\\b",
-    "\\[(?<label>[^\\]\\n]+)\\]\\((?<href>https?://[^\\s)]+)\\)",
+    "\\[(?<label>[^\\]\\n]+)\\]\\((?<href>https?://(?:[^\\s()]|\\([^\\s()]*\\))+)\\)",
   ].join("|"),
   "g",
 );
@@ -91,9 +94,9 @@ function renderInline(text: string, depth = 0): ReactNode[] {
 
 // ── Block grammar ───────────────────────────────────────────────────────────
 
-type ListEntry = { indent: number; ordered: boolean; text: string };
+type ListEntry = { indent: number; ordered: boolean; start: number; text: string };
 type ListItem = { text: string; child: List | null };
-type List = { ordered: boolean; items: ListItem[] };
+type List = { ordered: boolean; start: number; items: ListItem[] };
 
 type Block =
   | { kind: "p"; lines: string[] }
@@ -105,11 +108,35 @@ type Block =
 
 const FENCE_OPEN = /^ {0,3}```([^`\n]*)$/;
 const FENCE_CLOSE = /^ {0,3}```+\s*$/;
-const HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+// The optional closing sequence must be SPACE-separated (CommonMark): a
+// heading ending in "C#" keeps its #, only "## Title ##" sheds the tail.
+const HEADING = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
 // Checked BEFORE the list pattern: "- - -" / "***" are rules, not bullets.
 const HR = /^ {0,3}([-*_])\s*(?:\1\s*){2,}$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
-const LIST = /^(\s*)(?:[-*+]|\d{1,9}[.)])\s+(.*)$/;
+const LIST = /^(\s*)(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/;
+
+// listEntry parses one list-item line, or null. The ordered start number is
+// kept so "3. …" renders as 3, not silently renumbered from 1.
+function listEntry(line: string): ListEntry | null {
+  const m = LIST.exec(line);
+  if (!m) return null;
+  return {
+    indent: m[1].length,
+    ordered: m[3] !== undefined,
+    start: m[3] !== undefined ? parseInt(m[3], 10) : 1,
+    text: m[4],
+  };
+}
+
+// listInterrupts gates a list line BREAKING A PARAGRAPH: a bullet always may,
+// an ordered item only when numbered 1 (CommonMark's rule) — otherwise prose
+// with a hard break onto "1225. The keep fell." would swallow the year into a
+// renumbered list. At block start any number opens a list (start preserved).
+function listInterrupts(line: string): boolean {
+  const e = listEntry(line);
+  return e !== null && (!e.ordered || e.start === 1);
+}
 
 // buildList shapes a run of raw list entries into at most two levels: entries
 // indented ≥2 spaces past the run's first entry nest under the preceding
@@ -118,11 +145,11 @@ const LIST = /^(\s*)(?:[-*+]|\d{1,9}[.)])\s+(.*)$/;
 // fine where it does.
 function buildList(entries: ListEntry[]): List {
   const base = entries[0].indent;
-  const list: List = { ordered: entries[0].ordered, items: [] };
+  const list: List = { ordered: entries[0].ordered, start: entries[0].start, items: [] };
   for (const e of entries) {
     const parent = list.items[list.items.length - 1];
     if (e.indent >= base + 2 && parent) {
-      if (!parent.child) parent.child = { ordered: e.ordered, items: [] };
+      if (!parent.child) parent.child = { ordered: e.ordered, start: e.start, items: [] };
       parent.child.items.push({ text: e.text, child: null });
     } else {
       list.items.push({ text: e.text, child: null });
@@ -182,9 +209,12 @@ function parseBlocks(text: string, depth = 0): Block[] {
     if (LIST.test(line)) {
       const entries: ListEntry[] = [];
       while (i < lines.length) {
-        const m = LIST.exec(lines[i]);
-        if (!m) break;
-        entries.push({ indent: m[1].length, ordered: /\d/.test(lines[i].trim()[0]), text: m[2] });
+        // A rule line ("- - -") inside the run ends the list — HR outranks the
+        // list pattern here exactly as it does at block start.
+        if (HR.test(lines[i])) break;
+        const e = listEntry(lines[i]);
+        if (!e) break;
+        entries.push(e);
         i++;
       }
       blocks.push({ kind: "list", list: buildList(entries) });
@@ -202,7 +232,7 @@ function parseBlocks(text: string, depth = 0): Block[] {
       !HEADING.test(lines[i]) &&
       !HR.test(lines[i]) &&
       !QUOTE.test(lines[i]) &&
-      !LIST.test(lines[i])
+      !listInterrupts(lines[i])
     ) {
       para.push(lines[i]);
       i++;
@@ -215,16 +245,22 @@ function parseBlocks(text: string, depth = 0): Block[] {
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 function renderList(list: List, keyBase: number): ReactNode {
-  const Tag = list.ordered ? "ol" : "ul";
-  return (
-    <Tag key={keyBase} className="gx-md__list">
-      {list.items.map((item, i) => (
-        <li key={i}>
-          {renderInline(item.text)}
-          {item.child && renderList(item.child, i)}
-        </li>
-      ))}
-    </Tag>
+  const items = list.items.map((item, i) => (
+    <li key={i}>
+      {renderInline(item.text)}
+      {item.child && renderList(item.child, i)}
+    </li>
+  ));
+  // An ordered list keeps the model's numbering: "3." renders as 3 via the
+  // start attribute, not silently renumbered from 1.
+  return list.ordered ? (
+    <ol key={keyBase} className="gx-md__list" start={list.start !== 1 ? list.start : undefined}>
+      {items}
+    </ol>
+  ) : (
+    <ul key={keyBase} className="gx-md__list">
+      {items}
+    </ul>
   );
 }
 

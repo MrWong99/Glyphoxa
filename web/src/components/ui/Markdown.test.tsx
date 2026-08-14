@@ -23,6 +23,23 @@ describe("Markdown (block)", () => {
     expect(container.textContent).toContain("snake_case_name");
   });
 
+  it("leaves intraword double underscores literal", () => {
+    const { container } = render(<Markdown text="my__var__here and FILE__NAME__SUFFIX" />);
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.textContent).toContain("my__var__here");
+    expect(container.textContent).toContain("FILE__NAME__SUFFIX");
+  });
+
+  it("keeps balanced parentheses inside a link's URL", () => {
+    const { container } = render(
+      <Markdown text="[Rust](https://en.wikipedia.org/wiki/Rust_(programming_language))" />,
+    );
+    const a = container.querySelector("a");
+    expect(a?.getAttribute("href")).toBe("https://en.wikipedia.org/wiki/Rust_(programming_language)");
+    // No stray ')' leaks after the anchor.
+    expect(container.textContent).toBe("Rust");
+  });
+
   it("renders http(s) links in a new tab and refuses javascript: urls", () => {
     const { container } = render(
       <Markdown text="[docs](https://example.com/a) [evil](javascript:alert(1))" />,
@@ -69,6 +86,33 @@ describe("Markdown (block)", () => {
     const { container } = render(<Markdown text={"Ideas:\n- ambush\n- parley"} />);
     expect(container.querySelector("p")?.textContent).toBe("Ideas:");
     expect(container.querySelectorAll("li")).toHaveLength(2);
+  });
+
+  it("preserves an ordered list's start number", () => {
+    const { container } = render(<Markdown text={"3. third\n4. fourth"} />);
+    const ol = container.querySelector("ol");
+    expect(ol?.getAttribute("start")).toBe("3");
+    expect(ol?.children).toHaveLength(2);
+  });
+
+  it("does not let a mid-paragraph line starting with a big number become a list", () => {
+    // CommonMark's interruption rule: only "1." may break a paragraph — else
+    // prose with a hard break onto a year would swallow it into a list.
+    const { container } = render(<Markdown text={"The siege ended.\n1225. The keep fell."} />);
+    expect(container.querySelector("ol")).toBeNull();
+    expect(container.textContent).toContain("1225. The keep fell.");
+  });
+
+  it("keeps a heading's trailing # when not space-separated", () => {
+    const { container } = render(<Markdown text={"## Songs in C# and F#"} />);
+    expect(container.querySelector(".gx-md__heading")?.textContent).toBe("Songs in C# and F#");
+  });
+
+  it("treats a rule line inside a list run as a rule, not a bullet", () => {
+    const { container } = render(<Markdown text={"- item one\n- - -\n- item two"} />);
+    expect(container.querySelector("hr")).not.toBeNull();
+    const items = [...container.querySelectorAll("li")].map((li) => li.textContent);
+    expect(items).toEqual(["item one", "item two"]);
   });
 
   it("renders fenced code with markers left literal inside", () => {

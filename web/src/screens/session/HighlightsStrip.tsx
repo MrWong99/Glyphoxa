@@ -9,6 +9,7 @@ import { SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { stripMarkdown } from "@/components/ui/Markdown";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
@@ -152,8 +153,14 @@ export function HighlightsStrip({
       {highlights.map((h) => {
         const isCandidate = h.status === "candidate";
         const range = `${clipClock(h.startsAt)}–${clipClock(h.endsAt)}`;
+        // The excerpt can quote Agent speech (the Rollover Tape records Agent
+        // lines too) and the reason is classifier output — both markdown-prone.
+        // These are quote/caption surfaces, so markdown is DISABLED (flattened)
+        // rather than rendered, matching the appearance rows and palette.
+        const excerpt = stripMarkdown(h.excerpt);
+        const reason = stripMarkdown(h.reason);
         // A short, speakable label for the otherwise-anonymous native controls.
-        const clipLabel = t("session.clipLabel", { excerpt: h.excerpt.slice(0, 40) });
+        const clipLabel = t("session.clipLabel", { excerpt: excerpt.slice(0, 40) });
         return (
           <li key={h.id} className="gx-highlight" data-highlight-id={h.id}>
             <div className="gx-highlight__head">
@@ -169,8 +176,8 @@ export function HighlightsStrip({
               <time className="gx-highlight__clock">{range}</time>
               <span className="gx-highlight__score">{fmtScore(h.score, lang)}</span>
             </div>
-            <blockquote className="gx-highlight__excerpt">{h.excerpt}</blockquote>
-            <p className="gx-highlight__reason">{h.reason}</p>
+            <blockquote className="gx-highlight__excerpt">{excerpt}</blockquote>
+            <p className="gx-highlight__reason">{reason}</p>
             <audio
               className="gx-highlight__audio"
               controls
@@ -182,7 +189,7 @@ export function HighlightsStrip({
               <img
                 className="gx-highlight__image"
                 src={`/api/v1/highlights/${h.id}/image`}
-                alt={h.reason}
+                alt={reason}
                 loading="lazy"
               />
             )}

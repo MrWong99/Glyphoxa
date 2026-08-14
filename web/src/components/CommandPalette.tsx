@@ -238,8 +238,14 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
                           <Sparkles size={13} />
                         </span>
                         <span className="gx-palette__item-body">
-                          <span className="gx-palette__item-title">{h.excerpt}</span>
-                          {h.reason !== "" && <span className="gx-palette__snippet">{h.reason}</span>}
+                          {/* Same flattening as the transcript snippets above:
+                              the excerpt can quote Agent speech and the reason
+                              is classifier output — both markdown-prone, and a
+                              one-line row can't render it. */}
+                          <span className="gx-palette__item-title">{stripMarkdown(h.excerpt)}</span>
+                          {h.reason !== "" && (
+                            <span className="gx-palette__snippet">{stripMarkdown(h.reason)}</span>
+                          )}
                         </span>
                         <span className="gx-palette__item-meta">{stamp(h.startsAt, lang)}</span>
                       </Command.Item>
