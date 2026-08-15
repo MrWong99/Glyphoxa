@@ -110,6 +110,17 @@ describe("campaign sub-view path (ADR-0063)", () => {
     );
   });
 
+  it("a hand-edited ?node= on another sub-view redirects to knowledge", async () => {
+    // ?node= only means something on the knowledge view; subviewRoute's
+    // beforeLoad owns the correction so the screen's deep-link handling stays
+    // a single consume-then-strip.
+    const router = renderAt("/t/acme/campaign/cast?node=n-bart");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge"),
+    );
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+  });
+
   it("a legacy ?node= link lands on knowledge, and the screen strips the param", async () => {
     const router = renderAt("/t/acme/campaign?node=n-bart");
     await waitFor(() =>

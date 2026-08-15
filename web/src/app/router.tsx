@@ -205,6 +205,21 @@ const subviewRoute = createRoute({
   getParentRoute: () => tenantRoute,
   path: "$screen/$view",
   validateSearch: validateScreenSearch,
+  beforeLoad: ({ params, search }) => {
+    // ?node= only means something on the knowledge view; a hand-edited URL
+    // pairing it with another view redirects there. Owning this at the route
+    // keeps the screen's deep-link handling a single consume-then-strip — a
+    // screen-issued view switch + strip pair would race (the strip navigation
+    // would carry the pre-switch :view and undo the switch).
+    if (params.screen === "campaign" && search.node && params.view !== "knowledge") {
+      throw redirect({
+        to: "/t/$tenantSlug/$screen/$view",
+        params: { tenantSlug: params.tenantSlug, screen: "campaign", view: "knowledge" },
+        search: { node: search.node },
+        replace: true,
+      });
+    }
+  },
   component: function SubviewScreen() {
     const { screen, view, tenantSlug } = subviewRoute.useParams();
     const search = subviewRoute.useSearch();

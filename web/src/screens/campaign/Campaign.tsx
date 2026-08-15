@@ -100,16 +100,16 @@ export function Campaign({
 
   // Palette deep link (#591): ?node=… opens the Knowledge panel focused on that
   // entry (the RosterPrep onOpenNode path — KnowledgePanel resolves the id once
-  // its list loads). The palette lands node links on the knowledge sub-view
-  // already; switching here covers a hand-edited URL. Consumed once, then
-  // onDeepLinkHandled strips the param so the URL doesn't pin the focus.
+  // its list loads). The route guarantees ?node= only ever arrives on the
+  // knowledge view (subviewRoute's beforeLoad redirects any other pairing), so
+  // this is a pure consume-then-strip: take the focus, then onDeepLinkHandled
+  // strips the param so the URL doesn't pin it.
   const dlNode = deepLink?.node;
   useEffect(() => {
     if (!dlNode) return;
     setFocusNodeID(dlNode);
-    setView("knowledge");
     onDeepLinkHandled?.();
-    // onDeepLinkHandled/setView are stable route-level callbacks; the param is the trigger.
+    // onDeepLinkHandled is a stable route-level callback; the param is the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dlNode]);
 

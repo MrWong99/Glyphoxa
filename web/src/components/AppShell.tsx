@@ -24,7 +24,7 @@ import { CampaignSwitcher } from "./CampaignSwitcher";
 import { CommandPalette } from "./CommandPalette";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { useI18n, type MessageKey } from "@/i18n";
-import type { CampaignView } from "@/screens/campaign/views";
+import { isCampaignView, type CampaignView } from "@/screens/campaign/views";
 
 // The persistent app shell — sidebar + topbar — ported from the handoff
 // ui_kits/glyphoxa-web/shell.jsx (its inline styles lifted onto .gx-shell* /
@@ -60,12 +60,22 @@ const CAMPAIGN_SUBNAV: { view: CampaignView; label: MessageKey; icon: ReactNode 
   { view: "planning", label: "chat.tabPlanning", icon: <MessagesSquare size={15} /> },
 ];
 
+// The sidebar's off-canvas drawer breakpoint. Must stay in sync with the
+// @media block in styles/components.css; every JS check goes through
+// isDrawerViewport so the width lives in one place on this side.
+const DRAWER_BREAKPOINT = "(max-width: 880px)";
+const isDrawerViewport = () =>
+  typeof window !== "undefined" && (window.matchMedia?.(DRAWER_BREAKPOINT).matches ?? false);
+
 export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
   const { t } = useI18n();
   // view is present only under the campaign sub-view route (ADR-0063); it
-  // drives the sub-navigation's active highlight.
+  // drives the sub-navigation's active highlight. Derived by hand rather than
+  // via Link activeProps so the mocked-router unit test can observe it, and
+  // because the parent Campaign link needs the value anyway (see below).
   const { screen, view } = useParams({ strict: false }) as { screen?: string; view?: string };
   const active = NAV.find((n) => n.to === screen);
+  const activeView = screen === "campaign" && isCampaignView(view) ? view : undefined;
 
   // Sidebar collapse (#88 slice 4). On narrow viewports the sidebar is an
   // off-canvas drawer the topbar toggle opens; on wide viewports the toggle hides
@@ -73,17 +83,13 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   // unit test) read it without media-query support. It starts collapsed on a
   // small viewport so mobile loads with the drawer shut (matchMedia is absent in
   // jsdom → the shell defaults to expanded under test).
-  const [collapsed, setCollapsed] = useState(
-    () => typeof window !== "undefined" && (window.matchMedia?.("(max-width: 880px)").matches ?? false),
-  );
+  const [collapsed, setCollapsed] = useState(isDrawerViewport);
 
   // On the drawer breakpoint a nav tap should navigate AND shut the drawer —
   // otherwise it keeps covering the screen it just navigated to. On wide
   // viewports this is a no-op so the sidebar stays put.
   const closeDrawerOnMobile = () => {
-    if (typeof window !== "undefined" && (window.matchMedia?.("(max-width: 880px)").matches ?? false)) {
-      setCollapsed(true);
-    }
+    if (isDrawerViewport()) setCollapsed(true);
   };
 
   return (
@@ -106,16 +112,33 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
         <nav className="gx-nav">
           {NAV.map((item) => (
             <Fragment key={item.to}>
-              <Link
-                className="gx-nav__item"
-                to="/t/$tenantSlug/$screen"
-                params={{ tenantSlug, screen: item.to }}
-                activeProps={{ "data-active": "true" }}
-                onClick={closeDrawerOnMobile}
-              >
-                {item.icon}
-                {t(item.label)}
-              </Link>
+              {item.to === "campaign" && activeView ? (
+                // While a Campaign sub-view is open, the parent item links to
+                // the CURRENT sub-view — a bare /campaign would redirect to
+                // cast and stomp the open view (a habit-click hazard the old
+                // in-page tabs didn't have).
+                <Link
+                  className="gx-nav__item"
+                  to="/t/$tenantSlug/$screen/$view"
+                  params={{ tenantSlug, screen: "campaign", view: activeView }}
+                  data-active="true"
+                  onClick={closeDrawerOnMobile}
+                >
+                  {item.icon}
+                  {t(item.label)}
+                </Link>
+              ) : (
+                <Link
+                  className="gx-nav__item"
+                  to="/t/$tenantSlug/$screen"
+                  params={{ tenantSlug, screen: item.to }}
+                  activeProps={{ "data-active": "true" }}
+                  onClick={closeDrawerOnMobile}
+                >
+                  {item.icon}
+                  {t(item.label)}
+                </Link>
+              )}
               {/* Campaign sub-views (ADR-0063): the screen's former in-page
                   tabs, revealed while Campaign is the active screen. */}
               {item.to === "campaign" && screen === "campaign" && (
@@ -126,8 +149,8 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
                       className="gx-nav__subitem"
                       to="/t/$tenantSlug/$screen/$view"
                       params={{ tenantSlug, screen: "campaign", view: sub.view }}
-                      data-active={view === sub.view ? "true" : undefined}
-                      aria-current={view === sub.view ? "page" : undefined}
+                      data-active={activeView === sub.view ? "true" : undefined}
+                      aria-current={activeView === sub.view ? "page" : undefined}
                       onClick={closeDrawerOnMobile}
                     >
                       {sub.icon}

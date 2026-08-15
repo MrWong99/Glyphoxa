@@ -680,22 +680,27 @@ describe("Campaign", () => {
 });
 
 describe("Campaign palette deep link (#591)", () => {
-  // The sub-view itself is no longer a deep-link param — it lives in the path
-  // (ADR-0063), and router.test.tsx pins the legacy ?view= redirect. Only the
-  // ?node= focus hand-off remains the screen's job.
-  it("a node deep link switches to the Knowledge view and reports the param handled", async () => {
+  // The sub-view is no longer a deep-link param — it lives in the path
+  // (ADR-0063), and router.test.tsx pins the legacy ?view= redirect plus the
+  // rule that ?node= only ever arrives on the knowledge view. Only the ?node=
+  // focus consume-then-strip remains the screen's job.
+  it("consumes a node deep link on the knowledge view and reports it handled", async () => {
     const { transport } = mockTransport();
     const handled = vi.fn();
     render(
       <Providers transport={transport} queryClient={makeQueryClient()}>
-        <Harness initialView="cast" deepLink={{ node: "some-node-id" }} onDeepLinkHandled={handled} />
+        <Harness
+          initialView="knowledge"
+          deepLink={{ node: "some-node-id" }}
+          onDeepLinkHandled={handled}
+        />
       </Providers>,
     );
-    // The Knowledge view takes over (the focusNodeID hand-off to the panel is
-    // the RosterPrep onOpenNode path, resolved once the panel's list loads):
-    // the wiki lede renders and the roster is unmounted.
+    // The wiki view renders (the focusNodeID hand-off to the panel is the
+    // RosterPrep onOpenNode path, resolved once the panel's list loads) and the
+    // param is reported consumed exactly once.
     expect(await screen.findByText(/what the world knows/i)).toBeInTheDocument();
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
-    expect(handled).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(handled).toHaveBeenCalledTimes(1));
   });
 });

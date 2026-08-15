@@ -122,7 +122,7 @@ describe("AppShell", () => {
   });
 
   it("renders the Campaign sub-navigation with the active sub-view highlighted (ADR-0063)", async () => {
-    renderShell();
+    const { container } = renderShell();
     expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
 
     // The mocked route is /t/acme/campaign/cast, so the sub-items render under
@@ -134,6 +134,13 @@ describe("AppShell", () => {
     // The :view path param drives the highlight: cast is active, the rest not.
     expect(within(sub).getByText("Cast").closest("a")).toHaveAttribute("data-active", "true");
     expect(within(sub).getByText("Maps").closest("a")).not.toHaveAttribute("data-active");
+
+    // The parent Campaign item stays highlighted too (it links to the CURRENT
+    // sub-view while one is open, so a habit-click can't stomp it back to cast).
+    // Scoped to the sidebar nav — the topbar title also reads "Campaign", and
+    // the legal footer is a second navigation landmark.
+    const nav = container.querySelector(".gx-nav") as HTMLElement;
+    expect(within(nav).getByText("Campaign").closest("a")).toHaveAttribute("data-active", "true");
   });
 
   it("closes the mobile drawer when a nav item is tapped", async () => {
