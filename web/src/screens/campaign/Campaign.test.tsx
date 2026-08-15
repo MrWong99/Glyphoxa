@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -26,7 +27,8 @@ import {
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
-import { Campaign } from "./Campaign";
+import { Campaign, type CampaignDeepLink } from "./Campaign";
+import { CAMPAIGN_VIEWS, type CampaignView } from "./views";
 
 // An in-memory campaign store served over a router transport (no network): the
 // roster mutates in this closure, so a Save → invalidate → refetch proves the
@@ -161,14 +163,53 @@ function mockTransport() {
   return { transport, npcs, previewCalls, grants };
 }
 
-function renderScreen() {
+// The sub-view now arrives as a prop from the route path and changes via the
+// sidebar sub-navigation (ADR-0063). This harness stands in for the route +
+// sidebar pair: it owns the view state, feeds it back into the screen through
+// onViewChange, and exposes one "nav:<view>" button per sub-view so tests can
+// drive the same switching flow the sidebar does.
+function Harness({
+  initialView = "cast",
+  deepLink,
+  onDeepLinkHandled,
+}: {
+  initialView?: CampaignView;
+  deepLink?: CampaignDeepLink;
+  onDeepLinkHandled?: () => void;
+}) {
+  const [view, setView] = useState<CampaignView>(initialView);
+  return (
+    <>
+      <nav aria-label="test-subnav">
+        {CAMPAIGN_VIEWS.map((v) => (
+          <button key={v} type="button" onClick={() => setView(v)}>
+            {`nav:${v}`}
+          </button>
+        ))}
+      </nav>
+      <Campaign
+        view={view}
+        onViewChange={setView}
+        deepLink={deepLink}
+        onDeepLinkHandled={onDeepLinkHandled}
+      />
+    </>
+  );
+}
+
+function renderScreen(initialView: CampaignView = "cast") {
   const { transport, npcs, previewCalls, grants } = mockTransport();
   render(
     <Providers transport={transport} queryClient={makeQueryClient()}>
-      <Campaign />
+      <Harness initialView={initialView} />
     </Providers>,
   );
   return { npcs, previewCalls, grants };
+}
+
+// switchView drives the harness's stand-in for a sidebar sub-navigation click.
+function switchView(view: CampaignView) {
+  fireEvent.click(screen.getByRole("button", { name: `nav:${view}` }));
 }
 
 // The Tools section and the addressing switch live inside a closed-by-default
@@ -346,30 +387,30 @@ describe("Campaign", () => {
     expect(await screen.findByText("ElevenLabs · Rachel")).toBeInTheDocument();
   });
 
-  it("exposes a third Players tab and leaves Cast unchanged (#279)", async () => {
+  it("mounts the Players panel on its sub-view and leaves Cast unchanged (#279)", async () => {
     renderScreen();
     // Cast is the default: the roster loads first.
     expect(await screen.findByText("Bart")).toBeInTheDocument();
 
     // Switch to Players — the panel mounts on its own ListCharacters RPC.
-    fireEvent.click(screen.getByRole("tab", { name: "Players" }));
+    switchView("players");
     expect(await screen.findByText("Kira")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /add player/i })).toBeInTheDocument();
     // The roster (Cast) is no longer mounted.
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
 
     // Back to Cast — the roster is unchanged.
-    fireEvent.click(screen.getByRole("tab", { name: "Cast" }));
+    switchView("cast");
     expect(await screen.findByText("Bart")).toBeInTheDocument();
   });
 
-  it("exposes a fourth Suggestions tab that mounts the review panel (#300)", async () => {
+  it("mounts the Suggestions review panel on its sub-view (#300)", async () => {
     renderScreen();
     expect(await screen.findByText("Bart")).toBeInTheDocument();
 
     // Switch to Suggestions (the simplified name for Knowledge Proposals) — the
     // panel mounts on its own ListKnowledgeProposals RPC.
-    fireEvent.click(screen.getByRole("tab", { name: "Suggestions" }));
+    switchView("proposals");
     expect(await screen.findByText(/No pending suggestions/i)).toBeInTheDocument();
     // The roster (Cast) is no longer mounted.
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
@@ -639,45 +680,27 @@ describe("Campaign", () => {
 });
 
 describe("Campaign palette deep link (#591)", () => {
-  it("opens the linked sub-view and reports the params handled", async () => {
+  // The sub-view is no longer a deep-link param — it lives in the path
+  // (ADR-0063), and router.test.tsx pins the legacy ?view= redirect plus the
+  // rule that ?node= only ever arrives on the knowledge view. Only the ?node=
+  // focus consume-then-strip remains the screen's job.
+  it("consumes a node deep link on the knowledge view and reports it handled", async () => {
     const { transport } = mockTransport();
     const handled = vi.fn();
     render(
       <Providers transport={transport} queryClient={makeQueryClient()}>
-        <Campaign deepLink={{ view: "players" }} onDeepLinkHandled={handled} />
+        <Harness
+          initialView="knowledge"
+          deepLink={{ node: "some-node-id" }}
+          onDeepLinkHandled={handled}
+        />
       </Providers>,
     );
-    await waitFor(() =>
-      expect(screen.getByRole("tab", { name: /players/i })).toHaveAttribute("aria-selected", "true"),
-    );
-    expect(handled).toHaveBeenCalledTimes(1);
-  });
-
-  it("a node deep link opens the Knowledge panel focused on that entry", async () => {
-    const { transport } = mockTransport();
-    const handled = vi.fn();
-    render(
-      <Providers transport={transport} queryClient={makeQueryClient()}>
-        <Campaign deepLink={{ node: "some-node-id" }} onDeepLinkHandled={handled} />
-      </Providers>,
-    );
-    // The Knowledge tab takes over (the focusNodeID hand-off to the panel is the
-    // RosterPrep onOpenNode path, resolved once the panel's list loads).
-    await waitFor(() =>
-      expect(screen.getByRole("tab", { name: /world wiki/i })).toHaveAttribute("aria-selected", "true"),
-    );
-    expect(handled).toHaveBeenCalledTimes(1);
-  });
-
-  it("an unknown view value is ignored (params still handled, default view stays)", async () => {
-    const { transport } = mockTransport();
-    const handled = vi.fn();
-    render(
-      <Providers transport={transport} queryClient={makeQueryClient()}>
-        <Campaign deepLink={{ view: "nonsense" }} onDeepLinkHandled={handled} />
-      </Providers>,
-    );
-    await waitFor(() => expect(handled).toHaveBeenCalled());
-    expect(screen.getByRole("tab", { name: /cast/i })).toHaveAttribute("aria-selected", "true");
+    // The wiki view renders (the focusNodeID hand-off to the panel is the
+    // RosterPrep onOpenNode path, resolved once the panel's list loads) and the
+    // param is reported consumed exactly once.
+    expect(await screen.findByText(/what the world knows/i)).toBeInTheDocument();
+    expect(screen.queryByText("Bart")).not.toBeInTheDocument();
+    await waitFor(() => expect(handled).toHaveBeenCalledTimes(1));
   });
 });

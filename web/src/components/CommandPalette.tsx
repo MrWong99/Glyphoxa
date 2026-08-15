@@ -106,6 +106,17 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
     void navigate({ to: "/t/$tenantSlug/$screen", params: { tenantSlug, screen }, search });
   };
 
+  // Entry hits land on the World-wiki sub-view directly — the Campaign view is
+  // a path segment now (ADR-0063) — with ?node= as the consume-then-strip focus.
+  const goNode = (nodeId: string) => {
+    close();
+    void navigate({
+      to: "/t/$tenantSlug/$screen/$view",
+      params: { tenantSlug, screen: "campaign", view: "knowledge" },
+      search: { node: nodeId },
+    });
+  };
+
   if (!open) return null;
 
   const nodes = nodesQ.data?.nodes ?? [];
@@ -160,7 +171,7 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
                           key={n.id}
                           value={`node:${n.id}`}
                           className="gx-palette__item"
-                          onSelect={() => go("campaign", { view: "knowledge", node: n.id })}
+                          onSelect={() => goNode(n.id)}
                         >
                           <span
                             className="gx-palette__type-icon"

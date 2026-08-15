@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { RouterProvider, createRouter, createMemoryHistory } from "@tanstack/react-router";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -53,6 +53,7 @@ function renderAt(path: string) {
       <RouterProvider router={router} />
     </Providers>,
   );
+  return router;
 }
 
 describe("loginRoute ?error=not_authorized contract", () => {
@@ -80,5 +81,54 @@ describe("onboardingRoute /onboarding/create-tenant contract", () => {
   it("renders the name-your-Tenant screen at /onboarding/create-tenant", async () => {
     renderAt("/onboarding/create-tenant");
     expect(await screen.findByLabelText(/name your table/i)).toHaveValue("Rin's Table");
+  });
+});
+
+// The Campaign sub-view lives in the path (ADR-0063): /campaign/:view. A bare
+// /campaign visit — and any pre-ADR-0063 ?view=/?node= deep link (#591) — must
+// redirect onto the path so old bookmarks and palette links keep working.
+describe("campaign sub-view path (ADR-0063)", () => {
+  it("redirects a bare /campaign to the default cast sub-view", async () => {
+    const router = renderAt("/t/acme/campaign");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/cast"),
+    );
+  });
+
+  it("maps a legacy ?view= deep link onto the path", async () => {
+    const router = renderAt("/t/acme/campaign?view=players");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/players"),
+    );
+    expect(router.state.location.search).toEqual({});
+  });
+
+  it("an unknown ?view= value falls back to cast", async () => {
+    const router = renderAt("/t/acme/campaign?view=nonsense");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/cast"),
+    );
+  });
+
+  it("a hand-edited ?node= on another sub-view redirects to knowledge", async () => {
+    // ?node= only means something on the knowledge view; subviewRoute's
+    // beforeLoad owns the correction so the screen's deep-link handling stays
+    // a single consume-then-strip.
+    const router = renderAt("/t/acme/campaign/cast?node=n-bart");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge"),
+    );
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+  });
+
+  it("a legacy ?node= link lands on knowledge, and the screen strips the param", async () => {
+    const router = renderAt("/t/acme/campaign?node=n-bart");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge"),
+    );
+    // The redirect carries ?node= along; once the screen mounts it consumes the
+    // focus and strips the URL (consume-then-strip, see ScreenSearch). Campaign's
+    // own test covers the focus hand-off; here we pin the URL contract.
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
   });
 });

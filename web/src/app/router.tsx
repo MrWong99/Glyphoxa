@@ -9,6 +9,7 @@ import {
 
 import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
+import { isCampaignView } from "@/screens/campaign/views";
 import { useI18n } from "@/i18n";
 import { Login } from "@/screens/login/Login";
 import { CreateTenant } from "@/screens/onboarding/CreateTenant";
@@ -120,13 +121,15 @@ const tenantIndexRoute = createRoute({
 });
 
 // ScreenSearch is the deep-link vocabulary the command palette navigates with
-// (#591): the Campaign screen consumes view+node (open the Knowledge panel on
-// an entry), the Session screen consumes session+line (view a Voice Session and
+// (#591): the Campaign screen consumes node (open the World-wiki panel on an
+// entry), the Session screen consumes session+line (view a Voice Session and
 // jump to a transcript Line — the pair, never the line alone: line ids restart
 // per session) and session+highlight (scroll the Highlights strip to a row).
 // Screens consume the params once and then STRIP them (replace, no history
 // entry), so a later palette jump with the same target re-fires and a copied
-// URL acts once instead of pinning the screen.
+// URL acts once instead of pinning the screen. `view` is legacy vocabulary:
+// the Campaign sub-view moved into the path (ADR-0063), and screenRoute's
+// beforeLoad rewrites an old ?view= link onto it.
 export type ScreenSearch = {
   view?: string;
   node?: string;
@@ -137,18 +140,33 @@ export type ScreenSearch = {
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
 
+const validateScreenSearch = (search: Record<string, unknown>): ScreenSearch => ({
+  view: str(search.view),
+  node: str(search.node),
+  session: str(search.session),
+  line: str(search.line),
+  highlight: str(search.highlight),
+});
+
 // /t/:tenantSlug/:screen — selects the active screen. Configuration and Campaign
-// are live on their RPCs; Session renders a styled placeholder.
+// are live on their RPCs; Session renders a styled placeholder. The Campaign
+// screen never renders here: its sub-view is a path segment (ADR-0063), so a
+// bare /campaign visit redirects to the default sub-view — mapping a legacy
+// ?view=/?node= deep link (#591) onto the path so old links keep working.
 const screenRoute = createRoute({
   getParentRoute: () => tenantRoute,
   path: "$screen",
-  validateSearch: (search: Record<string, unknown>): ScreenSearch => ({
-    view: str(search.view),
-    node: str(search.node),
-    session: str(search.session),
-    line: str(search.line),
-    highlight: str(search.highlight),
-  }),
+  validateSearch: validateScreenSearch,
+  beforeLoad: ({ params, search }) => {
+    if (params.screen !== "campaign") return;
+    const view = search.node ? "knowledge" : isCampaignView(search.view) ? search.view : "cast";
+    throw redirect({
+      to: "/t/$tenantSlug/$screen/$view",
+      params: { tenantSlug: params.tenantSlug, screen: "campaign", view },
+      search: search.node ? { node: search.node } : {},
+      replace: true,
+    });
+  },
   component: function Screen() {
     const { screen, tenantSlug } = screenRoute.useParams();
     const search = screenRoute.useSearch();
@@ -168,13 +186,69 @@ const screenRoute = createRoute({
     switch (screen) {
       case "configuration":
         return <Configuration />;
-      case "campaign":
-        return <Campaign deepLink={search} onDeepLinkHandled={clearDeepLink} />;
       case "session":
         return <Session deepLink={search} onDeepLinkHandled={clearDeepLink} />;
       default:
         return <Placeholder title={t("auth.notFoundTitle")} />;
     }
+  },
+});
+
+// /t/:tenantSlug/campaign/:view — the Campaign screen with its sub-view in the
+// path (ADR-0063), so the sidebar sub-navigation can link to and highlight it
+// and a bookmark restores it. Declared as a generic $screen/$view sibling of
+// screenRoute (only Campaign defines sub-views today; any other screen with a
+// second segment is a notFound). Sub-view changes are param-only navigations
+// within this one route, so the screen stays mounted and its local state
+// (selected agent, wiki focus) survives a sidebar switch.
+const subviewRoute = createRoute({
+  getParentRoute: () => tenantRoute,
+  path: "$screen/$view",
+  validateSearch: validateScreenSearch,
+  beforeLoad: ({ params, search }) => {
+    // ?node= only means something on the knowledge view; a hand-edited URL
+    // pairing it with another view redirects there. Owning this at the route
+    // keeps the screen's deep-link handling a single consume-then-strip — a
+    // screen-issued view switch + strip pair would race (the strip navigation
+    // would carry the pre-switch :view and undo the switch).
+    if (params.screen === "campaign" && search.node && params.view !== "knowledge") {
+      throw redirect({
+        to: "/t/$tenantSlug/$screen/$view",
+        params: { tenantSlug: params.tenantSlug, screen: "campaign", view: "knowledge" },
+        search: { node: search.node },
+        replace: true,
+      });
+    }
+  },
+  component: function SubviewScreen() {
+    const { screen, view, tenantSlug } = subviewRoute.useParams();
+    const search = subviewRoute.useSearch();
+    const navigate = useNavigate();
+    const { t } = useI18n();
+    if (screen === "campaign" && isCampaignView(view)) {
+      return (
+        <Campaign
+          view={view}
+          onViewChange={(next) =>
+            void navigate({
+              to: "/t/$tenantSlug/$screen/$view",
+              params: { tenantSlug, screen, view: next },
+            })
+          }
+          deepLink={search}
+          onDeepLinkHandled={() =>
+            // Consume-then-strip, same contract as screenRoute (see ScreenSearch).
+            void navigate({
+              to: "/t/$tenantSlug/$screen/$view",
+              params: { tenantSlug, screen, view },
+              search: {},
+              replace: true,
+            })
+          }
+        />
+      );
+    }
+    return <Placeholder title={t("auth.notFoundTitle")} />;
   },
 });
 
@@ -190,7 +264,7 @@ export const routeTree = rootRoute.addChildren([
   datenschutzRoute,
   termsRoute,
   nutzungsbedingungenRoute,
-  tenantRoute.addChildren([tenantIndexRoute, screenRoute]),
+  tenantRoute.addChildren([tenantIndexRoute, screenRoute, subviewRoute]),
 ]);
 
 export const router = createRouter({
