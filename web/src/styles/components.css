@@ -701,6 +701,10 @@ textarea.gx-input {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  /* The Campaign sub-navigation (ADR-0063) lengthens the list; on a short
+   * phone viewport the nav scrolls instead of pushing the user footer out. */
+  min-height: 0;
+  overflow-y: auto;
 }
 .gx-nav__item {
   position: relative;
@@ -741,6 +745,51 @@ textarea.gx-input {
   width: 3px;
   border-radius: 999px;
   background: var(--gradient-arcane);
+}
+/* Campaign sub-navigation (ADR-0063): the screen's former in-page tabs as an
+ * indented group under the active Campaign item, with a guide line standing in
+ * for the tab bar's frame. Same hover/active language as .gx-nav__item, one
+ * step smaller. */
+.gx-nav__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px;
+  padding-left: 26px;
+  position: relative;
+}
+/* The guide runs under the parent item's icon column (item padding 12px +
+ * half the 18px icon ≈ 20px), just left of the indented sub-items. */
+.gx-nav__sub::before {
+  content: "";
+  position: absolute;
+  left: 20px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: var(--border-subtle);
+}
+.gx-nav__subitem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-base);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.gx-nav__subitem:hover {
+  background: rgba(144, 89, 255, 0.07);
+  color: var(--text-default);
+  text-decoration: none;
+}
+.gx-nav__subitem[data-active="true"] {
+  background: rgba(144, 89, 255, 0.14);
+  color: var(--color-violet-10);
 }
 .gx-sidebar__user {
   padding: 14px;

@@ -15,47 +15,14 @@
   margin-bottom: var(--spacing-lg);
 }
 
-/* Title + Cast|Knowledge seg-control on one row (#126). */
+/* Title row. The sub-view seg-control that used to share it moved into the
+ * sidebar sub-navigation (ADR-0063). */
 .gx-campaign-screen__title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--spacing-md);
   flex-wrap: wrap;
-}
-
-/* Segmented control (Cast | Knowledge), mirroring the Session screen's seg. */
-.gx-seg {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--surface-inset, var(--surface-card));
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
-}
-
-.gx-seg > button {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  padding: var(--spacing-xs) var(--spacing-md);
-  border-radius: var(--radius-pill);
-  font-size: var(--body-sm);
-  font-weight: var(--weight-semibold);
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard);
-}
-
-.gx-seg > button:hover {
-  color: var(--text-strong);
-}
-
-.gx-seg > button[data-active="true"] {
-  background: var(--surface-card);
-  color: var(--text-strong);
-  box-shadow: var(--glow-arcane-soft);
 }
 
 /* Knowledge view: list left, sticky editor card right (mirrors the roster grid). */

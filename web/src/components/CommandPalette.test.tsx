@@ -164,16 +164,18 @@ describe("CommandPalette (#591)", () => {
     expect(screen.queryByTestId("palette-degraded")).not.toBeInTheDocument();
   });
 
-  it("deep-links a node hit to the Knowledge panel and closes", async () => {
+  it("deep-links a node hit to the knowledge sub-view and closes", async () => {
     renderPalette();
     await searchFor("bart");
     fireEvent.click(await screen.findByText("Bart"));
 
+    // The Campaign sub-view is a path segment (ADR-0063): entry hits land on
+    // /campaign/knowledge with only the node focus left as a search param.
     expect(navigateMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "/t/$tenantSlug/$screen",
-        params: { tenantSlug: "acme", screen: "campaign" },
-        search: { view: "knowledge", node: "n-bart" },
+        to: "/t/$tenantSlug/$screen/$view",
+        params: { tenantSlug: "acme", screen: "campaign", view: "knowledge" },
+        search: { node: "n-bart" },
       }),
     );
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();

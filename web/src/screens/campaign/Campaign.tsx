@@ -19,6 +19,7 @@ import { playAudioBlob } from "@/lib/audio";
 import { errorMessage } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
+import type { CampaignView } from "./views";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { MapsPanel } from "./MapsPanel";
 import { PlayersPanel } from "./PlayersPanel";
@@ -49,15 +50,20 @@ function isButler(a: Agent): boolean {
   return a.role === "butler";
 }
 
-// CampaignDeepLink is the palette's arrival vocabulary (#591): view selects a
-// sub-view, node opens the Knowledge panel focused on that entry. Both optional;
-// the route strips the params after onDeepLinkHandled so nothing is sticky.
-export type CampaignDeepLink = { view?: string; node?: string };
+// CampaignDeepLink is the palette's arrival vocabulary (#591): node opens the
+// Knowledge panel focused on that entry. Optional; the route strips the param
+// after onDeepLinkHandled so nothing is sticky. (The sub-view itself is no
+// longer a deep-link param — it lives in the path, ADR-0063.)
+export type CampaignDeepLink = { node?: string };
 
 export function Campaign({
+  view = "cast",
+  onViewChange,
   deepLink,
   onDeepLinkHandled,
 }: {
+  view?: CampaignView;
+  onViewChange?: (view: CampaignView) => void;
   deepLink?: CampaignDeepLink;
   onDeepLinkHandled?: () => void;
 } = {}) {
@@ -78,12 +84,12 @@ export function Campaign({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = roster.find((a) => a.id === selectedId) ?? roster[0];
 
-  // Cast (roster editor), Knowledge (KG entries), or Players (Character ↔ Discord
-  // User bindings, #279) — the design's seg-control beside the title. Cast is the
-  // default so the roster is what loads first (#71).
-  const [view, setView] = useState<
-    "cast" | "knowledge" | "maps" | "players" | "proposals" | "planning"
-  >("cast");
+  // The sub-view — Cast (roster editor), Knowledge (KG entries), Maps, Players
+  // (Character ↔ Discord User bindings, #279), Suggestions, Planning — arrives
+  // from the route path and changes via the sidebar sub-navigation (ADR-0063);
+  // cross-view jumps inside the screen go through onViewChange (a param-only
+  // navigation, so this component stays mounted and its state survives).
+  const setView = (next: CampaignView) => onViewChange?.(next);
   // Within Cast: the editor (default), or the prep readiness view (#544). The
   // editor stays the default because adding and shaping NPCs is the common act;
   // readiness is what you check before a session.
@@ -94,29 +100,18 @@ export function Campaign({
 
   // Palette deep link (#591): ?node=… opens the Knowledge panel focused on that
   // entry (the RosterPrep onOpenNode path — KnowledgePanel resolves the id once
-  // its list loads); a bare ?view=… just selects the sub-view. Consumed once,
-  // then onDeepLinkHandled strips the params so the URL doesn't pin the view.
-  const dlView = deepLink?.view;
+  // its list loads). The palette lands node links on the knowledge sub-view
+  // already; switching here covers a hand-edited URL. Consumed once, then
+  // onDeepLinkHandled strips the param so the URL doesn't pin the focus.
   const dlNode = deepLink?.node;
   useEffect(() => {
-    if (!dlView && !dlNode) return;
-    if (dlNode) {
-      setFocusNodeID(dlNode);
-      setView("knowledge");
-    } else if (
-      dlView === "cast" ||
-      dlView === "knowledge" ||
-      dlView === "maps" ||
-      dlView === "players" ||
-      dlView === "proposals" ||
-      dlView === "planning"
-    ) {
-      setView(dlView);
-    }
+    if (!dlNode) return;
+    setFocusNodeID(dlNode);
+    setView("knowledge");
     onDeepLinkHandled?.();
-    // onDeepLinkHandled is a stable route-level callback; the params are the triggers.
+    // onDeepLinkHandled/setView are stable route-level callbacks; the param is the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dlView, dlNode]);
+  }, [dlNode]);
 
   // Creating a Character NPC auto-creates its wiki entry, and deleting one
   // unlinks that entry (ADR-0008 second amendment) — both are Knowledge Graph
@@ -146,69 +141,11 @@ export function Campaign({
   return (
     <div className="gx-campaign-screen">
       <header className="gx-campaign-screen__header">
+        {/* The sub-view tabs that used to sit beside the title moved into the
+            sidebar's Campaign sub-navigation (ADR-0063); the header keeps the
+            campaign identity and the per-view lede. */}
         <div className="gx-campaign-screen__title-row">
           <h1>{campaign?.name ?? t("campaign.fallbackTitle")}</h1>
-          <div className="gx-seg" role="tablist" aria-label={t("campaign.viewTablist")}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "cast"}
-              data-active={view === "cast" ? "true" : undefined}
-              onClick={() => setView("cast")}
-            >
-              {t("campaign.tabCast")}
-            </button>
-            {/* The internal "Knowledge Graph" never faces the GM — the tab reads
-                "World wiki" (the copy-simplification glossary). */}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "knowledge"}
-              data-active={view === "knowledge" ? "true" : undefined}
-              onClick={() => setView("knowledge")}
-            >
-              {t("campaign.tabWiki")}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "maps"}
-              data-active={view === "maps" ? "true" : undefined}
-              onClick={() => setView("maps")}
-            >
-              {t("campaign.tabMaps")}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "players"}
-              data-active={view === "players" ? "true" : undefined}
-              onClick={() => setView("players")}
-            >
-              {t("campaign.tabPlayers")}
-            </button>
-            {/* "Knowledge Proposals" simplifies to "Suggestions" for the same
-                reason the graph became a wiki: GMs, not developers. */}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "proposals"}
-              data-active={view === "proposals" ? "true" : undefined}
-              onClick={() => setView("proposals")}
-            >
-              {t("campaign.tabSuggestions")}
-            </button>
-            {/* Butler planning chat (#592, ADR-0062). */}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "planning"}
-              data-active={view === "planning" ? "true" : undefined}
-              onClick={() => setView("planning")}
-            >
-              {t("chat.tabPlanning")}
-            </button>
-          </div>
         </div>
         <div className="gx-campaign-screen__sub">
           {campaign?.system && <span className="gx-campaign-screen__system">{campaign.system}</span>}

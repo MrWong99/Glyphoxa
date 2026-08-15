@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, within } from "@testing-library/react";
+import type { MouseEventHandler, ReactNode } from "react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -17,11 +17,30 @@ import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 
 // The shell is driven by TanStack Router; mock the bits AppShell + SidebarUser
-// touch so it renders without a live router (mirrors AuthGate.test.tsx).
+// touch so it renders without a live router (mirrors AuthGate.test.tsx). The
+// Link mock keeps onClick (the mobile drawer-close) and data-active/aria-current
+// (the sub-navigation highlight) observable; useParams answers as if the route
+// were /t/acme/campaign/cast so the Campaign sub-navigation renders (ADR-0063).
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
+  Link: ({
+    children,
+    className,
+    onClick,
+    "data-active": dataActive,
+    "aria-current": ariaCurrent,
+  }: {
+    children: ReactNode;
+    className?: string;
+    onClick?: MouseEventHandler<HTMLAnchorElement>;
+    "data-active"?: string;
+    "aria-current"?: "page";
+  }) => (
+    <a className={className} onClick={onClick} data-active={dataActive} aria-current={ariaCurrent}>
+      {children}
+    </a>
+  ),
   Outlet: () => null,
-  useParams: () => ({ screen: "campaign" }),
+  useParams: () => ({ screen: "campaign", view: "cast" }),
   useNavigate: () => vi.fn(),
 }));
 
@@ -59,6 +78,10 @@ function renderShell() {
 }
 
 describe("AppShell", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("toggles the sidebar collapsed state from the topbar control", async () => {
     const { container } = renderShell();
     // Let the switcher's initial reads settle so the topbar is stable first.
@@ -96,5 +119,40 @@ describe("AppShell", () => {
     expect(container.querySelector(".gx-shell")).toHaveAttribute("data-collapsed", "true");
 
     expect(await screen.findByText("Select campaign")).toBeInTheDocument();
+  });
+
+  it("renders the Campaign sub-navigation with the active sub-view highlighted (ADR-0063)", async () => {
+    renderShell();
+    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
+
+    // The mocked route is /t/acme/campaign/cast, so the sub-items render under
+    // the Campaign nav item — one per sub-view, tab labels reused.
+    const sub = screen.getByRole("group", { name: /campaign view/i });
+    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning"]) {
+      expect(within(sub).getByText(label)).toBeInTheDocument();
+    }
+    // The :view path param drives the highlight: cast is active, the rest not.
+    expect(within(sub).getByText("Cast").closest("a")).toHaveAttribute("data-active", "true");
+    expect(within(sub).getByText("Maps").closest("a")).not.toHaveAttribute("data-active");
+  });
+
+  it("closes the mobile drawer when a nav item is tapped", async () => {
+    // Narrow viewport: matchMedia matches the drawer breakpoint, so the shell
+    // boots collapsed (drawer shut) and a nav tap must re-collapse it.
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: true } as MediaQueryList),
+    );
+    const { container } = renderShell();
+    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
+    const shell = container.querySelector(".gx-shell") as HTMLElement;
+    expect(shell).toHaveAttribute("data-collapsed", "true");
+
+    // Open the drawer, then tap a sub-navigation item: it navigates (mocked)
+    // AND shuts the drawer so it doesn't keep covering the screen.
+    fireEvent.click(screen.getByRole("button", { name: /toggle sidebar/i }));
+    expect(shell).not.toHaveAttribute("data-collapsed", "true");
+    fireEvent.click(screen.getByText("Maps"));
+    expect(shell).toHaveAttribute("data-collapsed", "true");
   });
 });
