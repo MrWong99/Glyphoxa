@@ -22,6 +22,8 @@ type fakeClipStore struct {
 	clipKey    string
 	imageKey   string // empty = no image yet (#311)
 	imageCT    string
+	soundKey   string // empty = no sound landed yet (#312)
+	soundCT    string
 }
 
 func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) (storage.Highlight, error) {
@@ -37,6 +39,8 @@ func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) 
 		ClipContentType:  "audio/wav",
 		ImageKey:         f.imageKey,
 		ImageContentType: f.imageCT,
+		SoundKey:         f.soundKey,
+		SoundContentType: f.soundCT,
 		CreatedAt:        time.Now(),
 	}, nil
 }

@@ -1187,6 +1187,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// ErrImageNotConfigured (the handler leaves the Highlight intact without media).
 	imageFactory := newImageFactory(store, cipher, keyEnt)
 	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
+	// Session Highlight sound enrichment (#312, ADR-0004 amendment/0049): the
+	// GM's opt-in "Add sound" action generates an ElevenLabs sting or Music
+	// track that attaches as a separate blob. The factory rides the tenant's
+	// tts Provider Config iff its provider is ElevenLabs — deliberately no new
+	// Component; anything else is highlight.ErrSoundNotConfigured (the handler
+	// leaves the Highlight intact without media).
+	soundFactory := newSoundFactory(store, cipher, keyEnt)
+	jobRunner.Register(highlight.JobKindEnrichSound, highlight.EnrichSoundHandler(store, blobStore, soundFactory, log))
 	// The Knowledge Graph appearance index (#545, ADR-0008 amendment): one pass per
 	// ended session, matching its committed Transcript Lines against the campaign's
 	// entry names. A job because the work is per-session and must never touch a
@@ -1464,6 +1472,7 @@ var plainMountPolicy = map[string]auth.TenantMode{
 	"GET /api/v1/sessions/{id}":                 auth.TenantRequired,
 	"GET /api/v1/highlights/{id}/clip":          auth.TenantRequired,
 	"GET /api/v1/highlights/{id}/image":         auth.TenantRequired,
+	"GET /api/v1/highlights/{id}/sound":         auth.TenantRequired,
 	"GET /api/v1/maps/{id}/image":               auth.TenantRequired,
 	"GET /api/v1/knowledge/nodes/{id}/portrait": auth.TenantRequired,
 	"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
@@ -1637,6 +1646,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// store + blob seam the Voice process writes through. Wired here so the many
 	// NewSessionServer call sites keep their signature.
 	sessionSrv.SetHighlights(store, blobStore, jobEnqueuer{store})
+	// Sound enrichment RPC seam (#312): SetHighlightSound prechecks the factory
+	// so an unconfigured tenant gets an actionable error at click time.
+	sessionSrv.SetSoundEnrichment(newSoundFactory(store, cipher, keyEnt))
 	// Highlight Discord delivery (#310, Epic 8, ADR-0051): the GM shares a promoted
 	// Highlight as a file to a text channel (DeploymentSharer resolves the Bot token +
 	// guild from deployment_config via the cipher, then plain net/http Discord REST —
@@ -1732,6 +1744,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Session Highlight AI image (#311): operator-gated image byte stream, same
 		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
 		"GET /api/v1/highlights/{id}/image": http.HandlerFunc(clipServer.ServeImage),
+		// Session Highlight generated sound (#312): operator-gated audio byte
+		// stream, same posture; no sound landed yet → 404.
+		"GET /api/v1/highlights/{id}/sound": http.HandlerFunc(clipServer.ServeSound),
 		// Campaign Map images (#538, ADR-0060) — the second blob owner's byte route,
 		// same posture as the Highlight clip/image mounts.
 		"GET /api/v1/maps/{id}/image": http.HandlerFunc(mapImages.ServeImage),

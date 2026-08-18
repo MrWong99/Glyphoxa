@@ -95,6 +95,21 @@ export const en = {
   "session.couldntPromote": "Couldn't promote the highlight: {message}",
   "session.couldntDelete": "Couldn't delete the highlight: {message}",
 
+  // --- Highlight sound (#312) ------------------------------------------------
+  "session.addSound": "Add sound",
+  "session.soundChoice": "Sound: {kind}",
+  "session.soundMenuLabel": "Highlight sound",
+  "session.soundHint":
+    "Generate a matching sound for this highlight — a short sting to layer under the clip, or an instrumental music theme.",
+  "session.soundSting": "Sting",
+  "session.soundMusic": "Music",
+  "session.removeSound": "Remove sound",
+  "session.soundClipLabel": "Generated sound",
+  "session.soundPending": "Generating a matching sound…",
+  "session.soundRequested": "Generating a matching sound — it appears here shortly.",
+  "session.soundRemoved": "Sound removed.",
+  "session.couldntSetSound": "Couldn't update the highlight sound: {message}",
+
   // --- Share-highlight dialog ------------------------------------------------
   "session.share": "Share",
   "session.shareGroupLabel": "Share this highlight",
@@ -207,6 +222,20 @@ export const de: Record<keyof typeof en, string> = {
   "session.deleteHighlightConfirm": "Highlight löschen",
   "session.couldntPromote": "Highlight konnte nicht übernommen werden: {message}",
   "session.couldntDelete": "Highlight konnte nicht gelöscht werden: {message}",
+
+  "session.addSound": "Sound hinzufügen",
+  "session.soundChoice": "Sound: {kind}",
+  "session.soundMenuLabel": "Highlight-Sound",
+  "session.soundHint":
+    "Erzeuge einen passenden Sound für dieses Highlight — einen kurzen Sting, der unter den Clip gelegt wird, oder ein instrumentales Musik-Thema.",
+  "session.soundSting": "Sting",
+  "session.soundMusic": "Musik",
+  "session.removeSound": "Sound entfernen",
+  "session.soundClipLabel": "Erzeugter Sound",
+  "session.soundPending": "Passender Sound wird erzeugt…",
+  "session.soundRequested": "Passender Sound wird erzeugt — er erscheint hier in Kürze.",
+  "session.soundRemoved": "Sound entfernt.",
+  "session.couldntSetSound": "Highlight-Sound konnte nicht geändert werden: {message}",
 
   "session.share": "Teilen",
   "session.shareGroupLabel": "Dieses Highlight teilen",

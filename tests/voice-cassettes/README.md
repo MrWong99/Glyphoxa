@@ -44,6 +44,20 @@ Per [ADR-0021](../../docs/adr/0021-cassette-based-llm-determinism.md), TTS casse
 
 The TTS cassette intentionally does not pin Voice, provider, or settings — the cassette is a contract on the **text** that flowed into the provider interface, which is what the orchestrator and Persona layer are responsible for producing.
 
+## Sound cassette schema
+
+```yaml
+generations:                 # required — one entry per Generator call, matched by hash
+  - request_sha256: <hex>    #   required — sha256 of {kind, model, duration_ms, prompt}
+    kind: sting|music        #   required — which soundgen.Generator method the call hit
+    model: <model-id>        #   required — the model that produced the recorded response
+    content_type: audio/mpeg #   required — the response's MIME type
+notes: |                     # optional — provenance for human reviewers
+  Free-form: provider, model, recording date, hand-authored vs live, etc.
+```
+
+Sound cassettes (`sound-*.yaml`, #312) back the Highlight sound-enrichment tests. Like the LLM cassette they are **hash-keyed**, not positional: `request_sha256` is computed by `voicecassette.HashSoundRequest` over the kind, model, target duration, and prompt, so a prompt-derivation or duration-clamp change misses and fails the test rather than silently replaying a stale asset. Like the TTS cassette they are **stub cassettes**: the generated audio bytes are never pinned (replay returns small deterministic stand-in bytes); the cassette is a contract on the request that flowed into the provider plus the response's content type.
+
 ## Workflow
 
 **Replay (default).** `go test ./...` reads cassettes from this directory; the cassette is the authoritative expectation. Sub-second, free, deterministic.

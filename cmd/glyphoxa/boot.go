@@ -26,6 +26,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
+	soundelevenlabs "github.com/MrWong99/Glyphoxa/pkg/voice/soundgen/elevenlabs"
 )
 
 // webEnvVars are the environment variables a web/all-Mode Web Instance must have
@@ -899,5 +901,42 @@ func newImageFactory(store providerConfigReader, cipher *crypto.Cipher, keyEnt l
 			model = cfgPtr.Model
 		}
 		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
+	}
+}
+
+// newSoundFactory builds the sound-generator factory Highlight sound
+// enrichment uses (#312, ADR-0004 amendment 2026-07-22): sound generation
+// rides the Tenant's existing `tts` Provider Config and uses its key IFF the
+// configured provider is ElevenLabs — deliberately NOT a new Component. Any
+// other tts provider, no tts row at all (the provider identity is then
+// unknown, so the amendment reads it as not configured), or no resolvable key
+// is highlight.ErrSoundNotConfigured — the clean no-op, no retry, no spend.
+// The ADR-0039 hybrid key policy and the ADR-0054 gated resolve apply exactly
+// as in newImageFactory: a saved key needs the cipher (loud error, never a
+// silent env fallback), an entitlement refusal errors before the env fallback
+// can spend the deployment's ELEVENLABS key.
+func newSoundFactory(store providerConfigReader, cipher *crypto.Cipher, keyEnt llmbuild.PlatformKeyEntitlement) highlight.SoundGeneratorFactory {
+	return func(fctx context.Context, tenantID uuid.UUID) (soundgen.Generator, error) {
+		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentTTS)
+		if errors.Is(cerr, storage.ErrNotFound) {
+			return nil, highlight.ErrSoundNotConfigured
+		}
+		if cerr != nil {
+			return nil, cerr
+		}
+		if cfg.Provider != soundelevenlabs.ProviderID {
+			return nil, highlight.ErrSoundNotConfigured
+		}
+		key, kerr := llmbuild.ResolveKeyGated(fctx, keyEnt, tenantID, cipher, &cfg, storage.ComponentTTS)
+		if kerr != nil {
+			return nil, kerr // saved key without cipher = loud error (ADR-0039)
+		}
+		if key == "" {
+			key = os.Getenv(soundelevenlabs.APIKeyEnv)
+		}
+		if key == "" {
+			return nil, highlight.ErrSoundNotConfigured
+		}
+		return soundelevenlabs.New(key), nil
 	}
 }

@@ -12,11 +12,22 @@ import {
 
 const NOW = 1_800_000_000_000;
 
-const hl = (fields: { status: string; imageContentType?: string; promotedMs?: number }) =>
+const hl = (fields: {
+  status: string;
+  imageContentType?: string;
+  promotedMs?: number;
+  soundKind?: string;
+  soundContentType?: string;
+  soundRequestedMs?: number;
+}) =>
   create(HighlightSchema, {
     status: fields.status,
     imageContentType: fields.imageContentType ?? "",
     promotedAt: fields.promotedMs != null ? timestampFromMs(fields.promotedMs) : undefined,
+    soundKind: fields.soundKind ?? "",
+    soundContentType: fields.soundContentType ?? "",
+    soundRequestedAt:
+      fields.soundRequestedMs != null ? timestampFromMs(fields.soundRequestedMs) : undefined,
   });
 
 describe("highlightsRefetchInterval (#309)", () => {
@@ -72,5 +83,61 @@ describe("highlightsRefetchInterval (#309)", () => {
 
   it("does not poll an ended session with an empty highlight list", () => {
     expect(highlightsRefetchInterval(false, [], NOW)).toBe(false);
+  });
+
+  // --- Sound await-media window (#312) ---------------------------------------
+
+  const imaged = {
+    status: "promoted",
+    imageContentType: "image/png",
+    promotedMs: NOW - IMAGE_WAIT_MAX_MS - 1,
+  };
+
+  it("polls when a promoted highlight has a freshly-requested, unlanded sound", () => {
+    expect(
+      highlightsRefetchInterval(
+        false,
+        [hl({ ...imaged, soundKind: "sting", soundContentType: "", soundRequestedMs: NOW - 30_000 })],
+        NOW,
+      ),
+    ).toBe(HIGHLIGHTS_IMAGE_MS);
+  });
+
+  it("stops polling once the sound-wait window has elapsed", () => {
+    expect(
+      highlightsRefetchInterval(
+        false,
+        [
+          hl({
+            ...imaged,
+            soundKind: "music",
+            soundContentType: "",
+            soundRequestedMs: NOW - IMAGE_WAIT_MAX_MS - 1,
+          }),
+        ],
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("stops polling once the requested sound has landed", () => {
+    expect(
+      highlightsRefetchInterval(
+        false,
+        [
+          hl({
+            ...imaged,
+            soundKind: "sting",
+            soundContentType: "audio/mpeg",
+            soundRequestedMs: NOW - 30_000,
+          }),
+        ],
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not wait on a highlight with no sound requested", () => {
+    expect(highlightsRefetchInterval(false, [hl(imaged)], NOW)).toBe(false);
   });
 });

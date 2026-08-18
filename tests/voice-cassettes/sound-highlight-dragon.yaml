@@ -1,0 +1,17 @@
+# Sound-generation cassette for the Highlight sound-enrichment tests (#312):
+# the natural-twenty dragon-kill fixture (the llm-highlight-dragon scenario)
+# with a 15s clip, once as a Sting (clip-length duration) and once as Music
+# (the 30s full-track floor). A STUB cassette (ADR-0021): it pins the request
+# fingerprint (kind + model + duration + prompt) and the response's content
+# type — never the audio bytes. Hand-authored; re-record against the live
+# endpoints with ELEVENLABS_API_KEY=… go test -tags=record ./internal/highlight/.
+generations:
+    - request_sha256: 5217adda9d1a52837dda7ae12e1ac368edea8f81526081e4d51ed3a4e6c8fd81
+      kind: sting
+      model: eleven_text_to_sound_v2
+      content_type: audio/mpeg
+    - request_sha256: fa10aa58ca9306b69dc45f86d5f598dc426d9dd52c7d549a79c619e18db3f465
+      kind: music
+      model: music_v1
+      content_type: audio/mpeg
+notes: 'Hand-authored sound-enrichment fixture (#312): pins the prompt derivation and clip-derived durations for the dragon-kill Highlight. Not a live recording.'

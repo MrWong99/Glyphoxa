@@ -60,6 +60,9 @@ type HighlightStore interface {
 	GetHighlight(ctx context.Context, tenantID, id uuid.UUID) (storage.Highlight, error)
 	PromoteHighlight(ctx context.Context, tenantID, id uuid.UUID) (storage.Highlight, error)
 	DeleteHighlight(ctx context.Context, tenantID, id uuid.UUID) (string, error)
+	// SetHighlightSoundKind records the GM's Add-sound choice on a PROMOTED
+	// row (#312); a candidate (or missing/foreign) id is ErrNotFound.
+	SetHighlightSoundKind(ctx context.Context, tenantID, id uuid.UUID, kind string) (storage.Highlight, error)
 }
 
 // highlightBlobs is the blob-seam surface the Highlight RPCs need (ADR-0048):
@@ -90,6 +93,15 @@ func (s *SessionServer) SetHighlights(store HighlightStore, blobs highlightBlobs
 	s.highlights = store
 	s.blobs = blobs
 	s.enqueue = enqueue
+}
+
+// SetSoundEnrichment wires the sound-generation factory SetHighlightSound
+// prechecks (#312): the RPC probes it once per call so a tenant without an
+// ElevenLabs tts Provider Config gets an actionable CodeFailedPrecondition
+// instead of a silently-forever-pending "generating…" state. Nil (unwired)
+// makes SetHighlightSound report CodeUnimplemented.
+func (s *SessionServer) SetSoundEnrichment(factory highlight.SoundGeneratorFactory) {
+	s.soundFactory = factory
 }
 
 // notWired is the CodeUnimplemented error a Highlight RPC returns when the server
@@ -305,12 +317,14 @@ func (s *SessionServer) DeleteHighlight(
 	// (highlight.SweepEnrichmentReconciliation), so it is never permanently orphaned.
 	if fresh, rerr := s.highlights.GetHighlight(ctx, tenantID, id); rerr == nil {
 		h.ImageKey = fresh.ImageKey
+		h.SoundKey = fresh.SoundKey
 	}
 
 	// Blob first (idempotent Delete): a missing clip must not block the row delete.
-	// A Highlight owns up to two blobs — the audio clip and (once enriched, #311)
-	// the generated image — so drop both before the row (ADR-0048). The image key
-	// is only present on an enriched row; an empty one is skipped.
+	// A Highlight owns up to three blobs — the audio clip, the generated image
+	// (#311), and the generated sound (#312) — so drop all before the row
+	// (ADR-0048). The image and sound keys are only present on enriched rows;
+	// empty ones are skipped.
 	if s.blobs != nil {
 		if err := s.blobs.Delete(ctx, h.ClipKey); err != nil {
 			s.log.Error("DeleteHighlight: delete clip failed", "err", err, "highlight", id)
@@ -319,6 +333,12 @@ func (s *SessionServer) DeleteHighlight(
 		if h.ImageKey != "" {
 			if err := s.blobs.Delete(ctx, h.ImageKey); err != nil {
 				s.log.Error("DeleteHighlight: delete image failed", "err", err, "highlight", id)
+				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			}
+		}
+		if h.SoundKey != "" {
+			if err := s.blobs.Delete(ctx, h.SoundKey); err != nil {
+				s.log.Error("DeleteHighlight: delete sound failed", "err", err, "highlight", id)
 				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 			}
 		}
@@ -331,6 +351,112 @@ func (s *SessionServer) DeleteHighlight(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.DeleteHighlightResponse{}), nil
+}
+
+// SetHighlightSound records the GM's "Add sound" choice on a promoted Highlight
+// (#312, ADR-0004 amendment) and schedules the async generation. Kind "sting" or
+// "music" clears any landed sound and enqueues JobKindEnrichSound (a re-run
+// regenerates / changes the choice); kind "" removes the sound entirely —
+// blob-then-row like every media delete (ADR-0048). A still-candidate row is
+// CodeFailedPrecondition (sound is opt-in AFTER promotion); an unknown kind is
+// CodeInvalidArgument; a foreign-tenant, cross-campaign, unknown, or unparsable
+// id is CodeNotFound. An unconfigured tenant (no ElevenLabs tts Provider
+// Config) is CodeFailedPrecondition BEFORE any row change, so the UI can say
+// "configure ElevenLabs first" instead of pending forever.
+func (s *SessionServer) SetHighlightSound(
+	ctx context.Context,
+	req *connect.Request[managementv1.SetHighlightSoundRequest],
+) (*connect.Response[managementv1.SetHighlightSoundResponse], error) {
+	if err := s.highlightsEnabled(); err != nil {
+		return nil, err
+	}
+	if s.soundFactory == nil || s.enqueue == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sound enrichment is not enabled on this server"))
+	}
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kind := req.Msg.GetKind()
+	if kind != "" && kind != storage.SoundKindSting && kind != storage.SoundKindMusic {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("kind must be \"sting\", \"music\", or empty"))
+	}
+	id, perr := uuid.Parse(req.Msg.GetId())
+	if perr != nil {
+		return nil, errNoSuchHighlight()
+	}
+	campaignID, err := s.activeCampaignForHighlight(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load first: campaign ownership BEFORE any mutation, the old sound key for
+	// the blob delete, and the promoted check for a precise error (the
+	// conditional store UPDATE would fold "candidate" into NotFound).
+	existing, gerr := s.highlights.GetHighlight(ctx, tenantID, id)
+	if errors.Is(gerr, storage.ErrNotFound) {
+		return nil, errNoSuchHighlight()
+	}
+	if gerr != nil {
+		s.log.Error("SetHighlightSound: load row failed", "err", gerr)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if existing.CampaignID != campaignID {
+		return nil, errNoSuchHighlight()
+	}
+	if existing.Status != storage.HighlightPromoted {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("promote the highlight before adding sound"))
+	}
+
+	// Configured precheck (#312): probing the factory costs one provider-config
+	// read and turns "unconfigured" into an actionable error at click time. The
+	// job re-checks anyway (the clean no-op), so a key revoked between here and
+	// the generation still leaves the Highlight intact. Skipped for "" — removing
+	// a sound must work even after the provider was unconfigured.
+	if kind != "" {
+		if _, ferr := s.soundFactory(ctx, tenantID); ferr != nil {
+			if errors.Is(ferr, highlight.ErrSoundNotConfigured) {
+				return nil, connect.NewError(connect.CodeFailedPrecondition,
+					errors.New("sound generation requires an ElevenLabs tts provider configuration"))
+			}
+			s.log.Error("SetHighlightSound: probe sound factory failed", "err", ferr)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+
+	// Blob first (ADR-0048): a previously landed asset is dropped for a re-run /
+	// removal alike — the row update below clears the triad, and a re-generated
+	// asset lands under the same deterministic key anyway. Idempotent Delete: an
+	// absent blob must not block the update.
+	if s.blobs != nil && existing.SoundKey != "" {
+		if derr := s.blobs.Delete(ctx, existing.SoundKey); derr != nil {
+			s.log.Error("SetHighlightSound: delete previous sound failed", "err", derr, "highlight", id)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+
+	h, err := s.highlights.SetHighlightSoundKind(ctx, tenantID, id, kind)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, errNoSuchHighlight() // deleted (or demoted) between the read and the write
+	}
+	if err != nil {
+		s.log.Error("SetHighlightSound: store update failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// Enqueue the generation (ADR-0049). An enqueue failure is logged only — the
+	// choice is recorded, and the boot reconciliation sweep re-enqueues any
+	// promoted Highlight whose requested sound never landed (the PromoteHighlight
+	// posture); failing the RPC here would wrongly report the choice as refused.
+	if kind != "" {
+		payload, merr := highlight.MarshalEnrichSound(h.ID, tenantID, kind)
+		if merr != nil {
+			s.log.Error("SetHighlightSound: marshal enrich payload failed", "err", merr, "highlight", h.ID)
+		} else if eerr := s.enqueue.Enqueue(ctx, highlight.JobKindEnrichSound, json.RawMessage(payload), time.Now()); eerr != nil {
+			s.log.Error("SetHighlightSound: enqueue sound enrichment failed", "err", eerr, "highlight", h.ID)
+		}
+	}
+	return connect.NewResponse(&managementv1.SetHighlightSoundResponse{Highlight: toProtoHighlight(h)}), nil
 }
 
 // toProtoHighlight maps a storage.Highlight onto its wire view (#308). clip_key
@@ -355,7 +481,16 @@ func toProtoHighlight(h storage.Highlight) *managementv1.Highlight {
 		// blob-seam detail, the clip_key posture). Empty when no image yet.
 		ImageContentType: h.ImageContentType,
 		ImageSizeBytes:   h.ImageSizeBytes,
+		// Sound fields (#312): kind + content type + size + requested-at, so the
+		// UI can render the choice, the pending state, and the player; sound_key
+		// is deliberately omitted (the clip_key posture).
+		SoundKind:        h.SoundKind,
+		SoundContentType: h.SoundContentType,
+		SoundSizeBytes:   h.SoundSizeBytes,
 		CreatedAt:        timestamppb.New(h.CreatedAt),
+	}
+	if h.SoundRequestedAt != nil {
+		pb.SoundRequestedAt = timestamppb.New(*h.SoundRequestedAt)
 	}
 	if h.PromotedAt != nil {
 		pb.PromotedAt = timestamppb.New(*h.PromotedAt)

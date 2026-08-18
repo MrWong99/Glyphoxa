@@ -200,3 +200,81 @@ func (c *ClipServer) ServeImage(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", h.ImageContentType)
 	http.ServeContent(w, req, "image", h.CreatedAt, bytes.NewReader(data))
 }
+
+// ServeSound streams one Highlight's generated sound asset (#312), mirroring
+// ServeClip/ServeImage: GET /api/v1/highlights/{id}/sound, a TenantRequired
+// guarded mount (session AND tenant, per #408). Same tenant + Active-Campaign
+// 404 posture (existence never leaked); http.ServeContent gives the browser
+// <audio> scrubber Range/conditional handling. A Highlight with no landed
+// sound (sound_key == "") is 404 — none requested, still generating,
+// unconfigured, or failed. A missing blob is also 404 (a purge race must not
+// 500). Conditional requests key off sound_requested_at (the asset changes on
+// every re-run of the Add-sound action, unlike the created_at-keyed clip).
+func (c *ClipServer) ServeSound(w http.ResponseWriter, req *http.Request) {
+	tenantID, ok := auth.TenantID(req.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	id, err := uuid.Parse(req.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+
+	h, err := c.store.GetHighlight(req.Context(), tenantID, id)
+	if errors.Is(err, storage.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		c.log.Error("highlight sound: load row", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if c.resolve != nil {
+		campaignID, ok, rerr := c.resolve(req.Context())
+		if rerr != nil {
+			c.log.Error("highlight sound: resolve active campaign", "err", rerr, "highlight", id)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok || h.CampaignID != campaignID {
+			http.NotFound(w, req)
+			return
+		}
+	}
+
+	// No sound landed: nothing to serve. 404 keeps the posture uniform.
+	if h.SoundKey == "" {
+		http.NotFound(w, req)
+		return
+	}
+
+	rc, _, err := c.blobs.Get(req.Context(), h.SoundKey)
+	if errors.Is(err, blob.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		c.log.Error("highlight sound: fetch blob", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		c.log.Error("highlight sound: read blob", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	modtime := h.CreatedAt
+	if h.SoundRequestedAt != nil {
+		modtime = *h.SoundRequestedAt
+	}
+	w.Header().Set("Content-Type", h.SoundContentType)
+	http.ServeContent(w, req, "sound", modtime, bytes.NewReader(data))
+}

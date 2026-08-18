@@ -32,7 +32,8 @@ export const IMAGE_WAIT_MAX_MS = 10 * 60_000;
 // test (mirrors sessionRefetchInterval, Session.tsx). While live, poll to catch
 // promotions as they happen — even on an empty list, since the FIRST highlight
 // must appear. Once ended, poll only while a promoted Highlight is still WITHIN
-// the post-promotion image-wait window; otherwise the list is settled, so stop.
+// an await-media window — its post-promotion image wait (#311) or its
+// post-request sound wait (#312) — otherwise the list is settled, so stop.
 export function highlightsRefetchInterval(
   live: boolean,
   highlights: Highlight[],
@@ -40,15 +41,24 @@ export function highlightsRefetchInterval(
 ): number | false {
   if (live) return HIGHLIGHTS_LIVE_MS;
   if (highlights.length === 0) return false;
-  const awaitingImage = highlights.some((h) => {
-    if (h.status !== "promoted" || h.imageContentType !== "") return false;
-    // Only a RECENTLY-promoted image-less Highlight is worth waiting on; an
-    // unset promotedAt (shouldn't happen for a promoted row) is treated as not
-    // waiting rather than waiting forever.
-    const promotedMs = h.promotedAt ? Number(timestampMs(h.promotedAt)) : null;
-    return promotedMs != null && now - promotedMs < IMAGE_WAIT_MAX_MS;
+  const awaitingMedia = highlights.some((h) => {
+    if (h.status !== "promoted") return false;
+    // Image (#311): only a RECENTLY-promoted image-less Highlight is worth
+    // waiting on; an unset promotedAt (shouldn't happen for a promoted row) is
+    // treated as not waiting rather than waiting forever.
+    if (h.imageContentType === "") {
+      const promotedMs = h.promotedAt ? Number(timestampMs(h.promotedAt)) : null;
+      if (promotedMs != null && now - promotedMs < IMAGE_WAIT_MAX_MS) return true;
+    }
+    // Sound (#312): a requested-but-unlanded sound waits the same window,
+    // keyed on the request stamp (re-running Add sound re-opens it).
+    if (h.soundKind !== "" && h.soundContentType === "") {
+      const requestedMs = h.soundRequestedAt ? Number(timestampMs(h.soundRequestedAt)) : null;
+      if (requestedMs != null && now - requestedMs < IMAGE_WAIT_MAX_MS) return true;
+    }
+    return false;
   });
-  return awaitingImage ? HIGHLIGHTS_IMAGE_MS : false;
+  return awaitingMedia ? HIGHLIGHTS_IMAGE_MS : false;
 }
 
 // useHighlights loads one Voice Session's Session Highlights (#308) into the

@@ -86,6 +86,23 @@ func (l *Ledger) STTAudioSeconds(provider observe.Provider, d time.Duration) {
 	})
 }
 
+// SoundGeneration accumulates one Highlight sound enrichment (#312). NOT part
+// of [observe.UsageSink] — sound generation is an off-session, per-generation
+// call with no pipeline capture point, so the enrichment job holds a Ledger
+// directly and flushes per generation (the planning-chat per-exchange
+// posture). Per the ADR-0004 amendment the row lands under the tts Component
+// (the key it rode) with the SFX/Music model id as the attribution
+// discriminator; the quantity column is the vendor's own credit unit (the
+// character-cost response header — ElevenLabs bills this API family in
+// credits ≈ characters, 0 when unreported), while the estimate prices the
+// REQUESTED duration through the ADR-0046 sound price map.
+func (l *Ledger) SoundGeneration(provider observe.Provider, model string, d time.Duration, characterCost int64) {
+	l.accumulate(storage.ComponentTTS, provider, model, func(r *storage.UsageRow) {
+		r.TTSCharacters += characterCost
+		r.EstimatedUSD += spend.EstimateSoundUSD(provider, model, d)
+	})
+}
+
 // accumulate applies fold to the bucket for (today, component, provider, model),
 // creating it on first use.
 func (l *Ledger) accumulate(component storage.Component, provider observe.Provider, model string, fold func(*storage.UsageRow)) {

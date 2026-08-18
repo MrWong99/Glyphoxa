@@ -90,6 +90,25 @@ func (f *fakeHighlightStore) DeleteHighlight(_ context.Context, tenantID, id uui
 	return h.ClipKey, nil
 }
 
+func (f *fakeHighlightStore) SetHighlightSoundKind(_ context.Context, tenantID, id uuid.UUID, kind string) (storage.Highlight, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.rows[id]
+	if !ok || h.TenantID != tenantID || h.Status != storage.HighlightPromoted {
+		return storage.Highlight{}, storage.ErrNotFound
+	}
+	h.SoundKind = kind
+	h.SoundKey, h.SoundContentType, h.SoundSizeBytes = "", "", 0
+	if kind == "" {
+		h.SoundRequestedAt = nil
+	} else {
+		now := time.Now()
+		h.SoundRequestedAt = &now
+	}
+	f.rows[id] = h
+	return h, nil
+}
+
 // fakeRPCBlobs records the keys deleted through the seam and serves clip bytes for
 // the ShareHighlight fetch (#310).
 type fakeRPCBlobs struct {

@@ -68,6 +68,35 @@ var sttPricePerHour = map[observe.Provider]float64{
 	observe.ProviderElevenLabs: 0.40,
 }
 
+// soundKey identifies a sound-generation price row (#312, ADR-0004 amendment):
+// SFX stings and Music tracks meter under their own model ids — the model is
+// the attribution discriminator since both ride the tts Provider Config.
+type soundKey struct {
+	provider observe.Provider
+	model    string
+}
+
+// soundPricePerMinute are the known per-audio-minute sound-generation rates
+// (USD), keyed (provider, model). ESTIMATES: ElevenLabs bills both endpoints in
+// plan-dependent credits, mapped here at the same ~$0.30/1k-credit ratio the
+// TTS estimate uses, priced on the REQUESTED duration.
+var soundPricePerMinute = map[soundKey]float64{
+	// ElevenLabs sound-effects (sting) — vendor credit table captured
+	// 2026-08-18: ~100 credits per generation (≲22s) ≈ $0.03; normalized to
+	// ~$0.10 / audio-minute. ESTIMATE (plan-dependent).
+	{observe.ProviderElevenLabs, "eleven_text_to_sound_v2"}: 0.10,
+	// ElevenLabs Music — vendor credit table captured 2026-08-18: ~2000
+	// credits per track-minute ≈ $0.60 / audio-minute. ESTIMATE
+	// (plan-dependent).
+	{observe.ProviderElevenLabs, "music_v1"}: 0.60,
+}
+
+// defaultSoundPerMinute is the conservative fallback for an unknown
+// sound-generation (provider, model): above the known Music estimate so an
+// unpriced model over-estimates, matching the LLM/TTS/STT fallback posture.
+// ESTIMATE.
+const defaultSoundPerMinute = 1.00
+
 // embeddingPricePerMTok are the known per-1M-token embeddings rates (USD),
 // keyed by provider alone — v1.0's only embeddings provider is local Ollama
 // (ADR-0011), which costs nothing per call; the OpenAI slot gets its own entry
@@ -119,6 +148,23 @@ func EstimateTTSUSD(provider observe.Provider, chars int) float64 {
 func EstimateSTTUSD(provider observe.Provider, d time.Duration) float64 {
 	usd, _ := sttCostUSD(provider, d)
 	return usd
+}
+
+// EstimateSoundUSD estimates the USD cost of one sound generation (#312) from
+// the requested audio duration — the Highlight sting/Music enrichment pricing.
+// Like EstimateEmbeddingUSD it is a direct estimate rather than a Meter capture
+// point: the ADR-0045 usage trio carries no sound kind, ADR-0046 caps are
+// live-session-only (an off-session enrichment is never cap-gated), and the
+// enrichment job flushes its own per-generation Usage Ledger rows (Tenant
+// attribution under the SFX/Music model id, ADR-0004 amendment). An unknown
+// (provider, model) uses the conservative default (over-estimates, mirroring
+// the other price fallbacks).
+func EstimateSoundUSD(provider observe.Provider, model string, d time.Duration) float64 {
+	p, ok := soundPricePerMinute[soundKey{provider, model}]
+	if !ok {
+		p = defaultSoundPerMinute
+	}
+	return d.Minutes() * p
 }
 
 // EstimateEmbeddingUSD estimates the USD cost of tokens submitted to an

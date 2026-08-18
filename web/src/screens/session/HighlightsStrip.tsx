@@ -14,6 +14,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
+import { HighlightSoundMenu } from "./HighlightSoundMenu";
 import { useHighlights } from "./useHighlights";
 
 // clipClock renders a Highlight bound (starts_at/ends_at) as an "HH:MM:SS" clock,
@@ -189,6 +190,24 @@ export function HighlightsStrip({
                 loading="lazy"
               />
             )}
+            {/* Generated sound (#312): a separate audio next to the clip — the
+                attach-as-blob decision, layered/offered client-side, zero DSP.
+                A requested-but-unlanded sound shows a pending note instead
+                (generating, or failed/unconfigured — re-run or Remove clears it). */}
+            {h.soundContentType !== "" && (
+              <audio
+                className="gx-highlight__audio gx-highlight__sound"
+                controls
+                preload="none"
+                aria-label={t("session.soundClipLabel")}
+                src={`/api/v1/highlights/${h.id}/sound`}
+              />
+            )}
+            {h.soundKind !== "" && h.soundContentType === "" && (
+              <p className="gx-highlight__sound-pending" data-testid="sound-pending">
+                {t("session.soundPending")}
+              </p>
+            )}
             <div className="gx-highlight__actions">
               {isCandidate && (
                 <Button
@@ -211,6 +230,9 @@ export function HighlightsStrip({
               >
                 {t("common.delete")}
               </Button>
+              {/* Sound is opt-in AFTER promotion (#312), so the action renders
+                  on promoted rows only — everywhere the strip renders them. */}
+              {!isCandidate && <HighlightSoundMenu highlight={h} />}
               {renderActions?.(h)}
             </div>
           </li>

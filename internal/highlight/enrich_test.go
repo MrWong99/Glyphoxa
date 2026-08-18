@@ -323,6 +323,12 @@ type fakeReconcileStore struct {
 	targetErr error
 	existErr  error
 	gotExist  []uuid.UUID // ids the sweep asked HighlightsExist about
+
+	// Sound half (#312): the requested-but-unlanded sound targets to
+	// re-enqueue and the kind the sweep asked for.
+	soundTargets   []storage.HighlightSoundEnrichTarget
+	gotSoundKind   string
+	soundTargetErr error
 }
 
 func (f *fakeReconcileStore) ListPromotedHighlightsNeedingEnrichment(_ context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error) {
@@ -331,6 +337,14 @@ func (f *fakeReconcileStore) ListPromotedHighlightsNeedingEnrichment(_ context.C
 		return nil, f.targetErr
 	}
 	return f.targets, nil
+}
+
+func (f *fakeReconcileStore) ListPromotedHighlightsNeedingSoundEnrichment(_ context.Context, enrichKind string) ([]storage.HighlightSoundEnrichTarget, error) {
+	f.gotSoundKind = enrichKind
+	if f.soundTargetErr != nil {
+		return nil, f.soundTargetErr
+	}
+	return f.soundTargets, nil
 }
 
 func (f *fakeReconcileStore) HighlightsExist(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
