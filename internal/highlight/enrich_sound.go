@@ -245,11 +245,11 @@ func EnrichSoundHandler(store SoundEnrichStore, blobs blob.Store, factory SoundG
 			release()
 			var httpErr *providererr.HTTPError
 			if errors.As(err, &httpErr) {
-				switch {
-				case httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden:
+				switch httpErr.StatusCode {
+				case http.StatusUnauthorized, http.StatusForbidden:
 					log.Error("highlight sound enrich: provider rejected the configured key",
 						"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
-				case httpErr.StatusCode == http.StatusTooManyRequests:
+				case http.StatusTooManyRequests:
 					log.Warn("highlight sound enrich: provider out of quota or rate-limited",
 						"err", err, "highlight", p.HighlightID, "tenant", p.TenantID)
 				}
