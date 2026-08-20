@@ -1235,3 +1235,33 @@ textarea.gx-input {
   border-top: 1px solid var(--border-subtle);
   margin: var(--spacing-sm) 0;
 }
+/* The wrapper owns horizontal overflow: a wide table scrolls inside the
+ * bubble rather than stretching it, the same trade the code block makes. */
+.gx-md__tablewrap {
+  margin: 0 0 var(--spacing-sm);
+  overflow-x: auto;
+}
+.gx-md__table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.gx-md__table th,
+.gx-md__table td {
+  border: 1px solid var(--border-subtle);
+  padding: 2px var(--spacing-sm);
+  text-align: left;
+  /* Cells keep their words together; the wrapper's scroll handles width. */
+  overflow-wrap: normal;
+}
+.gx-md__table th {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  background: var(--surface-raised, rgba(255, 255, 255, 0.06));
+}
+/* data-align carries the delimiter row's :--- / :---: / ---: choice. */
+.gx-md__table [data-align="center"] {
+  text-align: center;
+}
+.gx-md__table [data-align="right"] {
+  text-align: right;
+}

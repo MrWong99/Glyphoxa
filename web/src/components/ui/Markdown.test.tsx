@@ -144,6 +144,81 @@ describe("Markdown (block)", () => {
     const { container } = render(<Markdown text="x" className="extra" />);
     expect(container.querySelector(".gx-md.extra")).not.toBeNull();
   });
+
+  it("renders a pipe table with a header row and body rows", () => {
+    const { container } = render(
+      <Markdown text={"| Name | HP |\n| --- | --- |\n| Bart | 12 |\n| Ogre | 40 |"} />,
+    );
+    const table = container.querySelector("table.gx-md__table");
+    expect(table).not.toBeNull();
+    const ths = [...container.querySelectorAll("thead th")].map((th) => th.textContent);
+    expect(ths).toEqual(["Name", "HP"]);
+    const rows = [...container.querySelectorAll("tbody tr")];
+    expect(rows).toHaveLength(2);
+    expect([...rows[0].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["Bart", "12"]);
+  });
+
+  it("accepts edge-pipe-less rows and renders inline markdown inside cells", () => {
+    const { container } = render(
+      <Markdown text={"Name | Notes\n--- | ---\n**Bart** | owes `20 gold`"} />,
+    );
+    expect(container.querySelector("tbody strong")?.textContent).toBe("Bart");
+    expect(container.querySelector("tbody code")?.textContent).toBe("20 gold");
+  });
+
+  it("carries column alignment from the delimiter row as data-align", () => {
+    const { container } = render(
+      <Markdown text={"| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |"} />,
+    );
+    const tds = [...container.querySelectorAll("tbody td")];
+    expect(tds.map((td) => td.getAttribute("data-align"))).toEqual(["left", "center", "right"]);
+    const ths = [...container.querySelectorAll("thead th")];
+    expect(ths[1].getAttribute("data-align")).toBe("center");
+  });
+
+  it("squares ragged body rows to the header's width", () => {
+    const { container } = render(
+      <Markdown text={"| a | b |\n| --- | --- |\n| short |\n| one | two | extra |"} />,
+    );
+    const rows = [...container.querySelectorAll("tbody tr")];
+    expect([...rows[0].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["short", ""]);
+    expect([...rows[1].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["one", "two"]);
+  });
+
+  it("treats an escaped pipe as a literal pipe inside a cell", () => {
+    const { container } = render(
+      <Markdown text={"| expr | value |\n| --- | --- |\n| a \\| b | union |"} />,
+    );
+    const tds = [...container.querySelectorAll("tbody td")].map((td) => td.textContent);
+    expect(tds).toEqual(["a | b", "union"]);
+  });
+
+  it("leaves a header/delimiter cell-count mismatch as prose", () => {
+    const { container } = render(<Markdown text={"| a | b |\n| --- |\n| 1 | 2 |"} />);
+    expect(container.querySelector("table")).toBeNull();
+    expect(container.textContent).toContain("| a | b |");
+  });
+
+  it("does not turn a lone pipe-bearing paragraph into a table", () => {
+    const { container } = render(<Markdown text={"Either ambush | parley works."} />);
+    expect(container.querySelector("table")).toBeNull();
+  });
+
+  it("lets a table interrupt a paragraph glued above it", () => {
+    const { container } = render(
+      <Markdown text={"Initiative order:\n| Who | Roll |\n| --- | --- |\n| Bart | 17 |"} />,
+    );
+    expect(container.querySelector("p")?.textContent).toBe("Initiative order:");
+    expect(container.querySelector("table")).not.toBeNull();
+  });
+
+  it("ends the table at the first pipe-less line instead of swallowing prose", () => {
+    const { container } = render(
+      <Markdown text={"| a |\n| --- |\n| 1 |\nThe ogre attacks."} />,
+    );
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(container.querySelector("p")?.textContent).toBe("The ogre attacks.");
+  });
 });
 
 describe("InlineMarkdown", () => {
@@ -196,5 +271,11 @@ describe("stripMarkdown", () => {
 
   it("returns plain text unchanged", () => {
     expect(stripMarkdown("Bart owes the ogre 20 gold.")).toBe("Bart owes the ogre 20 gold.");
+  });
+
+  it("flattens a table to space-separated cell text", () => {
+    expect(stripMarkdown("| Name | HP |\n| --- | --- |\n| **Bart** | 12 |")).toBe(
+      "Name HP Bart 12",
+    );
   });
 });
