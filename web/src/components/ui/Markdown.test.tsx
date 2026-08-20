@@ -144,6 +144,124 @@ describe("Markdown (block)", () => {
     const { container } = render(<Markdown text="x" className="extra" />);
     expect(container.querySelector(".gx-md.extra")).not.toBeNull();
   });
+
+  it("renders a pipe table with a header row and body rows", () => {
+    const { container } = render(
+      <Markdown text={"| Name | HP |\n| --- | --- |\n| Bart | 12 |\n| Ogre | 40 |"} />,
+    );
+    const table = container.querySelector("table.gx-md__table");
+    expect(table).not.toBeNull();
+    const ths = [...container.querySelectorAll("thead th")].map((th) => th.textContent);
+    expect(ths).toEqual(["Name", "HP"]);
+    const rows = [...container.querySelectorAll("tbody tr")];
+    expect(rows).toHaveLength(2);
+    expect([...rows[0].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["Bart", "12"]);
+  });
+
+  it("accepts edge-pipe-less rows and renders inline markdown inside cells", () => {
+    const { container } = render(
+      <Markdown text={"Name | Notes\n--- | ---\n**Bart** | owes `20 gold`"} />,
+    );
+    expect(container.querySelector("tbody strong")?.textContent).toBe("Bart");
+    expect(container.querySelector("tbody code")?.textContent).toBe("20 gold");
+  });
+
+  it("carries column alignment from the delimiter row as data-align", () => {
+    const { container } = render(
+      <Markdown text={"| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |"} />,
+    );
+    const tds = [...container.querySelectorAll("tbody td")];
+    expect(tds.map((td) => td.getAttribute("data-align"))).toEqual(["left", "center", "right"]);
+    const ths = [...container.querySelectorAll("thead th")];
+    expect(ths[1].getAttribute("data-align")).toBe("center");
+  });
+
+  it("squares ragged body rows to the header's width", () => {
+    const { container } = render(
+      <Markdown text={"| a | b |\n| --- | --- |\n| short |\n| one | two | extra |"} />,
+    );
+    const rows = [...container.querySelectorAll("tbody tr")];
+    expect([...rows[0].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["short", ""]);
+    expect([...rows[1].querySelectorAll("td")].map((td) => td.textContent)).toEqual(["one", "two"]);
+  });
+
+  it("treats an escaped pipe as a literal pipe inside a cell", () => {
+    const { container } = render(
+      <Markdown text={"| expr | value |\n| --- | --- |\n| a \\| b | union |"} />,
+    );
+    const tds = [...container.querySelectorAll("tbody td")].map((td) => td.textContent);
+    expect(tds).toEqual(["a | b", "union"]);
+  });
+
+  it("leaves a header/delimiter cell-count mismatch as prose", () => {
+    const { container } = render(<Markdown text={"| a | b |\n| --- |\n| 1 | 2 |"} />);
+    expect(container.querySelector("table")).toBeNull();
+    expect(container.textContent).toContain("| a | b |");
+  });
+
+  it("does not turn a lone pipe-bearing paragraph into a table", () => {
+    const { container } = render(<Markdown text={"Either ambush | parley works."} />);
+    expect(container.querySelector("table")).toBeNull();
+  });
+
+  it("lets a table interrupt a paragraph glued above it", () => {
+    const { container } = render(
+      <Markdown text={"Initiative order:\n| Who | Roll |\n| --- | --- |\n| Bart | 17 |"} />,
+    );
+    expect(container.querySelector("p")?.textContent).toBe("Initiative order:");
+    expect(container.querySelector("table")).not.toBeNull();
+  });
+
+  it("ends the table at the first pipe-less line instead of swallowing prose", () => {
+    const { container } = render(
+      <Markdown text={"| a |\n| --- |\n| 1 |\nThe ogre attacks."} />,
+    );
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(container.querySelector("p")?.textContent).toBe("The ogre attacks.");
+  });
+
+  it("keeps a --- rule under prose whose only pipes are escaped or edge", () => {
+    // HR outranks the delimiter row: an escaped/edge pipe collapses to one
+    // splitRow cell, which must not pair with a bare "---" section divider
+    // into a one-column table that eats the rule.
+    for (const text of [
+      "Use `cat\\|dog` to match either.\n---\nMore prose.",
+      "| means OR in a regex.\n----",
+      "Progress: 80% done |\n---",
+    ]) {
+      const { container } = render(<Markdown text={text} />);
+      expect(container.querySelector("table")).toBeNull();
+      expect(container.querySelector("hr")).not.toBeNull();
+    }
+  });
+
+  it("still opens a single-column table from a piped delimiter row", () => {
+    const { container } = render(<Markdown text={"| a |\n| --- |\n| 1 |"} />);
+    expect(container.querySelector("thead th")?.textContent).toBe("a");
+  });
+
+  it("rejects a degenerate delimiter-shaped line in linear time", () => {
+    // TABLE_DELIM's backtracking regex is gone; a delimiter-shaped line with
+    // a huge whitespace run and one stray char must fail fast (the old regex
+    // went quadratic — >10s at this size, tripping the test timeout).
+    const { container } = render(
+      <Markdown text={"col a | col b\n|-" + " ".repeat(160000) + "x"} />,
+    );
+    expect(container.querySelector("table")).toBeNull();
+  });
+
+  it("breaks the table at a glued heading, list, or quote line that contains a pipe", () => {
+    const table = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    const heading = render(<Markdown text={table + "## Results | Summary"} />).container;
+    expect(heading.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(heading.querySelector(".gx-md__heading")?.textContent).toBe("Results | Summary");
+    const list = render(<Markdown text={table + "- note: `a | b` is a union"} />).container;
+    expect(list.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(list.querySelector("li code")?.textContent).toBe("a | b");
+    const quote = render(<Markdown text={table + "> caveat: a | b differs"} />).container;
+    expect(quote.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(quote.querySelector("blockquote")?.textContent).toBe("caveat: a | b differs");
+  });
 });
 
 describe("InlineMarkdown", () => {
@@ -196,5 +314,11 @@ describe("stripMarkdown", () => {
 
   it("returns plain text unchanged", () => {
     expect(stripMarkdown("Bart owes the ogre 20 gold.")).toBe("Bart owes the ogre 20 gold.");
+  });
+
+  it("flattens a table to space-separated cell text", () => {
+    expect(stripMarkdown("| Name | HP |\n| --- | --- |\n| **Bart** | 12 |")).toBe(
+      "Name HP Bart 12",
+    );
   });
 });

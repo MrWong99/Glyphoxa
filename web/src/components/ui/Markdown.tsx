@@ -17,10 +17,12 @@ import { Fragment, type ReactNode } from "react";
 //                    markdown" treatment where rendering can't apply.
 //
 // Deliberately unsupported: raw HTML (stays literal text), setext headings,
-// tables, images (an ![alt](url) renders as literal text — remote images from
+// images (an ![alt](url) renders as literal text — remote images from
 // model output would be a fetch to an attacker-chosen host), reference links,
 // and backslash escapes (model output in practice never uses them; a literal
-// `\*` therefore stays visible).
+// `\*` therefore stays visible). One exception: `\|` inside a table row reads
+// as a literal pipe — it's the only way GFM can put a | in a cell, and models
+// writing tables about code do emit it.
 
 // ── Inline grammar ──────────────────────────────────────────────────────────
 
@@ -98,12 +100,15 @@ type ListEntry = { indent: number; ordered: boolean; start: number; text: string
 type ListItem = { text: string; child: List | null };
 type List = { ordered: boolean; start: number; items: ListItem[] };
 
+type Align = "left" | "center" | "right" | null;
+
 type Block =
   | { kind: "p"; lines: string[] }
   | { kind: "heading"; level: number; text: string }
   | { kind: "fence"; lang: string; code: string }
   | { kind: "quote"; blocks: Block[] }
   | { kind: "list"; list: List }
+  | { kind: "table"; align: Align[]; header: string[]; rows: string[][] }
   | { kind: "hr" };
 
 const FENCE_OPEN = /^ {0,3}```([^`\n]*)$/;
@@ -156,6 +161,56 @@ function buildList(entries: ListEntry[]): List {
     }
   }
   return list;
+}
+
+// splitRow splits one pipe-delimited table row into trimmed cells. Edge pipes
+// are optional (GFM), and `\|` reads as a literal pipe inside a cell — the one
+// backslash escape this renderer honors (see the header comment). As in GFM,
+// the split happens before inline parsing, so a pipe inside a code span still
+// separates cells unless escaped.
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  const cells: string[] = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && s[i + 1] === "|") {
+      cur += "|";
+      i++;
+    } else if (s[i] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else {
+      cur += s[i];
+    }
+  }
+  cur = cur.trim();
+  // A trailing edge pipe leaves an empty last chunk — drop it; an interior
+  // empty cell (`a || b`) is real and kept by the branch above.
+  if (cur !== "" || cells.length === 0) cells.push(cur);
+  return cells;
+}
+
+// tableStart decides whether a header line plus the line under it open a
+// table: the header must contain a pipe (a bare paragraph line never becomes
+// a table by accident), the next line must be a delimiter row — every splitRow
+// cell shaped `:?-+:?` — and, GFM's rule, the two must agree on cell count,
+// else both stay prose. A rule line ("---", "----") is never a delimiter row:
+// HR outranks the table exactly as it outranks the list, so prose whose pipes
+// are all escaped or edge (one splitRow cell) followed by a `---` section
+// divider keeps its <hr> instead of becoming a one-column table.
+function tableStart(header: string, delim: string | undefined): { header: string[]; align: Align[] } | null {
+  if (delim === undefined || !header.includes("|") || HR.test(delim)) return null;
+  const cells = splitRow(header);
+  const delims = splitRow(delim);
+  if (delims.length !== cells.length || !delims.every((d) => /^:?-+:?$/.test(d))) return null;
+  const align = delims.map<Align>((d) => {
+    if (d.startsWith(":") && d.endsWith(":")) return "center";
+    if (d.endsWith(":")) return "right";
+    if (d.startsWith(":")) return "left";
+    return null;
+  });
+  return { header: cells, align };
 }
 
 // parseBlocks is a line-based single pass: each iteration consumes one whole
@@ -220,6 +275,36 @@ function parseBlocks(text: string, depth = 0): Block[] {
       blocks.push({ kind: "list", list: buildList(entries) });
       continue;
     }
+    const table = tableStart(line, lines[i + 1]);
+    if (table) {
+      i += 2; // past the header and delimiter rows
+      const rows: string[][] = [];
+      // Body rows must contain a pipe: where GFM would sweep a following
+      // prose line into the table as a one-cell row, chat models constantly
+      // glue prose straight under a table, so the first pipe-less line ends
+      // it instead. The start of any other block ends it too (as in GFM) —
+      // the same guards the paragraph loop uses, so a glued "## Results |
+      // Summary" heading or a "- note: `a | b`" bullet is never swallowed as
+      // a data row. Ragged rows are squared to the header (GFM): short rows
+      // pad with empty cells, long rows shed the excess.
+      while (
+        i < lines.length &&
+        lines[i].trim() !== "" &&
+        lines[i].includes("|") &&
+        !FENCE_OPEN.test(lines[i]) &&
+        !HEADING.test(lines[i]) &&
+        !HR.test(lines[i]) &&
+        !QUOTE.test(lines[i]) &&
+        !listInterrupts(lines[i])
+      ) {
+        const cells = splitRow(lines[i]).slice(0, table.header.length);
+        while (cells.length < table.header.length) cells.push("");
+        rows.push(cells);
+        i++;
+      }
+      blocks.push({ kind: "table", align: table.align, header: table.header, rows });
+      continue;
+    }
     // Paragraph: consecutive plain lines. Single newlines are kept as hard
     // breaks — chat prose treats them as intentional (the bubbles rendered
     // them via pre-wrap before this component existed).
@@ -232,7 +317,8 @@ function parseBlocks(text: string, depth = 0): Block[] {
       !HEADING.test(lines[i]) &&
       !HR.test(lines[i]) &&
       !QUOTE.test(lines[i]) &&
-      !listInterrupts(lines[i])
+      !listInterrupts(lines[i]) &&
+      tableStart(lines[i], lines[i + 1]) === null
     ) {
       para.push(lines[i]);
       i++;
@@ -291,6 +377,37 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
         );
       case "list":
         return renderList(b.list, i);
+      case "table":
+        // The wrapper div owns horizontal overflow: a wide table scrolls
+        // inside the bubble instead of stretching it. data-align mirrors the
+        // heading's data-level idiom — alignment stays in CSS, not style
+        // attributes.
+        return (
+          <div key={i} className="gx-md__tablewrap">
+            <table className="gx-md__table">
+              <thead>
+                <tr>
+                  {b.header.map((cell, j) => (
+                    <th key={j} data-align={b.align[j] ?? undefined}>
+                      {renderInline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {b.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, j) => (
+                      <td key={j} data-align={b.align[j] ?? undefined}>
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
       case "hr":
         return <hr key={i} className="gx-md__hr" />;
       case "p":
@@ -358,6 +475,10 @@ function blockPlain(b: Block): string {
         .map((it) =>
           [inlinePlain(it.text), ...(it.child?.items.map((c) => inlinePlain(c.text)) ?? [])].join(" "),
         )
+        .join(" ");
+    case "table":
+      return [b.header, ...b.rows]
+        .map((row) => row.filter((c) => c !== "").map((c) => inlinePlain(c)).join(" "))
         .join(" ");
     case "hr":
       return "";

@@ -143,6 +143,13 @@
   font-size: var(--body-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* The bubble is a non-stretched flex item, so it sizes to fit-content —
+   * and a scroll container's intrinsic size is its CONTENT'S, so a wide
+   * markdown table (unbreakable cells by design) would inflate the bubble
+   * past the msg's 78% cap and pan the whole message list sideways. Clamping
+   * here bounds fit-content, which is what lets .gx-md__tablewrap actually
+   * scroll instead. */
+  max-width: 100%;
 }
 
 .gx-planning__msg[data-role="user"] .gx-planning__bubble {
