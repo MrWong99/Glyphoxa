@@ -156,6 +156,14 @@
   .gx-session {
     flex-direction: column;
   }
+  /* Stacked, the main column is a non-stretched flex item (the container's
+   * align-items: flex-start still applies), so it would size to fit-content —
+   * and a wide recap table's min-content would inflate the card past the
+   * viewport and pan the whole column instead of scrolling inside
+   * .gx-md__tablewrap. Pin it like the voice panel below. */
+  .gx-session__main {
+    width: 100%;
+  }
   .gx-voice-panel {
     flex-basis: auto;
     width: 100%;
