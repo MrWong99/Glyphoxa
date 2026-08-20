@@ -2239,6 +2239,17 @@ service SessionService {
   // ADR-0048), returning nothing (#308). A missing/foreign id is CodeNotFound.
   // State-changing: CSRF + auth guard it.
   rpc DeleteHighlight(DeleteHighlightRequest) returns (DeleteHighlightResponse);
+  // SetHighlightSound records the GM's "Add sound" choice on a PROMOTED
+  // Highlight (#312, Epic 8, ADR-0004 amendment): kind "sting" or "music"
+  // clears any previously landed sound and schedules an async ElevenLabs
+  // generation (re-running regenerates or changes the choice); kind ""
+  // removes the sound entirely (None, the default). The generated asset
+  // attaches as a separate blob served from GET /highlights/{id}/sound. A
+  // still-candidate Highlight is CodeFailedPrecondition (sound is opt-in
+  // after promotion); an unknown kind is CodeInvalidArgument; a
+  // missing/foreign/cross-campaign id is CodeNotFound. State-changing (spends
+  // provider money): CSRF + auth guard it.
+  rpc SetHighlightSound(SetHighlightSoundRequest) returns (SetHighlightSoundResponse);
   // ListShareChannels lists the deployment guild's text channels the GM can post a
   // Highlight file into, plus the Active Campaign's last-chosen channel so the share
   // dialog pre-selects it (#310, Epic 8, ADR-0051). A read (NO_SIDE_EFFECTS); a
@@ -2298,6 +2309,22 @@ message Highlight {
   string image_content_type = 15;
   // image_size_bytes is the stored image's size in bytes (0 when no image yet).
   int64 image_size_bytes = 16;
+  // sound_kind is the GM's standing "Add sound" choice (#312): "sting",
+  // "music", or "" (none requested — the default). A set kind with an empty
+  // sound_content_type means the generation is pending (or failed /
+  // unconfigured — the row stays intact without media).
+  string sound_kind = 17;
+  // sound_content_type is the generated sound's MIME type; empty means no
+  // sound landed yet. The audio bytes are served through
+  // GET /highlights/{id}/sound; the blob key is NEVER exposed (clip_key
+  // posture).
+  string sound_content_type = 18;
+  // sound_size_bytes is the stored sound's size in bytes (0 when none yet).
+  int64 sound_size_bytes = 19;
+  // sound_requested_at is when the GM last ran the Add-sound action; unset
+  // when sound_kind is "". The web tier bounds its await-media polling on it
+  // (the promoted_at/image pattern).
+  google.protobuf.Timestamp sound_requested_at = 20;
 }
 
 // ListHighlightsRequest names the Voice Session whose Highlights to list.
@@ -2344,6 +2371,24 @@ message DeleteHighlightRequest {
 
 // DeleteHighlightResponse is empty; the delete cascades the clip through the seam.
 message DeleteHighlightResponse {}
+
+// SetHighlightSoundRequest names the promoted Highlight and the GM's sound
+// choice (#312).
+message SetHighlightSoundRequest {
+  // id is the promoted Highlight to set the sound choice on.
+  string id = 1;
+  // kind is "sting" (a short sound-effect sting), "music" (a composed
+  // instrumental track), or "" (remove the sound — None).
+  string kind = 2;
+}
+
+// SetHighlightSoundResponse carries the updated Highlight: the recorded choice
+// with the sound triad cleared (the generation lands asynchronously; poll
+// ListHighlights for sound_content_type to fill).
+message SetHighlightSoundResponse {
+  // highlight is the updated row.
+  Highlight highlight = 1;
+}
 
 // ListShareChannelsRequest is empty: the guild is the deployment's single Discord
 // guild and the Campaign is resolved server-side (ADR-0039).

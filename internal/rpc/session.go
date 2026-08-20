@@ -14,6 +14,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/session"
@@ -126,6 +127,10 @@ type SessionServer struct {
 	// enqueue schedules the image-enrichment job on promotion (#311, ADR-0049);
 	// nil disables enrichment (the promote itself still succeeds).
 	enqueue HighlightEnqueuer
+	// soundFactory backs SetHighlightSound's is-it-configured precheck (#312);
+	// wired via SetSoundEnrichment. Nil (unwired) makes SetHighlightSound
+	// report CodeUnimplemented rather than enqueue jobs that can never run.
+	soundFactory highlight.SoundGeneratorFactory
 
 	// sharer / replayer / shareStore back the Highlight Discord-delivery RPCs (#310);
 	// wired via SetSharing after construction. Nil (unwired) makes ShareHighlight /

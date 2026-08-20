@@ -667,6 +667,38 @@
   align-items: flex-start;
 }
 
+/* Generated highlight sound (#312): the requested-but-unlanded note under the
+ * players, and the Add-sound choice panel (the share panel's compact shape). */
+.gx-highlight__sound-pending {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+
+.gx-highlight-sound {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-inset);
+  width: 100%;
+}
+
+.gx-highlight-sound__hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+
+.gx-highlight-sound__choices {
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* Highlight share surface (#310): the GM's Discord-delivery panel, opened from the
  * per-row Share action. A compact column so the channel picker, replay, and
  * download read as one group. */

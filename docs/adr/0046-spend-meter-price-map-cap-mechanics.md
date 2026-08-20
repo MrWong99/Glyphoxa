@@ -52,6 +52,33 @@ mechanism reading the Usage Ledger, not this ADR's live cap: the soft/hard-cap
 mechanics, `AllowTurn`, and `SpendCapReached` remain exclusively the running
 Voice Session's concern, unchanged.
 
+## Amendment (2026-08-18, #312 Highlight sound enrichment)
+
+Highlight sound generation (ElevenLabs SFX stings and Music tracks, ADR-0004
+amendment 2026-07-22) is the third off-session consumer, and it introduces the
+price map's first **sound** rows: `internal/spend/prices.go` gains a
+model-keyed `soundPricePerMinute` map — the SFX and Music model ids price
+separately, per the ADR-0004 amendment's attribution requirement — with the
+usual conservative (higher-than-any-known-row) fallback for an unknown model.
+Its metering posture:
+
+- **Estimated directly, never a Meter capture point.** The ADR-0045 usage trio
+  (LLM/TTS/STT) carries no sound kind, and caps are live-Voice-Session-only —
+  an off-session enrichment job is never cap-gated (the Recap posture). The
+  new `spend.EstimateSoundUSD(provider, model, duration)` prices the
+  REQUESTED audio duration (the one quantity known before the vendor bill),
+  the embeddings-estimate pattern.
+- **Usage-Ledger attribution per generation.** The enrichment job flushes one
+  `billing.Ledger` row per generation with Tenant attribution: component
+  `tts` (the Provider Config the call rode — deliberately no `sound`
+  Component), the SFX/Music model id as discriminator, the vendor's
+  `character-cost` header as the quantity (its own credit unit; 0 when
+  unreported), and the duration-priced estimate. The planning-chat
+  per-exchange flush pattern.
+
+The live-session meter, caps, gate, and `SpendCapReached` mechanics are
+unchanged.
+
 ## Relationship to other ADRs
 
 ADR-0004 (amendment is the spec this implements), ADR-0045 (usage capture points), ADR-0043 (close seam + end_reason prefixes), ADR-0032 (no session labels), ADR-0020/0014/0039 (event + SSE + screen surface).

@@ -282,6 +282,10 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 // Highlight ids still have a row — the absent ones are the orphans.
 type ReconcileStore interface {
 	ListPromotedHighlightsNeedingEnrichment(ctx context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error)
+	// ListPromotedHighlightsNeedingSoundEnrichment is the sound half (#312):
+	// promoted Highlights whose requested sound never landed and have no live
+	// sound job for the SAME requested kind.
+	ListPromotedHighlightsNeedingSoundEnrichment(ctx context.Context, enrichKind string) ([]storage.HighlightSoundEnrichTarget, error)
 	HighlightsExist(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
@@ -301,8 +305,8 @@ type ReconcileStore interface {
 //     seam (blob.Store.List, #421) — never a direct query against a backend table —
 //     so the sweep survives an S3 swap; the anti-join against live rows
 //     (store.HighlightsExist) happens in Go. It touches ONLY the 'highlight'
-//     owner-kind's 'image' and 'clip.wav' names (ADR-0048), never another owner's
-//     blob or a live row's blobs (the row still exists).
+//     owner-kind's 'image', 'clip.wav', and 'sound' names (ADR-0048), never
+//     another owner's blob or a live row's blobs (the row still exists).
 //
 // Both halves run even if one's list fails: a store-list error is collected and
 // returned so boot logs it, but the sweep never aborts (AC4) — the caller (main.go)
@@ -331,6 +335,27 @@ func SweepEnrichmentReconciliation(ctx context.Context, store ReconcileStore, bl
 		}
 	}
 
+	// (a') Re-enqueue sound generation for promoted Highlights whose requested
+	// sound never landed (#312) — a crash between the SetHighlightSound RPC's
+	// row update and its enqueue, or a dead-lettered generation whose key has
+	// since been fixed. The payload carries the row's CURRENT sound_kind, so
+	// the re-enqueued job generates what the GM currently wants.
+	soundTargets, err := store.ListPromotedHighlightsNeedingSoundEnrichment(ctx, JobKindEnrichSound)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list promoted highlights needing sound enrichment: %w", err))
+	} else {
+		for _, t := range soundTargets {
+			payload := soundEnrichPayload{HighlightID: t.HighlightID, TenantID: t.TenantID, Kind: t.Kind}
+			if err := enqueue.Enqueue(ctx, JobKindEnrichSound, payload, time.Now()); err != nil {
+				log.Error("highlight enrich sweep: enqueue backstop sound enrichment", "err", err, "highlight", t.HighlightID)
+				continue
+			}
+		}
+		if len(soundTargets) > 0 {
+			log.Warn("scheduled backstop sound enrichment for soundless promoted highlights", "count", len(soundTargets))
+		}
+	}
+
 	// (b) Sweep orphaned Highlight blobs. Enumerate every blob through the seam,
 	// keep the Highlight-owned blobs — the enrichment images AND the audio clips
 	// (#435: a clip whose row insert failed after the Put is row-less consented
@@ -348,7 +373,7 @@ func SweepEnrichmentReconciliation(ctx context.Context, store ReconcileStore, bl
 			if perr != nil || parts.OwnerKind != highlightOwnerKind {
 				continue
 			}
-			if parts.Name != imageBlobName && parts.Name != clipBlobName {
+			if parts.Name != imageBlobName && parts.Name != clipBlobName && parts.Name != soundBlobName {
 				continue
 			}
 			orphanCandidates = append(orphanCandidates, k)

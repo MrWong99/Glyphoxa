@@ -124,3 +124,54 @@ func TestLedgerFlushErrorRetainsRows(t *testing.T) {
 		t.Fatalf("tts chars after retry = %d, want 150 (100 merged back + 50 new)", got[0].TTSCharacters)
 	}
 }
+
+// TestLedgerSoundGeneration pins the #312 attribution row: sound generation
+// lands under the tts Component (the key it rode, ADR-0004 amendment) with the
+// SFX/Music model id as the discriminator, the vendor's character-cost as the
+// quantity, and the ADR-0046 sound price map's duration estimate.
+func TestLedgerSoundGeneration(t *testing.T) {
+	tenant := uuid.New()
+	at := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	l := NewLedger(tenant, fixedNow(at))
+
+	l.SoundGeneration(observe.ProviderElevenLabs, "eleven_text_to_sound_v2", 30*time.Second, 100)
+	l.SoundGeneration(observe.ProviderElevenLabs, "music_v1", time.Minute, 0)
+
+	var rows []storage.UsageRow
+	if err := l.Flush(context.Background(), func(_ context.Context, r []storage.UsageRow) error {
+		rows = r
+		return nil
+	}); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (one per model id)", len(rows))
+	}
+	byModel := map[string]storage.UsageRow{}
+	for _, r := range rows {
+		if r.Component != storage.ComponentTTS {
+			t.Errorf("component = %s, want tts (the key it rode)", r.Component)
+		}
+		if r.Provider != string(observe.ProviderElevenLabs) {
+			t.Errorf("provider = %s, want elevenlabs", r.Provider)
+		}
+		byModel[r.Model] = r
+	}
+	sfx, ok := byModel["eleven_text_to_sound_v2"]
+	if !ok {
+		t.Fatalf("no SFX row: %+v", rows)
+	}
+	if sfx.TTSCharacters != 100 {
+		t.Errorf("SFX quantity = %d, want the vendor-reported 100 credits", sfx.TTSCharacters)
+	}
+	if want := spend.EstimateSoundUSD(observe.ProviderElevenLabs, "eleven_text_to_sound_v2", 30*time.Second); sfx.EstimatedUSD != want {
+		t.Errorf("SFX estimate = %v, want %v", sfx.EstimatedUSD, want)
+	}
+	music, ok := byModel["music_v1"]
+	if !ok {
+		t.Fatalf("no Music row: %+v", rows)
+	}
+	if want := spend.EstimateSoundUSD(observe.ProviderElevenLabs, "music_v1", time.Minute); music.EstimatedUSD != want {
+		t.Errorf("Music estimate = %v, want %v", music.EstimatedUSD, want)
+	}
+}

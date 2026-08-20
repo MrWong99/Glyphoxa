@@ -30,6 +30,17 @@ const (
 	HighlightPromoted = "promoted"
 )
 
+// Highlight sound kinds (CHECK-constrained in the schema, #312): the GM's
+// standing "Add sound" choice on a promoted Highlight. Empty means none
+// requested (the default).
+const (
+	// SoundKindSting: a short sound-effect sting (the ElevenLabs
+	// sound-effects endpoint, bounded to ≤22s).
+	SoundKindSting = "sting"
+	// SoundKindMusic: a composed Music track (the ElevenLabs Music endpoint).
+	SoundKindMusic = "music"
+)
+
 // Highlight is one persisted Session Highlight row (#308).
 type Highlight struct {
 	ID              uuid.UUID
@@ -55,6 +66,20 @@ type Highlight struct {
 	ImageKey         string
 	ImageContentType string
 	ImageSizeBytes   int64
+	// SoundKind / SoundRequestedAt / SoundKey / SoundContentType /
+	// SoundSizeBytes carry the GM's opt-in sound enrichment (#312, Epic 8,
+	// ADR-0004 amendment): SoundKind is the standing choice ("sting" or
+	// "music", "" = none), SoundRequestedAt stamps the latest request (the web
+	// tier's await-media poll bound), and the key/content-type/size triad
+	// mirrors the image's. SoundKey == "" with SoundKind != "" means requested
+	// but not landed (generating, unconfigured, or failed — the row stays
+	// intact without media). SoundKey is NEVER exposed on the wire (clip_key
+	// posture): the audio is served through GET /highlights/{id}/sound.
+	SoundKind        string
+	SoundRequestedAt *time.Time
+	SoundKey         string
+	SoundContentType string
+	SoundSizeBytes   int64
 	CreatedAt        time.Time
 	PromotedAt       *time.Time
 }
@@ -63,19 +88,25 @@ const highlightColumns = `
 	id, tenant_id, voice_session_id, campaign_id, status,
 	starts_at, ends_at, score, excerpt, reason, speaker_ids,
 	clip_key, clip_content_type, clip_size_bytes,
-	image_key, image_content_type, image_size_bytes, created_at, promoted_at`
+	image_key, image_content_type, image_size_bytes,
+	sound_kind, sound_requested_at, sound_key, sound_content_type, sound_size_bytes,
+	created_at, promoted_at`
 
 func scanHighlight(row pgx.Row) (Highlight, error) {
 	var (
 		h  Highlight
+		sr *time.Time
 		pr *time.Time
 	)
 	err := row.Scan(
 		&h.ID, &h.TenantID, &h.VoiceSessionID, &h.CampaignID, &h.Status,
 		&h.StartsAt, &h.EndsAt, &h.Score, &h.Excerpt, &h.Reason, &h.SpeakerIDs,
 		&h.ClipKey, &h.ClipContentType, &h.ClipSizeBytes,
-		&h.ImageKey, &h.ImageContentType, &h.ImageSizeBytes, &h.CreatedAt, &pr,
+		&h.ImageKey, &h.ImageContentType, &h.ImageSizeBytes,
+		&h.SoundKind, &sr, &h.SoundKey, &h.SoundContentType, &h.SoundSizeBytes,
+		&h.CreatedAt, &pr,
 	)
+	h.SoundRequestedAt = sr
 	h.PromotedAt = pr
 	return h, err
 }
@@ -295,15 +326,18 @@ func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind
 
 // ListCampaignHighlightClipKeys returns EVERY blob key a campaign hard-delete
 // must sweep through the seam BEFORE the row cascade removes the highlights
-// (ADR-0048): each highlight's clip_key AND its image_key when non-empty (#311 —
-// a promoted, enriched Highlight owns two blobs). No status filter: a campaign
-// delete takes its highlights with it, kept or not. clip_key is always present;
-// image_key is UNION ALL'd only where set, so unenriched rows contribute one key.
+// (ADR-0048): each highlight's clip_key AND its image_key (#311) AND its
+// sound_key (#312) when non-empty — a fully enriched Highlight owns three
+// blobs. No status filter: a campaign delete takes its highlights with it,
+// kept or not. clip_key is always present; image_key and sound_key are
+// UNION ALL'd only where set, so unenriched rows contribute one key.
 func (s *Store) ListCampaignHighlightClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
 	return s.scanClipKeys(ctx,
 		`SELECT clip_key FROM highlight WHERE campaign_id = $1
 		 UNION ALL
-		 SELECT image_key FROM highlight WHERE campaign_id = $1 AND image_key <> ''`, campaignID)
+		 SELECT image_key FROM highlight WHERE campaign_id = $1 AND image_key <> ''
+		 UNION ALL
+		 SELECT sound_key FROM highlight WHERE campaign_id = $1 AND sound_key <> ''`, campaignID)
 }
 
 // HighlightEnrichTarget is a promoted, still-imageless Highlight the boot
@@ -393,6 +427,144 @@ func (s *Store) ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) e
 		return fmt.Errorf("storage: release highlight enrich claim %s: %w", id, err)
 	}
 	return nil
+}
+
+// SetHighlightSoundKind records the GM's "Add sound" choice on a PROMOTED
+// Highlight within the tenant (#312), returning the updated row. A non-empty
+// kind ("sting"/"music" — the RPC validates) stamps sound_requested_at and
+// clears any previously landed sound triad, so the row reads "requested but
+// not landed" until the generation job attaches the new asset; kind "" clears
+// the choice entirely (None). The claim column is deliberately untouched: a
+// live generation keeps serializing blob writes, and the superseded job
+// releases its own claim when its conditional land misses (see
+// SetHighlightSound). A missing/foreign id — or a still-candidate row (sound
+// is opt-in AFTER promotion, #312) — yields ErrNotFound.
+func (s *Store) SetHighlightSoundKind(ctx context.Context, tenantID, id uuid.UUID, kind string) (Highlight, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE highlight
+		    SET sound_kind = $3,
+		        sound_requested_at = CASE WHEN $3 = '' THEN NULL ELSE now() END,
+		        sound_key = '', sound_content_type = '', sound_size_bytes = 0
+		  WHERE id = $1 AND tenant_id = $2 AND status = 'promoted'
+		 RETURNING `+highlightColumns, id, tenantID, kind)
+	h, err := scanHighlight(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Highlight{}, ErrNotFound
+	}
+	if err != nil {
+		return Highlight{}, fmt.Errorf("storage: set highlight sound kind %s: %w", id, err)
+	}
+	return h, nil
+}
+
+// SetHighlightSound lands a generated sound asset on a Highlight (#312): the
+// enrichment job stores the audio behind the blob seam (ADR-0048) and then
+// records its key, MIME type, and size here. Tenant-free like
+// SetHighlightImage (the id scopes the row). The write is CONDITIONAL on
+// sound_kind still equalling the kind the job generated for: the GM can change
+// or clear the choice while a generation is in flight, and the stale job's
+// asset must not land under the newer choice. ErrNotFound covers both misses —
+// row gone and kind superseded — and the handler disambiguates with a re-read
+// (only a GONE row compensates the blob; a superseded kind leaves it for the
+// newer job to overwrite).
+func (s *Store) SetHighlightSound(ctx context.Context, id uuid.UUID, kind, soundKey, contentType string, sizeBytes int64) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE highlight
+		    SET sound_key = $3, sound_content_type = $4, sound_size_bytes = $5
+		  WHERE id = $1 AND sound_kind = $2`,
+		id, kind, soundKey, contentType, sizeBytes)
+	if err != nil {
+		return fmt.Errorf("storage: set highlight sound %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TryClaimHighlightSoundEnrich atomically claims the sound generation of a
+// Highlight (#312, the #406 image-claim pattern): a conditional UPDATE that
+// stamps sound_enrich_claimed_at iff a sound is still requested-but-unlanded
+// AND no claim newer than ttl is held. It reports whether THIS caller won
+// (RowsAffected == 1). The single-clock lease (#421) applies: stamp and cutoff
+// are both DB now(), the app contributes only the TTL magnitude. Tenant-free.
+func (s *Store) TryClaimHighlightSoundEnrich(ctx context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE highlight
+		    SET sound_enrich_claimed_at = now()
+		  WHERE id = $1
+		    AND sound_kind <> ''
+		    AND sound_key = ''
+		    AND (sound_enrich_claimed_at IS NULL
+		         OR sound_enrich_claimed_at < now() - make_interval(secs => $2))`,
+		id, ttl.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("storage: claim highlight sound enrich %s: %w", id, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReleaseHighlightSoundEnrichClaim clears a Highlight's sound-generation claim
+// (#312) so a retry (or a re-run of the Add-sound action) can re-claim without
+// waiting out the ttl. Idempotent and tenant-free.
+func (s *Store) ReleaseHighlightSoundEnrichClaim(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE highlight SET sound_enrich_claimed_at = NULL WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("storage: release highlight sound enrich claim %s: %w", id, err)
+	}
+	return nil
+}
+
+// HighlightSoundEnrichTarget is a promoted Highlight whose requested sound
+// never landed and has no live generation job — the boot reconciliation
+// sweep's re-enqueue input (#312, the #406 pattern). Kind rides along because
+// the sound job payload carries the requested kind (unlike the image's).
+type HighlightSoundEnrichTarget struct {
+	HighlightID uuid.UUID
+	TenantID    uuid.UUID
+	Kind        string
+}
+
+// ListPromotedHighlightsNeedingSoundEnrichment returns every PROMOTED
+// Highlight with a requested-but-unlanded sound (sound_kind set, sound_key
+// empty) and NO enrich job of the given kind in a live state matching BOTH the
+// highlight AND the requested sound kind (#312). Matching the payload's kind
+// too is what lets a choice CHANGE re-sweep: a 'done' sting job must not
+// satisfy a later music request. 'done' counts as satisfied (an unconfigured
+// no-op is not re-swept every boot); 'dead' is treated as absent so a
+// dead-lettered generation is re-scheduled once the key is fixed. Process-wide,
+// carries no tenant.
+func (s *Store) ListPromotedHighlightsNeedingSoundEnrichment(ctx context.Context, enrichKind string) ([]HighlightSoundEnrichTarget, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT h.id, h.tenant_id, h.sound_kind
+		   FROM highlight h
+		  WHERE h.status = 'promoted'
+		    AND h.sound_kind <> ''
+		    AND h.sound_key = ''
+		    AND NOT EXISTS (
+		          SELECT 1 FROM job j
+		           WHERE j.kind = $1
+		             AND j.status IN ('pending','running','done')
+		             AND j.payload->>'highlight_id' = h.id::text
+		             AND j.payload->>'kind' = h.sound_kind
+		        )`, enrichKind)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list promoted highlights needing sound enrichment: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HighlightSoundEnrichTarget
+	for rows.Next() {
+		var t HighlightSoundEnrichTarget
+		if err := rows.Scan(&t.HighlightID, &t.TenantID, &t.Kind); err != nil {
+			return nil, fmt.Errorf("storage: scan sound enrich target: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list promoted highlights needing sound enrichment: %w", err)
+	}
+	return out, nil
 }
 
 // HighlightsExist reports which of the given Highlight ids still have a row,
