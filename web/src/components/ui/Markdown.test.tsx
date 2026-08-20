@@ -219,6 +219,49 @@ describe("Markdown (block)", () => {
     expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(container.querySelector("p")?.textContent).toBe("The ogre attacks.");
   });
+
+  it("keeps a --- rule under prose whose only pipes are escaped or edge", () => {
+    // HR outranks the delimiter row: an escaped/edge pipe collapses to one
+    // splitRow cell, which must not pair with a bare "---" section divider
+    // into a one-column table that eats the rule.
+    for (const text of [
+      "Use `cat\\|dog` to match either.\n---\nMore prose.",
+      "| means OR in a regex.\n----",
+      "Progress: 80% done |\n---",
+    ]) {
+      const { container } = render(<Markdown text={text} />);
+      expect(container.querySelector("table")).toBeNull();
+      expect(container.querySelector("hr")).not.toBeNull();
+    }
+  });
+
+  it("still opens a single-column table from a piped delimiter row", () => {
+    const { container } = render(<Markdown text={"| a |\n| --- |\n| 1 |"} />);
+    expect(container.querySelector("thead th")?.textContent).toBe("a");
+  });
+
+  it("rejects a degenerate delimiter-shaped line in linear time", () => {
+    // TABLE_DELIM's backtracking regex is gone; a delimiter-shaped line with
+    // a huge whitespace run and one stray char must fail fast (the old regex
+    // went quadratic — >10s at this size, tripping the test timeout).
+    const { container } = render(
+      <Markdown text={"col a | col b\n|-" + " ".repeat(160000) + "x"} />,
+    );
+    expect(container.querySelector("table")).toBeNull();
+  });
+
+  it("breaks the table at a glued heading, list, or quote line that contains a pipe", () => {
+    const table = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    const heading = render(<Markdown text={table + "## Results | Summary"} />).container;
+    expect(heading.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(heading.querySelector(".gx-md__heading")?.textContent).toBe("Results | Summary");
+    const list = render(<Markdown text={table + "- note: `a | b` is a union"} />).container;
+    expect(list.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(list.querySelector("li code")?.textContent).toBe("a | b");
+    const quote = render(<Markdown text={table + "> caveat: a | b differs"} />).container;
+    expect(quote.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(quote.querySelector("blockquote")?.textContent).toBe("caveat: a | b differs");
+  });
 });
 
 describe("InlineMarkdown", () => {

@@ -120,10 +120,6 @@ const HEADING = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
 const HR = /^ {0,3}([-*_])\s*(?:\1\s*){2,}$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const LIST = /^(\s*)(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/;
-// A GFM table's delimiter row: `:?-+:?` cells separated by pipes, edge pipes
-// optional. Matching this shape alone is not enough to open a table — see
-// tableStart for the header/delimiter cell-count agreement it also requires.
-const TABLE_DELIM = /^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 
 // listEntry parses one list-item line, or null. The ordered start number is
 // kept so "3. …" renders as 3, not silently renumbered from 1.
@@ -197,11 +193,14 @@ function splitRow(line: string): string[] {
 
 // tableStart decides whether a header line plus the line under it open a
 // table: the header must contain a pipe (a bare paragraph line never becomes
-// a table by accident), the next line must be a delimiter row, and — GFM's
-// rule — the two must agree on cell count, else both stay prose.
+// a table by accident), the next line must be a delimiter row — every splitRow
+// cell shaped `:?-+:?` — and, GFM's rule, the two must agree on cell count,
+// else both stay prose. A rule line ("---", "----") is never a delimiter row:
+// HR outranks the table exactly as it outranks the list, so prose whose pipes
+// are all escaped or edge (one splitRow cell) followed by a `---` section
+// divider keeps its <hr> instead of becoming a one-column table.
 function tableStart(header: string, delim: string | undefined): { header: string[]; align: Align[] } | null {
-  if (delim === undefined || !header.includes("|")) return null;
-  if (!TABLE_DELIM.test(delim)) return null;
+  if (delim === undefined || !header.includes("|") || HR.test(delim)) return null;
   const cells = splitRow(header);
   const delims = splitRow(delim);
   if (delims.length !== cells.length || !delims.every((d) => /^:?-+:?$/.test(d))) return null;
@@ -283,9 +282,21 @@ function parseBlocks(text: string, depth = 0): Block[] {
       // Body rows must contain a pipe: where GFM would sweep a following
       // prose line into the table as a one-cell row, chat models constantly
       // glue prose straight under a table, so the first pipe-less line ends
-      // it instead. Ragged rows are squared to the header (GFM): short rows
+      // it instead. The start of any other block ends it too (as in GFM) —
+      // the same guards the paragraph loop uses, so a glued "## Results |
+      // Summary" heading or a "- note: `a | b`" bullet is never swallowed as
+      // a data row. Ragged rows are squared to the header (GFM): short rows
       // pad with empty cells, long rows shed the excess.
-      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
+      while (
+        i < lines.length &&
+        lines[i].trim() !== "" &&
+        lines[i].includes("|") &&
+        !FENCE_OPEN.test(lines[i]) &&
+        !HEADING.test(lines[i]) &&
+        !HR.test(lines[i]) &&
+        !QUOTE.test(lines[i]) &&
+        !listInterrupts(lines[i])
+      ) {
         const cells = splitRow(lines[i]).slice(0, table.header.length);
         while (cells.length < table.header.length) cells.push("");
         rows.push(cells);
