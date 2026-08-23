@@ -110,6 +110,11 @@
   margin: 0;
 }
 
+/* The capture link is a plain block so the img keeps the frame's geometry. */
+.gx-landing__shot a {
+  display: block;
+}
+
 .gx-landing__shot img,
 .gx-landing__shot-placeholder {
   display: block;
@@ -120,8 +125,9 @@
   border-radius: 12px;
 }
 
-/* Until #263's captures land, each slot is a quiet frame rather than a fake
-   image: honest about being a placeholder, and the layout is already final. */
+/* Fallback for a slot with no capture: a quiet frame rather than a fake image.
+   All shipped slots carry real captures (web/public/shots/); this survives as
+   the graceful degradation for a src that goes missing. */
 .gx-landing__shot-placeholder {
   background:
     radial-gradient(circle at 30% 25%, rgba(144, 89, 255, 0.18), transparent 55%),
