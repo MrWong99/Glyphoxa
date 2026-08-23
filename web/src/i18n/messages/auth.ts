@@ -63,10 +63,20 @@ export const en = {
     "Bring your own AI service keys and the usage is yours alone. Everything lives in a single database on the operator's own server, and deleting a campaign removes all of it.",
   "auth.landingShotsAria": "Screenshots",
   "auth.shotSessionCaption":
-    "The live session screen: transcript, who is speaking, spending so far.",
+    "The live session screen: the transcript as it happens, every NPC one mute button away.",
+  "auth.shotHighlightsCaption":
+    "Highlights: the table's best moments — clipped, scored and illustrated.",
+  "auth.shotSearchCaption":
+    "Every session is transcribed, and searchable across the whole campaign.",
   "auth.shotPersonaCaption": "An NPC's personality and voice, in the campaign editor.",
-  "auth.shotWikiCaption": "The campaign's world wiki, built from play.",
-  "auth.shotKeysCaption": "Your AI service keys and spending limits.",
+  "auth.shotWikiCaption":
+    "The world wiki as a relationship map: who knows whom, and what stays GM-only.",
+  "auth.shotMapsCaption":
+    "Maps — uploaded or generated — with the world's entries pinned in place.",
+  "auth.shotPlanningCaption":
+    "Planning chat with the Butler: it reads your transcripts and wiki before it answers.",
+  "auth.shotKeysCaption":
+    "Your AI service keys, checked and working — models and voices stay your choice.",
   "auth.betaHeading": "How the free beta works",
   "auth.betaTrialTitle": "Try it on us",
   "auth.betaTrialBody":
@@ -142,10 +152,20 @@ export const de: Record<keyof typeof en, string> = {
     "Bring deine eigenen KI-Dienst-Schlüssel mit — die Nutzung gehört dir allein. Alles liegt in einer einzigen Datenbank auf dem Server des Betreibers, und wenn du eine Kampagne löschst, ist alles davon weg.",
   "auth.landingShotsAria": "Screenshots",
   "auth.shotSessionCaption":
-    "Der Live-Bildschirm der Session: Mitschrift, wer gerade spricht, bisherige Ausgaben.",
+    "Der Live-Bildschirm der Session: die Mitschrift, während sie entsteht — jeder NPC nur einen Stummschalter entfernt.",
+  "auth.shotHighlightsCaption":
+    "Highlights: die besten Momente des Tisches — als Clip, bewertet und illustriert.",
+  "auth.shotSearchCaption":
+    "Jede Session wird mitgeschrieben — und ist über die ganze Kampagne durchsuchbar.",
   "auth.shotPersonaCaption": "Persönlichkeit und Stimme eines NPCs im Kampagnen-Editor.",
-  "auth.shotWikiCaption": "Das Welt-Wiki der Kampagne, entstanden aus dem Spiel.",
-  "auth.shotKeysCaption": "Deine KI-Dienst-Schlüssel und Ausgabenlimits.",
+  "auth.shotWikiCaption":
+    "Das Welt-Wiki als Beziehungskarte: wer wen kennt — und was GM-only bleibt.",
+  "auth.shotMapsCaption":
+    "Karten — hochgeladen oder generiert — mit den Einträgen deiner Welt als Pins.",
+  "auth.shotPlanningCaption":
+    "Planungs-Chat mit dem Butler: Er liest erst Mitschriften und Wiki, dann antwortet er.",
+  "auth.shotKeysCaption":
+    "Deine KI-Dienst-Schlüssel, geprüft und einsatzbereit — Modelle und Stimmen bleiben deine Wahl.",
   "auth.betaHeading": "So funktioniert die kostenlose Beta",
   "auth.betaTrialTitle": "Geht auf uns",
   "auth.betaTrialBody":

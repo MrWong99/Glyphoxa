@@ -27,8 +27,10 @@ import "./landing.css";
 // CTA, so a stock self-host install never advertises a signup it rejects or
 // an allowance it does not fund.
 //
-// The screenshots are placeholders until #263's captures land; each frame keeps
-// its caption so the layout (and the honesty of the caption) is already right.
+// The screenshots (#263) are real captures of a staged demo campaign ("Tides
+// over Saltmarsh") on a stock local instance — nothing in them is mocked up in
+// an image editor. Sources live in web/public/shots/ as 1600x1000 WebP; vite
+// copies them into the SPA dist verbatim, so they ship inside the binary.
 //
 // Copy lives in the i18n catalog (auth.* fragment); this module stores only
 // MessageKeys, never translated strings, so the display language can change
@@ -43,15 +45,19 @@ const FEATURES: Feature[] = [
   { icon: KeyRound, titleKey: "auth.featureKeysTitle", bodyKey: "auth.featureKeysBody" },
 ];
 
-// Screenshot slots. src stays null until #263's captures land; the frame then
-// renders the image in place of the placeholder with no layout change.
+// Screenshot slots. A null src falls back to the quiet placeholder frame, so a
+// missing capture degrades gracefully instead of breaking the grid.
 type Shot = { captionKey: MessageKey; src: string | null };
 
 const SHOTS: Shot[] = [
-  { captionKey: "auth.shotSessionCaption", src: null },
-  { captionKey: "auth.shotPersonaCaption", src: null },
-  { captionKey: "auth.shotWikiCaption", src: null },
-  { captionKey: "auth.shotKeysCaption", src: null },
+  { captionKey: "auth.shotSessionCaption", src: "/shots/session-live.webp" },
+  { captionKey: "auth.shotHighlightsCaption", src: "/shots/session-highlights.webp" },
+  { captionKey: "auth.shotSearchCaption", src: "/shots/session-search.webp" },
+  { captionKey: "auth.shotPersonaCaption", src: "/shots/cast-persona.webp" },
+  { captionKey: "auth.shotWikiCaption", src: "/shots/wiki-graph.webp" },
+  { captionKey: "auth.shotMapsCaption", src: "/shots/maps.webp" },
+  { captionKey: "auth.shotPlanningCaption", src: "/shots/planning.webp" },
+  { captionKey: "auth.shotKeysCaption", src: "/shots/setup-keys.webp" },
 ];
 
 export function Landing({ open = false }: { open?: boolean }) {
@@ -109,7 +115,11 @@ export function Landing({ open = false }: { open?: boolean }) {
         {SHOTS.map((shot) => (
           <figure key={shot.captionKey} className="gx-landing__shot">
             {shot.src ? (
-              <img src={shot.src} alt={t(shot.captionKey)} loading="lazy" />
+              /* The grid tile is a small window on a dense app screen; the link
+                 opens the full 1600px capture in a new tab for a real look. */
+              <a href={shot.src} target="_blank" rel="noreferrer">
+                <img src={shot.src} alt={t(shot.captionKey)} loading="lazy" />
+              </a>
             ) : (
               <div className="gx-landing__shot-placeholder" role="presentation" />
             )}
