@@ -6,7 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -69,6 +71,30 @@ type PlaybackPump struct {
 	// on tape (ADR-0051). Nil by default — no tap means unchanged playback; the tap
 	// MUST NOT block, it runs on disgo's 20 ms sender goroutine.
 	outboundTap func(opus []byte)
+
+	// rec, when set, receives the inter-sentence playback gap and the look-ahead
+	// lane events (#606). Nil by default — every recording path is then a no-op.
+	rec PumpRecorder
+
+	// lastEndAt / lastEndTurn are the gap measurement's start stamp: when sentence
+	// N of a turn finished cleanly, and which turn it belonged to. They are owned
+	// EXCLUSIVELY by the run() worker goroutine — read and written there and
+	// nowhere else — so they need no lock. Release/Discard run on coordinator
+	// goroutines and must never touch them.
+	lastEndAt   time.Time
+	lastEndTurn string
+}
+
+// PumpRecorder receives the pump's playback-quality measurements (#606): the
+// audible silence between consecutive sentences of one turn, and the #375
+// look-ahead lane's events. It is the wire-side view of the observe adapter, kept
+// narrow so wire depends on no recorder internals.
+type PumpRecorder interface {
+	// IntersentenceGap records the silence between sentence N's last frame and
+	// sentence N+1's first frame, for consecutive sentences of the SAME turn.
+	IntersentenceGap(d time.Duration)
+	// PlaybackLookahead counts one look-ahead lane event.
+	PlaybackLookahead(ev observe.LookaheadEvent)
 }
 
 // PumpOption configures a [PlaybackPump] at construction.
@@ -79,6 +105,12 @@ type PumpOption func(*PlaybackPump)
 // playback is unchanged.
 func WithOutboundOpusTap(tap func(opus []byte)) PumpOption {
 	return func(p *PlaybackPump) { p.outboundTap = tap }
+}
+
+// WithPumpRecorder installs the recorder for the inter-sentence playback gap and
+// the look-ahead lane counters (#606). Without it the pump records nothing.
+func WithPumpRecorder(rec PumpRecorder) PumpOption {
+	return func(p *PlaybackPump) { p.rec = rec }
 }
 
 type playJob struct {
@@ -230,11 +262,16 @@ func (p *PlaybackPump) ReleaseLookahead(turnID string) {
 		p.laneJob = nil
 		p.laneTurn = ""
 		p.laneMu.Unlock()
+		// Counted here, on the coordinator goroutine, NOT in the worker: the worker
+		// must never touch the lane (ADR-0025, #375). A released job is the lane
+		// doing its job — its pre-paid TTS startup hid an inter-sentence gap.
+		p.lookahead(observe.LookaheadReleased)
 		p.enqueue(job)
 		return
 	}
 	p.released = turnID
 	p.laneMu.Unlock()
+	p.lookahead(observe.LookaheadLatched)
 }
 
 // DiscardLookahead drains-and-drops the held look-ahead sentence for turnID (a
@@ -251,6 +288,10 @@ func (p *PlaybackPump) DiscardLookahead(turnID string) {
 		p.laneTurn = ""
 		p.laneMu.Unlock()
 		go drain(job.chunks)
+		// Only a real held job dropped counts: the coordinator defers this discard
+		// unconditionally, so a stale keyed no-op (and the latch-clear below) must
+		// leave the series alone or it would measure calls, not dropped audio.
+		p.lookahead(observe.LookaheadDiscarded)
 		return
 	}
 	if p.released == turnID {
@@ -285,10 +326,21 @@ func (p *PlaybackPump) run() {
 			// but it must not be invisible either: a persistent failure here is
 			// "the NPC went mute", so warn on everything except the expected
 			// barge-in interrupt and ctx cancellation.
-			if err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap); err != nil &&
-				!errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
+			turn := voiceevent.TurnIDFrom(job.ctx)
+			err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap, p.gapStamp(turn))
+			if err != nil && !errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
 				p.logger.Warn("wire: sentence playback failed", "err", err)
 			}
+			// Only a sentence that ended CLEANLY opens a gap span for the next one.
+			// Any error — a barge-in interrupt, a cancellation, a playback fault —
+			// clears the stamp: the silence after a torn-down sentence is the turn
+			// ending, not an inter-sentence gap, and measuring it would fabricate a
+			// giant outlier the GM never experienced as a stutter.
+			if err != nil {
+				p.lastEndAt, p.lastEndTurn = time.Time{}, ""
+				continue
+			}
+			p.lastEndAt, p.lastEndTurn = time.Now(), turn
 		case <-p.stop:
 			// A job can already sit in queue when stop closes (enqueued before
 			// Close, never dequeued because this select picked the stop arm).
@@ -304,6 +356,33 @@ func (p *PlaybackPump) run() {
 			}
 		}
 	}
+}
+
+// lookahead counts one look-ahead lane event, or nothing when no recorder is
+// installed. It runs on the coordinator goroutine that moved the lane, never on
+// the worker, and takes no lane lock.
+func (p *PlaybackPump) lookahead(ev observe.LookaheadEvent) {
+	if p.rec == nil {
+		return
+	}
+	p.rec.PlaybackLookahead(ev)
+}
+
+// gapStamp returns the first-frame callback that records the inter-sentence gap
+// for the sentence about to play, or nil when there is no gap to measure (#606).
+// A gap exists ONLY between consecutive sentences of the SAME turn: a turn's first
+// sentence measures nothing (that span is response_latency's, ADR-0032), and the
+// silence across a turn boundary is conversational, not a pipeline stutter — so
+// neither is sampled. Called on (and only on) the worker goroutine, which owns the
+// lastEnd fields; the returned closure runs on disgo's 20 ms sender goroutine and
+// so does no logging and takes no lock.
+func (p *PlaybackPump) gapStamp(turn string) func(time.Time) {
+	if p.rec == nil || turn == "" || turn != p.lastEndTurn || p.lastEndAt.IsZero() {
+		return nil
+	}
+	start := p.lastEndAt
+	rec := p.rec
+	return func(t time.Time) { rec.IntersentenceGap(t.Sub(start)) }
 }
 
 // Close stops the worker (after any in-flight sentence) and blocks until it has

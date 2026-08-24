@@ -114,7 +114,7 @@ func TestPlaySentenceBus_OutboundTapSeesEveryFrame(t *testing.T) {
 	var got [][]byte
 	tap := func(opus []byte) { got = append(got, opus) }
 
-	if err := playSentenceBus(context.Background(), drainingPlayer{}, codec, chunks, nil, tap); err != nil {
+	if err := playSentenceBus(context.Background(), drainingPlayer{}, codec, chunks, nil, tap, nil); err != nil {
 		t.Fatalf("playSentenceBus: %v", err)
 	}
 	if len(got) != 3 {

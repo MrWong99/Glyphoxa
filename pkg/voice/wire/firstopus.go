@@ -57,6 +57,40 @@ func (s *firstOpusSource) NextFrame(ctx context.Context) ([]byte, error) {
 	return frame, err
 }
 
+// firstFrameSource decorates a playback [gxvoice.Source] to call fn exactly once,
+// with the moment the first Opus frame of THIS sentence is pulled to the wire —
+// the sentence's audible start (#606). It is the inter-sentence gap's end stamp,
+// where [firstOpusSource] is the TURN's first-frame signal; a sentence that yields
+// no frame (a barge-cancelled one) never fires, so no gap is fabricated for audio
+// nobody heard. fn runs inline on disgo's 20 ms sender goroutine and must not
+// block or log.
+type firstFrameSource struct {
+	inner gxvoice.Source
+	fn    func(time.Time)
+	fired atomic.Bool
+	nowFn func() time.Time
+}
+
+// newFirstFrameSource wraps inner so the first frame it yields calls fn. A nil fn
+// returns inner unwrapped — no overhead when no gap is being measured (the turn's
+// first sentence, or a pump with no recorder).
+func newFirstFrameSource(inner gxvoice.Source, fn func(time.Time)) gxvoice.Source {
+	if fn == nil {
+		return inner
+	}
+	return &firstFrameSource{inner: inner, fn: fn, nowFn: time.Now}
+}
+
+// NextFrame forwards to the inner Source and, on the first frame actually yielded
+// (no error), stamps and reports it exactly once.
+func (s *firstFrameSource) NextFrame(ctx context.Context) ([]byte, error) {
+	frame, err := s.inner.NextFrame(ctx)
+	if err == nil && s.fired.CompareAndSwap(false, true) {
+		s.fn(s.nowFn())
+	}
+	return frame, err
+}
+
 // tappedSource decorates a playback [gxvoice.Source] to copy every Opus frame it
 // yields to a tap — the rollover tape's agent-speech capture point (#306). Agent
 // audio is always on tape (ADR-0051). The tap runs inline on disgo's 20 ms sender
