@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,17 +145,28 @@ func (s *Store) SetChunkEmbedding(ctx context.Context, id uuid.UUID, vec []float
 // shortest round-trippable float32 decimal ('g', 32-bit) so the stored value is
 // exactly what was embedded. Keeping this a plain string keeps the storage layer
 // free of a pgvector-go binding.
+//
+// Rendering appends into one pre-sized buffer (#613): FormatFloat would allocate
+// a throwaway string per element — 782 allocations for a vector(768) row — and
+// the embedworker pays that on every row it drains off the backlog. AppendFloat
+// emits the identical bytes, so values written before and after this change are
+// byte-identical in the column.
 func encodeVector(v []float32) string {
-	var b strings.Builder
-	b.WriteByte('[')
+	// A shortest-round-trip float32 is at most 15 bytes ("-1.35849605e-05":
+	// sign, 9 significant digits, point, 4-byte exponent), 16 with its
+	// separator; the two brackets ride along in the +2. Sizing for the maximum
+	// means no vector can force a regrow, so the allocation count is two for
+	// every input.
+	buf := make([]byte, 0, len(v)*16+2)
+	buf = append(buf, '[')
 	for i, f := range v {
 		if i > 0 {
-			b.WriteByte(',')
+			buf = append(buf, ',')
 		}
-		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
+		buf = strconv.AppendFloat(buf, float64(f), 'g', -1, 32)
 	}
-	b.WriteByte(']')
-	return b.String()
+	buf = append(buf, ']')
+	return string(buf)
 }
 
 // ChunkMatch is one Transcript Chunk returned by ANN retrieval together with its
