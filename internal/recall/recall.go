@@ -58,10 +58,16 @@ type Sessions interface {
 	Resolve(sessionID uuid.UUID) (storage.VoiceSession, bool)
 }
 
-// Metrics records recall outcomes (#122, ADR-0032). *observe.PrometheusRecorder
-// satisfies it; a nil Metrics is replaced with a no-op so call sites never check.
+// Metrics records recall outcomes and how long each took (#122/#604, ADR-0032).
+// *observe.PrometheusRecorder satisfies it; a nil Metrics is replaced with a no-op
+// so call sites never check.
+//
+// The duration is the WHOLE Recall call, measured from entry — including the
+// defensive early exits, which are the ones that must be visibly instant rather
+// than silently slow. It exists to size the distance to the hard budget; taking it
+// is a time.Since, so measurement never blocks the turn path (ADR-0042).
 type Metrics interface {
-	MemoryRecall(observe.RecallOutcome)
+	MemoryRecall(o observe.RecallOutcome, d time.Duration)
 }
 
 // Config tunes the recaller. Zero values take the package defaults.
@@ -213,12 +219,19 @@ func (r *Recaller) Close() {
 // this turn, honoring the bounded-sync budget and degrading to a zero Memory
 // rather than stalling. It never returns an error and never panics.
 func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.Memory {
+	// Wall-clock span of the whole call, recorded with every counted outcome (#604):
+	// what the counter cannot say is how much of the 250ms budget a hit or miss
+	// actually spent. Deliberately time.Now, not the injected r.now seam — that seam
+	// is the speculator's fake clock, which only advances on sleep and would report
+	// every recall as instantaneous.
+	start := time.Now()
+
 	aid, err := uuid.Parse(agentID)
 	if err != nil {
 		// Defensive, consistent with the chunker's posture: an unparseable agent id
 		// is a wiring bug, not a turn failure — skip and move on.
 		r.log.Warn("memory recall: unparseable agent id; skipping", "agent_id", agentID, "err", err)
-		r.metrics.MemoryRecall(observe.RecallSkip)
+		r.metrics.MemoryRecall(observe.RecallSkip, time.Since(start))
 		return agent.Memory{}
 	}
 	id, ok := session.FromContext(ctx)
@@ -226,7 +239,7 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 		// No session Identity on the run context to scope retrieval — recall runs
 		// during a live turn descended from the Manager's run context, so this is
 		// defensive; count it as a skip.
-		r.metrics.MemoryRecall(observe.RecallSkip)
+		r.metrics.MemoryRecall(observe.RecallSkip, time.Since(start))
 		return agent.Memory{}
 	}
 	campaignID := id.CampaignID
@@ -236,7 +249,7 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	if err := ctx.Err(); err != nil {
 		// The turn ctx was already cancelled (a barge before recall even started):
 		// yield nothing and count nothing.
-		return r.degrade(ctx, err)
+		return r.degrade(ctx, time.Since(start), err)
 	}
 
 	norm := normalize(utterance)
@@ -259,22 +272,22 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 		vec = cached.vec
 		w, err := r.retriever.SearchChunksByCampaign(ctx, campaignID, vec, r.k)
 		if err != nil {
-			return r.degrade(ctx, fmt.Errorf("search world chunks (hit, prefetch had failed): %w", err))
+			return r.degrade(ctx, time.Since(start), fmt.Errorf("search world chunks (hit, prefetch had failed): %w", err))
 		}
 		world = w
 	default:
 		// Miss: embed the utterance and run BOTH modes inline under the budget.
 		vecs, err := r.embedder.Embed(ctx, []string{utterance})
 		if err != nil {
-			return r.degrade(ctx, fmt.Errorf("embed utterance: %w", err))
+			return r.degrade(ctx, time.Since(start), fmt.Errorf("embed utterance: %w", err))
 		}
 		if len(vecs) != 1 {
-			return r.degrade(ctx, fmt.Errorf("embed returned %d vectors, want 1", len(vecs)))
+			return r.degrade(ctx, time.Since(start), fmt.Errorf("embed returned %d vectors, want 1", len(vecs)))
 		}
 		vec = vecs[0]
 		w, err := r.retriever.SearchChunksByCampaign(ctx, campaignID, vec, r.k)
 		if err != nil {
-			return r.degrade(ctx, fmt.Errorf("search world chunks: %w", err))
+			return r.degrade(ctx, time.Since(start), fmt.Errorf("search world chunks: %w", err))
 		}
 		world = w
 	}
@@ -283,7 +296,7 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	// during speech, so a hit still owes this one indexed, sub-ms query.
 	personal, err := r.retriever.SearchChunksByAgent(ctx, campaignID, aid, vec, r.k)
 	if err != nil {
-		return r.degrade(ctx, fmt.Errorf("search agent chunks: %w", err))
+		return r.degrade(ctx, time.Since(start), fmt.Errorf("search agent chunks: %w", err))
 	}
 
 	// A chunk the NPC participated in can also land in the campaign-wide top-k;
@@ -292,9 +305,9 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	world = excludeByID(world, chunkIDSet(personal))
 
 	if hit {
-		r.metrics.MemoryRecall(observe.RecallHit)
+		r.metrics.MemoryRecall(observe.RecallHit, time.Since(start))
 	} else {
-		r.metrics.MemoryRecall(observe.RecallMiss)
+		r.metrics.MemoryRecall(observe.RecallMiss, time.Since(start))
 	}
 	return agent.Memory{
 		Personal: chunkContents(personal),
@@ -305,12 +318,16 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 // degrade yields a zero Memory. A cancelled ctx is a barge (ADR-0042): silent,
 // NOT counted — the turn is gone, nothing was wasted. Any other failure (budget
 // elapsed, provider/DB error) logs and counts a skip.
-func (r *Recaller) degrade(ctx context.Context, cause error) agent.Memory {
+//
+// elapsed is passed in rather than measured here: a skip's duration is meant to
+// answer "did this burn the whole budget, or fail instantly?", and measuring after
+// the Warn above would fold the log write into that answer.
+func (r *Recaller) degrade(ctx context.Context, elapsed time.Duration, cause error) agent.Memory {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return agent.Memory{}
 	}
 	r.log.Warn("memory recall degraded to no-memory", "err", cause)
-	r.metrics.MemoryRecall(observe.RecallSkip)
+	r.metrics.MemoryRecall(observe.RecallSkip, elapsed)
 	return agent.Memory{}
 }
 
@@ -358,7 +375,7 @@ func excludeByID(matches []storage.ChunkMatch, exclude map[uuid.UUID]bool) []sto
 // discardMetrics is the no-op Metrics used when none is configured.
 type discardMetrics struct{}
 
-func (discardMetrics) MemoryRecall(observe.RecallOutcome) {}
+func (discardMetrics) MemoryRecall(observe.RecallOutcome, time.Duration) {}
 
 // Static assertion that Recaller is a MemoryRecaller.
 var _ agent.MemoryRecaller = (*Recaller)(nil)

@@ -45,10 +45,27 @@ func liveCtx(campaignID uuid.UUID) context.Context {
 	return session.NewContext(context.Background(), session.Identity{CampaignID: campaignID})
 }
 
-// fakeMetrics records the outcomes it was handed.
-type fakeMetrics struct{ outcomes []observe.FactsOutcome }
+// fakeMetrics records the outcomes it was handed, with their durations (#604).
+type fakeMetrics struct {
+	outcomes []observe.FactsOutcome
+	durs     []time.Duration
+}
 
-func (f *fakeMetrics) KGFacts(o observe.FactsOutcome) { f.outcomes = append(f.outcomes, o) }
+func (f *fakeMetrics) KGFacts(o observe.FactsOutcome, d time.Duration) {
+	f.outcomes = append(f.outcomes, o)
+	f.durs = append(f.durs, d)
+}
+
+// durations returns the durations recorded for one outcome, in order (#604).
+func (f *fakeMetrics) durations(o observe.FactsOutcome) []time.Duration {
+	var out []time.Duration
+	for i, got := range f.outcomes {
+		if got == o {
+			out = append(out, f.durs[i])
+		}
+	}
+	return out
+}
 
 func (f *fakeMetrics) count(o observe.FactsOutcome) int {
 	n := 0
@@ -230,6 +247,39 @@ func TestFacts_NoSession_Nil(t *testing.T) {
 	}
 	if m.count(observe.FactsDegraded) != 0 {
 		t.Errorf("no-session must not count a degraded read: %v", m.outcomes)
+	}
+}
+
+// TestFacts_RecordsDurationWithOutcome pins the budget-headroom signal (#604):
+// each of the three outcomes carries how long the read took, so a degraded read
+// can be told apart as a 50ms budget overrun rather than an instant DB refusal.
+func TestFacts_RecordsDurationWithOutcome(t *testing.T) {
+	camp := uuid.New()
+
+	cases := []struct {
+		name  string
+		nodes *fakeNodes
+		want  observe.FactsOutcome
+	}{
+		{"ok", &fakeNodes{nodes: []storage.KGNode{{ID: uuid.New(), Name: "Bart", Body: "Keeps the tavern."}}}, observe.FactsOK},
+		{"empty", &fakeNodes{}, observe.FactsEmpty},
+		{"degraded", &fakeNodes{err: errors.New("db down")}, observe.FactsDegraded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &fakeMetrics{}
+			r := newRecaller(t, tc.nodes, m)
+
+			r.Facts(liveCtx(camp), testAgent.String())
+
+			durs := m.durations(tc.want)
+			if len(durs) != 1 {
+				t.Fatalf("%s durations = %v (outcomes %v), want exactly one", tc.want, durs, m.outcomes)
+			}
+			if durs[0] <= 0 {
+				t.Errorf("%s duration = %v, want the elapsed read time (> 0)", tc.want, durs[0])
+			}
+		})
 	}
 }
 

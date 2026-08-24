@@ -79,10 +79,15 @@ type PromptKG interface {
 // Compile-time assertion: the storage prompt view satisfies the seam.
 var _ PromptKG = storage.PromptKGView{}
 
-// Metrics records KG-fact-read outcomes (#126, ADR-0032). *observe.PrometheusRecorder
-// satisfies it; a nil Metrics is replaced with a no-op so call sites never check.
+// Metrics records KG-fact-read outcomes and how long each took (#126/#604,
+// ADR-0032). *observe.PrometheusRecorder satisfies it; a nil Metrics is replaced
+// with a no-op so call sites never check.
+//
+// The duration is the WHOLE Facts call, measured from entry, so the read's distance
+// to its 50ms budget is sizeable from production. Taking it is a time.Since — the
+// measurement adds nothing blocking to the turn path (ADR-0042).
 type Metrics interface {
-	KGFacts(observe.FactsOutcome)
+	KGFacts(o observe.FactsOutcome, d time.Duration)
 }
 
 // Config tunes the recaller. Zero values take the package defaults.
@@ -135,11 +140,16 @@ func New(nodes PromptKG, metrics Metrics, log *slog.Logger, cfg Config) *Recalle
 // UNLINKED Character NPC gets an empty slot (no campaign-wide fallback); an
 // unparseable/empty agentID yields nil, counted empty. It never errors or panics.
 func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
+	// Wall-clock span of the whole call, recorded with every counted outcome (#604):
+	// the counter alone cannot separate a read that burned the 50ms budget from one
+	// that failed in microseconds.
+	start := time.Now()
+
 	if _, ok := session.FromContext(ctx); !ok {
 		// No session Identity on the run context (defensive — Facts runs during a live
 		// turn descended from the Manager's run context): nothing to scope, inject
 		// nothing. Count it as an empty read, not a degradation (#487).
-		r.metrics.KGFacts(observe.FactsEmpty)
+		r.metrics.KGFacts(observe.FactsEmpty, time.Since(start))
 		return nil
 	}
 
@@ -147,7 +157,7 @@ func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
 	if err != nil || aid == uuid.Nil {
 		// A Persona with no persisted uuid: there is nothing to scope the
 		// neighbourhood read to, so inject nothing. Empty, not degraded.
-		r.metrics.KGFacts(observe.FactsEmpty)
+		r.metrics.KGFacts(observe.FactsEmpty, time.Since(start))
 		return nil
 	}
 
@@ -156,32 +166,36 @@ func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
 	if err := ctx.Err(); err != nil {
 		// The turn ctx was already cancelled (a barge before the read even started):
 		// yield nothing and count nothing.
-		return r.degrade(ctx, err)
+		return r.degrade(ctx, time.Since(start), err)
 	}
 
 	nodes, err := r.nodes.AgentNodeFacts(ctx, aid)
 	if err != nil {
-		return r.degrade(ctx, fmt.Errorf("agent node facts: %w", err))
+		return r.degrade(ctx, time.Since(start), fmt.Errorf("agent node facts: %w", err))
 	}
 
 	facts := renderFacts(nodes)
 	if len(facts) == 0 {
-		r.metrics.KGFacts(observe.FactsEmpty)
+		r.metrics.KGFacts(observe.FactsEmpty, time.Since(start))
 		return nil
 	}
-	r.metrics.KGFacts(observe.FactsOK)
+	r.metrics.KGFacts(observe.FactsOK, time.Since(start))
 	return facts
 }
 
 // degrade yields nil. A cancelled ctx is a barge (ADR-0042): silent, NOT counted —
 // the turn is gone, nothing was wasted. Any other failure (budget elapsed, DB
 // error) logs and counts a degraded read.
-func (r *Recaller) degrade(ctx context.Context, cause error) []string {
+//
+// elapsed is passed in rather than measured here: the degraded histogram exists to
+// separate a budget overrun from an instant DB refusal, and measuring after the
+// Warn above would fold the log write into that answer.
+func (r *Recaller) degrade(ctx context.Context, elapsed time.Duration, cause error) []string {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil
 	}
 	r.log.Warn("kg facts degraded to no-facts", "err", cause)
-	r.metrics.KGFacts(observe.FactsDegraded)
+	r.metrics.KGFacts(observe.FactsDegraded, elapsed)
 	return nil
 }
 
@@ -462,7 +476,7 @@ func truncateRunes(s string, max int) string {
 // discardMetrics is the no-op Metrics used when none is configured.
 type discardMetrics struct{}
 
-func (discardMetrics) KGFacts(observe.FactsOutcome) {}
+func (discardMetrics) KGFacts(observe.FactsOutcome, time.Duration) {}
 
 // Static assertion that Recaller is a FactsRecaller.
 var _ agent.FactsRecaller = (*Recaller)(nil)

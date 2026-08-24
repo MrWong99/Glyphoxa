@@ -124,12 +124,42 @@ type PrometheusRecorder struct {
 	jobsBacklog *prometheus.GaugeVec     // kind
 	jobsTotal   *prometheus.CounterVec   // kind, outcome
 	jobDuration *prometheus.HistogramVec // kind
+
+	// --- APPEND ZONE A (recorder fields) ---
+	// New instruments append their own comment-tagged section HERE, at the end of
+	// the struct, rather than editing a neighbour's block — several metric slices
+	// land in parallel and a shared edit point is a guaranteed conflict.
+
+	// #604: duration of the two BUDGETED turn-path recalls, alongside their existing
+	// outcome counters. memoryRecall_total says WHICH way a recall went;
+	// memoryRecallSeconds says how close it ran to the hard 250ms budget (ADR-0042)
+	// and kgFactsSeconds to the 50ms one — so a slow drift toward the budget edge is
+	// visible before it turns into a skip rate. outcome stays the only label
+	// (ADR-0032); the histograms mirror their counters' names and namespaces.
+	memoryRecallSeconds *prometheus.HistogramVec // outcome
+	kgFactsSeconds      *prometheus.HistogramVec // outcome
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
 // job work spans sub-second bookkeeping to minutes-long media enrichment, so the
 // bins run 0.1s..120s — wider and coarser than the voice SLO buckets.
 var jobDurationBuckets = []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120}
+
+// --- APPEND ZONE B (bucket vars) ---
+// Bucket sets for new histograms append HERE, each in its own comment-tagged
+// block.
+
+// recallBuckets bracket the hard 250ms memory-recall budget (#604, ADR-0042): fine
+// bins below it, since a speculation hit is expected in single-digit ms and the
+// interesting question is how much headroom an inline miss still has, plus one bin
+// past the budget so the near-misses that a timeout would otherwise hide are
+// countable.
+var recallBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.25, 0.5}
+
+// kgFactsBuckets bracket the 50ms KG-fact-read budget (#604): one indexed OLTP read
+// is sub-millisecond, so the bins start at 1ms and run to 250ms — five times the
+// budget — to size how badly a wedged DB overruns it.
+var kgFactsBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25}
 
 // FactsOutcome is the bounded outcome label on the KG-fact-read counter
 // (glyphoxa_kg_facts_total, #126). Exactly three values reach a series (ADR-0032):
@@ -335,6 +365,30 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
 	)
+
+	// --- APPEND ZONE C (construct + register) ---
+	// A new instrument constructs its own field and registers it in its OWN
+	// MustRegister call HERE, after the big list above — that list is a shared edit
+	// point and several metric slices land in parallel.
+
+	// #604: the two budgeted-recall duration histograms. Each mirrors the namespace
+	// of the counter it accompanies — memory recall is a voice-pipeline series
+	// (glyphoxa_voice_*), the KG read is process-level (glyphoxa_*) — so the
+	// _seconds and _total families sit next to each other in a scrape.
+	r.memoryRecallSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: subsystem,
+		Name:    "memory_recall_seconds",
+		Help:    "NPC memory recall duration by outcome (#604, ADR-0042), against the hard 250ms inline budget. Budget headroom: histogram_quantile(0.95, rate(glyphoxa_voice_memory_recall_seconds_bucket[5m])) / 0.25.",
+		Buckets: recallBuckets,
+	}, []string{"outcome"})
+	r.kgFactsSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, // process-level, matching kg_facts_total (ADR-0032)
+		Name:      "kg_facts_seconds",
+		Help:      "NPC Hot Context KG-fact read duration by outcome (#604), against the 50ms inline budget. Budget headroom: histogram_quantile(0.95, rate(glyphoxa_kg_facts_seconds_bucket[5m])) / 0.05.",
+		Buckets:   kgFactsBuckets,
+	}, []string{"outcome"})
+	reg.MustRegister(r.memoryRecallSeconds, r.kgFactsSeconds)
+
 	return r
 }
 
@@ -429,12 +483,16 @@ func (r *PrometheusRecorder) MalformedToolGen(p Provider, path MalformedPath) {
 	r.malformedToolGen.WithLabelValues(string(p), string(path)).Inc()
 }
 
-// MemoryRecall counts one NPC memory recall by its bounded outcome (#122,
-// ADR-0042/0032). It is the standalone recall-metrics sink the internal/recall
-// component records against (its local Metrics interface), separate from the
-// StageRecorder contract: recall is not an orchestrator stage.
-func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome) {
+// MemoryRecall records one NPC memory recall by its bounded outcome and how long
+// it took (#122/#604, ADR-0042/0032). It is the standalone recall-metrics sink the
+// internal/recall component records against (its local Metrics interface),
+// separate from the StageRecorder contract: recall is not an orchestrator stage.
+//
+// Counter and histogram move together, on purpose: the counter alone cannot say
+// whether a hit is running at 5ms or at 240ms of its 250ms budget.
+func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome, d time.Duration) {
 	r.memoryRecall.WithLabelValues(string(o)).Inc()
+	r.memoryRecallSeconds.WithLabelValues(string(o)).Observe(d.Seconds())
 }
 
 // HighlightClassify counts one Session-Highlights classifier pass by its bounded
@@ -445,12 +503,18 @@ func (r *PrometheusRecorder) HighlightClassify(o HighlightOutcome) {
 	r.highlightClassify.WithLabelValues(string(o)).Inc()
 }
 
-// KGFacts counts one NPC Hot Context KG-fact read by its bounded outcome (#126,
-// ADR-0008/0032). It is the standalone facts-metrics sink the internal/kgfacts
-// component records against (its local Metrics interface), separate from the
-// StageRecorder contract: the KG read is not an orchestrator stage.
-func (r *PrometheusRecorder) KGFacts(o FactsOutcome) {
+// KGFacts records one NPC Hot Context KG-fact read by its bounded outcome and how
+// long it took (#126/#604, ADR-0008/0032). It is the standalone facts-metrics sink
+// the internal/kgfacts component records against (its local Metrics interface),
+// separate from the StageRecorder contract: the KG read is not an orchestrator
+// stage.
+//
+// The duration is what separates the two shapes of "degraded" the counter alone
+// conflates: a read that burned the whole 50ms budget, versus one that failed in
+// microseconds because the DB refused it.
+func (r *PrometheusRecorder) KGFacts(o FactsOutcome, d time.Duration) {
 	r.kgFacts.WithLabelValues(string(o)).Inc()
+	r.kgFactsSeconds.WithLabelValues(string(o)).Observe(d.Seconds())
 }
 
 // SetEmbeddingBacklog publishes the current count of transcript chunks awaiting an
@@ -519,3 +583,8 @@ func roundIndexLabel(i int) string {
 }
 
 var roundIndexNames = [...]string{"0", "1", "2", "3", "4", "5"}
+
+// --- APPEND ZONE D (recorder methods) ---
+// Recording methods for new instruments append HERE, at the end of the file, each
+// in its own comment-tagged section. #604 has none: its two methods (MemoryRecall,
+// KGFacts) already existed and were extended in place above.
