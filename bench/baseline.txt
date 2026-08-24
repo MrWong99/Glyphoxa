@@ -1,0 +1,74 @@
+goos: linux
+goarch: amd64
+pkg: github.com/MrWong99/Glyphoxa/internal/tape
+cpu: 13th Gen Intel(R) Core(TM) i9-13900K
+BenchmarkAppendInbound-32    	12343910	       107.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	12905760	        91.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	11482437	        87.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	12639560	        88.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	12287906	        97.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	10574457	       101.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	14183984	        88.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	12431416	        90.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	12173229	        92.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendInbound-32    	11524603	        95.75 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/MrWong99/Glyphoxa/internal/tape	15.502s
+goos: linux
+goarch: amd64
+pkg: github.com/MrWong99/Glyphoxa/internal/textnorm
+cpu: 13th Gen Intel(R) Core(TM) i9-13900K
+BenchmarkNormalize-32    	 3355590	       357.4 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3351542	       363.2 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3405094	       353.8 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3402890	       359.8 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3340521	       364.3 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3236100	       362.5 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3331698	       357.5 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3270208	       363.9 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3383007	       359.1 ns/op	      92 B/op	       1 allocs/op
+BenchmarkNormalize-32    	 3452028	       356.8 ns/op	      92 B/op	       1 allocs/op
+PASS
+ok  	github.com/MrWong99/Glyphoxa/internal/textnorm	12.072s
+goos: linux
+goarch: amd64
+pkg: github.com/MrWong99/Glyphoxa/internal/storage
+cpu: 13th Gen Intel(R) Core(TM) i9-13900K
+BenchmarkEncodeVector768-32    	   51832	     23768 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   51784	     23975 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   51544	     23522 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   48292	     24557 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   49573	     23820 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   48236	     23460 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   48090	     24409 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   48512	     24033 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   52081	     24431 ns/op	   23040 B/op	       2 allocs/op
+BenchmarkEncodeVector768-32    	   49216	     24313 ns/op	   23040 B/op	       2 allocs/op
+PASS
+ok  	github.com/MrWong99/Glyphoxa/internal/storage	12.001s
+goos: linux
+goarch: amd64
+pkg: github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec/dsp
+cpu: 13th Gen Intel(R) Core(TM) i9-13900K
+BenchmarkResamplerProcess24kTo48k-32       	   85906	     13258 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	  105225	     12585 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   94897	     12906 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   97675	     12774 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   79884	     13014 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   98436	     12710 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   91708	     12237 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   98202	     13251 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	  102621	     11976 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcess24kTo48k-32       	   85312	     12283 ns/op	    9472 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2267850	       525.6 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2291888	       527.8 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2244068	       538.6 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2283502	       521.9 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2258448	       525.6 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2262530	       529.8 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2260015	       528.9 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2221323	       532.4 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2220976	       542.7 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkResamplerProcessPassthrough-32    	 2247866	       534.1 ns/op	    4096 B/op	       1 allocs/op
+PASS
+ok  	github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec/dsp	23.909s

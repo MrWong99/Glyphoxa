@@ -294,6 +294,86 @@ jobs:
       - name: Cassette latency benchmark (regression gate)
         run: go test -race -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
+  # Microbenchmark regression tracking (#611). Sibling of `audio`: the cassette
+  # bench above gates the PIPELINE's p95, this one gates the hot loops
+  # (tape append, text normalisation, pgvector encoding, the resampler) that no
+  # job ran at all before — `BenchmarkAppendInbound` had never executed in CI.
+  #
+  # Split verdicts on purpose: ns/op is WARN-ONLY (a shared runner's wall time
+  # is noise, and the committed baseline comes from another machine entirely),
+  # while allocs/op is deterministic and therefore the hard gate. An extra
+  # allocation per sample is a real regression on any machine.
+  bench:
+    name: bench (microbenchmark allocs gate)
+    needs: [proto]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Restore the generated stubs before any go test (gen/ is gitignored).
+      - name: Download gen artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gen
+          path: gen
+
+      # The gate must itself be trusted (the #140 lesson, same as the
+      # helm-validate and container-smoke self-tests): assert it FAILS on an
+      # allocs/op increase, on a missing baseline, and on an empty run — and
+      # that the committed bench/baseline.txt still parses. Runs first so a
+      # regressed gate fails in seconds, before the benchmark wall-time.
+      - name: Bench gate self-test
+        run: scripts/bench-gate-test.sh
+
+      # Byte-for-byte the command bench/README.md documents for regenerating the
+      # baseline — the two must not drift, or the committed file stops being
+      # comparable with what CI measures. -run '^$' skips the unit tests; no
+      # -race (it perturbs allocation-free hot loops and slows the job).
+      - name: Run microbenchmarks
+        run: |
+          go test -bench . -benchmem -count 10 -run '^$' \
+            ./internal/tape/ ./internal/textnorm/ ./internal/storage/ ./pkg/voice/wire/codec/dsp/ \
+            | tee "$RUNNER_TEMP/bench-new.txt"
+
+      # Pinned by comment, not by version: benchstat has no tagged releases.
+      # v0.0.0-20260819171926-ebcb4798430d is what @latest resolved to when this
+      # job was written; its output is informational only, so a drifting version
+      # can change the REPORT but never the verdict — the gate below parses the
+      # raw go test output itself.
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      # Warn-only ns/op report into the step summary. Names are stripped of
+      # their GOMAXPROCS suffix (the baseline machine's -32 vs the runner's -4)
+      # so benchstat pairs the rows, and -ignore=cpu keeps a differing `cpu:`
+      # header from splitting the tables. Never fails the job: `|| true`.
+      - name: Benchstat report (ns/op, warn-only)
+        run: |
+          strip_procs() { sed -E 's/^(Benchmark[^ \t]*)-[0-9]+/\1/' "$1"; }
+          strip_procs bench/baseline.txt >"$RUNNER_TEMP/base-norm.txt"
+          strip_procs "$RUNNER_TEMP/bench-new.txt" >"$RUNNER_TEMP/new-norm.txt"
+          {
+            echo "### benchstat (ns/op — informational, never fails the job)"
+            echo
+            echo '```'
+            benchstat -ignore=cpu "baseline=$RUNNER_TEMP/base-norm.txt" "pr=$RUNNER_TEMP/new-norm.txt" 2>&1 || true
+            echo '```'
+            echo
+            echo "_Wall time on a shared runner is noise; only the allocs/op gate below is binding._"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # The binding verdict. Fails only on an allocs/op INCREASE; a benchmark
+      # missing from the baseline warns ("add on next regen"), a missing or
+      # empty baseline fails (the file must exist and hold results).
+      - name: Allocs/op regression gate
+        run: scripts/bench-gate.sh bench/baseline.txt "$RUNNER_TEMP/bench-new.txt"
+
   image:
     name: container image (build + smoke)
     # `web` is added so its `spa-dist` artifact (the real built console) exists
