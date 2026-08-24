@@ -56,13 +56,13 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.TurnOutcome(TurnAbandoned, ReasonTTSError)
 	rec.TurnOutcome(TurnAbandoned, ReasonProviderError)
 
-	rec.MemoryRecall(RecallHit)
-	rec.MemoryRecall(RecallMiss)
-	rec.MemoryRecall(RecallSkip)
+	rec.MemoryRecall(RecallHit, 4*time.Millisecond)
+	rec.MemoryRecall(RecallMiss, 120*time.Millisecond)
+	rec.MemoryRecall(RecallSkip, 250*time.Millisecond)
 
-	rec.KGFacts(FactsOK)
-	rec.KGFacts(FactsEmpty)
-	rec.KGFacts(FactsDegraded)
+	rec.KGFacts(FactsOK, 800*time.Microsecond)
+	rec.KGFacts(FactsEmpty, 600*time.Microsecond)
+	rec.KGFacts(FactsDegraded, 60*time.Millisecond)
 
 	rec.MalformedToolGen(ProviderGroq, MalformedStreamError)
 
@@ -293,6 +293,58 @@ func TestNoUnboundedLabels(t *testing.T) {
 	for _, banned := range []string{"guild-SECRET-7788", "guild=", "agent_id=", "turn_id=", "tenant_id="} {
 		if strings.Contains(out, banned) {
 			t.Errorf("unbounded label leaked into series: %q\n%s", banned, filterGlyphoxa(out))
+		}
+	}
+}
+
+// TestMemoryRecallDurationHistogram pins the budgeted memory-recall duration
+// series (#604, ADR-0042): one recall records BOTH the outcome counter and a
+// duration observation on glyphoxa_voice_memory_recall_seconds, so a hit or miss
+// drifting toward the hard 250ms budget is visible before it becomes a skip rate.
+func TestMemoryRecallDurationHistogram(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.MemoryRecall(RecallMiss, 120*time.Millisecond)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		// 120ms lands in the 0.15 bin and every wider one, not in 0.1.
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="miss",le="0.1"} 0`,
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="miss",le="0.15"} 1`,
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="miss",le="0.25"} 1`,
+		`glyphoxa_voice_memory_recall_seconds_count{outcome="miss"} 1`,
+		// The counter is unchanged: duration is additive, not a replacement.
+		`glyphoxa_voice_memory_recall_total{outcome="miss"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
+// TestKGFactsDurationHistogram pins the budgeted KG-fact-read duration series
+// (#604): a degraded read records its duration on glyphoxa_kg_facts_seconds, so a
+// degradation can be told apart as a budget overrun rather than a fast DB error.
+// Process-level namespace (glyphoxa_, no voice subsystem), matching kg_facts_total.
+func TestKGFactsDurationHistogram(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.KGFacts(FactsDegraded, 60*time.Millisecond)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		// 60ms overran the 50ms budget: it misses the 0.05 bin, lands in 0.1.
+		`glyphoxa_kg_facts_seconds_bucket{outcome="degraded",le="0.05"} 0`,
+		`glyphoxa_kg_facts_seconds_bucket{outcome="degraded",le="0.1"} 1`,
+		`glyphoxa_kg_facts_seconds_count{outcome="degraded"} 1`,
+		`glyphoxa_kg_facts_total{outcome="degraded"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
 		}
 	}
 }

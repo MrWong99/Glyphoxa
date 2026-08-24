@@ -114,14 +114,28 @@ func recallCtx(sess fakeSessions) context.Context {
 type fakeMetrics struct {
 	mu     sync.Mutex
 	counts map[observe.RecallOutcome]int
+	durs   map[observe.RecallOutcome][]time.Duration
 }
 
-func newFakeMetrics() *fakeMetrics { return &fakeMetrics{counts: map[observe.RecallOutcome]int{}} }
+func newFakeMetrics() *fakeMetrics {
+	return &fakeMetrics{
+		counts: map[observe.RecallOutcome]int{},
+		durs:   map[observe.RecallOutcome][]time.Duration{},
+	}
+}
 
-func (f *fakeMetrics) MemoryRecall(o observe.RecallOutcome) {
+func (f *fakeMetrics) MemoryRecall(o observe.RecallOutcome, d time.Duration) {
 	f.mu.Lock()
 	f.counts[o]++
+	f.durs[o] = append(f.durs[o], d)
 	f.mu.Unlock()
+}
+
+// durations returns the durations recorded for one outcome, in order (#604).
+func (f *fakeMetrics) durations(o observe.RecallOutcome) []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Duration(nil), f.durs[o]...)
 }
 
 func (f *fakeMetrics) count(o observe.RecallOutcome) int {
@@ -299,6 +313,56 @@ func TestRecall_SpeculationHit_ReusesPrefetch_CountsHit(t *testing.T) {
 	}
 }
 
+// TestRecall_RecordsDurationWithOutcome pins the budget-headroom signal (#604):
+// every counted recall carries how long it took, on BOTH the inline-miss path and
+// the speculation-hit path — the two whose distance from the hard 250ms budget
+// (ADR-0042) is the thing the histogram exists to show.
+func TestRecall_RecordsDurationWithOutcome(t *testing.T) {
+	// Miss: no speculation, so the full embed + both ANN searches run inline.
+	emb := &fakeEmbedder{vec: fixedVec()}
+	ret := &fakeRetriever{
+		agentChunks: []storage.ChunkMatch{chunkMatch("personal")},
+		campChunks:  []storage.ChunkMatch{chunkMatch("world")},
+	}
+	m := newFakeMetrics()
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, voiceevent.NewBus(), Config{})
+
+	r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the ale")
+
+	missDurs := m.durations(observe.RecallMiss)
+	if len(missDurs) != 1 {
+		t.Fatalf("miss durations = %v, want exactly one", missDurs)
+	}
+	if missDurs[0] <= 0 {
+		t.Errorf("miss duration = %v, want the elapsed recall time (> 0)", missDurs[0])
+	}
+
+	// Hit: a matching partial was prefetched, so only the deferred NPC-knowledge
+	// query runs — still measured, because "a hit is free" is the claim the
+	// histogram has to be able to falsify.
+	emb2 := &fakeEmbedder{vec: fixedVec()}
+	ret2 := &fakeRetriever{
+		agentChunks: []storage.ChunkMatch{chunkMatch("personal")},
+		campChunks:  []storage.ChunkMatch{chunkMatch("world")},
+	}
+	m2 := newFakeMetrics()
+	bus := voiceevent.NewBus()
+	r2 := newTestRecaller(t, emb2, ret2, sess, m2, bus, Config{})
+
+	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the knight?", UtteranceID: "u1"})
+	waitSpeculated(t, r2)
+	r2.Recall(recallCtx(sess), uuid.NewString(), "do you remember the knight")
+
+	hitDurs := m2.durations(observe.RecallHit)
+	if len(hitDurs) != 1 {
+		t.Fatalf("hit durations = %v, want exactly one", hitDurs)
+	}
+	if hitDurs[0] <= 0 {
+		t.Errorf("hit duration = %v, want the elapsed recall time (> 0)", hitDurs[0])
+	}
+}
+
 // TestRecall_SpeculationMiss_FallsBackInline_CountsMiss pins that a final NOT
 // matching the speculated partial re-embeds inline and counts a miss.
 func TestRecall_SpeculationMiss_FallsBackInline_CountsMiss(t *testing.T) {
@@ -417,6 +481,12 @@ func TestRecall_UnparseableAgentID_Skips(t *testing.T) {
 	}
 	if m.count(observe.RecallSkip) != 1 {
 		t.Errorf("skip = %d, want 1", m.count(observe.RecallSkip))
+	}
+	// The early exits are measured too (#604), or the skip histogram would be a
+	// biased sample of only the slow skips — and "wiring bug" would be
+	// indistinguishable from "budget elapsed" in the p95.
+	if durs := m.durations(observe.RecallSkip); len(durs) != 1 || durs[0] < 0 {
+		t.Errorf("skip durations = %v, want one non-negative sample", durs)
 	}
 	if emb.callCount() != 0 {
 		t.Errorf("must not embed with a bad agent id; calls = %d", emb.callCount())
