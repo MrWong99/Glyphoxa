@@ -165,6 +165,32 @@ func TestJobRunnerMetrics(t *testing.T) {
 	}
 }
 
+// TestTranscriptSSEMetrics pins the live-transcript SSE series (#612,
+// ADR-0032): both families are process-level with NO labels (a session id is
+// never a label), the lag counter accumulates, and the subscriber gauge is a
+// Set (idempotent) not an Inc — Sets to 5 then 3 leave it at 3.
+func TestTranscriptSSEMetrics(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.TranscriptSSELagged()
+
+	// Set-not-Inc: a re-Set from a fresh count overwrites, never accumulates.
+	rec.SetTranscriptSSESubscribers(5)
+	rec.SetTranscriptSSESubscribers(3)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		"glyphoxa_transcript_sse_lagged_total 1",
+		"glyphoxa_transcript_sse_subscribers 3",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
 // TestWiredHistogramsAndProviderCounters is the #125 AC pin: after one real
 // observation on each previously-reserved instrument, every one of the six
 // histogram families exposes a non-empty series, the STT and TTS provider-call /

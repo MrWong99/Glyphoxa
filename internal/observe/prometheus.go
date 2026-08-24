@@ -138,6 +138,14 @@ type PrometheusRecorder struct {
 	// (ADR-0032); the histograms mirror their counters' names and namespaces.
 	memoryRecallSeconds *prometheus.HistogramVec // outcome
 	kgFactsSeconds      *prometheus.HistogramVec // outcome
+
+	// #612 live-transcript SSE (ADR-0014/0032): how many browsers tail the Session
+	// screen, and how often one falls far enough behind that the relay drops it and
+	// forces an EventSource reconnect — a user-visible transcript stall, invisible
+	// until now. Process-level with ZERO labels: the session id is NEVER a label
+	// (ADR-0032). The gauge is Set-from-COUNT like embeddingBacklog.
+	transcriptSSELagged      prometheus.Counter
+	transcriptSSESubscribers prometheus.Gauge
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
@@ -389,6 +397,19 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	}, []string{"outcome"})
 	reg.MustRegister(r.memoryRecallSeconds, r.kgFactsSeconds)
 
+	// #612 live-transcript SSE series (ADR-0032): namespace-only, no labels.
+	r.transcriptSSELagged = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "transcript_sse_lagged_total",
+		Help:      "Live-transcript SSE subscribers dropped for lagging, forcing a client reconnect (#612).",
+	})
+	r.transcriptSSESubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "transcript_sse_subscribers",
+		Help:      "Live-transcript SSE subscribers currently connected (Set-from-COUNT).",
+	})
+	reg.MustRegister(r.transcriptSSELagged, r.transcriptSSESubscribers)
+
 	return r
 }
 
@@ -588,3 +609,23 @@ var roundIndexNames = [...]string{"0", "1", "2", "3", "4", "5"}
 // Recording methods for new instruments append HERE, at the end of the file, each
 // in its own comment-tagged section. #604 has none: its two methods (MemoryRecall,
 // KGFacts) already existed and were extended in place above.
+
+// --- #612 live-transcript SSE (transcript.SSEMetrics) ---
+
+// TranscriptSSELagged counts one live-transcript SSE subscriber dropped for
+// lagging (#612): its fan-out channel overflowed, so the relay closed the stream
+// and the browser's EventSource reconnects and replays from Last-Event-ID
+// (ADR-0014's designed degradation). One event per dropped subscriber, so the
+// rate reads as user-visible transcript stalls per second — not per lost frame.
+// Non-blocking (a bare Inc): the relay calls it under its own lock.
+func (r *PrometheusRecorder) TranscriptSSELagged() {
+	r.transcriptSSELagged.Inc()
+}
+
+// SetTranscriptSSESubscribers publishes the number of browsers currently tailing
+// a live transcript (#612). The relay Sets it from len(subs) on every attach and
+// detach — never Inc/Dec — so the gauge cannot drift across concurrent handlers
+// or a restart, mirroring SetEmbeddingBacklog.
+func (r *PrometheusRecorder) SetTranscriptSSESubscribers(n int) {
+	r.transcriptSSESubscribers.Set(float64(n))
+}

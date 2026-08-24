@@ -604,6 +604,7 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 	// Manager finalizes its writer queue on Stop (Deps.Transcript).
 	relay := transcript.NewRelay(eventBus, sessions, store, log)
 	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
+	relay.SetMetrics(metrics)          // #612: SSE subscriber gauge + lagged-drop counter
 
 	// The Transcript Chunk writer (#104, ADR-0011) folds utterances into
 	// 3–6-utterance chunks written with embedding NULL (the async pipeline #116
