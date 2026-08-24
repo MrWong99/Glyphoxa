@@ -201,6 +201,12 @@ jobs:
       - name: Vet (record tag)
         run: go vet -tags=record ./...
 
+      # The jsonv2bench comparison benchmarks (#609) are build-tag guarded, so
+      # nothing else compiles them; vet them here so they cannot silently rot
+      # against a changed decode struct or a moved fixture corpus.
+      - name: Vet (jsonv2bench tag)
+        run: go vet -tags=jsonv2bench ./pkg/voice/stt/elevenlabs/... ./pkg/voice/llm/anthropic/...
+
       # Default suite stays Docker-free and fast (ADR-0021): the persistence
       # testcontainers tests are tag-isolated behind `integration` (ADR-0033)
       # and excluded here. They run in the separate `integration` job below.
