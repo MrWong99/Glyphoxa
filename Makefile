@@ -1,5 +1,5 @@
 # Glyphoxa Makefile
-# Requires: Go 1.26+. The default (untagged) build is pure Go: CGO stays off
+# Requires: Go 1.27+. The default (untagged) build is pure Go: CGO stays off
 # so it is statically linked and trivially cross-compilable. The exception is
 # the `opus` build tag — the outbound Opus encoder links system libopus via
 # CGO (ADR-0034 amendment 2026-07-19) and must be paired with

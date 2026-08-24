@@ -543,13 +543,17 @@ jobs:
       # Install golangci-lint v2 from source rather than via the official
       # action: the action's v6 release pins golangci-lint v1, which can't
       # parse the v2 config in .golangci.yml and refuses to run against
-      # Go 1.26 modules. Building from source under the same Go toolchain
+      # Go 1.27 modules. Building from source under the same Go toolchain
       # used for the project sidesteps both problems and keeps the lint
       # binary's "built with" version aligned with the project target.
       # Pinned (not @latest) so a new lint release can't change what CI
       # enforces — or what code it runs — without a reviewed bump.
+      # v2.13.1 is the Go 1.27 floor: v2.12.2's bundled staticcheck v0.7.0
+      # panics building IR for the 1.27 stdlib ("unexpected expr:
+      # *ast.KeyValueExpr" in internal/poll — the new struct-literal
+      # field-selector keys), killing the whole run.
       - name: Install golangci-lint v2
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
 
       - name: Run golangci-lint
         run: golangci-lint run ./...

@@ -33,7 +33,7 @@ The fastest way to a running instance is **Docker Compose** (§9) or the
 
 ## 1. Prerequisites
 
-- **Go 1.26+** — the whole stack is pure Go (`CGO_ENABLED=0`, Makefile): no C
+- **Go 1.27+** — the whole stack is pure Go (`CGO_ENABLED=0`, Makefile): no C
   toolchain, and the binary is fully static.
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go
   binary embeds; without it you get a blank placeholder page (see §3).
@@ -342,6 +342,10 @@ server (the Helm chart's `ollamaUrl` value renders it), or semantic memory
 | `GLYPHOXA_VOICE_MAX_CONNECT_CYCLES` | optional | How many Discord connect cycles one Voice Session may run through before it is closed as churning; default `200`, `0` disables. Every cycle rebuilds the per-cycle world (voice connection, codec, one HTTP transport per provider adapter, a VAD session per Speaker Lane, a streaming-STT websocket) and not all of it is reclaimed. |
 | `GLYPHOXA_VOICE_HEAP_CEILING_MIB` | optional | Go heap footprint in MiB above which the Voice Instance closes the single least-recently-active Voice Session it hosts; default `0` (off). A **process** reading, so with `GLYPHOXA_MAX_VOICE_SESSIONS` > 1 one Tenant's pressure can cost another Tenant their session — deliberate (the alternative at the memory limit is an OOM kill that takes them all), but size it against your own container limit rather than guessing. |
 | `GLYPHOXA_VOICE_GOROUTINE_CEILING` | optional | Process goroutine count above which the Voice Instance sheds its quietest Voice Session; default `0` (off). Same process-wide caveat as the heap ceiling. |
+| `GLYPHOXA_PPROF` | optional | `1` mounts `/debug/pprof` on the observability listener (#586) — including `/debug/pprof/goroutineleak` (Go 1.27+), which reports goroutines blocked on unreachable primitives, i.e. leaks a live pod can name without a rebuild. Off by default: profiles expose goroutine stacks (argument values included) and on-demand CPU profiling burns CPU. The metrics port is cluster-internal (ADR-0032), so this is an operator switch, not a security boundary. |
+| `GLYPHOXA_PPROF_BLOCK_RATE` | optional | With `GLYPHOXA_PPROF=1`: nanoseconds of goroutine blocking per sampled event (`runtime.SetBlockProfileRate`) so `/debug/pprof/block` carries data; e.g. `10000000` ≈ one sample per 10ms blocked. Default off — sampling costs the realtime voice path. Non-numeric/≤0 ⇒ ignored. |
+| `GLYPHOXA_PPROF_MUTEX_FRACTION` | optional | With `GLYPHOXA_PPROF=1`: sample 1/n of mutex contention events (`runtime.SetMutexProfileFraction`) so `/debug/pprof/mutex` carries data. Default off; non-numeric/≤0 ⇒ ignored. |
+| `GLYPHOXA_GOROUTINE_LEAK_SAMPLE_INTERVAL` | optional | Go duration arming the `glyphoxa_goroutine_leaks` gauge: on scrape, at most once per interval, the Go 1.27 goroutineleak profile is sampled and the count of permanently blocked goroutines exported — the leak-trend companion to `GLYPHOXA_VOICE_GOROUTINE_CEILING`'s raw count. Each sample runs a GC cycle, so pick minutes, not seconds (e.g. `5m`). Default off; not-a-duration/≤0 ⇒ off. Independent of `GLYPHOXA_PPROF` (a count exposes no stacks). |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
 | `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |
