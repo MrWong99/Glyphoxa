@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -72,12 +74,30 @@ func MountObservability(mux *http.ServeMux, rec *PrometheusRecorder, ready Readi
 	// nothing an always-on unauthenticated port should offer. The metrics port
 	// is cluster-internal (ADR-0032 keeps it off the public web port), so the
 	// env gate is the operator's deliberate switch, not a security boundary.
+	//
+	// pprof.Index serves every named runtime/pprof profile under /debug/pprof/,
+	// which as of Go 1.27 includes /debug/pprof/goroutineleak: it runs a GC
+	// cycle and reports goroutines blocked on concurrency primitives that are
+	// unreachable and so can never wake up — a live-pod answer to the class of
+	// leak that #579 could only pin in tests. (?debug=1 for readable stacks;
+	// the GC cost is why it sits behind the same opt-in gate.)
 	if os.Getenv("GLYPHOXA_PPROF") == "1" {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		setProfileRates(os.Getenv)
+	}
+	// Leak trend: the opt-in glyphoxa_goroutine_leaks gauge over the Go 1.27
+	// goroutineleak profile (see leaksampler.go), armed by
+	// GLYPHOXA_GOROUTINE_LEAK_SAMPLE_INTERVAL. Its own knob, independent of
+	// GLYPHOXA_PPROF — a scraped count exposes no stacks, so it can be safe to
+	// arm where the profile endpoints are not. Register (not MustRegister):
+	// production mounts once per process, but a second mount on the same
+	// recorder must stay a no-op rather than a panic.
+	if d := leakSampleInterval(os.Getenv); d > 0 {
+		_ = rec.reg.Register(newGoroutineLeakCollector(d))
 	}
 	// Readiness: gate traffic on the dependency probe (a DB ping).
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +119,34 @@ func MountObservability(mux *http.ServeMux, rec *PrometheusRecorder, ready Readi
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
+}
+
+// setProfileRates arms the contention profiles behind the same GLYPHOXA_PPROF
+// gate: /debug/pprof/block and /debug/pprof/mutex exist as endpoints but stay
+// EMPTY until the runtime is told to sample, which nothing did before — so the
+// realtime voice path's lock/channel contention was unmeasurable on a live
+// pod. Both knobs default to off because sampling costs the hot path:
+//
+//   - GLYPHOXA_PPROF_BLOCK_RATE: nanoseconds of blocking per sampled event
+//     (runtime.SetBlockProfileRate; 1 records everything — start coarse, e.g.
+//     10000000 for one sample per 10ms blocked).
+//   - GLYPHOXA_PPROF_MUTEX_FRACTION: sample 1/n mutex contention events
+//     (runtime.SetMutexProfileFraction; 1 records everything).
+//
+// Values that don't parse as a positive integer are ignored — the profiles
+// then stay empty, same as unset, and the pod keeps serving. getenv is a
+// parameter for the same reason the boot helpers take one: testability.
+func setProfileRates(getenv func(string) string) {
+	if v := getenv("GLYPHOXA_PPROF_BLOCK_RATE"); v != "" {
+		if rate, err := strconv.Atoi(v); err == nil && rate > 0 {
+			runtime.SetBlockProfileRate(rate)
+		}
+	}
+	if v := getenv("GLYPHOXA_PPROF_MUTEX_FRACTION"); v != "" {
+		if frac, err := strconv.Atoi(v); err == nil && frac > 0 {
+			runtime.SetMutexProfileFraction(frac)
+		}
+	}
 }
 
 // newMux wires the voice-node endpoints onto a fresh mux via
