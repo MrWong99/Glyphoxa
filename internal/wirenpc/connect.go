@@ -210,7 +210,11 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// this cycle's connection.state{connecting}/{connected} (#123).
 	// tapePumpOptions adds the outbound (agent-speech) tape tap when the campaign is
 	// armed (#306); nil tape → no option → unchanged playback.
-	pump := wire.NewPlaybackPump(sess, cdc, log, bus, tapePumpOptions(cfg.Tape)...)
+	// pumpRecorderOptions adds the #606 inter-sentence gap histogram and look-ahead
+	// lane counters against cfg.StageMetrics, the same recorder codec.WithMetrics
+	// above stamps its per-frame costs on; a no-op recorder adds no option.
+	pumpOpts := append(tapePumpOptions(cfg.Tape), pumpRecorderOptions(cfg.StageMetrics)...)
+	pump := wire.NewPlaybackPump(sess, cdc, log, bus, pumpOpts...)
 	defer pump.Close()
 
 	// cfg.keys.tts is the resolved BYOK TTS key (issue #69): the decrypted saved

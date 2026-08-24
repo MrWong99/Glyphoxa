@@ -299,6 +299,36 @@ func TestUsageMeters_TokensCharactersAudioSeconds(t *testing.T) {
 	}
 }
 
+// TestPlaybackGapAndLookaheadSeries is the #606 AC pin: the audible inter-sentence
+// silence lands in its own label-free histogram (TurnID is NEVER a label, ADR-0032)
+// with gap-sized bins, and the #375 look-ahead lane's three events are counted apart
+// on a bounded event label.
+func TestPlaybackGapAndLookaheadSeries(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.IntersentenceGap(400 * time.Millisecond)
+	rec.PlaybackLookahead(LookaheadReleased)
+	rec.PlaybackLookahead(LookaheadLatched)
+	rec.PlaybackLookahead(LookaheadDiscarded)
+
+	out := scrape(t, rec)
+
+	wantSeries := []string{
+		// 0.4s falls in the 0.5 bin, not the 0.35 one below it.
+		`glyphoxa_voice_playback_intersentence_gap_seconds_bucket{le="0.35"} 0`,
+		`glyphoxa_voice_playback_intersentence_gap_seconds_bucket{le="0.5"} 1`,
+		`glyphoxa_voice_playback_intersentence_gap_seconds_count 1`,
+		`glyphoxa_voice_playback_lookahead_total{event="released"} 1`,
+		`glyphoxa_voice_playback_lookahead_total{event="latched"} 1`,
+		`glyphoxa_voice_playback_lookahead_total{event="discarded"} 1`,
+	}
+	for _, want := range wantSeries {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q\n%s", want, filterGlyphoxa(out))
+		}
+	}
+}
+
 func TestSessionGaugeTracksOpenClose(t *testing.T) {
 	rec := NewPrometheusRecorder()
 	rec.SessionOpened("a")

@@ -155,6 +155,13 @@ type PrometheusRecorder struct {
 	// text and its args NEVER reach a series. Process-level (namespace only): a
 	// query is an OLTP read, not a voice-pipeline stage.
 	dbQuery *prometheus.HistogramVec // query
+
+	// #606 playback gap: the audible silence between consecutive sentences of one
+	// turn, and the #375 look-ahead lane's events. The histogram is LABEL-FREE —
+	// turn_id is never a label (ADR-0032 §2.1) and there is nothing else to split
+	// by; the counter's event label is a bounded three-value enum.
+	intersentenceGap  prometheus.Histogram
+	playbackLookahead *prometheus.CounterVec // event
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
@@ -185,6 +192,14 @@ var kgFactsBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2
 // search's p95 reads directly against the 250ms recall budget (ADR-0042). A
 // query slower than 1s lands in +Inf, which is itself the alert.
 var dbQueryBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1}
+
+// #606 gapBuckets size the inter-sentence playback gap: it is not an SLO span but
+// the silence a GM hears between an Agent's sentences, which under the no-pre-
+// synthesis-pipelining tradeoff is the next sentence's TTS startup latency. Dense
+// from 50ms (below which nothing is perceptible as a pause) through 1s (where a
+// gap reads as the NPC hesitating), with tail bins to 5s so a provider stall is
+// still observable. Own bins, not the shared latencyBuckets (ADR-0044 precedent).
+var gapBuckets = []float64{0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0}
 
 // FactsOutcome is the bounded outcome label on the KG-fact-read counter
 // (glyphoxa_kg_facts_total, #126). Exactly three values reach a series (ADR-0032):
@@ -436,6 +451,18 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	}, []string{"query"})
 	reg.MustRegister(r.dbQuery)
 
+	// #606 playback gap: the histogram carries no labels at all (ADR-0032) and its
+	// own gap-sized bins; the lane counter splits by the bounded event enum.
+	r.intersentenceGap = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: subsystem,
+		Name:    "playback_intersentence_gap_seconds",
+		Help:    "Audible silence between consecutive sentences of one turn: sentence N's playback end to N+1's first Opus frame on the wire. Cross-turn and post-barge spans are never sampled.",
+		Buckets: gapBuckets,
+	})
+	r.playbackLookahead = counterVec("playback_lookahead_total",
+		"Look-ahead lane events (#375, ADR-0025): a held Reaction sentence released into the play queue, a release latched before its prime, or a held-but-unplayed sentence discarded.",
+		"event")
+	reg.MustRegister(r.intersentenceGap, r.playbackLookahead)
 	return r
 }
 
@@ -665,4 +692,22 @@ func (r *PrometheusRecorder) SetTranscriptSSESubscribers(n int) {
 // ADR-0042), so it is one Observe and nothing else.
 func (r *PrometheusRecorder) DBQuery(query string, d time.Duration) {
 	r.dbQuery.WithLabelValues(query).Observe(d.Seconds())
+}
+
+// --- #606 playback gap ---
+
+// IntersentenceGap records the audible silence between two consecutive sentences
+// of ONE turn — sentence N's playback end to N+1's first Opus frame on the wire.
+// It is the number that decides whether pre-synthesis pipelining is worth building
+// (today an ordinary gap is N+1's TTS startup latency). The pump samples only the
+// same-turn span: a turn's first sentence belongs to response_latency, a turn
+// boundary is conversational, and a barge-torn sentence opens no span.
+func (r *PrometheusRecorder) IntersentenceGap(d time.Duration) {
+	r.intersentenceGap.Observe(d.Seconds())
+}
+
+// PlaybackLookahead counts one look-ahead lane event (#375, ADR-0025), so the
+// lane's gap-hiding is readable next to the gap histogram it suppresses.
+func (r *PrometheusRecorder) PlaybackLookahead(ev LookaheadEvent) {
+	r.playbackLookahead.WithLabelValues(string(ev)).Inc()
 }
