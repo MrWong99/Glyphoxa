@@ -2,6 +2,14 @@ package elevenlabs
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"os"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -66,20 +74,111 @@ var sttFrames = []sttFrame{
 	},
 }
 
-// decodeSTTFrame is the decode readPump performs on every websocket frame,
-// copied verbatim from stream.go so the benchmark measures the production
-// anonymous-struct shape and not a stand-in. Keep the struct byte-identical to
-// the one in readPump.
+// sttDecodeStruct mirrors the anonymous struct readPump unmarshals every
+// websocket frame into (stream.go). It is a hand-made copy — readPump's struct
+// is anonymous, so no compiler-level binding to it exists — but the copy is NOT
+// left to trust: TestSTTDecodeStruct_MatchesReadPump parses stream.go and fails
+// if the two shapes drift apart.
+type sttDecodeStruct struct {
+	MessageType string `json:"message_type"`
+	Text        string `json:"text"`
+	Error       string `json:"error"`
+}
+
+// decodeSTTFrame is the decode readPump performs on every websocket frame, over
+// the mirrored production struct shape.
 func decodeSTTFrame(data []byte) (messageType, text, errText string, err error) {
-	var msg struct {
-		MessageType string `json:"message_type"`
-		Text        string `json:"text"`
-		Error       string `json:"error"`
-	}
+	var msg sttDecodeStruct
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return "", "", "", err
 	}
 	return msg.MessageType, msg.Text, msg.Error, nil
+}
+
+// structField is one field of a decode struct as either the source or
+// reflection sees it: Go name, type expression, and struct tag.
+type structField struct {
+	Name string
+	Type string
+	Tag  string
+}
+
+// readPumpDecodeFields parses the given Go source and returns the fields of the
+// anonymous struct declared as `var msg struct { ... }` inside readPump — the
+// literal shape production decodes every Scribe frame into.
+func readPumpDecodeFields(t *testing.T, src []byte) []structField {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "stream.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse stream.go: %v", err)
+	}
+
+	var lit *ast.StructType
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "readPump" || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			vs, ok := n.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "msg" {
+				return true
+			}
+			if st, ok := vs.Type.(*ast.StructType); ok {
+				lit = st
+				return false
+			}
+			return true
+		})
+	}
+	if lit == nil {
+		t.Fatal("no `var msg struct{...}` found in readPump — has the decode site moved?")
+	}
+
+	var out []structField
+	for _, f := range lit.Fields.List {
+		typ := &strings.Builder{}
+		if err := printer.Fprint(typ, token.NewFileSet(), f.Type); err != nil {
+			t.Fatalf("print field type: %v", err)
+		}
+		tag := ""
+		if f.Tag != nil {
+			unquoted, err := strconv.Unquote(f.Tag.Value)
+			if err != nil {
+				t.Fatalf("unquote tag %s: %v", f.Tag.Value, err)
+			}
+			tag = unquoted
+		}
+		for _, name := range f.Names {
+			out = append(out, structField{Name: name.Name, Type: typ.String(), Tag: tag})
+		}
+	}
+	return out
+}
+
+// TestSTTDecodeStruct_MatchesReadPump is the drift guard for the benchmark's
+// hand-made copy of readPump's anonymous decode struct. It reads stream.go,
+// extracts the real struct literal, and asserts field-for-field (name, type,
+// json tag) equality with [sttDecodeStruct]. If readPump's struct gains,
+// renames, or retags a field, this fails — update sttDecodeStruct — instead of
+// letting the benchmarks silently measure a stale shape.
+func TestSTTDecodeStruct_MatchesReadPump(t *testing.T) {
+	src, err := os.ReadFile("stream.go")
+	if err != nil {
+		t.Fatalf("read stream.go: %v", err)
+	}
+	want := readPumpDecodeFields(t, src)
+
+	rt := reflect.TypeOf(sttDecodeStruct{})
+	got := make([]structField, 0, rt.NumField())
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		got = append(got, structField{Name: f.Name, Type: f.Type.String(), Tag: string(f.Tag)})
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sttDecodeStruct has drifted from readPump's decode struct in stream.go\n got: %+v\nwant: %+v", got, want)
+	}
 }
 
 // TestSTTFrameFixtures_DecodeToReadPumpFields keeps the benchmark corpus honest:
