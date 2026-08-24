@@ -28,22 +28,53 @@ func encodeVectorReference(v []float32) string {
 // cannot optimise the call away inside the allocation measurement.
 var encodeVectorSink string
 
-// TestEncodeVectorAllocationBudget holds the renderer to a constant number of
-// allocations regardless of vector length (#613). Every embedding write —
-// SetChunkEmbedding, SetNodeEmbedding, and the embedworker draining a whole
-// backlog — pays this cost per row, so a per-element allocation is per-row GC
-// pressure. One buffer plus one string conversion is the budget.
+// TestEncodeVectorAllocationBudget holds the renderer to two allocations — the
+// buffer and the final string conversion — regardless of vector length or
+// content (#613). Every embedding write (SetChunkEmbedding, SetNodeEmbedding,
+// the embedworker draining a whole backlog) pays this per row, so a per-element
+// allocation is per-row GC pressure.
+//
+// The worst case is the one that matters: a buffer sized for typical elements
+// regrows — a third allocation — on a vector where every element renders at the
+// float32 maximum. Shortest-round-trip 'g' formatting tops out at 15 bytes
+// ("-1.35849605e-05": sign, 9 significant digits, point, 4-byte exponent), 16
+// with the separator, so the "typical" case alone would not catch an undersized
+// cap.
 func TestEncodeVectorAllocationBudget(t *testing.T) {
-	vec := make([]float32, 768)
-	for i := range vec {
-		vec[i] = float32(math.Sin(float64(i) * 0.7300271))
+	const budget = 2
+
+	typical := make([]float32, 768)
+	for i := range typical {
+		typical[i] = float32(math.Sin(float64(i) * 0.7300271))
 	}
-	const budget = 3
-	got := testing.AllocsPerRun(50, func() {
-		encodeVectorSink = encodeVector(vec)
-	})
-	if got > budget {
-		t.Errorf("encodeVector allocated %.0f times per call, want at most %d", got, budget)
+
+	// Every element renders at the 15-byte maximum; asserted below rather than
+	// assumed, so a formatting change cannot quietly defang this case.
+	widest := make([]float32, 768)
+	for i := range widest {
+		widest[i] = -1.35849605e-05
+	}
+	for i, f := range widest {
+		if got := len(strconv.FormatFloat(float64(f), 'g', -1, 32)); got != 15 {
+			t.Fatalf("widest[%d] renders in %d bytes, want the 15-byte float32 maximum", i, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		vec  []float32
+	}{
+		{"typical embedding", typical},
+		{"widest elements", widest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testing.AllocsPerRun(50, func() {
+				encodeVectorSink = encodeVector(tc.vec)
+			})
+			if got > budget {
+				t.Errorf("encodeVector allocated %.0f times per call, want at most %d", got, budget)
+			}
+		})
 	}
 }
 

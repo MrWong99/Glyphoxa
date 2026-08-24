@@ -152,9 +152,12 @@ func (s *Store) SetChunkEmbedding(ctx context.Context, id uuid.UUID, vec []float
 // emits the identical bytes, so values written before and after this change are
 // byte-identical in the column.
 func encodeVector(v []float32) string {
-	// 14 bytes covers a shortest-round-trip float32 ("-1.2345678e-05") plus its
-	// separator; the ']' and a byte of slack ride along in the +2.
-	buf := make([]byte, 0, len(v)*15+2)
+	// A shortest-round-trip float32 is at most 15 bytes ("-1.35849605e-05":
+	// sign, 9 significant digits, point, 4-byte exponent), 16 with its
+	// separator; the two brackets ride along in the +2. Sizing for the maximum
+	// means no vector can force a regrow, so the allocation count is two for
+	// every input.
+	buf := make([]byte, 0, len(v)*16+2)
 	buf = append(buf, '[')
 	for i, f := range v {
 		if i > 0 {
