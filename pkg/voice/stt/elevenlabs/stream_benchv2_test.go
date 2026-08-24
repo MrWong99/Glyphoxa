@@ -17,14 +17,13 @@ import (
 	"testing"
 )
 
-// decodeSTTFrameV2 is [decodeSTTFrame] with the explicit v2 unmarshaler; the
-// struct shape is identical so the two benchmarks differ only in the decoder.
+// decodeSTTFrameV2 is [decodeSTTFrame] with the explicit v2 unmarshaler. It
+// decodes into the same [sttDecodeStruct] — so the two benchmarks differ only
+// in the decoder, and the v2 side is covered by the same AST drift guard
+// (TestSTTDecodeStruct_MatchesReadPump) rather than carrying a third copy of
+// readPump's struct.
 func decodeSTTFrameV2(data []byte) (messageType, text, errText string, err error) {
-	var msg struct {
-		MessageType string `json:"message_type"`
-		Text        string `json:"text"`
-		Error       string `json:"error"`
-	}
+	var msg sttDecodeStruct
 	if err := jsonv2.Unmarshal(data, &msg); err != nil {
 		return "", "", "", err
 	}
