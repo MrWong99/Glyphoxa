@@ -172,3 +172,19 @@ func TestSSEMetricsUnwired(t *testing.T) {
 	flood(bus, subBuffer+2)
 	r.detach(s2)
 }
+
+// TestSSEMetricsTypedNil: a nil *fakeSSEMetrics is a NON-nil interface value, so
+// a plain `m == nil` guard would store it and panic on the first attach. Boot
+// wires whatever recorder the mode built, and a mode that builds none hands over
+// a typed nil — the relay must degrade to discard, never take the process down.
+func TestSSEMetricsTypedNil(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+
+	var typedNil *fakeSSEMetrics
+	r.SetMetrics(typedNil)
+
+	bus.Publish(voiceevent.STTFinal{At: at(0), Text: "warm", TurnID: "w"})
+	s, _ := r.attach(id, 0)
+	flood(bus, subBuffer+2)
+	r.detach(s)
+}

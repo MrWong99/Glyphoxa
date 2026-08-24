@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -351,16 +352,36 @@ func (discardSSEMetrics) TranscriptSSELagged()            {}
 func (discardSSEMetrics) SetTranscriptSSESubscribers(int) {}
 
 // SetMetrics wires the SSE observability sink (#612) after construction,
-// mirroring SetResolver so NewRelay call sites stay byte-identical. nil restores
-// the discard default. Called once at boot before the relay serves any
-// connection; guarded by r.mu so it is safe against the subscribed bus callback.
+// mirroring SetResolver so NewRelay call sites stay byte-identical. A nil sink —
+// including a TYPED nil, e.g. a (*observe.PrometheusRecorder)(nil) from a mode
+// that built no recorder, which is a non-nil interface value and would panic on
+// the first attach — restores the discard default. Called once at boot before
+// the relay serves any connection; guarded by r.mu so it is safe against the
+// subscribed bus callback.
 func (r *Relay) SetMetrics(m SSEMetrics) {
-	r.mu.Lock()
-	if m == nil {
+	if isNilSink(m) {
 		m = discardSSEMetrics{}
 	}
+	r.mu.Lock()
 	r.metrics = m
 	r.mu.Unlock()
+}
+
+// isNilSink reports whether m carries nothing to call: an untyped nil interface,
+// or an interface holding a nil pointer/map/etc. Observability must never be the
+// thing that kills the process, so a miswired sink degrades to discard rather
+// than panicking on the fan-out path.
+func isNilSink(m SSEMetrics) bool {
+	if m == nil {
+		return true
+	}
+	v := reflect.ValueOf(m)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // TenantScope reports whether the Voice Session belongs to the Tenant — the
