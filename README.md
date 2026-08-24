@@ -3,7 +3,7 @@
 # 🐉 Glyphoxa
 
 [![CI](https://github.com/MrWong99/Glyphoxa/actions/workflows/ci.yml/badge.svg)](https://github.com/MrWong99/Glyphoxa/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/MrWong99/Glyphoxa)](https://goreportcard.com/report/github.com/MrWong99/Glyphoxa)
 [![codecov](https://codecov.io/github/MrWong99/Glyphoxa/graph/badge.svg?token=NCVR87I8YK)](https://codecov.io/github/MrWong99/Glyphoxa)
@@ -74,7 +74,7 @@ docs/configuration.md §9).
 
 ### Prerequisites
 
-- **Go 1.26+** — the default build is pure Go (`CGO_ENABLED=0`); no C toolchain
+- **Go 1.27+** — the default build is pure Go (`CGO_ENABLED=0`); no C toolchain
 - **Node.js 20+ and npm** — the console bundle is embedded into the binary
 - **[buf](https://buf.build/docs/installation)** — generates the Connect/protobuf stubs
 - **Postgres with the [pgvector](https://github.com/pgvector/pgvector) extension**

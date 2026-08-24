@@ -543,7 +543,7 @@ jobs:
       # Install golangci-lint v2 from source rather than via the official
       # action: the action's v6 release pins golangci-lint v1, which can't
       # parse the v2 config in .golangci.yml and refuses to run against
-      # Go 1.26 modules. Building from source under the same Go toolchain
+      # Go 1.27 modules. Building from source under the same Go toolchain
       # used for the project sidesteps both problems and keeps the lint
       # binary's "built with" version aligned with the project target.
       # Pinned (not @latest) so a new lint release can't change what CI
