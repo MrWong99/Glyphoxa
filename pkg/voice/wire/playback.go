@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -70,7 +71,7 @@ func PlaySentence(ctx context.Context, sess *gxvoice.Session, codec Codec, chunk
 // fake player and no live connection. It publishes no FirstOpus (nil bus); the
 // live pump uses [playSentenceBus].
 func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk) error {
-	return playSentenceBus(ctx, p, codec, chunks, nil, nil)
+	return playSentenceBus(ctx, p, codec, chunks, nil, nil, nil)
 }
 
 // playSentenceBus is playSentence with an optional bus: when non-nil, the
@@ -81,7 +82,9 @@ func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-ch
 // or a ctx with no turn id leaves the Source unwrapped. outboundTap, when non-nil,
 // receives every Opus frame pulled to the wire (#306's agent-speech capture); it
 // must not block.
-func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk, bus *voiceevent.Bus, outboundTap func(opus []byte)) error {
+// firstFrame, when non-nil, is called with the moment THIS sentence's first Opus
+// frame reaches the wire (#606's inter-sentence gap end stamp); it must not block.
+func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk, bus *voiceevent.Bus, outboundTap func(opus []byte), firstFrame func(t time.Time)) error {
 	if chunks == nil {
 		return fmt.Errorf("wire.PlaySentence: chunks must not be nil")
 	}
@@ -107,6 +110,10 @@ func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <
 	src = newTappedSource(src, outboundTap)
 	src = newFirstAudioSource(src, bus, voiceevent.TurnIDFrom(ctx), voiceevent.IsPlaybackLookahead(ctx))
 	src = newFirstOpusSource(src, bus, voiceevent.TurnIDFrom(ctx))
+	// Outermost (#606): the per-sentence first-frame stamp closes the inter-sentence
+	// gap on the same frame the wrappers below have already published against. Nil
+	// firstFrame (the turn's first sentence, or no recorder) leaves src unwrapped.
+	src = newFirstFrameSource(src, firstFrame)
 
 	pb, err := p.Play(ctx, src)
 	if err != nil {

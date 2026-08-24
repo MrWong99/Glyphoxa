@@ -62,3 +62,26 @@ func (t teeRecorder) HighlightClassify(o HighlightOutcome) {
 		hc.HighlightClassify(o)
 	}
 }
+
+// IntersentenceGap forwards the playback-gap sample to the wrapped base when it
+// implements the pump's recorder (#606). Same reason as HighlightClassify above:
+// IntersentenceGap is NOT on StageRecorder, so the embedded INTERFACE promotes
+// nothing and the pump's type-assertion would fail behind this tee — the series
+// would read zero in production (the session Manager always wraps the adapter here)
+// while every test on the bare adapter passed. No usage fan-out: this is a pure
+// metric, the spend meter prices nothing off it. Re-asserting on base keeps the
+// recovery working through any tee depth (base may itself be a tee).
+func (t teeRecorder) IntersentenceGap(d time.Duration) {
+	if ig, ok := t.StageRecorder.(interface{ IntersentenceGap(time.Duration) }); ok {
+		ig.IntersentenceGap(d)
+	}
+}
+
+// PlaybackLookahead forwards the look-ahead lane count to the wrapped base when it
+// implements the pump's recorder (#606) — same capability-through-the-tee rule as
+// IntersentenceGap above.
+func (t teeRecorder) PlaybackLookahead(ev LookaheadEvent) {
+	if pl, ok := t.StageRecorder.(interface{ PlaybackLookahead(LookaheadEvent) }); ok {
+		pl.PlaybackLookahead(ev)
+	}
+}
