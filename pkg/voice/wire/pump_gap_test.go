@@ -49,18 +49,25 @@ func (r *fakePumpRecorder) snapshotEvents() []observe.LookaheadEvent {
 // not: it PULLS the first frame from the playback Source, which is what stamps the
 // first-frame moment the gap is measured to. delay pauses before that pull, so the
 // injected silence is a lower bound on the recorded gap.
+// mute lists 1-based play indexes that yield NO frame at all — a sentence whose
+// audio never reached the wire (an immediately barge-cancelled or empty one).
 type gapPlayer struct {
 	started chan *fakePlayback
 	delay   time.Duration
+	mute    map[int]bool
+	plays   int
 }
 
 func newGapPlayer(delay time.Duration) *gapPlayer {
-	return &gapPlayer{started: make(chan *fakePlayback, 8), delay: delay}
+	return &gapPlayer{started: make(chan *fakePlayback, 8), delay: delay, mute: map[int]bool{}}
 }
 
 func (p *gapPlayer) Play(ctx context.Context, src gxvoice.Source) (playback, error) {
 	time.Sleep(p.delay)
-	_, _ = src.NextFrame(ctx)
+	p.plays++
+	if !p.mute[p.plays] {
+		_, _ = src.NextFrame(ctx)
+	}
 	pb := &fakePlayback{done: make(chan struct{})}
 	p.started <- pb
 	return pb, nil
@@ -188,6 +195,37 @@ func TestPlaybackPump_GapPerSentenceBoundary(t *testing.T) {
 
 	if gaps := rec.snapshotGaps(); len(gaps) != 2 {
 		t.Fatalf("gap samples = %v, want 2 (one per sentence boundary of a 3-sentence turn)", gaps)
+	}
+}
+
+// TestPlaybackPump_FramelessSentenceKeepsPreviousAnchor pins where the gap span is
+// anchored when a sentence puts NOTHING on the wire: its "end" was never audible,
+// so restamping there would measure from a moment no one heard. The span stays
+// anchored at the last sentence that actually reached the wire, and the next
+// audible frame closes it — one sample, spanning the silent sentence too.
+func TestPlaybackPump_FramelessSentenceKeepsPreviousAnchor(t *testing.T) {
+	const delay = 20 * time.Millisecond
+	rec := &fakePumpRecorder{}
+	p := newGapPlayer(delay)
+	p.mute[2] = true // sentence 2 yields no frame at all
+	pump := newPump(p, fakeCodec{}, nil, nil, WithPumpRecorder(rec))
+	defer pump.Close()
+
+	ctx := turnCtx("T1")
+	for i := 0; i < 3; i++ {
+		_, ro := openChunks()
+		pump.HandleSentence(ctx, ro)
+		p.waitPlay(t).finish(nil)
+	}
+
+	gaps := rec.snapshotGaps()
+	if len(gaps) != 1 {
+		t.Fatalf("gap samples = %v, want exactly 1 (a frameless sentence opens no span of its own)", gaps)
+	}
+	// Anchored at sentence 1's end, so the span covers the silent sentence as well
+	// — strictly more than the single inter-play delay.
+	if gaps[0] < 2*delay {
+		t.Fatalf("gap = %v, want ≥ %v: the span must stay anchored at the last AUDIBLE sentence's end", gaps[0], 2*delay)
 	}
 }
 

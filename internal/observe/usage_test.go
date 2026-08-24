@@ -1,6 +1,7 @@
 package observe
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,5 +53,41 @@ func TestTeeUsageFansOutUsageOnly(t *testing.T) {
 	}
 	if sink.llm != 1 || sink.tts != 1 || sink.stt != 1 {
 		t.Fatalf("sink usage counts = llm:%d tts:%d stt:%d, want 1/1/1", sink.llm, sink.tts, sink.stt)
+	}
+}
+
+// pumpCapable is the capability the pump wiring recovers by type-assertion:
+// IntersentenceGap/PlaybackLookahead are NOT on StageRecorder (#606), exactly like
+// HighlightClassify. Declared here so the test asserts the same shape production does.
+type pumpCapable interface {
+	IntersentenceGap(time.Duration)
+	PlaybackLookahead(LookaheadEvent)
+}
+
+// TestTeeUsagePreservesPumpRecorder is the regression pin for the capability the
+// spend tee swallows by default: the session Manager wraps the Prometheus adapter in
+// TeeUsage, which embeds the StageRecorder INTERFACE — so without an explicit
+// override the pump's assertion fails behind the tee and both #606 series record
+// zero in production, while every unit test on the bare adapter still passes.
+func TestTeeUsagePreservesPumpRecorder(t *testing.T) {
+	base := NewPrometheusRecorder()
+	tee := TeeUsage(base, &sinkSpy{})
+
+	pc, ok := tee.(pumpCapable)
+	if !ok {
+		t.Fatal("the spend tee hides the pump recorder: the #606 series would never record in production")
+	}
+	pc.IntersentenceGap(400 * time.Millisecond)
+	pc.PlaybackLookahead(LookaheadReleased)
+
+	// Through ANY tee depth the samples must land on the wrapped adapter's series.
+	out := scrape(t, base)
+	for _, want := range []string{
+		`glyphoxa_voice_playback_intersentence_gap_seconds_count 1`,
+		`glyphoxa_voice_playback_lookahead_total{event="released"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tee did not forward to the wrapped adapter; missing %q\n%s", want, filterGlyphoxa(out))
+		}
 	}
 }

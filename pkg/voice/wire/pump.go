@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
@@ -327,7 +328,12 @@ func (p *PlaybackPump) run() {
 			// "the NPC went mute", so warn on everything except the expected
 			// barge-in interrupt and ctx cancellation.
 			turn := voiceevent.TurnIDFrom(job.ctx)
-			err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap, p.gapStamp(turn))
+			// audible flips on this sentence's first frame reaching the wire. It is
+			// written on disgo's sender goroutine and read here after the playback's
+			// Done, hence atomic.
+			var audible atomic.Bool
+			err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap,
+				p.firstFrameStamp(turn, &audible))
 			if err != nil && !errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
 				p.logger.Warn("wire: sentence playback failed", "err", err)
 			}
@@ -338,6 +344,13 @@ func (p *PlaybackPump) run() {
 			// giant outlier the GM never experienced as a stutter.
 			if err != nil {
 				p.lastEndAt, p.lastEndTurn = time.Time{}, ""
+				continue
+			}
+			// A sentence that put NOTHING on the wire has no audible end to anchor
+			// the next gap to, so it leaves the previous anchor untouched: the span
+			// then correctly runs from the last sentence the room actually heard to
+			// the next frame it hears, silent sentence included.
+			if !audible.Load() {
 				continue
 			}
 			p.lastEndAt, p.lastEndTurn = time.Now(), turn
@@ -368,21 +381,30 @@ func (p *PlaybackPump) lookahead(ev observe.LookaheadEvent) {
 	p.rec.PlaybackLookahead(ev)
 }
 
-// gapStamp returns the first-frame callback that records the inter-sentence gap
-// for the sentence about to play, or nil when there is no gap to measure (#606).
+// firstFrameStamp returns the callback fired when the sentence about to play puts
+// its first frame on the wire (#606). It always marks the sentence audible — that
+// is what qualifies its end as an anchor for the NEXT gap — and additionally
+// records the gap when this sentence closes one.
+//
 // A gap exists ONLY between consecutive sentences of the SAME turn: a turn's first
 // sentence measures nothing (that span is response_latency's, ADR-0032), and the
 // silence across a turn boundary is conversational, not a pipeline stutter — so
 // neither is sampled. Called on (and only on) the worker goroutine, which owns the
 // lastEnd fields; the returned closure runs on disgo's 20 ms sender goroutine and
-// so does no logging and takes no lock.
-func (p *PlaybackPump) gapStamp(turn string) func(time.Time) {
-	if p.rec == nil || turn == "" || turn != p.lastEndTurn || p.lastEndAt.IsZero() {
+// so does no logging and takes no lock. Nil recorder → nil callback, no wrapper.
+func (p *PlaybackPump) firstFrameStamp(turn string, audible *atomic.Bool) func(time.Time) {
+	if p.rec == nil {
 		return nil
+	}
+	if turn == "" || turn != p.lastEndTurn || p.lastEndAt.IsZero() {
+		return func(time.Time) { audible.Store(true) }
 	}
 	start := p.lastEndAt
 	rec := p.rec
-	return func(t time.Time) { rec.IntersentenceGap(t.Sub(start)) }
+	return func(t time.Time) {
+		audible.Store(true)
+		rec.IntersentenceGap(t.Sub(start))
+	}
 }
 
 // Close stops the worker (after any in-flight sentence) and blocks until it has
