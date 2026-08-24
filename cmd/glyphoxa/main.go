@@ -195,6 +195,20 @@ func main() {
 // drives the hot-path plumbing counters (Config.Metrics → Manager) AND the
 // orchestrator stage/turn latency + provider series (Config.StageMetrics →
 // buildConversation: the bus subscriber + the agenttool provider adapter).
+// newTracedPool opens a pgxpool with the storage QueryTracer attached, so every
+// query the pool runs feeds glyphoxa_db_query_seconds under its bounded
+// statement family (#605, ADR-0032). Used for the three LONG-LIVED server pools
+// (voice node, voice worker, web) — the CLI one-shots (seed/billing/export/user)
+// stay untraced: they run once and exit, with no /metrics to scrape.
+func newTracedPool(ctx context.Context, dsn string, rec storage.QueryMetrics) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse db dsn: %w", err)
+	}
+	cfg.ConnConfig.Tracer = storage.NewQueryTracer(rec)
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
 func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *observe.PrometheusRecorder, metricsAddr string) error {
 	// #491 (ADR-0057): -mode voice WITHOUT -guild/-channel and WITH a database is
 	// the claim-plane worker — DB-driven assignment, no static target flags. WITH
@@ -238,7 +252,7 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newTracedPool(ctx, dsn, metrics)
 	if err != nil {
 		return fmt.Errorf("voice: open db pool: %w", err)
 	}
@@ -372,7 +386,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		return err
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newTracedPool(ctx, dsn, metrics)
 	if err != nil {
 		return fmt.Errorf("voice worker: open db pool: %w", err)
 	}
@@ -831,7 +845,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return fmt.Errorf("web: %w", err)
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newTracedPool(ctx, dsn, metrics)
 	if err != nil {
 		return fmt.Errorf("web: open db pool: %w", err)
 	}
