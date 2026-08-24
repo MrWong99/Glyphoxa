@@ -479,10 +479,18 @@ voice:
   # documented here because enabling it needs a volume, not just an env var.
   #
   # Setting GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS (integer milliseconds, e.g. 2500 =
-  # the response_latency p95 SLO) arms a runtime/trace FlightRecorder in the voice
-  # process: every turn slower than the threshold dumps the last ~10s of execution
-  # trace to GLYPHOXA_FLIGHT_TRACE_DIR (default $TMPDIR/glyphoxa-flight), newest 8
-  # kept, at most one snapshot per 30s. Read one with `go tool trace <file>`.
+  # the response_latency p95 SLO) arms a runtime/trace FlightRecorder: every turn
+  # slower than the threshold dumps the last ~10s of execution trace to
+  # GLYPHOXA_FLIGHT_TRACE_DIR (default $TMPDIR/glyphoxa-flight), newest 8 kept, at
+  # most one snapshot per 30s. Read one with `go tool trace <file>`.
+  #
+  # Armed by every process that hosts the voice hot path: the standalone voice
+  # node, the claim-plane voice worker, and — under `mode: all`, where the web pod
+  # runs the voice loop in-process — the web pod. So under `mode: split` set it on
+  # the voice pod, and under `mode: all` set it on the web pod. A web-only replica
+  # (`mode: split`) ignores the env var entirely: it records no response_latency
+  # span. Arming logs one line ("flight recorder armed", with threshold and dir),
+  # which is how you confirm it took effect.
   #
   # Two costs to accept before arming it: ~1-2% CPU continuously while armed, and
   # the image is FROM scratch with a read-only root filesystem — so the directory

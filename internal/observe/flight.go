@@ -58,6 +58,7 @@ type FlightRecorder struct {
 
 	trigger  chan time.Duration
 	done     chan struct{}
+	wg       sync.WaitGroup // Close joins the writer goroutine through it
 	closeOne sync.Once
 
 	// last is the time of the previous snapshot. Writer-goroutine-owned — no
@@ -132,6 +133,7 @@ func newFlightRecorder(threshold time.Duration, dir string, writeTo func(io.Writ
 		trigger: make(chan time.Duration, 1),
 		done:    make(chan struct{}),
 	}
+	f.wg.Add(1)
 	go f.run()
 	return f
 }
@@ -154,11 +156,20 @@ func (f *FlightRecorder) LatencyBreach(d time.Duration) {
 // trace window is dumped at most once at a time and the hot path pays nothing
 // but a channel send.
 func (f *FlightRecorder) run() {
+	defer f.wg.Done()
 	for {
 		select {
 		case <-f.done:
 			return
 		case d := <-f.trigger:
+			// Shutdown wins a race with a queued trigger: without this re-check
+			// a breach landing as the process drains would call WriteTo on an
+			// already-stopped recorder and log a confusing failure on the way out.
+			select {
+			case <-f.done:
+				return
+			default:
+			}
 			f.snapshot(d)
 		}
 	}
@@ -217,6 +228,10 @@ func (f *FlightRecorder) rotate() {
 func (f *FlightRecorder) Close() {
 	f.closeOne.Do(func() {
 		close(f.done)
+		// Join the writer BEFORE stopping the runtime recorder: a snapshot in
+		// flight must finish against a live trace window, not a stopped one.
+		// Bounded by one WriteTo of a 16 MiB window.
+		f.wg.Wait()
 		f.stop()
 	})
 }

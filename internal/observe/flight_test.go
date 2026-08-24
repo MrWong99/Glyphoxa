@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +51,37 @@ func snapshots(t *testing.T, dir string, want int) []string {
 			return names
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestFlightRecorderCooldownExpires drives the cooldown off a fake clock so
+// both directions are pinned: it must SUPPRESS a breach inside the window and
+// must RE-ARM once the window elapses. Without the second half, a recorder that
+// snapshots exactly once per process lifetime would look healthy.
+func TestFlightRecorderCooldownExpires(t *testing.T) {
+	f, dir := newTestRecorder(t, 500*time.Millisecond)
+	var clock atomic.Int64 // nanoseconds since base; atomic so the writer may read it freely
+	base := time.Date(2026, 8, 24, 20, 0, 0, 0, time.UTC)
+	f.now = func() time.Time { return base.Add(time.Duration(clock.Load())) }
+
+	f.LatencyBreach(900 * time.Millisecond)
+	if names := snapshots(t, dir, 1); len(names) != 1 {
+		t.Fatalf("first breach: snapshots = %v, want 1", names)
+	}
+
+	// Inside the cooldown: same incident, no second dump.
+	clock.Store(int64(10 * time.Second))
+	f.LatencyBreach(900 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	if names := snapshots(t, dir, 1); len(names) != 1 {
+		t.Fatalf("breach 10s later: snapshots = %v, want still 1", names)
+	}
+
+	// Past the cooldown: a later spike is a new incident and gets its own trace.
+	clock.Store(int64(flightCooldown + time.Second))
+	f.LatencyBreach(900 * time.Millisecond)
+	if names := snapshots(t, dir, 2); len(names) != 2 {
+		t.Fatalf("breach after the cooldown: snapshots = %v, want 2", names)
 	}
 }
 

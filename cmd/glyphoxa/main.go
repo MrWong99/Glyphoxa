@@ -193,6 +193,26 @@ func newTracedPool(ctx context.Context, dsn string, rec storage.QueryMetrics) (*
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
+// armFlightRecorder arms the #607 execution-trace recorder if
+// GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS says so (off by default) and returns the
+// shutdown func, so a caller writes `defer armFlightRecorder(log, metrics)()`.
+// It is called from EVERY entrypoint that hosts the voice hot path — the
+// standalone node, the claim-plane worker and `all` mode — and from none that
+// does not: a web-only replica records no response_latency span, so arming it
+// there would buy nothing for ~1-2% CPU.
+//
+// Call it at boot, before anything starts a bus subscriber: that ordering is
+// what makes [observe.PrometheusRecorder.SetResponseLatencyHook]'s plain field
+// safe. The returned func is a no-op when the recorder is off.
+func armFlightRecorder(log *slog.Logger, metrics *observe.PrometheusRecorder) func() {
+	fr := observe.StartFlightRecorder(os.Getenv, log)
+	if fr == nil {
+		return func() {}
+	}
+	metrics.SetResponseLatencyHook(fr.LatencyBreach)
+	return fr.Close
+}
+
 // runVoice resolves runtime credentials from the environment, builds the live
 // NPC voice loop, and runs it until SIGINT/SIGTERM. Credentials are never
 // compiled in: DISCORD_BOT_TOKEN, plus the provider keys the STT/TTS/LLM
@@ -231,16 +251,7 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// empty except the DAVE counter and the process collectors.
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
-	// #607: opt-in execution-trace snapshots on a response_latency SLO breach,
-	// armed by GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS (nil = off, the default). Voice
-	// mode only — the web tier records no SLO span and should never pay the
-	// recorder's ~1-2% CPU. Installed HERE, before buildConversation starts the
-	// bus subscriber that calls ResponseLatency, which is the ordering
-	// SetResponseLatencyHook requires.
-	if fr := observe.StartFlightRecorder(os.Getenv, log); fr != nil {
-		metrics.SetResponseLatencyHook(fr.LatencyBreach)
-		defer fr.Close()
-	}
+	defer armFlightRecorder(log, metrics)() // #607
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -388,14 +399,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN") // central-token fallback; BYOK tenants override per-session
-	// #607, same as the standalone node above: arm before anything records a
-	// span, and leave it off unless GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS says
-	// otherwise. On the worker the snapshots cover every Voice Instance this pod
-	// claims, which is exactly the fleet-level "p95 spiked last night" case.
-	if fr := observe.StartFlightRecorder(os.Getenv, log); fr != nil {
-		metrics.SetResponseLatencyHook(fr.LatencyBreach)
-		defer fr.Close()
-	}
+	defer armFlightRecorder(log, metrics)()    // #607
 
 	dsn := databaseURL()
 	// ADR-0031: the worker never migrates (only -mode all does); verify the schema
@@ -1002,6 +1006,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	cfg.Logger = log
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
+	// #607: `all` mode drives the voice loop in-process, so it hosts the same
+	// realtime hot path a voice pod does and arms the same diagnostic — which is
+	// the self-host case that has no separate voice pod to arm instead. A web-only
+	// replica records no SLO span and stays unarmed, whatever the env says.
+	if withVoice {
+		defer armFlightRecorder(log, metrics)()
+	}
 	// ONE process-wide event bus (issue #73, ADR-0014): set on the base config
 	// BEFORE the Manager copies it, so the bus pointer flows through every
 	// manager-started session (Manager.base → RunFromDB → connectAndServe) and
