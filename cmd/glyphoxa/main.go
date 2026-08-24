@@ -231,6 +231,16 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// empty except the DAVE counter and the process collectors.
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
+	// #607: opt-in execution-trace snapshots on a response_latency SLO breach,
+	// armed by GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS (nil = off, the default). Voice
+	// mode only — the web tier records no SLO span and should never pay the
+	// recorder's ~1-2% CPU. Installed HERE, before buildConversation starts the
+	// bus subscriber that calls ResponseLatency, which is the ordering
+	// SetResponseLatencyHook requires.
+	if fr := observe.StartFlightRecorder(os.Getenv, log); fr != nil {
+		metrics.SetResponseLatencyHook(fr.LatencyBreach)
+		defer fr.Close()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -378,6 +388,14 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN") // central-token fallback; BYOK tenants override per-session
+	// #607, same as the standalone node above: arm before anything records a
+	// span, and leave it off unless GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS says
+	// otherwise. On the worker the snapshots cover every Voice Instance this pod
+	// claims, which is exactly the fleet-level "p95 spiked last night" case.
+	if fr := observe.StartFlightRecorder(os.Getenv, log); fr != nil {
+		metrics.SetResponseLatencyHook(fr.LatencyBreach)
+		defer fr.Close()
+	}
 
 	dsn := databaseURL()
 	// ADR-0031: the worker never migrates (only -mode all does); verify the schema
