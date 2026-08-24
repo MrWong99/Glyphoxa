@@ -309,6 +309,31 @@ func TestSessionGaugeTracksOpenClose(t *testing.T) {
 	}
 }
 
+// TestDBQueryHistogram pins the Postgres query-latency family (#605, ADR-0032):
+// the metric name, the bounded `query` family label, and the sub-second bucket
+// layout that makes an ANN p95 readable against the 250ms recall budget
+// (ADR-0042).
+func TestDBQueryHistogram(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.DBQuery("search_chunks", 5*time.Millisecond)
+	rec.DBQuery("other", 300*time.Millisecond)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		`glyphoxa_db_query_seconds_bucket{query="search_chunks",le="0.005"} 1`,
+		`glyphoxa_db_query_seconds_count{query="search_chunks"} 1`,
+		`glyphoxa_db_query_seconds_bucket{query="other",le="0.25"} 0`,
+		`glyphoxa_db_query_seconds_bucket{query="other",le="0.5"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
 func TestNoUnboundedLabels(t *testing.T) {
 	// Cardinality guard (ADR-0032 §2.1): the guild passed to the plumbing methods
 	// must NEVER reach a series — only bounded enums label glyphoxa_voice_*.

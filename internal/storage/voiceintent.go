@@ -74,6 +74,7 @@ func (s *Store) CreateVoiceSessionIntent(ctx context.Context, tenantID, campaign
 // mid-session takeover); ReapDeadVoiceSessionIntents marks such a row 'dead'
 // instead, and the Tenant restarts.
 func (s *Store) ClaimVoiceSessionIntent(ctx context.Context, instanceID string) (VoiceSessionIntent, error) {
+	ctx = withQueryFamily(ctx, famClaimVoiceIntent) // #605
 	row := s.db.QueryRow(ctx,
 		`UPDATE voice_session_intents
 		    SET status = 'claimed',

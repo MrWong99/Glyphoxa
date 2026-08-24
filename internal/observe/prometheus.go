@@ -146,6 +146,15 @@ type PrometheusRecorder struct {
 	// (ADR-0032). The gauge is Set-from-COUNT like embeddingBacklog.
 	transcriptSSELagged      prometheus.Counter
 	transcriptSSESubscribers prometheus.Gauge
+
+	// #605
+	// Postgres query latency (#605, ADR-0032/0042): per-statement-family timing
+	// fed by the pgx QueryTracer on the long-lived server pools. query is a
+	// bounded label from storage's const family registry (search_chunks,
+	// first_line_at_or_after, …) with everything unannotated in "other" — the SQL
+	// text and its args NEVER reach a series. Process-level (namespace only): a
+	// query is an OLTP read, not a voice-pipeline stage.
+	dbQuery *prometheus.HistogramVec // query
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
@@ -168,6 +177,14 @@ var recallBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.25, 0.5}
 // is sub-millisecond, so the bins start at 1ms and run to 250ms — five times the
 // budget — to size how badly a wedged DB overruns it.
 var kgFactsBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25}
+
+// #605
+// dbQueryBuckets size the Postgres query-latency histogram (#605): OLTP reads
+// are sub-second work, so the bins run 1ms..1s — dense at the bottom, where a
+// healthy indexed read lives, with boundaries at 0.25s and 0.5s so the ANN
+// search's p95 reads directly against the 250ms recall budget (ADR-0042). A
+// query slower than 1s lands in +Inf, which is itself the alert.
+var dbQueryBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1}
 
 // FactsOutcome is the bounded outcome label on the KG-fact-read counter
 // (glyphoxa_kg_facts_total, #126). Exactly three values reach a series (ADR-0032):
@@ -410,6 +427,15 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	})
 	reg.MustRegister(r.transcriptSSELagged, r.transcriptSSESubscribers)
 
+	// #605
+	r.dbQuery = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, // process-level like embedding_backlog (ADR-0032)
+		Name:      "db_query_seconds",
+		Help:      "Postgres query latency by bounded statement family (#605); unannotated statements record as \"other\".",
+		Buckets:   dbQueryBuckets,
+	}, []string{"query"})
+	reg.MustRegister(r.dbQuery)
+
 	return r
 }
 
@@ -628,4 +654,15 @@ func (r *PrometheusRecorder) TranscriptSSELagged() {
 // or a restart, mirroring SetEmbeddingBacklog.
 func (r *PrometheusRecorder) SetTranscriptSSESubscribers(n int) {
 	r.transcriptSSESubscribers.Set(float64(n))
+}
+
+// #605
+// DBQuery records one Postgres query's latency under its statement family
+// (#605). query MUST come from storage's const family registry — the pgx
+// QueryTracer is the sole caller and emits only registered names or "other", so
+// this method does no clamping and the label space stays bounded (ADR-0032).
+// Called on the query hot path (the ANN search inside the 250ms recall budget,
+// ADR-0042), so it is one Observe and nothing else.
+func (r *PrometheusRecorder) DBQuery(query string, d time.Duration) {
+	r.dbQuery.WithLabelValues(query).Observe(d.Seconds())
 }

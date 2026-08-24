@@ -66,6 +66,7 @@ func scanTranscriptLine(row pgx.Row) (TranscriptLine, error) {
 // ListTranscriptLines (ORDER BY seq) matches the live-view order even when an
 // interleaved line landed between a reply's sentences.
 func (s *Store) UpsertTranscriptLine(ctx context.Context, l TranscriptLine) error {
+	ctx = withQueryFamily(ctx, famUpsertTranscriptLine) // #605
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO transcript_line (`+transcriptLineInsertColumns+`)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
@@ -190,6 +191,7 @@ func (s *Store) SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID,
 // time (a chunk flushed after the last persisted Line) is ErrNotFound — the
 // caller renders the hit without a scroll target, not an error.
 func (s *Store) FirstLineIDAtOrAfter(ctx context.Context, voiceSessionID uuid.UUID, at time.Time) (string, error) {
+	ctx = withQueryFamily(ctx, famFirstLineAtOrAfter) // #605
 	var lineID string
 	err := s.db.QueryRow(ctx,
 		`SELECT line_id

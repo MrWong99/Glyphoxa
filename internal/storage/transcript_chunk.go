@@ -39,6 +39,7 @@ type TranscriptChunk struct {
 // arrays default to empty (never NULL). embedding_model is left at its empty
 // column default; the backfill worker (#116) stamps it when it embeds the row.
 func (s *Store) InsertTranscriptChunk(ctx context.Context, c TranscriptChunk) (uuid.UUID, error) {
+	ctx = withQueryFamily(ctx, famInsertTranscriptChunk) // #605
 	speakers := c.SpeakerDiscordUserIDs
 	if speakers == nil {
 		speakers = []string{}
@@ -220,6 +221,9 @@ func (s *Store) searchChunks(ctx context.Context, campaignID uuid.UUID, agentID 
 	if k <= 0 {
 		return nil, fmt.Errorf("storage: search chunks: k must be > 0, got %d", k)
 	}
+	// Family annotation for the query-latency histogram (#605): the label rides
+	// the context, so the SQL below (and pgx's statement cache) is untouched.
+	ctx = withQueryFamily(ctx, famSearchChunks)
 	// $1 campaign, $2 query vector (also the <=> operand), [$3 agent], $N limit.
 	args := []any{campaignID, encodeVector(query)}
 	agentFilter := ""
