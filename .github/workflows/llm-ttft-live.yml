@@ -1,7 +1,10 @@
 name: llm-ttft-live
 
-# On-demand live TTFT probe for the deployment LLM (ADR-0036: Llama 3.3 70B on
-# Groq). This is the diagnostic instrument for the bench-live SLO: it isolates the
+# On-demand live TTFT probe for the deployment LLM (ADR-0036, #424 amendment:
+# openai/gpt-oss-120b on Groq — the -run pattern below must track the test name
+# in pkg/voice/llm/groq/latency_live_test.go, or this probe green-passes while
+# running NOTHING, which is exactly how the stale Llama pattern slipped by).
+# This is the diagnostic instrument for the bench-live SLO: it isolates the
 # RAW provider time-to-first-content-token (no STT/TTS/orchestrator) so a
 # response_latency breach can be attributed to Groq itself vs. the pipeline.
 #
@@ -57,4 +60,4 @@ jobs:
             echo "GROQ_API_KEY secret must be set under repo Settings → Secrets and variables → Actions." >&2
             exit 1
           fi
-          go test -v -tags live -run '^TestLive_GroqLlama_TTFT$' ./pkg/voice/llm/groq/
+          go test -v -tags live -run '^TestLive_GroqGPTOSS_TTFT$' ./pkg/voice/llm/groq/
