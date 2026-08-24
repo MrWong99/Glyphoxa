@@ -50,7 +50,11 @@ func (r *Relay) push(sid string, f Frame) {
 		select {
 		case s.ch <- f:
 		default:
+			// The single drop site: lagged is closed exactly once per subscriber
+			// (the check above never returns here twice), so the counter records
+			// one event per user-visible stall-and-reconnect (#612).
 			close(s.lagged)
+			r.metrics.TranscriptSSELagged()
 		}
 	}
 }
@@ -71,6 +75,7 @@ func (r *Relay) attach(id string, lastID uint64) (*subscriber, []Frame) {
 	}
 	s := &subscriber{id: id, ch: make(chan Frame, subBuffer), lagged: make(chan struct{})}
 	r.subs[s] = struct{}{}
+	r.metrics.SetTranscriptSSESubscribers(len(r.subs))
 	return s, replay
 }
 
@@ -78,6 +83,7 @@ func (r *Relay) attach(id string, lastID uint64) (*subscriber, []Frame) {
 func (r *Relay) detach(s *subscriber) {
 	r.mu.Lock()
 	delete(r.subs, s)
+	r.metrics.SetTranscriptSSESubscribers(len(r.subs))
 	r.mu.Unlock()
 }
 

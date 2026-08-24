@@ -249,6 +249,7 @@ type Relay struct {
 	store    LineStore       // persists projected lines (#74); nil disables persistence
 	resolver SpeakerResolver // resolves SpeakerID → name/GM (#281); nil = anonymous lane
 	scope    TenantScope     // tenant-ownership gate for the HTTP mounts (#439); nil = unscoped
+	metrics  SSEMetrics      // SSE lag/subscriber observability (#612); never nil after NewRelay
 	log      *slog.Logger
 
 	// proj is the shared projection scaffold (#447/#487): it attributes every
@@ -299,6 +300,7 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 		states:       map[string]*sessionState{},
 		subs:         map[*subscriber]struct{}{},
 		writeTimeout: defaultWriteTimeout,
+		metrics:      discardSSEMetrics{},
 		closing:      make(chan struct{}),
 	}
 	// One writer goroutine for the process drains the queue (#74). Only started
@@ -323,6 +325,41 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 func (r *Relay) SetResolver(res SpeakerResolver) {
 	r.mu.Lock()
 	r.resolver = res
+	r.mu.Unlock()
+}
+
+// SSEMetrics observes the live-transcript SSE fan-out (#612, ADR-0032): how
+// many browsers are tailing, and how often one falls far enough behind that the
+// relay drops it and forces an EventSource reconnect (ADR-0014's designed
+// degradation — counted, not changed). Process-level, no labels: a session id is
+// NEVER a label. Implementations MUST NOT block: both methods are called under
+// r.mu, on the bus-delivery path.
+type SSEMetrics interface {
+	// TranscriptSSELagged counts one subscriber dropped for lagging. Called at
+	// most once per subscriber lifetime.
+	TranscriptSSELagged()
+	// SetTranscriptSSESubscribers publishes the live subscriber count. Always
+	// Set-from-COUNT, never Inc/Dec, so the gauge cannot drift.
+	SetTranscriptSSESubscribers(n int)
+}
+
+// discardSSEMetrics is the do-nothing default, so an unwired relay (voice
+// standalone, unit tests) needs no nil check on the hot fan-out path.
+type discardSSEMetrics struct{}
+
+func (discardSSEMetrics) TranscriptSSELagged()            {}
+func (discardSSEMetrics) SetTranscriptSSESubscribers(int) {}
+
+// SetMetrics wires the SSE observability sink (#612) after construction,
+// mirroring SetResolver so NewRelay call sites stay byte-identical. nil restores
+// the discard default. Called once at boot before the relay serves any
+// connection; guarded by r.mu so it is safe against the subscribed bus callback.
+func (r *Relay) SetMetrics(m SSEMetrics) {
+	r.mu.Lock()
+	if m == nil {
+		m = discardSSEMetrics{}
+	}
+	r.metrics = m
 	r.mu.Unlock()
 }
 
