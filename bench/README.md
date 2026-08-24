@@ -37,7 +37,10 @@ That is byte-for-byte the command the CI job runs. Regenerate when:
 - `allocs/op` **improves** — the job reports `IMPROVED: …` and asks for a
   regeneration so the lower number becomes the new ceiling;
 - an `allocs/op` increase is **deliberate and reviewed** — regenerate in the
-  same PR, and say why in the PR body.
+  same PR, and say why in the PR body;
+- a benchmark is **removed** — until then the job hard-fails with `MISSING: …`,
+  which is deliberate: a benchmark that silently stops running (panic, deleted,
+  or a truncated run) is indistinguishable from one that never regressed.
 
 The committed baseline was generated on a 32-core Linux workstation
 (`goarch: amd64`, Go 1.27.0). The machine class is recorded only so the times

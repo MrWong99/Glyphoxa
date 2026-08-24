@@ -55,13 +55,31 @@ report=$(awk '
     name = key($1)
     a = allocs + 0
     if (FNR == NR) {
-      if (!(name in base) || a > base[name]) base[name] = a
+      if (!(name in base)) { border[++nb] = name; base[name] = a }
+      else if (a > base[name]) base[name] = a
     } else {
       if (!(name in cur)) { order[++n] = name; cur[name] = a }
       else if (a > cur[name]) cur[name] = a
     }
   }
   END {
+    # A run that parsed no allocs/op at all (e.g. -benchmem dropped from the
+    # command) must not read as "no regressions" — the whole gate would be a
+    # no-op with every line still looking like a benchmark result.
+    if (n == 0) {
+      print "FAIL: no allocs/op figures parsed from the benchmark run — was -benchmem dropped?"
+      exit 1
+    }
+    # Walk the BASELINE first: a benchmark that ran last time and is missing
+    # now (panicked, was deleted, or the run was truncated by a failure) is a
+    # hard failure. Iterating only the run would let it disappear silently.
+    for (i = 1; i <= nb; i++) {
+      name = border[i]
+      if (!(name in cur)) {
+        print "MISSING: " name " is in the baseline but produced no result in this run (panicked, deleted, or truncated run)"
+        failed = 1
+      }
+    }
     for (i = 1; i <= n; i++) {
       name = order[i]
       if (!(name in base)) {
@@ -96,7 +114,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 fi
 
 if [ "$status" -ne 0 ]; then
-  echo "FAIL: allocs/op regressed — see the REGRESSION lines above. allocs/op is deterministic, so this is a real allocation regression, not runner noise." >&2
+  echo "FAIL: see the REGRESSION / MISSING lines above. allocs/op is deterministic, so an increase is a real allocation regression, not runner noise; a missing benchmark means the run did not measure what the baseline covers." >&2
   exit 1
 fi
 

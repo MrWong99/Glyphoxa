@@ -337,6 +337,10 @@ jobs:
       # -race (it perturbs allocation-free hot loops and slows the job).
       - name: Run microbenchmarks
         run: |
+          # This workflow sets no `defaults.run.shell`, so steps run under
+          # `bash -e` WITHOUT pipefail: a panicking benchmark would exit 2 into
+          # `tee`, which exits 0, and the step would go green on partial output.
+          set -o pipefail
           go test -bench . -benchmem -count 10 -run '^$' \
             ./internal/tape/ ./internal/textnorm/ ./internal/storage/ ./pkg/voice/wire/codec/dsp/ \
             | tee "$RUNNER_TEMP/bench-new.txt"
@@ -368,9 +372,11 @@ jobs:
             echo "_Wall time on a shared runner is noise; only the allocs/op gate below is binding._"
           } >>"$GITHUB_STEP_SUMMARY"
 
-      # The binding verdict. Fails only on an allocs/op INCREASE; a benchmark
-      # missing from the baseline warns ("add on next regen"), a missing or
-      # empty baseline fails (the file must exist and hold results).
+      # The binding verdict. Fails on an allocs/op INCREASE, on a baseline
+      # benchmark that produced NO result this run (panicked / truncated — the
+      # other half of the pipefail hole above), and on a missing/empty baseline
+      # or a run with no allocs/op figures at all. A benchmark missing from the
+      # BASELINE only warns ("add on next regen").
       - name: Allocs/op regression gate
         run: scripts/bench-gate.sh bench/baseline.txt "$RUNNER_TEMP/bench-new.txt"
 
