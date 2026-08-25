@@ -1106,6 +1106,21 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 	if r.replyStream != nil {
 		return r.dispatchStream(ctx, e)
 	}
+	// Pre-synthesis pipeline (#626): with a look-ahead pump wired, sentence k+1
+	// synthesizes into the held lane while k is delivered. The flush MUST precede
+	// finish — the tail sentence may still be setting the state finish reads.
+	if r.lookahead != nil {
+		p := r.newPipelinedTurn(ctx, e.TurnID)
+		ctx := withPipelinedDispatch(ctx)
+		for _, rep := range r.reply(ctx, e) {
+			if OutcomeOf(p.dispatch(rep)) == SentenceCut {
+				_ = p.flush()
+				return ""
+			}
+		}
+		_ = p.flush()
+		return p.finish(nil)
+	}
 	t := r.newTurn(ctx)
 	for _, rep := range r.reply(ctx, e) {
 		// A start-error skips the sentence but keeps draining (the sticky
@@ -1126,6 +1141,18 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 // per-sentence FirstAudio ordering both hold — and the module's finish maps the
 // producer's return to the terminal reason.
 func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
+	// Pre-synthesis pipeline (#626): with a look-ahead pump wired the producer's
+	// dispatch returns as soon as the PREVIOUS sentence resolved, so the next
+	// sentence's TTS startup burns during the current one's playback. The producer
+	// ctx is marked so it commits strictly through the [Reply] hooks (its return
+	// value no longer proves delivery), and the flush — which awaits the tail —
+	// MUST run before finish, whose terminal reason depends on the tail's state.
+	if r.lookahead != nil {
+		p := r.newPipelinedTurn(ctx, e.TurnID)
+		err := r.replyStream(withPipelinedDispatch(ctx), e, p.dispatch)
+		_ = p.flush()
+		return p.finish(err)
+	}
 	t := r.newTurn(ctx)
 	return t.finish(r.replyStream(ctx, e, t.dispatch))
 }

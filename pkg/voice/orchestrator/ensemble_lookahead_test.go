@@ -115,7 +115,10 @@ type laneSynth struct {
 
 func (s *laneSynth) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
 	lookahead := voiceevent.IsPlaybackLookahead(ctx)
-	id := voiceevent.TurnIDFrom(ctx)
+	// The LANE KEY, not the turn id: since #626 a turn can hold a different
+	// sentence on every pipeline step, and the ensemble key (one held sentence per
+	// turn) is exactly the turn id.
+	id := voiceevent.LookaheadKeyFrom(ctx)
 	s.mu.Lock()
 	s.calls = append(s.calls, synthCall{sentence: req.Sentence, lookahead: lookahead, turnID: id})
 	s.mu.Unlock()
