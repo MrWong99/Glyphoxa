@@ -13,7 +13,6 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec"
@@ -237,30 +236,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// TextSink is set on butler-role specs only inside rosterDepsForLive.
 	textPoster := newVoiceChannelPoster(client, channel)
 
-	conv, roster, cleanup, err := buildConversation(conversationDeps{
-		bus:              bus,
-		log:              log,
-		npcs:             cfg.npcs,
-		language:         cfg.language,
-		synth:            teeSynth,
-		stageMetrics:     cfg.StageMetrics,
-		keys:             cfg.keys,
-		llmProviderID:    cfg.llmProviderID,
-		sttStreaming:     cfg.STTStreaming,
-		memory:           cfg.Memory,
-		facts:            cfg.Facts,
-		directives:       cfg.Directives,
-		location:         cfg.Location,
-		speakerName:      cfg.SpeakerName,
-		playerCharacters: cfg.playerCharacters,
-		mutes:            cfg.Mutes,
-		gate:             cfg.Gate,
-		gmSpeaker:        cfg.GMSpeaker,
-		toolDeps:         cfg.ToolDeps,
-		textPoster:       textPoster,
-		clipReplayLoad:   cfg.ClipReplayLoader,
-		clipReplaySink:   orchestrator.ClipSink(pump.HandleSentence),
-	})
+	conv, roster, cleanup, err := buildConversation(cycleConversationDeps(bus, log, cfg, teeSynth, pump, textPoster))
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}

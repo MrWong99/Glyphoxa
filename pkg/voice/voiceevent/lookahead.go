@@ -29,3 +29,34 @@ func IsPlaybackLookahead(ctx context.Context) bool {
 	v, _ := ctx.Value(playbackLookaheadKey{}).(bool)
 	return v
 }
+
+// lookaheadKeyKey is the unexported context key carrying an EXPLICIT look-ahead
+// lane key (#626). The lane holds one sentence at a time (depth 1, ADR-0025); its
+// key identifies WHICH sentence is held, so a release/discard can never move a
+// sentence other than the one it was issued for. The ensemble Reaction (#375)
+// holds one sentence per turn and needs no explicit key; the intra-turn
+// pre-synthesis pipeline holds a different sentence of the SAME turn on every
+// step, so it keys per sentence.
+type lookaheadKeyKey struct{}
+
+// WithLookaheadKey returns a copy of ctx carrying key as the look-ahead lane key
+// for this sentence's synthesis. An empty key leaves ctx unchanged (the turn id
+// then keys the lane). It rides the same ctx path as the turn id and the
+// look-ahead marker: installed by the reply coordinator, recovered by the pump.
+func WithLookaheadKey(ctx context.Context, key string) context.Context {
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, lookaheadKeyKey{}, key)
+}
+
+// LookaheadKeyFrom returns the look-ahead lane key ctx routes a held sentence
+// under: the explicit key from [WithLookaheadKey] when set, else the turn id
+// ([TurnIDFrom]) — the pre-#626 behaviour every ensemble caller relies on, where
+// one turn holds at most one sentence so turn id and lane key coincide.
+func LookaheadKeyFrom(ctx context.Context) string {
+	if key, _ := ctx.Value(lookaheadKeyKey{}).(string); key != "" {
+		return key
+	}
+	return TurnIDFrom(ctx)
+}

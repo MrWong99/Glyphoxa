@@ -691,6 +691,7 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 		voice:            r.cfg.Persona.Voice,
 		selfName:         r.cfg.Persona.Name,
 		onFirstDelivered: func() { r.appendUser(commitText) },
+		pipelined:        orchestrator.PipelinedDispatch(ctx),
 	}
 
 	var dispErr error
@@ -710,6 +711,7 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 		}
 	}
 
+	d.wait()
 	r.commitSpoken(d.text())
 
 	// A cancel is the expected barge path (the whole ensemble was torn down), not a
@@ -736,6 +738,20 @@ type deliveredText struct {
 	voice            tts.Voice
 	onFirstDelivered func()
 	spoken           strings.Builder
+
+	// pipelined mirrors [orchestrator.PipelinedDispatch] for this turn (#626).
+	// Under a pipelined dispatch the callback returns as soon as the PREVIOUS
+	// sentence resolved, so its return value no longer proves delivery: the commit
+	// moves onto the [orchestrator.Reply.OnDelivered] hook (fired at ADR-0012's
+	// commit point, on the pipeline's goroutine) and [deliveredText.wait] is the
+	// barrier every reader of [deliveredText.text] must cross first. Unpipelined,
+	// emit commits on the return exactly as before, hook-free.
+	pipelined bool
+	// mu guards spoken/onFirstDelivered, which the pipelined commit hook writes
+	// from a goroutine other than the producer's. wg counts sentences dispatched
+	// but not yet resolved.
+	mu sync.Mutex
+	wg sync.WaitGroup
 
 	// selfName is the Agent's own display name, non-empty only when the Replier
 	// knows it. Every sentence this emitter sees has a leading "<selfName>:"
@@ -771,7 +787,15 @@ func (d *deliveredText) emit(sentence string) error {
 			return nil
 		}
 	}
-	err := d.dispatch(orchestrator.Reply{Sentence: sentence, Voice: d.voice})
+	rep := orchestrator.Reply{Sentence: sentence, Voice: d.voice}
+	if d.pipelined {
+		// Hook-commit (#626): this sentence's outcome is not what dispatch returns,
+		// so the commit rides OnDelivered and the wait barrier rides OnResolved.
+		d.wg.Add(1)
+		rep.OnDelivered = func() { d.commit(sentence) }
+		rep.OnResolved = func(orchestrator.SentenceOutcome) { d.wg.Done() }
+	}
+	err := d.dispatch(rep)
 	switch orchestrator.OutcomeOf(err) {
 	case orchestrator.SentenceNotDelivered:
 		d.attempted = true
@@ -780,6 +804,18 @@ func (d *deliveredText) emit(sentence string) error {
 		return err // stop the drain; nothing more is committed
 	}
 	d.attempted = true
+	if !d.pipelined {
+		d.commit(sentence)
+	}
+	return nil
+}
+
+// commit appends one DELIVERED sentence to the turn's spoken text, running the
+// lazy first-delivery hook before the first of them. Pipelined, it runs on the
+// dispatch goroutine — hence the lock.
+func (d *deliveredText) commit(sentence string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.onFirstDelivered != nil {
 		d.onFirstDelivered()
 		d.onFirstDelivered = nil
@@ -788,11 +824,22 @@ func (d *deliveredText) emit(sentence string) error {
 		d.spoken.WriteByte(' ')
 	}
 	d.spoken.WriteString(sentence)
-	return nil
 }
 
-// text returns the delivered text so far — the history commit.
-func (d *deliveredText) text() string { return d.spoken.String() }
+// wait blocks until every sentence this emitter dispatched has resolved, so
+// [deliveredText.text] reports the turn's FINAL delivered text. Under an
+// unpipelined dispatch nothing is outstanding and it returns at once; pipelined,
+// it is the barrier the last sentence's commit lands before — without it the
+// history commit races the tail sentence and drops it.
+func (d *deliveredText) wait() { d.wg.Wait() }
+
+// text returns the delivered text so far — the history commit. Call
+// [deliveredText.wait] first: only then is "so far" the whole turn.
+func (d *deliveredText) text() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.spoken.String()
+}
 
 // crossTalkSilence is the sentinel a Cross-talk Reaction emits to DECLINE speaking
 // (ADR-0025, #302): the Reaction prompt permits an explicit "stay silent" output to
@@ -988,7 +1035,8 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	// turn was cancelled (mute/barge) never reaches the spoken text: the room
 	// never heard it.
 	var split sentenceSplitter
-	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name,
+		pipelined: orchestrator.PipelinedDispatch(ctx)}
 
 	onText := func(delta string) error {
 		for _, sentence := range split.Push(delta) {
@@ -1011,6 +1059,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 		}
 	}
 
+	d.wait()
 	r.commitSpoken(d.text())
 
 	// A cancellation of the CALLER's turn ctx is the expected barge-in path, not
@@ -1061,20 +1110,21 @@ func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Messa
 	if reply == "" {
 		return nil
 	}
-	// Deliver-then-commit (ADR-0012): dispatch FIRST, commit only once the reply
-	// was delivered. A turn cancelled before the reply drained delivered nothing,
-	// so it must leave no assistant message.
-	switch err := dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice}); orchestrator.OutcomeOf(err) {
-	case orchestrator.SentenceNotDelivered:
-		// A start-error under a live turn (#362): nothing delivered, so commit
-		// nothing — and swallow the signal (return nil). Returning it would
-		// misclassify the turn as provider_error; the reactor already recorded
-		// tts_error.
-		return nil
-	case orchestrator.SentenceCut:
+	// Deliver-then-commit (ADR-0012) through the shared emitter (#626): the commit
+	// hangs off the delivery hook and the wait barrier, because under a pipelined
+	// dispatch this single dispatch returns before the reply has resolved — its
+	// return no longer proves the room heard anything. A start-error commits
+	// nothing and is swallowed (returning it would misclassify the turn as
+	// provider_error; the reactor already recorded tts_error); a cut stops the
+	// turn.
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name,
+		pipelined: orchestrator.PipelinedDispatch(ctx)}
+	err = d.emit(reply)
+	d.wait()
+	r.commitSpoken(d.text())
+	if orchestrator.OutcomeOf(err) == orchestrator.SentenceCut {
 		return err
 	}
-	r.commitSpoken(reply)
 	return nil
 }
 
@@ -1137,19 +1187,23 @@ func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string
 	// Spoken delivery: sentence-split the whole answer and dispatch each through
 	// the shared emitter (ADR-0012, #444), committing only what was delivered.
 	var split sentenceSplitter
-	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name,
+		pipelined: orchestrator.PipelinedDispatch(ctx)}
 	for _, sentence := range split.Push(answer) {
 		if err := d.emit(sentence); err != nil {
+			d.wait()
 			r.commitSpoken(d.text())
 			return err
 		}
 	}
 	if tail := split.Flush(); tail != "" {
 		if err := d.emit(tail); err != nil {
+			d.wait()
 			r.commitSpoken(d.text())
 			return err
 		}
 	}
+	d.wait()
 	r.commitSpoken(d.text())
 	return nil
 }

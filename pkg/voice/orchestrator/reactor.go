@@ -837,6 +837,18 @@ type Reply struct {
 	// own return-value drain and pass hook-less Replies, so they simply never
 	// set it.)
 	OnDelivered func()
+
+	// OnResolved, when non-nil, fires EXACTLY ONCE when this Reply's outcome is
+	// final — after OnDelivered on the delivered path — carrying the same
+	// three-class outcome the dispatch return would ([OutcomeOf]). It exists for
+	// the pre-synthesis pipeline (#626): a pipelined dispatch returns as soon as
+	// the PREVIOUS sentence resolved, so its own return value is control flow
+	// ("keep producing" / "stop"), not a settled outcome. A producer that must
+	// read what was actually delivered — the agent's ADR-0012 history commit —
+	// waits for every Reply's OnResolved before committing. It may run on the
+	// pipeline's goroutine, so a producer's hooks must be safe to call from one.
+	// Nil is a no-op; a synchronous dispatch fires it inline, before returning.
+	OnResolved func(SentenceOutcome)
 }
 
 // ReplyFunc decides what an addressed Agent says in response to one
@@ -1094,6 +1106,21 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 	if r.replyStream != nil {
 		return r.dispatchStream(ctx, e)
 	}
+	// Pre-synthesis pipeline (#626): with a look-ahead pump wired, sentence k+1
+	// synthesizes into the held lane while k is delivered. The flush MUST precede
+	// finish — the tail sentence may still be setting the state finish reads.
+	if r.lookahead != nil {
+		p := r.newPipelinedTurn(ctx, e.TurnID)
+		ctx := WithPipelinedDispatch(ctx)
+		for _, rep := range r.reply(ctx, e) {
+			if OutcomeOf(p.dispatch(rep)) == SentenceCut {
+				_ = p.flush()
+				return ""
+			}
+		}
+		_ = p.flush()
+		return p.finish(nil)
+	}
 	t := r.newTurn(ctx)
 	for _, rep := range r.reply(ctx, e) {
 		// A start-error skips the sentence but keeps draining (the sticky
@@ -1114,6 +1141,18 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 // per-sentence FirstAudio ordering both hold — and the module's finish maps the
 // producer's return to the terminal reason.
 func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
+	// Pre-synthesis pipeline (#626): with a look-ahead pump wired the producer's
+	// dispatch returns as soon as the PREVIOUS sentence resolved, so the next
+	// sentence's TTS startup burns during the current one's playback. The producer
+	// ctx is marked so it commits strictly through the [Reply] hooks (its return
+	// value no longer proves delivery), and the flush — which awaits the tail —
+	// MUST run before finish, whose terminal reason depends on the tail's state.
+	if r.lookahead != nil {
+		p := r.newPipelinedTurn(ctx, e.TurnID)
+		err := r.replyStream(WithPipelinedDispatch(ctx), e, p.dispatch)
+		_ = p.flush()
+		return p.finish(err)
+	}
 	t := r.newTurn(ctx)
 	return t.finish(r.replyStream(ctx, e, t.dispatch))
 }
