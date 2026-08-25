@@ -111,7 +111,7 @@ func TestNewConversation_BargeRequiresReplyStrategy(t *testing.T) {
 }
 
 // TestNewConversation_LookaheadWithoutEnsemble pins the #626 relaxation: the
-// look-ahead lane is no longer the Cross-talk Reaction'''s alone — every routed
+// look-ahead lane is no longer the Cross-talk Reaction”'s alone — every routed
 // turn pre-synthesizes its next sentence into it — so a pump wired WITHOUT an
 // ensemble speaker is the ordinary production shape, not a construction error.
 func TestNewConversation_LookaheadWithoutEnsemble(t *testing.T) {

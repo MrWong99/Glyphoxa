@@ -29,9 +29,10 @@ import (
 //
 // Consequence of strict serialization with the lockstep tee: while sentence N
 // plays, sentence N+1's chunk channel is not drained, so its synthesis
-// back-pressures until N finishes — no pre-synthesis pipelining, so an ordinary
-// inter-sentence gap is N+1's TTS startup latency. Correct speech over gapless is
-// the right v1 tradeoff for the ordinary queue.
+// back-pressures until N finishes — on the ORDINARY queue an inter-sentence gap
+// is therefore N+1's whole TTS startup latency. Correct speech over gapless is
+// the right tradeoff for that queue; the look-ahead lane below is how a
+// coordinator buys the gap back without weakening it.
 //
 // The ONE exception is the keyed look-ahead lane (#375, #626, ADR-0025): a sentence
 // marked [voiceevent.WithPlaybackLookahead] — a queued Cross-talk Reaction's FIRST
