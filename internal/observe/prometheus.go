@@ -130,6 +130,10 @@ type PrometheusRecorder struct {
 	// the struct, rather than editing a neighbour's block — several metric slices
 	// land in parallel and a shared edit point is a guaranteed conflict.
 
+	// #623: disgo audio-send failures, fed from the slog filter the same way
+	// daveDecryptErrs is. Unlabelled (ADR-0032 §2.1).
+	audioSendErrs prometheus.Counter
+
 	// #604: duration of the two BUDGETED turn-path recalls, alongside their existing
 	// outcome counters. memoryRecall_total says WHICH way a recall went;
 	// memoryRecallSeconds says how close it ran to the hard 250ms budget (ADR-0042)
@@ -418,6 +422,16 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	// MustRegister call HERE, after the big list above — that list is a shared edit
 	// point and several metric slices land in parallel.
 
+	// #623: send-path failures, so a turn abandoned with no_first_audio can be told
+	// apart from other abandonment causes.
+	r.audioSendErrs = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "audio_send_errors_total",
+		Help:      "disgo audio-send failures (voice gateway not Ready or UDP write error); bursts accompany reconnect windows; ref #623.",
+	})
+	reg.MustRegister(r.audioSendErrs)
+
 	// #604: the two budgeted-recall duration histograms. Each mirrors the namespace
 	// of the counter it accompanies — memory recall is a voice-pipeline series
 	// (glyphoxa_voice_*), the KG read is process-level (glyphoxa_*) — so the
@@ -672,6 +686,18 @@ var roundIndexNames = [...]string{"0", "1", "2", "3", "4", "5"}
 // Recording methods for new instruments append HERE, at the end of the file, each
 // in its own comment-tagged section. #604 has none: its two methods (MemoryRecall,
 // KGFacts) already existed and were extended in place above.
+
+// --- #623 disgo audio-send failures ---
+
+// AudioSendErrorHook returns the increment hook for NewLogger's
+// LogHooks.OnAudioSendError, so disgo's rate-limited "failed to send audio"
+// records feed glyphoxa_voice_audio_send_errors_total. Every matched record
+// increments (the rate limit trims the LOG line only), so a reconnect window that
+// abandons N turns shows up as N here — the send path becoming distinguishable
+// from the other causes of a turn_total{outcome="abandoned",reason="no_first_audio"}.
+func (r *PrometheusRecorder) AudioSendErrorHook() func() {
+	return func() { r.audioSendErrs.Inc() }
+}
 
 // --- #612 live-transcript SSE (transcript.SSEMetrics) ---
 

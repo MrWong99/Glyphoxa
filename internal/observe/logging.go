@@ -29,15 +29,16 @@ func ParseLogFormat(s string) LogFormat {
 }
 
 // NewLogger builds the process logger for the given format and level, with the
-// disgo DAVE-decrypt noise already filtered (NewDAVEFilterHandler wrapping the
-// chosen encoder). onDAVEDecrypt is the metric hook for
-// glyphoxa_voice_dave_decrypt_errors_total (nil = no-op until the Prometheus
-// adapter wires it in task #3). w is the sink (os.Stderr in main).
+// noisy disgo records already filtered (NewDisgoFilterHandler wrapping the chosen
+// encoder). hooks carry the metric increments for
+// glyphoxa_voice_dave_decrypt_errors_total and
+// glyphoxa_voice_audio_send_errors_total (zero value = filtering only). w is the
+// sink (os.Stderr in main).
 //
 // The caller is expected to slog.SetDefault this logger AND pass it to disgo via
 // bot.WithLogger so every library on the default logger — not just disgo's bot
 // logger — is covered (observability.md §1.5).
-func NewLogger(w io.Writer, format LogFormat, level slog.Level, onDAVEDecrypt func()) *slog.Logger {
+func NewLogger(w io.Writer, format LogFormat, level slog.Level, hooks LogHooks) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: level}
 	var enc slog.Handler
 	switch format {
@@ -46,7 +47,7 @@ func NewLogger(w io.Writer, format LogFormat, level slog.Level, onDAVEDecrypt fu
 	default:
 		enc = slog.NewTextHandler(w, opts)
 	}
-	return slog.New(NewDAVEFilterHandler(enc, onDAVEDecrypt))
+	return slog.New(NewDisgoFilterHandler(enc, hooks))
 }
 
 // loggerKey is the private context key carrying a turn/session-scoped logger.

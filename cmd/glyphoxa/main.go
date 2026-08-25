@@ -73,10 +73,11 @@ import (
 const defaultMode = "all"
 
 func main() {
-	// The Prometheus adapter is built first so its DAVE-decrypt counter hook can
+	// The Prometheus adapter is built first so its log-filter counter hooks can
 	// feed the slog filter: A1 suppresses the benign disgo noise from the console
 	// but preserves the information as glyphoxa_voice_dave_decrypt_errors_total
-	// (observability.md §1 — "nothing is actually lost").
+	// (observability.md §1 — "nothing is actually lost"), and #623 counts disgo's
+	// rate-limited audio-send failures as glyphoxa_voice_audio_send_errors_total.
 	metrics := observe.NewPrometheusRecorder()
 
 	// ADR-0032: mode-selected handler (JSON prod / text dev) replacing the old
@@ -84,7 +85,10 @@ func main() {
 	// slog.SetDefault routes ANY library on the default logger — not just disgo's
 	// bot logger — through the same handler (observability.md §1.5).
 	format := observe.ParseLogFormat(os.Getenv("GLYPHOXA_LOG_FORMAT"))
-	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, metrics.DAVEDecryptHook())
+	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, observe.LogHooks{
+		OnDAVEDecrypt:    metrics.DAVEDecryptHook(),
+		OnAudioSendError: metrics.AudioSendErrorHook(),
+	})
 	slog.SetDefault(log)
 
 	// Gateway IDENTIFY-budget observer (#486): registers the identify/resume
