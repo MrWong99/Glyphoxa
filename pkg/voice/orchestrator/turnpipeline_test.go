@@ -2,8 +2,10 @@ package orchestrator_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -124,4 +126,116 @@ func TestReplier_NoLookahead_KeepsLegacyDispatch(t *testing.T) {
 		}
 	}
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 2)
+}
+
+// TestReplier_Pipelined_BargeDropsHeldSentence is #626's ADR-0027 proof at the
+// reactor seam: a human barges while sentence 1 is speaking and sentence 2 is
+// already synthesized and HELD. The held audio is discarded — never released,
+// never announced, so no Line is persisted for speech the room never heard
+// (ADR-0040) — while the characters submitted for it stay metered, so the
+// discarded look-ahead is visible in the Usage Ledger rather than being a
+// surprise (ADR-0045/0054).
+func TestReplier_Pipelined_BargeDropsHeldSentence(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	pump := newFakeLookahead()
+	synth := &laneSynth{
+		pump:     pump,
+		holdSet:  map[string]bool{"one.": true},
+		holdGate: make(chan struct{}),
+	}
+	spy := &metricsSpy{}
+
+	stream := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		if err := dispatch(orchestrator.Reply{Sentence: "one."}); err != nil {
+			return err
+		}
+		return dispatch(orchestrator.Reply{Sentence: "two."})
+	}
+	ttsStage := orchestrator.NewTTS(h.Bus, synth, orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+	replier := orchestrator.NewStreamReplier(ttsStage, stream, nil)
+	replier.SetFloor(floor)
+	replier.SetLookahead(pump)
+	defer replier.Bind(t.Context(), h.Bus)()
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "T", Text: "Bart, report", Target: voiceevent.AddressTarget{AgentID: "bart"}})
+
+	// Wait until sentence 2 is held in the lane (its TTFB burning during sentence
+	// 1's playback) — the state a barge must be able to tear down.
+	waitUntil(t, "sentence 2 held in the look-ahead lane", func() bool {
+		_, ok := synth.findCall(func(c synthCall) bool { return c.sentence == "two." && c.lookahead })
+		return ok
+	})
+
+	// The human barges: the floor yields, cancelling the turn ctx.
+	if _, yielded := floor.Yield(); !yielded {
+		t.Fatal("floor.Yield did not yield the speaking turn")
+	}
+	pump.waitDiscard(t)
+
+	ops := pump.opsSnapshot()
+	for _, op := range ops {
+		if op == "release:T#2" {
+			t.Fatalf("lane ops = %v, want NO release for the barged sentence", ops)
+		}
+	}
+	if len(ops) == 0 {
+		t.Fatal("lane ops empty, want the held sentence discarded")
+	}
+	for _, ev := range h.Events() {
+		if e, ok := ev.(voiceevent.TTSInvoked); ok && e.Sentence == "two." {
+			t.Fatal("a discarded look-ahead sentence must never be announced (ADR-0040)")
+		}
+	}
+	// The submitted characters were billed the moment Synthesize accepted the
+	// request, discarded or not — the ledger shows the pre-render.
+	var billed int
+	for _, rec := range spy.characters() {
+		billed += rec.chars
+	}
+	if want := len("one.") + len("two."); billed != want {
+		t.Fatalf("TTS characters metered = %d, want %d (both sentences submitted)", billed, want)
+	}
+}
+
+// TestReplier_Pipelined_DeterministicEventOrder pins ADR-0021/0033 for the
+// pipeline: even though two sentences of one turn are now in flight at once, the
+// release points are sequential done-waits, so a replayed turn produces the SAME
+// observable sequence every run — the property cassette-based tests depend on.
+func TestReplier_Pipelined_DeterministicEventOrder(t *testing.T) {
+	run := func() ([]string, []string) {
+		h := voicetest.New(t)
+		pump := newFakeLookahead()
+		synth := &laneSynth{pump: pump}
+		stream := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+			for _, s := range []string{"one.", "two.", "three."} {
+				if err := dispatch(orchestrator.Reply{Sentence: s}); orchestrator.OutcomeOf(err) == orchestrator.SentenceCut {
+					return err
+				}
+			}
+			return nil
+		}
+		replier := pipelineReplier(h, stream, pump, synth)
+		defer replier.Bind(t.Context(), h.Bus)()
+		h.Bus.Publish(voiceevent.AddressRouted{TurnID: "T", Text: "Bart, report", Target: voiceevent.AddressTarget{AgentID: "bart"}})
+
+		var events []string
+		for _, ev := range h.Events() {
+			if e, ok := ev.(voiceevent.TTSInvoked); ok {
+				events = append(events, e.Sentence)
+			}
+		}
+		return events, pump.opsSnapshot()
+	}
+
+	wantEvents, wantOps := run()
+	for i := 0; i < 5; i++ {
+		gotEvents, gotOps := run()
+		if strings.Join(gotEvents, "|") != strings.Join(wantEvents, "|") {
+			t.Fatalf("run %d TTSInvoked order = %v, want %v (must be reproducible)", i, gotEvents, wantEvents)
+		}
+		if strings.Join(gotOps, "|") != strings.Join(wantOps, "|") {
+			t.Fatalf("run %d lane ops = %v, want %v (must be reproducible)", i, gotOps, wantOps)
+		}
+	}
 }

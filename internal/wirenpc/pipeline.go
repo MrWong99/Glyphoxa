@@ -189,6 +189,40 @@ type conversationDeps struct {
 	// (#310); a nil loader leaves a ReplayRequested inert.
 	clipReplayLoad orchestrator.ClipLoader
 	clipReplaySink orchestrator.ClipSink
+
+	// lookahead is this cycle's playback pump as the look-ahead lane (#375, #626):
+	// with it, every routed turn pre-synthesizes its NEXT sentence into the lane
+	// while the current one plays, so the inter-sentence gap collapses from a cold
+	// TTS TTFB to pacing overhead. nil is the feature-off default (bench / voice
+	// standalone), which keeps every dispatch synchronous.
+	lookahead orchestrator.LookaheadPump
+}
+
+// bargeGroup builds the barge-in group (ADR-0027) and everything that rides its
+// floor for one live cycle (#453): the confirm/coalesce windows, the mute view,
+// the spend gate, and the pump look-ahead lane.
+//
+// No Ensemble speaker yet: the live matcher is single-target (Config.MaxTargets
+// unset ⇒ 1, ADR-0025 deferred), so an EnsembleRouted never fires. Since #626 the
+// look-ahead lane no longer waits on it — the intra-turn pre-synthesis pipeline
+// consumes the same lane on ordinary routed turns.
+func bargeGroup(d conversationDeps) orchestrator.Barge {
+	return orchestrator.Barge{
+		Confirm:  bargeConfirmWindow,
+		Coalesce: floorCoalesceWindow,
+		// Per-Agent mute (#211): the replier discards a muted addressee's route
+		// before taking the floor, and a MuteCut reactor cuts the floor when the
+		// speaking Agent is muted. A nil view is the feature-off default (voice
+		// standalone / bench).
+		Mutes: d.mutes,
+		// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW
+		// turn once the session's estimated spend crosses the soft cap. A nil gate
+		// is the feature-off default (no caps configured).
+		Gate: d.gate,
+		// Pre-synthesis pipelining (#626) — and, when an Ensemble speaker lands, the
+		// Cross-talk Reaction pre-render (#375) — over the session's playback pump.
+		Lookahead: d.lookahead,
+	}
 }
 
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
@@ -343,25 +377,7 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 		// identity) cancel the turn it had just triggered, which is the 20s
 		// self-cancel the latency investigation found. With B1 a confirmed barge
 		// cancels mid-generation, not just pending dispatch.
-		orchestrator.WithBargeIn(orchestrator.Barge{
-			Confirm:  bargeConfirmWindow,
-			Coalesce: floorCoalesceWindow,
-			// Per-Agent mute (#211): the replier discards a muted addressee's route
-			// before taking the floor, and a MuteCut reactor cuts the floor when the
-			// speaking Agent is muted. A nil view is the feature-off default (voice
-			// standalone / bench).
-			Mutes: d.mutes,
-			// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW
-			// turn once the session's estimated spend crosses the soft cap. A nil
-			// gate is the feature-off default (no caps configured).
-			Gate: d.gate,
-			// No Ensemble speaker yet: the live matcher is single-target
-			// (Config.MaxTargets unset ⇒ 1, ADR-0025 deferred), so an EnsembleRouted
-			// never fires. The Reaction look-ahead pump ([wire.PlaybackPump]) is
-			// wired here together with the Ensemble speaker when that lands —
-			// Barge.Lookahead without Barge.Ensemble is a construction error, not a
-			// silent no-op (#453).
-		}),
+		orchestrator.WithBargeIn(bargeGroup(d)),
 		// Streaming STT (ADR-0042, issue #180): a nil manager is byte-for-byte the
 		// batch path, so this option is unconditional — buildStreamManager returns nil
 		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.

@@ -110,16 +110,22 @@ func TestNewConversation_BargeRequiresReplyStrategy(t *testing.T) {
 	wantConstructionError(t, err, "WithBargeIn", "reply strategy")
 }
 
-// TestNewConversation_LookaheadRequiresEnsemble pins the look-ahead rule: only
-// the ensemble Cross-talk Reaction consumes the pump, so wiring it without an
-// ensemble speaker is a construction error rather than a silent no-op.
-func TestNewConversation_LookaheadRequiresEnsemble(t *testing.T) {
+// TestNewConversation_LookaheadWithoutEnsemble pins the #626 relaxation: the
+// look-ahead lane is no longer the Cross-talk Reaction'''s alone — every routed
+// turn pre-synthesizes its next sentence into it — so a pump wired WITHOUT an
+// ensemble speaker is the ordinary production shape, not a construction error.
+func TestNewConversation_LookaheadWithoutEnsemble(t *testing.T) {
 	h, vadStage, sttStage, ttsStage := validateStages(t)
-	_, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+	conv, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: nopStream}),
 		orchestrator.WithBargeIn(orchestrator.Barge{Lookahead: fakePump{}}),
 	)
-	wantConstructionError(t, err, "Lookahead", "Ensemble")
+	if err != nil {
+		t.Fatalf("NewConversation with a look-ahead pump and no ensemble: %v", err)
+	}
+	if conv == nil {
+		t.Fatal("NewConversation returned no Conversation")
+	}
 }
 
 // TestConversation_BargeMutes_BindsMuteCut pins the mute-binding rule

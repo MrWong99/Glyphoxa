@@ -260,6 +260,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		textPoster:       textPoster,
 		clipReplayLoad:   cfg.ClipReplayLoader,
 		clipReplaySink:   orchestrator.ClipSink(pump.HandleSentence),
+		// The same pump is the look-ahead lane (#375, #626): a routed turn holds its
+		// NEXT sentence there while the current one plays, so its TTS startup burns
+		// during playback instead of opening an audible gap.
+		lookahead: pump,
 	})
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)

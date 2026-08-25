@@ -95,10 +95,10 @@ func (r ReplyStrategy) enabled() bool { return r.Whole != nil || r.Stream != nil
 //     (ADR-0025, #301). An ensemble is ONE floor-holding unit, so the speaker
 //     exists only inside this group: ensemble-without-barge is unrepresentable.
 //     nil degrades an EnsembleRouted to the top-scored single route.
-//   - Lookahead pre-renders the Cross-talk Reaction's first sentence during
-//     the Lead's playback (#375). Only the ensemble path consumes it, so
-//     setting it without Ensemble is a construction error rather than a silent
-//     no-op.
+//   - Lookahead is the pump's held pre-render lane: the Cross-talk Reaction's
+//     first sentence during the Lead's playback (#375), and — since #626 —
+//     every routed turn's NEXT sentence during its predecessor's, which is what
+//     collapses the inter-sentence gap to pacing overhead. It needs no Ensemble.
 //
 // A barge group requires a reply strategy ([ReplyStrategy]): the floor and
 // everything above wire through the replier, so without one none of it can
@@ -129,25 +129,28 @@ type Barge struct {
 	// EnsembleRouted degrades to the top-scored single route). The production
 	// speaker is agent.Cast.
 	Ensemble EnsembleSpeaker
-	// Lookahead is the pump look-ahead seam (#375); nil = feature off (the
-	// Reaction pre-renders TEXT only — onset gap = one cold TTS TTFB, the #302
-	// legacy path). Requires Ensemble. The production pump is
+	// Lookahead is the pump look-ahead seam (#375, #626); nil = feature off (no
+	// pre-synthesis: every inter-sentence gap is one cold TTS TTFB, and the
+	// Reaction pre-renders TEXT only — the #302 legacy path). With it, every
+	// routed turn pipelines its next sentence into the lane and a queued
+	// Cross-talk Reaction pre-renders its first. The production pump is
 	// [wire.PlaybackPump].
 	Lookahead LookaheadPump
 }
 
-// LookaheadPump is the pump pre-render seam the Cross-talk Reaction coordinator
-// drives (#375, ADR-0025): a queued Reaction's first sentence is synthesized and
-// HELD in the pump's look-ahead lane during the Lead's playback (keyed by turn id),
-// then either released to play at the Lead's end for a near-zero onset gap, or
+// LookaheadPump is the pump pre-render seam the reply coordinators drive (#375,
+// #626, ADR-0025): a sentence is synthesized and HELD in the pump's look-ahead
+// lane while the previous one plays — a queued Reaction's first sentence during
+// the Lead's playback, or a routed turn's next sentence during its predecessor's
+// — keyed per held sentence, then either released to play for a near-zero gap, or
 // discarded on a barge/yield (its pre-rendered-but-unplayed audio dropped, ADR-0012/
 // 0027). Both methods are non-blocking latch operations — they never wait for the
 // sentence to be primed — and a keyed discard for an unknown turn is a harmless
 // no-op, so the coordinator can defer it on every exit path. The production
 // implementation is [wire.PlaybackPump].
 type LookaheadPump interface {
-	ReleaseLookahead(turnID string)
-	DiscardLookahead(turnID string)
+	ReleaseLookahead(key string)
+	DiscardLookahead(key string)
 }
 
 // Option configures a [Conversation] at construction.
@@ -297,9 +300,9 @@ func (c *Conversation) validate() error {
 		if !c.reply.enabled() {
 			return errors.New("orchestrator: WithBargeIn requires a reply strategy (WithReply); without a replier there is no turn to interrupt")
 		}
-		if c.barge.Lookahead != nil && c.barge.Ensemble == nil {
-			return errors.New("orchestrator: Barge.Lookahead requires Barge.Ensemble; only the ensemble Cross-talk Reaction consumes the look-ahead")
-		}
+		// Since #626 the look-ahead lane is NOT the Cross-talk Reaction's alone: every
+		// routed turn pre-synthesizes its next sentence into it, so a pump without an
+		// ensemble speaker is the ordinary production wiring rather than a dead option.
 	}
 	return nil
 }
