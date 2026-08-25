@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -139,18 +140,22 @@ func TestReplier_Pipelined_BargeDropsHeldSentence(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	pump := newFakeLookahead()
+	// Deliberately different lengths, so a per-sentence character assertion below
+	// can tell the spoken sentence'''s metering from the discarded one'''s.
+	const spokenSentence = "one."
+	const heldSentence = "the second sentence."
 	synth := &laneSynth{
 		pump:     pump,
-		holdSet:  map[string]bool{"one.": true},
+		holdSet:  map[string]bool{spokenSentence: true},
 		holdGate: make(chan struct{}),
 	}
 	spy := &metricsSpy{}
 
 	stream := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
-		if err := dispatch(orchestrator.Reply{Sentence: "one."}); err != nil {
+		if err := dispatch(orchestrator.Reply{Sentence: spokenSentence}); err != nil {
 			return err
 		}
-		return dispatch(orchestrator.Reply{Sentence: "two."})
+		return dispatch(orchestrator.Reply{Sentence: heldSentence})
 	}
 	ttsStage := orchestrator.NewTTS(h.Bus, synth, orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
 	replier := orchestrator.NewStreamReplier(ttsStage, stream, nil)
@@ -163,7 +168,7 @@ func TestReplier_Pipelined_BargeDropsHeldSentence(t *testing.T) {
 	// Wait until sentence 2 is held in the lane (its TTFB burning during sentence
 	// 1's playback) — the state a barge must be able to tear down.
 	waitUntil(t, "sentence 2 held in the look-ahead lane", func() bool {
-		_, ok := synth.findCall(func(c synthCall) bool { return c.sentence == "two." && c.lookahead })
+		_, ok := synth.findCall(func(c synthCall) bool { return c.sentence == heldSentence && c.lookahead })
 		return ok
 	})
 
@@ -183,18 +188,30 @@ func TestReplier_Pipelined_BargeDropsHeldSentence(t *testing.T) {
 		t.Fatal("lane ops empty, want the held sentence discarded")
 	}
 	for _, ev := range h.Events() {
-		if e, ok := ev.(voiceevent.TTSInvoked); ok && e.Sentence == "two." {
+		if e, ok := ev.(voiceevent.TTSInvoked); ok && e.Sentence == heldSentence {
 			t.Fatal("a discarded look-ahead sentence must never be announced (ADR-0040)")
 		}
 	}
-	// The submitted characters were billed the moment Synthesize accepted the
-	// request, discarded or not — the ledger shows the pre-render.
-	var billed int
+	// The DISCARDED sentence'''s own characters were billed the moment Synthesize
+	// accepted the request — metering sits before the drain, so a barge cannot
+	// erase it. Asserted per sentence (the two differ in length) rather than as a
+	// total, so moving the meter past the drain would fail here instead of merely
+	// halving a sum: the ledger AC is that a discarded look-ahead is VISIBLE, never
+	// a surprise (ADR-0045/0054).
+	billed := map[int]int{}
 	for _, rec := range spy.characters() {
-		billed += rec.chars
+		if rec.provider != observe.ProviderElevenLabs {
+			t.Fatalf("TTS characters metered under provider %q, want the wired provider", rec.provider)
+		}
+		billed[rec.chars]++
 	}
-	if want := len("one.") + len("two."); billed != want {
-		t.Fatalf("TTS characters metered = %d, want %d (both sentences submitted)", billed, want)
+	if got := billed[utf8.RuneCountInString(heldSentence)]; got != 1 {
+		t.Fatalf("TTSCharacters records for the DISCARDED sentence (%d runes) = %d, want 1; all records: %v",
+			utf8.RuneCountInString(heldSentence), got, spy.characters())
+	}
+	if got := billed[utf8.RuneCountInString(spokenSentence)]; got != 1 {
+		t.Fatalf("TTSCharacters records for the spoken sentence (%d runes) = %d, want 1",
+			utf8.RuneCountInString(spokenSentence), got)
 	}
 }
 

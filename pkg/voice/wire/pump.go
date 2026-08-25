@@ -36,8 +36,9 @@ import (
 //
 // The ONE exception is the keyed look-ahead lane (#375, #626, ADR-0025): a sentence
 // marked [voiceevent.WithPlaybackLookahead] — a queued Cross-talk Reaction's FIRST
-// sentence, or the NEXT sentence of a pipelined turn (#626) — is HELD in the lane — synthesized eagerly (its first chunk pre-paid at the tee,
-// so its TTFB is spent DURING the Lead's playback) but never drained nor played —
+// sentence, or the NEXT sentence of a pipelined turn (#626) — is HELD in the lane.
+// It is synthesized eagerly (its first chunk pre-paid at the tee, so its TTFB is
+// spent DURING the previous sentence's playback) but never drained nor played
 // until the coordinator calls [PlaybackPump.ReleaseLookahead]. The hold is pure
 // readiness with ZERO chunk buffering: the tee stays blocked on its play<-chunk
 // send, so its forward goroutine never closes the sentence and its Dispatch never
