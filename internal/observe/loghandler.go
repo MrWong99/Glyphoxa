@@ -31,8 +31,13 @@ import (
 // name=voice_conn).
 // A second, unrelated disgo record rides the same mechanism (#623): the
 // audio-send failure from voice/audio_sender.go handleErr ("failed to send
-// audio" + err, no name tag), which fires per outbound frame when the voice
-// gateway is not Ready or the UDP write fails. Its LINE is rate-limited the same
+// audio" + err), which fires per outbound frame when the voice gateway is not
+// Ready or the UDP write fails. It reaches us on the SAME name chain as the DAVE
+// record (conn_config.go tags the conn logger name=voice_conn before
+// NewAudioSender), so the two are told apart by message, not by name. Note
+// handleErr does NOT log at all for ErrGatewayNotConnected / net.ErrClosed — it
+// silently Close()s the sender — so this counter covers the not-Ready/UDP-error
+// class only, not every send-path death. Its LINE is rate-limited the same
 // way (a reconnect window otherwise floods the console at 50 frames/s) but it is
 // NOT downgraded: a send failure is a real fault, so the survivor keeps its
 // original Error level. The counter still moves once per record.
@@ -99,12 +104,18 @@ func (h *disgoFilterHandler) Enabled(ctx context.Context, level slog.Level) bool
 	return h.base.Enabled(ctx, level)
 }
 
-// Handle applies the content filter, then delegates. For the one benign DAVE
-// record it bumps the counter and rate-limits; the survivor is rewritten to
-// Debug and only forwarded if the base handler is actually enabled at Debug —
-// otherwise it is dropped entirely (so in prod Info/JSON the line vanishes and
-// only the counter advances, which is the whole point of A1). Everything else is
-// forwarded verbatim at its original level.
+// Handle applies the content filter, then delegates. Two record classes are
+// matched, each with its own counter hook and its own limiter:
+//
+//   - the benign DAVE-decrypt record: counted, rate-limited, and the survivor
+//     rewritten to Debug — so on a prod Info/JSON console the line vanishes and
+//     only the counter advances (the whole point of A1);
+//   - the audio-send failure (#623): counted, rate-limited, but emitted at its
+//     ORIGINAL level, because a send fault must stay visible in prod.
+//
+// A survivor is forwarded only if the base handler is enabled at the level it
+// carries; otherwise it is dropped and the counter carries the information.
+// Everything else is forwarded verbatim at its original level.
 func (h *disgoFilterHandler) Handle(ctx context.Context, r slog.Record) error {
 	switch {
 	case h.isBenignDAVE(r):
@@ -148,8 +159,10 @@ func (h *disgoFilterHandler) countAndLimit(ctx context.Context, r slog.Record, h
 }
 
 // isAudioSendFailure matches disgo's outbound audio-send failure: the exact
-// message plus an err attr. There is no name tag on that logger (unlike the DAVE
-// record's name=voice_conn), so message + err is the whole signature.
+// message plus an err attr. In prod that record arrives on the same
+// bot→voice→voice_conn name chain as the DAVE one (the sender inherits the conn
+// logger), so the name is not discriminating here and is deliberately ignored —
+// message + err is the whole signature.
 func isAudioSendFailure(r slog.Record) bool {
 	return r.Message == audioSendMsg && hasErrAttr(r, "")
 }

@@ -120,11 +120,15 @@ func TestDAVEFilterIgnoresNonVoiceConn(t *testing.T) {
 	}
 }
 
-// audioSenderLogger reproduces disgo's audio-send failure site: voice/audio_sender.go
-// handleErr logs "failed to send audio" with an err attr and NO name=voice_conn tag.
+// audioSenderLogger reproduces disgo's audio-send failure site: the sender
+// inherits the conn logger (conn_config.go tags name=voice_conn before
+// NewAudioSender), so the record arrives on the same bot→voice→voice_conn chain
+// as the DAVE one and voice/audio_sender.go handleErr logs "failed to send audio"
+// with an err attr.
 func audioSenderLogger(buf *bytes.Buffer, level slog.Level, hooks LogHooks) *slog.Logger {
 	base := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})
-	return slog.New(NewDisgoFilterHandler(base, hooks)).With("name", "bot").With("name", "voice")
+	return slog.New(NewDisgoFilterHandler(base, hooks)).
+		With("name", "bot").With("name", "voice").With("name", "voice_conn")
 }
 
 func TestAudioSendFailureCountsEveryRecord(t *testing.T) {
