@@ -1111,7 +1111,7 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 	// finish — the tail sentence may still be setting the state finish reads.
 	if r.lookahead != nil {
 		p := r.newPipelinedTurn(ctx, e.TurnID)
-		ctx := withPipelinedDispatch(ctx)
+		ctx := WithPipelinedDispatch(ctx)
 		for _, rep := range r.reply(ctx, e) {
 			if OutcomeOf(p.dispatch(rep)) == SentenceCut {
 				_ = p.flush()
@@ -1149,7 +1149,7 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 	// MUST run before finish, whose terminal reason depends on the tail's state.
 	if r.lookahead != nil {
 		p := r.newPipelinedTurn(ctx, e.TurnID)
-		err := r.replyStream(withPipelinedDispatch(ctx), e, p.dispatch)
+		err := r.replyStream(WithPipelinedDispatch(ctx), e, p.dispatch)
 		_ = p.flush()
 		return p.finish(err)
 	}

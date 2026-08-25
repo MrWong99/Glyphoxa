@@ -6,10 +6,10 @@ import "context"
 // callback is PIPELINED (#626).
 type pipelinedDispatchKey struct{}
 
-// withPipelinedDispatch marks ctx as a pipelined turn's producer context. The
+// WithPipelinedDispatch marks ctx as a pipelined turn's producer context. The
 // [Replier] installs it on the ctx it hands the producer ([StreamReplyFunc], the
 // batch [ReplyFunc]) whenever the turn runs through the pre-synthesis pipeline.
-func withPipelinedDispatch(ctx context.Context) context.Context {
+func WithPipelinedDispatch(ctx context.Context) context.Context {
 	return context.WithValue(ctx, pipelinedDispatchKey{}, true)
 }
 
