@@ -129,6 +129,18 @@ tests:
       - exists:
           path: spec.template.spec.volumes[0].emptyDir
 
+  - it: renders no resources block when ollama.resources is left at its default
+    # Guards the byte-identical default-render AC (#624) permanently, not
+    # just via a one-time manual `helm template` diff.
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].resources
+
   - it: renders the resources block when ollama.resources is set
     # ADR-0042's 250ms recall budget needs a CPU request on the pod (#624) —
     # this proves the commented values.yaml example actually renders.
