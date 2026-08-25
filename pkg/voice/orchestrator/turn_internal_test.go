@@ -267,3 +267,75 @@ func TestOutcomeOf_ThreeClassContract(t *testing.T) {
 		t.Fatal("an unknown dispatch error must classify as cut (stop the producer)")
 	}
 }
+
+// TestTurnRun_OnResolvedFiresOnceOnEveryExit pins the #626 resolution hook: with
+// the pre-synthesis pipeline the dispatch callback returns BEFORE the sentence is
+// resolved, so a producer that must know when its last sentence finally settled
+// (the agent's history commit, ADR-0012) waits on OnResolved. It fires EXACTLY
+// once on every exit — cut before the synth call, start-error, cut during the
+// drain, and delivery — and after OnDelivered when the sentence was delivered.
+func TestTurnRun_OnResolvedFiresOnceOnEveryExit(t *testing.T) {
+	cancelled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	startErr := errors.New("tts start failed")
+
+	cases := []struct {
+		name  string
+		ctx   context.Context
+		synth *fakeSynth
+		want  SentenceOutcome
+	}{
+		{"cut before the synth call", cancelled(), &fakeSynth{}, SentenceCut},
+		{"start-error under a live turn", context.Background(), &fakeSynth{err: startErr}, SentenceNotDelivered},
+		{"delivered", context.Background(), &fakeSynth{}, SentenceDelivered},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newTurnRun(tc.ctx, tc.synth.dispatch, nil)
+			var order []string
+			var got []SentenceOutcome
+			err := run.dispatch(Reply{
+				Sentence:    "hello",
+				OnDelivered: func() { order = append(order, "delivered") },
+				OnResolved: func(o SentenceOutcome) {
+					order = append(order, "resolved")
+					got = append(got, o)
+				},
+			})
+			if len(got) != 1 {
+				t.Fatalf("OnResolved fired %d times, want exactly 1", len(got))
+			}
+			if got[0] != tc.want || OutcomeOf(err) != tc.want {
+				t.Fatalf("outcome: hook=%v return=%v, want %v", got[0], OutcomeOf(err), tc.want)
+			}
+			if tc.want == SentenceDelivered && (len(order) != 2 || order[0] != "delivered") {
+				t.Fatalf("hook order = %v, want OnDelivered then OnResolved", order)
+			}
+		})
+	}
+
+	t.Run("cut during the drain", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		synth := &fakeSynth{onCall: cancel}
+		run := newTurnRun(ctx, synth.dispatch, nil)
+		var got []SentenceOutcome
+		delivered := 0
+		err := run.dispatch(Reply{
+			Sentence:    "hello",
+			OnDelivered: func() { delivered++ },
+			OnResolved:  func(o SentenceOutcome) { got = append(got, o) },
+		})
+		if len(got) != 1 || got[0] != SentenceCut {
+			t.Fatalf("OnResolved = %v, want exactly one SentenceCut", got)
+		}
+		if delivered != 0 {
+			t.Fatalf("OnDelivered fired %d times on a mid-drain cut, want 0", delivered)
+		}
+		if OutcomeOf(err) != SentenceCut {
+			t.Fatalf("dispatch outcome = %v, want SentenceCut", OutcomeOf(err))
+		}
+	})
+}

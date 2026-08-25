@@ -837,6 +837,18 @@ type Reply struct {
 	// own return-value drain and pass hook-less Replies, so they simply never
 	// set it.)
 	OnDelivered func()
+
+	// OnResolved, when non-nil, fires EXACTLY ONCE when this Reply's outcome is
+	// final — after OnDelivered on the delivered path — carrying the same
+	// three-class outcome the dispatch return would ([OutcomeOf]). It exists for
+	// the pre-synthesis pipeline (#626): a pipelined dispatch returns as soon as
+	// the PREVIOUS sentence resolved, so its own return value is control flow
+	// ("keep producing" / "stop"), not a settled outcome. A producer that must
+	// read what was actually delivered — the agent's ADR-0012 history commit —
+	// waits for every Reply's OnResolved before committing. It may run on the
+	// pipeline's goroutine, so a producer's hooks must be safe to call from one.
+	// Nil is a no-op; a synchronous dispatch fires it inline, before returning.
+	OnResolved func(SentenceOutcome)
 }
 
 // ReplyFunc decides what an addressed Agent says in response to one
