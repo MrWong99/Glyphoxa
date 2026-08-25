@@ -214,6 +214,15 @@ ollamaUrl: "http://<ollama-host>:11434"
 #     persistence:
 #       size: 20Gi           # the model cache — nomic-embed-text is pulled on
 #                            # first start, so the PVC saves a re-download
+#     resources:
+#       requests:
+#         cpu: "2"           # give this a real CPU request. Without one the
+#                            # pod can be throttled to near-zero under node
+#         memory: 2Gi        # contention, and speculative memory recall
+#       limits:              # (ADR-0042) falls back to an inline embedding
+#         memory: 4Gi        # call under a hard ~250ms budget — a CPU-starved
+#                            # Ollama pod cannot meet that, and recall
+#                            # degrades to no-memory on timeout.
 
 database:
   password: "<generate a real one; URL-safe characters>"

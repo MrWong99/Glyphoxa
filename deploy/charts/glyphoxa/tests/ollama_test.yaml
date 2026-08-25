@@ -128,3 +128,28 @@ tests:
           count: 1 # no PVC
       - exists:
           path: spec.template.spec.volumes[0].emptyDir
+
+  - it: renders the resources block when ollama.resources is set
+    # ADR-0042's 250ms recall budget needs a CPU request on the pod (#624) —
+    # this proves the commented values.yaml example actually renders.
+    set:
+      ollama:
+        enabled: true
+        resources:
+          requests:
+            cpu: "2"
+            memory: 2Gi
+          limits:
+            memory: 4Gi
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: "2"
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 2Gi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 4Gi
