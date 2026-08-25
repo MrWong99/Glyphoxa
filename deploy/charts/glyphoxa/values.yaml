@@ -79,6 +79,22 @@ ollama:
     enabled: true
     size: 20Gi
     # storageClassName: ""  # use the cluster default when unset
+  # A pod with no CPU request can get throttled to near-zero under node
+  # contention — and speculative memory recall (ADR-0042) falls back to an
+  # inline embedding call under a hard ~250ms budget
+  # (`internal/recall/recall.go`'s `defaultBudget`), so a CPU-starved Ollama
+  # pod makes that budget unmeetable and recall degrades to no-memory on
+  # timeout. Empty below (no default resource change — the k3d test env is
+  # resource-constrained); uncomment and size for your node when running this
+  # for real. "2" is a starting point, not a measured guarantee under 250ms —
+  # needs the 4-vCPU-recommended node sizing (see docs/deploy/k3s-proxmox.md);
+  # halve it on a 2-vCPU-minimum node or the pod goes Pending instead of slow:
+  # resources:
+  #   requests:
+  #     cpu: "2"
+  #     memory: 2Gi
+  #   limits:
+  #     memory: 4Gi
   resources: {}
 
 # Nightly Postgres backups (#520). The in-chart Postgres is a single StatefulSet

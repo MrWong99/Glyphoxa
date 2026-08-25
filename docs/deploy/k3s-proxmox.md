@@ -64,6 +64,12 @@ at:
 | RAM | 4 GiB | 8 GiB |
 | Disk | 20 GiB | 40+ GiB (Postgres + transcripts/blobs grow) |
 
+Running in-cluster Ollama (`ollama.enabled: true`) needs the **4-vCPU
+recommended** sizing, not the 2-vCPU minimum: the web pod alone already
+requests 500m, and the `ollama.resources` example below asks for a further
+2 full cores — on a 2-vCPU (2000m) node that pod goes Pending forever
+instead of just slow (recall fully dead, not degraded).
+
 In Proxmox: Ubuntu Server 24.04 (or Debian 13) cloud image or ISO, VirtIO
 disk/NIC, `qemu-guest-agent` installed, and a **static IP or DHCP
 reservation** — the router's port forward must keep pointing at it. Enable
@@ -214,6 +220,21 @@ ollamaUrl: "http://<ollama-host>:11434"
 #     persistence:
 #       size: 20Gi           # the model cache — nomic-embed-text is pulled on
 #                            # first start, so the PVC saves a re-download
+#     resources:             # give this a real CPU request. Without one the
+#       requests:             # pod can be throttled to near-zero under node
+#         cpu: "2"            # contention, and speculative memory recall
+#         memory: 2Gi         # (ADR-0042) falls back to an inline embedding
+#       limits:               # call under a hard ~250ms budget — a CPU-starved
+#         memory: 4Gi         # Ollama pod cannot meet that, and recall
+#                             # degrades to no-memory on timeout.
+#                             #
+#                             # "2" is a starting point, not a measured
+#                             # guarantee under 250ms — no benchmark backs a
+#                             # specific core count for nomic-embed-text.
+#                             # Needs the 4-vCPU recommended sizing above
+#                             # (500m already goes to the web pod); on a
+#                             # 2-vCPU minimum node halve it (cpu: "1") or the
+#                             # pod goes Pending instead of just slow.
 
 database:
   password: "<generate a real one; URL-safe characters>"

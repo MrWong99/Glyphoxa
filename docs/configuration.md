@@ -320,7 +320,14 @@ matrix: v1.0 embeds through **Ollama only**
 reachable endpoint. The default is loopback, so any containerized run (the
 image ships no Ollama) must point `GLYPHOXA_OLLAMA_URL` at a real Ollama
 server (the Helm chart's `ollamaUrl` value renders it), or semantic memory
-(L2) stalls with a WARN loop while everything else keeps working.
+(L2) stalls with a WARN loop while everything else keeps working. If the
+chart runs Ollama in-cluster (`ollama.enabled: true`), give the pod a real
+CPU request via `ollama.resources` — without one it can be throttled to
+near-zero under node contention, and speculative memory recall
+([ADR-0042](adr/0042-streaming-stt-speculative-memory-recall.md)) falls back
+to an inline embedding call under a hard ~250ms budget
+(`internal/recall/recall.go`'s `defaultBudget`) that a CPU-starved pod cannot
+meet, degrading recall to no-memory on timeout.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
