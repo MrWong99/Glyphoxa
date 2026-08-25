@@ -162,6 +162,13 @@ type PrometheusRecorder struct {
 	// by; the counter's event label is a bounded three-value enum.
 	intersentenceGap  prometheus.Histogram
 	playbackLookahead *prometheus.CounterVec // event
+
+	// #607: optional side-channel on the headline SLO span. Voice mode installs
+	// the flight recorder's trigger here (see flight.go) so a tail spike leaves an
+	// execution trace behind, not just a histogram bucket. Nil everywhere else —
+	// no series, no cost. Written once at boot before any bus subscriber exists
+	// (see SetResponseLatencyHook), read on the subscriber goroutine after.
+	respLatencyHook func(time.Duration)
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
@@ -500,6 +507,9 @@ func (r *PrometheusRecorder) BargeCancelled(string) { r.bargeCancels.Inc() }
 
 func (r *PrometheusRecorder) ResponseLatency(role AgentRole, d time.Duration) {
 	r.responseLatency.WithLabelValues(string(role)).Observe(d.Seconds())
+	if h := r.respLatencyHook; h != nil { // #607
+		h(d)
+	}
 }
 func (r *PrometheusRecorder) VADHangover(d time.Duration)   { r.vadHangover.Observe(d.Seconds()) }
 func (r *PrometheusRecorder) AddressDetect(d time.Duration) { r.addressDetect.Observe(d.Seconds()) }
@@ -710,4 +720,20 @@ func (r *PrometheusRecorder) IntersentenceGap(d time.Duration) {
 // lane's gap-hiding is readable next to the gap histogram it suppresses.
 func (r *PrometheusRecorder) PlaybackLookahead(ev LookaheadEvent) {
 	r.playbackLookahead.WithLabelValues(string(ev)).Inc()
+}
+
+// --- #607 flight recorder ---
+
+// SetResponseLatencyHook installs a side-channel on ResponseLatency (#607).
+// The hook runs INLINE on the caller's goroutine — today the observe bus
+// subscriber, holding its lock — so it must cost nanoseconds and never block or
+// touch I/O; [FlightRecorder.LatencyBreach] is the intended implementation (a
+// comparison plus a non-blocking channel send).
+//
+// Call it exactly once, at boot, BEFORE the bus subscriber that records spans
+// is started. That ordering is what makes the plain field safe: the goroutine
+// that reads it is created after the write, so the write happens-before every
+// read. A caller that cannot promise it must not use this seam.
+func (r *PrometheusRecorder) SetResponseLatencyHook(h func(time.Duration)) {
+	r.respLatencyHook = h
 }

@@ -430,6 +430,31 @@ func TestKGFactsDurationHistogram(t *testing.T) {
 	}
 }
 
+// TestResponseLatencyHook pins the #607 seam: an installed hook sees every
+// recorded SLO span, and installing one does not cost the histogram its
+// observation — the metric is the always-on signal, the hook only the opt-in
+// flight-recorder trigger hanging off it.
+func TestResponseLatencyHook(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	var got []time.Duration
+	rec.SetResponseLatencyHook(func(d time.Duration) { got = append(got, d) })
+	rec.ResponseLatency(RoleCharacter, 2600*time.Millisecond)
+
+	if len(got) != 1 || got[0] != 2600*time.Millisecond {
+		t.Fatalf("hook saw %v, want [2.6s]", got)
+	}
+	if out := scrape(t, rec); !strings.Contains(out, `glyphoxa_voice_response_latency_seconds_count{agent_role="character"} 1`) {
+		t.Fatalf("histogram lost its observation while a hook was installed:\n%s", filterGlyphoxa(out))
+	}
+}
+
+// TestResponseLatencyWithoutHook: the default (and every web-mode) recorder has
+// no hook, and the hot path must not panic on the nil one.
+func TestResponseLatencyWithoutHook(t *testing.T) {
+	NewPrometheusRecorder().ResponseLatency(RoleButler, time.Second)
+}
+
 func filterGlyphoxa(s string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(s, "\n") {
