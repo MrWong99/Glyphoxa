@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// daveFilterHandler is the app-owned slog.Handler decorator that tames the one
-// known-benign, high-frequency disgo voice-receive message (A1 / observability.md
+// disgoFilterHandler is the app-owned slog.Handler decorator that tames the
+// known high-frequency disgo voice messages (A1 / observability.md
 // §1.5). disgo logs every undecryptable inbound packet at Error
 // ("error while reading packet" with err "failed to DAVE decrypt packet: …"); on
 // a healthy call this is a steady benign trickle around DAVE/MLS epoch rolls, and
@@ -29,16 +29,42 @@ import (
 // hook are therefore held by POINTER and shared across every derivation; only the
 // accumulated name attrs are copied per-derivation (that's how we see the inner
 // name=voice_conn).
-type daveFilterHandler struct {
+// A second, unrelated disgo record rides the same mechanism (#623): the
+// audio-send failure from voice/audio_sender.go handleErr ("failed to send
+// audio" + err), which fires per outbound frame when the voice gateway is not
+// Ready or the UDP write fails. It reaches us on the SAME name chain as the DAVE
+// record (conn_config.go tags the conn logger name=voice_conn before
+// NewAudioSender), so the two are told apart by message, not by name. Note
+// handleErr does NOT log at all for ErrGatewayNotConnected / net.ErrClosed — it
+// silently Close()s the sender — so this counter covers the not-Ready/UDP-error
+// class only, not every send-path death. Its LINE is rate-limited the same
+// way (a reconnect window otherwise floods the console at 50 frames/s) but it is
+// NOT downgraded: a send failure is a real fault, so the survivor keeps its
+// original Error level. The counter still moves once per record.
+type disgoFilterHandler struct {
 	base slog.Handler
 	// names accumulates the values of every "name" attribute seen through
 	// WithAttrs (disgo tags its logger name=bot → name=voice → name=voice_conn).
 	names []string
-	// onDAVEDecrypt is called once per matched benign record (the metric bump).
-	// Held so the Prometheus adapter (task #3) can wire glyphoxa_voice_dave_
-	// decrypt_errors_total; nil is a no-op.
-	onDAVEDecrypt func()
-	limiter       *rateLimiter
+	// hooks are the metric increments, one per matched record (nil = no-op).
+	hooks LogHooks
+	// One limiter per matched record class, so a DAVE trickle never rate-limits
+	// away the audio-send line (or vice versa). Shared by pointer across
+	// derivations — see the concurrency note above.
+	daveLimiter      *rateLimiter
+	audioSendLimiter *rateLimiter
+}
+
+// LogHooks bundles the per-record metric increments the disgo filter feeds. A nil
+// field is a no-op, so a caller that only wants the log filtering passes the zero
+// value.
+type LogHooks struct {
+	// OnDAVEDecrypt fires once per benign DAVE-decrypt record →
+	// glyphoxa_voice_dave_decrypt_errors_total.
+	OnDAVEDecrypt func()
+	// OnAudioSendError fires once per disgo audio-send failure record →
+	// glyphoxa_voice_audio_send_errors_total (#623).
+	OnAudioSendError func()
 }
 
 const (
@@ -48,16 +74,25 @@ const (
 	// daveLogWindow is the per-window rate limit: at most one survivor line is
 	// emitted (at Debug) per window, carrying suppressed=N for the rest.
 	daveLogWindow = 10 * time.Second
+
+	// audioSendMsg is disgo's audio-send failure message (voice/audio_sender.go
+	// handleErr). Unlike the DAVE record it carries no name attr, so the match is
+	// message + presence of an err attr.
+	audioSendMsg = "failed to send audio"
+	// audioSendLogWindow rate-limits the LINE only; the counter is never limited.
+	audioSendLogWindow = 10 * time.Second
 )
 
-// NewDAVEFilterHandler wraps base so the benign disgo DAVE-decrypt noise is
-// downgraded to Debug + rate-limited and counted via onDAVEDecrypt (nil = no-op).
-// Every other record passes through base unchanged at its original level.
-func NewDAVEFilterHandler(base slog.Handler, onDAVEDecrypt func()) slog.Handler {
-	return &daveFilterHandler{
-		base:          base,
-		onDAVEDecrypt: onDAVEDecrypt,
-		limiter:       &rateLimiter{window: daveLogWindow},
+// NewDisgoFilterHandler wraps base so the two known noisy disgo records — the
+// benign DAVE-decrypt trickle and the audio-send failure burst — are rate-limited
+// and counted via hooks. Every other record passes through base unchanged at its
+// original level.
+func NewDisgoFilterHandler(base slog.Handler, hooks LogHooks) slog.Handler {
+	return &disgoFilterHandler{
+		base:             base,
+		hooks:            hooks,
+		daveLimiter:      &rateLimiter{window: daveLogWindow},
+		audioSendLimiter: &rateLimiter{window: audioSendLogWindow},
 	}
 }
 
@@ -65,53 +100,91 @@ func NewDAVEFilterHandler(base slog.Handler, onDAVEDecrypt func()) slog.Handler 
 // NOT pre-filter benign records here: slog calls Enabled once with the record's
 // ORIGINAL level (Error → true) and TextHandler/JSONHandler.Handle never re-check
 // level, so the actual suppression has to happen in Handle (see there).
-func (h *daveFilterHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *disgoFilterHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.base.Enabled(ctx, level)
 }
 
-// Handle applies the content filter, then delegates. For the one benign DAVE
-// record it bumps the counter and rate-limits; the survivor is rewritten to
-// Debug and only forwarded if the base handler is actually enabled at Debug —
-// otherwise it is dropped entirely (so in prod Info/JSON the line vanishes and
-// only the counter advances, which is the whole point of A1). Everything else is
-// forwarded verbatim at its original level.
-func (h *daveFilterHandler) Handle(ctx context.Context, r slog.Record) error {
-	if !h.isBenignDAVE(r) {
-		return h.base.Handle(ctx, r)
+// Handle applies the content filter, then delegates. Two record classes are
+// matched, each with its own counter hook and its own limiter:
+//
+//   - the benign DAVE-decrypt record: counted, rate-limited, and the survivor
+//     rewritten to Debug — so on a prod Info/JSON console the line vanishes and
+//     only the counter advances (the whole point of A1);
+//   - the audio-send failure (#623): counted, rate-limited, but emitted at its
+//     ORIGINAL level, because a send fault must stay visible in prod.
+//
+// A survivor is forwarded only if the base handler is enabled at the level it
+// carries; otherwise it is dropped and the counter carries the information.
+// Everything else is forwarded verbatim at its original level.
+func (h *disgoFilterHandler) Handle(ctx context.Context, r slog.Record) error {
+	switch {
+	case h.isBenignDAVE(r):
+		return h.countAndLimit(ctx, r, h.hooks.OnDAVEDecrypt, h.daveLimiter, slog.LevelDebug)
+	case isAudioSendFailure(r):
+		// Kept at its original level: a send failure is a genuine fault (#623), so
+		// prod must still see one line per window — only the burst is trimmed.
+		return h.countAndLimit(ctx, r, h.hooks.OnAudioSendError, h.audioSendLimiter, r.Level)
+	}
+	return h.base.Handle(ctx, r)
+}
+
+// countAndLimit is the shared filter body: bump the metric hook for EVERY matched
+// record, then let at most one line per limiter window through at level, carrying
+// suppressed=N for the drops. A survivor whose level the base handler does not
+// accept is dropped entirely — the counter is what carries the information then.
+func (h *disgoFilterHandler) countAndLimit(ctx context.Context, r slog.Record, hook func(), limiter *rateLimiter, level slog.Level) error {
+	if hook != nil {
+		hook()
 	}
 
-	if h.onDAVEDecrypt != nil {
-		h.onDAVEDecrypt()
-	}
-
-	emit, suppressed := h.limiter.allow(r.Time)
+	emit, suppressed := limiter.allow(r.Time)
 	if !emit {
 		return nil // counted, rate-limited away
 	}
-	if !h.base.Enabled(ctx, slog.LevelDebug) {
-		// Prod (Info+): the benign trickle leaves no log line at all; the metric
-		// carries the information instead.
+	if !h.base.Enabled(ctx, level) {
+		// e.g. prod (Info+) with a Debug survivor: the benign trickle leaves no log
+		// line at all; the metric carries the information instead.
 		return nil
 	}
 
-	// Dev (Debug enabled): emit a single survivor at Debug, annotated with how
-	// many siblings were suppressed in this window.
-	down := slog.NewRecord(r.Time, slog.LevelDebug, r.Message, r.PC)
+	out := slog.NewRecord(r.Time, level, r.Message, r.PC)
 	r.Attrs(func(a slog.Attr) bool {
-		down.AddAttrs(a)
+		out.AddAttrs(a)
 		return true
 	})
 	if suppressed > 0 {
-		down.AddAttrs(slog.Int("suppressed", suppressed))
+		out.AddAttrs(slog.Int("suppressed", suppressed))
 	}
-	return h.base.Handle(ctx, down)
+	return h.base.Handle(ctx, out)
+}
+
+// isAudioSendFailure matches disgo's outbound audio-send failure: the exact
+// message plus an err attr. In prod that record arrives on the same
+// bot→voice→voice_conn name chain as the DAVE one (the sender inherits the conn
+// logger), so the name is not discriminating here and is deliberately ignored —
+// message + err is the whole signature.
+func isAudioSendFailure(r slog.Record) bool {
+	return r.Message == audioSendMsg && hasErrAttr(r, "")
+}
+
+// hasErrAttr reports whether r carries an "err" attr, optionally containing sub.
+func hasErrAttr(r slog.Record, sub string) bool {
+	found := false
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "err" && (sub == "" || strings.Contains(a.Value.String(), sub)) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // isBenignDAVE matches ONLY disgo's known benign voice-receive decrypt log: the
 // exact message, the inner name=voice_conn tag, and an err attr containing
 // "DAVE decrypt". All three must hold so a genuine voice_conn gateway error
 // (different message, or an err without DAVE decrypt) is never quieted.
-func (h *daveFilterHandler) isBenignDAVE(r slog.Record) bool {
+func (h *disgoFilterHandler) isBenignDAVE(r slog.Record) bool {
 	if r.Message != daveMsg {
 		return false
 	}
@@ -125,22 +198,14 @@ func (h *daveFilterHandler) isBenignDAVE(r slog.Record) bool {
 	if !hasConn {
 		return false
 	}
-	hasDAVEErr := false
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == "err" && strings.Contains(a.Value.String(), daveErrSubstring) {
-			hasDAVEErr = true
-			return false
-		}
-		return true
-	})
-	return hasDAVEErr
+	return hasErrAttr(r, daveErrSubstring)
 }
 
 // WithAttrs derives a handler that remembers any "name" attrs (so the inner
 // name=voice_conn reaches isBenignDAVE) and otherwise delegates attr storage to
 // base. The limiter and counter hook are shared by pointer with the parent so
 // rate-limiting and the metric aggregate across all derivations.
-func (h *daveFilterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h *disgoFilterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	names := h.names
 	for _, a := range attrs {
 		if a.Key == "name" {
@@ -150,23 +215,25 @@ func (h *daveFilterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			names = append(next, a.Value.String())
 		}
 	}
-	return &daveFilterHandler{
-		base:          h.base.WithAttrs(attrs),
-		names:         names,
-		onDAVEDecrypt: h.onDAVEDecrypt,
-		limiter:       h.limiter,
+	return &disgoFilterHandler{
+		base:             h.base.WithAttrs(attrs),
+		names:            names,
+		hooks:            h.hooks,
+		daveLimiter:      h.daveLimiter,
+		audioSendLimiter: h.audioSendLimiter,
 	}
 }
 
 // WithGroup delegates to base; groups do not affect the name-attr matching (the
 // name tags disgo sets are plain attrs, not a group), and the shared limiter /
 // counter are preserved.
-func (h *daveFilterHandler) WithGroup(name string) slog.Handler {
-	return &daveFilterHandler{
-		base:          h.base.WithGroup(name),
-		names:         h.names,
-		onDAVEDecrypt: h.onDAVEDecrypt,
-		limiter:       h.limiter,
+func (h *disgoFilterHandler) WithGroup(name string) slog.Handler {
+	return &disgoFilterHandler{
+		base:             h.base.WithGroup(name),
+		names:            h.names,
+		hooks:            h.hooks,
+		daveLimiter:      h.daveLimiter,
+		audioSendLimiter: h.audioSendLimiter,
 	}
 }
 

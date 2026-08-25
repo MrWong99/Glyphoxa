@@ -40,6 +40,8 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.PlaybackFinished("guild-123", true)
 	rec.BargeCancelled("guild-123")
 	rec.DAVEDecryptHook()()
+	rec.AudioSendErrorHook()()
+	rec.AudioSendErrorHook()()
 
 	rec.ResponseLatency(RoleCharacter, 900*time.Millisecond)
 	rec.VADHangover(480 * time.Millisecond)
@@ -74,6 +76,9 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_voice_inbound_frames_dropped_total 3`,
 		`glyphoxa_voice_inbound_undecodable_frames_total 1`,
 		`glyphoxa_voice_dave_decrypt_errors_total 1`,
+		// #623: send-path failures distinguishable from other no_first_audio
+		// abandonments; unlabelled per ADR-0032 §2.1 bounded cardinality.
+		`glyphoxa_voice_audio_send_errors_total 2`,
 		`glyphoxa_voice_sessions 1`,
 		`glyphoxa_voice_playback_total{interrupted="true"} 1`,
 		`glyphoxa_voice_barge_cancels_total 1`,
