@@ -339,3 +339,32 @@ func TestTurnRun_OnResolvedFiresOnceOnEveryExit(t *testing.T) {
 		}
 	})
 }
+
+// TestTurnRun_DispatchHeld_FiresOnResolvedOnPreCut closes the one exit that
+// bypassed the resolution hook: dispatchHeld's own pre-dispatch ctx check returns
+// before run is entered. "Fires exactly once on every exit" must hold there too —
+// a producer that waits on OnResolved (the #626 history-commit barrier) would
+// otherwise wait forever on a turn cut before its held sentence was primed.
+func TestTurnRun_DispatchHeld_FiresOnResolvedOnPreCut(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	synth := &fakeSynth{}
+	run := newTurnRun(ctx, synth.dispatch, nil)
+
+	var got []SentenceOutcome
+	held := 0
+	err := run.dispatchHeld(Reply{
+		Sentence:   "hello",
+		OnResolved: func(o SentenceOutcome) { got = append(got, o) },
+	}, func(string) { held++ }, errors.New("abort"))
+
+	if len(got) != 1 || got[0] != SentenceCut {
+		t.Fatalf("OnResolved = %v, want exactly one SentenceCut", got)
+	}
+	if OutcomeOf(err) != SentenceCut {
+		t.Fatalf("dispatchHeld outcome = %v, want SentenceCut", OutcomeOf(err))
+	}
+	if held != 0 || len(synth.calls) != 0 {
+		t.Fatalf("a pre-cut held dispatch must reach neither the coordinator nor the synthesizer (held=%d calls=%v)", held, synth.calls)
+	}
+}

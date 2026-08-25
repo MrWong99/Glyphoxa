@@ -514,3 +514,53 @@ func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetr
 			orchestrator.WithStreamSpeakerID(speakerID))
 	}
 }
+
+// playbackPump is the live cycle's playback pump at the seam the pipeline needs
+// it: a playback sink (the Highlight clip-replay target, #310) that is ALSO the
+// held look-ahead lane (#375, #626). The production implementation is
+// [wire.PlaybackPump]; the interface exists so the hand-off below is testable
+// without a Discord voice Session.
+type playbackPump interface {
+	HandleSentence(ctx context.Context, chunks <-chan tts.AudioChunk)
+	orchestrator.LookaheadPump
+}
+
+// cycleConversationDeps assembles the pipeline's dependencies for one live cycle:
+// the run Config's long-lived collaborators plus the three objects this cycle
+// built — the tee'd synthesizer, the playback pump, and the Butler's text poster.
+//
+// It is a named function rather than an inline literal because the pump crosses
+// here TWICE, as the clip-replay sink and as the look-ahead lane, and the lane
+// hand-off has no other observable consequence in tests: drop it and everything
+// still builds and passes while routed turns quietly stop pre-synthesizing and the
+// inter-sentence gap grows back by one cold TTS TTFB.
+func cycleConversationDeps(bus *voiceevent.Bus, log *slog.Logger, cfg Config, synth tts.Synthesizer, pump playbackPump, textPoster func(ctx context.Context, text string) error) conversationDeps {
+	return conversationDeps{
+		bus:              bus,
+		log:              log,
+		npcs:             cfg.npcs,
+		language:         cfg.language,
+		synth:            synth,
+		stageMetrics:     cfg.StageMetrics,
+		keys:             cfg.keys,
+		llmProviderID:    cfg.llmProviderID,
+		sttStreaming:     cfg.STTStreaming,
+		memory:           cfg.Memory,
+		facts:            cfg.Facts,
+		directives:       cfg.Directives,
+		location:         cfg.Location,
+		speakerName:      cfg.SpeakerName,
+		playerCharacters: cfg.playerCharacters,
+		mutes:            cfg.Mutes,
+		gate:             cfg.Gate,
+		gmSpeaker:        cfg.GMSpeaker,
+		toolDeps:         cfg.ToolDeps,
+		textPoster:       textPoster,
+		clipReplayLoad:   cfg.ClipReplayLoader,
+		clipReplaySink:   orchestrator.ClipSink(pump.HandleSentence),
+		// The same pump is the look-ahead lane: a routed turn holds its NEXT sentence
+		// there while the current one plays, so that sentence's TTS startup burns
+		// during playback instead of opening an audible gap (#626).
+		lookahead: pump,
+	}
+}

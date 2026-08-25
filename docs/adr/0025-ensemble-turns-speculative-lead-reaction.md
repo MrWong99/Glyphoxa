@@ -31,4 +31,11 @@ On top of that lane, every routed turn now runs a **depth-1 pre-synthesis pipeli
 
 Consequences carried through unchanged: the hold buffers **no** audio (the lockstep tee stays blocked on its send), a barge discards the held sentence and commits nothing (ADR-0012/0027), release points are sequential done-waits so the observable event order stays reproducible (ADR-0021/0033), and no new metric is added (ADR-0032) — the existing `playback_lookahead_total{released|latched|discarded}` and the inter-sentence gap histogram already show the effect.
 
-Because the dispatch callback now returns as soon as the *previous* sentence resolved, its return value is control flow only: producers commit strictly through `Reply.OnDelivered` and wait for `Reply.OnResolved`. ADR-0044's note that `tts_total` spans a held sentence's lane hold applies to every pipelined sentence now, not just a Reaction's first — it remains a deliver span, with `tts_ttfb` as the provider-latency signal.
+Because the dispatch callback now returns as soon as the *previous* sentence resolved, its return value is control flow only: producers commit strictly through `Reply.OnDelivered` and wait for `Reply.OnResolved`.
+
+**Metric semantics, read carefully.** ADR-0044's note that `tts_total` spans a held sentence's lane hold now applies to every pipelined sentence, not just a Reaction's first; it remains a *deliver* span. `tts_ttfb` changes meaning per sentence and its distribution becomes **bimodal** — a dashboard-interpretation hazard worth stating outright:
+
+- A turn's **first** sentence is never held, so its `TTSInvoked`→`FirstAudio` pair still measures real provider time-to-first-byte. This is the only remaining provider-TTFB signal at this seam.
+- Every **pipelined** sentence (k ≥ 2) announces at its RELEASE, after its audio is already synthesized and waiting, so its pair measures release→wire (≈0 ms). That near-zero sample is the pipeline *working*, not a fast vendor.
+
+So a `tts_ttfb` mean over all sentences drifts down as replies get longer, and reads as a vendor improvement it is not. Interpret the first-sentence mode for provider latency; the near-zero mode is a pre-render count, already covered by `playback_lookahead_total{released}`. No new series is added for this (ADR-0032).

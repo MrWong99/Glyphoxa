@@ -1,6 +1,15 @@
 package wirenpc
 
-import "testing"
+import (
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+)
 
 // stubPump is a no-op [orchestrator.LookaheadPump] standing in for the session's
 // live [wire.PlaybackPump].
@@ -29,3 +38,29 @@ func TestBargeGroup_CarriesLookaheadPump(t *testing.T) {
 		t.Fatal("a deps without a pump must leave the look-ahead lane unwired")
 	}
 }
+
+// TestCycleConversationDeps_PumpIsBothSinkAndLane pins the live-cycle handoff
+// itself (#626): the session's playback pump must reach the pipeline BOTH as the
+// clip-replay sink and as the look-ahead lane. Dropping the lane assignment is
+// invisible to every other test — the build stays green, routed turns silently
+// fall back to synchronous dispatch, and the ~1.5 s inter-sentence gap returns.
+func TestCycleConversationDeps_PumpIsBothSinkAndLane(t *testing.T) {
+	pump := &fakeCyclePump{}
+	deps := cycleConversationDeps(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config{}, nil, pump, nil)
+
+	if deps.lookahead != orchestrator.LookaheadPump(pump) {
+		t.Fatalf("deps.lookahead = %#v, want this cycle's playback pump (routed turns would not pipeline)", deps.lookahead)
+	}
+	if deps.clipReplaySink == nil {
+		t.Fatal("deps.clipReplaySink is nil, want the pump's HandleSentence (#310)")
+	}
+}
+
+// fakeCyclePump stands in for the live [wire.PlaybackPump] at the seam the cycle
+// hands it across: a playback sink that is also the look-ahead lane.
+type fakeCyclePump struct{}
+
+func (*fakeCyclePump) HandleSentence(context.Context, <-chan tts.AudioChunk) {}
+func (*fakeCyclePump) ReleaseLookahead(string)                               {}
+func (*fakeCyclePump) DiscardLookahead(string)                               {}

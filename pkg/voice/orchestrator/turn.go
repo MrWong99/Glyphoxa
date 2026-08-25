@@ -135,7 +135,10 @@ func (t *turnRun) dispatch(rep Reply) error {
 // supplies a non-sentinel error that stops the producer's drain as a unit.
 func (t *turnRun) dispatchHeld(rep Reply, onHeld func(sentence string), abort error) error {
 	if err := t.ctx.Err(); err != nil {
-		return err
+		// This early return is an EXIT of the dispatch too, so it resolves the Reply
+		// like every path inside run does — "OnResolved fires exactly once on every
+		// exit" is what a producer waiting on the hook (#626) depends on.
+		return t.resolve(rep, err)
 	}
 	onHeld(rep.Sentence)
 	return t.run(voiceevent.WithPlaybackLookahead(t.ctx), rep, abort, t.ctx)
@@ -150,9 +153,7 @@ func (t *turnRun) run(dctx context.Context, rep Reply, notDelivered error, check
 	// The sentence's outcome is final at EVERY return below, so the resolution
 	// hook (#626) is fired by one exit wrapper rather than per branch: a producer
 	// waiting on it (the agent's history commit) would deadlock on a leaked exit.
-	if rep.OnResolved != nil {
-		defer func() { rep.OnResolved(OutcomeOf(err)) }()
-	}
+	defer func() { err = t.resolve(rep, err) }()
 	if checkCtx == nil {
 		checkCtx = dctx
 	}
@@ -223,6 +224,18 @@ func (t *turnRun) finish(producerErr error) voiceevent.TurnEndReason {
 		return voiceevent.TurnEndTTSError
 	}
 	return ""
+}
+
+// resolve fires the Reply's resolution hook (#626) with err's outcome and returns
+// err unchanged, so every dispatch exit can end `return t.resolve(rep, err)` (or
+// route through the deferred call in [turnRun.run]). Routing ALL exits through one
+// helper is what makes "exactly once, on every exit" true by construction: a
+// producer blocked on the hook deadlocks on the first path that forgets it.
+func (t *turnRun) resolve(rep Reply, err error) error {
+	if rep.OnResolved != nil {
+		rep.OnResolved(OutcomeOf(err))
+	}
+	return err
 }
 
 // mark applies a state mutation to the turn's accumulated flags under the lock.
@@ -325,6 +338,13 @@ func (p *pipelinedTurn) dispatch(rep Reply) error {
 		// pre-rendering: drop its audio unplayed and unannounced, and stop the
 		// producer. Its own run unwinds on the same cancelled ctx.
 		p.lane.DiscardLookahead(key)
+		// The CUT sentence's own release may still be latched — it was released
+		// before it primed, and the barge then made its prime drain instead of
+		// consuming the latch. Clear it so no release outlives the turn that issued
+		// it (keys are never reused, so this is hygiene, not correctness-critical).
+		if prev.key != "" {
+			p.lane.DiscardLookahead(prev.key)
+		}
 		return prev.err
 	case SentenceNotDelivered:
 		// The previous sentence never reached the lane (a TTS start-error), so the

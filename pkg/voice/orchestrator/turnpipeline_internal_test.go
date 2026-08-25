@@ -345,3 +345,44 @@ func TestPipelinedTurn_StartErrorClearsStaleLatch(t *testing.T) {
 		t.Fatal("a start-errored sentence must leave the turn's ttsFailed sticky (tts_error terminal)")
 	}
 }
+
+// TestPipelinedTurn_CutAlsoClearsPreviousLatch pins the lane-cleanliness rule on
+// the barge path: the cut sentence's OWN release may still be latched in the pump
+// (release-before-prime, then the barge drains the prime without consuming the
+// latch). The coordinator therefore discards BOTH keys — the newly held sentence
+// and the cut predecessor — so no release latch outlives the turn that issued it.
+func TestPipelinedTurn_CutAlsoClearsPreviousLatch(t *testing.T) {
+	log := &eventLog{}
+	synth := newScriptedSynth(log, "one.", "two.", "three.")
+	lane := &laneSpy{events: log}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := newTestPipeline(ctx, log, synth, lane)
+
+	// s1 delivers, so s2 is released (its lane key T#2 now owns a release).
+	_ = p.dispatch(Reply{Sentence: "one."})
+	synth.awaitStart(t, "one.")
+	s2 := make(chan error, 1)
+	go func() { s2 <- p.dispatch(Reply{Sentence: "two."}) }()
+	synth.awaitStart(t, "two.")
+	synth.release("one.")
+	if err := <-s2; err != nil {
+		t.Fatalf("dispatch(s2) = %v, want nil", err)
+	}
+
+	// The human barges while s2 is speaking and s3 is pre-rendering.
+	s3 := make(chan error, 1)
+	go func() { s3 <- p.dispatch(Reply{Sentence: "three."}) }()
+	synth.awaitStart(t, "three.")
+	cancel()
+	synth.release("two.")
+	if err := <-s3; OutcomeOf(err) != SentenceCut {
+		t.Fatalf("dispatch(s3) outcome = %v, want SentenceCut", OutcomeOf(err))
+	}
+
+	ops := lane.snapshot()
+	for _, want := range []string{"discard:T#3", "discard:T#2"} {
+		if indexOf(ops, want) < 0 {
+			t.Fatalf("lane ops = %v, want %q (no release latch may outlive the cut turn)", ops, want)
+		}
+	}
+}
