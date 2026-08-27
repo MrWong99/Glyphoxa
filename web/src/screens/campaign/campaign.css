@@ -1004,6 +1004,10 @@
   cursor: pointer;
 }
 
+.gx-kg-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-default);
+}
 .gx-kg-chip[aria-pressed="true"] {
   color: var(--text-strong);
   border-color: var(--text-muted);

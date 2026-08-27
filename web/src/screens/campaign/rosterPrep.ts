@@ -162,8 +162,12 @@ function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[]
       key: "facts",
       // The figure the voice loop will actually inject, from the same renderer
       // (#535) — content on the entry does not guarantee the NPC receives it.
-      labelKey: r ? "campaign.checkFactsCount" : "campaign.checkFacts",
-      labelParams: r ? { n: r.factCount } : undefined,
+      labelKey: r
+        ? r.factCount === 1
+          ? "campaign.checkFactsCountOne"
+          : "campaign.checkFactsCount"
+        : "campaign.checkFacts",
+      labelParams: r && r.factCount !== 1 ? { n: r.factCount } : undefined,
       ok: (r?.factCount ?? 0) > 0,
       fix: "entry",
     },

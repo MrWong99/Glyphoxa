@@ -19,6 +19,7 @@ import {
   edgeOptions,
 } from "./knowledgeVocab";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
+import { errorMessage } from "@/lib/connectError";
 
 function typeMeta(t: NodeType) {
   return NODE_TYPE_META[t] ?? NODE_TYPE_META[NodeType.NOTE];
@@ -140,7 +141,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
           <span className="gx-field__hint">{t("knowledge.voicedByHint")}</span>
           {setNodeAgent.isError && (
             <span className="gx-editor__status gx-editor__status--error" role="alert">
-              {t("knowledge.linkAgentError", { message: setNodeAgent.error.message })}
+              {t("knowledge.linkAgentError", { message: errorMessage(setNodeAgent.error) })}
             </span>
           )}
         </div>
@@ -186,7 +187,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
             </Button>
             {createEdge.isError && (
               <span className="gx-editor__status gx-editor__status--error" role="alert">
-                {t("knowledge.addConnectionError", { message: createEdge.error.message })}
+                {t("knowledge.addConnectionError", { message: errorMessage(createEdge.error) })}
               </span>
             )}
           </div>
@@ -205,7 +206,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
             saving={updateDetails.isPending && updateDetails.variables?.id === e.id}
             saveError={
               updateDetails.isError && updateDetails.variables?.id === e.id
-                ? t("common.couldntSave", { message: updateDetails.error.message })
+                ? t("common.couldntSave", { message: errorMessage(updateDetails.error) })
                 : null
             }
             saved={savedEdgeID === e.id}
@@ -216,7 +217,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
         )}
         {deleteEdge.isError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            {t("knowledge.deleteConnectionError", { message: deleteEdge.error.message })}
+            {t("knowledge.deleteConnectionError", { message: errorMessage(deleteEdge.error) })}
           </span>
         )}
       </section>

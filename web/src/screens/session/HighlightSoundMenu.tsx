@@ -9,6 +9,7 @@ import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
 
 // HighlightSoundMenu is the GM's opt-in "Add sound" action for ONE promoted
 // Session Highlight (#312, Epic 8): pick a Sting (a short sound effect layered
@@ -37,7 +38,7 @@ export function HighlightSoundMenu({ highlight }: { highlight: Highlight }) {
       invalidate();
       setOpen(false);
     },
-    onError: (err: Error) => toast.error(t("session.couldntSetSound", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntSetSound", { message: errorMessage(err) })),
   });
 
   const choose = (kind: string) => {

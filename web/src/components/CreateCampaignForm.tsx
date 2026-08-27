@@ -12,6 +12,7 @@ import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 import "./createCampaignForm.css";
+import { errorMessage } from "@/lib/connectError";
 
 // The campaign create form + its create-then-activate flow (#267), shared by the
 // topbar CampaignSwitcher's create mode and the Configuration first-run CTA.
@@ -68,7 +69,7 @@ export function useCreateCampaign(onCreated?: () => void) {
     },
     onError: (err) => {
       flow.current = "idle"; // retryable — as a pure activation, via createdId
-      toast.error(t("components.createdCampaignCouldntSwitchToast", { message: err.message }));
+      toast.error(t("components.createdCampaignCouldntSwitchToast", { message: errorMessage(err) }));
     },
     // The sweep runs on SETTLED, not just success: even a failed activation must
     // refetch resolution truth. On first run the just-created campaign already
@@ -95,7 +96,7 @@ export function useCreateCampaign(onCreated?: () => void) {
     },
     onError: (err) => {
       flow.current = "idle"; // retryable — nothing was created
-      toast.error(t("components.couldntCreateCampaignToast", { message: err.message }));
+      toast.error(t("components.couldntCreateCampaignToast", { message: errorMessage(err) }));
     },
   });
 
@@ -212,8 +213,8 @@ export function CreateCampaignForm({
         {error && (
           <span className="gx-campaign-create__error" role="alert">
             {activateFailed
-              ? t("components.createdCouldntSwitchInline", { message: error.error.message })
-              : t("components.couldntCreateInline", { message: error.error.message })}
+              ? t("components.createdCouldntSwitchInline", { message: errorMessage(error.error) })
+              : t("components.couldntCreateInline", { message: errorMessage(error.error) })}
           </span>
         )}
       </div>

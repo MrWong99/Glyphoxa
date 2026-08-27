@@ -16,6 +16,7 @@ import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
 import { HighlightSoundMenu } from "./HighlightSoundMenu";
 import { useHighlights } from "./useHighlights";
+import { errorMessage } from "@/lib/connectError";
 
 // clipClock renders a Highlight bound (starts_at/ends_at) as an "HH:MM:SS" clock,
 // reusing the transcript's formatClock. An unset bound renders "".
@@ -89,12 +90,12 @@ export function HighlightsStrip({
 
   const promote = useMutation(SessionService.method.promoteHighlight, {
     onSuccess: () => invalidate(),
-    onError: (err: Error) => toast.error(t("session.couldntPromote", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntPromote", { message: errorMessage(err) })),
   });
 
   const remove = useMutation(SessionService.method.deleteHighlight, {
     onSuccess: () => invalidate(),
-    onError: (err: Error) => toast.error(t("session.couldntDelete", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntDelete", { message: errorMessage(err) })),
   });
 
   // No rendered session (fresh install, never started) — there is nothing to list,
@@ -113,7 +114,7 @@ export function HighlightsStrip({
   if (query.isError && !query.data) {
     return (
       <p className="gx-highlights__error" role="alert">
-        {t("session.couldntLoadHighlights", { message: query.error.message })}
+        {t("session.couldntLoadHighlights", { message: errorMessage(query.error) })}
       </p>
     );
   }

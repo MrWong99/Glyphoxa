@@ -16,6 +16,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Markdown } from "@/components/ui/Markdown";
 
 import "./planning.css";
+import { errorMessage } from "@/lib/connectError";
 
 // The Planning panel (#592, ADR-0062) backs the Campaign screen's "Planning"
 // view: the Butler as a GM-only prep chat over the ChatService RPCs. Threads
@@ -31,6 +32,10 @@ import "./planning.css";
 
 // MESSAGE_MAX mirrors the server-side bound on one exchange's user message.
 const MESSAGE_MAX = 4000;
+
+// TITLE_MAX mirrors maxThreadTitleRunes (internal/rpc/chat.go) — the input
+// stops where the server would reject.
+const TITLE_MAX = 200;
 
 // stamp renders a thread/message timestamp in the display language
 // ("Aug 3, 19:30" / "3. Aug., 19:30") — same treatment as the palette (#591).
@@ -106,14 +111,14 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
       void invalidateThreads();
       if (res.thread) setSelectedId(res.thread.id);
     },
-    onError: (err) => toast.error(t("chat.createError", { message: err.message })),
+    onError: (err) => toast.error(t("chat.createError", { message: errorMessage(err) })),
   });
   const renameThread = useMutation(ChatService.method.renamePlanningThread, {
     onSuccess: () => {
       void invalidateThreads();
       void invalidateThread();
     },
-    onError: (err) => toast.error(t("chat.renameError", { message: err.message })),
+    onError: (err) => toast.error(t("chat.renameError", { message: errorMessage(err) })),
   });
   const deleteThread = useMutation(ChatService.method.deletePlanningThread, {
     onSuccess: (_res, req) => {
@@ -130,7 +135,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
       });
       void invalidateThreads();
     },
-    onError: (err) => toast.error(t("chat.deleteError", { message: err.message })),
+    onError: (err) => toast.error(t("chat.deleteError", { message: errorMessage(err) })),
   });
 
   // The thread a delete has been requested for; drives the confirm dialog —
@@ -141,6 +146,15 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   const [stream, setStream] = useState<StreamState | null>(null);
   const streaming = stream !== null && stream.errorKey === null;
   const [draft, setDraft] = useState("");
+
+  // The composer disables while the reply streams, which drops keyboard focus;
+  // hand it back when streaming ends so the GM can keep typing without a click.
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) composerRef.current?.focus();
+    wasStreaming.current = streaming;
+  }, [streaming]);
 
   const send = async () => {
     const text = draft.trim();
@@ -261,7 +275,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           <div className="gx-skeleton" data-testid="planning-threads-loading" />
         ) : threadsQuery.status === "error" ? (
           <p className="gx-campaign__error" role="alert">
-            {t("chat.threadsLoadError", { message: threadsQuery.error.message })}
+            {t("chat.threadsLoadError", { message: errorMessage(threadsQuery.error) })}
           </p>
         ) : threads.length === 0 ? (
           <p className="gx-planning__empty">{t("chat.threadsEmpty")}</p>
@@ -293,19 +307,32 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           aria-label={t("chat.messagesAria")}
           ref={paneRef}
           onScroll={onPaneScroll}
+          // A scroll region with no focusable content is unreachable by
+          // keyboard; tabIndex puts the history itself in the tab order.
+          tabIndex={0}
         >
           {selectedId !== null && threadQuery.status === "error" && (
             <li className="gx-planning__notice-item">
               <p className="gx-campaign__error" role="alert">
-                {t("chat.threadLoadError", { message: threadQuery.error.message })}
+                {t("chat.threadLoadError", { message: errorMessage(threadQuery.error) })}
               </p>
             </li>
           )}
-          {messages.length === 0 && !activeStream && threadQuery.status !== "error" && (
+          {selectedId !== null && threadQuery.isPending && (
             <li className="gx-planning__notice-item">
-              <p className="gx-planning__empty">{t("chat.emptyThread")}</p>
+              <div className="gx-skeleton" data-testid="thread-loading" />
             </li>
           )}
+          {/* "No messages yet" means the thread IS empty — while it still loads
+              the skeleton speaks instead, so opening a full thread never
+              flashes the empty-state copy. */}
+          {messages.length === 0 &&
+            !activeStream &&
+            (selectedId === null || threadQuery.isSuccess) && (
+              <li className="gx-planning__notice-item">
+                <p className="gx-planning__empty">{t("chat.emptyThread")}</p>
+              </li>
+            )}
           {messages.map((m) => {
             const when = stamp(m.createdAt, lang);
             return (
@@ -386,6 +413,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
         >
           <textarea
             className="gx-input gx-textarea gx-planning__input"
+            ref={composerRef}
             rows={2}
             maxLength={MESSAGE_MAX}
             value={draft}
@@ -486,6 +514,7 @@ function ThreadRow({
           className="gx-input gx-planning__rename"
           aria-label={t("chat.renameInputAria")}
           value={title}
+          maxLength={TITLE_MAX}
           autoFocus
           disabled={renaming}
           onChange={(e) => setTitle(e.target.value)}

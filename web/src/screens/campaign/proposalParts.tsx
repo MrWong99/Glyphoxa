@@ -10,7 +10,7 @@ import { useI18n, type Lang, type TFunc } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { failedPreconditionMessage } from "@/lib/connectError";
+import { errorMessage, failedPreconditionMessage } from "@/lib/connectError";
 import { DISPOSITION_LABEL, edgeLabel, metaOf } from "./knowledgeVocab";
 
 // The pieces of a Knowledge Proposal review — a "suggestion" in the GM-facing
@@ -204,9 +204,9 @@ export function ProposalActions({
   const inlineError = blockedReason
     ? blockedReason
     : approve.isError
-      ? t("knowledge.addToWikiError", { message: approve.error.message })
+      ? t("knowledge.addToWikiError", { message: errorMessage(approve.error) })
       : reject.isError
-        ? t("knowledge.dismissError", { message: reject.error.message })
+        ? t("knowledge.dismissError", { message: errorMessage(reject.error) })
         : null;
 
   const pending = approve.isPending || reject.isPending;

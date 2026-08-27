@@ -232,7 +232,7 @@ export function Configuration() {
         ) : status === "error" ? (
           <div className="gx-campaign">
             <p className="gx-campaign__error" role="alert">
-              {t("config.couldntLoadCampaign", { message: error.message })}
+              {t("config.couldntLoadCampaign", { message: errorMessage(error) })}
             </p>
           </div>
         ) : (
@@ -304,7 +304,16 @@ export function Configuration() {
               placeholder={t("config.serverIdPlaceholder")}
               hint={t("config.serverIdHint")}
               value={guildId}
+              // A snowflake is digits — the numeric keyboard on touch, same as
+              // the player bind form's Discord ID field.
+              inputMode="numeric"
               onChange={(e) => editGuildId(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && guildId && !saveDiscordIds.isPending) {
+                  e.preventDefault();
+                  saveDiscordIds.mutate({ guildId });
+                }
+              }}
             />
           </div>
           <div className="gx-discord__save">
@@ -324,7 +333,7 @@ export function Configuration() {
                 stored, or it resurfaces as a session-start failure (#142). */}
             {saveDiscordIds.isError && (
               <span className="gx-discord__error" role="alert">
-                {t("common.couldntSave", { message: saveDiscordIds.error.message })}
+                {t("common.couldntSave", { message: errorMessage(saveDiscordIds.error) })}
               </span>
             )}
           </div>
@@ -356,7 +365,7 @@ export function Configuration() {
               )}
               {releaseGuild.isError && (
                 <span className="gx-discord__error" role="alert">
-                  {t("config.couldntUnlink", { message: releaseGuild.error.message })}
+                  {t("config.couldntUnlink", { message: errorMessage(releaseGuild.error) })}
                 </span>
               )}
             </div>
@@ -476,7 +485,7 @@ function SpendCapsCard() {
         </Button>
         {save.isError && (
           <span className="gx-spendcaps__error" role="alert">
-            {t("common.couldntSave", { message: save.error.message })}
+            {t("common.couldntSave", { message: errorMessage(save.error) })}
           </span>
         )}
       </div>
@@ -683,6 +692,12 @@ function SecretRow({
                 aria-label={t("config.secretKeyAria", { name })}
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && value && !busy) {
+                    e.preventDefault();
+                    void handleSave();
+                  }
+                }}
               />
               <Button variant="primary" size="sm" onClick={handleSave} disabled={!value || busy}>
                 {t("common.save")}

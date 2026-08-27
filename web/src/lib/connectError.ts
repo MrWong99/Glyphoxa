@@ -23,11 +23,14 @@ export function failedPreconditionMessage(error: unknown): string | null {
   return ce.code === Code.FailedPrecondition ? ce.rawMessage : null;
 }
 
-// errorMessage renders any thrown value as a display string: an Error's message
-// (a ConnectError keeps its "[code] …" prefix), anything else via String().
-// The one home for the `instanceof Error` narrowing the mutation error handlers
-// used to each hand-roll.
+// errorMessage renders any thrown value as a display string: a ConnectError's
+// rawMessage (the server's reason WITHOUT the "[failed_precondition] " wire
+// prefix — gRPC code slugs are internal vocabulary, not user copy), a plain
+// Error's message, anything else via String(). The one home for the
+// `instanceof Error` narrowing the mutation error handlers used to each
+// hand-roll.
 export function errorMessage(err: unknown): string {
+  if (err instanceof ConnectError) return err.rawMessage;
   return err instanceof Error ? err.message : String(err);
 }
 

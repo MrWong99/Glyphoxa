@@ -133,6 +133,8 @@ describe("ShareHighlightDialog (#310)", () => {
     fireEvent.click(screen.getByRole("button", { name: /share/i }));
     const link = await screen.findByRole("link", { name: /download/i });
     expect(link).toHaveAttribute("href", "/api/v1/highlights/h2/clip");
-    expect(link).toHaveAttribute("download", "highlight.wav");
+    // Named by its moment (start timestamp), falling back to the highlight id
+    // when the fixture carries no timestamp — never a colliding "highlight.wav".
+    expect(link).toHaveAttribute("download", "highlight-h2.wav");
   });
 });

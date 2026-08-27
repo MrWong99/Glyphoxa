@@ -39,13 +39,6 @@ export function SidebarUser({ user }: { user: User }) {
         aria-label={t("components.logOut")}
         onClick={() => logout.mutate({})}
         disabled={logout.isPending}
-        style={{
-          background: "none",
-          border: "none",
-          color: "var(--text-subtle)",
-          cursor: "pointer",
-          padding: 4,
-        }}
       >
         <LogOut size={15} />
       </button>

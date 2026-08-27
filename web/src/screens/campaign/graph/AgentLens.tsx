@@ -6,6 +6,7 @@ import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/managemen
 import { useI18n } from "@/i18n";
 import { Select } from "@/components/ui/Select";
 import { egoNetwork } from "./layout";
+import { errorMessage } from "@/lib/connectError";
 
 // The agent-knowledge lens (#535): pick a Character NPC and the graph dims to
 // exactly the subgraph kgfacts would inject for it, with a live budget readout.
@@ -123,7 +124,7 @@ export function useAgentLens(agentID: string, nodes: GraphNode[], edges: GraphEd
     options,
     agentName,
     pending: agentID !== "" && previewQuery.isPending,
-    error: previewQuery.isError ? previewQuery.error.message : null,
+    error: previewQuery.isError ? errorMessage(previewQuery.error) : null,
   };
 }
 

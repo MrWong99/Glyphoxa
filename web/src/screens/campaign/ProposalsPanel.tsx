@@ -7,6 +7,7 @@ import { useI18n } from "@/i18n";
 import { Card } from "@/components/ui/Card";
 import { invalidateProposalReview } from "./knowledgeCache";
 import { KindBadge, ProposalActions, ProposalWrite, SimilarHint, fmtWhen } from "./proposalParts";
+import { errorMessage } from "@/lib/connectError";
 
 // The Proposals panel (#300, ADR-0052) backs the Campaign screen's "Proposals"
 // view: the GM review queue an Agent's remember_knowledge call files into. Each
@@ -37,7 +38,7 @@ export function ProposalsPanel() {
   if (status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("knowledge.loadSuggestionsError", { message: error.message })}
+        {t("knowledge.loadSuggestionsError", { message: errorMessage(error) })}
       </p>
     );
   }

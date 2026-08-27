@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useI18n } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
 import { errorMessage } from "@/lib/connectError";
@@ -122,17 +123,21 @@ export function Campaign({
     invalidateKnowledgeReads(queryClient);
   };
 
+  // Both roster writes surface their failures (ADR-0017: sonner) — a rejected
+  // create/delete otherwise leaves the roster silently unchanged.
   const createAgent = useMutation(CampaignService.method.createAgent, {
     onSuccess: (res) => {
       void invalidateRoster();
       if (res.agent) setSelectedId(res.agent.id);
     },
+    onError: (err) => toast.error(t("campaign.couldntCreate", { message: errorMessage(err) })),
   });
   const deleteAgent = useMutation(CampaignService.method.deleteAgent, {
     onSuccess: () => {
       setSelectedId(null); // fall back to the Butler
       void invalidateRoster();
     },
+    onError: (err) => toast.error(t("campaign.couldntDeleteNpc", { message: errorMessage(err) })),
   });
 
   const campaign = data?.campaign;
@@ -158,7 +163,9 @@ export function Campaign({
                   ? t("campaign.ledeSuggestions")
                   : view === "planning"
                     ? t("chat.ledePlanning")
-                    : t("campaign.ledeCast")}
+                    : view === "maps"
+                      ? t("campaign.ledeMaps")
+                      : t("campaign.ledeCast")}
           </span>
         </div>
       </header>
@@ -191,7 +198,7 @@ export function Campaign({
           <PlanningPanel campaignId={campaign.id} />
         ) : status === "error" ? (
           <p className="gx-campaign__error" role="alert">
-            {t("campaign.loadError", { message: error.message })}
+            {t("campaign.loadError", { message: errorMessage(error) })}
           </p>
         ) : (
           <div className="gx-skeleton" data-testid="planning-loading" />
@@ -200,7 +207,7 @@ export function Campaign({
         <div className="gx-skeleton" data-testid="roster-loading" />
       ) : status === "error" ? (
         <p className="gx-campaign__error" role="alert">
-          {t("campaign.loadError", { message: error.message })}
+          {t("campaign.loadError", { message: errorMessage(error) })}
         </p>
       ) : (
         <>
@@ -339,13 +346,14 @@ function AgentEditor({
   const [persona, setPersona] = useState(agent.persona);
   const [voice, setVoice] = useState(agent.voice);
   const [addressOnly, setAddressOnly] = useState(agent.addressOnly);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const update = useMutation(CampaignService.method.updateAgent, {
     onSuccess: () => {
       onSaved();
       toast.success(t("campaign.savedAgent", { name: name || agent.name }));
     },
-    onError: (err) => toast.error(t("common.couldntSave", { message: err.message })),
+    onError: (err) => toast.error(t("common.couldntSave", { message: errorMessage(err) })),
   });
   const preview = useMutation(VoiceService.method.previewVoice);
 
@@ -520,21 +528,37 @@ function AgentEditor({
           {update.isPending ? t("common.saving") : t("common.saveChanges")}
         </Button>
         {onDelete && (
-          <Button
-            variant="danger"
-            iconStart={<Trash2 size={14} />}
-            onClick={onDelete}
-            disabled={deleting}
-          >
-            {t("campaign.deleteNpc")}
-          </Button>
+          <>
+            <Button
+              variant="danger"
+              iconStart={<Trash2 size={14} />}
+              onClick={() => setConfirmDelete(true)}
+              disabled={deleting}
+            >
+              {t("campaign.deleteNpc")}
+            </Button>
+            {/* Deleting an NPC is the destructive act every other surface gates
+                behind a ConfirmDialog (players, maps, campaigns) — one stray
+                click must not remove a cast member. */}
+            <ConfirmDialog
+              open={confirmDelete}
+              onOpenChange={setConfirmDelete}
+              title={t("campaign.deleteNpcTitle", { name: agent.name })}
+              description={t("campaign.deleteNpcDesc")}
+              confirmLabel={t("campaign.deleteNpc")}
+              onConfirm={() => {
+                setConfirmDelete(false);
+                onDelete();
+              }}
+            />
+          </>
         )}
         {/* Deterministic, accessible save cue — independent of the toast portal so
             the screen test (rendered without the shell's <Toaster>) can assert it. */}
         <span className="gx-editor__status" aria-live="polite">
           {update.isError ? (
             <span className="gx-editor__status--error" role="alert">
-              {t("common.couldntSave", { message: update.error.message })}
+              {t("common.couldntSave", { message: errorMessage(update.error) })}
             </span>
           ) : update.isSuccess ? (
             t("campaign.savedStatus")
@@ -568,6 +592,12 @@ function ToolGrants({ agentId }: { agentId: string }) {
       <span className="gx-field__hint">{t("campaign.toolsHint")}</span>
       {status === "pending" ? (
         <div className="gx-skeleton" data-testid="tools-loading" />
+      ) : status === "error" ? (
+        // A failed read is not an empty registry — "No tools available" on a
+        // transport error would tell the GM the wrong story.
+        <span className="gx-field__hint" role="alert">
+          {t("campaign.toolsLoadError")}
+        </span>
       ) : grants.length === 0 ? (
         <span className="gx-field__hint">{t("campaign.toolsNone")}</span>
       ) : (
@@ -597,7 +627,7 @@ function ToolRow({
   const update = useMutation(CampaignService.method.updateToolGrant, {
     onSuccess: () => onChanged(),
     onError: (err) =>
-      toast.error(t("campaign.toolUpdateError", { tool: grant.toolName, message: err.message })),
+      toast.error(t("campaign.toolUpdateError", { tool: grant.toolName, message: errorMessage(err) })),
   });
 
   // The grant Switch never carries the local scope draft (#215): turning a grant

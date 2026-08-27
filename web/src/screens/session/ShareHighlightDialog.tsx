@@ -3,11 +3,22 @@ import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { Share2, Send, Radio, Download } from "lucide-react";
 import { toast } from "sonner";
 
+import { timestampMs } from "@bufbuild/protobuf/wkt";
+
 import { SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Highlight } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
+
+// clipFileSlug names a downloaded clip by its moment ("2026-08-23-22-56-36"),
+// falling back to the highlight id when the timestamp is unset — filesystem-safe
+// (no colons) and sortable.
+function clipFileSlug(h: Highlight): string {
+  const ms = h.startsAt ? Number(timestampMs(h.startsAt)) : null;
+  return ms != null ? new Date(ms).toISOString().slice(0, 19).replace(/[T:]/g, "-") : h.id;
+}
 
 // ShareHighlightDialog is the GM's Discord-delivery surface for ONE promoted
 // Session Highlight (#310, Epic 8, ADR-0051 GM-only sharing). It offers the three
@@ -51,7 +62,7 @@ export function ShareHighlightDialog({
 
   const share = useMutation(SessionService.method.shareHighlight, {
     onSuccess: () => setOpen(false),
-    onError: (err: Error) => toast.error(t("session.couldntShare", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntShare", { message: errorMessage(err) })),
   });
 
   const postToChannel = () => {
@@ -85,7 +96,7 @@ export function ShareHighlightDialog({
     <div className="gx-highlight-share" role="group" aria-label={t("session.shareGroupLabel")}>
       {channels.isError ? (
         <p className="gx-highlight-share__error" role="alert">
-          {channels.error.message}
+          {errorMessage(channels.error)}
         </p>
       ) : (
         <div className="gx-highlight-share__channel">
@@ -127,7 +138,9 @@ export function ShareHighlightDialog({
       <a
         className="gx-highlight-share__download"
         href={`/api/v1/highlights/${highlight.id}/clip`}
-        download="highlight.wav"
+        // Named by its moment — a downloads folder of identical
+        // "highlight.wav"s silently overwrites or numbers itself.
+        download={`highlight-${clipFileSlug(highlight)}.wav`}
       >
         <Download size={14} aria-hidden="true" /> {t("session.download")}
       </a>

@@ -989,7 +989,7 @@ describe("Configuration first-run (#267)", () => {
     expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("dnd5e");
     expect((screen.getByLabelText("Spoken language") as HTMLInputElement).value).toBe("en");
     // …and the old error card is gone.
-    expect(screen.queryByText(/could not load the active campaign/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load the active campaign/i)).not.toBeInTheDocument();
   });
 
   it("creates the first campaign from the CTA and swaps in the live header", async () => {
@@ -1031,7 +1031,7 @@ describe("Configuration first-run (#267)", () => {
     // a campaign would be lured into creating a duplicate.
     renderScreen(firstRunBackend({ activeErrorCode: Code.Internal }));
 
-    expect(await screen.findByText(/could not load the active campaign/i)).toBeInTheDocument();
+    expect(await screen.findByText(/couldn.t load the active campaign/i)).toBeInTheDocument();
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
   });
 

@@ -57,7 +57,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
   if (listQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("campaign.mapsLoadError", { message: listQuery.error.message })}
+        {t("campaign.mapsLoadError", { message: errorMessage(listQuery.error) })}
       </p>
     );
   }
@@ -95,6 +95,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
           mapID={currentID}
           onNavigate={setOpenID}
           onChanged={invalidate}
+          onDeleted={() => setOpenID(null)}
           onOpenNode={onOpenNode}
         />
       ) : (
@@ -109,11 +110,15 @@ function MapView({
   mapID,
   onNavigate,
   onChanged,
+  onDeleted,
   onOpenNode,
 }: {
   mapID: string;
   onNavigate: (id: string) => void;
   onChanged: () => void;
+  // Deleting THIS map must also drop the panel's pinned selection — otherwise
+  // the view re-reads the deleted id and strands on an error panel.
+  onDeleted: () => void;
   onOpenNode?: (nodeID: string) => void;
 }) {
   const { t } = useI18n();
@@ -151,13 +156,19 @@ function MapView({
   const createPin = useMutation(CampaignService.method.createPin, { onSuccess: refresh, onError: fail });
   const updatePin = useMutation(CampaignService.method.updatePin, { onSuccess: refresh, onError: fail });
   const deletePin = useMutation(CampaignService.method.deletePin, { onSuccess: refresh, onError: fail });
-  const deleteMap = useMutation(CampaignService.method.deleteMap, { onSuccess: onChanged, onError: fail });
+  const deleteMap = useMutation(CampaignService.method.deleteMap, {
+    onSuccess: () => {
+      onChanged();
+      onDeleted();
+    },
+    onError: fail,
+  });
 
   if (viewQuery.isPending) return <div className="gx-skeleton" data-testid="map-loading" />;
   if (viewQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("campaign.mapOpenError", { message: viewQuery.error.message })}
+        {t("campaign.mapOpenError", { message: errorMessage(viewQuery.error) })}
       </p>
     );
   }
@@ -329,7 +340,7 @@ function MapView({
         </div>
         {suggest.isError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            {suggest.error.message}
+            {errorMessage(suggest.error)}
           </span>
         )}
         {suggested.size > 0 && (
@@ -371,9 +382,11 @@ function MapView({
           }}
           title={t("campaign.deleteMapTitle", { name: map.name })}
           description={
-            view.pins.length === 1
-              ? t("campaign.deleteMapDescOne")
-              : t("campaign.deleteMapDescMany", { n: view.pins.length })
+            view.pins.length === 0
+              ? t("campaign.deleteMapDescNone")
+              : view.pins.length === 1
+                ? t("campaign.deleteMapDescOne")
+                : t("campaign.deleteMapDescMany", { n: view.pins.length })
           }
           confirmLabel={t("campaign.deleteMap")}
           onConfirm={() => {

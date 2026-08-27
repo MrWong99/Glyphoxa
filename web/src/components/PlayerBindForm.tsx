@@ -100,6 +100,15 @@ export function PlayerBindForm({
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder={t("components.characterNamePlaceholder")}
+        // The form opens to be typed into — start the caret in its first field,
+        // and let Enter submit like the alias/board inputs already do.
+        autoFocus
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          }
+        }}
       />
 
       {/* Aliases editor — alternate names Address Detection also matches, mirroring
@@ -158,6 +167,12 @@ export function PlayerBindForm({
             placeholder={t("components.discordUserIdPlaceholder")}
             aria-invalid={idInvalid || undefined}
             inputMode="numeric"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
           />
           {members.length > 0 && (
             <div className="gx-playerform__picker-anchor">

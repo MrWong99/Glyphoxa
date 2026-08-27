@@ -225,7 +225,7 @@ export const de: Record<keyof typeof en, string> = {
   "components.selectPlaceholder": "Auswählen…",
   "components.searchPlaceholder": "Suchen…",
   "components.noMatches": "Keine Treffer",
-  "components.useCustomValue": '"{text}" verwenden',
+  "components.useCustomValue": "„{text}“ verwenden",
   "components.comboboxOptionsLabel": "Optionen",
   "components.typeToConfirm": "Gib „{text}“ ein, um zu bestätigen",
 };

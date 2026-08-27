@@ -423,12 +423,12 @@ textarea.gx-input {
   font-weight: 600;
   color: var(--text-default);
 }
-.gx-select-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
 .gx-select {
+  /* The trigger anchors its own absolutely-positioned chevron: the old
+   * .gx-select-wrap that used to carry position:relative did not survive the
+   * Radix port, and without a positioned ancestor the chevron escaped to the
+   * viewport edge (visible on /login). */
+  position: relative;
   width: 100%;
   box-sizing: border-box;
   -webkit-appearance: none;
@@ -463,6 +463,8 @@ textarea.gx-input {
 .gx-select-chevron {
   position: absolute;
   right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 14px;
   height: 14px;
   pointer-events: none;
@@ -508,6 +510,7 @@ textarea.gx-input {
 }
 .gx-combobox__trigger .gx-select-chevron {
   position: static;
+  transform: none;
   flex: 0 0 auto;
 }
 .gx-combobox__value {
@@ -814,6 +817,26 @@ textarea.gx-input {
   font-size: 11px;
   color: var(--text-subtle);
 }
+.gx-sidebar__logout {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+.gx-sidebar__logout:hover {
+  background: rgba(144, 89, 255, 0.07);
+  color: var(--text-default);
+}
+.gx-sidebar__logout:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .gx-main {
   flex: 1;
   min-width: 0;
@@ -834,11 +857,6 @@ textarea.gx-input {
 .gx-topbar__titles {
   flex: 1;
   min-width: 0;
-}
-.gx-topbar__breadcrumb {
-  font-size: 11px;
-  color: var(--text-subtle);
-  margin-bottom: 1px;
 }
 .gx-topbar__title {
   font-family: var(--font-display);
@@ -893,7 +911,18 @@ textarea.gx-input {
   color: var(--arcane);
 }
 .gx-provider-row__meta {
-  width: 110px;
+  /* Wide enough for the short provider names to align, but allowed to grow so
+   * a row with a real description (Planning chat) doesn't wrap it into a
+   * one-word-per-line sliver. */
+  flex: 0 1 auto;
+  min-width: 110px;
+  max-width: 320px;
+}
+.gx-provider-row__desc {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-top: 2px;
 }
 .gx-provider-row__name {
   font-size: 14px;
@@ -912,26 +941,6 @@ textarea.gx-input {
   color: var(--text-strong);
   margin: 28px 0 12px;
 }
-.gx-defaults__grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-}
-.gx-defaults__body {
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.gx-coming-soon {
-  font-family: var(--font-base);
-  font-size: var(--body-2xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-}
-
 /* The campaign header reads LIVE GetActiveCampaign data (ADR-0039). */
 .gx-campaign {
   padding: 16px;
@@ -1042,7 +1051,6 @@ textarea.gx-input {
 
   /* Two-up grids drop to a single column. */
   .gx-discord__ids,
-  .gx-defaults__grid,
   .gx-editor__grid {
     grid-template-columns: 1fr;
   }

@@ -14,7 +14,7 @@ export const en = {
   "palette.transcriptsDegraded": "Keyword matches — semantic search is unavailable (no embeddings provider).",
   "palette.noResults": "No results for “{query}”.",
   "palette.searchFailed": "{group}: search failed ({message})",
-  "palette.gmPrivateBadge": "GM-private",
+  "palette.gmPrivateBadge": "GM-only",
   // A semantic chunk hit has no single speaker; the row leads with the session
   // date instead. {when} is the localized timestamp.
   "palette.transcriptAt": "Session, {when}",
@@ -22,14 +22,14 @@ export const en = {
 
 export const de: Record<keyof typeof en, string> = {
   "palette.title": "Kampagnen-Suche",
-  "palette.placeholder": "Einträge, Transkripte, Highlights durchsuchen…",
+  "palette.placeholder": "Einträge, Mitschriften, Highlights durchsuchen…",
   "palette.hint": "Tippen, um diese Kampagne zu durchsuchen. Esc schließt.",
   "palette.groupEntries": "Einträge",
-  "palette.groupTranscripts": "Transkripte",
+  "palette.groupTranscripts": "Mitschriften",
   "palette.groupHighlights": "Highlights",
   "palette.transcriptsDegraded": "Stichwort-Treffer — semantische Suche nicht verfügbar (kein Embeddings-Anbieter).",
   "palette.noResults": "Keine Ergebnisse für „{query}“.",
   "palette.searchFailed": "{group}: Suche fehlgeschlagen ({message})",
-  "palette.gmPrivateBadge": "Nur GM",
-  "palette.transcriptAt": "Sitzung, {when}",
+  "palette.gmPrivateBadge": "Nur für GM",
+  "palette.transcriptAt": "Session, {when}",
 };

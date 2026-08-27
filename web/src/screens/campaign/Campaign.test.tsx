@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -300,8 +300,12 @@ describe("Campaign", () => {
     expect(await screen.findByText("New NPC")).toBeInTheDocument();
     expect(npcs).toHaveLength(2);
 
-    // Delete the freshly added NPC (it is auto-selected after creation).
+    // Delete the freshly added NPC (it is auto-selected after creation). The
+    // destructive act is gated behind a ConfirmDialog — nothing mutates until
+    // the dialog's own confirm is pressed.
     fireEvent.click(screen.getByRole("button", { name: /delete npc/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /delete npc/i }));
     // The new NPC leaves the roster once the store re-reads; the original stays.
     await waitFor(() => expect(screen.queryByText("New NPC")).not.toBeInTheDocument());
     expect(npcs).toHaveLength(1);

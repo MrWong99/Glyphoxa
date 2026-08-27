@@ -199,7 +199,7 @@ export function KnowledgePanel({
   if (status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("knowledge.loadEntriesError", { message: error.message })}
+        {t("knowledge.loadEntriesError", { message: errorMessage(error) })}
       </p>
     );
   }
@@ -222,15 +222,15 @@ export function KnowledgePanel({
   // falls back into the same role=alert line so it is never swallowed.
   const saveError = editing
     ? updateNode.isError
-      ? updateNode.error.message
+      ? errorMessage(updateNode.error)
       : null
     : createNode.isError
-      ? createNode.error.message
+      ? errorMessage(createNode.error)
       : null;
   const editorError = saveError
     ? t("common.couldntSave", { message: saveError })
     : deleteNode.isError
-      ? t("knowledge.deleteError", { message: deleteNode.error.message })
+      ? t("knowledge.deleteError", { message: errorMessage(deleteNode.error) })
       : null;
 
   // Clicking a graph node opens the SAME editor the list opens (#534): the graph
@@ -299,7 +299,7 @@ export function KnowledgePanel({
             <div className="gx-skeleton" data-testid="kg-graph-loading" />
           ) : graphQuery.isError ? (
             <p className="gx-campaign__error" role="alert">
-              {t("knowledge.loadMapError", { message: graphQuery.error.message })}
+              {t("knowledge.loadMapError", { message: errorMessage(graphQuery.error) })}
             </p>
           ) : mode === "health" ? (
             <WorldHealthPanel

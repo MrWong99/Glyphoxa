@@ -34,7 +34,7 @@ export const en = {
   "auth.onboardingSkip": "Skip for now",
 
   // ---- AuthGate boot error ----
-  "auth.gateLoadError": "Could not load your account: {message}",
+  "auth.gateLoadError": "Couldn't load your account: {message}",
 
   // ---- Landing page (#521) ----
   "auth.landingSignIn": "Sign in",
@@ -159,7 +159,7 @@ export const de: Record<keyof typeof en, string> = {
     "Jede Session wird mitgeschrieben — und ist über die ganze Kampagne durchsuchbar.",
   "auth.shotPersonaCaption": "Persönlichkeit und Stimme eines NPCs im Kampagnen-Editor.",
   "auth.shotWikiCaption":
-    "Das Welt-Wiki als Beziehungskarte: wer wen kennt — und was GM-only bleibt.",
+    "Das Welt-Wiki als Beziehungskarte: wer wen kennt — und was nur für GM bleibt.",
   "auth.shotMapsCaption":
     "Karten — hochgeladen oder generiert — mit den Einträgen deiner Welt als Pins.",
   "auth.shotPlanningCaption":

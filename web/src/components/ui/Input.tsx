@@ -21,6 +21,8 @@ export function Input({
   const generatedId = useId();
   const fid = id || generatedId;
   const invalid = Boolean(error);
+  // The hint/error line is announced WITH the field, not just painted under it.
+  const describedBy = error || hint ? `${fid}-hint` : undefined;
   const inputCls = ["gx-input", icon ? "gx-input--has-icon" : "", invalid ? "gx-input--invalid" : "", className]
     .filter(Boolean)
     .join(" ");
@@ -34,10 +36,18 @@ export function Input({
       )}
       <div className="gx-field__wrap">
         {icon && <span className="gx-field__icon">{icon}</span>}
-        <input id={fid} className={inputCls} aria-invalid={invalid || undefined} {...props} />
+        <input
+          id={fid}
+          className={inputCls}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy}
+          {...props}
+        />
       </div>
       {(error || hint) && (
-        <span className={"gx-field__hint" + (error ? " gx-field__hint--error" : "")}>{error || hint}</span>
+        <span id={describedBy} className={"gx-field__hint" + (error ? " gx-field__hint--error" : "")}>
+          {error || hint}
+        </span>
       )}
     </div>
   );

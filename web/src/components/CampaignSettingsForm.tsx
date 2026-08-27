@@ -15,6 +15,7 @@ import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang } from "@/i18n";
 
 import "./createCampaignForm.css";
+import { errorMessage } from "@/lib/connectError";
 
 // The per-campaign settings editor (#268): edit an existing campaign's name,
 // System, and Campaign Language, rendered in the topbar CampaignSwitcher's edit
@@ -104,7 +105,7 @@ export function CampaignSettingsForm({
       onSaved();
     },
     onError: (err) =>
-      toast.error(t("components.couldntSaveCampaignSettings", { message: err.message })),
+      toast.error(t("components.couldntSaveCampaignSettings", { message: errorMessage(err) })),
   });
 
   const canSubmit = name.trim() !== "" && !update.isPending;
@@ -153,7 +154,7 @@ export function CampaignSettingsForm({
           <span className="gx-field__hint">{t("components.spokenLanguageHint")}</span>
           {langQ.isError && (
             <span className="gx-field__hint gx-field__hint--error" role="alert">
-              {t("components.couldntLoadLanguages", { message: langQ.error.message })}
+              {t("components.couldntLoadLanguages", { message: errorMessage(langQ.error) })}
             </span>
           )}
         </div>
@@ -186,7 +187,7 @@ export function CampaignSettingsForm({
         </Button>
         {update.error && (
           <span className="gx-campaign-create__error" role="alert">
-            {t("common.couldntSave", { message: update.error.message })}
+            {t("common.couldntSave", { message: errorMessage(update.error) })}
           </span>
         )}
       </div>

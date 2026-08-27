@@ -14,9 +14,10 @@ export const en = {
   "campaign.tabSuggestions": "Suggestions",
   "campaign.ledeWiki": "What the world knows. Public entries feed your NPCs; GM-only entries stay yours.",
   "campaign.ledePlayers": "Link each Discord user to their character so the transcript names who's speaking.",
-  "campaign.ledeSuggestions": "What your NPCs want to remember. Approve to make it canon, or reject.",
+  "campaign.ledeSuggestions": "What your NPCs want to remember. Add to the wiki to make it canon, or dismiss.",
+  "campaign.ledeMaps": "Maps of your world. Pin wiki entries where they belong — from a continent down to a single room.",
   "campaign.ledeCast": "One Butler is required; add as many NPCs as your table needs.",
-  "campaign.loadError": "Could not load the campaign: {message}",
+  "campaign.loadError": "Couldn't load the campaign: {message}",
 
   // ── Cast view: roster list + prep mode switch ────────────────────────────
   "campaign.castViewGroup": "Cast view",
@@ -59,14 +60,19 @@ export const en = {
   "campaign.toolsLabel": "Tools",
   "campaign.toolsHint": "Grant the tools this cast member may use. Changes take effect in the next session.",
   "campaign.toolsNone": "No tools available.",
+  "campaign.toolsLoadError": "Couldn't load the tools. Reload to try again.",
   "campaign.toolUpdateError": "Couldn't update {tool}: {message}",
   "campaign.toolScopeLabel": "{tool} scope",
   "campaign.toolScopeSave": "Save scope",
   "campaign.deleteNpc": "Delete NPC",
+  "campaign.deleteNpcTitle": "Delete “{name}”?",
+  "campaign.deleteNpcDesc":
+    "This removes the NPC from the cast and unlinks its wiki entry — the entry itself stays in the wiki. This can't be undone.",
+  "campaign.couldntDeleteNpc": "Couldn't delete the NPC: {message}",
   "campaign.savedStatus": "Saved",
 
   // ── Roster prep (readiness view) ─────────────────────────────────────────
-  "campaign.prepLoadError": "Could not load the world: {message}",
+  "campaign.prepLoadError": "Couldn't load the world: {message}",
   "campaign.prepEmpty": "No NPCs yet — the readiness view fills in as you add them.",
   "campaign.prepAria": "NPC readiness",
   "campaign.prepButlerExempt": "Butler — always ready",
@@ -81,9 +87,10 @@ export const en = {
   "campaign.checkContent": "Entry has content",
   "campaign.checkFacts": "Facts in reach",
   "campaign.checkFactsCount": "{n} facts in reach",
+  "campaign.checkFactsCountOne": "1 fact in reach",
 
   // ── Players panel ────────────────────────────────────────────────────────
-  "campaign.playersLoadError": "Could not load players: {message}",
+  "campaign.playersLoadError": "Couldn't load players: {message}",
   "campaign.playersCount": "Players · {n}",
   "campaign.addPlayer": "Add player",
   "campaign.badgeLinked": "Linked",
@@ -97,14 +104,15 @@ export const en = {
   "campaign.editPlayerRole": "Change the Discord user, or delete the character",
   "campaign.playersPrompt": "Select a player to edit or delete, or add a new one.",
   "campaign.deletePlayerTitle": "Delete “{name}”?",
-  "campaign.deletePlayerDesc": "This removes the character and its Discord link. To keep the player but connect a different Discord user, edit the link instead of deleting.",
+  "campaign.deletePlayerDesc": "This removes the character and its Discord link. This can't be undone. To keep the player but connect a different Discord user, edit the link instead of deleting.",
   "campaign.deletePlayerConfirm": "Delete player",
+  "campaign.couldntDeletePlayer": "Couldn't delete the player: {message}",
 
   // ── Maps panel ───────────────────────────────────────────────────────────
-  "campaign.mapsLoadError": "Could not load maps: {message}",
+  "campaign.mapsLoadError": "Couldn't load maps: {message}",
   "campaign.mapGmPrivateAria": "GM-only",
   "campaign.mapsEmpty": "No maps yet. Upload one and your world gets a place for everything in it.",
-  "campaign.mapOpenError": "Could not open the map: {message}",
+  "campaign.mapOpenError": "Couldn't open the map: {message}",
   "campaign.mapBreadcrumbAria": "Map breadcrumb",
   "campaign.zoomIn": "Zoom in",
   "campaign.zoomOut": "Zoom out",
@@ -122,6 +130,7 @@ export const en = {
   "campaign.trayAllPlaced": "Everything placeable is already on this map.",
   "campaign.suggestedAria": "{name} — suggested for this map",
   "campaign.deleteMapTitle": "Delete “{name}”?",
+  "campaign.deleteMapDescNone": "This permanently deletes the map and its image. Nothing is placed on it. This can't be undone.",
   "campaign.deleteMapDescOne": "This permanently deletes the map, its image, and the 1 entry placed on it. The entry itself is untouched — only its place here is lost. This can't be undone.",
   "campaign.deleteMapDescMany": "This permanently deletes the map, its image, and the {n} entries placed on it. The entries themselves are untouched — only their places here are lost. This can't be undone.",
   "campaign.pinAria": "{name} ({type})",
@@ -157,6 +166,11 @@ export const en = {
   "campaign.boardsLabel": "Boards",
   "campaign.boardsHint": "Shortlists for a session. Your NPCs never see them.",
   "campaign.boardUpdateError": "Couldn't update the board: {message}",
+  "campaign.boardsLoadError": "Couldn't load the boards: {message}",
+  "campaign.deleteBoardTitle": "Delete “{name}”?",
+  "campaign.deleteBoardDesc":
+    "This deletes the board. The entries on it are untouched — only this grouping is lost. This can't be undone.",
+  "campaign.deleteBoardConfirm": "Delete board",
   "campaign.newBoardAria": "New board name",
   "campaign.newBoardPlaceholder": "tonight: the harbour heist",
   "campaign.addBoard": "Add board",
@@ -179,7 +193,8 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.tabSuggestions": "Vorschläge",
   "campaign.ledeWiki": "Was die Welt weiß. Öffentliche Einträge speisen deine NPCs; Einträge nur für GM bleiben bei dir.",
   "campaign.ledePlayers": "Verknüpfe jeden Discord-Nutzer mit seinem Charakter, damit die Mitschrift zeigt, wer spricht.",
-  "campaign.ledeSuggestions": "Was deine NPCs sich merken wollen. Annehmen macht es Kanon — oder lehn es ab.",
+  "campaign.ledeSuggestions": "Was deine NPCs sich merken wollen. Ins Wiki übernehmen macht es Kanon — oder verwirf es.",
+  "campaign.ledeMaps": "Karten deiner Welt. Setze Wiki-Einträge dort als Pin, wo sie hingehören — vom Kontinent bis zum einzelnen Raum.",
   "campaign.ledeCast": "Ein Butler ist Pflicht; füge so viele NPCs hinzu, wie dein Tisch braucht.",
   "campaign.loadError": "Kampagne konnte nicht geladen werden: {message}",
 
@@ -224,10 +239,15 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.toolsLabel": "Tools",
   "campaign.toolsHint": "Lege fest, welche Tools dieses Ensemblemitglied nutzen darf. Änderungen greifen ab der nächsten Session.",
   "campaign.toolsNone": "Keine Tools verfügbar.",
+  "campaign.toolsLoadError": "Tools konnten nicht geladen werden. Lade die Seite neu.",
   "campaign.toolUpdateError": "{tool} konnte nicht aktualisiert werden: {message}",
   "campaign.toolScopeLabel": "{tool} – Bereich",
   "campaign.toolScopeSave": "Bereich speichern",
   "campaign.deleteNpc": "NPC löschen",
+  "campaign.deleteNpcTitle": "„{name}“ löschen?",
+  "campaign.deleteNpcDesc":
+    "Das entfernt den NPC aus der Besetzung und löst die Verknüpfung zu seinem Wiki-Eintrag — der Eintrag selbst bleibt im Wiki. Das lässt sich nicht rückgängig machen.",
+  "campaign.couldntDeleteNpc": "NPC konnte nicht gelöscht werden: {message}",
   "campaign.savedStatus": "Gespeichert",
 
   // ── Roster prep ──────────────────────────────────────────────────────────
@@ -246,6 +266,7 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.checkContent": "Eintrag hat Inhalt",
   "campaign.checkFacts": "Fakten in Reichweite",
   "campaign.checkFactsCount": "{n} Fakten in Reichweite",
+  "campaign.checkFactsCountOne": "1 Fakt in Reichweite",
 
   // ── Players panel ────────────────────────────────────────────────────────
   "campaign.playersLoadError": "Spieler konnten nicht geladen werden: {message}",
@@ -262,8 +283,9 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.editPlayerRole": "Discord-Nutzer ändern oder den Charakter löschen",
   "campaign.playersPrompt": "Wähle einen Spieler zum Bearbeiten oder Löschen — oder füge einen neuen hinzu.",
   "campaign.deletePlayerTitle": "„{name}“ löschen?",
-  "campaign.deletePlayerDesc": "Das entfernt den Charakter und seine Discord-Verknüpfung. Willst du den Spieler behalten, aber einen anderen Discord-Nutzer verbinden, ändere die Verknüpfung, statt zu löschen.",
+  "campaign.deletePlayerDesc": "Das entfernt den Charakter und seine Discord-Verknüpfung. Das lässt sich nicht rückgängig machen. Willst du den Spieler behalten, aber einen anderen Discord-Nutzer verbinden, ändere die Verknüpfung, statt zu löschen.",
   "campaign.deletePlayerConfirm": "Spieler löschen",
+  "campaign.couldntDeletePlayer": "Spieler konnte nicht gelöscht werden: {message}",
 
   // ── Maps panel ───────────────────────────────────────────────────────────
   "campaign.mapsLoadError": "Karten konnten nicht geladen werden: {message}",
@@ -287,6 +309,7 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.trayAllPlaced": "Alles Platzierbare ist schon auf dieser Karte.",
   "campaign.suggestedAria": "{name} — für diese Karte vorgeschlagen",
   "campaign.deleteMapTitle": "„{name}“ löschen?",
+  "campaign.deleteMapDescNone": "Das löscht die Karte und ihr Bild endgültig. Es sind keine Einträge platziert. Das lässt sich nicht rückgängig machen.",
   "campaign.deleteMapDescOne": "Das löscht die Karte, ihr Bild und den einen platzierten Eintrag endgültig. Der Eintrag selbst bleibt erhalten — nur sein Platz hier geht verloren. Das lässt sich nicht rückgängig machen.",
   "campaign.deleteMapDescMany": "Das löscht die Karte, ihr Bild und die {n} platzierten Einträge endgültig. Die Einträge selbst bleiben erhalten — nur ihre Plätze hier gehen verloren. Das lässt sich nicht rückgängig machen.",
   "campaign.pinAria": "{name} ({type})",
@@ -322,6 +345,11 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.boardsLabel": "Boards",
   "campaign.boardsHint": "Merklisten für eine Session. Deine NPCs sehen sie nie.",
   "campaign.boardUpdateError": "Board konnte nicht aktualisiert werden: {message}",
+  "campaign.boardsLoadError": "Boards konnten nicht geladen werden: {message}",
+  "campaign.deleteBoardTitle": "„{name}“ löschen?",
+  "campaign.deleteBoardDesc":
+    "Das löscht das Board. Die Einträge darauf bleiben erhalten — nur diese Zusammenstellung geht verloren. Das lässt sich nicht rückgängig machen.",
+  "campaign.deleteBoardConfirm": "Board löschen",
   "campaign.newBoardAria": "Name des neuen Boards",
   "campaign.newBoardPlaceholder": "heute Abend: der Coup im Hafen",
   "campaign.addBoard": "Board hinzufügen",

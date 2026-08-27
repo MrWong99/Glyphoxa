@@ -1839,7 +1839,9 @@ describe("Session voice-channel picker", () => {
 
     expect(await screen.findByText("Idle")).toBeInTheDocument();
     const hint = await screen.findByTestId("channel-hint");
-    expect(hint).toHaveTextContent("link a Discord server first");
+    // The two known lister preconditions render through the message catalog
+    // (localizable); any unknown server message still renders verbatim.
+    expect(hint).toHaveTextContent("Link a Discord server first.");
     expect(hint).toHaveAttribute("role", "alert");
     expect(screen.queryByTestId("channel-picker")).not.toBeInTheDocument();
 
