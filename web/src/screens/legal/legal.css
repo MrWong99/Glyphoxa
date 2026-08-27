@@ -31,7 +31,7 @@
   height: 32px;
   border-radius: 9px;
   color: #fff;
-  background: linear-gradient(135deg, #9059ff, #00ddff);
+  background: var(--gradient-arcane-diag);
 }
 
 .gx-legal__title {

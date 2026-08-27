@@ -934,6 +934,22 @@ textarea.gx-input {
   flex: 1;
   max-width: 240px;
 }
+/* Health badge + its visible failure detail (Configuration). The detail used
+ * to hide in a title-attr tooltip — unreachable by keyboard/touch. */
+.gx-health {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 260px;
+}
+.gx-health__detail {
+  font-size: var(--body-2xs);
+  color: var(--text-muted);
+  text-align: right;
+  line-height: 1.4;
+}
+
 .gx-section-title {
   font-family: var(--font-display);
   font-size: 18px;

@@ -33,8 +33,14 @@ export const en = {
   "chat.messagesAria": "Messages",
   "chat.emptyThread": "No messages yet. Ask about your world, past sessions, or what to prep next.",
   "chat.working": "The Butler is writing…",
-  "chat.toolChip": "Consulted {tool}…",
+  "chat.toolChip": "Used {tool}…",
   "chat.toolChipError": "{tool} failed",
+  // Friendly names for the planning belt's tools (internal/planchat/tools.go);
+  // an unknown wire name falls back to de-snake_cased text in the component.
+  "chat.toolSearchTranscripts": "transcript search",
+  "chat.toolFindNode": "wiki lookup",
+  "chat.toolAppearancesOf": "appearances index",
+  "chat.toolProposeKnowledge": "wiki suggestion",
 
   // ── Composer ─────────────────────────────────────────────────────────────
   "chat.inputAria": "Message to the Butler",
@@ -85,8 +91,12 @@ export const de: Record<keyof typeof en, string> = {
   "chat.emptyThread":
     "Noch keine Nachrichten. Frag nach deiner Welt, vergangenen Sessions oder was du als Nächstes vorbereiten solltest.",
   "chat.working": "Der Butler schreibt…",
-  "chat.toolChip": "Hat {tool} verwendet…",
+  "chat.toolChip": "{tool} verwendet…",
   "chat.toolChipError": "{tool} fehlgeschlagen",
+  "chat.toolSearchTranscripts": "Mitschrift-Suche",
+  "chat.toolFindNode": "Wiki-Suche",
+  "chat.toolAppearancesOf": "Auftritts-Index",
+  "chat.toolProposeKnowledge": "Wiki-Vorschlag",
 
   // ── Composer ─────────────────────────────────────────────────────────────
   "chat.inputAria": "Nachricht an den Butler",

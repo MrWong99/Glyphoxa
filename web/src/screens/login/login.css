@@ -28,7 +28,7 @@
   height: 48px;
   border-radius: 12px;
   color: #fff;
-  background: linear-gradient(135deg, #9059ff, #00ddff);
+  background: var(--gradient-arcane-diag);
 }
 
 .gx-login__wordmark {

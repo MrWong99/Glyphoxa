@@ -286,7 +286,9 @@ describe("Configuration", () => {
     );
     const badge = await screen.findByText(/discord connection failed/i);
     expect(badge).toBeInTheDocument();
-    expect(badge).toHaveAttribute("title", expect.stringContaining("invalid_bot_token"));
+    // The detail renders VISIBLY under the badge — a title-attr tooltip was
+    // unreachable by keyboard and on touch.
+    expect(screen.getByText(/invalid_bot_token/)).toBeInTheDocument();
   });
 
   it("shows no integration badge in the waiting/web-only state (#489)", async () => {

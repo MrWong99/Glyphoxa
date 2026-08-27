@@ -145,9 +145,9 @@
   color: var(--text-strong);
 }
 .gx-voice-row__toggle[data-muted] {
-  border-color: rgba(255, 79, 94, 0.42);
-  background: rgba(255, 79, 94, 0.09);
-  color: rgb(255, 79, 94);
+  border-color: color-mix(in srgb, var(--status-danger) 42%, transparent);
+  background: color-mix(in srgb, var(--status-danger) 9%, transparent);
+  color: var(--status-danger);
 }
 .gx-voice-row__toggle:disabled {
   opacity: 0.5;

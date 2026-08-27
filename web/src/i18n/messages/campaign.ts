@@ -65,6 +65,10 @@ export const en = {
   "campaign.toolScopeLabel": "{tool} scope",
   "campaign.toolScopeSave": "Save scope",
   "campaign.deleteNpc": "Delete NPC",
+  "campaign.discardEditsTitle": "Discard unsaved changes?",
+  "campaign.discardEditsDesc":
+    "The edits to “{name}” haven't been saved. Switching away throws them away.",
+  "campaign.discardEditsConfirm": "Discard changes",
   "campaign.deleteNpcTitle": "Delete “{name}”?",
   "campaign.deleteNpcDesc":
     "This removes the NPC from the cast and unlinks its wiki entry — the entry itself stays in the wiki. This can't be undone.",
@@ -244,6 +248,10 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.toolScopeLabel": "{tool} – Bereich",
   "campaign.toolScopeSave": "Bereich speichern",
   "campaign.deleteNpc": "NPC löschen",
+  "campaign.discardEditsTitle": "Ungespeicherte Änderungen verwerfen?",
+  "campaign.discardEditsDesc":
+    "Die Änderungen an „{name}“ sind nicht gespeichert. Beim Wechseln gehen sie verloren.",
+  "campaign.discardEditsConfirm": "Änderungen verwerfen",
   "campaign.deleteNpcTitle": "„{name}“ löschen?",
   "campaign.deleteNpcDesc":
     "Das entfernt den NPC aus der Besetzung und löst die Verknüpfung zu seinem Wiki-Eintrag — der Eintrag selbst bleibt im Wiki. Das lässt sich nicht rückgängig machen.",

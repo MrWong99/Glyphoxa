@@ -3,6 +3,7 @@
 
 export const en = {
   "palette.title": "Campaign search",
+  "palette.openSearch": "Search the campaign (Ctrl+K)",
   "palette.placeholder": "Search entries, transcripts, highlights…",
   "palette.hint": "Type to search this campaign. Esc closes.",
   "palette.groupEntries": "Entries",
@@ -22,6 +23,7 @@ export const en = {
 
 export const de: Record<keyof typeof en, string> = {
   "palette.title": "Kampagnen-Suche",
+  "palette.openSearch": "Kampagne durchsuchen (Strg+K)",
   "palette.placeholder": "Einträge, Mitschriften, Highlights durchsuchen…",
   "palette.hint": "Tippen, um diese Kampagne zu durchsuchen. Esc schließt.",
   "palette.groupEntries": "Einträge",

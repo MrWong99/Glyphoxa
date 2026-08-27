@@ -216,7 +216,10 @@ export const en = {
   // ---- Relationship map (graph view) ----
   "knowledge.filterByTypeAria": "Filter by type",
   "knowledge.filterByConnectionAria": "Filter by connection",
-  "knowledge.tableView": "Table view",
+  // "Player view" — what the players' NPCs can see. The DE catalog already
+  // said "Spieler-Ansicht"; "Table view" collided with the tenant term
+  // ("your table") and named the same toggle differently per language.
+  "knowledge.tableView": "Player view",
   "knowledge.suggestionsToggle": "Suggestions ({n})",
   "knowledge.zoomInAria": "Zoom in",
   "knowledge.zoomOutAria": "Zoom out",
@@ -225,7 +228,7 @@ export const en = {
   "knowledge.focusedOn": "Focused on {name}",
   "knowledge.depth": "Depth {n}",
   "knowledge.clearFocus": "Clear focus",
-  "knowledge.mapEmptySuggestionsHidden": "Nothing to draw here. Suggestions are hidden in table view.",
+  "knowledge.mapEmptySuggestionsHidden": "Nothing to draw here. Suggestions are hidden in player view.",
   "knowledge.mapEmptyFiltered":
     "Nothing to draw — every entry is filtered out. Turn a type chip back on.",
   "knowledge.mapAria": "Relationship map — entries: {n}, connections: {m}",
