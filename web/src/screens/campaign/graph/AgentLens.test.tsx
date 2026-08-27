@@ -233,7 +233,7 @@ describe("agent-knowledge lens", () => {
   it("keeps withheld neighbours visible even in table view", async () => {
     renderWithLens();
     await pickBart();
-    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Player view" }));
     // Table view hides gm_private entries; the lens exists to show what an NPC is
     // DENIED, so it must win while it is on.
     expect(await screen.findByLabelText(/The bribe .*hidden from Bart/)).toBeInTheDocument();

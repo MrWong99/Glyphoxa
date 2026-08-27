@@ -56,10 +56,27 @@ function groupError(t: TFunc, group: string, err: Error | null) {
   );
 }
 
-export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
+export function CommandPalette({
+  tenantSlug,
+  open: openProp,
+  onOpenChange,
+}: {
+  tenantSlug: string;
+  // Optionally controlled (the AppShell pairs it with a visible topbar search
+  // button — Ctrl+K alone is undiscoverable and unreachable on touch); when
+  // the pair is absent the palette owns its state, as the unit tests do.
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const { t, lang } = useI18n();
   const navigate = useNavigate();
-  const [open, setOpen] = useState(false);
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = onOpenChange ?? setOpenState;
+  // The keybinding effect attaches once; it reads the live value via a ref so
+  // a controlled parent's state is toggled, not a stale closure's.
+  const openRef = useRef(open);
+  openRef.current = open;
   const [q, setQ] = useState("");
   const [debounced, setDebounced] = useState("");
 
@@ -72,11 +89,14 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setOpen((o) => !o);
+        setOpen(!openRef.current);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
+    // setOpen is stable in uncontrolled mode and openRef keeps the read live in
+    // controlled mode; re-attaching per render would churn the listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The 200ms debounce is the KnowledgePanel search convention; queries fire

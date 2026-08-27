@@ -9,6 +9,7 @@ import {
   MessagesSquare,
   PanelLeft,
   ScrollText,
+  Search,
   Settings,
   Swords,
   Users,
@@ -91,6 +92,10 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   // small viewport so mobile loads with the drawer shut (matchMedia is absent in
   // jsdom → the shell defaults to expanded under test).
   const [collapsed, setCollapsed] = useState(isDrawerViewport);
+
+  // The Ctrl+K palette, lifted so the topbar's search button can open it too —
+  // a keyboard chord alone is undiscoverable and unreachable on touch.
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // On the drawer breakpoint a nav tap should navigate AND shut the drawer —
   // otherwise it keeps covering the screen it just navigated to. On wide
@@ -189,6 +194,15 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           <div className="gx-topbar__titles">
             <div className="gx-topbar__title">{active ? t(active.title) : "Glyphoxa"}</div>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gx-topbar__search"
+            aria-label={t("palette.openSearch")}
+            title={t("palette.openSearch")}
+            onClick={() => setPaletteOpen(true)}
+            iconStart={<Search size={17} />}
+          />
           {/* The Active-Campaign switcher lives on every screen (#266a): the
               titles' flex:1 pushes it to the topbar's right edge. */}
           <CampaignSwitcher />
@@ -212,7 +226,7 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           authenticated screen and never renders for an unauthenticated visitor
           (the shell sits inside the AuthGate). Closed it renders nothing and
           fires no RPCs, so screen tests stay clean. */}
-      <CommandPalette tenantSlug={tenantSlug} />
+      <CommandPalette tenantSlug={tenantSlug} open={paletteOpen} onOpenChange={setPaletteOpen} />
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
           in Providers, so the screen unit tests that render without the shell get a

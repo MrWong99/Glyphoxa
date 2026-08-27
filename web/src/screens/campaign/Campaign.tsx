@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -62,11 +62,14 @@ export function Campaign({
   onViewChange,
   deepLink,
   onDeepLinkHandled,
+  onOpenTranscriptLine,
 }: {
   view?: CampaignView;
   onViewChange?: (view: CampaignView) => void;
   deepLink?: CampaignDeepLink;
   onDeepLinkHandled?: () => void;
+  /** Route-owned jump to one Transcript Line on the Session screen (#545). */
+  onOpenTranscriptLine?: (sessionID: string, lineID: string) => void;
 } = {}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -140,6 +143,19 @@ export function Campaign({
     onError: (err) => toast.error(t("campaign.couldntDeleteNpc", { message: errorMessage(err) })),
   });
 
+  // Unsaved editor text is guarded: the editor remounts per selection
+  // (key={id}), so a roster click used to silently throw away typing. The
+  // editor reports its dirtiness; a dirty switch asks first.
+  const editorDirty = useRef(false);
+  const [pendingSelect, setPendingSelect] = useState<string | null>(null);
+  const selectAgent = (id: string) => {
+    if (editorDirty.current && id !== selected?.id) {
+      setPendingSelect(id);
+      return;
+    }
+    setSelectedId(id);
+  };
+
   const campaign = data?.campaign;
   const npcs = roster.filter((a) => !isButler(a));
 
@@ -179,6 +195,7 @@ export function Campaign({
             setCastMode("edit");
             setView("cast");
           }}
+          onOpenLine={onOpenTranscriptLine}
         />
       ) : view === "maps" ? (
         <MapsPanel
@@ -253,7 +270,7 @@ export function Campaign({
               className="gx-roster__item"
               data-active={selected?.id === a.id ? "true" : undefined}
               data-role={a.role}
-              onClick={() => setSelectedId(a.id)}
+              onClick={() => selectAgent(a.id)}
             >
               {isButler(a) ? (
                 <Avatar name={a.name} size="sm" />
@@ -312,6 +329,25 @@ export function Campaign({
               isButler(selected) ? undefined : () => deleteAgent.mutate({ id: selected.id })
             }
             deleting={deleteAgent.isPending}
+            onDirtyChange={(d) => {
+              editorDirty.current = d;
+            }}
+          />
+        )}
+        {pendingSelect !== null && (
+          <ConfirmDialog
+            open
+            onOpenChange={(open) => {
+              if (!open) setPendingSelect(null);
+            }}
+            title={t("campaign.discardEditsTitle")}
+            description={t("campaign.discardEditsDesc", { name: selected?.name ?? "" })}
+            confirmLabel={t("campaign.discardEditsConfirm")}
+            onConfirm={() => {
+              editorDirty.current = false;
+              setSelectedId(pendingSelect);
+              setPendingSelect(null);
+            }}
           />
         )}
         </div>
@@ -332,12 +368,15 @@ function AgentEditor({
   onSaved,
   onDelete,
   deleting,
+  onDirtyChange,
 }: {
   agent: Agent;
   voices: Voice[];
   onSaved: () => void;
   onDelete?: () => void;
   deleting: boolean;
+  /** Reports whether the local fields differ from the persisted agent. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useI18n();
   const butler = isButler(agent);
@@ -347,6 +386,23 @@ function AgentEditor({
   const [voice, setVoice] = useState(agent.voice);
   const [addressOnly, setAddressOnly] = useState(agent.addressOnly);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Dirtiness is derived, not tracked: the roster refetch after a save updates
+  // the agent prop, so a saved editor reads clean again without bookkeeping.
+  const isDirty =
+    name !== agent.name ||
+    title !== agent.title ||
+    persona !== agent.persona ||
+    voice !== agent.voice ||
+    addressOnly !== agent.addressOnly;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(
+    () => () => onDirtyChange?.(false), // unmount lifts the guard
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const update = useMutation(CampaignService.method.updateAgent, {
     onSuccess: () => {

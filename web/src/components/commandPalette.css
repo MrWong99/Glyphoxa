@@ -68,7 +68,7 @@
   margin: 4px 6px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 79, 94, 0.12);
+  background: var(--status-danger-bg);
   color: var(--text-default);
   font-size: 0.8rem;
 }
@@ -79,7 +79,7 @@
   margin: 2px 6px 4px;
   padding: 4px 8px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 189, 79, 0.12);
+  background: var(--status-warning-bg);
   color: var(--text-muted);
   font-size: 0.78rem;
 }

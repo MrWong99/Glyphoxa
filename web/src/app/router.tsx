@@ -245,6 +245,17 @@ const subviewRoute = createRoute({
               replace: true,
             })
           }
+          // An appearances row jumps to the exact Transcript Line on the
+          // Session screen — the same session+line deep-link pair the palette
+          // uses (#591). Wired here because the route owns navigation; the
+          // screens below stay router-free (and router-mock-free in tests).
+          onOpenTranscriptLine={(sessionID, lineID) =>
+            void navigate({
+              to: "/t/$tenantSlug/$screen",
+              params: { tenantSlug, screen: "session" },
+              search: { session: sessionID, line: lineID },
+            })
+          }
         />
       );
     }

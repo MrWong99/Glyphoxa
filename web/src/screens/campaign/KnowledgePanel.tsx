@@ -59,6 +59,7 @@ export function KnowledgePanel({
   focusNodeID,
   onFocusHandled,
   onOpenCast,
+  onOpenLine,
 }: {
   /**
    * An entry another screen asked to open — the roster's readiness marks and the
@@ -69,6 +70,8 @@ export function KnowledgePanel({
   onFocusHandled?: () => void;
   /** Hands a cast Agent back to the Cast tab, where its fix lives. */
   onOpenCast?: (agentID: string) => void;
+  /** Jump to one Transcript Line on the Session screen (appearances, #545). */
+  onOpenLine?: (sessionID: string, lineID: string) => void;
 } = {}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -366,6 +369,7 @@ export function KnowledgePanel({
         node={editing}
         pending={editing ? updateNode.isPending : createNode.isPending}
         error={editorError}
+        onOpenLine={onOpenLine}
         onCancel={() => setEditing(null)}
         onDelete={editing ? () => setConfirmNode(editing) : undefined}
         onSubmit={(fields, reset) => {
@@ -1006,6 +1010,7 @@ function EntryEditor({
   onSubmit,
   onDelete,
   onCancel,
+  onOpenLine,
 }: {
   node: Node | null;
   pending: boolean;
@@ -1013,6 +1018,8 @@ function EntryEditor({
   onSubmit: (fields: EditorFields, reset: () => void) => void;
   onDelete?: () => void;
   onCancel: () => void;
+  /** Jump to one Transcript Line on the Session screen (appearances, #545). */
+  onOpenLine?: (sessionID: string, lineID: string) => void;
 }) {
   const { t } = useI18n();
   const isEdit = node != null;
@@ -1109,7 +1116,7 @@ function EntryEditor({
       {isEdit && node && <NodePortrait node={node} />}
       {isEdit && node && <NodeTags nodeID={node.id} />}
       {isEdit && node && <NodeBoards nodeID={node.id} />}
-      {isEdit && node && <NodeAppearances nodeID={node.id} />}
+      {isEdit && node && <NodeAppearances nodeID={node.id} onOpenLine={onOpenLine} />}
       {isEdit && node && <NodeRelations node={node} />}
 
       <div className="gx-kg-editor__actions">

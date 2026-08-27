@@ -10,7 +10,7 @@ import { Check, MessageSquarePlus, Pencil, SendHorizontal, Trash2, X } from "luc
 import { ChatService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateMethodQueries } from "@/lib/queryClient";
-import { useI18n, type Lang, type MessageKey } from "@/i18n";
+import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Markdown } from "@/components/ui/Markdown";
@@ -56,6 +56,22 @@ function stamp(ts: Timestamp | undefined, lang: Lang): string | null {
 // ToolChip is one executed tool call reported by the stream — name + outcome
 // only, the arguments stay server-side (ADR-0062).
 type ToolChip = { toolName: string; isError: boolean };
+
+// The planning belt's wire names (internal/planchat/tools.go) rendered as
+// friendly labels — "search_transcripts" is internal vocabulary, not GM copy.
+// A tool this map doesn't know (a belt addition that outruns the web tier)
+// still renders, de-snake_cased, rather than leaking underscores.
+const TOOL_LABEL_KEYS: Record<string, MessageKey> = {
+  search_transcripts: "chat.toolSearchTranscripts",
+  find_node: "chat.toolFindNode",
+  appearances_of: "chat.toolAppearancesOf",
+  propose_knowledge: "chat.toolProposeKnowledge",
+};
+
+function toolLabel(t: TFunc, toolName: string): string {
+  const key = TOOL_LABEL_KEYS[toolName];
+  return key ? t(key) : toolName.replace(/_/g, " ");
+}
 
 // StreamState is the whole in-flight exchange. errorKey null = still streaming;
 // set = the stream failed and the localized notice renders in-chat until the GM
@@ -365,10 +381,9 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                         className="gx-planning__chip"
                         data-error={tool.isError ? "true" : undefined}
                       >
-                        {/* toolName is a wire value and stays untranslated. */}
                         {tool.isError
-                          ? t("chat.toolChipError", { tool: tool.toolName })
-                          : t("chat.toolChip", { tool: tool.toolName })}
+                          ? t("chat.toolChipError", { tool: toolLabel(t, tool.toolName) })
+                          : t("chat.toolChip", { tool: toolLabel(t, tool.toolName) })}
                       </span>
                     ))}
                   </div>

@@ -187,9 +187,13 @@ export function PlayerBindForm({
                 {t("components.fromVoice")}
               </Button>
               {pickerOpen && (
+                // A labelled group of plain buttons, the CampaignSwitcher
+                // precedent — not role=listbox: a short list with no
+                // roving-tabindex/arrow-key model must not announce one. The
+                // already-bound member carries aria-current.
                 <ul
                   className="gx-playerform__picker"
-                  role="listbox"
+                  role="group"
                   aria-label={t("components.voiceChannelMembers")}
                 >
                   {members.map((m) => (
@@ -197,8 +201,7 @@ export function PlayerBindForm({
                       <button
                         type="button"
                         className="gx-playerform__picker-item"
-                        role="option"
-                        aria-selected={m.discordUserId === discordUserId}
+                        aria-current={m.discordUserId === discordUserId || undefined}
                         onClick={() => pickMember(m)}
                       >
                         <Avatar name={m.displayName} src={m.avatarUrl || null} size="sm" />

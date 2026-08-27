@@ -267,7 +267,7 @@ describe("proposals on the graph", () => {
     // outright so the GM can share the screen. Unreviewed suggestions are strictly
     // worse there: an Agent's unvetted guesses about the plot, whose subject line
     // can name a gm_private entry and whose review card spells out the whole write.
-    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Player view" }));
 
     await waitFor(() =>
       expect(

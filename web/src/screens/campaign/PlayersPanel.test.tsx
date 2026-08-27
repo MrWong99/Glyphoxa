@@ -107,7 +107,9 @@ describe("PlayersPanel", () => {
 
     // Open the member picker and pick the unbound member.
     fireEvent.click(screen.getByRole("button", { name: /from voice/i }));
-    fireEvent.click(await screen.findByRole("option", { name: /borin_irl/i }));
+    // Plain buttons in a labelled group (the CampaignSwitcher precedent) — the
+    // picker no longer announces a listbox model it doesn't implement.
+    fireEvent.click(await screen.findByRole("button", { name: /borin_irl/i }));
 
     fireEvent.click(screen.getByRole("button", { name: /create player/i }));
 

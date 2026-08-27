@@ -184,6 +184,35 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
             ref={menuRef}
             className="gx-select__content gx-campaign-row-actions__menu"
             role="menu"
+            // The menu keyboard model (WAI-ARIA menu pattern): arrows cycle the
+            // enabled items, Home/End jump, and Tab closes — the menu portals
+            // to document.body, so an escaping Tab would land at the page's end
+            // with the menu still painted open.
+            onKeyDown={(e) => {
+              const items = Array.from(
+                menuRef.current?.querySelectorAll<HTMLButtonElement>(
+                  '[role="menuitem"]:not(:disabled)',
+                ) ?? [],
+              );
+              if (items.length === 0) return;
+              const at = items.findIndex((el) => el === document.activeElement);
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                items[(at + 1) % items.length].focus();
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                items[(at - 1 + items.length) % items.length].focus();
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                items[0].focus();
+              } else if (e.key === "End") {
+                e.preventDefault();
+                items[items.length - 1].focus();
+              } else if (e.key === "Tab") {
+                e.preventDefault();
+                setMenuOpen(false); // the close effect restores trigger focus
+              }
+            }}
             style={
               pos
                 ? {

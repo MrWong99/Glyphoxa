@@ -99,6 +99,7 @@ export const en = {
   "config.hardLimitPlaceholder": "e.g. 10.00",
   "config.hardLimitHint": "Ends the session. Must be at least the soft limit.",
   "config.saveSpendingLimits": "Save spending limits",
+  "config.spendCapsLoadError": "Couldn't load the stored limits: {message}",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -182,4 +183,5 @@ export const de: Record<keyof typeof en, string> = {
   "config.hardLimitPlaceholder": "z. B. 10,00",
   "config.hardLimitHint": "Beendet die Session. Muss mindestens so hoch sein wie das weiche Limit.",
   "config.saveSpendingLimits": "Ausgabenlimits speichern",
+  "config.spendCapsLoadError": "Gespeicherte Limits konnten nicht geladen werden: {message}",
 };

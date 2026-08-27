@@ -126,7 +126,7 @@ describe("KnowledgeGraph", () => {
   it("table view removes gm_private nodes entirely", () => {
     renderGraph();
     expect(screen.queryByLabelText("The bribe (Note), GM-only")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Player view" }));
     expect(screen.queryByLabelText("The bribe (Note), GM-only")).not.toBeInTheDocument();
     expect(node("Bart (NPC)")).toBeInTheDocument();
   });

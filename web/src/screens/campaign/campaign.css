@@ -1492,22 +1492,22 @@
 /* Disposition colours the relation (#546). A graph of bare `knows` lines says
    nothing about how the world feels about itself; these do. */
 .gx-kg-graph__edge[data-disposition="-2"] {
-  stroke: #ff4f5e;
+  stroke: var(--color-red-50);
   stroke-opacity: 0.65;
 }
 
 .gx-kg-graph__edge[data-disposition="-1"] {
-  stroke: #ff7139;
+  stroke: var(--color-orange-50);
   stroke-opacity: 0.5;
 }
 
 .gx-kg-graph__edge[data-disposition="1"] {
-  stroke: #35c48d;
+  stroke: var(--color-green-50);
   stroke-opacity: 0.5;
 }
 
 .gx-kg-graph__edge[data-disposition="2"] {
-  stroke: #4fa9ff;
+  stroke: var(--color-blue-30);
   stroke-opacity: 0.65;
 }
 

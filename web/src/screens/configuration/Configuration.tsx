@@ -478,11 +478,19 @@ function SpendCapsCard() {
         <Button
           variant="primary"
           size="sm"
-          disabled={save.isPending}
+          // Held until the stored caps have actually been read: blank means
+          // "clear that cap", so a Save clicked before the seed lands (or after
+          // a failed read) would silently wipe limits the GM never saw.
+          disabled={save.isPending || !capsQuery.isSuccess}
           onClick={() => save.mutate({ softUsd: parse(soft), hardUsd: parse(hard) })}
         >
           {t("config.saveSpendingLimits")}
         </Button>
+        {capsQuery.isError && (
+          <span className="gx-spendcaps__error" role="alert">
+            {t("config.spendCapsLoadError", { message: errorMessage(capsQuery.error) })}
+          </span>
+        )}
         {save.isError && (
           <span className="gx-spendcaps__error" role="alert">
             {t("common.couldntSave", { message: errorMessage(save.error) })}
@@ -507,10 +515,16 @@ function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealt
     );
   }
   if (health?.status === HealthStatus.DEGRADED) {
+    // The failure reason renders VISIBLY under the badge — a title-attr
+    // tooltip is unreachable by keyboard and on touch, and this detail is the
+    // one clue to what's wrong with the key.
     return (
-      <Badge variant="danger" dot size="sm" title={health.detail || undefined}>
-        {t("config.badgeDegraded")}
-      </Badge>
+      <span className="gx-health">
+        <Badge variant="danger" dot size="sm">
+          {t("config.badgeDegraded")}
+        </Badge>
+        {health.detail && <span className="gx-health__detail">{health.detail}</span>}
+      </span>
     );
   }
   return (
@@ -531,9 +545,12 @@ function IntegrationBadge({ state, detail }: { state: string; detail: string }) 
   }
   if (state === "failed") {
     return (
-      <Badge variant="danger" dot size="sm" title={detail || undefined}>
-        {t("config.discordIntegrationFailed")}
-      </Badge>
+      <span className="gx-health">
+        <Badge variant="danger" dot size="sm">
+          {t("config.discordIntegrationFailed")}
+        </Badge>
+        {detail && <span className="gx-health__detail">{detail}</span>}
+      </span>
     );
   }
   return (
