@@ -60,6 +60,7 @@ export function Combobox({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // The defaults resolve here rather than in the parameter list: a default
   // parameter can't call hooks, and the translated fallbacks must follow the
@@ -96,6 +97,15 @@ export function Combobox({
     if (!open) setSearch("");
   }, [open]);
 
+  // The popover autofocuses its cmdk input; closing unmounts it, which would
+  // drop keyboard focus to <body>. Restore the trigger on close — the same
+  // contract the campaign row-actions menu keeps (#338).
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) triggerRef.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
+
   const pick = (optValue: string) => {
     onValueChange?.(optValue);
     setOpen(false); // the close effect clears the search
@@ -112,6 +122,7 @@ export function Combobox({
         <button
           type="button"
           id={fid}
+          ref={triggerRef}
           className="gx-select gx-combobox__trigger"
           aria-haspopup="listbox"
           aria-expanded={open}

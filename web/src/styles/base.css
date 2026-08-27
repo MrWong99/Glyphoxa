@@ -142,6 +142,30 @@ pre {
   font-variant-numeric: tabular-nums;
 }
 
+/* Boot placeholder — AuthGate / RootEntry / CreateTenant render this bare div
+ * while the session resolves. A themed surface with a small spinner instead of
+ * a flash of unstyled blank (the class previously had no definition at all). */
+.gx-auth-boot {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--surface-base);
+}
+.gx-auth-boot::after {
+  content: "";
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--arcane);
+  animation: gx-boot-spin 0.9s linear infinite;
+}
+@keyframes gx-boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

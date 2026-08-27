@@ -228,7 +228,7 @@ export const en = {
   "knowledge.mapEmptySuggestionsHidden": "Nothing to draw here. Suggestions are hidden in table view.",
   "knowledge.mapEmptyFiltered":
     "Nothing to draw — every entry is filtered out. Turn a type chip back on.",
-  "knowledge.mapAria": "Relationship map: {n} entries, {m} connections",
+  "knowledge.mapAria": "Relationship map — entries: {n}, connections: {m}",
   "knowledge.ariaGmOnly": ", GM-only",
   "knowledge.ariaHiddenFrom": ", hidden from {agent}",
   "knowledge.ariaDropped": ", dropped from {agent}'s prompt — over budget",
@@ -424,14 +424,14 @@ export const de: Record<keyof typeof en, string> = {
   "knowledge.portraitHint":
     "Ein Bild für diesen Eintrag — aus seinem eigenen Text generiert oder hochgeladen.",
   "knowledge.portraitPrivateHint":
-    "Nur-SL-Einträge können kein generiertes Porträt speisen — lade stattdessen ein Bild hoch.",
+    "Nur-für-GM-Einträge können kein generiertes Porträt speisen — lade stattdessen ein Bild hoch.",
   "knowledge.portraitAlt": "Porträt von {name}",
   "knowledge.portraitPromptLabel": "Zusätzliche Wünsche (optional)",
   "knowledge.portraitPromptPlaceholder": "z. B. lachend, mit einem Humpen",
   "knowledge.portraitPromptHint":
     "Jeder Lauf kostet eine Bildgenerierung. Gespeichert wird erst mit „Porträt übernehmen“.",
   "knowledge.generatePortrait": "Porträt generieren",
-  "knowledge.generatePortraitPending": "Generiere …",
+  "knowledge.generatePortraitPending": "Wird generiert…",
   "knowledge.regeneratePortrait": "Neu generieren",
   "knowledge.portraitDraftAlt": "Generierter Porträt-Entwurf",
   "knowledge.applyPortrait": "Porträt übernehmen",
@@ -523,7 +523,7 @@ export const de: Record<keyof typeof en, string> = {
     "Hier gibt es nichts zu zeichnen. In der Spieler-Ansicht sind Vorschläge ausgeblendet.",
   "knowledge.mapEmptyFiltered":
     "Nichts zu zeichnen — alle Einträge sind ausgefiltert. Schalte einen Typ-Filter wieder ein.",
-  "knowledge.mapAria": "Beziehungskarte: {n} Einträge, {m} Verbindungen",
+  "knowledge.mapAria": "Beziehungskarte — Einträge: {n}, Verbindungen: {m}",
   "knowledge.ariaGmOnly": ", nur für GM",
   "knowledge.ariaHiddenFrom": ", vor {agent} verborgen",
   "knowledge.ariaDropped": ", fehlt im Prompt von {agent} — über dem Limit",

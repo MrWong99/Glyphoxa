@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Link, Outlet, useParams } from "@tanstack/react-router";
 import { Toaster } from "sonner";
 import {
@@ -76,6 +76,13 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   const { screen, view } = useParams({ strict: false }) as { screen?: string; view?: string };
   const active = NAV.find((n) => n.to === screen);
   const activeView = screen === "campaign" && isCampaignView(view) ? view : undefined;
+
+  // The browser tab names the screen ("Session · Glyphoxa") — with several
+  // Glyphoxa tabs open, an all-"Glyphoxa" tab strip is a guessing game.
+  const screenTitle = active ? t(active.title) : null;
+  useEffect(() => {
+    document.title = screenTitle ? `${screenTitle} · Glyphoxa` : "Glyphoxa";
+  }, [screenTitle]);
 
   // Sidebar collapse (#88 slice 4). On narrow viewports the sidebar is an
   // off-canvas drawer the topbar toggle opens; on wide viewports the toggle hides

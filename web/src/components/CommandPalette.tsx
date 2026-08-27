@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Command } from "cmdk";
 import { useQuery } from "@connectrpc/connect-query";
 import { keepPreviousData } from "@tanstack/react-query";
@@ -13,6 +13,7 @@ import { metaOf, alphaBg } from "@/screens/campaign/knowledgeVocab";
 import { stripMarkdown } from "@/components/ui/Markdown";
 
 import "./commandPalette.css";
+import { errorMessage } from "@/lib/connectError";
 
 // CommandPalette — the Ctrl+K campaign search (#591). One overlay searching the
 // three campaign sources with a shared debounced query: Knowledge Graph entries
@@ -50,7 +51,7 @@ function groupError(t: TFunc, group: string, err: Error | null) {
   if (!err) return null;
   return (
     <div className="gx-palette__error" role="alert">
-      {t("palette.searchFailed", { group, message: err.message })}
+      {t("palette.searchFailed", { group, message: errorMessage(err) })}
     </div>
   );
 }
@@ -99,6 +100,43 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
     setDebounced("");
   };
 
+  // Modal focus contract, hand-rolled like the row-actions menu (#338, no new
+  // dependency): remember where keyboard focus was when the palette opened and
+  // put it back on close — cmdk's autofocused input would otherwise drop focus
+  // to <body> when it unmounts.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) {
+      restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      return;
+    }
+    restoreRef.current?.focus();
+    restoreRef.current = null;
+  }, [open]);
+
+  // Tab must cycle INSIDE the dialog — without a trap it walks the inert page
+  // behind the overlay.
+  const trapTab = (e: React.KeyboardEvent) => {
+    if (e.key !== "Tab") return;
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusables || focusables.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
   // go closes first, then navigates with the deep-link params; the target
   // screen consumes them and strips the URL (router.tsx ScreenSearch).
   const go = (screen: string, search: Record<string, string>) => {
@@ -136,7 +174,14 @@ export function CommandPalette({ tenantSlug }: { tenantSlug: string }) {
         if (e.target === e.currentTarget) close();
       }}
     >
-      <div className="gx-palette" role="dialog" aria-label={t("palette.title")}>
+      <div
+        className="gx-palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("palette.title")}
+        ref={dialogRef}
+        onKeyDown={trapTab}
+      >
         <Command
           shouldFilter={false}
           label={t("palette.title")}

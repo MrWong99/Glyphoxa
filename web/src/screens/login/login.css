@@ -15,8 +15,8 @@
   width: 100%;
   max-width: 360px;
   padding: 32px 28px;
-  background: var(--surface-card, #16131f);
-  border: 1px solid var(--border-subtle, #2a2535);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 16px;
   text-align: center;
 }
@@ -38,7 +38,7 @@
 
 .gx-login__lede {
   margin: 0 0 8px;
-  color: var(--text-subtle, #9a93a8);
+  color: var(--text-subtle);
 }
 
 /* Operator-allowlist rejection banner (ADR-0041, #103). Inline + role=alert —
@@ -47,10 +47,10 @@
   margin: 0;
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid var(--status-danger, #ff5c7a);
-  border-radius: var(--radius-sm, 8px);
-  color: var(--status-danger, #ff5c7a);
-  font-size: var(--body-sm, 0.875rem);
+  border: 1px solid var(--status-danger);
+  border-radius: var(--radius-sm);
+  color: var(--status-danger);
+  font-size: var(--body-sm);
   text-align: left;
 }
 
@@ -77,8 +77,8 @@
   gap: 10px;
   align-items: flex-start;
   width: 100%;
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
   text-align: left;
   cursor: pointer;
 }

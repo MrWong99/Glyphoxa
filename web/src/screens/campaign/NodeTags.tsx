@@ -7,6 +7,7 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
 import { Input } from "@/components/ui/Input";
 import { invalidateMethodQueries } from "@/lib/queryClient";
+import { errorMessage } from "@/lib/connectError";
 
 // Free-form tags on an entry (#543).
 //
@@ -127,7 +128,7 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
 
       {save.isError && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          {t("knowledge.saveTagsError", { message: save.error.message })}
+          {t("knowledge.saveTagsError", { message: errorMessage(save.error) })}
         </span>
       )}
     </div>

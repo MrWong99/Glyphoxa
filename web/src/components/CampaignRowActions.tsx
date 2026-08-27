@@ -138,7 +138,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       setMenuOpen(false);
       refreshAfterChange();
     },
-    onError: (err) => toast.error(t("components.couldntArchiveCampaign", { message: err.message })),
+    onError: (err) => toast.error(t("components.couldntArchiveCampaign", { message: errorMessage(err) })),
   });
 
   const unarchive = useMutation(CampaignService.method.unarchiveCampaign, {
@@ -147,7 +147,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       refreshAfterChange();
     },
     onError: (err) =>
-      toast.error(t("components.couldntUnarchiveCampaign", { message: err.message })),
+      toast.error(t("components.couldntUnarchiveCampaign", { message: errorMessage(err) })),
   });
 
   const del = useMutation(CampaignService.method.deleteCampaign, {
@@ -156,7 +156,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       setMenuOpen(false);
       refreshAfterChange();
     },
-    onError: (err) => toast.error(t("components.couldntDeleteCampaign", { message: err.message })),
+    onError: (err) => toast.error(t("components.couldntDeleteCampaign", { message: errorMessage(err) })),
   });
 
   return (

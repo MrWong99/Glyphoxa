@@ -64,7 +64,7 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
       setSummary(null);
       onSwitched?.();
     },
-    onError: (err) => toast.error(t("components.importedCouldntSwitch", { message: err.message })),
+    onError: (err) => toast.error(t("components.importedCouldntSwitch", { message: errorMessage(err) })),
   });
 
   // Opening the native file picker; the input is reset on each open so re-picking

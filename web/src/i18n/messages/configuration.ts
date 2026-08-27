@@ -11,7 +11,7 @@ export const en = {
   // Active-campaign header card.
   "config.activeCampaign": "Active campaign",
   "config.campaignSystem": "System",
-  "config.couldntLoadCampaign": "Could not load the active campaign: {message}",
+  "config.couldntLoadCampaign": "Couldn't load the active campaign: {message}",
 
   // First-run CTA (#267) — Butler is a product name, explained in plain words.
   "config.firstCampaignTitle": "Create your first campaign",
@@ -59,10 +59,10 @@ export const en = {
     "The Discord server your group plays on. Sessions pick their voice channel on the Session screen.",
   "config.saveDiscordSettings": "Save Discord settings",
 
-  // Unlink (#504) — "workspace", never "tenant", in user-facing copy.
+  // Unlink (#504) — "table", never "tenant", in user-facing copy.
   "config.unlinkServer": "Unlink server",
   "config.unlinkNote":
-    "Unlink this Discord server? Sessions stop working until a server is linked again, and another workspace can then link it.",
+    "Unlink this Discord server? Sessions stop working until a server is linked again, and another table can then link it.",
   "config.confirmUnlink": "Confirm unlink",
   "config.couldntUnlink": "Couldn't unlink: {message}",
 
@@ -148,7 +148,7 @@ export const de: Record<keyof typeof en, string> = {
 
   "config.unlinkServer": "Server trennen",
   "config.unlinkNote":
-    "Diesen Discord-Server trennen? Sessions funktionieren erst wieder, wenn erneut ein Server verknüpft ist — und ein anderer Arbeitsbereich kann ihn dann verknüpfen.",
+    "Diesen Discord-Server trennen? Sessions funktionieren erst wieder, wenn erneut ein Server verknüpft ist — und ein anderer Tisch kann ihn dann verknüpfen.",
   "config.confirmUnlink": "Trennen bestätigen",
   "config.couldntUnlink": "Trennen fehlgeschlagen: {message}",
 
@@ -175,11 +175,11 @@ export const de: Record<keyof typeof en, string> = {
   "config.spendCapsLede":
     "Beendet eine Session, wenn ihre geschätzten KI-Dienst-Kosten ein Limit überschreiten. Die Beträge sind Schätzungen, keine Abrechnung. Lass ein Feld leer, um das Limit auszuschalten; Änderungen gelten ab der nächsten Session.",
   "config.softLimitLabel": "Weiches Limit (USD)",
-  "config.softLimitPlaceholder": "z. B. 5.00",
+  "config.softLimitPlaceholder": "z. B. 5,00",
   "config.softLimitHint":
     "Danach beginnt die KI keine neuen Antworten mehr; laufende Antworten werden zu Ende geführt.",
   "config.hardLimitLabel": "Hartes Limit (USD)",
-  "config.hardLimitPlaceholder": "z. B. 10.00",
+  "config.hardLimitPlaceholder": "z. B. 10,00",
   "config.hardLimitHint": "Beendet die Session. Muss mindestens so hoch sein wie das weiche Limit.",
   "config.saveSpendingLimits": "Ausgabenlimits speichern",
 };

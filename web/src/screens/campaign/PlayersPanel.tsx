@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Plus, UserPlus } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
@@ -14,6 +15,7 @@ import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
 
 // PlayersPanel (#279) is the Campaign screen's third view: the campaign's Player
 // Characters, each bound to a Discord User, with a bind form to create a Character
@@ -69,6 +71,10 @@ export function PlayersPanel() {
       setEditingId(null);
       void invalidateCharacters();
     },
+    // The confirm dialog closes on confirm, so a rejected delete needs its own
+    // voice (ADR-0017: sonner) — silence here reads as a completed delete.
+    onError: (err) =>
+      toast.error(t("campaign.couldntDeletePlayer", { message: errorMessage(err) })),
   });
 
   const startCreate = () => {
@@ -92,7 +98,7 @@ export function PlayersPanel() {
   if (listQuery.status === "error") {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("campaign.playersLoadError", { message: listQuery.error.message })}
+        {t("campaign.playersLoadError", { message: errorMessage(listQuery.error) })}
       </p>
     );
   }
@@ -153,7 +159,7 @@ export function PlayersPanel() {
             pending={createCharacter.isPending}
             error={
               createCharacter.isError
-                ? t("campaign.couldntCreate", { message: createCharacter.error.message })
+                ? t("campaign.couldntCreate", { message: errorMessage(createCharacter.error) })
                 : null
             }
             onSubmit={submitCreate}
@@ -179,7 +185,7 @@ export function PlayersPanel() {
             pending={updateCharacter.isPending}
             error={
               updateCharacter.isError
-                ? t("common.couldntSave", { message: updateCharacter.error.message })
+                ? t("common.couldntSave", { message: errorMessage(updateCharacter.error) })
                 : null
             }
             onSubmit={submitEdit}

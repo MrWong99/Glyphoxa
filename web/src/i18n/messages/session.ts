@@ -16,9 +16,15 @@ export const en = {
   "session.voiceChannelPlaceholder": "Voice channel…",
   "session.setAsDefault": "Set as default",
   "session.noVoiceChannels": "The linked Discord server has no voice channels.",
+  // Localized doubles of the channel lister's two known preconditions
+  // (internal/rpc/session_channels.go) — matched on the raw server message,
+  // any other message still renders verbatim.
+  "session.hintLinkServerFirst": "Link a Discord server first.",
+  "session.hintSaveBotTokenFirst": "Save a Discord Bot token first.",
   "session.couldntStart": "Couldn't start the session: {message}",
   "session.couldntStop": "Couldn't stop the session: {message}",
   "session.couldntSaveDefaultChannel": "Couldn't save the default channel: {message}",
+  "session.couldntSetMute": "Couldn't change the mute: {message}",
   "session.connectionFailedReason": "Voice connection failed: {reason}",
   "session.connectionFailed": "Voice connection failed.",
 
@@ -26,10 +32,11 @@ export const en = {
   "session.spendCapHard": "Hard spending limit reached — the session is ending.",
   "session.spendCapSoft":
     "Soft spending limit reached — no new AI replies will start (replies in progress will finish).",
-  "session.spendEstimate": "Estimated spend {usd} (estimated).",
+  "session.spendEstimate": "Estimated spend {usd}.",
 
   // --- Last-session summary + recap ----------------------------------------
   "session.lastSummary": "Last session ended {when} · {duration} · {n} lines transcribed.",
+  "session.lastSummaryOne": "Last session ended {when} · {duration} · 1 line transcribed.",
   "session.durationHm": "{h}h {m}m",
   "session.recap": "Recap",
   "session.generatingRecap": "Generating recap…",
@@ -51,6 +58,7 @@ export const en = {
   "session.pickerLabel": "Sessions",
   "session.pickerLive": "live",
   "session.pickerLines": "{n} lines",
+  "session.pickerLinesOne": "1 line",
   "session.backToCurrent": "Back to current session",
 
   // --- Transcript search -----------------------------------------------------
@@ -67,11 +75,13 @@ export const en = {
   "session.voiceControl": "Voice control",
   "session.npcVoices": "NPC voices",
   "session.voicingCount": "{voicing} of {total} speaking",
+  "session.voicingCountOne": "{voicing} of {total} speaking",
   "session.muteAll": "Mute all",
   "session.unmuteAll": "Unmute all",
   "session.butlerState": "Butler · answers when called by name",
   "session.stateMuted": "Muted",
   "session.stateSpeaking": "Speaking",
+  "session.stateIdle": "Ready",
   "session.muteAgent": "Mute {name}",
   "session.unmuteAgent": "Unmute {name}",
   "session.mutedHint":
@@ -151,18 +161,22 @@ export const de: Record<keyof typeof en, string> = {
   "session.voiceChannelPlaceholder": "Sprachkanal…",
   "session.setAsDefault": "Als Standard festlegen",
   "session.noVoiceChannels": "Der verbundene Discord-Server hat keine Sprachkanäle.",
+  "session.hintLinkServerFirst": "Verknüpfe zuerst einen Discord-Server.",
+  "session.hintSaveBotTokenFirst": "Speichere zuerst einen Discord-Bot-Token.",
   "session.couldntStart": "Session konnte nicht gestartet werden: {message}",
   "session.couldntStop": "Session konnte nicht beendet werden: {message}",
   "session.couldntSaveDefaultChannel": "Standardkanal konnte nicht gespeichert werden: {message}",
+  "session.couldntSetMute": "Stummschalten fehlgeschlagen: {message}",
   "session.connectionFailedReason": "Sprachverbindung fehlgeschlagen: {reason}",
   "session.connectionFailed": "Sprachverbindung fehlgeschlagen.",
 
   "session.spendCapHard": "Hartes Ausgabenlimit erreicht — die Session wird beendet.",
   "session.spendCapSoft":
     "Weiches Ausgabenlimit erreicht — es starten keine neuen KI-Antworten (laufende Antworten werden noch beendet).",
-  "session.spendEstimate": "Geschätzte Ausgaben {usd} (Schätzung).",
+  "session.spendEstimate": "Geschätzte Ausgaben {usd}.",
 
   "session.lastSummary": "Letzte Session endete {when} · {duration} · {n} Zeilen mitgeschrieben.",
+  "session.lastSummaryOne": "Letzte Session endete {when} · {duration} · 1 Zeile mitgeschrieben.",
   "session.durationHm": "{h} Std. {m} Min.",
   "session.recap": "Recap",
   "session.generatingRecap": "Recap wird erstellt…",
@@ -183,6 +197,7 @@ export const de: Record<keyof typeof en, string> = {
   "session.pickerLabel": "Sessions",
   "session.pickerLive": "live",
   "session.pickerLines": "{n} Zeilen",
+  "session.pickerLinesOne": "1 Zeile",
   "session.backToCurrent": "Zurück zur aktuellen Session",
 
   "session.searchTranscript": "Mitschrift durchsuchen",
@@ -196,11 +211,13 @@ export const de: Record<keyof typeof en, string> = {
   "session.voiceControl": "Stimmen-Steuerung",
   "session.npcVoices": "NPC-Stimmen",
   "session.voicingCount": "{voicing} von {total} sprechen",
+  "session.voicingCountOne": "{voicing} von {total} spricht",
   "session.muteAll": "Alle stummschalten",
   "session.unmuteAll": "Alle laut stellen",
   "session.butlerState": "Butler · antwortet nur auf direkte Ansprache",
   "session.stateMuted": "Stumm",
   "session.stateSpeaking": "Spricht",
+  "session.stateIdle": "Bereit",
   "session.muteAgent": "{name} stummschalten",
   "session.unmuteAgent": "{name} laut stellen",
   "session.mutedHint":

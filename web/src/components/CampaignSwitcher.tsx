@@ -10,7 +10,7 @@ import {
   watchVoiceSessionEnd,
 } from "@/lib/campaignCache";
 import { useI18n } from "@/i18n";
-import { isNotFound } from "@/lib/connectError";
+import { errorMessage, isNotFound } from "@/lib/connectError";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { Badge } from "@/components/ui/Badge";
 import { CampaignRowActions } from "./CampaignRowActions";
@@ -103,7 +103,7 @@ export function CampaignSwitcher() {
       void invalidateActiveCampaignScopedQueries(queryClient);
       close();
     },
-    onError: (err) => toast.error(t("components.couldntSwitchCampaign", { message: err.message })),
+    onError: (err) => toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) })),
   });
   const switching = setActive.isPending;
 
@@ -169,7 +169,11 @@ export function CampaignSwitcher() {
           {triggerLabel === null ? (
             <span className="gx-skeleton" data-testid="campaign-switcher-loading" />
           ) : (
-            <span className="gx-campaign-switcher__name">{triggerLabel}</span>
+            // title: the name ellipsizes in a fixed-width trigger, and a
+            // truncated campaign name with no hover reveal is a guessing game.
+            <span className="gx-campaign-switcher__name" title={triggerLabel}>
+              {triggerLabel}
+            </span>
           )}
         </span>
         <ChevronDown size={14} className="gx-campaign-switcher__chevron" />
@@ -263,7 +267,7 @@ export function CampaignSwitcher() {
 
               {listQ.isError && (
                 <p className="gx-campaign__error gx-campaign-switcher__error" role="alert">
-                  {t("components.couldntLoadCampaigns", { message: listQ.error.message })}
+                  {t("components.couldntLoadCampaigns", { message: errorMessage(listQ.error) })}
                 </p>
               )}
 

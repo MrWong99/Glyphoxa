@@ -24,6 +24,7 @@ import { PrepBoards } from "../campaign/PrepBoards";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
+import { errorMessage } from "@/lib/connectError";
 
 // The Session screen (#72) drives the live Voice Session from the UI on the live
 // SessionService (ADR-0039): Start/Stop call the in-process SessionManager, the
@@ -126,8 +127,11 @@ function formatUsd(usd: number, lang: Lang): string {
 
 // formatStamp renders a session's started_at instant as a short "Mon D, HH:MM"
 // stamp for the past-session picker label, in the display language's locale.
+// Sessions from a previous year carry the year — without it, two sessions a
+// year apart render identical labels.
 function formatStamp(d: Date, lang: Lang): string {
   return d.toLocaleString(lang, {
+    year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -143,7 +147,11 @@ function sessionOption(vs: VoiceSession, t: TFunc, lang: Lang): string {
   const startedMs = tsMs(vs.startedAt);
   const when = startedMs != null ? formatStamp(new Date(startedMs), lang) : "—";
   const count =
-    vs.status === "running" ? t("session.pickerLive") : t("session.pickerLines", { n: vs.lineCount });
+    vs.status === "running"
+      ? t("session.pickerLive")
+      : vs.lineCount === 1
+        ? t("session.pickerLinesOne")
+        : t("session.pickerLines", { n: vs.lineCount });
   return `${when} · ${count}`;
 }
 
@@ -155,8 +163,20 @@ function lastSummary(session: VoiceSession, t: TFunc, lang: Lang): string {
   const startedMs = tsMs(session.startedAt);
   const ended = endedMs != null ? new Date(endedMs) : null;
 
+  // Time-only for a session that ended today; older sessions carry the date
+  // (and the year once it differs) — a bare "ended 11:59 PM" days later reads
+  // as tonight.
+  const now = new Date();
   const when = ended
-    ? ended.toLocaleTimeString(lang, { hour: "2-digit", minute: "2-digit" })
+    ? ended.toDateString() === now.toDateString()
+      ? ended.toLocaleTimeString(lang, { hour: "2-digit", minute: "2-digit" })
+      : ended.toLocaleString(lang, {
+          year: ended.getFullYear() === now.getFullYear() ? undefined : "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
     : "—";
 
   let h = 0;
@@ -167,7 +187,9 @@ function lastSummary(session: VoiceSession, t: TFunc, lang: Lang): string {
     m = minutes % 60;
   }
   const duration = t("session.durationHm", { h, m });
-  return t("session.lastSummary", { when, duration, n: session.lineCount });
+  return session.lineCount === 1
+    ? t("session.lastSummaryOne", { when, duration })
+    : t("session.lastSummary", { when, duration, n: session.lineCount });
 }
 
 // SessionDeepLink is the palette's arrival vocabulary (#591): session+line
@@ -231,7 +253,7 @@ export function Session({
   // loop already died server-side, and the refetch snaps the badge off Live.
   // The server's message stays verbatim, interpolated into the localized template.
   const onError = (key: MessageKey) => (err: Error) => {
-    toast.error(t(key, { message: err.message }));
+    toast.error(t(key, { message: errorMessage(err) }));
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {
@@ -265,6 +287,15 @@ export function Session({
     channelsQ.error != null && ConnectError.from(channelsQ.error).code !== Code.Unimplemented
       ? ConnectError.from(channelsQ.error).rawMessage
       : null;
+  // The lister's two known preconditions (internal/rpc/session_channels.go)
+  // render localized; any other server message stays verbatim — the message IS
+  // the operator's next step, and a raw English hint in a German UI isn't.
+  const channelsErrorText =
+    channelsError === "link a Discord server first"
+      ? t("session.hintLinkServerFirst")
+      : channelsError === "save a Discord Bot token first"
+        ? t("session.hintSaveBotTokenFirst")
+        : channelsError;
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null);
   // A stored default that is no longer among the guild's channels (deleted in
   // Discord) must not ride a Start invisibly: fall back to the first listed
@@ -285,7 +316,7 @@ export function Session({
       void invalidateMethodQueries(queryClient, ProviderService.method.listProviderConfigs);
     },
     onError: (err: Error) =>
-      toast.error(t("session.couldntSaveDefaultChannel", { message: err.message })),
+      toast.error(t("session.couldntSaveDefaultChannel", { message: errorMessage(err) })),
   });
 
   // The timer runs only while live, counting up from the running session's start.
@@ -298,6 +329,35 @@ export function Session({
   const transcript = useSessionEvents(renderedSessionId ?? undefined, active && !viewingPast, viewingPast);
   const hasLines = transcript.lines.length > 0;
   const showTyping = active && transcript.typing.active;
+
+  // Live follow: keep the newest line in view as the session speaks — the GM
+  // must not hand-scroll after every line all night. Same stick contract as the
+  // planning chat pane, but against the page-level scroller (.gx-content): at
+  // (or near) the transcript's tail the view follows each append; scrolling up
+  // to re-read disarms it, and returning to the tail re-arms it. Past-session
+  // replays never auto-scroll (the deep-link jump owns those).
+  const transcriptListRef = useRef<HTMLOListElement | null>(null);
+  const followRef = useRef(true);
+  useEffect(() => {
+    const list = transcriptListRef.current;
+    const scroller = list?.closest(".gx-content");
+    if (!list || !scroller) return;
+    const onScroll = () => {
+      const listBottom = list.getBoundingClientRect().bottom;
+      const viewBottom = scroller.getBoundingClientRect().bottom;
+      followRef.current = listBottom - viewBottom < 120;
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll);
+  }, [hasLines, active, viewingPast]);
+  useEffect(() => {
+    if (!active || viewingPast || !followRef.current) return;
+    try {
+      transcriptListRef.current?.scrollIntoView?.({ block: "end" });
+    } catch {
+      // jsdom: scrollIntoView is a no-op; nothing to keep in view there.
+    }
+  }, [transcript.lines.length, showTyping, active, viewingPast]);
 
   // Gateway connection state (#123): a fatal rejection is failed from EITHER the
   // durable session status (the reload/poll truth: status "failed" + end_reason) OR
@@ -468,7 +528,7 @@ export function Session({
   // under a different session. A failure surfaces as a toast (ADR-0017: sonner).
   const [recapResult, setRecapResult] = useState<{ startedMs: number | null; text: string } | null>(null);
   const generateRecap = useMutation(SessionService.method.generateRecap, {
-    onError: (err: Error) => toast.error(t("session.couldntGenerateRecap", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntGenerateRecap", { message: errorMessage(err) })),
   });
   // The rendered session the operator is looking at RIGHT NOW, tracked in a ref so
   // the async onSuccess below can compare against it — a ~2min recap may resolve
@@ -573,9 +633,9 @@ export function Session({
                   ("link a Discord server first" / "save a Discord Bot token
                   first"), and hiding it once left Start dead-ending on an empty
                   default with no visible cause. */}
-              {channelsError && (
+              {channelsErrorText && (
                 <span className="gx-session__channel-hint" role="alert" data-testid="channel-hint">
-                  {channelsError}
+                  {channelsErrorText}
                 </span>
               )}
               {channelsQ.isSuccess && channels.length === 0 && (
@@ -688,7 +748,7 @@ export function Session({
                   : t("session.startToCapture")}
             </p>
           ) : (
-            <ol className="gx-transcript">
+            <ol className="gx-transcript" ref={transcriptListRef}>
               {transcript.lines.map((line) => (
                 <li
                   key={line.id}

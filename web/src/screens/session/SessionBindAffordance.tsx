@@ -12,6 +12,7 @@ import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
 
 // NEW_TARGET is the sentinel Character-select value for "create a new Character"
 // (Radix Select forbids an empty item value).
@@ -68,7 +69,7 @@ export function SessionBindAffordance() {
       toast.success(t("session.boundPlayer"));
       close();
     },
-    onError: (err: Error) => toast.error(t("session.couldntBindPlayer", { message: err.message })),
+    onError: (err: Error) => toast.error(t("session.couldntBindPlayer", { message: errorMessage(err) })),
   });
   const updateCharacter = useMutation(CampaignService.method.updateCharacter, {
     onSuccess: () => {
@@ -77,7 +78,7 @@ export function SessionBindAffordance() {
       close();
     },
     onError: (err: Error) =>
-      toast.error(t("session.couldntReassignCharacter", { message: err.message })),
+      toast.error(t("session.couldntReassignCharacter", { message: errorMessage(err) })),
   });
 
   const pending = createCharacter.isPending || updateCharacter.isPending;
@@ -128,9 +129,9 @@ export function SessionBindAffordance() {
         pending={pending}
         error={
           createCharacter.isError
-            ? t("session.couldntBind", { message: createCharacter.error.message })
+            ? t("session.couldntBind", { message: errorMessage(createCharacter.error) })
             : updateCharacter.isError
-              ? t("session.couldntReassign", { message: updateCharacter.error.message })
+              ? t("session.couldntReassign", { message: errorMessage(updateCharacter.error) })
               : null
         }
         onSubmit={submit}

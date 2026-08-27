@@ -2,11 +2,10 @@ import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ConnectError } from "@connectrpc/connect";
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
-import { isUnauthenticated } from "@/lib/connectError";
+import { errorMessage, isUnauthenticated } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 
 // AuthGate is the SPA boot gate (ADR-0016 / ADR-0039): it probes
@@ -43,8 +42,8 @@ export function AuthGate({ children }: { children: (user: User) => ReactNode }) 
       <div className="gx-providers">
         <p className="gx-campaign__error" role="alert">
           {/* The raw server message stays verbatim, interpolated into the
-              localized template (spec rule: never translate err.message). */}
-          {t("auth.gateLoadError", { message: ConnectError.from(error).message })}
+              localized template (spec rule: never translate the server reason). */}
+          {t("auth.gateLoadError", { message: errorMessage(error) })}
         </p>
       </div>
     );

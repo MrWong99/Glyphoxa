@@ -8,6 +8,7 @@ import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { metaOf } from "../knowledgeVocab";
 import { worldHealth } from "./worldHealth";
+import { errorMessage } from "@/lib/connectError";
 
 // The world checkup panel (#536): derived warnings about the campaign's wiki,
 // computed from the graph payload the tab already holds. No new storage.
@@ -54,7 +55,7 @@ export function WorldHealthPanel({
     <section className="gx-kg-health" aria-label={t("knowledge.healthAria")}>
       {rosterQuery.isError && (
         <p className="gx-campaign__error" role="alert">
-          {t("knowledge.healthRosterError", { message: rosterQuery.error.message })}
+          {t("knowledge.healthRosterError", { message: errorMessage(rosterQuery.error) })}
         </p>
       )}
       {healthy ? (
@@ -113,7 +114,7 @@ export function WorldHealthPanel({
 
         {duplicates.isError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            {t("knowledge.duplicatesError", { message: duplicates.error.message })}
+            {t("knowledge.duplicatesError", { message: errorMessage(duplicates.error) })}
           </span>
         )}
 

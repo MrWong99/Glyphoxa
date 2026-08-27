@@ -24,6 +24,7 @@ import { LAYOUT, egoNetwork, filterGraph, layout } from "./layout";
 import type { Pin } from "./layout";
 import { placeProposals, resolveProposals } from "./proposalGhosts";
 import type { ResolvedProposal } from "./proposalGhosts";
+import { errorMessage } from "@/lib/connectError";
 
 // The Graph view (#534, ADR-0008 amendment "no graph viz" reversal) — shown to
 // the GM as the "Relationship map". Edges were authorable through NodeRelations'
@@ -119,7 +120,7 @@ export function KnowledgeGraph({
       setLinkError(null);
       onGraphChanged();
     },
-    onError: (err) => setLinkError(err.message),
+    onError: (err) => setLinkError(errorMessage(err)),
   });
 
   // Focus is computed over the UNFILTERED edge set on purpose: a relation chip

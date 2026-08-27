@@ -1,10 +1,12 @@
 import { useMemo } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
+import { toast } from "sonner";
 import { Volume2, VolumeX } from "lucide-react";
 
 import { SessionService, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
 import { Avatar } from "@/components/ui/Avatar";
+import { errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { useMuteCache } from "./muteCache";
 
@@ -37,11 +39,15 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
 
   // Both mutations patch the SHARED getSession cache from their authoritative
   // response, so the panel (and any other reader) reflects the new set instantly.
+  // A failed flip surfaces (ADR-0017: sonner) — a GM muting an NPC mid-scene
+  // must know the NPC is still speaking, not read silence as success.
   const setAgentMute = useMutation(SessionService.method.setAgentMute, {
     onSuccess: (res) => replace(res.mutedAgentIds),
+    onError: (err) => toast.error(t("session.couldntSetMute", { message: errorMessage(err) })),
   });
   const setAllMute = useMutation(SessionService.method.setAllMute, {
     onSuccess: (res) => replace(res.mutedAgentIds),
+    onError: (err) => toast.error(t("session.couldntSetMute", { message: errorMessage(err) })),
   });
 
   // The Address-Only Butler is never voiced and never a mute target (ADR-0009); the
@@ -63,7 +69,9 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
         <span className="gx-overline">{t("session.voiceControl")}</span>
         <h2 className="gx-voice-panel__title">{t("session.npcVoices")}</h2>
         <p className="gx-voice-panel__count" data-testid="voicing-count">
-          {t("session.voicingCount", { voicing, total })}
+          {voicing === 1
+            ? t("session.voicingCountOne", { voicing, total })
+            : t("session.voicingCount", { voicing, total })}
         </p>
       </div>
 
@@ -85,11 +93,15 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
           // state and no mute toggle (muting it would hit ErrAgentNotInCampaign →
           // a silently swallowed CodeNotFound), while Character NPCs toggle mute.
           // "address-only" is internal vocabulary — users see plain language.
+          // With no live session nobody is producing audio: "Ready", not
+          // "Speaking" — the head counts 0 of N and the rows must agree.
           const state = butler
             ? t("session.butlerState")
-            : isMuted
-              ? t("session.stateMuted")
-              : t("session.stateSpeaking");
+            : !active
+              ? t("session.stateIdle")
+              : isMuted
+                ? t("session.stateMuted")
+                : t("session.stateSpeaking");
           return (
             <li key={a.id} className="gx-voice-row" data-muted={isMuted || undefined} data-testid="voice-row">
               {butler ? (

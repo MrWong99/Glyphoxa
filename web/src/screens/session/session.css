@@ -73,6 +73,10 @@
   font-weight: 600;
   cursor: pointer;
 }
+.gx-voice-panel__all:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
 .gx-voice-panel__all:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -135,6 +139,10 @@
   background: transparent;
   color: var(--text-default);
   cursor: pointer;
+}
+.gx-voice-row__toggle:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-strong);
 }
 .gx-voice-row__toggle[data-muted] {
   border-color: rgba(255, 79, 94, 0.42);

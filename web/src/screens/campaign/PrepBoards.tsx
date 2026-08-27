@@ -1,14 +1,17 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Plus, Trash2, X } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Input } from "@/components/ui/Input";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
+import { errorMessage } from "@/lib/connectError";
 
 // Saved session prep boards (#543): a named, ordered shortlist of entries the GM
 // pins for one session — the "tonight: the harbour heist" text file they already
@@ -84,7 +87,7 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
       </ul>
       {update.isError && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          {t("campaign.boardUpdateError", { message: update.error.message })}
+          {t("campaign.boardUpdateError", { message: errorMessage(update.error) })}
         </span>
       )}
     </div>
@@ -106,9 +109,25 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
 
   const invalidate = () => invalidateBoards(queryClient);
 
-  const createBoard = useMutation(CampaignService.method.createBoard, { onSuccess: invalidate });
-  const updateBoard = useMutation(CampaignService.method.updateBoard, { onSuccess: invalidate });
-  const deleteBoard = useMutation(CampaignService.method.deleteBoard, { onSuccess: invalidate });
+  // Every board write surfaces its failure (ADR-0017: sonner) — a rejected
+  // create/toggle/delete otherwise reads as success with nothing changed.
+  const fail = (err: unknown) =>
+    toast.error(t("campaign.boardUpdateError", { message: errorMessage(err) }));
+  const createBoard = useMutation(CampaignService.method.createBoard, {
+    onSuccess: invalidate,
+    onError: fail,
+  });
+  const updateBoard = useMutation(CampaignService.method.updateBoard, {
+    onSuccess: invalidate,
+    onError: fail,
+  });
+  const deleteBoard = useMutation(CampaignService.method.deleteBoard, {
+    onSuccess: invalidate,
+    onError: fail,
+  });
+  // The board a delete click is asking about — confirmed in a dialog, like
+  // every other destructive act.
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
   const boards = boardsQuery.data?.boards ?? [];
 
@@ -141,7 +160,13 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
         </Button>
       </div>
 
-      {boards.length === 0 ? (
+      {boardsQuery.isPending ? (
+        <div className="gx-skeleton" data-testid="boards-loading" />
+      ) : boardsQuery.isError ? (
+        <p className="gx-campaign__error" role="alert">
+          {t("campaign.boardsLoadError", { message: errorMessage(boardsQuery.error) })}
+        </p>
+      ) : boards.length === 0 ? (
         <p className="gx-kg-empty">{t("campaign.boardsEmpty")}</p>
       ) : (
         boards.map((b) => (
@@ -152,7 +177,7 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
                 type="button"
                 className="gx-kg-iconbtn gx-kg-iconbtn--danger"
                 aria-label={t("campaign.deleteBoardAria", { name: b.name })}
-                onClick={() => deleteBoard.mutate({ id: b.id })}
+                onClick={() => setDeleteTarget({ id: b.id, name: b.name })}
               >
                 <Trash2 size={13} />
               </button>
@@ -172,7 +197,9 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
                         style={{ color: meta.color, background: alphaBg(meta.color) }}
                         onClick={() => onOpenNode?.(id)}
                       >
-                        {node?.name ?? t("campaign.deletedEntry")}
+                        {/* While the node list still loads a missing name means
+                            "not resolved yet", never "deleted". */}
+                        {node?.name ?? (nodesQuery.isPending ? "…" : t("campaign.deletedEntry"))}
                       </button>
                       <button
                         type="button"
@@ -198,6 +225,22 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
             )}
           </div>
         ))
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setDeleteTarget(null);
+          }}
+          title={t("campaign.deleteBoardTitle", { name: deleteTarget.name })}
+          description={t("campaign.deleteBoardDesc")}
+          confirmLabel={t("campaign.deleteBoardConfirm")}
+          onConfirm={() => {
+            deleteBoard.mutate({ id: deleteTarget.id });
+            setDeleteTarget(null);
+          }}
+        />
       )}
     </section>
   );
