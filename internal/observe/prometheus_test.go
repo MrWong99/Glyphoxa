@@ -137,6 +137,35 @@ func TestHighlightClassifyMetric(t *testing.T) {
 	}
 }
 
+// TestHighlightPersistMetric pins the Session-Highlights persist-funnel series:
+// one increment per outcome exposes the exact
+// glyphoxa_voice_highlight_persist_total name with the bounded outcome label, and
+// the label space is exactly the five fixed values.
+func TestHighlightPersistMetric(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.HighlightPersist(HighlightPersistSaved)
+	rec.HighlightPersist(HighlightPersistClipFailed)
+	rec.HighlightPersist(HighlightPersistBlobFailed)
+	rec.HighlightPersist(HighlightPersistRowFailed)
+	rec.HighlightPersist(HighlightPersistDropped)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		`glyphoxa_voice_highlight_persist_total{outcome="saved"} 1`,
+		`glyphoxa_voice_highlight_persist_total{outcome="clip_failed"} 1`,
+		`glyphoxa_voice_highlight_persist_total{outcome="blob_failed"} 1`,
+		`glyphoxa_voice_highlight_persist_total{outcome="row_failed"} 1`,
+		`glyphoxa_voice_highlight_persist_total{outcome="dropped"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
 // TestJobRunnerMetrics pins the background-job-runner series (#286, ADR-0049):
 // the three families expose their exact glyphoxa_jobs_* / glyphoxa_job_* names
 // and kind/outcome labels, and SetJobBacklog is a Set (idempotent) not an Inc —

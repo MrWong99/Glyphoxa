@@ -15,9 +15,51 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/blob"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 )
+
+// capturePersistMetrics retains every persist outcome the Saver counts, so a
+// test can assert the funnel: exactly one bounded outcome per handled Trigger.
+type capturePersistMetrics struct {
+	mu       sync.Mutex
+	outcomes []observe.HighlightPersistOutcome
+}
+
+func (m *capturePersistMetrics) HighlightPersist(o observe.HighlightPersistOutcome) {
+	m.mu.Lock()
+	m.outcomes = append(m.outcomes, o)
+	m.mu.Unlock()
+}
+
+func (m *capturePersistMetrics) count(o observe.HighlightPersistOutcome) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, got := range m.outcomes {
+		if got == o {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *capturePersistMetrics) total() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.outcomes)
+}
+
+// persistOutcomes recovers the capture newTestSaver always injects.
+func persistOutcomes(t *testing.T, s *Saver) *capturePersistMetrics {
+	t.Helper()
+	pm, ok := s.metrics.(*capturePersistMetrics)
+	if !ok {
+		t.Fatalf("saver metrics is %T, want the injected capture", s.metrics)
+	}
+	return pm
+}
 
 // fakeHighlightStore records created highlights and can be told to fail.
 type fakeHighlightStore struct {
@@ -176,7 +218,7 @@ func newTestSaver(t *testing.T) (*Saver, *fakeHighlightStore, *fakeBlobs, *fakeE
 	blobs := newFakeBlobs()
 	enq := &fakeEnqueuer{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewSaver(store, blobs, enq, log), store, blobs, enq
+	return NewSaver(store, blobs, enq, &capturePersistMetrics{}, log), store, blobs, enq
 }
 
 func TestSaver_HandleTrigger_ClipAndRow(t *testing.T) {
@@ -213,6 +255,10 @@ func TestSaver_HandleTrigger_ClipAndRow(t *testing.T) {
 	}
 	if len(blobs.deleted) != 0 {
 		t.Fatalf("successful save must not delete anything (#435 AC3), deleted: %v", blobs.deleted)
+	}
+	pm := persistOutcomes(t, saver)
+	if pm.count(observe.HighlightPersistSaved) != 1 || pm.total() != 1 {
+		t.Fatalf("persist outcomes = %v, want exactly [saved]", pm.outcomes)
 	}
 }
 
@@ -361,6 +407,18 @@ func TestSaver_HandleTrigger_NonBlockingDropsWhenFull(t *testing.T) {
 	if store.count() == 0 {
 		t.Fatalf("nothing saved at all")
 	}
+	// Funnel invariant: EVERY handled trigger got exactly one bounded outcome —
+	// the overflow shows up as dropped, never as silence.
+	pm := persistOutcomes(t, saver)
+	if pm.total() != saveQueue+64 {
+		t.Fatalf("persist outcomes = %d, want one per trigger (%d)", pm.total(), saveQueue+64)
+	}
+	if got := pm.count(observe.HighlightPersistSaved) + pm.count(observe.HighlightPersistDropped); got != pm.total() {
+		t.Fatalf("outcomes beyond saved/dropped under overflow: %v", pm.outcomes)
+	}
+	if pm.count(observe.HighlightPersistDropped) == 0 {
+		t.Fatalf("overflow produced no dropped outcome")
+	}
 }
 
 // TestSaver_CompensationSurvivesExhaustedBudget pins #435: when CreateHighlight
@@ -407,5 +465,80 @@ func TestSaver_WorkerFailureSurvives(t *testing.T) {
 	// the one successfully-rowed clip remains.
 	if blobs.keys() != 1 {
 		t.Fatalf("orphan clip not cleaned after row-create failure: %d clips left", blobs.keys())
+	}
+	// The funnel counts both fates: one trigger died at the row insert, one saved.
+	pm := persistOutcomes(t, saver)
+	if pm.count(observe.HighlightPersistRowFailed) != 1 || pm.count(observe.HighlightPersistSaved) != 1 || pm.total() != 2 {
+		t.Fatalf("persist outcomes = %v, want [row_failed saved]", pm.outcomes)
+	}
+}
+
+// TestSaver_PersistOutcome_BlobFailed: a clip that encodes but will not store
+// counts blob_failed and attempts no row.
+func TestSaver_PersistOutcome_BlobFailed(t *testing.T) {
+	saver, store, blobs, _ := newTestSaver(t)
+	blobs.putErr = errors.New("backend down")
+
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	sink.HandleTrigger(newTrigger())
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	if store.count() != 0 {
+		t.Fatalf("row created despite blob Put failure: %d rows", store.count())
+	}
+	pm := persistOutcomes(t, saver)
+	if pm.count(observe.HighlightPersistBlobFailed) != 1 || pm.total() != 1 {
+		t.Fatalf("persist outcomes = %v, want exactly [blob_failed]", pm.outcomes)
+	}
+}
+
+// TestSaver_PersistOutcome_ClipFailed: a snapshot whose range would encode past
+// the blob size cap dies before any I/O and counts clip_failed.
+func TestSaver_PersistOutcome_ClipFailed(t *testing.T) {
+	saver, store, blobs, _ := newTestSaver(t)
+
+	trig := newTrigger()
+	// 10 minutes at 48kHz mono ≈ 55 MiB of WAV — past blob.MaxSize (32 MiB), so
+	// mixdown.WAVClip refuses up front with ErrClipTooLarge.
+	trig.Snapshot = tape.Snapshot{From: trig.At.Add(-10 * time.Minute), To: trig.At}
+
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	sink.HandleTrigger(trig)
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	if store.count() != 0 || blobs.keys() != 0 {
+		t.Fatalf("clip-encode failure still persisted something: rows=%d blobs=%d", store.count(), blobs.keys())
+	}
+	pm := persistOutcomes(t, saver)
+	if pm.count(observe.HighlightPersistClipFailed) != 1 || pm.total() != 1 {
+		t.Fatalf("persist outcomes = %v, want exactly [clip_failed]", pm.outcomes)
+	}
+}
+
+// TestSaver_PersistOutcome_DroppedAfterFinalize: a trigger arriving after its
+// session's Finalize is dropped AND counted, so a scrape can see triggers that
+// never reached a save worker.
+func TestSaver_PersistOutcome_DroppedAfterFinalize(t *testing.T) {
+	saver, store, _, _ := newTestSaver(t)
+
+	vsID := uuid.New()
+	sink := saver.Begin(vsID, uuid.New(), uuid.New())
+	if err := saver.Finalize(context.Background(), vsID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	sink.HandleTrigger(newTrigger())
+
+	if store.count() != 0 {
+		t.Fatalf("post-finalize trigger persisted: %d rows", store.count())
+	}
+	pm := persistOutcomes(t, saver)
+	if pm.count(observe.HighlightPersistDropped) != 1 || pm.total() != 1 {
+		t.Fatalf("persist outcomes = %v, want exactly [dropped]", pm.outcomes)
 	}
 }

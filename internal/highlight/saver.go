@@ -12,6 +12,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/mixdown"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -66,6 +67,23 @@ type JobEnqueuer interface {
 	Enqueue(ctx context.Context, kind string, payload any, runAfter time.Time) error
 }
 
+// persistMetrics counts one bounded outcome per Trigger handed to the Saver —
+// the confirmed-trigger funnel next to the detector's classify counter. The
+// production *observe.PrometheusRecorder satisfies it; an untyped-nil metrics
+// arg to [NewSaver] degrades to counting nothing (a test, a keyless build) — a
+// TYPED nil pointer is a caller bug the guard cannot see. Without it
+// a session whose classifier runs clean but never confirms a moment is
+// indistinguishable from one whose saves silently fail — the log ERRORs cover
+// the latter, this series covers both from a scrape.
+type persistMetrics interface {
+	HighlightPersist(observe.HighlightPersistOutcome)
+}
+
+// noopPersistMetrics is the nil-metrics default: outcomes are not counted.
+type noopPersistMetrics struct{}
+
+func (noopPersistMetrics) HighlightPersist(observe.HighlightPersistOutcome) {}
+
 // Saver implements [Sink]. Construct with [NewSaver], then drive it from the
 // session Manager: Begin at session Start, HandleTrigger via cfg.Highlights,
 // Finalize at loop exit.
@@ -73,6 +91,7 @@ type Saver struct {
 	store   Store
 	blobs   blob.Store
 	enqueue JobEnqueuer
+	metrics persistMetrics
 	log     *slog.Logger
 
 	// saveTimeout is the per-trigger save budget — the saveTimeout constant in
@@ -96,12 +115,17 @@ type saverSession struct {
 	done           chan struct{} // closed when the worker goroutine exits
 }
 
-// NewSaver builds a Saver over the storage + blob + job-enqueue seams.
-func NewSaver(store Store, blobs blob.Store, enqueue JobEnqueuer, log *slog.Logger) *Saver {
+// NewSaver builds a Saver over the storage + blob + job-enqueue seams. metrics
+// is the persist-outcome sink (the production *observe.PrometheusRecorder); nil
+// counts nothing.
+func NewSaver(store Store, blobs blob.Store, enqueue JobEnqueuer, metrics persistMetrics, log *slog.Logger) *Saver {
+	if metrics == nil {
+		metrics = noopPersistMetrics{}
+	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Saver{store: store, blobs: blobs, enqueue: enqueue, log: log, saveTimeout: saveTimeout, sessions: map[uuid.UUID]*saverSession{}}
+	return &Saver{store: store, blobs: blobs, enqueue: enqueue, metrics: metrics, log: log, saveTimeout: saveTimeout, sessions: map[uuid.UUID]*saverSession{}}
 }
 
 // Begin binds a new Voice Session, starts its worker goroutine, and returns the
@@ -150,12 +174,14 @@ func (h sessionSink) HandleTrigger(t Trigger) {
 	defer h.saver.mu.Unlock()
 	if cur, ok := h.saver.sessions[h.ss.voiceSessionID]; !ok || cur != h.ss {
 		h.saver.log.Warn("highlight saver: trigger after finalize, dropping", "score", t.Score)
+		h.saver.metrics.HighlightPersist(observe.HighlightPersistDropped)
 		return
 	}
 	select {
 	case h.ss.queue <- t:
 	default:
 		h.saver.log.Warn("highlight saver: save queue full, dropping trigger", "score", t.Score)
+		h.saver.metrics.HighlightPersist(observe.HighlightPersistDropped)
 	}
 }
 
@@ -235,15 +261,18 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 	key, err := blob.Key(ss.tenantID, highlightOwnerKind, highlightID, clipBlobName)
 	if err != nil {
 		s.log.Error("highlight saver: build clip key", "err", err)
+		s.metrics.HighlightPersist(observe.HighlightPersistClipFailed)
 		return
 	}
 	wav, err := mixdown.WAVClip(t.Snapshot, mixdown.Options{})
 	if err != nil {
 		s.log.Error("highlight saver: encode clip", "err", err, "voice_session", ss.voiceSessionID)
+		s.metrics.HighlightPersist(observe.HighlightPersistClipFailed)
 		return
 	}
 	if err := s.blobs.Put(ctx, key, "audio/wav", bytes.NewReader(wav), int64(len(wav))); err != nil {
 		s.log.Error("highlight saver: store clip", "err", err, "voice_session", ss.voiceSessionID)
+		s.metrics.HighlightPersist(observe.HighlightPersistBlobFailed)
 		return
 	}
 	h := storage.Highlight{
@@ -264,6 +293,7 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 	}
 	if err := s.store.CreateHighlight(ctx, h); err != nil {
 		s.log.Error("highlight saver: create highlight row", "err", err, "voice_session", ss.voiceSessionID)
+		s.metrics.HighlightPersist(observe.HighlightPersistRowFailed)
 		// Compensate the orphaned clip (ADR-0048): the blob is stored but no row will
 		// ever reference it, so drop it through the seam. The delete runs on a FRESH
 		// bounded budget (#435, the #421 pattern): the row insert frequently fails
@@ -279,5 +309,6 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 		}
 		return
 	}
+	s.metrics.HighlightPersist(observe.HighlightPersistSaved)
 	s.log.Info("highlight saved", "voice_session", ss.voiceSessionID, "highlight", highlightID, "score", t.Score)
 }

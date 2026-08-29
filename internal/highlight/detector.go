@@ -483,8 +483,9 @@ func boundExcerpt(text string, n int) string {
 }
 
 // logClassify emits the one per-pass observability line for a classify (#428): an
-// INFO carrying the score, the parsed flag and the transcript-window line count on a
-// parsed verdict (so a below-bar pass is visible in the default live config), or a
+// INFO carrying the score, the Bar it is judged against, the parsed flag and the
+// transcript-window line count on a parsed verdict (so a below-bar pass is visible
+// — and readable as below-bar — in the default live config), or a
 // WARN with a rune-bounded raw excerpt when the completed stream held no parseable
 // verdict. An llm_error pass already logged its complete/stream WARN in
 // runClassifier, so it adds no second line here (the outcome counter carries it).
@@ -504,8 +505,12 @@ func (d *Detector) logClassify(w *workerState, cls classification, outcome obser
 			"window", len(w.window),
 			"outcome", string(outcome))
 	case observe.HighlightOK:
+		// bar rides on every parsed pass so a live log reads score AGAINST the
+		// confirmation threshold: a session full of clean below-bar passes ("score=2
+		// bar=8") is legible as tuning, not as a silent persistence fault.
 		d.log.Info("highlight classify",
 			"score", cls.score,
+			"bar", d.cfg.Bar,
 			"parsed", true,
 			"window", len(w.window),
 			"outcome", string(outcome))

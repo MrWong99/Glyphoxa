@@ -672,8 +672,9 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 		Transcript: relay,
 		Chunker:    chunker,
 		// Session Highlights persistence (#308, ADR-0051): #307's detector Sink,
-		// Begun/Finalized per session by the Manager.
-		Highlights: highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log),
+		// Begun/Finalized per session by the Manager. metrics feeds the persist-
+		// outcome funnel next to the detector's classify counter.
+		Highlights: highlight.NewSaver(store, blobStore, jobEnqueuer{store}, metrics, log),
 		// Per-Campaign Speaker-Lane attribution (#488): the Manager rebinds
 		// cfg.SpeakerName per Start with the session's Campaign so N concurrent
 		// sessions each attribute user lines against their own roster.

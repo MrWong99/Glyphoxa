@@ -159,6 +159,11 @@ func TestClassifyBelowBarLogsInfo(t *testing.T) {
 	if v, ok := attrValue(rec, "score"); !ok || v.Float64() != 2.0 {
 		t.Errorf("score attr = %v (ok=%v), want 2.0", v, ok)
 	}
+	// The line must be legible WITHOUT the source: score against the bar it is
+	// judged by, so a run of clean below-bar passes reads as tuning, not a fault.
+	if v, ok := attrValue(rec, "bar"); !ok || v.Float64() != 8.0 {
+		t.Errorf("bar attr = %v (ok=%v), want 8.0", v, ok)
+	}
 	if v, ok := attrValue(rec, "parsed"); !ok || v.Bool() != true {
 		t.Errorf("parsed attr = %v (ok=%v), want true", v, ok)
 	}
