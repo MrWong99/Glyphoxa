@@ -363,3 +363,33 @@ const (
 	// (barge/yield tore the unit down) — pre-rendered audio nobody heard.
 	LookaheadDiscarded LookaheadEvent = "discarded"
 )
+
+// --- Session-Highlights persist outcomes ---
+
+// HighlightPersistOutcome is the bounded outcome label on the Session-Highlights
+// persist counter (glyphoxa_voice_highlight_persist_total). One increment per
+// detector Trigger handed to the Saver's Sink, so the series is the confirmed-
+// trigger funnel the classify counter cannot see: highlight_classify_total says
+// the classifier ran, this says whether a confirmed moment reached a row. A
+// scrape where classify ok grows while this stays flat means no window cleared
+// Bar for ConfirmWindows consecutive passes — tuning, not a persistence fault.
+// Exactly five values reach a series (ADR-0032).
+type HighlightPersistOutcome string
+
+const (
+	// HighlightPersistSaved: the clip blob and the candidate highlight row are
+	// both durable.
+	HighlightPersistSaved HighlightPersistOutcome = "saved"
+	// HighlightPersistClipFailed: the trigger died before any I/O — the blob key
+	// could not be built or the tape snapshot would not encode to WAV.
+	HighlightPersistClipFailed HighlightPersistOutcome = "clip_failed"
+	// HighlightPersistBlobFailed: the WAV encoded but the blob.Put failed, so no
+	// row was attempted.
+	HighlightPersistBlobFailed HighlightPersistOutcome = "blob_failed"
+	// HighlightPersistRowFailed: the clip stored but CreateHighlight failed; the
+	// orphaned blob is compensated away (#435).
+	HighlightPersistRowFailed HighlightPersistOutcome = "row_failed"
+	// HighlightPersistDropped: the trigger never reached the save worker — the
+	// session's mailbox was full, or it arrived after that session's Finalize.
+	HighlightPersistDropped HighlightPersistOutcome = "dropped"
+)

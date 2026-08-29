@@ -173,6 +173,11 @@ type PrometheusRecorder struct {
 	// no series, no cost. Written once at boot before any bus subscriber exists
 	// (see SetResponseLatencyHook), read on the subscriber goroutine after.
 	respLatencyHook func(time.Duration)
+
+	// Session-Highlights persist funnel: one increment per detector Trigger handed
+	// to the Saver, by bounded outcome. The counterpart highlightClassify says the
+	// classifier ran; this says whether a confirmed moment reached a durable row.
+	highlightPersist *prometheus.CounterVec // outcome
 }
 
 // jobDurationBuckets size the background-job handler-duration histogram (#286):
@@ -484,6 +489,15 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		"Look-ahead lane events (#375, ADR-0025): a held Reaction sentence released into the play queue, a release latched before its prime, or a held-but-unplayed sentence discarded.",
 		"event")
 	reg.MustRegister(r.intersentenceGap, r.playbackLookahead)
+
+	// Session-Highlights persist funnel: closes the observability gap between "the
+	// classifier ran" (highlight_classify_total) and "a row exists" — a session
+	// with classify ok growing and every series here at zero had no window clear
+	// Bar for ConfirmWindows consecutive passes, which no log ERROR accompanies.
+	r.highlightPersist = counterVec("highlight_persist_total",
+		"Session-Highlights triggers handed to the Saver by bounded persist outcome (ADR-0032): saved, clip_failed (key/WAV-encode), blob_failed (clip Put), row_failed (CreateHighlight, clip compensated), or dropped (queue full / after finalize). Zero across all outcomes while classify ok grows = no moment confirmed against Bar.",
+		"outcome")
+	reg.MustRegister(r.highlightPersist)
 	return r
 }
 
@@ -762,4 +776,17 @@ func (r *PrometheusRecorder) PlaybackLookahead(ev LookaheadEvent) {
 // read. A caller that cannot promise it must not use this seam.
 func (r *PrometheusRecorder) SetResponseLatencyHook(h func(time.Duration)) {
 	r.respLatencyHook = h
+}
+
+// --- Session-Highlights persist funnel ---
+
+// HighlightPersist counts one Session-Highlights trigger handed to the Saver by
+// its bounded persist outcome. It is the standalone persist-metrics sink the
+// internal/highlight Saver records against (its local interface), separate from
+// the StageRecorder contract — a save is worker I/O, not an orchestrator stage —
+// and the confirmed-trigger funnel next to HighlightClassify: classify ok growing
+// while every outcome here stays flat means no window cleared Bar for
+// ConfirmWindows consecutive passes.
+func (r *PrometheusRecorder) HighlightPersist(o HighlightPersistOutcome) {
+	r.highlightPersist.WithLabelValues(string(o)).Inc()
 }
