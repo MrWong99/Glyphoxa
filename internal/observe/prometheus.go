@@ -174,9 +174,10 @@ type PrometheusRecorder struct {
 	// (see SetResponseLatencyHook), read on the subscriber goroutine after.
 	respLatencyHook func(time.Duration)
 
-	// Session-Highlights persist funnel: one increment per detector Trigger handed
-	// to the Saver, by bounded outcome. The counterpart highlightClassify says the
-	// classifier ran; this says whether a confirmed moment reached a durable row.
+	// #632: Session-Highlights persist funnel — one increment per detector Trigger
+	// handed to the Saver, by bounded outcome. The counterpart highlightClassify
+	// says the classifier ran; this says whether a confirmed moment reached a
+	// durable row.
 	highlightPersist *prometheus.CounterVec // outcome
 }
 
@@ -490,8 +491,8 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		"event")
 	reg.MustRegister(r.intersentenceGap, r.playbackLookahead)
 
-	// Session-Highlights persist funnel: closes the observability gap between "the
-	// classifier ran" (highlight_classify_total) and "a row exists" — a session
+	// #632 Session-Highlights persist funnel: closes the observability gap between
+	// "the classifier ran" (highlight_classify_total) and "a row exists" — a session
 	// with classify ok growing and every series here at zero had no window clear
 	// Bar for ConfirmWindows consecutive passes, which no log ERROR accompanies.
 	r.highlightPersist = counterVec("highlight_persist_total",
@@ -778,7 +779,7 @@ func (r *PrometheusRecorder) SetResponseLatencyHook(h func(time.Duration)) {
 	r.respLatencyHook = h
 }
 
-// --- Session-Highlights persist funnel ---
+// --- #632 Session-Highlights persist funnel ---
 
 // HighlightPersist counts one Session-Highlights trigger handed to the Saver by
 // its bounded persist outcome. It is the standalone persist-metrics sink the

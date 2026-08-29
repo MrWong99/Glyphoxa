@@ -364,10 +364,10 @@ const (
 	LookaheadDiscarded LookaheadEvent = "discarded"
 )
 
-// --- Session-Highlights persist outcomes ---
+// --- #632 Session-Highlights persist outcomes ---
 
 // HighlightPersistOutcome is the bounded outcome label on the Session-Highlights
-// persist counter (glyphoxa_voice_highlight_persist_total). One increment per
+// persist counter (glyphoxa_voice_highlight_persist_total, #632). One increment per
 // detector Trigger handed to the Saver's Sink, so the series is the confirmed-
 // trigger funnel the classify counter cannot see: highlight_classify_total says
 // the classifier ran, this says whether a confirmed moment reached a row. A
