@@ -66,6 +66,15 @@ export function CampaignSettingsForm({
   const [system, setSystem] = useState(campaign.system);
   const [language, setLanguage] = useState(campaign.language);
   const [tapeArmed, setTapeArmed] = useState(campaign.tapeArmed);
+  // Session-Highlights tuning (#632 follow-up), held as strings like the spend
+  // caps: 0 on the wire means "engine default", rendered as an empty field with
+  // the default in the placeholder — so clearing a field IS the reset gesture.
+  const [highlightBar, setHighlightBar] = useState(
+    campaign.highlightBar === 0 ? "" : String(campaign.highlightBar),
+  );
+  const [highlightConfirm, setHighlightConfirm] = useState(
+    campaign.highlightConfirmWindows === 0 ? "" : String(campaign.highlightConfirmWindows),
+  );
 
   // The Campaign Language choices come solely from the registered encoders.
   // retry:false so a failed load settles into the error hint at once rather than
@@ -113,8 +122,27 @@ export function CampaignSettingsForm({
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
+    // The knob fields are always sent explicitly: an empty field is 0 = "back
+    // to the engine default" (a real write), never an omission. The server is
+    // the range authority (0–10) — an out-of-range value comes back as the
+    // save error, matching the spend-caps posture. The isFinite fallbacks keep
+    // a non-numeric value (unreachable through a real number input) from riding
+    // as NaN — which an int32 field would serialize as JSON null, dodging the
+    // designed server refusal.
+    const barNum = Number(highlightBar);
+    const bar = highlightBar.trim() === "" || !Number.isFinite(barNum) ? 0 : barNum;
+    const confirmNum = Math.round(Number(highlightConfirm));
+    const confirm = highlightConfirm.trim() === "" || !Number.isFinite(confirmNum) ? 0 : confirmNum;
     // Name is trimmed (the server rejects empty); System/Language ride opaque.
-    update.mutate({ id: campaign.id, name: name.trim(), system, language, tapeArmed });
+    update.mutate({
+      id: campaign.id,
+      name: name.trim(),
+      system,
+      language,
+      tapeArmed,
+      highlightBar: bar,
+      highlightConfirmWindows: confirm,
+    });
   };
 
   return (
@@ -177,6 +205,41 @@ export function CampaignSettingsForm({
               keeps only what a GM must know up front. */}
           <span className="gx-field__hint">{t("components.highlightRecordingHint")}</span>
         </div>
+        {/* Detector tuning (#632 follow-up) sits beside the arming switch: the
+            knobs only act while highlight recording is armed (no tape, no
+            detector), so separating them would strand them from their gate. */}
+        <div className="gx-campaign-create__row">
+          <Input
+            label={t("components.highlightBarLabel")}
+            type="number"
+            min="0"
+            max="10"
+            // step="any": the server accepts any double in [0,10], and a value
+            // stored off-step by a non-web client would otherwise trip native
+            // stepMismatch validation and block the WHOLE form submit.
+            step="any"
+            inputMode="decimal"
+            placeholder={t("components.highlightBarPlaceholder")}
+            hint={t("components.highlightBarHint")}
+            value={highlightBar}
+            onChange={(e) => setHighlightBar(e.target.value)}
+            disabled={update.isPending}
+          />
+          <Input
+            label={t("components.highlightConfirmLabel")}
+            type="number"
+            min="0"
+            max="10"
+            step="1"
+            inputMode="numeric"
+            placeholder={t("components.highlightConfirmPlaceholder")}
+            hint={t("components.highlightConfirmHint")}
+            value={highlightConfirm}
+            onChange={(e) => setHighlightConfirm(e.target.value)}
+            disabled={update.isPending}
+          />
+        </div>
+        <span className="gx-field__hint">{t("components.highlightTuningApplyHint")}</span>
       </AdvancedCard>
       <div className="gx-campaign-create__actions">
         <Button type="submit" variant="primary" disabled={!canSubmit}>

@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -224,6 +225,92 @@ func TestUpdateCampaign_TapeArmed(t *testing.T) {
 		t.Fatalf("omitting tape_armed disarmed the campaign: %+v", resp.Msg.GetCampaign())
 	}
 }
+
+// TestUpdateCampaign_HighlightKnobs pins the Session-Highlights tuning pair
+// through the RPC (#632 follow-up): an in-range write persists and is returned,
+// an update omitting the optional fields leaves them unchanged, and an explicit
+// 0 is a real write (back to the engine default), not an omission.
+func TestUpdateCampaign_HighlightKnobs(t *testing.T) {
+	t.Parallel()
+	store := newFakeManagementStore()
+	id := uuid.New()
+	tenantID := uuid.New()
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{
+		id: {ID: id, TenantID: tenantID, Name: "Old", Language: "de"},
+	}
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, nil)
+
+	bar := 4.5
+	cw := int32(1)
+	resp, err := client.UpdateCampaign(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCampaignRequest{
+			Id: id.String(), Name: "Old", HighlightBar: &bar, HighlightConfirmWindows: &cw,
+		}))
+	if err != nil {
+		t.Fatalf("UpdateCampaign (set knobs): %v", err)
+	}
+	if got := resp.Msg.GetCampaign(); got.GetHighlightBar() != 4.5 || got.GetHighlightConfirmWindows() != 1 {
+		t.Fatalf("knobs not returned after set: bar=%v cw=%v", got.GetHighlightBar(), got.GetHighlightConfirmWindows())
+	}
+
+	// An update omitting both optional fields must not reset them.
+	resp, err = client.UpdateCampaign(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCampaignRequest{
+			Id: id.String(), Name: "Renamed",
+		}))
+	if err != nil {
+		t.Fatalf("UpdateCampaign (rename): %v", err)
+	}
+	if got := resp.Msg.GetCampaign(); got.GetHighlightBar() != 4.5 || got.GetHighlightConfirmWindows() != 1 {
+		t.Fatalf("omitting the knobs reset them: bar=%v cw=%v", got.GetHighlightBar(), got.GetHighlightConfirmWindows())
+	}
+
+	// Explicit 0 is a real write: it restores the engine default.
+	zeroBar, zeroCW := 0.0, int32(0)
+	resp, err = client.UpdateCampaign(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCampaignRequest{
+			Id: id.String(), Name: "Renamed", HighlightBar: &zeroBar, HighlightConfirmWindows: &zeroCW,
+		}))
+	if err != nil {
+		t.Fatalf("UpdateCampaign (reset knobs): %v", err)
+	}
+	if got := resp.Msg.GetCampaign(); got.GetHighlightBar() != 0 || got.GetHighlightConfirmWindows() != 0 {
+		t.Fatalf("explicit 0 did not reset the knobs: bar=%v cw=%v", got.GetHighlightBar(), got.GetHighlightConfirmWindows())
+	}
+}
+
+// TestUpdateCampaign_HighlightKnobsRange pins the RPC-layer range authority
+// (#632 follow-up): out-of-range or non-finite knob values are refused with
+// CodeInvalidArgument and nothing is written.
+func TestUpdateCampaign_HighlightKnobsRange(t *testing.T) {
+	t.Parallel()
+	store := newFakeManagementStore()
+	id := uuid.New()
+	tenantID := uuid.New()
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{
+		id: {ID: id, TenantID: tenantID, Name: "Old", Language: "en"},
+	}
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, nil)
+
+	for name, req := range map[string]*managementv1.UpdateCampaignRequest{
+		"bar above 10": {Id: id.String(), Name: "Old", HighlightBar: ptrFloat(10.5)},
+		"bar negative": {Id: id.String(), Name: "Old", HighlightBar: ptrFloat(-1)},
+		"bar NaN":      {Id: id.String(), Name: "Old", HighlightBar: ptrFloat(math.NaN())},
+		"cw above 10":  {Id: id.String(), Name: "Old", HighlightConfirmWindows: ptrInt32(11)},
+		"cw negative":  {Id: id.String(), Name: "Old", HighlightConfirmWindows: ptrInt32(-1)},
+	} {
+		_, err := client.UpdateCampaign(context.Background(), connect.NewRequest(req))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s: err = %v, want CodeInvalidArgument", name, err)
+		}
+	}
+	if n := len(store.updatedCampaigns); n != 0 {
+		t.Fatalf("rejected requests reached the store: %d writes", n)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+func ptrInt32(v int32) *int32     { return &v }
 
 // TestUpdateCampaign_OpaqueFreeText pins the #264 opacity rule: an arbitrary,
 // non-vocabulary system/language string reaches storage verbatim — no validation

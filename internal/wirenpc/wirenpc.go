@@ -247,6 +247,14 @@ type Config struct {
 	// "", which — like any code without a registered encoder — resolves to "en"
 	// (see matcherLanguage), preserving the pre-#199 behavior.
 	language string
+	// highlightBar / highlightConfirmWindows are the campaign's Session-Highlights
+	// tuning knobs (#632 follow-up), read once per session start like language.
+	// RunFromDB sets them from the campaign row; 0 (an unset column, or the
+	// env-only Run path) flows into highlight.Config, whose withDefaults resolves
+	// non-positive to the engine defaults (8.0 / 2). Inert wherever Highlights is
+	// nil (standalone -mode voice builds no Saver), exactly like Tape.
+	highlightBar            float64
+	highlightConfirmWindows int
 	// playerCharacters are the campaign's bound player-character names (#276's
 	// `character` table): with SpeakerName wired they render the system prompt's
 	// speaker-attribution section ([agent.Config.PlayerCharacters]) beside the

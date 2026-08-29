@@ -67,10 +67,17 @@ type CampaignUpdate struct {
 	// leaves the current value unchanged (the proto field is `optional`, so an
 	// UpdateCampaign that does not touch the tape must not silently disarm it).
 	TapeArmed *bool
+	// HighlightBar / HighlightConfirmWindows, when non-nil, set the Session-
+	// Highlights tuning knobs (#632 follow-up); nil leaves the current value
+	// unchanged. A pointer to 0 is a real write meaning "back to the engine
+	// default". Range-validated at the RPC layer, stored verbatim here.
+	HighlightBar            *float64
+	HighlightConfirmWindows *int
 }
 
-// UpdateCampaign writes a campaign's name/system/language (and tape_armed when set)
-// and bumps updated_at, returning the updated row. It is TENANT-SCOPED (#473): the
+// UpdateCampaign writes a campaign's name/system/language (and tape_armed and the
+// highlight knobs, each when set) and bumps updated_at, returning the updated
+// row. It is TENANT-SCOPED (#473): the
 // UPDATE matches (id, tenant_id), so a foreign-tenant id is invisible and yields
 // ErrNotFound (the RPC layer maps it to Connect CodeNotFound) — a cross-tenant
 // write can never land.
@@ -81,10 +88,13 @@ func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign,
 		    system = $3,
 		    language = $4,
 		    tape_armed = COALESCE($5, tape_armed),
+		    highlight_bar = COALESCE($7, highlight_bar),
+		    highlight_confirm_windows = COALESCE($8, highlight_confirm_windows),
 		    updated_at = now()
 		  WHERE id = $1 AND tenant_id = $6
 		 RETURNING `+campaignColumns,
-		c.ID, c.Name, c.System, c.Language, c.TapeArmed, c.TenantID)
+		c.ID, c.Name, c.System, c.Language, c.TapeArmed, c.TenantID,
+		c.HighlightBar, c.HighlightConfirmWindows)
 	updated, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound

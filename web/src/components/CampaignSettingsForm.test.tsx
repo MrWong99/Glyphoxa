@@ -13,7 +13,15 @@ import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignSettingsForm } from "./CampaignSettingsForm";
 
-type Camp = { id?: string; name?: string; system?: string; language?: string; tapeArmed?: boolean };
+type Camp = {
+  id?: string;
+  name?: string;
+  system?: string;
+  language?: string;
+  tapeArmed?: boolean;
+  highlightBar?: number;
+  highlightConfirmWindows?: number;
+};
 
 // A Connect backend for the settings form: ListSupportedLanguages returns the
 // registered encoder codes (the Campaign Language choices, ADR-0024) and
@@ -41,6 +49,8 @@ function mockBackend(
             system: req.system,
             language: req.language,
             tapeArmed: req.tapeArmed,
+            highlightBar: req.highlightBar,
+            highlightConfirmWindows: req.highlightConfirmWindows,
           };
         return create(UpdateCampaignResponseSchema, {
           campaign: create(CampaignSchema, {
@@ -49,6 +59,8 @@ function mockBackend(
             system: req.system,
             language: req.language,
             tapeArmed: req.tapeArmed ?? false,
+            highlightBar: req.highlightBar ?? 0,
+            highlightConfirmWindows: req.highlightConfirmWindows ?? 0,
           }),
         });
       },
@@ -63,6 +75,8 @@ function makeCampaign(c: Camp = {}) {
     system: c.system ?? "D&D 5e",
     language: c.language ?? "en",
     tapeArmed: c.tapeArmed ?? false,
+    highlightBar: c.highlightBar ?? 0,
+    highlightConfirmWindows: c.highlightConfirmWindows ?? 0,
   });
 }
 
@@ -197,6 +211,9 @@ describe("CampaignSettingsForm", () => {
       system: "D&D 5e",
       language: "en",
       tapeArmed: false,
+      // The knob fields always ride explicitly; 0 = engine default (#632 follow-up).
+      highlightBar: 0,
+      highlightConfirmWindows: 0,
     });
   });
 
@@ -222,10 +239,12 @@ describe("CampaignSettingsForm", () => {
     openAdvanced();
     // The simplified hint keeps the three facts a GM must know: a consent
     // message is posted in the voice channel, only consenting speakers are
-    // recorded, and the change applies from the next session.
-    expect(screen.getByText(/consent message.*voice channel/i)).toBeInTheDocument();
-    expect(screen.getByText(/only speakers who consent are recorded/i)).toBeInTheDocument();
-    expect(screen.getByText(/applies from the next session/i)).toBeInTheDocument();
+    // recorded, and the change applies from the next session. (The next-session
+    // clause is asserted on the consent hint node — the tuning hint below the
+    // knobs carries the same phrase.)
+    const hint = screen.getByText(/consent message.*voice channel/i);
+    expect(hint).toHaveTextContent(/only speakers who consent are recorded/i);
+    expect(hint).toHaveTextContent(/applies from the next session/i);
   });
 
   it("keeps the Highlight recording switch out of the tree while the advanced card is closed", () => {
@@ -254,6 +273,59 @@ describe("CampaignSettingsForm", () => {
       system: "D&D 5e",
       language: "en",
       tapeArmed: true,
+      highlightBar: 0,
+      highlightConfirmWindows: 0,
+    });
+  });
+
+  // Session-Highlights tuning (#632 follow-up): the bar/confirm-windows pair
+  // sits inside the same AdvancedCard as the arming switch (the knobs only act
+  // while recording is armed). 0 on the wire = engine default, shown as an
+  // empty field with the default in the placeholder.
+  it("shows empty knob fields with default placeholders for an untuned campaign", () => {
+    renderForm({ campaign: makeCampaign() });
+    openAdvanced();
+    const bar = screen.getByLabelText(/highlight score bar/i) as HTMLInputElement;
+    const confirm = screen.getByLabelText(/confirmation windows/i) as HTMLInputElement;
+    expect(bar.value).toBe("");
+    expect(bar.placeholder).toMatch(/8 \(default\)/);
+    expect(confirm.value).toBe("");
+    expect(confirm.placeholder).toMatch(/2 \(default\)/);
+  });
+
+  it("prefills the knob fields from a tuned campaign", () => {
+    renderForm({ campaign: makeCampaign({ highlightBar: 4.5, highlightConfirmWindows: 1 }) });
+    openAdvanced();
+    expect((screen.getByLabelText(/highlight score bar/i) as HTMLInputElement).value).toBe("4.5");
+    expect((screen.getByLabelText(/confirmation windows/i) as HTMLInputElement).value).toBe("1");
+  });
+
+  it("round-trips the knob values through UpdateCampaign, and clearing sends 0", async () => {
+    const updated: { req?: Record<string, unknown> } = {};
+    const onSaved = vi.fn();
+    renderForm(
+      {
+        campaign: makeCampaign({ id: "camp-9", highlightBar: 7, highlightConfirmWindows: 3 }),
+        onSaved,
+      },
+      mockBackend({ languages: ["de", "en"], updated }),
+    );
+
+    openAdvanced();
+    fireEvent.change(screen.getByLabelText(/highlight score bar/i), { target: { value: "4.5" } });
+    // Clearing the confirm field is the reset gesture: it must ride as 0.
+    fireEvent.change(screen.getByLabelText(/confirmation windows/i), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(updated.req).toEqual({
+      id: "camp-9",
+      name: "The Sunless Citadel",
+      system: "D&D 5e",
+      language: "en",
+      tapeArmed: false,
+      highlightBar: 4.5,
+      highlightConfirmWindows: 0,
     });
   });
 });

@@ -40,7 +40,13 @@ func buildHighlightDetector(cfg Config, bus *voiceevent.Bus, log *slog.Logger) *
 		cfg.Gate,
 		cfg.StageMetrics,
 		log,
-		highlight.Config{ProviderLabel: llmProviderLabel(cfg.llmProviderID)},
+		highlight.Config{
+			ProviderLabel: llmProviderLabel(cfg.llmProviderID),
+			// The campaign's tuning knobs (#632 follow-up): zero = withDefaults'
+			// engine defaults (8.0 / 2), so an untouched campaign is unchanged.
+			Bar:            cfg.highlightBar,
+			ConfirmWindows: cfg.highlightConfirmWindows,
+		},
 	)
 }
 

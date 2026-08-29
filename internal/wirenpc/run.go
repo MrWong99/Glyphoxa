@@ -83,6 +83,10 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// selection, round spans and spend pricing follow the key's provider.
 	cfg.llmProviderID = llmProviderID(llmCfg)
 	cfg.language = campaign.Language
+	// Session-Highlights tuning (#632 follow-up): read once per session start,
+	// same cadence as language — a mid-session edit applies on the next session.
+	cfg.highlightBar = campaign.HighlightBar
+	cfg.highlightConfirmWindows = campaign.HighlightConfirmWindows
 
 	// The campaign's bound player-character names (#276's `character` table) feed
 	// the system prompt's speaker-attribution section beside the roster's NPC

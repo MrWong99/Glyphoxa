@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -91,9 +92,13 @@ func (s *campaignManagement) CreateCampaign(
 	return connect.NewResponse(&managementv1.CreateCampaignResponse{Campaign: toProtoCampaign(created)}), nil
 }
 
-// UpdateCampaign writes a campaign's name/system/language and returns the updated
-// row. id is required (unparsable is CodeInvalidArgument) and name must be
-// non-empty (CodeInvalidArgument). System/Language are written opaquely, exactly
+// UpdateCampaign writes a campaign's name/system/language (plus tape_armed and
+// the Session-Highlights knobs when present) and returns the updated row. id is
+// required (unparsable is CodeInvalidArgument) and name must be non-empty
+// (CodeInvalidArgument). This handler is the knobs' range authority: an
+// out-of-range or NaN highlight_bar / highlight_confirm_windows (valid: 0-10)
+// is a third CodeInvalidArgument cause, refused before any write (#632
+// follow-up). System/Language are written opaquely, exactly
 // as stored today — no validation, no vocabulary curation (that is the settings
 // editor slice's call). An unknown id is CodeNotFound.
 func (s *campaignManagement) UpdateCampaign(
@@ -110,6 +115,23 @@ func (s *campaignManagement) UpdateCampaign(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
+	// Session-Highlights tuning (#632 follow-up): the RPC layer is the range
+	// authority (the store writes verbatim by design). 0 is a valid write — it
+	// restores the engine default (8.0 / 2, highlight.Config.withDefaults).
+	if hb := m.HighlightBar; hb != nil {
+		if math.IsNaN(*hb) || *hb < 0 || *hb > 10 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("highlight_bar must be between 0 and 10"))
+		}
+	}
+	var confirmWindows *int
+	if cw := m.HighlightConfirmWindows; cw != nil {
+		if *cw < 0 || *cw > 10 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("highlight_confirm_windows must be between 0 and 10"))
+		}
+		v := int(*cw)
+		confirmWindows = &v
+	}
+
 	tenantID, ok := auth.TenantID(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
@@ -124,6 +146,9 @@ func (s *campaignManagement) UpdateCampaign(
 		// tape_armed is `optional` on the wire: forward the pointer as-is so a
 		// request that omits it leaves the current opt-in unchanged (ADR-0051).
 		TapeArmed: m.TapeArmed,
+		// The highlight knobs are `optional` the same way: absent = unchanged.
+		HighlightBar:            m.HighlightBar,
+		HighlightConfirmWindows: confirmWindows,
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
