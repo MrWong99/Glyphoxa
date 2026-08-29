@@ -1349,3 +1349,29 @@ type noProviderConfig struct{}
 func (noProviderConfig) GetProviderConfigByComponent(context.Context, uuid.UUID, storage.Component) (storage.ProviderConfig, error) {
 	return storage.ProviderConfig{}, storage.ErrNotFound
 }
+
+// TestVoiceMediaStallWindow pins the media watchdog knob's translation (#633,
+// ADR-0064) onto wirenpc.Config.MediaStallWindow's contract: a positive
+// duration arms the verdict, "off" disables it (negative), and a blank or
+// unparsable value takes the 45s default — a typo must never switch the
+// protection off.
+func TestVoiceMediaStallWindow(t *testing.T) {
+	for _, c := range []struct {
+		val  string
+		want time.Duration
+	}{
+		{"", defaultVoiceMediaStallWindow},
+		{"garbage", defaultVoiceMediaStallWindow},
+		{"45", defaultVoiceMediaStallWindow}, // unitless = typo, not a disable
+		{"0s", defaultVoiceMediaStallWindow},
+		{"-10s", defaultVoiceMediaStallWindow},
+		{"off", -1},
+		{"OFF", -1},
+		{"30s", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+	} {
+		if got := voiceMediaStallWindow(envMap(map[string]string{"GLYPHOXA_VOICE_MEDIA_STALL_WINDOW": c.val})); got != c.want {
+			t.Errorf("voiceMediaStallWindow(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}

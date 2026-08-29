@@ -27,20 +27,27 @@ import (
 // A nil logger discards transport logs; a nil rec discards the keepalive
 // counters (glyphoxa_voice_udp_keepalives_total and friends).
 func TransportOption(logger *slog.Logger, rec MetricsRecorder) bot.ConfigOpt {
+	return bot.WithVoiceManagerConfigOpts(voice.WithConnConfigOpts(
+		voice.WithUDPConnCreateFunc(transportUDPConnCreate(logger, rec)),
+		voice.WithConnEventHandlerFunc(noteSpeakingEvent),
+	))
+}
+
+// transportUDPConnCreate is the [voice.UDPConnCreateFunc] TransportOption
+// installs, named so a test can pin that it yields the keepalive transport and
+// not some inert stand-in. The opts disgo forwards configure only the stock
+// impl's logger/dialer (an unexported config we cannot apply); nothing in this
+// repo sets them.
+func transportUDPConnCreate(logger *slog.Logger, rec MetricsRecorder) voice.UDPConnCreateFunc {
 	if logger == nil {
 		logger = discardLogger()
 	}
 	if rec == nil {
 		rec = discardMetrics{}
 	}
-	return bot.WithVoiceManagerConfigOpts(voice.WithConnConfigOpts(
-		// The opts disgo forwards configure only the stock impl's logger/dialer
-		// (an unexported config we cannot apply); nothing in this repo sets them.
-		voice.WithUDPConnCreateFunc(func(daveSession godave.Session, ssrcLookup voice.SsrcLookupFunc, _ ...voice.UDPConnConfigOpt) voice.UDPConn {
-			return newKeepaliveUDPConn(daveSession, ssrcLookup, logger, rec)
-		}),
-		voice.WithConnEventHandlerFunc(noteSpeakingEvent),
-	))
+	return func(daveSession godave.Session, ssrcLookup voice.SsrcLookupFunc, _ ...voice.UDPConnConfigOpt) voice.UDPConn {
+		return newKeepaliveUDPConn(daveSession, ssrcLookup, logger, rec)
+	}
 }
 
 // MediaLiveness is a point-in-time view of one Session's inbound media
@@ -53,13 +60,21 @@ type MediaLiveness struct {
 	// stamped before decryption — an undecryptable packet still proves the
 	// media path is alive. Reset to zero when the connection re-opens.
 	Packets uint64
+	// Echoes counts keepalive echoes on the current socket (reset on re-open):
+	// the voice server reflects our 8-byte keepalives back, so on a healthy
+	// socket this moves ~every 5s whether or not anyone speaks. Their
+	// cessation is the watchdog's speech-independent dead-socket signal; a
+	// server that never echoes simply never arms it.
+	Echoes uint64
 	// Keepalives counts keepalive datagrams written since the connection was
 	// first opened.
 	Keepalives uint64
-	// LastSpeaking is when a REMOTE participant last announced speaking on the
-	// voice gateway (opcode 5), zero if never. The Bot's own speaking echo is
-	// excluded — otherwise an NPC talking into a quiet room would look like
-	// evidence that inbound audio should be flowing.
+	// LastSpeaking is when a REMOTE participant last announced ACTIVE speaking
+	// on the voice gateway (opcode 5 with non-empty flags), zero if never.
+	// Stop announcements (flags 0) are excluded — they legitimately PRECEDE
+	// silence — and so is the Bot's own speaking echo, otherwise an NPC
+	// talking into a quiet room would look like evidence that inbound audio
+	// should be flowing.
 	LastSpeaking time.Time
 }
 
@@ -83,6 +98,7 @@ func (s *Session) MediaLiveness() (MediaLiveness, bool) {
 	}
 	return MediaLiveness{
 		Packets:      ku.packets.Load(),
+		Echoes:       ku.echoes.Load(),
 		Keepalives:   ku.keepalives.Load(),
 		LastSpeaking: speakingEvents.last(tc.Gateway()),
 	}, true
@@ -143,6 +159,11 @@ func noteSpeakingEvent(gw voice.Gateway, op voice.Opcode, _ int, data voice.Gate
 	}
 	if d.SSRC == gw.SSRC() {
 		return // our own speaking relayed back is not remote evidence
+	}
+	if d.Speaking == voice.SpeakingFlagNone {
+		// A stop announcement legitimately precedes silence; counting it would
+		// let an ordinary end-of-utterance convict a healthy-but-now-quiet room.
+		return
 	}
 	speakingEvents.note(gw, time.Now())
 }

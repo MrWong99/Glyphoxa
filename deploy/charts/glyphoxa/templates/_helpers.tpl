@@ -382,9 +382,10 @@ lives beside it either way.
 
 Every key is emitted ONLY when set away from its default, so a stock install
 renders NO env var here and the binary's own defaults (15m window, 30s sweep,
-200 connect cycles, both process ceilings off) apply — the same "unset means
-byte-identical" posture maxVoiceSessions uses. Include it inside a container's
-`env:` list; it emits nothing at all when idleClose is left untouched.
+200 connect cycles, both process ceilings off, 45s media stall window) apply —
+the same "unset means byte-identical" posture maxVoiceSessions uses. Include it
+inside a container's `env:` list; it emits nothing at all when idleClose is
+left untouched.
 */}}
 {{- define "glyphoxa.idleCloseEnv" -}}
 {{- with .Values.idleClose }}
@@ -424,12 +425,23 @@ The `int` coercion is only reached once the key is known to be non-nil.
 - name: GLYPHOXA_VOICE_GOROUTINE_CEILING
   value: {{ int .goroutineCeiling | quote }}
 {{- end }}
-{{- if .mediaStallWindow }}
-# How long inbound RTP may be absent — while participants keep announcing
-# speech — before the media watchdog rebuilds the voice connection (ADR-0064).
-# "off" disables the verdict; the liveness log keeps running.
+{{- /*
+An UNQUOTED `off` in a values file is YAML-1.1 boolean false, which a naive
+truthiness gate would silently drop — the operator asked to disable the
+verdict and got the default instead. Coerce bools back to the words the
+binary understands before the emptiness check.
+*/ -}}
+{{- $msw := .mediaStallWindow }}
+{{- if kindIs "bool" $msw }}
+{{- $msw = ternary "on" "off" $msw }}
+{{- end }}
+{{- if $msw }}
+# How long inbound voice RTP may be absent — despite keepalive echoes or
+# speaking announcements proving the socket should be receiving — before the
+# media watchdog rebuilds the voice connection (ADR-0064). "off" disables the
+# verdict; the liveness log keeps running.
 - name: GLYPHOXA_VOICE_MEDIA_STALL_WINDOW
-  value: {{ .mediaStallWindow | quote }}
+  value: {{ $msw | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

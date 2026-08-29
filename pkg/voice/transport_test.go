@@ -38,12 +38,19 @@ func TestNoteSpeakingEventRecordsRemoteSpeakersOnly(t *testing.T) {
 
 	// Our own speaking relayed back is not remote evidence: an NPC talking into
 	// a quiet room must not arm the watchdog against that room.
-	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 42})
+	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 42, Speaking: voice.SpeakingFlagMicrophone})
 	if !speakingEvents.last(gw).IsZero() {
 		t.Fatal("our own speaking echo was recorded as remote evidence")
 	}
 
-	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 7})
+	// A STOP announcement (flags 0) legitimately precedes silence and must not
+	// count as evidence that audio should be flowing.
+	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 7, Speaking: voice.SpeakingFlagNone})
+	if !speakingEvents.last(gw).IsZero() {
+		t.Fatal("a stop announcement was recorded as active-speaking evidence")
+	}
+
+	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 7, Speaking: voice.SpeakingFlagMicrophone})
 	if speakingEvents.last(gw).IsZero() {
 		t.Fatal("remote speaking was not recorded")
 	}
@@ -79,8 +86,8 @@ func TestSpeakingLogPrunesStaleEntries(t *testing.T) {
 			pruned++
 		}
 	}
-	if pruned == 0 {
-		t.Fatal("no stale gateway entries were pruned; a long-lived shared client would leak one per session")
+	if pruned != len(gws) {
+		t.Fatalf("pruned %d of %d stale gateway entries, want all of them; a long-lived shared client would otherwise leak one per session", pruned, len(gws))
 	}
 }
 
@@ -109,16 +116,17 @@ func TestSessionMediaLiveness(t *testing.T) {
 	gw := &fakeVoiceGateway{ssrc: 42}
 	ku := newKeepaliveUDPConn(noopDave(), nil, discardLogger(), discardMetrics{})
 	ku.packets.Store(5)
+	ku.echoes.Store(4)
 	ku.keepalives.Store(9)
-	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 7})
+	noteSpeakingEvent(gw, voice.OpcodeSpeaking, 0, voice.GatewayMessageDataSpeaking{SSRC: 7, Speaking: voice.SpeakingFlagMicrophone})
 
 	s := &Session{conn: &livenessConn{udp: ku, gw: gw}}
 	ml, ok := s.MediaLiveness()
 	if !ok {
 		t.Fatal("MediaLiveness not ok with the keepalive transport installed")
 	}
-	if ml.Packets != 5 || ml.Keepalives != 9 {
-		t.Fatalf("counters = %d/%d, want 5/9", ml.Packets, ml.Keepalives)
+	if ml.Packets != 5 || ml.Echoes != 4 || ml.Keepalives != 9 {
+		t.Fatalf("counters = %d/%d/%d, want 5/4/9", ml.Packets, ml.Echoes, ml.Keepalives)
 	}
 	if ml.LastSpeaking.IsZero() {
 		t.Fatal("LastSpeaking not surfaced from the speaking log")
@@ -139,3 +147,19 @@ func (bareConn) Open(context.Context, snowflake.ID, bool, bool) error { return n
 func (bareConn) SetOpusFrameProvider(voice.OpusFrameProvider)         {}
 func (bareConn) SetOpusFrameReceiver(voice.OpusFrameReceiver)         {}
 func (bareConn) Close(context.Context)                                {}
+
+// TestTransportUDPConnCreateYieldsKeepaliveTransport pins that the create func
+// TransportOption installs builds THIS package's keepalive transport — a
+// refactor swapping in something inert would otherwise ship the stock
+// keepalive-less transport that goes deaf after ~15 minutes (#633). The option
+// itself must also be a real bot.ConfigOpt, unlike the dave stub's no-op.
+func TestTransportUDPConnCreateYieldsKeepaliveTransport(t *testing.T) {
+	t.Parallel()
+	u := transportUDPConnCreate(nil, nil)(noopDave(), func(uint32) snowflake.ID { return 0 })
+	if _, ok := u.(*keepaliveUDPConn); !ok {
+		t.Fatalf("create func yielded %T, want *keepaliveUDPConn", u)
+	}
+	if TransportOption(nil, nil) == nil {
+		t.Fatal("TransportOption returned a nil bot.ConfigOpt")
+	}
+}

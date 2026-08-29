@@ -28,9 +28,16 @@ const keepaliveInterval = 5 * time.Second
 // keepalivePacketSize is the size of one keepalive datagram: 8 bytes carrying a
 // little-endian incrementing counter, the exact shape discordgo sends. The
 // server does not parse it — any small non-RTP datagram from the established
-// 5-tuple proves liveness — and its echo, if any, is shorter than an RTP header
-// so [keepaliveUDPConn.ReadPacket] silently skips it.
+// 5-tuple proves liveness — and its echo is shorter than an RTP header, so
+// [keepaliveUDPConn.ReadPacket] skips it after counting it (the echoes field).
 const keepalivePacketSize = 8
+
+// retiredSocketLinger is how long a re-Open keeps the previous socket alive
+// before closing it — long enough for disgo's audio sender to finish any Write
+// whose conn snapshot predates the swap (a net.ErrClosed there self-reaps the
+// sender permanently), short enough that a reader parked on the old socket is
+// released promptly.
+const retiredSocketLinger = 250 * time.Millisecond
 
 // keepaliveUDPConn is this package's implementation of disgo's [voice.UDPConn].
 // It reimplements the pinned disgo udpConnImpl (see go.mod's disgo pin comment;
@@ -83,6 +90,12 @@ type keepaliveUDPConn struct {
 	// stopKeepalive ends the current keepalive goroutine; non-nil exactly while
 	// one runs. Guarded by connMu.
 	stopKeepalive chan struct{}
+	// closed latches on Close so a straggler voice-gateway Ready dispatched
+	// during teardown cannot revive the transport — a revived Open would dial a
+	// socket and start a keepalive goroutine that nothing ever stops. Guarded
+	// by connMu. A closed transport refuses Open with a clear error; the join
+	// then fails visibly and the caller's retry builds a fresh conn.
+	closed bool
 
 	encrypter voice.Encrypter
 
@@ -100,6 +113,14 @@ type keepaliveUDPConn struct {
 	// than a timestamp so the hot path reads no clock — the watchdog derives
 	// recency by diffing it on its own tick, the idleclose marks discipline.
 	packets atomic.Uint64
+	// echoes counts keepalive echoes on the CURRENT socket (reset on re-Open):
+	// inbound datagrams of exactly [keepalivePacketSize] bytes, the shape the
+	// voice server reflects our keepalives back in. On a healthy socket they
+	// arrive ~every 5s REGARDLESS of anyone speaking, which makes their
+	// cessation the watchdog's speech-independent dead-socket signal — and if
+	// a server generation stops echoing, the counter simply never arms that
+	// signal (see mediawatch): absence of echoes is never read as death.
+	echoes atomic.Uint64
 	// keepalives counts keepalive datagrams successfully written, cumulatively
 	// across re-Opens; the liveness log reports its per-interval delta.
 	keepalives atomic.Uint64
@@ -174,9 +195,20 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
 
+	if u.closed {
+		return "", 0, fmt.Errorf("voice: transport already closed; refusing to reopen")
+	}
+
 	u.stopKeepaliveLocked()
-	if u.conn != nil {
-		_ = u.conn.Close()
+	if old := u.conn; old != nil {
+		// Retire the previous socket on a LINGER, not immediately: disgo's audio
+		// sender may hold a Write-time snapshot of it, and net.ErrClosed makes
+		// the sender PERMANENTLY self-reap (audio_sender handleErr) — a mute NPC
+		// inside a cycle that keeps serving. The linger lets any in-flight write
+		// finish on the old socket (harmlessly, toward the old server); a reader
+		// parked in a deadline-less Read still gets its net.ErrClosed wake, just
+		// a beat later, instead of being stranded forever like disgo strands it.
+		time.AfterFunc(retiredSocketLinger, func() { _ = old.Close() })
 	}
 
 	host := net.JoinHostPort(ip, strconv.Itoa(port))
@@ -240,6 +272,7 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 
 	u.conn = conn
 	u.packets.Store(0)
+	u.echoes.Store(0)
 	stop := make(chan struct{})
 	u.stopKeepalive = stop
 	go u.keepaliveLoop(conn, stop)
@@ -347,6 +380,9 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 		}
 
 		if n < voice.RTPHeaderSize {
+			if n == keepalivePacketSize {
+				u.echoes.Add(1)
+			}
 			continue
 		}
 
@@ -442,6 +478,7 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 func (u *keepaliveUDPConn) Close() error {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
+	u.closed = true
 	u.stopKeepaliveLocked()
 	if u.conn == nil {
 		return nil
