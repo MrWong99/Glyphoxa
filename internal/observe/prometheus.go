@@ -143,6 +143,15 @@ type PrometheusRecorder struct {
 	memoryRecallSeconds *prometheus.HistogramVec // outcome
 	kgFactsSeconds      *prometheus.HistogramVec // outcome
 
+	// #633: voice UDP transport liveness. Keepalives move ~every 5s per open
+	// voice connection (a flat keepalives series while glyphoxa_voice_sessions
+	// is >0 is itself a transport alarm); stall rebuilds count the media
+	// watchdog declaring the inbound path dead and forcing a reconnect cycle.
+	// All unlabelled (ADR-0032 §2.1 — guild is never a label).
+	udpKeepalives        prometheus.Counter
+	udpKeepaliveSendErrs prometheus.Counter
+	mediaStallRebuilds   prometheus.Counter
+
 	// #612 live-transcript SSE (ADR-0014/0032): how many browsers tail the Session
 	// screen, and how often one falls far enough behind that the relay drops it and
 	// forces an EventSource reconnect — a user-visible transcript stall, invisible
@@ -499,6 +508,29 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		"Session-Highlights triggers handed to the Saver by bounded persist outcome (ADR-0032): saved, clip_failed (key/WAV-encode), blob_failed (clip Put), row_failed (CreateHighlight, clip compensated), or dropped (queue full / after finalize). Zero across all outcomes while classify ok grows = no moment confirmed against Bar.",
 		"outcome")
 	reg.MustRegister(r.highlightPersist)
+
+	// #633: voice UDP transport liveness. Discord's voice server stops routing
+	// inbound RTP to an outbound-silent peer after ~13-15 min, so pkg/voice's
+	// transport writes one keepalive datagram every ~5s per open connection.
+	r.udpKeepalives = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "udp_keepalives_total",
+		Help:      "Keepalive datagrams written to voice UDP sockets (~one per 5s per open connection); flat while glyphoxa_voice_sessions > 0 means the transport loop is dead; ref #633.",
+	})
+	r.udpKeepaliveSendErrs = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "udp_keepalive_send_errors_total",
+		Help:      "Voice UDP keepalive datagrams that failed to write (transient socket errors; a closed socket ends the loop instead of counting); ref #633.",
+	})
+	r.mediaStallRebuilds = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "media_stall_rebuilds_total",
+		Help:      "Media watchdog verdicts: participants kept announcing speech while no RTP arrived, so the cycle was torn down to rebuild the voice connection; ref #633.",
+	})
+	reg.MustRegister(r.udpKeepalives, r.udpKeepaliveSendErrs, r.mediaStallRebuilds)
 	return r
 }
 
@@ -791,3 +823,20 @@ func (r *PrometheusRecorder) SetResponseLatencyHook(h func(time.Duration)) {
 func (r *PrometheusRecorder) HighlightPersist(o HighlightPersistOutcome) {
 	r.highlightPersist.WithLabelValues(string(o)).Inc()
 }
+
+// --- #633 voice UDP transport liveness (voice.MetricsRecorder) ---
+
+// UDPKeepaliveSent counts one keepalive datagram written to a voice UDP socket
+// (#633). Called from the per-connection keepalive goroutine, ~every 5s.
+func (r *PrometheusRecorder) UDPKeepaliveSent() { r.udpKeepalives.Inc() }
+
+// UDPKeepaliveSendError counts one keepalive datagram that failed to write
+// (#633). A closed socket ends the keepalive loop instead of counting here, so
+// a moving rate means a live-but-erroring socket.
+func (r *PrometheusRecorder) UDPKeepaliveSendError() { r.udpKeepaliveSendErrs.Inc() }
+
+// MediaStallRebuild counts one media-watchdog verdict (#633): remote
+// participants kept announcing speech while no RTP arrived for the stall
+// window, so the connect cycle was ended to rebuild the voice connection. The
+// guild arg is discarded like every voice.MetricsRecorder label (ADR-0032).
+func (r *PrometheusRecorder) MediaStallRebuild(string) { r.mediaStallRebuilds.Inc() }

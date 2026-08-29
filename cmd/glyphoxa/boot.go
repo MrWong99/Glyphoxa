@@ -498,6 +498,11 @@ const (
 	defaultVoiceIdleCloseWindow  = 15 * time.Minute
 	defaultVoiceIdleCloseSweep   = 30 * time.Second
 	defaultVoiceMaxConnectCycles = 200
+	// defaultVoiceMediaStallWindow is the media watchdog's stall window (#633):
+	// how long inbound RTP may be absent — while remote Speaking announcements
+	// keep arriving — before the cycle is rebuilt. Bounded 30-60s by the incident
+	// asks; 45s keeps an utterance-length jitter gap from ever tripping it.
+	defaultVoiceMediaStallWindow = 45 * time.Second
 )
 
 // idleCloseOffToken is the literal that disables a duration knob whose zero value
@@ -571,6 +576,21 @@ func voiceIdleClosePolicy(getenv func(string) string) idleclose.Policy {
 		HeapCeiling:      mibToBytes(envCeiling(getenv, "GLYPHOXA_VOICE_HEAP_CEILING_MIB", 0)),
 		GoroutineCeiling: envCeiling(getenv, "GLYPHOXA_VOICE_GOROUTINE_CEILING", 0),
 	}
+}
+
+// voiceMediaStallWindow reads the media watchdog's stall window (#633) from
+// GLYPHOXA_VOICE_MEDIA_STALL_WINDOW — parsed HERE in the composition root, like
+// the Idle Close knobs. It translates to wirenpc.Config.MediaStallWindow's
+// contract: a positive duration arms the verdict at that window, and the literal
+// "off" returns a negative value that disables the verdict (the liveness log
+// keeps running). A blank or unparsable value takes the default — a typo must
+// never switch a protection off.
+func voiceMediaStallWindow(getenv func(string) string) time.Duration {
+	d := envDurationOff(getenv, "GLYPHOXA_VOICE_MEDIA_STALL_WINDOW", defaultVoiceMediaStallWindow)
+	if d <= 0 {
+		return -1
+	}
+	return d
 }
 
 // warnIdleClosePolicy flags an Idle Close policy that will surprise its operator.

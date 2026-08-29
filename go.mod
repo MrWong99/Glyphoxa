@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately
+	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately. pkg/voice/udpconn.go REIMPLEMENTS this pin's voice/udp_conn.go (keepalive transport, ADR-0064/#633): re-diff it against upstream on every bump.
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0

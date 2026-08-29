@@ -255,7 +255,8 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// empty except the DAVE counter and the process collectors.
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
-	defer armFlightRecorder(log, metrics)() // #607
+	cfg.MediaStallWindow = voiceMediaStallWindow(os.Getenv) // #633
+	defer armFlightRecorder(log, metrics)()                 // #607
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -360,6 +361,7 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		defer h.Release()
 		cfg.Activity = h.Mark
 		cfg.ConnectCycle = h.CycleStarted
+		cfg.MediaSuspect = h.MediaSuspect // #633: dead media path ≠ quiet table
 		// This node has no commit step — the session is live the moment RunFromDB
 		// runs — so admit it to the sweep as soon as the config carries its marks.
 		h.Activate()
@@ -402,8 +404,9 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	cfg.Logger = log
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
-	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN") // central-token fallback; BYOK tenants override per-session
-	defer armFlightRecorder(log, metrics)()    // #607
+	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")              // central-token fallback; BYOK tenants override per-session
+	cfg.MediaStallWindow = voiceMediaStallWindow(os.Getenv) // #633
+	defer armFlightRecorder(log, metrics)()                 // #607
 
 	dsn := databaseURL()
 	// ADR-0031: the worker never migrates (only -mode all does); verify the schema
@@ -486,6 +489,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	reg.RegisterComponentHandler(presence.NewConsentButtons(store, sessions, log).HandleComponent)
 	clients := presence.NewClients(store, cipher, reg, cfg.Token, log)
 	clients.SetGatewayBudget(cfg.GatewayBudget)
+	clients.SetVoiceMetrics(cfg.Metrics) // #633: keepalive counters on the standing clients
 
 	// The Manager's persistence deps (the buildVoiceDeps set, #491): the relay's
 	// headless line writer/finalizer, the chunk writer, the Highlight saver, NPC
@@ -1011,6 +1015,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	cfg.Logger = log
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
+	cfg.MediaStallWindow = voiceMediaStallWindow(os.Getenv) // #633
 	// #607: `all` mode drives the voice loop in-process, so it hosts the same
 	// realtime hot path a voice pod does and arms the same diagnostic — which is
 	// the self-host case that has no separate voice pod to arm instead. A web-only
@@ -1081,6 +1086,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// instrumented clients, so they need no per-cycle listeners (cfg.GatewayBudget
 		// stays used only on the owned bench path).
 		clients.SetGatewayBudget(cfg.GatewayBudget)
+		clients.SetVoiceMetrics(cfg.Metrics) // #633: keepalive counters on the standing clients
 		// The voice loop borrows the Tenant's standing client from the registry via
 		// the session Manager's Deps.Clients (wired below), NOT a single shared
 		// ClientProvider on the base config — a per-session start resolves the client

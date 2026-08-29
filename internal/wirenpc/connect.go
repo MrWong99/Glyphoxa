@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -81,6 +82,14 @@ func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *sl
 			gateway.IntentGuilds | gateway.IntentGuildVoiceStates,
 		)),
 		gxvoice.DaveOption(),
+		// Voice UDP transport hardening (#633): keepalive datagrams for the whole
+		// connection lifetime (without them Discord silently stops routing inbound
+		// RTP to a non-speaking Bot after ~13-15 min) plus the speaking-event
+		// observer the media watchdog reads. Unconditional, unlike DaveOption —
+		// there is no build in which the stock keepalive-less transport is right.
+		// The standing shared client (internal/presence defaultClientBuilder) gets
+		// the same option; a client without it runs deaf-after-15-minutes again.
+		gxvoice.TransportOption(log, cfg.Metrics),
 	}
 	// Gateway IDENTIFY-budget observability (#486): count this per-cycle client's
 	// IDENTIFYs at send time (via the identify rate-limiter wrapper, so a connect
@@ -127,8 +136,12 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// child of ctx, so a cancelled process still unwinds promptly (pipe.Run et al.
 	// observe the cancellation), and runWithReconnect checks the OUTER ctx to
 	// decide shutdown vs reconnect.
-	cycleCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// WithCancelCause so the media watchdog (#633) can end the cycle with
+	// errMediaStall as the recorded cause; the return path below surfaces it to
+	// runWithReconnect as a named, transient reason instead of a bare
+	// context.Canceled.
+	cycleCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	// The orchestrator bus is created here (not deeper) so the connection-state
 	// transitions ride the SAME bus as the pipeline's events (#123). The web tier
@@ -175,6 +188,19 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// connecting → connected live (#123). Rides the same bus as {connecting}.
 	publishConnectionState(bus, voiceevent.ConnectionConnected, "")
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npcs", npcNames(cfg.npcs))
+
+	// Media-path liveness watchdog (#633): a per-cycle goroutine, bound to
+	// cycleCtx like the stage subscriber's sweeper. It reads the transport
+	// counters TransportOption installed (inert when the Session reports no
+	// transport monitor — the test fakes, or a client built without the option),
+	// emits the once-a-minute liveness line, and on a stall verdict cancels this
+	// cycle with errMediaStall so runWithReconnect rebuilds the connection.
+	// Config.MediaStallWindow: 0 = default, negative = verdict off (log only).
+	stallWindow := cfg.MediaStallWindow
+	if stallWindow == 0 {
+		stallWindow = defaultMediaStallWindow
+	}
+	go newMediaWatchdog(sess.MediaLiveness, cancel, cfg.MediaSuspect, cfg.Metrics, log, guild.String(), stallWindow).run(cycleCtx)
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
 	// single Pipeline.Run goroutine) and PlaybackSource (called from the playback
@@ -301,5 +327,17 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	pipeOpts = append(pipeOpts, highlightPCMOptions(detector)...)
 	pipeOpts = append(pipeOpts, activityInboundOptions(cfg.Activity)...)
 	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics, pipeOpts...)
-	return pipe.Run(cycleCtx, sess)
+	return resolveStallCause(cycleCtx, pipe.Run(cycleCtx, sess))
+}
+
+// resolveStallCause surfaces a watchdog verdict as errMediaStall so
+// runWithReconnect logs the real reason (classifyFatal does not know it, so it
+// stays transient and the backed-off rebuild proceeds). Only a cancellation is
+// rewritten: a cycle that died of an independent error in the same watchdog
+// tick keeps that error — rewriting it could hide a fatal classification.
+func resolveStallCause(cycleCtx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) && errors.Is(context.Cause(cycleCtx), errMediaStall) {
+		return errMediaStall
+	}
+	return err
 }
