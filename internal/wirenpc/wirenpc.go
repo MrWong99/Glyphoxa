@@ -419,6 +419,27 @@ type Config struct {
 	// session's idleclose.Session handle (a single atomic increment).
 	ConnectCycle func()
 
+	// MediaSuspect, when non-nil, is called when the media watchdog (#633)
+	// declares the inbound media path dead — remote participants kept announcing
+	// speech while no RTP arrived for the stall window. The session's
+	// idleclose.Session handle satisfies it (Session.MediaSuspect, one atomic
+	// store): if the rebuilds the watchdog triggers never bring audio back and
+	// Idle Close ends the session anyway, the end_reason reads media_path_dead
+	// instead of blaming a quiet table. Frames flowing again clear the flag on
+	// the next idleclose sweep.
+	//
+	// nil is the feature-off default (no Idle Close watchdog armed); the media
+	// watchdog still rebuilds, it just cannot annotate the close reason.
+	MediaSuspect func()
+
+	// MediaStallWindow overrides how long inbound RTP may be absent — while
+	// remote Speaking announcements keep arriving — before the media watchdog
+	// (#633) declares the path dead and ends the cycle for a rebuild. Zero takes
+	// the 45s default; negative disables the verdict entirely (the once-a-minute
+	// liveness log keeps running). Parsed from GLYPHOXA_VOICE_MEDIA_STALL_WINDOW
+	// in the composition root, like the Idle Close knobs.
+	MediaStallWindow time.Duration
+
 	// KeyEntitlement gates the session's provider-key env fallback behind the
 	// tenant's platform-key entitlement (ADR-0054 seam (a), ADR-0055): a
 	// resolution landing on "" (no Provider Config row, or the seeded "env"

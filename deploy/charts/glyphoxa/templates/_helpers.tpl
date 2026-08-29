@@ -424,6 +424,13 @@ The `int` coercion is only reached once the key is known to be non-nil.
 - name: GLYPHOXA_VOICE_GOROUTINE_CEILING
   value: {{ int .goroutineCeiling | quote }}
 {{- end }}
+{{- if .mediaStallWindow }}
+# How long inbound RTP may be absent — while participants keep announcing
+# speech — before the media watchdog rebuilds the voice connection (ADR-0064).
+# "off" disables the verdict; the liveness log keeps running.
+- name: GLYPHOXA_VOICE_MEDIA_STALL_WINDOW
+  value: {{ .mediaStallWindow | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 

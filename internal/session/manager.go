@@ -771,6 +771,10 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voi
 		as.idle = h
 		cfg.Activity = h.Mark
 		cfg.ConnectCycle = h.CycleStarted
+		// The media watchdog's dead-path flag (#633): if its rebuilds never bring
+		// audio back and the Idle Close Window breaches anyway, the end_reason
+		// reads media_path_dead instead of blaming a quiet table.
+		cfg.MediaSuspect = h.MediaSuspect
 	}
 
 	// Spend meter (#130, ADR-0046): only when the Tenant configured at least one

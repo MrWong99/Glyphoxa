@@ -443,3 +443,6 @@ func (discardMetrics) SessionClosed(string)             {}
 func (discardMetrics) PlaybackStarted(string)           {}
 func (discardMetrics) PlaybackFinished(string, bool)    {}
 func (discardMetrics) BargeCancelled(string)            {}
+func (discardMetrics) UDPKeepaliveSent()                {}
+func (discardMetrics) UDPKeepaliveSendError()           {}
+func (discardMetrics) MediaStallRebuild(string)         {}

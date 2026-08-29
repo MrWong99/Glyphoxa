@@ -149,6 +149,13 @@ type Clients struct {
 	// open would be a data race.
 	budget wirenpc.GatewayBudgetRecorder
 
+	// voiceMetrics feeds the voice UDP transport counters (#633) on EVERY
+	// standing client the registry builds — gxvoice.TransportOption reads it
+	// lazily at build time, exactly like budget above (same set-at-boot,
+	// not-mu-guarded contract). nil discards the counters; the keepalive
+	// transport itself is attached unconditionally.
+	voiceMetrics gxvoice.MetricsRecorder
+
 	// ensureMu serializes EnsureTenant/EnsureAll so builds and registrations never
 	// overlap; it is held ACROSS gateway/REST I/O. mu guards the entries/tenants
 	// maps and their non-atomic fields and is NEVER held across I/O — the read-hot
@@ -189,6 +196,10 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 	// Ensure still lands on every standing client.
 	c.build = defaultClientBuilder(reg, log, c.invalidate, func(token string) []bot.ConfigOpt {
 		return wirenpc.GatewayBudgetClientOpts(token, c.budget)
+	}, func() bot.ConfigOpt {
+		// #633: read at build time like the budget opts, so a SetVoiceMetrics
+		// between NewClients and the first Ensure still lands on every client.
+		return gxvoice.TransportOption(log, c.voiceMetrics)
 	})
 	c.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	c.register = restRegister
@@ -204,6 +215,13 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 // mid-life set also takes effect on the next build.
 func (c *Clients) SetGatewayBudget(b wirenpc.GatewayBudgetRecorder) {
 	c.budget = b
+}
+
+// SetVoiceMetrics installs the recorder the voice UDP transport counters (#633)
+// on every standing client feed. Same contract as [Clients.SetGatewayBudget]:
+// call once at boot before the first Ensure; later builds re-read it.
+func (c *Clients) SetVoiceMetrics(rec gxvoice.MetricsRecorder) {
+	c.voiceMetrics = rec
 }
 
 // reconcileInterval reads GLYPHOXA_PRESENCE_RECONCILE_INTERVAL (a Go duration),
@@ -649,7 +667,7 @@ func (c *Clients) Close() {
 // disgo client with the SAME options the per-session voice wiring used (so a
 // shared-client Voice Session keeps its DAVE encryption and voice-state intents,
 // ADR-0006) plus the interaction listeners and async event delivery.
-func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetOpts func(token string) []bot.ConfigOpt) ClientBuilder {
+func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetOpts func(token string) []bot.ConfigOpt, transportOpt func() bot.ConfigOpt) ClientBuilder {
 	return func(token string) (*bot.Client, error) {
 		// client is captured by the close handler below; disgo.New assigns it
 		// before any gateway open, so it is non-nil by the time a close can fire.
@@ -672,6 +690,11 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot
 				}),
 			),
 			gxvoice.DaveOption(),
+			// Voice UDP transport hardening (#633): keepalives + the speaking-event
+			// observer, mirroring wirenpc's per-cycle client. Every Voice Session
+			// borrowing this standing client rides this transport; without it the
+			// session goes silently deaf after ~13-15 outbound-quiet minutes.
+			transportOpt(),
 			bot.WithEventListenerFunc(reg.HandleCommand),
 			bot.WithEventListenerFunc(reg.HandleAutocomplete),
 			// Message-component (button) interactions: the rollover-tape consent

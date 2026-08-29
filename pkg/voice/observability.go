@@ -42,6 +42,23 @@ type MetricsRecorder interface {
 	// active turn (ADR-0027): the voiceevent.BargeDetected moment.
 	// (glyphoxa_voice_barge_cancels_total)
 	BargeCancelled(guild string)
+	// UDPKeepaliveSent reports one keepalive datagram written to the voice UDP
+	// socket. Unlike the methods above it takes no guild: disgo constructs the
+	// transport before the guild is known there, and the adapter would discard
+	// it anyway (ADR-0032). A healthy connection moves this ~every 5s, so a
+	// flat series while a session is open is itself a transport alarm.
+	// (glyphoxa_voice_udp_keepalives_total)
+	UDPKeepaliveSent()
+	// UDPKeepaliveSendError reports one keepalive datagram that failed to
+	// write (transient socket errors; net.ErrClosed ends the loop instead and
+	// is not counted). (glyphoxa_voice_udp_keepalive_send_errors_total)
+	UDPKeepaliveSendError()
+	// MediaStallRebuild reports the receive-side media watchdog declaring the
+	// inbound media path dead — remote participants kept announcing speech
+	// while no RTP arrived — and ending the cycle so the reconnect loop
+	// rebuilds the voice connection.
+	// (glyphoxa_voice_media_stall_rebuilds_total)
+	MediaStallRebuild(guild string)
 }
 
 // discardMetrics is the no-op MetricsRecorder used when none is configured.
@@ -54,6 +71,9 @@ func (discardMetrics) SessionClosed(string)             {}
 func (discardMetrics) PlaybackStarted(string)           {}
 func (discardMetrics) PlaybackFinished(string, bool)    {}
 func (discardMetrics) BargeCancelled(string)            {}
+func (discardMetrics) UDPKeepaliveSent()                {}
+func (discardMetrics) UDPKeepaliveSendError()           {}
+func (discardMetrics) MediaStallRebuild(string)         {}
 
 // discardLogger returns a logger that drops everything, used when no logger is
 // configured so call sites never nil-check.
