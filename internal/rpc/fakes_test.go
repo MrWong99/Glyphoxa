@@ -166,6 +166,12 @@ func (f *fakeManagementStore) UpdateCampaign(_ context.Context, c storage.Campai
 	if c.TapeArmed != nil { // optional: nil leaves it unchanged (COALESCE semantics)
 		existing.TapeArmed = *c.TapeArmed
 	}
+	if c.HighlightBar != nil { // optional, same COALESCE semantics (#632 follow-up)
+		existing.HighlightBar = *c.HighlightBar
+	}
+	if c.HighlightConfirmWindows != nil {
+		existing.HighlightConfirmWindows = *c.HighlightConfirmWindows
+	}
 	f.campaignsByID[c.ID] = existing
 	return existing, nil
 }

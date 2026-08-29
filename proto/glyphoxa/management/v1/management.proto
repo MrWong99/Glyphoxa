@@ -1548,6 +1548,13 @@ message Campaign {
   // Voice Sessions (#306, ADR-0051). Default false: capture is hard-disabled
   // without it, and even armed, only individually consenting speakers are taped.
   bool tape_armed = 9;
+  // highlight_bar tunes the Session-Highlights detector for this campaign
+  // (#632 follow-up): the minimum classifier score (0-10) a transcript window
+  // must reach to count toward a highlight. 0 means "engine default" (8.0).
+  double highlight_bar = 10;
+  // highlight_confirm_windows is how many consecutive at-or-above-bar classifier
+  // windows promote a moment to a highlight clip. 0 means "engine default" (2).
+  int32 highlight_confirm_windows = 11;
 }
 
 // GetActiveCampaignRequest is the (empty) request for GetActiveCampaign; the
@@ -1609,6 +1616,16 @@ message UpdateCampaignRequest {
   // absent leaves the current value unchanged, so an edit that does not touch the
   // tape never silently disarms it.
   optional bool tape_armed = 5;
+  // highlight_bar, when present, sets the Session-Highlights score bar for this
+  // campaign (#632 follow-up). Valid range 0-10, where 0 restores the engine
+  // default (8.0); out-of-range or non-finite is CodeInvalidArgument. Absent
+  // leaves the current value unchanged.
+  optional double highlight_bar = 6;
+  // highlight_confirm_windows, when present, sets the consecutive-window
+  // confirmation count. Valid range 0-10, where 0 restores the engine default
+  // (2); out-of-range is CodeInvalidArgument. Absent leaves the current value
+  // unchanged.
+  optional int32 highlight_confirm_windows = 7;
 }
 
 // UpdateCampaignResponse carries the updated campaign.

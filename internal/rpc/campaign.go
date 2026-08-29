@@ -312,6 +312,10 @@ func toProtoCampaign(c storage.Campaign) *managementv1.Campaign {
 		CreatedAt: timestamppb.New(c.CreatedAt),
 		UpdatedAt: timestamppb.New(c.UpdatedAt),
 		TapeArmed: c.TapeArmed,
+		// Session-Highlights tuning (#632 follow-up): 0 = engine default, mapped
+		// verbatim so the settings form can distinguish "default" from an override.
+		HighlightBar:            c.HighlightBar,
+		HighlightConfirmWindows: int32(c.HighlightConfirmWindows),
 	}
 	// archived_at is left unset (nil) for an active campaign so the wire "unset =
 	// active" contract holds; set only when the campaign is archived (#269).

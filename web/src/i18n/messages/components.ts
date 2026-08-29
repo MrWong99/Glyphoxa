@@ -62,6 +62,16 @@ export const en = {
   "components.highlightRecordingLabel": "Highlight recording",
   "components.highlightRecordingHint":
     "Posts a consent message in the voice channel; only speakers who consent are recorded. Applies from the next session.",
+  "components.highlightBarLabel": "Highlight score bar (0–10)",
+  "components.highlightBarPlaceholder": "8 (default)",
+  "components.highlightBarHint":
+    "Minimum classifier score a moment needs to count toward a highlight. Empty = default.",
+  "components.highlightConfirmLabel": "Confirmation windows",
+  "components.highlightConfirmPlaceholder": "2 (default)",
+  "components.highlightConfirmHint":
+    "Consecutive passes at or above the bar before a clip is cut. Empty = default.",
+  "components.highlightTuningApplyHint":
+    "Tuning only acts while highlight recording is on, and applies from the next session.",
 
   // — ImportCampaignButton (bundle restore, #294) —
   "components.importCampaign": "Import campaign",
@@ -178,6 +188,16 @@ export const de: Record<keyof typeof en, string> = {
   "components.highlightRecordingLabel": "Highlight-Aufnahme",
   "components.highlightRecordingHint":
     "Postet eine Zustimmungsnachricht im Sprachkanal; aufgenommen wird nur, wer zustimmt. Gilt ab der nächsten Session.",
+  "components.highlightBarLabel": "Highlight-Schwelle (0–10)",
+  "components.highlightBarPlaceholder": "8 (Standard)",
+  "components.highlightBarHint":
+    "Mindestbewertung des Klassifikators, damit ein Moment als Highlight zählt. Leer = Standard.",
+  "components.highlightConfirmLabel": "Bestätigungsfenster",
+  "components.highlightConfirmPlaceholder": "2 (Standard)",
+  "components.highlightConfirmHint":
+    "Aufeinanderfolgende Durchläufe auf oder über der Schwelle, bevor ein Clip geschnitten wird. Leer = Standard.",
+  "components.highlightTuningApplyHint":
+    "Die Feineinstellung wirkt nur bei aktiver Highlight-Aufnahme und gilt ab der nächsten Session.",
 
   // — ImportCampaignButton —
   "components.importCampaign": "Kampagne importieren",

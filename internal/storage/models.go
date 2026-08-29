@@ -77,9 +77,17 @@ type Campaign struct {
 	ArchivedAt *time.Time
 	// TapeArmed is the GM opt-in that arms the rollover tape for this Campaign's
 	// Voice Sessions (#306, ADR-0051; default false, capture hard-disabled without
-	// it). Appended LAST in campaignColumns/scanCampaign (column-order coupling), so
-	// any new column follows it in both places.
+	// it).
 	TapeArmed bool
+	// HighlightBar / HighlightConfirmWindows tune the Session-Highlights detector
+	// for this Campaign (#632 follow-up): the minimum classifier score (0-10) a
+	// window must reach, and the consecutive at-or-above-bar windows that confirm
+	// a moment into a clip. 0 means "engine default" (8.0 / 2) — the value flows
+	// verbatim into highlight.Config, whose withDefaults treats non-positive as
+	// unset. Appended LAST in campaignColumns/scanCampaign (column-order coupling),
+	// so any new column follows them in both places.
+	HighlightBar            float64
+	HighlightConfirmWindows int
 }
 
 // ProviderConfig is a Tenant-scoped, encrypted BYOK credential record binding a

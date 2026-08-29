@@ -16,11 +16,26 @@ import (
 )
 
 // fakeHighlightSink records triggers for the wiring assertions.
-type fakeHighlightSink struct{ n int }
+type fakeHighlightSink struct {
+	mu sync.Mutex
+	n  int
+}
 
-func (s *fakeHighlightSink) HandleTrigger(highlight.Trigger) { s.n++ }
+func (s *fakeHighlightSink) HandleTrigger(highlight.Trigger) {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+}
 
-// stubLLM replays a fixed low-score classifier verdict (no trigger, no network).
+func (s *fakeHighlightSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+// stubLLM replays a fixed score-1.0 classifier verdict (no network): below the
+// engine default bar (8.0, so no trigger under default Config), but confirmable
+// under a lowered campaign bar — the knobs test depends on exactly that split.
 type stubLLM struct{}
 
 func (stubLLM) Complete(_ context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
@@ -31,17 +46,21 @@ func (stubLLM) Complete(_ context.Context, _ llm.Request) (<-chan llm.StreamEven
 	return ch, nil
 }
 
-// labelSpy captures the provider label the detector meters usage under.
+// labelSpy captures the provider label the detector meters usage under, and
+// counts metered classifies (one LLMTokens call per classifier pass) so a test
+// can await "at least N classifies have completed".
 type labelSpy struct {
 	observe.Discard
 	mu       sync.Mutex
 	provider observe.Provider
 	seen     bool
+	calls    int
 }
 
 func (s *labelSpy) LLMTokens(p observe.Provider, _ string, _, _ int) {
 	s.mu.Lock()
 	s.provider, s.seen = p, true
+	s.calls++
 	s.mu.Unlock()
 }
 
@@ -49,6 +68,12 @@ func (s *labelSpy) get() (observe.Provider, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.provider, s.seen
+}
+
+func (s *labelSpy) classifies() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 // TestBuildHighlightDetectorMetersProviderLabel asserts the ProviderLabel deviation
@@ -88,6 +113,55 @@ func TestBuildHighlightDetectorMetersProviderLabel(t *testing.T) {
 	}
 	if got != observe.Provider("anthropic") {
 		t.Errorf("metered provider = %q, want %q (label not wired from cfg.llmProviderID)", got, observe.ProviderAnthropic)
+	}
+}
+
+// TestBuildHighlightDetectorCampaignKnobs (#632 follow-up): the campaign's
+// highlightBar / highlightConfirmWindows reach the detector's confirmation gate.
+// The stub classifier scores every window 1.0 — under the engine defaults
+// (Bar 8.0, ConfirmWindows 2) that can NEVER confirm a trigger, so a trigger
+// arriving at the sink proves the campaign knobs (bar 1.0, one confirm window)
+// were wired through and not silently replaced by withDefaults.
+func TestBuildHighlightDetectorCampaignKnobs(t *testing.T) {
+	orig := newLLM
+	newLLM = func(_, _ string) (llm.Provider, error) { return stubLLM{}, nil }
+	defer func() { newLLM = orig }()
+
+	bus := voiceevent.NewBus()
+	tp := tape.New(tape.Window, nil, nil)
+	defer tp.Close()
+	spy := &labelSpy{}
+	sink := &fakeHighlightSink{}
+	cfg := Config{
+		Tape: tp, Highlights: sink, StageMetrics: spy,
+		highlightBar: 1.0, highlightConfirmWindows: 1,
+	}
+	d := buildHighlightDetector(cfg, bus, slog.New(slog.DiscardHandler))
+	if d == nil {
+		t.Fatal("detector = nil, want non-nil")
+	}
+	// Close is idempotent, so the defer backstops the Fatal paths (no leaked
+	// worker) while the explicit Close below stays the flush point the final
+	// assertion depends on.
+	defer d.Close()
+
+	// Feed spaced finals (defeating latest-wins coalescing) until at least one
+	// classify has been metered — with bar 1.0 and one confirm window, that first
+	// score-1.0 pass already schedules the cut.
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; spy.classifies() < 1 && time.Now().Before(deadline); i++ {
+		bus.Publish(voiceevent.STTFinal{Text: fmt.Sprintf("line %d of the scene", i), At: time.Now()})
+		time.Sleep(8 * time.Millisecond)
+	}
+	if spy.classifies() < 1 {
+		t.Fatal("no classify completed within the deadline")
+	}
+
+	// Close flushes the Tail-delayed cut immediately and waits it out, so the
+	// sink count is settled when it returns.
+	d.Close()
+	if sink.count() < 1 {
+		t.Fatal("no trigger reached the sink: campaign bar/confirm knobs not wired into highlight.Config")
 	}
 }
 

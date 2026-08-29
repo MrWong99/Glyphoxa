@@ -208,7 +208,13 @@ export function CampaignSwitcher() {
             // create, returns to the list on save or cancel.
             <div className="gx-campaign-switcher__create">
               <div className="gx-campaign-switcher__create-head">{t("components.campaignSettings")}</div>
+              {/* key: the form seeds its state from the campaign prop on mount
+                  only (protecting in-progress edits from background refetches),
+                  so an Active-Campaign IDENTITY change mid-edit must remount it
+                  — otherwise a save would write the old campaign's seeded
+                  values under the new campaign's id. */}
               <CampaignSettingsForm
+                key={activeCampaign.id}
                 campaign={activeCampaign}
                 onSaved={() => setPanel("list")}
                 onCancel={() => setPanel("list")}
