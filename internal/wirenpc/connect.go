@@ -327,12 +327,16 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	pipeOpts = append(pipeOpts, highlightPCMOptions(detector)...)
 	pipeOpts = append(pipeOpts, activityInboundOptions(cfg.Activity)...)
 	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics, pipeOpts...)
-	err = pipe.Run(cycleCtx, sess)
-	// A watchdog-cancelled cycle returns context.Canceled from the pipeline;
-	// surface the recorded cause instead so runWithReconnect logs the real
-	// reason (classifyFatal does not know errMediaStall, so it stays transient
-	// and the backed-off rebuild proceeds).
-	if cause := context.Cause(cycleCtx); errors.Is(cause, errMediaStall) {
+	return resolveStallCause(cycleCtx, pipe.Run(cycleCtx, sess))
+}
+
+// resolveStallCause surfaces a watchdog verdict as errMediaStall so
+// runWithReconnect logs the real reason (classifyFatal does not know it, so it
+// stays transient and the backed-off rebuild proceeds). Only a cancellation is
+// rewritten: a cycle that died of an independent error in the same watchdog
+// tick keeps that error — rewriting it could hide a fatal classification.
+func resolveStallCause(cycleCtx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) && errors.Is(context.Cause(cycleCtx), errMediaStall) {
 		return errMediaStall
 	}
 	return err

@@ -347,6 +347,25 @@ func TestKeepaliveUDPConnCountsOnlyParsedRTP(t *testing.T) {
 	if got := u.packets.Load(); got != 1 {
 		t.Fatalf("packets = %d, want 1 (echo and non-voice packets must not count)", got)
 	}
+	if got := u.echoes.Load(); got != 1 {
+		t.Fatalf("echoes = %d, want 1 (the 8-byte datagram is a keepalive echo)", got)
+	}
+}
+
+func TestKeepaliveUDPConnRefusesOpenAfterClose(t *testing.T) {
+	t.Parallel()
+	ticks := make(chan time.Time)
+	fc := newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc)
+	open(t, u, fc, 42)
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// A straggler voice-gateway Ready dispatched during teardown must not
+	// revive the transport with a socket and keepalive loop nothing will stop.
+	if _, _, err := u.Open(context.Background(), "198.51.100.1", 443, 42); err == nil {
+		t.Fatal("Open succeeded on a closed transport")
+	}
 }
 
 func TestKeepaliveUDPConnCountsUndecryptableRTP(t *testing.T) {

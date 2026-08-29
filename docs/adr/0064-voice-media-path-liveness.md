@@ -28,22 +28,42 @@ above it can ever notice. This ADR decides the three-layer fix.
     directly to the raw socket, never through the RTP `Write` path (which
     mutates sequence/timestamp state and DAVE-encrypts);
   - a parsed-RTP packet counter, stamped before decryption so a DAVE key-roll
-    hiccup still proves the path is alive — the liveness signal everything
+    hiccup still proves the path is alive, plus a keepalive-echo counter (the
+    server reflects the 8-byte datagram back, so a healthy socket receives one
+    ~every 5s regardless of anyone speaking) — the liveness signals everything
     below reads via `Session.MediaLiveness`;
-  - re-`Open` closes the previous socket (disgo overwrites it, stranding a
-    reader blocked on the old fd forever — a second latent zombie this
-    replaces).
+  - re-`Open` retires the previous socket on a short linger (disgo overwrites
+    it un-closed, stranding a reader blocked on the old fd forever — a second
+    latent zombie this replaces; the linger, rather than an immediate close,
+    keeps an in-flight sender `Write` holding the old snapshot from eating
+    `net.ErrClosed`, on which disgo's sender permanently self-reaps);
+  - `Close` is terminal: a voice-gateway `Ready` still in flight during
+    teardown gets a refusal instead of reviving a socket and keepalive
+    goroutine nothing would ever stop.
 - **A per-cycle media watchdog detects and recovers.** It lives in wirenpc's
-  `connectAndServe`, bound to cycleCtx like the stage subscriber. Its verdict
-  requires BOTH halves of the incident's signature: no RTP for the stall window
-  (`GLYPHOXA_VOICE_MEDIA_STALL_WINDOW`, default 45s; doubled while a connection
-  has never carried a packet, so a slow DAVE/MLS handshake cannot false-fire)
-  AND a **remote** Speaking announcement on the still-healthy voice websocket
-  after audio last moved (observed via `voice.WithConnEventHandlerFunc`; the
-  Bot's own speaking echo is excluded). A genuinely quiet table produces no
-  Speaking events and can never trip it — Idle Close remains that table's only
-  policy. On a verdict it cancels the cycle with the `errMediaStall` cause, and
-  `runWithReconnect` rebuilds the whole connection on its existing backoff;
+  `connectAndServe`, bound to cycleCtx like the stage subscriber, and carries
+  two independent evidence tiers because neither signal alone is trustworthy:
+  - *Echo cessation* (primary): once the current socket has proven the voice
+    server echoes our keepalives (≥3 echoes), a full stall window
+    (`GLYPHOXA_VOICE_MEDIA_STALL_WINDOW`, default 45s) with NOTHING inbound —
+    no RTP, no echoes, while keepalives go out every 5s — is a dead socket,
+    whatever the table is doing. Self-calibrating: a server generation that
+    never echoes never arms this tier, so echo absence alone is never read as
+    death.
+  - *Speaking without audio* (secondary): no RTP for the window (doubled while
+    the connection has never carried a packet, so a slow DAVE/MLS handshake
+    cannot false-fire) while a **remote** participant announced ACTIVE speech
+    on the still-healthy voice websocket comfortably after audio last moved
+    (observed via `voice.WithConnEventHandlerFunc`; stop announcements and the
+    Bot's own speaking echo are excluded). Discord does not guarantee
+    per-utterance Speaking relays — historically they arrive at least on a
+    user's first transmission — which is exactly why this tier is secondary
+    and the echo tier exists.
+
+  A genuinely quiet table trips neither: quiet stops RTP, never the echoes,
+  and produces no Speaking announcements — Idle Close remains that table's
+  only policy. On a verdict the watchdog cancels the cycle with the
+  `errMediaStall` cause, and `runWithReconnect` rebuilds the whole connection;
   every rebuild still counts toward the ADR-0061 churn ceiling.
 - **Idle Close stops lying about dead transports.** The watchdog also flags the
   session's idleclose handle (`Session.MediaSuspect`); an idle breach with the
@@ -63,8 +83,12 @@ above it can ever notice. This ADR decides the three-layer fix.
 ## Consequences
 
 - A dead media path now costs the table under a minute of deafness (one stall
-  window + a backed-off rejoin) instead of up to 15 silent minutes, and the
-  session record tells the truth about what happened when recovery fails.
+  window + a rejoin) instead of up to 15 silent minutes, and the session record
+  tells the truth about what happened when recovery fails. A PERSISTENTLY dead
+  path rebuild-loops at roughly one cycle per stall window — each cycle serves
+  past `healthyAfter`, so the reconnect backoff stays at its initial delay by
+  design — bounded by the ADR-0061 churn ceiling and, 15 minutes in, by the
+  Idle Close window delivering the `media_path_dead` verdict.
 - The keepalive removes the root cause, so the watchdog should be a
   rarely-firing safety net; a moving `media_stall_rebuilds_total` is a signal
   to investigate, not steady-state noise.

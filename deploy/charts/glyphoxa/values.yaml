@@ -253,11 +253,13 @@ idleClose:
 
   # Media watchdog stall window (GLYPHOXA_VOICE_MEDIA_STALL_WINDOW, ADR-0064)
   # — a sibling protection riding the same env block: how long inbound voice
-  # RTP may be absent, while participants keep announcing speech, before the
-  # voice connection is rebuilt. A Go duration; empty takes the binary's 45s
-  # default; the literal "off" disables the verdict (the once-a-minute liveness
-  # log keeps running). A quiet table can never trip it — silence without
-  # Speaking events is not a stall.
+  # RTP may be absent — despite the connection's keepalive echoes or a
+  # participant's speaking announcement proving the socket should be receiving
+  # — before the voice connection is rebuilt. A Go duration; empty takes the
+  # binary's 45s default; "off" (QUOTE it — bare off is YAML boolean false,
+  # though the template coerces that back) disables the verdict; the
+  # once-a-minute liveness log keeps running either way. A quiet table can
+  # never trip it.
   mediaStallWindow: ""
 
 # DB connection. By default the chart stands up its own in-cluster Postgres and

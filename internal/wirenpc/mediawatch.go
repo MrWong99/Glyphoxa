@@ -44,6 +44,11 @@ const (
 	// Debug: the prod log floor is Info, and 13.5 silent minutes on an open
 	// session was itself one of #633's findings.
 	mediaLivenessLogEvery = 60 * time.Second
+	// echoArmCount is how many keepalive echoes the current socket must have
+	// carried before their cessation counts as a verdict. The echo tier is
+	// self-calibrating: a server generation that never echoes never reaches
+	// this count, so echo absence alone is never read as death.
+	echoArmCount = 3
 )
 
 // mediaWatchdog watches one connect-and-serve cycle's inbound media path. Its
@@ -72,9 +77,15 @@ type mediaWatchdog struct {
 	lastPackets uint64
 	lastMove    time.Time // when the packet counter last moved (start until then)
 	everMoved   bool
+	// lastAny/lastAnyMove track packets+echoes combined: on an echo-armed
+	// socket, NOTHING arriving — not even our keepalives reflected back — for
+	// the stall window is a dead socket regardless of anyone speaking.
+	lastAny     uint64
+	lastAnyMove time.Time
 
 	lastLog       time.Time
 	logPackets    uint64
+	logEchoes     uint64
 	logKeepalives uint64
 	fired         bool
 }
@@ -98,6 +109,7 @@ func newMediaWatchdog(liveness func() (gxvoice.MediaLiveness, bool), cancel cont
 func (w *mediaWatchdog) run(ctx context.Context) {
 	start := w.now()
 	w.lastMove = start
+	w.lastAnyMove = start
 	w.lastLog = start
 	ticks := w.ticks
 	if ticks == nil {
@@ -134,23 +146,49 @@ func (w *mediaWatchdog) check(now time.Time) {
 		w.lastMove = now
 		w.everMoved = ml.Packets > 0
 	}
+	if any := ml.Packets + ml.Echoes; any != w.lastAny {
+		w.lastAny = any
+		w.lastAnyMove = now
+	}
 
 	if now.Sub(w.lastLog) >= mediaLivenessLogEvery {
 		w.log.Info("voice media liveness",
 			"guild", w.guild,
 			"packets_delta", counterDelta(ml.Packets, w.logPackets),
+			"echoes_delta", counterDelta(ml.Echoes, w.logEchoes),
 			"keepalives_delta", counterDelta(ml.Keepalives, w.logKeepalives),
 			"last_packet_ago", agoOrNever(now, w.lastMove, w.everMoved),
 			"speaking_ago", agoOrNever(now, ml.LastSpeaking, !ml.LastSpeaking.IsZero()),
 		)
 		w.lastLog = now
 		w.logPackets = ml.Packets
+		w.logEchoes = ml.Echoes
 		w.logKeepalives = ml.Keepalives
 	}
 
 	if w.window <= 0 {
 		return
 	}
+
+	// Verdict tier 1 — echo cessation. Once the socket has proven the voice
+	// server echoes our keepalives (echoArmCount on THIS socket), a full stall
+	// window with NOTHING inbound — no RTP, no echoes, while keepalives go out
+	// every 5s — is a dead socket, whether or not anyone is speaking. This is
+	// the tier that does not depend on Discord relaying per-utterance Speaking
+	// events, and a quiet table cannot trip it: quiet only stops RTP, never the
+	// echoes.
+	if ml.Echoes >= echoArmCount && now.Sub(w.lastAnyMove) >= w.window {
+		w.fire(now, ml, "echo_cessation", now.Sub(w.lastAnyMove), w.window)
+		return
+	}
+
+	// Verdict tier 2 — speaking evidence. No RTP for the (possibly doubled)
+	// window while a remote participant announced ACTIVE speech on the still
+	// healthy voice websocket, comfortably after the last time audio moved
+	// (one full tick of slack: lastMove is stamped at tick resolution, so a
+	// stop-start announcement racing a tick boundary must not convict). A
+	// silent room produces no Speaking events and can never trip this — Idle
+	// Close remains its only policy.
 	window := w.window
 	if !w.everMoved {
 		// The receiver reads nothing while the DAVE/MLS handshake runs, so a
@@ -162,18 +200,19 @@ func (w *mediaWatchdog) check(now time.Time) {
 	if stall < window {
 		return
 	}
-	// The discriminator against a genuinely quiet table: someone announced
-	// speech on the (still healthy) voice websocket AFTER the last time audio
-	// moved. A silent room produces no Speaking events, so it can never trip
-	// this — Idle Close remains its only policy.
-	if ml.LastSpeaking.IsZero() || !ml.LastSpeaking.After(w.lastMove) {
+	if ml.LastSpeaking.IsZero() || !ml.LastSpeaking.After(w.lastMove.Add(mediaWatchTick)) {
 		return
 	}
+	w.fire(now, ml, "speaking_without_audio", stall, window)
+}
 
+// fire records the verdict exactly once and ends the cycle with errMediaStall.
+func (w *mediaWatchdog) fire(now time.Time, ml gxvoice.MediaLiveness, evidence string, stall, window time.Duration) {
 	w.fired = true
 	w.log.Warn("inbound media path stalled; ending cycle to rebuild the voice connection",
-		"guild", w.guild, "stall", stall, "speaking_ago", now.Sub(ml.LastSpeaking),
-		"packets", ml.Packets, "keepalives", ml.Keepalives, "window", window)
+		"guild", w.guild, "evidence", evidence, "stall", stall, "window", window,
+		"speaking_ago", agoOrNever(now, ml.LastSpeaking, !ml.LastSpeaking.IsZero()),
+		"packets", ml.Packets, "echoes", ml.Echoes, "keepalives", ml.Keepalives)
 	if w.metrics != nil {
 		w.metrics.MediaStallRebuild(w.guild)
 	}
