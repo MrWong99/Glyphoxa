@@ -58,6 +58,13 @@ const (
 	// ReasonChurn is written when a Voice Session ran through more Discord
 	// reconnect cycles than its ceiling allows.
 	ReasonChurn = "reconnect_churn: the Voice Session exceeded its reconnect-cycle ceiling"
+	// ReasonMediaDead is written when a Voice Session processed no audio for the
+	// whole Idle Close Window AND the media watchdog had flagged the inbound
+	// media path as dead (#633: remote participants kept announcing speech while
+	// no RTP arrived, and the rebuilds it triggered never brought audio back).
+	// The same breach as [ReasonIdle], told apart so a transport fault stops
+	// masquerading as a quiet table.
+	ReasonMediaDead = "media_path_dead: the Voice Session received no audio while participants kept speaking"
 )
 
 // defaultSweep is the watchdog cadence when the Policy leaves it unset. 30s is
@@ -197,6 +204,13 @@ type Session struct {
 	// Atomic rather than Guard.mu-guarded so an owner can call it while holding its
 	// OWN lock without introducing a lock order between the two.
 	live atomic.Bool
+	// mediaSuspect records that the media watchdog declared the inbound media
+	// path dead (#633) since audio last moved. Set by [Session.MediaSuspect]
+	// from the wirenpc watchdog goroutine, cleared by the sweep the moment
+	// marks move again — so it only recolors an idle breach whose silence the
+	// transport fault actually explains. Atomic for the same lock-order reason
+	// as live.
+	mediaSuspect atomic.Bool
 
 	// The fields below are guarded by Guard.mu.
 	seen       uint64    // marks as of lastActive
@@ -211,7 +225,7 @@ type Session struct {
 // in the watchdog's logs only.
 //
 // close is invoked at most once, from the sweep goroutine, with one of
-// [ReasonIdle] / [ReasonChurn] / [ReasonResource]. The session stays enrolled
+// [ReasonIdle] / [ReasonMediaDead] / [ReasonChurn] / [ReasonResource]. The session stays enrolled
 // after it fires (its loop takes seconds to unwind through its finalizers) but is
 // never chosen again.
 //
@@ -256,6 +270,19 @@ func (s *Session) Activate() {
 		return
 	}
 	s.live.Store(true)
+}
+
+// MediaSuspect records that the media watchdog (#633) declared this session's
+// inbound media path dead: remote participants kept announcing speech while no
+// RTP arrived. If the flag is still standing when the Idle Close Window
+// breaches, the close reports [ReasonMediaDead] instead of [ReasonIdle]; audio
+// flowing again clears it on the next sweep. One atomic store, safe on a nil
+// handle.
+func (s *Session) MediaSuspect() {
+	if s == nil {
+		return
+	}
+	s.mediaSuspect.Store(true)
 }
 
 // CycleStarted records that this Voice Session began another Discord connect
@@ -365,9 +392,13 @@ func (g *Guard) sweep(now time.Time) {
 	for _, s := range g.order {
 		// A moved counter is the only evidence of audio. Reading it here — rather
 		// than stamping a timestamp on the audio path — is what keeps Mark free.
+		// Moving audio also retires a standing media-dead verdict (#633): the
+		// watchdog's rebuild evidently worked, so a LATER quiet stretch is a quiet
+		// table again, not the transport fault.
 		if n := s.marks.Load(); n != s.seen {
 			s.seen = n
 			s.lastActive = now
+			s.mediaSuspect.Store(false)
 		}
 		// Not yet admitted (the owner is still starting it): collect its marks, close
 		// nothing. See [Session.Activate].
@@ -382,7 +413,13 @@ func (g *Guard) sweep(now time.Time) {
 			breached = append(breached, breach{s, ReasonChurn})
 		case g.policy.Window > 0 && now.Sub(s.lastActive) >= g.policy.Window:
 			s.closed = true
-			breached = append(breached, breach{s, ReasonIdle})
+			// The same breach, two truths (#633): with a standing media-dead
+			// verdict the silence is a transport fault, not a quiet table.
+			reason := ReasonIdle
+			if s.mediaSuspect.Load() {
+				reason = ReasonMediaDead
+			}
+			breached = append(breached, breach{s, reason})
 		}
 	}
 	if len(breached) == 0 {

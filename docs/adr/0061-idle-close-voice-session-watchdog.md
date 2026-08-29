@@ -57,3 +57,19 @@ A table that is present but produces no audio for the whole window — everyone 
 ## Relationship to other ADRs
 
 ADR-0046 (the hard spend cap — the mechanism this copies verbatim: a fresh goroutine, `endReasonOverride` under the Manager lock, publish and cancel outside it, `ended` not `failed`), ADR-0043 (`end_reason` is a stable machine prefix plus prose — this adds three prefixes and, for the first time, propagates a policy reason onto the claim-plane row), ADR-0006 and ADR-0057 (e) (only the owning Voice Instance ends its own session; no cross-instance kill), ADR-0051 (an Idle Close is a Voice Session end like any other, so the tape is discarded wholesale and the Highlight-candidate purge horizon is scheduled by the same finalizers), ADR-0032 (the watchdog logs its decisions; it adds no new metric label), ADR-0050 (a Speaker Lane's idle reap retires ONE lane inside a still-live Voice Session — a different mechanism at a different grain, and the reason this is called Idle *Close*).
+
+## Amendment: a fourth reason, `media_path_dead` (2026-08-29, #633)
+
+The incident this watchdog existed for arrived wearing its clothes: a dead
+Discord media path (no UDP keepalive in disgo — the transport went silently
+deaf after ~13–15 outbound-quiet minutes) froze the activity marks, and Idle
+Close reaped the live table 15 minutes later as `idle_no_audio`. ADR-0064 adds
+the transport keepalive and a receive-side media watchdog; this amendment adds
+the honest close reason. The watchdog flags the session handle
+(`Session.MediaSuspect`) when it observes remote Speaking announcements with no
+RTP arriving; an idle breach with the flag standing closes as
+`media_path_dead: the Voice Session received no audio while participants kept speaking`.
+Moving audio clears the flag on the next sweep, churn still outranks both, and
+everything downstream (Manager, storage, RPC, claim plane, bundle) already
+carries any reason string verbatim. Prod rows written before this amendment may
+record dead-media closes as `idle_no_audio`.

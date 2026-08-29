@@ -24,6 +24,9 @@ func (m *countingMetrics) SessionClosed(string)                 {}
 func (m *countingMetrics) PlaybackStarted(string)               { m.started.Add(1) }
 func (m *countingMetrics) PlaybackFinished(string, bool)        { m.finished.Add(1) }
 func (m *countingMetrics) BargeCancelled(string)                {}
+func (m *countingMetrics) UDPKeepaliveSent()                    {}
+func (m *countingMetrics) UDPKeepaliveSendError()               {}
+func (m *countingMetrics) MediaStallRebuild(string)             {}
 
 func pkt(seq uint16, ts uint32, ssrc uint32, opus []byte) *voice.Packet {
 	return &voice.Packet{Sequence: seq, Timestamp: ts, SSRC: ssrc, Opus: opus}

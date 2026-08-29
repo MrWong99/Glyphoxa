@@ -42,6 +42,11 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.DAVEDecryptHook()()
 	rec.AudioSendErrorHook()()
 	rec.AudioSendErrorHook()()
+	rec.UDPKeepaliveSent()
+	rec.UDPKeepaliveSent()
+	rec.UDPKeepaliveSent()
+	rec.UDPKeepaliveSendError()
+	rec.MediaStallRebuild("guild-123")
 
 	rec.ResponseLatency(RoleCharacter, 900*time.Millisecond)
 	rec.VADHangover(480 * time.Millisecond)
@@ -79,6 +84,11 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		// #623: send-path failures distinguishable from other no_first_audio
 		// abandonments; unlabelled per ADR-0032 §2.1 bounded cardinality.
 		`glyphoxa_voice_audio_send_errors_total 2`,
+		// #633: voice UDP transport liveness — keepalives, their send errors, and
+		// media-watchdog rebuild verdicts; unlabelled per ADR-0032 §2.1.
+		`glyphoxa_voice_udp_keepalives_total 3`,
+		`glyphoxa_voice_udp_keepalive_send_errors_total 1`,
+		`glyphoxa_voice_media_stall_rebuilds_total 1`,
 		`glyphoxa_voice_sessions 1`,
 		`glyphoxa_voice_playback_total{interrupted="true"} 1`,
 		`glyphoxa_voice_barge_cancels_total 1`,

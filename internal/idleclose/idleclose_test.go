@@ -650,3 +650,73 @@ func TestRuntimeUsage_ReportsSomething(t *testing.T) {
 		t.Error("runtimeUsage().Goroutines = 0; the goroutine ceiling would never fire")
 	}
 }
+
+// TestGuard_MediaSuspectRecolorsIdleClose pins #633's reason split: the same
+// idle breach reports media_path_dead when the media watchdog flagged the
+// inbound path, so a transport fault stops masquerading as a quiet table.
+func TestGuard_MediaSuspectRecolorsIdleClose(t *testing.T) {
+	t.Parallel()
+	g, advance := newGuard(t, testPolicy())
+	var rec recorder
+	h := enroll(g, "s1", rec.close)
+
+	h.MediaSuspect()
+	advance(15 * time.Minute)
+	got := rec.snapshot()
+	if len(got) != 1 || got[0] != ReasonMediaDead {
+		t.Fatalf("close reasons = %v, want exactly one %q", got, ReasonMediaDead)
+	}
+}
+
+// TestGuard_AudioClearsMediaSuspect pins the flag's retirement: audio flowing
+// again proves the watchdog's rebuild worked, so a LATER quiet stretch closes
+// as a plain idle table, not as a dead media path.
+func TestGuard_AudioClearsMediaSuspect(t *testing.T) {
+	t.Parallel()
+	g, advance := newGuard(t, testPolicy())
+	var rec recorder
+	h := enroll(g, "s1", rec.close)
+
+	h.MediaSuspect()
+	h.Mark() // the rebuilt connection heard something
+	advance(time.Minute)
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("closed prematurely: %v", got)
+	}
+
+	advance(15 * time.Minute)
+	got := rec.snapshot()
+	if len(got) != 1 || got[0] != ReasonIdle {
+		t.Fatalf("close reasons = %v, want exactly one %q — the suspect flag must not outlive recovered audio", got, ReasonIdle)
+	}
+}
+
+// TestGuard_ChurnOutranksMediaSuspect keeps the existing breach precedence: a
+// session cycling itself to death names the churn even when the media path was
+// also flagged, since the cycle ceiling is the more actionable end_reason.
+func TestGuard_ChurnOutranksMediaSuspect(t *testing.T) {
+	t.Parallel()
+	p := testPolicy()
+	p.MaxCycles = 2
+	g, advance := newGuard(t, p)
+	var rec recorder
+	h := enroll(g, "s1", rec.close)
+
+	h.MediaSuspect()
+	for range 3 {
+		h.CycleStarted()
+	}
+	advance(15 * time.Minute)
+	got := rec.snapshot()
+	if len(got) != 1 || got[0] != ReasonChurn {
+		t.Fatalf("close reasons = %v, want exactly one %q", got, ReasonChurn)
+	}
+}
+
+// TestSession_MediaSuspectNilSafe keeps the feature-off contract every other
+// handle method carries.
+func TestSession_MediaSuspectNilSafe(t *testing.T) {
+	t.Parallel()
+	var s *Session
+	s.MediaSuspect() // must not panic
+}
