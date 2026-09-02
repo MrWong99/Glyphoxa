@@ -164,14 +164,14 @@ func importInTx(
 	for i := range b.Campaign.Agents {
 		a := &b.Campaign.Agents[i]
 		if _, dup := res.AgentIDs[a.ID]; dup {
-			return fmt.Errorf("bundle: import: duplicate agent ref %q", a.ID)
+			return fmt.Errorf("%w: duplicate agent ref %q", ErrInvalidBundle, a.ID)
 		}
 		if a.Role == string(storage.AgentRoleButler) {
 			if butlerSeen {
 				// A Campaign has exactly one Butler (ADR-0009, types.go): a second in
 				// the bundle would last-wins-overwrite the first and lie in the counts,
 				// so it is a hard error that rolls the import back.
-				return fmt.Errorf("bundle: import: more than one butler in bundle")
+				return fmt.Errorf("%w: more than one butler in bundle", ErrInvalidBundle)
 			}
 			butlerSeen = true
 			if err := mergeButler(ctx, tx, campaignID, a, res); err != nil {
@@ -190,7 +190,7 @@ func importInTx(
 		if _, dup := nodeIDs[n.ID]; dup {
 			// Two nodes sharing a ref key would clobber the remap, binding edges/links
 			// to the wrong node — same all-or-nothing discipline as an unknown ref.
-			return fmt.Errorf("bundle: import: duplicate node ref %q", n.ID)
+			return fmt.Errorf("%w: duplicate node ref %q", ErrInvalidBundle, n.ID)
 		}
 		created, err := tx.CreateNode(ctx, storage.NewKGNode{
 			CampaignID: campaignID,
@@ -229,7 +229,7 @@ func importInTx(
 		if n.AgentID != "" {
 			agentID, ok := res.AgentIDs[n.AgentID]
 			if !ok {
-				return fmt.Errorf("bundle: import: node %q references unknown agent %q", n.Name, n.AgentID)
+				return fmt.Errorf("%w: node %q references unknown agent %q", ErrInvalidBundle, n.Name, n.AgentID)
 			}
 			if _, err := tx.SetNodeAgent(ctx, campaignID, created.ID,
 				uuid.NullUUID{UUID: agentID, Valid: true}); err != nil {
@@ -242,11 +242,11 @@ func importInTx(
 		e := &b.Campaign.Edges[i]
 		from, ok := nodeIDs[e.From]
 		if !ok {
-			return fmt.Errorf("bundle: import: edge references unknown from-node %q", e.From)
+			return fmt.Errorf("%w: edge references unknown from-node %q", ErrInvalidBundle, e.From)
 		}
 		to, ok := nodeIDs[e.To]
 		if !ok {
-			return fmt.Errorf("bundle: import: edge references unknown to-node %q", e.To)
+			return fmt.Errorf("%w: edge references unknown to-node %q", ErrInvalidBundle, e.To)
 		}
 		created, err := tx.CreateEdge(ctx, storage.NewKGEdge{
 			CampaignID: campaignID,
@@ -328,13 +328,13 @@ func importMaps(
 	for i := range b.Campaign.Maps {
 		m := &b.Campaign.Maps[i]
 		if _, dup := mapIDs[m.ID]; dup {
-			return fmt.Errorf("bundle: import: duplicate map ref %q", m.ID)
+			return fmt.Errorf("%w: duplicate map ref %q", ErrInvalidBundle, m.ID)
 		}
 		anchor := uuid.NullUUID{}
 		if m.AnchorNodeID != "" {
 			id, ok := nodeIDs[m.AnchorNodeID]
 			if !ok {
-				return fmt.Errorf("bundle: import: map %q references unknown anchor entry %q", m.Name, m.AnchorNodeID)
+				return fmt.Errorf("%w: map %q references unknown anchor entry %q", ErrInvalidBundle, m.Name, m.AnchorNodeID)
 			}
 			anchor = uuid.NullUUID{UUID: id, Valid: true}
 		}
@@ -356,7 +356,7 @@ func importMaps(
 		var key string
 		if m.ImageBase64 != "" {
 			if imgs == nil {
-				return fmt.Errorf("bundle: import: map %q carries an image but this deployment has no blob store", m.Name)
+				return fmt.Errorf("%w: map %q carries an image but this deployment has no blob store", ErrInvalidBundle, m.Name)
 			}
 			k, kerr := blob.Key(tenantID, "map", uuid.New(), "image")
 			if kerr != nil {
@@ -365,14 +365,14 @@ func importMaps(
 			key = k
 			data, derr := base64.StdEncoding.DecodeString(m.ImageBase64)
 			if derr != nil {
-				return fmt.Errorf("bundle: import: map %q image is not valid base64: %w", m.Name, derr)
+				return fmt.Errorf("%w: map %q image is not valid base64: %w", ErrInvalidBundle, m.Name, derr)
 			}
 			contentType := m.ContentType
 			if contentType == "" {
 				contentType = "image/png"
 			}
 			if !rasterImageType(contentType) {
-				return fmt.Errorf("bundle: import: map %q: image content type %q is not allowed (PNG, JPEG, WebP or GIF only)", m.Name, contentType)
+				return fmt.Errorf("%w: map %q: image content type %q is not allowed (PNG, JPEG, WebP or GIF only)", ErrInvalidBundle, m.Name, contentType)
 			}
 			if err := imgs.WriteMapImage(ctx, key, contentType, data); err != nil {
 				return fmt.Errorf("bundle: import: map %q image: %w", m.Name, err)
@@ -404,7 +404,7 @@ func importMaps(
 		}
 		parent, ok := mapIDs[m.ParentMapID]
 		if !ok {
-			return fmt.Errorf("bundle: import: map %q references unknown parent %q", m.Name, m.ParentMapID)
+			return fmt.Errorf("%w: map %q references unknown parent %q", ErrInvalidBundle, m.Name, m.ParentMapID)
 		}
 		anchor := uuid.NullUUID{}
 		if m.AnchorNodeID != "" {
@@ -430,7 +430,7 @@ func importMaps(
 		for _, p := range m.Pins {
 			nodeID, ok := nodeIDs[p.NodeID]
 			if !ok {
-				return fmt.Errorf("bundle: import: pin on map %q references unknown entry %q", m.Name, p.NodeID)
+				return fmt.Errorf("%w: pin on map %q references unknown entry %q", ErrInvalidBundle, m.Name, p.NodeID)
 			}
 			if _, err := tx.CreatePin(ctx, storage.NewMapPin{
 				MapID:         mapIDs[m.ID],
@@ -468,7 +468,7 @@ func importBoards(
 		for _, ref := range bd.NodeIDs {
 			id, ok := nodeIDs[ref]
 			if !ok {
-				return fmt.Errorf("bundle: import: board %q references unknown entry %q", bd.Name, ref)
+				return fmt.Errorf("%w: board %q references unknown entry %q", ErrInvalidBundle, bd.Name, ref)
 			}
 			ids = append(ids, id)
 		}

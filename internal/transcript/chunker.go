@@ -208,6 +208,17 @@ func (c *Chunker) fold(e voiceevent.Event) {
 		c.appendHuman(sid, ev)
 	case voiceevent.AddressRouted:
 		c.proj.Turn(sid, ev.TurnID).target = ev.Target
+	case voiceevent.SpeakRequested:
+		// A GM /say (#295), an Ensemble Lead (#301) and a Cross-talk Reaction
+		// (#302) all speak under a turn id that never saw AddressRouted, so WHO
+		// speaks is recorded here exactly as the relay does. Without it the chunk
+		// read "NPC: …" with no participant ref, and the NPC-knowledge ANN filter
+		// (participated_agent_ids) could never return those lines.
+		c.proj.Turn(sid, ev.TurnID).target = ev.Target
+	case voiceevent.EnsembleLead:
+		c.proj.Turn(sid, ev.TurnID).target = ev.Target
+	case voiceevent.EnsembleReaction:
+		c.proj.Turn(sid, ev.TurnID).target = ev.Target
 	case voiceevent.TTSInvoked:
 		c.bufferAgentSentence(sid, ev)
 	case voiceevent.FirstAudio:
@@ -377,15 +388,17 @@ func (c *Chunker) abortSentence(sid string, ev voiceevent.TTSStreamFailed) {
 		return
 	}
 	switch {
+	case t.line.text == nameOr(t.target.Name, "NPC")+": "+s:
+		// The failed sentence opened the line — no delivered text remains, so the
+		// line leaves the open chunk entirely and the turn re-opens on a later
+		// delivered sentence. Checked FIRST and by equality: an opener also ends
+		// in " "+s, so the tail-trim case below used to shadow this one and leave
+		// an empty "Bart:" line (and its count) behind.
+		c.removeOpenLine(sid, t.line)
+		t.line = nil
 	case strings.HasSuffix(t.line.text, " "+s):
 		// A later sentence of a multi-sentence line: trim just the failed tail.
 		t.line.text = strings.TrimSuffix(t.line.text, " "+s)
-	case strings.HasSuffix(t.line.text, ": "+s):
-		// The failed sentence opened the line — no delivered text remains, so the
-		// line leaves the open chunk entirely and the turn re-opens on a later
-		// delivered sentence.
-		c.removeOpenLine(sid, t.line)
-		t.line = nil
 	default:
 		c.log.Warn("transcript: mid-stream TTS failure did not match the committed tail, leaving line unchanged",
 			"turn", ev.TurnID)
@@ -562,3 +575,11 @@ func (c *Chunker) FlushSession(ctx context.Context, sessionID uuid.UUID) error {
 
 	return c.queue.Flush(ctx, nil)
 }
+
+// Compile-time pins: *storage.Store satisfies every narrow store seam this
+// package declares, so a drift in a store method fails THIS package's build
+// instead of surfacing only at the composition root (CONTRIBUTING: interface
+// assertions).
+var (
+	_ ChunkStore = (*storage.Store)(nil)
+)

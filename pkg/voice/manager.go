@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/voice"
@@ -217,7 +218,16 @@ func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID, opts ..
 	conn := m.vm.CreateConn(guild)
 	sess, err := newSession(ctx, guild, channel, conn, cfg)
 	if err != nil {
-		m.vm.RemoveConn(guild) // unwind the conn disgo created on our behalf
+		// Open may already have sent the voice-state JOIN (and opened the voice
+		// gateway/UDP) before it failed or the ctx fired: Close sends the LEAVE
+		// and tears those down, RemoveConn alone only forgot the handle and left
+		// a ghost Bot presence in the channel plus the leaked goroutines. Bounded
+		// and detached from the possibly-cancelled caller ctx so the leave goes
+		// out; RemoveConn stays for the mock seam (idempotent with disgo's own).
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		conn.Close(cctx)
+		cancel()
+		m.vm.RemoveConn(guild)
 		return nil, err
 	}
 

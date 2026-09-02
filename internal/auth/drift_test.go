@@ -386,3 +386,53 @@ func TestAdapterTenantPosture(t *testing.T) {
 			optSeen.hasUser, optSeen.hasTenant)
 	}
 }
+
+// erringAuthN models a session store that cannot answer at all (DB outage, pool
+// timeout): every lookup fails with something other than storage.ErrNotFound.
+type erringAuthN struct{ err error }
+
+func (e erringAuthN) AuthenticateSession(context.Context, string) (storage.User, error) {
+	return storage.User{}, e.err
+}
+
+// TestAdapterParity_AuthenticatorFailureIsUnavailable pins the third outcome:
+// a presented session that could not be VERIFIED is CodeUnavailable / 503 on
+// both transports — never "please sign in" (401), which the SPA turns into a
+// logout, and never a silent "no principal" on the public probe either.
+func TestAdapterParity_AuthenticatorFailureIsUnavailable(t *testing.T) {
+	t.Parallel()
+	authn := erringAuthN{err: errors.New("connection refused")}
+	tenants := fakeTenant{id: uuid.New()}
+	client := connectAdapter(t, authn, tenants)
+	readMount, writeMount, _ := httpAdapter(t, authn, tenants, auth.TenantOptional)
+
+	cookie := auth.SessionCookieName + "=" + validToken + "; " + auth.CSRFCookieName + "=" + csrfValue
+
+	readReq := connect.NewRequest(&managementv1.GetCurrentUserRequest{})
+	readReq.Header().Set("Cookie", cookie)
+	if _, err := client.GetCurrentUser(context.Background(), readReq); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("GetCurrentUser code = %v, want Unavailable (err=%v)", connect.CodeOf(err), err)
+	}
+	writeReq := connect.NewRequest(&managementv1.LogoutRequest{})
+	writeReq.Header().Set("Cookie", cookie)
+	writeReq.Header().Set("X-CSRF-Token", csrfValue)
+	if _, err := client.Logout(context.Background(), writeReq); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("Logout code = %v, want Unavailable (err=%v)", connect.CodeOf(err), err)
+	}
+
+	httpRead := httptest.NewRequest(http.MethodGet, "/read", nil)
+	httpRead.Header.Set("Cookie", cookie)
+	readRec := httptest.NewRecorder()
+	readMount.ServeHTTP(readRec, httpRead)
+	if readRec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET mount status = %d, want 503", readRec.Code)
+	}
+	httpWrite := httptest.NewRequest(http.MethodPost, "/write", nil)
+	httpWrite.Header.Set("Cookie", cookie)
+	httpWrite.Header.Set("X-CSRF-Token", csrfValue)
+	writeRec := httptest.NewRecorder()
+	writeMount.ServeHTTP(writeRec, httpWrite)
+	if writeRec.Code != http.StatusServiceUnavailable {
+		t.Errorf("POST mount status = %d, want 503", writeRec.Code)
+	}
+}

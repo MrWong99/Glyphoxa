@@ -145,3 +145,11 @@ func IndexHandler(store Store, encoders *address.EncoderRegistry, log *slog.Logg
 		return nil
 	}
 }
+
+// Compile-time pins: *storage.Store satisfies every narrow store seam this
+// package declares, so a drift in a store method fails THIS package's build
+// instead of surfacing only at the composition root (CONTRIBUTING: interface
+// assertions).
+var (
+	_ Store = (*storage.Store)(nil)
+)

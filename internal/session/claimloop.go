@@ -287,7 +287,7 @@ func (l *ClaimLoop) runSession(ctx context.Context, intent storage.VoiceSessionI
 		case <-ctx.Done():
 			// Graceful shutdown (SIGTERM): end the session cleanly and finish the row
 			// on a detached ctx (the run ctx is already cancelled).
-			l.endSession(tenant, intent.ID, storage.VoiceIntentDone, "")
+			l.endSession(tenant, intent)
 			return
 		case <-ticker.C:
 			_, live, _ := l.mgr.Active(ctx, tenant)
@@ -336,7 +336,7 @@ func (l *ClaimLoop) runSession(ctx context.Context, intent storage.VoiceSessionI
 			// carry its outcome (an endSession here would be a redundant Stop and would
 			// mislabel a failed self-exit 'done').
 			if stop && live {
-				l.endSession(tenant, intent.ID, storage.VoiceIntentDone, "")
+				l.endSession(tenant, intent)
 				return
 			}
 			if live {
@@ -476,13 +476,19 @@ func (l *ClaimLoop) finishSelfExit(intent storage.VoiceSessionIntent) {
 // without it a clean drain inside the budget could cross Expiry unheartbeated
 // and be reaped 'dead' mid-drain. Beats end BEFORE the finish (stopBeat waits
 // out the goroutine), so no beat is ever ordered after the terminal write.
-func (l *ClaimLoop) endSession(tenant uuid.UUID, intentID uuid.UUID, status storage.VoiceSessionIntentStatus, lastError string) {
-	stopBeat := l.startDrainHeartbeat(intentID)
+//
+// The OUTCOME is read from the voice_sessions row (finishSelfExit), never
+// assumed: Stop has just waited for the terminal row to land, so a GM/SIGTERM
+// stop of a live session still finishes 'done' with no error, while a SIGTERM
+// that lands on a session already failing its self-exit carries that failure
+// instead of mislabelling it 'done' with an empty last_error.
+func (l *ClaimLoop) endSession(tenant uuid.UUID, intent storage.VoiceSessionIntent) {
+	stopBeat := l.startDrainHeartbeat(intent.ID)
 	if _, err := l.mgr.Stop(l.detached(), tenant); err != nil && !errors.Is(err, ErrNoActiveSession) {
-		l.log.Warn("claim loop: stop session", "intent", intentID, "err", err)
+		l.log.Warn("claim loop: stop session", "intent", intent.ID, "err", err)
 	}
 	stopBeat()
-	l.finish(intentID, status, lastError)
+	l.finishSelfExit(intent)
 }
 
 // startDrainHeartbeat keeps the intent's heartbeat fresh while a wind-down

@@ -118,6 +118,14 @@ func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	playCtx, cancel := context.WithCancel(ctx)
 	pb := newPlayback(cancel)
 	slot := &playSlot{pb: pb, src: src, ctx: playCtx}
+	// ctx cancellation is authoritative, not advisory: without this watcher the
+	// only path from a cancelled playCtx to a closed Done ran on disgo's sender
+	// goroutine (the provider's per-frame ctx.Err check), so a barge-in or
+	// conv-stop landing while the sender was DAVE-gated or already reaped never
+	// finished the playback — and a PlaybackPump waiting on Done wedged the whole
+	// cycle teardown. finish is first-wins, so a clean EOF that already landed
+	// keeps its nil error.
+	stopWatch := context.AfterFunc(playCtx, func() { pb.finish(ErrInterrupted) })
 
 	// Swap atomically, then interrupt whatever we displaced. The provider may
 	// have already retired the previous slot on EOF (clear sets it to nil); in
@@ -135,6 +143,10 @@ func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	// its Done closes, whether by clean EOF, Stop, or interruption.
 	go func() {
 		<-pb.Done()
+		// Release the watcher and the child ctx on every completion path — a
+		// clean EOF never cancelled playCtx before, leaking the AfterFunc.
+		stopWatch()
+		cancel()
 		s.metrics.PlaybackFinished(s.guild.String(), pb.Err() != nil)
 	}()
 

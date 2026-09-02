@@ -312,3 +312,11 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 	s.metrics.HighlightPersist(observe.HighlightPersistSaved)
 	s.log.Info("highlight saved", "voice_session", ss.voiceSessionID, "highlight", highlightID, "score", t.Score)
 }
+
+// Compile-time pins: *storage.Store satisfies every narrow store seam this
+// package declares, so a drift in a store method fails THIS package's build
+// instead of surfacing only at the composition root (CONTRIBUTING: interface
+// assertions).
+var (
+	_ Store = (*storage.Store)(nil)
+)

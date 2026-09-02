@@ -99,8 +99,11 @@ func (i policyInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFun
 // connectCode maps a policy [Denial] onto the Connect transport — the
 // interceptor-side mirror of middleware.go's [WriteDenial].
 func connectCode(d Denial) connect.Code {
-	if d == DenyCSRF {
+	switch d {
+	case DenyCSRF:
 		return connect.CodePermissionDenied
+	case DenyUnavailable:
+		return connect.CodeUnavailable
 	}
 	return connect.CodeUnauthenticated
 }

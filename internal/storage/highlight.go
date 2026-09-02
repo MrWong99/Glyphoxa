@@ -530,10 +530,13 @@ type HighlightSoundEnrichTarget struct {
 // empty) and NO enrich job of the given kind in a live state matching BOTH the
 // highlight AND the requested sound kind (#312). Matching the payload's kind
 // too is what lets a choice CHANGE re-sweep: a 'done' sting job must not
-// satisfy a later music request. 'done' counts as satisfied (an unconfigured
-// no-op is not re-swept every boot); 'dead' is treated as absent so a
-// dead-lettered generation is re-scheduled once the key is fixed. Process-wide,
-// carries no tenant.
+// satisfy a later music request. 'done' counts as satisfied only for the
+// request it was enqueued for (created_at >= sound_requested_at — both are DB
+// now() stamps, and the job is always enqueued after the kind write commits), so
+// an unconfigured no-op is not re-swept every boot while a same-kind
+// regenerate or an A->B->A re-request whose enqueue was lost IS re-driven;
+// 'dead' is treated as absent so a dead-lettered generation is re-scheduled
+// once the key is fixed. Process-wide, carries no tenant.
 func (s *Store) ListPromotedHighlightsNeedingSoundEnrichment(ctx context.Context, enrichKind string) ([]HighlightSoundEnrichTarget, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT h.id, h.tenant_id, h.sound_kind
@@ -544,7 +547,8 @@ func (s *Store) ListPromotedHighlightsNeedingSoundEnrichment(ctx context.Context
 		    AND NOT EXISTS (
 		          SELECT 1 FROM job j
 		           WHERE j.kind = $1
-		             AND j.status IN ('pending','running','done')
+		             AND (j.status IN ('pending','running')
+		                  OR (j.status = 'done' AND j.created_at >= h.sound_requested_at))
 		             AND j.payload->>'highlight_id' = h.id::text
 		             AND j.payload->>'kind' = h.sound_kind
 		        )`, enrichKind)

@@ -232,3 +232,15 @@ func (c *Cast) SpeakReaction(ctx context.Context, e voiceevent.AddressRouted, le
 	}
 	return r.speakDraftModality(ctx, crossTalkUserText(c.turnLine(r, e, false), leadName, leadText), e.Text, reaction, dispatch)
 }
+
+// Compile-time pins for the optional orchestrator seams *Cast satisfies. The
+// ensemble reactor discovers them by runtime type assertion (orchestrator's
+// ensemble.go) and silently degrades when one is missing — a drift here must
+// fail the build, not a table (the LookaheadPump pin in pipeline.go is the
+// precedent).
+var (
+	_ orchestrator.EnsembleSpeaker  = (*Cast)(nil)
+	_ orchestrator.CrossTalker      = (*Cast)(nil)
+	_ orchestrator.FallbackSpeaker  = (*Cast)(nil)
+	_ orchestrator.ReactionModality = (*Cast)(nil)
+)

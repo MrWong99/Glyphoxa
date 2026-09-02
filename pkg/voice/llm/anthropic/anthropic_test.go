@@ -624,3 +624,49 @@ func TestComplete_ServerErrorEvent_EmitsEventError(t *testing.T) {
 		t.Errorf("EventError %q does not carry the server payload", events[0].Err)
 	}
 }
+
+// TestComplete_ContextCanceled_NoTerminalEvent pins the cancellation contract the
+// other adapters honour: a ctx cancelled mid-stream closes the channel with
+// NEITHER an EventDone nor an EventError. The adapter's own doc promised it, but
+// the scanner's read error (context canceled) used to surface as a terminal
+// EventError on about half the cancellations.
+func TestComplete_ContextCanceled_NoTerminalEvent(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sse(`{"type":"message_start","message":{"id":"msg_1"}}`)))
+		_, _ = w.Write([]byte(sse(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}`)))
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		select {
+		case <-release: // hold the stream open so only the ctx cancel can close it
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	ch, err := c.Complete(ctx, llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}}})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	first, ok := <-ch
+	if !ok || first.Type != llm.EventText {
+		t.Fatalf("first event = %+v (ok=%v), want EventText", first, ok)
+	}
+	cancel()
+	for ev := range ch {
+		if ev.Type == llm.EventError {
+			t.Errorf("got EventError %q on ctx cancel, want a clean close", ev.Err)
+		}
+		if ev.Type == llm.EventDone {
+			t.Error("got EventDone on ctx cancel, want a clean close")
+		}
+	}
+}

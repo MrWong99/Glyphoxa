@@ -144,6 +144,40 @@ func TestServeImport(t *testing.T) {
 		}
 	})
 
+	t.Run("a bundle with a dangling ref is 400, not 500", func(t *testing.T) {
+		bad := encodeBundle(t, &bundle.Bundle{
+			FormatVersion: bundle.FormatVersion,
+			Campaign: bundle.Campaign{
+				Name: "Broken", System: "dnd5e", Language: "en",
+				Nodes: []bundle.Node{{ID: "n1", Type: "npc", Name: "Bart"}},
+				Edges: []bundle.Edge{{From: "n1", To: "ghost", Type: "knows"}},
+			},
+		})
+		body, ct := multipartBundle(t, bad)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("code=%d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "unknown to-node") {
+			t.Fatalf("body=%s, want the dangling ref named", rec.Body.String())
+		}
+	})
+
+	t.Run("every import slot busy is 503", func(t *testing.T) {
+		release := bundle.HoldImportSlotsForTest()
+		body, ct := multipartBundle(t, good)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		release()
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("code=%d, want 503", rec.Code)
+		}
+		if rec.Header().Get("Retry-After") == "" {
+			t.Fatal("503 without Retry-After")
+		}
+	})
+
 	t.Run("oversized upload is 413", func(t *testing.T) {
 		// The cap is shrunk rather than the payload grown: MaxImportBytes is 192 MiB
 		// (#547 — an images-included bundle carries several base64-inflated images,

@@ -297,7 +297,8 @@ func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.Pro
 // back to the model. It gathers two candidate sets, both scoped to the target
 // entity (never global): the target Node's established body facts (its body split
 // into non-empty lines) and the salient text of every PENDING proposal addressing
-// the same target.
+// the same target. Every same-target pending row feeds the dedup check, but only
+// the rows the calling Agent (agentID) authored are marked for the echo.
 //
 // The target key is UNIFIED across the two write paths: an own_node proposal keys
 // on its anchor node id, and a campaign proposal keys on its subject NAME — but the
@@ -308,7 +309,7 @@ func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.Pro
 // keeps a "subj:" key. Established body facts skip gm_private Nodes — a GM secret
 // must never surface into a prompt via the echo (ADR-0008). No session ⇒
 // ErrNoActiveSession; the comparison itself is the handler's.
-func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
+func (a *Adapter) ExistingKnowledge(ctx context.Context, agentID string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
 	campaignID, err := a.activeCampaign(ctx)
 	if err != nil {
 		return tool.KnownForTarget{}, err
@@ -363,6 +364,12 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.Propos
 		if canonicalTargetKey(pw, nameToID) == wantKey {
 			if s := tool.ProposalSalient(pw); s != "" {
 				known.Pending = append(known.Pending, s)
+				// Only the caller's own rows are echoed back into its prompt: a
+				// pending proposal another Agent filed (the Butler from the GM-only
+				// planning chat, ADR-0062) is a secret until the GM approves it.
+				if p.AuthoringAgentID.String() == agentID {
+					known.OwnPending = append(known.OwnPending, s)
+				}
 			}
 		}
 	}

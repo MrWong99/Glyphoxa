@@ -228,14 +228,14 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 
 	// Write-time dedup (#411, ADR-0052 mechanism a): suppress an exact/normalized
 	// re-proposal of something already pending for this target or already canon on
-	// its Node, and feed the agent its own pending proposals so it stops repeating
-	// itself. The read is best-effort — a KG hiccup must never drop the NPC's
+	// its Node, and feed the agent its OWN pending proposals so it stops repeating
+	// itself (never another Agent's — see KnownForTarget). The read is best-effort — a KG hiccup must never drop the NPC's
 	// memory — so it FAILS OPEN to creating the row.
 	var known KnownForTarget
 	if k, err := rk.dst.ExistingKnowledge(ctx, CallerID(ctx), w); err == nil {
 		known = k
 		if matched, dup := firstKnownMatch(ProposalSalient(w), append(known.Established, known.Pending...)); dup {
-			return alreadyNotedResult(matched, known.Pending), nil
+			return alreadyNotedResult(matched, known.OwnPending), nil
 		}
 	} else {
 		// Fail OPEN: a KG read hiccup must never drop the NPC's memory. Warn so a
@@ -247,7 +247,7 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 	if err := rk.dst.CreateProposal(ctx, CallerID(ctx), w); err != nil {
 		return "", fmt.Errorf("remember_knowledge: %w", err)
 	}
-	return notedResult(known.Pending), nil
+	return notedResult(known.OwnPending), nil
 }
 
 // maxEchoedPending caps how many of the target's pending proposals are echoed

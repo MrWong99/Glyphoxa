@@ -420,3 +420,35 @@ func TestKeepaliveUDPConnKeepaliveErrorCountsAndContinues(t *testing.T) {
 		t.Fatal("keepalive loop died on a transient write error instead of continuing")
 	}
 }
+
+// TestKeepaliveUDPConnReadsPayloadsLargerThanInitialBuffer pins the buffer-length
+// contract: the DAVE session copies into out[:len(out)], so the 512-byte initial
+// buffer must be re-sized by LENGTH for larger Opus payloads (high-bitrate
+// channels), not merely grown in capacity as the upstream disgo code does — that
+// silently truncated every payload over 512 bytes.
+func TestKeepaliveUDPConnReadsPayloadsLargerThanInitialBuffer(t *testing.T) {
+	t.Parallel()
+	ticks := make(chan time.Time)
+	fc := newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc)
+	open(t, u, fc, 42)
+	defer u.Close()
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey: %v", err)
+	}
+
+	for i, size := range []int{513, 700, 960} {
+		payload := make([]byte, size)
+		for j := range payload {
+			payload[j] = byte(j)
+		}
+		fc.reads <- sealRTP(t, uint16(9+i), 960, 7, payload)
+		p, err := u.ReadPacket()
+		if err != nil {
+			t.Fatalf("ReadPacket(%d bytes): %v", size, err)
+		}
+		if !bytes.Equal(p.Opus, payload) {
+			t.Fatalf("payload of %d bytes: got %d bytes back, want the whole payload", size, len(p.Opus))
+		}
+	}
+}

@@ -216,6 +216,21 @@ func TestListPromotedHighlightsNeedingSoundEnrichment(t *testing.T) {
 	// promoted with no request → excluded.
 	promote()
 
+	// (want) re-requested the SAME kind after a job of that kind completed → a
+	// target again: a 'done' job only satisfies the request it was enqueued for
+	// (created_at >= sound_requested_at), so a regenerate whose enqueue was lost
+	// is re-driven instead of being blocked by the earlier completion forever.
+	reRequestedID := promote()
+	request(reRequestedID, storage.SoundKindSting)
+	doneJob, err := st.EnqueueJob(ctx, highlight.JobKindEnrichSound, soundJobPayload(t, reRequestedID, tenantID, storage.SoundKindSting), 0)
+	if err != nil {
+		t.Fatalf("enqueue done job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE job SET status = 'done' WHERE id = $1`, doneJob); err != nil {
+		t.Fatalf("mark job done: %v", err)
+	}
+	request(reRequestedID, storage.SoundKindSting) // regenerate: re-stamps sound_requested_at
+
 	got, err := st.ListPromotedHighlightsNeedingSoundEnrichment(ctx, highlight.JobKindEnrichSound)
 	if err != nil {
 		t.Fatalf("list needing sound enrichment: %v", err)
@@ -224,8 +239,11 @@ func TestListPromotedHighlightsNeedingSoundEnrichment(t *testing.T) {
 	for _, tgt := range got {
 		byID[tgt.HighlightID] = tgt
 	}
-	if len(got) != 2 {
-		t.Fatalf("want the 2 unsatisfied requests, got %+v", got)
+	if len(got) != 3 {
+		t.Fatalf("want the 3 unsatisfied requests, got %+v", got)
+	}
+	if tgt, ok := byID[reRequestedID]; !ok || tgt.Kind != storage.SoundKindSting {
+		t.Fatalf("re-requested target wrong (a stale 'done' job must not satisfy a newer request): %+v", byID[reRequestedID])
 	}
 	if tgt, ok := byID[wantID]; !ok || tgt.Kind != storage.SoundKindMusic || tgt.TenantID != tenantID {
 		t.Fatalf("no-job target wrong: %+v", byID[wantID])

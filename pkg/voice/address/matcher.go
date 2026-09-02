@@ -537,6 +537,18 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	m.pruneLocked(now)
 	m.recordWordsLocked(words, now)
 
+	// A final with no tokens at all — the marks a recognizer renders for a noise
+	// burst ("...", "?", "—") — is neither an utterance nor a Backchannel (that
+	// takes a filler WORD). It routes nowhere and, unlike filler, does not touch
+	// the continuation anchor: the detector's empty-final guard (#434) only
+	// catches whitespace, so this is the matcher-side half of the substance gate
+	// (ADR-0024). Without it the zero-score utterance fell straight through to
+	// last-speaker continuation and re-woke the last addressed NPC.
+	if len(words) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+
 	nameThreshold := m.nameThreshold()
 	anyNameMatched := false
 	for _, score := range nameScores {

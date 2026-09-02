@@ -220,3 +220,49 @@ func TestOAuthCallback_NotAllowlisted_Rejected(t *testing.T) {
 		}
 	}
 }
+
+// TestOAuthCallback_SecureAndIPBehindProxy pins the production shape of ADR-0016's
+// Secure attribute: behind the https reverse proxy the request itself is
+// cleartext, so `X-Forwarded-Proto: https` must mark every issued cookie Secure
+// (and its absence must leave local cleartext dev non-Secure), while the first
+// X-Forwarded-For hop is what the session row records as the client IP.
+func TestOAuthCallback_SecureAndIPBehindProxy(t *testing.T) {
+	t.Parallel()
+	for _, proxied := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "proxied"}[proxied], func(t *testing.T) {
+			t.Parallel()
+			disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
+			store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, nil)
+
+			form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+			req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
+			req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+			if proxied {
+				req.Header.Set("X-Forwarded-Proto", "https")
+				req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+			}
+			rec := httptest.NewRecorder()
+			o.Callback(rec, req)
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+			}
+			cookies := rec.Result().Cookies()
+			if len(cookies) == 0 {
+				t.Fatal("no cookies issued")
+			}
+			for _, c := range cookies {
+				if c.Secure != proxied {
+					t.Errorf("cookie %s Secure=%v, want %v", c.Name, c.Secure, proxied)
+				}
+			}
+			wantIP := req.RemoteAddr
+			if proxied {
+				wantIP = "203.0.113.7"
+			}
+			if store.created.IP != wantIP {
+				t.Errorf("session IP = %q, want %q", store.created.IP, wantIP)
+			}
+		})
+	}
+}

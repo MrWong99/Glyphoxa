@@ -220,3 +220,35 @@ func pullAll(t *testing.T, conn *mock.Conn) [][]byte {
 	t.Fatal("pullAll did not reach idle within 100 pulls")
 	return nil
 }
+
+// stuckSource never yields a frame: it models a sentence whose sender is gone
+// (DAVE-gated, reaped) so the only way its playback can end is by contract.
+type stuckSource struct{}
+
+func (stuckSource) NextFrame(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestSessionPlayCtxCancelClosesDoneWithoutPoll pins the Play contract that
+// cancelling ctx ends the playback as ErrInterrupted — WITHOUT disgo's sender
+// goroutine ever polling a frame. Before the ctx watcher, Done only closed via
+// the provider's per-frame ctx check, so a barge-in or conv-stop landing while
+// the sender was gated or reaped hung every waiter (the PlaybackPump included).
+func TestSessionPlayCtxCancelClosesDoneWithoutPoll(t *testing.T) {
+	sess, _ := openSession(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	pb, err := sess.Play(ctx, stuckSource{})
+	if err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	cancel()
+	select {
+	case <-pb.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done did not close after ctx cancel (no sender poll happened)")
+	}
+	if !errors.Is(pb.Err(), ErrInterrupted) {
+		t.Fatalf("Err = %v, want ErrInterrupted", pb.Err())
+	}
+}

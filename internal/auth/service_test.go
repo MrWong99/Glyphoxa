@@ -441,3 +441,35 @@ func TestGetCurrentUser_TenantBranches(t *testing.T) {
 		}
 	})
 }
+
+// TestLogout_SecureBehindProxy pins that the cleared cookies carry Secure when
+// the request was forwarded as https, and not on cleartext (local dev).
+func TestLogout_SecureBehindProxy(t *testing.T) {
+	t.Parallel()
+	for _, proxied := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "proxied"}[proxied], func(t *testing.T) {
+			t.Parallel()
+			op := operator()
+			client, _ := newAuthClient(t, fakeAuthN{users: map[string]storage.User{validToken: op}}, &fakeDeleter{})
+			req := connect.NewRequest(&managementv1.LogoutRequest{})
+			req.Header().Set("Cookie", auth.SessionCookieName+"="+validToken+"; "+auth.CSRFCookieName+"="+csrfValue)
+			req.Header().Set("X-CSRF-Token", csrfValue)
+			if proxied {
+				req.Header().Set("X-Forwarded-Proto", "https")
+			}
+			resp, err := client.Logout(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Logout: %v", err)
+			}
+			set := resp.Header().Values("Set-Cookie")
+			if len(set) == 0 {
+				t.Fatal("no Set-Cookie on logout")
+			}
+			for _, sc := range set {
+				if got := strings.Contains(sc, "; Secure"); got != proxied {
+					t.Errorf("Set-Cookie %q Secure=%v, want %v", sc, got, proxied)
+				}
+			}
+		})
+	}
+}

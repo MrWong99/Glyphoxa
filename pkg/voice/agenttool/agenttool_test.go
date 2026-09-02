@@ -43,6 +43,11 @@ func addressed(agentID, text string) voiceevent.AddressRouted {
 // Compile-time assertion: the bridge Engine satisfies the agent seam.
 var _ agent.Engine = (*agenttool.Engine)(nil)
 
+// The streaming seam is discovered by runtime type assertion in the agent
+// package; pin it so a drift fails the build rather than silently falling back
+// to the buffered path.
+var _ agent.StreamingEngine = (*agenttool.Engine)(nil)
+
 // scriptedProvider is a deterministic streaming [llm.Provider] for the bridge
 // tests. Each call to Complete pops the next scripted step and streams it as
 // EventText / EventToolCall deltas followed by EventDone. It records every
@@ -1421,9 +1426,12 @@ func TestEngine_ToolSyntax_ForwardedDeltaNotRetried(t *testing.T) {
 	}
 }
 
-// cancelOnFirstProvider fails the first tool-armed call with a tool-syntax start
-// error but cancels the turn ctx first — so complete's between-attempt ctx check
-// aborts before the retry ever dials.
+// cancelOnFirstProvider fails the first tool-armed call with a tool-syntax STREAM
+// error and cancels the turn ctx as it does — so complete's between-attempt ctx
+// check aborts before the retry ever dials. It must be a stream error, not a
+// start error: retry.Do re-checks the ctx after a failed op and would hand back
+// ctx.Err() instead of the ToolSyntaxError, skipping the tool-syntax branch the
+// test exists to pin.
 type cancelOnFirstProvider struct {
 	mu     sync.Mutex
 	calls  int
@@ -1435,11 +1443,15 @@ func (p *cancelOnFirstProvider) Complete(context.Context, llm.Request) (<-chan l
 	p.calls++
 	n := p.calls
 	p.mu.Unlock()
-	if n == 1 {
-		p.cancel() // barge lands between attempt 1's failure and the retry
-		return nil, &providererr.ToolSyntaxError{Op: "test.Complete", Msg: "tool_use_failed"}
-	}
 	ch := make(chan llm.StreamEvent)
+	if n == 1 {
+		go func() {
+			defer close(ch)
+			ch <- llm.StreamEvent{Type: llm.EventError, ErrClass: llm.ErrClassToolSyntax, Err: "tool_use_failed"}
+			p.cancel() // barge lands between attempt 1's failure and the retry
+		}()
+		return ch, nil
+	}
 	go func() {
 		defer close(ch)
 		ch <- llm.StreamEvent{Type: llm.EventText, Text: "should not reach here "}
@@ -1476,6 +1488,11 @@ func TestEngine_ToolSyntax_CtxCancelBetweenAttemptsAborts(t *testing.T) {
 	}
 	if provErrs != 0 {
 		t.Errorf("provider_errors = %d on a barge cancel between attempts, want 0 (not a fault)", provErrs)
+	}
+	// Attempt 1 must have been classified as tool-syntax (the guard at the top of
+	// the retry branch is what aborted), not swallowed as a plain start error.
+	if got := rec.malformedPaths(); len(got) != 1 {
+		t.Errorf("malformed paths = %v, want exactly one tool-syntax classification", got)
 	}
 }
 

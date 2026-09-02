@@ -40,12 +40,15 @@ func (f *fakeKGWriter) ExistingKnowledge(_ context.Context, _ string, w Proposed
 	}
 	out := KnownForTarget{
 		Pending:     append([]string(nil), f.known.Pending...),
+		OwnPending:  append([]string(nil), f.known.OwnPending...),
 		Established: append([]string(nil), f.known.Established...),
 	}
 	key := ProposalTargetKey(w)
 	for _, p := range f.created {
 		if ProposalTargetKey(p) == key {
+			// Rows this fake created came from the caller itself: own AND pending.
 			out.Pending = append(out.Pending, ProposalSalient(p))
+			out.OwnPending = append(out.OwnPending, ProposalSalient(p))
 		}
 	}
 	return out, nil

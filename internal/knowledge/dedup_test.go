@@ -164,3 +164,35 @@ func TestExistingKnowledge_IgnoresStaleWriteVersion(t *testing.T) {
 		t.Errorf("pending = %q, want the unreadable row ignored", known.Pending)
 	}
 }
+
+// TestExistingKnowledge_EchoesOnlyCallerPending pins the echo boundary: every
+// same-target pending proposal feeds the silent dedup (Pending), but only the
+// rows the CALLING Agent authored are marked for the echo (OwnPending). A
+// proposal the Butler filed from the GM-only planning chat is a secret until
+// the GM approves it and must never be quoted into the NPC's prompt (ADR-0062).
+func TestExistingKnowledge_EchoesOnlyCallerPending(t *testing.T) {
+	cid := uuid.New()
+	caller, butler := uuid.New(), uuid.New()
+	node := uuid.New()
+	own := pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.String(), Subject: "Bart", Fact: "the players bought me a drink"})
+	own.AuthoringAgentID = caller
+	secret := pendingRow(cid, tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.String(), Subject: "Bart", Fact: "is the hidden leader of the Red Hand cult"})
+	secret.AuthoringAgentID = butler
+	store := &fakeStore{
+		allNodes: []storage.KGNode{{ID: node, Name: "Bart"}},
+		pending:  []storage.KnowledgeProposal{own, secret},
+	}
+	adapter := knowledge.New(store, store)
+
+	w := tool.ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: "fact", NodeID: node.String(), Subject: "Bart", Fact: "something new"}
+	known, err := adapter.ExistingKnowledge(liveCtx(cid), caller.String(), w)
+	if err != nil {
+		t.Fatalf("ExistingKnowledge: %v", err)
+	}
+	if len(known.Pending) != 2 {
+		t.Errorf("pending = %q, want both same-target rows for the dedup check", known.Pending)
+	}
+	if len(known.OwnPending) != 1 || known.OwnPending[0] != "the players bought me a drink" {
+		t.Errorf("own pending = %q, want only the caller's row", known.OwnPending)
+	}
+}

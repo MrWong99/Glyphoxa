@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -337,10 +336,11 @@ func (u *keepaliveUDPConn) Write(p []byte) (int, error) {
 	binary.BigEndian.PutUint32(u.header[4:8], u.timestamp)
 	u.timestamp += voice.OpusFrameSize
 
-	bufferCap := u.daveSession.MaxEncryptedFrameSize(len(p))
-	if cap(u.encryptBuffer) < bufferCap {
-		u.encryptBuffer = slices.Grow(u.encryptBuffer, bufferCap)
-	}
+	// Sized by LENGTH, not capacity — a deliberate divergence from the pinned
+	// disgo udp_conn.go, which only grows cap: every godave.Session bounds its
+	// output by len(out), so a len-512 buffer silently truncated any frame over
+	// 512 bytes. Keep this on the next upstream re-diff.
+	u.encryptBuffer = sizedBuffer(u.encryptBuffer, u.daveSession.MaxEncryptedFrameSize(len(p)))
 
 	n, err := u.daveSession.Encrypt(u.ssrc, p, u.encryptBuffer)
 	if err != nil {
@@ -455,10 +455,10 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 		decrypted = decrypted[decryptedOffset:]
 
 		userID := godave.UserID(u.ssrcLookup(p.SSRC).String())
-		bufferCap := u.daveSession.MaxDecryptedFrameSize(userID, len(decrypted))
-		if cap(u.decryptBuffer) < bufferCap {
-			u.decryptBuffer = slices.Grow(u.decryptBuffer, bufferCap)
-		}
+		// Sized by LENGTH (see Write): with the upstream cap-only growth a
+		// high-bitrate channel's >512-byte Opus payloads decoded as corrupted
+		// audio because Decrypt copied only len(out) bytes.
+		u.decryptBuffer = sizedBuffer(u.decryptBuffer, u.daveSession.MaxDecryptedFrameSize(userID, len(decrypted)))
 
 		n, err = u.daveSession.Decrypt(userID, decrypted, u.decryptBuffer)
 		if err != nil {
@@ -469,6 +469,16 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 
 		return &p, nil
 	}
+}
+
+// sizedBuffer returns buf with len(buf) == n, reusing the backing array when its
+// capacity allows and allocating a fresh one otherwise. The DAVE encrypt/decrypt
+// calls write into out[:len(out)], so the LENGTH is the contract, not the cap.
+func sizedBuffer(buf []byte, n int) []byte {
+	if cap(buf) < n {
+		return make([]byte, n)
+	}
+	return buf[:n]
 }
 
 // Close stops the keepalive loop and closes the socket. The closed socket
