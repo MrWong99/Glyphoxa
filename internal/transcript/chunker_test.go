@@ -924,3 +924,76 @@ func TestChunker_MidStreamFailureBeforeFirstAudioPurgesPending(t *testing.T) {
 		t.Errorf("content = %q,\nwant %q (the undelivered pending sentence purged)", got[0].Content, want)
 	}
 }
+
+// TestChunker_MidStreamFailureOnOpeningSentenceNoRecovery pins the retraction
+// when NOTHING follows the failed opener: the opener case in abortSentence was
+// shadowed by the tail-trim case (an opener also ends in " "+sentence), so the
+// line survived as an empty "Bart:" entry and its count stayed on the chunk.
+func TestChunker_MidStreamFailureOnOpeningSentenceNoRecovery(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello Bart", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "This whole sentence dies mid-air.", at(3))
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1"})
+	bus.Publish(voiceevent.STTFinal{At: at(6), Text: "Okay then.", TurnID: "t2"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	want := "Player / DM: Hello Bart\nPlayer / DM: Okay then."
+	if got[0].Content != want {
+		t.Errorf("content = %q,\nwant %q (no empty \"Bart:\" line artifact)", got[0].Content, want)
+	}
+}
+
+// TestChunker_SayAndEnsembleTurnsAreAttributed pins that a GM /say, an Ensemble
+// Lead and a Cross-talk Reaction — turns that never see AddressRouted — still
+// name their speaker in the chunk and land in participated_agent_ids, like the
+// relay already did. Before, those lines persisted as "NPC: …" with no
+// participant ref, invisible to the NPC-knowledge filter.
+func TestChunker_SayAndEnsembleTurnsAreAttributed(t *testing.T) {
+	bart, gesa, orc := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.SpeakRequested{At: at(1), TurnID: "s1",
+		Target: voiceevent.AddressTarget{AgentID: bart.String(), AgentRole: "character", Name: "Bart"}, Text: "Welcome."})
+	agentReply(bus, "s1", "Welcome.", at(2))
+	bus.Publish(voiceevent.EnsembleLead{At: at(3), TurnID: "e1",
+		Target: voiceevent.AddressTarget{AgentID: gesa.String(), AgentRole: "character", Name: "Gesa"}})
+	agentReply(bus, "e1", "I lead.", at(4))
+	bus.Publish(voiceevent.EnsembleReaction{At: at(5), TurnID: "r1", LeadTurnID: "e1",
+		Target: voiceevent.AddressTarget{AgentID: orc.String(), AgentRole: "character", Name: "Orc"}})
+	agentReply(bus, "r1", "I react.", at(6))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	want := "Bart: Welcome.\nGesa: I lead.\nOrc: I react."
+	if got[0].Content != want {
+		t.Errorf("content = %q,\nwant %q", got[0].Content, want)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, id := range got[0].ParticipatedAgentIDs {
+		seen[id] = true
+	}
+	for _, id := range []uuid.UUID{bart, gesa, orc} {
+		if !seen[id] {
+			t.Errorf("participated_agent_ids = %v, missing %s", got[0].ParticipatedAgentIDs, id)
+		}
+	}
+}

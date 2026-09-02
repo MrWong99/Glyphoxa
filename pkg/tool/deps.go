@@ -139,7 +139,15 @@ type KGWriter interface {
 // Both are RAW text (unnormalized): the handler normalizes at compare time via the
 // shared [textnorm.Normalize], and echoes the raw pending wording verbatim.
 type KnownForTarget struct {
-	Pending     []string
+	// Pending is the salient text of EVERY pending proposal addressing the
+	// target, whoever authored it. It feeds the silent duplicate check only and
+	// is never echoed: another Agent's pending proposal — a GM secret the Butler
+	// filed from the planning chat, say — must not reach a player-facing prompt
+	// through the echo (ADR-0062).
+	Pending []string
+	// OwnPending is the subset of Pending the calling Agent authored itself; it
+	// is what the tool result echoes so the model stops repeating itself.
+	OwnPending  []string
 	Established []string
 }
 

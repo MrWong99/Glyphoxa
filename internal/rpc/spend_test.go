@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -75,6 +76,11 @@ func TestSpendCaps_Validation(t *testing.T) {
 		{"negative soft", &managementv1.SetSpendCapsRequest{SoftUsd: dptr(-1)}},
 		{"negative hard", &managementv1.SetSpendCapsRequest{HardUsd: dptr(-0.5)}},
 		{"hard below soft", &managementv1.SetSpendCapsRequest{SoftUsd: dptr(10), HardUsd: dptr(5)}},
+		// NaN and Inf are valid doubles on the wire but compare false against
+		// everything, which would silently disarm the meter's hard trip.
+		{"nan soft", &managementv1.SetSpendCapsRequest{SoftUsd: dptr(math.NaN())}},
+		{"nan hard", &managementv1.SetSpendCapsRequest{HardUsd: dptr(math.NaN())}},
+		{"inf hard", &managementv1.SetSpendCapsRequest{HardUsd: dptr(math.Inf(1))}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -410,6 +410,9 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		}
 	}
 	if err := sc.Err(); err != nil {
+		if ctx.Err() != nil {
+			return // cancellation closes cleanly; not a stream failure (the llm.Provider contract)
+		}
 		fail("anthropic: read stream: " + err.Error())
 	}
 }

@@ -102,9 +102,10 @@ type fakeBlobs struct {
 	data      map[string][]byte
 	gate      chan struct{} // if non-nil, Put blocks until a receive
 	putErr    error
-	deleteErr error    // if set, Delete returns it (blob-backend failure)
-	listErr   error    // if set, List returns it (seam-list failure)
-	deleted   []string // keys passed to Delete (compensation assertions)
+	deleteErr error                // if set, Delete returns it (blob-backend failure)
+	listErr   error                // if set, List returns it (seam-list failure)
+	deleted   []string             // keys passed to Delete (compensation assertions)
+	createdAt map[string]time.Time // optional per-key CreatedAt reported by Get
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
@@ -130,7 +131,7 @@ func (f *fakeBlobs) Get(_ context.Context, key string) (io.ReadCloser, blob.Meta
 	if !ok {
 		return nil, blob.Meta{}, blob.ErrNotFound
 	}
-	return io.NopCloser(bytes.NewReader(b)), blob.Meta{ContentType: "audio/wav", Size: int64(len(b))}, nil
+	return io.NopCloser(bytes.NewReader(b)), blob.Meta{ContentType: "audio/wav", Size: int64(len(b)), CreatedAt: f.createdAt[key]}, nil
 }
 
 func (f *fakeBlobs) Delete(ctx context.Context, key string) error {

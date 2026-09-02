@@ -56,11 +56,49 @@ func SetImportLimitForTest(n int64) func() {
 // decodeLimit is the effective decode cap; a var so tests can shrink it.
 var decodeLimit = MaxDecodedBytes
 
+// importConcurrency bounds how many imports may inflate at once. The per-request
+// caps (192 MiB compressed, 256 MiB decoded — ADR-0053) keep one backup
+// importable, but gzip inflates whitespace ~1000:1 and Decode holds about twice
+// the decoded size, so a few concurrent 260 KB uploads could still pin the web
+// tier's memory. Imports are rare and operator-driven; serializing them costs
+// nothing.
+const importConcurrency = 2
+
+var importGate = make(chan struct{}, importConcurrency)
+
+// acquireImportSlot takes an import slot without blocking; ok is false when
+// every slot is busy, and release returns the slot.
+func acquireImportSlot() (release func(), ok bool) {
+	select {
+	case importGate <- struct{}{}:
+		return func() { <-importGate }, true
+	default:
+		return nil, false
+	}
+}
+
+// HoldImportSlotsForTest fills every import slot until the returned release is
+// called, so a test can prove the gate answers 503 without racing a real import.
+func HoldImportSlotsForTest() (release func()) {
+	for range cap(importGate) {
+		importGate <- struct{}{}
+	}
+	return func() {
+		for range cap(importGate) {
+			<-importGate
+		}
+	}
+}
+
 var (
 	// ErrNewerFormat means the bundle was written by a newer build than this one.
 	ErrNewerFormat = errors.New("bundle format is newer than this build supports")
 	// ErrUnsupportedFormat means the format version has no migration path here.
 	ErrUnsupportedFormat = errors.New("bundle format version is unsupported")
+	// ErrInvalidBundle wraps every importer-side validation failure of the
+	// bundle's own content (a dangling ref, a duplicate ref, a bad image) — a
+	// client-caused 400, never a 500 with an alarming Error log.
+	ErrInvalidBundle = errors.New("invalid campaign bundle")
 	// ErrTooLarge means the decompressed bundle exceeded the decode cap.
 	ErrTooLarge = errors.New("bundle exceeds maximum decoded size")
 )

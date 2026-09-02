@@ -1126,3 +1126,45 @@ func TestClaimLoop_NoCapacityNoClaim(t *testing.T) {
 		t.Fatalf("second intent status = %q, want pending (no capacity)", got)
 	}
 }
+
+// TestClaimLoop_SigtermDuringFailedSelfExitCarriesFailure pins the ctx.Done
+// arm of the intent loop: a SIGTERM landing while a session is already failing
+// its self-exit must finish the intent 'failed' with the row's reason, exactly
+// like the ticker arm does — not 'done' with an empty last_error.
+func TestClaimLoop_SigtermDuringFailedSelfExitCarriesFailure(t *testing.T) {
+	mstore := newFakeStore()
+	closeGate := make(chan struct{})
+	mstore.closeGate = closeGate // parks CloseVoiceSession → holds the end window open
+	runner := newFailingRunner(errors.New("gateway exploded"))
+	mgr := newManager(t, mstore, runner.run, true)
+	istore := newFakeIntentStore()
+	istore.sessionOutcome = func(id uuid.UUID) (storage.VoiceSession, error) {
+		return mstore.session(id), nil
+	}
+	loop := newClaimLoop(t, istore, mgr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tenantID := uuid.New()
+	intent := istore.add(tenantID, uuid.New())
+	loop.TickForTest(ctx)
+	waitFor(t, time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentLive })
+
+	// The session fails NOW and parks in its end window; then the SIGTERM lands.
+	runner.fail()
+	waitFor(t, time.Second, func() bool {
+		_, live, _ := mgr.Active(context.Background(), tenantID)
+		return !live
+	})
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+	close(closeGate)
+
+	waitFor(t, 2*time.Second, func() bool {
+		st := istore.get(intent.ID).Status
+		return st == storage.VoiceIntentFailed || st == storage.VoiceIntentDone
+	})
+	if got := istore.get(intent.ID); got.Status != storage.VoiceIntentFailed || !strings.Contains(got.LastError, "gateway exploded") {
+		t.Fatalf("intent = %q/%q, want failed carrying the session's reason", got.Status, got.LastError)
+	}
+	loop.DrainForTest()
+}

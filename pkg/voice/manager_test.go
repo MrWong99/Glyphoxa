@@ -156,3 +156,31 @@ func TestManagerOpenConcurrentSameGuild_NoLeak(t *testing.T) {
 		t.Error("the winning session is closed")
 	}
 }
+
+// TestManagerOpenFailureClosesConn pins the unwind: a join that fails after the
+// conn was created must Close it (the LEAVE + gateway/UDP teardown), not merely
+// forget it — otherwise a cancelled join left a ghost Bot in the channel.
+func TestManagerOpenFailureClosesConn(t *testing.T) {
+	fm := mock.NewManager()
+	var created *mock.Conn
+	fm.NewConn = func(snowflake.ID) *mock.Conn {
+		c := mock.NewConn()
+		c.OpenErr = errors.New("ctx cancelled during join")
+		created = c
+		return c
+	}
+	m := newTestManager(fm)
+
+	if _, err := m.Open(context.Background(), testGuild, testChannel); err == nil {
+		t.Fatal("expected Open to fail")
+	}
+	if created == nil {
+		t.Fatal("no conn was created")
+	}
+	if !created.Closed() {
+		t.Fatal("the failed join's conn was not Closed")
+	}
+	if removed := fm.Removed(); len(removed) != 1 || removed[0] != testGuild {
+		t.Fatalf("RemoveConn calls got %v want [%d]", removed, testGuild)
+	}
+}

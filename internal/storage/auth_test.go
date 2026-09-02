@@ -5,6 +5,7 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,11 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	if sess.ID == uuid.Nil || sess.UserID != u.ID {
 		t.Fatalf("session = %+v", sess)
+	}
+	// The cookie secret is never stored: the row (and the returned Session)
+	// carries its digest, so a DB read yields no replayable credential.
+	if sess.Token == "opaque-token-1" || sess.Token == "" {
+		t.Fatalf("stored token = %q, want the digest of the cookie secret", sess.Token)
 	}
 
 	// Valid token resolves to the owning user.
@@ -393,5 +399,48 @@ func TestListTenantOperatorDiscordIDs(t *testing.T) {
 	ids, err = st.ListTenantOperatorDiscordIDs(ctx)
 	if err != nil || len(ids) != 2 {
 		t.Errorf("unsuspended listing = %v, %v, want both again", ids, err)
+	}
+}
+
+// TestResolveOperatorTenantConcurrentSameUser pins the same-user serialization:
+// N concurrent first logins of ONE user must all resolve to the single seeded
+// tenant. Without the per-user lock two of them could both miss the bound-tenant
+// read and each claim or seed a tenant.
+func TestResolveOperatorTenantConcurrentSameUser(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	seeded, err := st.CreateTenant(ctx, "Seeded")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	u, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: "u-race", Name: "Op"})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	const n = 16
+	start := make(chan struct{})
+	results := make(chan uuid.UUID, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			<-start
+			ten, err := st.ResolveOperatorTenant(ctx, u.ID)
+			if err != nil {
+				t.Errorf("resolve: %v", err)
+				results <- uuid.Nil
+				return
+			}
+			results <- ten.ID
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for id := range results {
+		if id != seeded {
+			t.Errorf("resolved %s, want the seeded tenant %s (a same-user race bound a second tenant)", id, seeded)
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -790,15 +791,15 @@ func (s *ProviderServer) SetSpendCaps(
 
 	var caps storage.SpendCaps
 	if v := req.Msg.SoftUsd; v != nil {
-		if *v < 0 {
-			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("soft cap must not be negative"))
+		if err := validateSpendCap(*v, "soft"); err != nil {
+			return nil, err
 		}
 		soft := *v
 		caps.SoftUSD = &soft
 	}
 	if v := req.Msg.HardUsd; v != nil {
-		if *v < 0 {
-			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("hard cap must not be negative"))
+		if err := validateSpendCap(*v, "hard"); err != nil {
+			return nil, err
 		}
 		hard := *v
 		caps.HardUSD = &hard
@@ -812,6 +813,22 @@ func (s *ProviderServer) SetSpendCaps(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.SetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
+}
+
+// validateSpendCap rejects a negative or non-finite cap. NaN and ±Inf are legal
+// protobuf doubles ("NaN" / "Infinity" on the JSON wire) but they poison every
+// comparison downstream: NaN compares false against everything, so a NaN hard cap
+// would never trip the meter, and the ADR-0055 plan-allowance rung — which only
+// tightens the cap when the remaining allowance is BELOW it — would never engage
+// either. Refuse them at the edge, before the value reaches the row.
+func validateSpendCap(v float64, which string) error {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("%s cap must be a finite number", which))
+	}
+	if v < 0 {
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("%s cap must not be negative", which))
+	}
+	return nil
 }
 
 // toProtoSpendCaps maps storage caps onto the wire view: a nil pointer stays absent

@@ -93,7 +93,8 @@ func TestRememberKnowledge_DoubleRememberYieldsOneRow(t *testing.T) {
 func TestRememberKnowledge_ResultEchoesPending(t *testing.T) {
 	w := &fakeKGWriter{
 		ownRef: KGNodeRef{ID: "node-1", Name: "Gesa"}, ownOK: true,
-		known: KnownForTarget{Pending: []string{"Gesa ist die Schwester von Arturus."}},
+		// The echo covers the caller's OWN pending proposals only (ADR-0062).
+		known: KnownForTarget{Pending: []string{"Gesa ist die Schwester von Arturus."}, OwnPending: []string{"Gesa ist die Schwester von Arturus."}},
 	}
 	rk := NewRememberKnowledge(w)
 	ctx := WithCaller(context.Background(), "agent-9")
@@ -128,7 +129,7 @@ func TestRememberKnowledge_EchoTruncatesLongPending(t *testing.T) {
 	longFact := strings.Repeat("a", 5000)
 	w := &fakeKGWriter{
 		ownRef: KGNodeRef{ID: "node-1", Name: "Gesa"}, ownOK: true,
-		known: KnownForTarget{Pending: []string{longFact}},
+		known: KnownForTarget{Pending: []string{longFact}, OwnPending: []string{longFact}},
 	}
 	rk := NewRememberKnowledge(w)
 	ctx := WithCaller(context.Background(), "agent-9")

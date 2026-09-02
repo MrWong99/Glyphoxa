@@ -174,7 +174,9 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	)
 	defer mgr.Close()
 
-	sess, err := mgr.Open(cycleCtx, guild, channel)
+	sess, err := joinVoiceChannel(cycleCtx, func(c context.Context) (*gxvoice.Session, error) {
+		return mgr.Open(c, guild, channel)
+	}, defaultJoinTimeout)
 	if err != nil {
 		return fmt.Errorf("wirenpc: join voice channel: %w", err)
 	}
@@ -340,4 +342,30 @@ func resolveStallCause(cycleCtx context.Context, err error) error {
 		return errMediaStall
 	}
 	return err
+}
+
+// defaultJoinTimeout bounds the voice-channel join. Discord answers a join with
+// VOICE_STATE_UPDATE + VOICE_SERVER_UPDATE and disgo's conn.Open waits for them
+// with no deadline of its own — a channel the Bot cannot CONNECT to, a non-voice
+// channel, or an id outside the guild simply never answers, which used to hang
+// the cycle (and the Voice Session) forever.
+const defaultJoinTimeout = 30 * time.Second
+
+// errJoinTimeout names the join that Discord never answered, so the reconnect
+// loop and the operator see a reason rather than a bare deadline error.
+var errJoinTimeout = errors.New("wirenpc: no voice server answer within the join timeout")
+
+// joinVoiceChannel runs open under a join deadline. A deadline that fires while
+// the OUTER ctx is still live is reported as errJoinTimeout; a cancelled outer
+// ctx (a GM Stop during the join) keeps surfacing as the plain cancellation the
+// reconnect loop already classifies. disgo opens the gateway/UDP on its own
+// background ctx, so cancelling the join ctx after a successful Open is safe.
+func joinVoiceChannel(ctx context.Context, open func(context.Context) (*gxvoice.Session, error), timeout time.Duration) (*gxvoice.Session, error) {
+	joinCtx, cancelJoin := context.WithTimeout(ctx, timeout)
+	defer cancelJoin()
+	sess, err := open(joinCtx)
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w: %w", errJoinTimeout, err)
+	}
+	return sess, err
 }

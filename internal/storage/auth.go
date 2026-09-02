@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -230,7 +232,8 @@ func (s *Store) ListTenantOperatorBindings(ctx context.Context) ([]TenantOperato
 }
 
 // NewSession is the input to CreateSession. Token is the opaque random secret
-// the auth tier minted; ExpiresAt is the absolute expiry the validator enforces.
+// the auth tier minted (the cookie value); ExpiresAt is the absolute expiry the
+// validator enforces. The row never holds Token itself — see sessionTokenHash.
 type NewSession struct {
 	UserID    uuid.UUID
 	Token     string
@@ -239,13 +242,25 @@ type NewSession struct {
 	UA        string
 }
 
-// CreateSession inserts a session row and returns it.
+// sessionTokenHash is what the sessions.token column holds: the SHA-256 of the
+// cookie secret, base64url. A DB read (a backup, a replica, a dump) therefore
+// yields no replayable credential — the plaintext existed only in the cookie.
+// A plain unsalted hash is sufficient because the input is 256 bits of
+// crypto/rand entropy (the same reasoning as ADR-0056's invitation token_hash),
+// and the column's UNIQUE constraint applies to the digest unchanged.
+func sessionTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// CreateSession inserts a session row and returns it. The returned
+// Session.Token is the stored digest, never the cookie secret.
 func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error) {
 	row := s.db.QueryRow(ctx,
 		`INSERT INTO sessions (user_id, token, expires_at, ip, ua)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, user_id, token, created_at, last_seen_at, expires_at, ip, ua`,
-		n.UserID, n.Token, n.ExpiresAt, n.IP, n.UA)
+		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA)
 	var sess Session
 	err := row.Scan(
 		&sess.ID, &sess.UserID, &sess.Token, &sess.CreatedAt,
@@ -276,7 +291,7 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 		 SELECT u.id, u.discord_user_id, u.name, u.avatar, u.role,
 		        u.created_at, u.updated_at, u.suspended_at, u.aup_accepted_at
 		   FROM users u JOIN s ON s.user_id = u.id
-		  WHERE u.suspended_at IS NULL`, token)
+		  WHERE u.suspended_at IS NULL`, sessionTokenHash(token))
 	u, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
@@ -290,7 +305,7 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 // DeleteSession removes a session row by token (logout / revocation). Deleting a
 // token that no longer exists is not an error — logout is idempotent.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token); err != nil {
+	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, sessionTokenHash(token)); err != nil {
 		return fmt.Errorf("storage: delete session: %w", err)
 	}
 	return nil
@@ -333,6 +348,17 @@ func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserI
 func (s *Store) ResolveOperatorTenant(ctx context.Context, userID uuid.UUID) (Tenant, error) {
 	var t Tenant
 	err := s.InTx(ctx, func(tx *Store) error {
+		// Serialize resolves for the SAME user first: two concurrent first logins
+		// of one user (a double-submitted callback, two tabs) could both miss the
+		// bound-tenant read below and each claim or seed a tenant — SKIP LOCKED on
+		// the claim only arbitrates DIFFERENT users contending for one row. The
+		// user row always exists here (both callers UpsertUser first), so this is
+		// a cheap row lock that the loser waits on until the winner's binding is
+		// committed and visible to its own step-1 read.
+		if _, err := tx.db.Exec(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+			return fmt.Errorf("storage: lock user for tenant resolve: %w", err)
+		}
+
 		// Already bound to this operator?
 		row := tx.db.QueryRow(ctx,
 			`SELECT id, name, created_at, updated_at FROM tenant
@@ -345,7 +371,7 @@ func (s *Store) ResolveOperatorTenant(ctx context.Context, userID uuid.UUID) (Te
 		}
 
 		// Claim the earliest claimable tenant, locking it so two concurrent
-		// first-logins can't both claim the same row. A tenant held by the
+		// first-logins of DIFFERENT users can't both claim the same row. A tenant held by the
 		// synthetic dev operator is claimable too: the caller reaching this
 		// step is a DIFFERENT user (their own binding was checked above), so a
 		// real first login takes over what dev mode configured rather than

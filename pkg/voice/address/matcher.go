@@ -537,6 +537,18 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	m.pruneLocked(now)
 	m.recordWordsLocked(words, now)
 
+	// A final with no tokens at all — the marks a recognizer renders for a noise
+	// burst ("...", "?", "—") — is neither an utterance nor a Backchannel (that
+	// takes a filler WORD). It routes nowhere and, unlike filler, does not touch
+	// the continuation anchor: the detector's empty-final guard (#434) only
+	// catches whitespace, so this is the matcher-side half of the substance gate
+	// (ADR-0024). Without it the zero-score utterance fell straight through to
+	// last-speaker continuation and re-woke the last addressed NPC.
+	if len(words) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+
 	nameThreshold := m.nameThreshold()
 	anyNameMatched := false
 	for _, score := range nameScores {
@@ -562,7 +574,15 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		// age out of [LastAddressed.Within] while the human is plainly still
 		// listening. Only the timestamp moves; the addressee set is untouched, and a
 		// matcher that has never addressed anybody stays unanchored.
-		if len(m.lastAddressed) > 0 {
+		//
+		// ...but only while that exchange is still ALIVE. lastAddressed is never
+		// cleared on expiry (the window is enforced at score time), so an
+		// unconditional refresh let any filler — a cough that transcribes as "hm"
+		// ten minutes after the last routed turn — re-arm a dead claim, and the
+		// next unnamed utterance routed to an NPC nobody was talking to: the
+		// "named once, answers everything" defect the 2026-07-27 amendment
+		// removed, back through the most frequent kind of STT final at a table.
+		if len(m.lastAddressed) > 0 && m.continuationAlive(now) {
 			m.lastAddressedAt = now
 		}
 		m.mu.Unlock()
@@ -719,6 +739,24 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 
 	m.mu.Unlock()
 	return out
+}
+
+// continuationAlive reports whether the last-addressed claim is still inside
+// the continuation window of the stack's [LastAddressed] heuristic — the same
+// bound [DecisionContext.AddressedWithin] applies at score time, so the anchor
+// refresh and the scoring agree on when an exchange is over. A stack without
+// the heuristic, or one with a zero/negative Within, is unbounded. Caller holds
+// m.mu.
+func (m *Matcher) continuationAlive(now time.Time) bool {
+	if m.lastAddressedAt.IsZero() {
+		return false
+	}
+	for _, h := range m.heuristics {
+		if la, ok := h.(LastAddressed); ok {
+			return la.Within <= 0 || now.Sub(m.lastAddressedAt) <= la.Within
+		}
+	}
+	return true
 }
 
 // nameThreshold returns the Threshold of the first [NameMatch] heuristic in the

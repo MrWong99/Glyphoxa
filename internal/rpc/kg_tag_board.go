@@ -158,6 +158,9 @@ func (s *kgOrganize) CreateBoard(
 	}
 	b, err := s.store.CreateBoard(ctx, c.ID, name)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidTag) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
 		slog.Default().Error("CreateBoard: store write failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}

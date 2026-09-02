@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -105,10 +106,14 @@ func (s *agentRoster) CreateAgent(
 	}
 
 	m := req.Msg
+	name := strings.TrimSpace(m.GetName())
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
+	}
 	id, err := s.store.CreateAgentWithNPCNode(ctx, storage.NewAgent{
 		CampaignID: c.ID,
 		Role:       storage.AgentRoleCharacter,
-		Name:       m.GetName(),
+		Name:       name,
 		Title:      m.GetTitle(),
 		Persona:    m.GetPersona(),
 		// A new agent has no persisted voice yet; the active campaign's language
@@ -158,6 +163,10 @@ func (s *agentRoster) UpdateAgent(
 	// reads back as CodeNotFound before its voice can ever reach the response — the
 	// scoped store UPDATE would refuse it anyway (#353/#342), but the pre-read must
 	// not leak cross-campaign voice tuning in the meantime.
+	name := strings.TrimSpace(req.Msg.GetName())
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
+	}
 	existing, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -175,7 +184,7 @@ func (s *agentRoster) UpdateAgent(
 	updated, err := s.store.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:          id,
 		CampaignID:  c.ID,
-		Name:        m.GetName(),
+		Name:        name,
 		Title:       m.GetTitle(),
 		Persona:     m.GetPersona(),
 		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),

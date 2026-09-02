@@ -195,3 +195,49 @@ func TestMatcher_BackchannelVocabularyIsLanguageScoped(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Er."), "npc-bart")
 	assertIDs(t, m.TargetMatch("Um."), "npc-bart")
 }
+
+// TestMatcher_BackchannelDoesNotResurrectAnExpiredExchange is the other half of
+// the anchor refresh: filler keeps a LIVE exchange alive, it must not revive a
+// dead one. lastAddressed is never cleared on expiry, so without the liveness
+// check a stray "hm" minutes after the last routed turn re-armed the claim and
+// the next unnamed utterance — players talking to each other — routed to an NPC
+// nobody was addressing.
+func TestMatcher_BackchannelDoesNotResurrectAnExpiredExchange(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	m := address.NewMatcher(address.Config{
+		Language:           "de",
+		Clock:              clk.now,
+		ContinuationWindow: 30 * time.Second,
+	}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatch("Bart, erzähl mir vom Keller."), "npc-bart")
+
+	clk.advance(10 * time.Minute) // the exchange is long over
+	assertIDs(t, m.TargetMatch("hm"))
+
+	clk.advance(5 * time.Second)
+	assertIDs(t, m.TargetMatch("und was machen wir jetzt?"))
+}
+
+// TestMatcher_PunctuationOnlyDoesNotRoute pins the matcher-side half of the
+// substance gate: a final that tokenizes to nothing ("...", "?") is a noise
+// burst, not an utterance. It must not ride last-speaker continuation to the
+// NPC addressed a moment ago, and it must not keep that exchange alive either.
+func TestMatcher_PunctuationOnlyDoesNotRoute(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	m := address.NewMatcher(address.Config{
+		Language:           "de",
+		Clock:              clk.now,
+		ContinuationWindow: 30 * time.Second,
+	}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatch("Bart, erzähl mir vom Keller."), "npc-bart")
+
+	for _, text := range []string{"...", "?", "—", ".. ?!"} {
+		clk.advance(time.Second)
+		assertIDs(t, m.TargetMatch(text))
+	}
+
+	clk.advance(40 * time.Second) // well past the window since the routed turn
+	assertIDs(t, m.TargetMatch("und was war da unten?"))
+}

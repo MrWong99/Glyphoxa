@@ -882,3 +882,28 @@ func TestSuggestMapPins_NoAnchorIsRefusedWithAReason(t *testing.T) {
 		t.Error("an anchorless map still spent a call")
 	}
 }
+
+// TestCreateMap_RejectsScriptableImageType pins the raster allowlist on the map
+// upload: the map mount echoes the stored Content-Type same-origin, so a
+// scriptable type (SVG) would be stored XSS. Nothing may reach the blob seam or
+// the row.
+func TestCreateMap_RejectsScriptableImageType(t *testing.T) {
+	t.Parallel()
+	store := newFakeMapStore()
+	blobs := newMemBlobs()
+	client, _ := mapClient(t, store, blobs)
+
+	req := createReq("Saltmarsh")
+	req.ContentType = "image/svg+xml"
+	req.ImageBytes = []byte("<svg onload=alert(1)/>")
+	_, err := client.CreateMap(context.Background(), connect.NewRequest(req))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("err = %v, want InvalidArgument", err)
+	}
+	if got := blobs.log(); len(got) != 0 {
+		t.Errorf("blob seam was touched: %v", got)
+	}
+	if len(store.created) != 0 {
+		t.Errorf("row was created: %+v", store.created)
+	}
+}

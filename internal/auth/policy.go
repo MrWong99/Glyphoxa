@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -119,6 +120,12 @@ const (
 	DenyUnauthenticated
 	// DenyCSRF is the double-submit failure: CodePermissionDenied / 403.
 	DenyCSRF
+	// DenyUnavailable means the session could not be checked at all — the
+	// authenticator failed for a reason other than "no such session" (a DB
+	// outage, a pool timeout): CodeUnavailable / 503. It is NOT an
+	// unauthenticated answer: a presented token that could not be verified must
+	// not read as "please sign in" (the SPA logs the operator out on that).
+	DenyUnavailable
 )
 
 // Message is the user-facing rejection text, identical on both transports.
@@ -126,6 +133,8 @@ func (d Denial) Message() string {
 	switch d {
 	case DenyCSRF:
 		return "csrf check failed, retry"
+	case DenyUnavailable:
+		return "sign-in check temporarily unavailable, retry"
 	default:
 		return "please sign in"
 	}
@@ -179,11 +188,19 @@ func (p *Policy) Evaluate(ctx context.Context, in Input, c Check) Verdict {
 
 // evaluateSession validates the session token and resolves the operator. A
 // missing/invalid token on a non-public check denies; on a public check the
-// request proceeds without a principal (the procedure self-handles it).
+// request proceeds without a principal (the procedure self-handles it). An
+// authenticator FAILURE (anything but storage.ErrNotFound) is [DenyUnavailable]
+// on both kinds of check: the token was presented and could not be verified,
+// which is neither "signed in" nor "not signed in".
 func (p *Policy) evaluateSession(ctx context.Context, token string, public bool) (storage.User, bool, Denial) {
 	if token != "" && p.authn != nil {
-		if u, err := p.authn.AuthenticateSession(ctx, token); err == nil {
+		u, err := p.authn.AuthenticateSession(ctx, token)
+		switch {
+		case err == nil:
 			return u, true, DenyNone
+		case !errors.Is(err, storage.ErrNotFound):
+			slog.Default().Warn("auth policy: authenticate session", "err", err)
+			return storage.User{}, false, DenyUnavailable
 		}
 	}
 	if public {

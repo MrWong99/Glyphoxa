@@ -156,6 +156,15 @@ type importResponse struct {
 // (ADR-0053 §7); the import runs SYNCHRONOUSLY (ADR-0049, no job row) and does NOT
 // auto-activate the imported campaign (ADR-0053 §7 — the UI offers the switch).
 func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
+	// The process-wide gate comes FIRST, before a byte of the body is read or
+	// inflated: the size caps below bound one request, this bounds how many run.
+	release, ok := acquireImportSlot()
+	if !ok {
+		w.Header().Set("Retry-After", "30")
+		writeImportError(w, http.StatusServiceUnavailable, "another import is in progress; retry shortly")
+		return
+	}
+	defer release()
 	r.Body = http.MaxBytesReader(w, r.Body, importLimit)
 
 	file, _, err := r.FormFile("bundle")
@@ -197,8 +206,12 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 
 	res, err := Import(r.Context(), h.pg(), tenantID, b)
 	if err != nil {
-		if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) {
+		if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) || errors.Is(err, ErrInvalidBundle) {
 			writeImportError(w, http.StatusBadRequest, importErrorMessage(err))
+			return
+		}
+		if errors.Is(err, blob.ErrTooLarge) {
+			writeImportError(w, http.StatusBadRequest, fmt.Sprintf("a map image is too large (max %d MiB)", blob.MaxSize>>20))
 			return
 		}
 		h.logError("import bundle", err)
@@ -234,7 +247,9 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 // versions) verbatim to the client, but keeps any other decode failure opaque so
 // an internal error string never leaks through the 400 body.
 func importErrorMessage(err error) string {
-	if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) {
+	// The bundle's own validation errors name only bundle-supplied refs/names,
+	// never internal detail, so they are safe to surface verbatim.
+	if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) || errors.Is(err, ErrInvalidBundle) {
 		return err.Error()
 	}
 	return "invalid campaign bundle"

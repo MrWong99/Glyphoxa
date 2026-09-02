@@ -384,9 +384,21 @@ func SweepEnrichmentReconciliation(ctx context.Context, store ReconcileStore, bl
 			errs = append(errs, fmt.Errorf("check highlight rows for orphan blobs: %w", perr))
 		} else {
 			swept := 0
+			now := sweepNow()
 			for i, k := range orphanCandidates {
 				if present[ids[i]] {
 					continue // the row still exists: a live highlight or in-flight enrichment, not an orphan
+				}
+				// A row-less blob younger than the grace window is an in-flight save,
+				// not an orphan: the Saver Puts the clip BEFORE it inserts the row, and
+				// a web-tier boot sweep can land in that gap while a voice worker is
+				// mid-save (a shared-pool deployment, ADR-0057). Only the handful of
+				// row-less candidates pay the Get; the whole-store List stays cheap.
+				if skip, err := inFlightSave(ctx, blobs, k, now); err != nil {
+					log.Error("highlight enrich sweep: inspect orphan candidate", "err", err, "key", k)
+					continue
+				} else if skip {
+					continue
 				}
 				if err := blobs.Delete(ctx, k); err != nil {
 					log.Error("highlight enrich sweep: delete orphan blob", "err", err, "key", k)
@@ -431,3 +443,35 @@ func truncateRunes(s string, n int) string {
 	}
 	return b.String()
 }
+
+// orphanSweepGrace is how long a row-less Highlight blob is presumed to be an
+// in-flight save rather than an orphan: twice the Saver's own bound, so a save
+// that is still inside its timeout can never be reaped from under it.
+const orphanSweepGrace = 2 * saveTimeout
+
+// sweepNow is the sweep's clock; a variable so tests can pin it.
+var sweepNow = time.Now
+
+// inFlightSave reports whether the row-less blob at key must be left alone:
+// it is gone already (nothing to sweep) or it was written inside the grace
+// window. A blob with no CreatedAt (an older backend) is treated as old.
+func inFlightSave(ctx context.Context, blobs blob.Store, key string, now time.Time) (bool, error) {
+	rc, meta, err := blobs.Get(ctx, key)
+	if errors.Is(err, blob.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = rc.Close()
+	return !meta.CreatedAt.IsZero() && now.Sub(meta.CreatedAt) < orphanSweepGrace, nil
+}
+
+// Compile-time pins: *storage.Store satisfies every narrow store seam this
+// package declares, so a drift in a store method fails THIS package's build
+// instead of surfacing only at the composition root (CONTRIBUTING: interface
+// assertions).
+var (
+	_ EnrichStore    = (*storage.Store)(nil)
+	_ ReconcileStore = (*storage.Store)(nil)
+)

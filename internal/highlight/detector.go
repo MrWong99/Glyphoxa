@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -61,12 +62,15 @@ func (l finalLine) render() string {
 // for concurrent bus callbacks and PCM-tap calls; all detector state lives on the
 // single worker goroutine.
 type Detector struct {
-	provider llm.Provider
-	model    string
-	snap     SnapshotFunc
-	sink     Sink
-	gate     orchestrator.TurnGate
-	metrics  observe.StageRecorder
+	// classifyTimeout bounds one provider completion (see classifyTimeout const);
+	// a field so white-box tests can shorten it, like saver.go's saveTimeout.
+	classifyTimeout time.Duration
+	provider        llm.Provider
+	model           string
+	snap            SnapshotFunc
+	sink            Sink
+	gate            orchestrator.TurnGate
+	metrics         observe.StageRecorder
 	// classifyMetric counts one classify-outcome per pass (#428). It is recovered
 	// from the injected StageRecorder when that recorder also satisfies it (the
 	// production *observe.PrometheusRecorder does) — a non-StageRecorder bounded-label
@@ -147,21 +151,22 @@ func newDetector(provider llm.Provider, model string, snap SnapshotFunc, sink Si
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Detector{
-		provider:       provider,
-		model:          model,
-		snap:           snap,
-		sink:           sink,
-		gate:           gate,
-		metrics:        metrics,
-		classifyMetric: classifyMetric,
-		log:            log,
-		cfg:            cfg.withDefaults(),
-		now:            time.Now,
-		ctx:            ctx,
-		cancel:         cancel,
-		done:           make(chan struct{}),
-		signal:         make(chan struct{}, 1),
-		features:       make(chan frameFeature, featureMailboxCap),
+		provider:        provider,
+		model:           model,
+		snap:            snap,
+		sink:            sink,
+		gate:            gate,
+		metrics:         metrics,
+		classifyMetric:  classifyMetric,
+		log:             log,
+		cfg:             cfg.withDefaults(),
+		now:             time.Now,
+		classifyTimeout: classifyTimeout,
+		ctx:             ctx,
+		cancel:          cancel,
+		done:            make(chan struct{}),
+		signal:          make(chan struct{}, 1),
+		features:        make(chan frameFeature, featureMailboxCap),
 	}
 }
 
@@ -424,6 +429,14 @@ func (d *Detector) scheduleCut(from, to time.Time, trig Trigger) {
 // a leading excerpt of at most this many runes (not bytes) for triage (#428).
 const classifyExcerptRunes = 200
 
+// classifyTimeout bounds one classifier completion. The adapters delegate the
+// end-to-end bound to the caller's ctx, and classify() runs synchronously on the
+// detector's single worker: without a deadline a wedged provider stream pinned
+// the worker for the rest of the session and no moment was ever classified
+// again. A ~256-token verdict never legitimately needs longer (the recall
+// speculation budget is the precedent).
+const classifyTimeout = 30 * time.Second
+
 // runClassifier drives one provider completion, meters its token usage on the
 // stage recorder (ADR-0045/0046), and parses the verdict. It never crashes the
 // worker: a provider error, a truncated stream, or malformed JSON yields a zero
@@ -432,7 +445,9 @@ const classifyExcerptRunes = 200
 // the raw model text (for the parse-fail excerpt). The existing complete/stream
 // WARNs are retained; the per-pass INFO/WARN and the outcome count are the caller's.
 func (d *Detector) runClassifier(req llm.Request) (classification, observe.HighlightOutcome, string) {
-	stream, err := d.provider.Complete(d.ctx, req)
+	ctx, cancel := context.WithTimeout(d.ctx, d.classifyTimeout)
+	defer cancel()
+	stream, err := d.provider.Complete(ctx, req)
 	if err != nil {
 		d.log.Warn("highlight classify: llm complete", "err", err)
 		return classification{}, observe.HighlightLLMError, ""
@@ -451,6 +466,12 @@ func (d *Detector) runClassifier(req llm.Request) (classification, observe.Highl
 			d.log.Warn("highlight classify: llm stream error", "err", ev.Err)
 			streamErr = true
 		}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) && d.ctx.Err() == nil {
+		// The adapters close the stream on ctx cancel without a terminal event;
+		// a deadline (not a Close) is a provider failure for the outcome count.
+		d.log.Warn("highlight classify: timeout", "after", d.classifyTimeout)
+		streamErr = true
 	}
 	in, out := usage.InputTokens, usage.OutputTokens
 	if !haveUsage {

@@ -338,10 +338,25 @@ func (s *VoiceServer) PreviewVoice(
 		channels   = 1
 	)
 	for chunk := range ch {
+		if chunk.Err != nil {
+			// The stream's TERMINAL element (#436): synthesis failed mid-way and
+			// no audio follows. The bytes gathered so far are a truncated clip,
+			// not a preview — surface the failure instead of playing them.
+			s.log.Warn("PreviewVoice: synthesis failed mid-stream", "err", chunk.Err)
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("voice preview is unavailable"))
+		}
 		if len(pcm) == 0 && chunk.SampleRate > 0 {
 			sampleRate, channels = chunk.SampleRate, chunk.Channels
 		}
 		pcm = append(pcm, chunk.PCM...)
+	}
+	if err := synCtx.Err(); err != nil {
+		// The provider closed the stream because the deadline (or the caller)
+		// cut it, not because the sentence ended: the clip is partial.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("voice preview timed out"))
+		}
+		return nil, connect.NewError(connect.CodeCanceled, err)
 	}
 	if channels == 0 {
 		channels = 1

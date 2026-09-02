@@ -18,8 +18,11 @@ import (
 // Call it only with a real denial, never [DenyNone].
 func WriteDenial(w http.ResponseWriter, d Denial) {
 	status := http.StatusUnauthorized
-	if d == DenyCSRF {
+	switch d {
+	case DenyCSRF:
 		status = http.StatusForbidden
+	case DenyUnavailable:
+		status = http.StatusServiceUnavailable
 	}
 	http.Error(w, d.Message(), status)
 }

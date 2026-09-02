@@ -706,3 +706,32 @@ func TestEnrichImageHandler_Compensation_RowDeletedDuringWrite(t *testing.T) {
 		t.Fatalf("expected exactly the orphan key deleted, got %v", blobs.deleted)
 	}
 }
+
+// TestSweepEnrichmentReconciliation_SparesInFlightSave pins the grace window:
+// the Saver Puts a clip BEFORE it inserts the row, so a row-less clip younger
+// than the window is a save in flight (a web-tier boot sweep racing a voice
+// worker), not an orphan. An old row-less clip is still swept.
+func TestSweepEnrichmentReconciliation_SparesInFlightSave(t *testing.T) {
+	tenantID := uuid.New()
+	youngID, oldID := uuid.New(), uuid.New()
+	blobs := newFakeBlobs()
+	young := "t/" + tenantID.String() + "/highlight/" + youngID.String() + "/clip.wav"
+	old := "t/" + tenantID.String() + "/highlight/" + oldID.String() + "/clip.wav"
+	blobs.data[young] = []byte("mid-save")
+	blobs.data[old] = []byte("orphan")
+	blobs.createdAt = map[string]time.Time{
+		young: time.Now(),
+		old:   time.Now().Add(-2 * orphanSweepGrace),
+	}
+	store := &fakeReconcileStore{live: map[uuid.UUID]bool{}}
+
+	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if !blobs.has(young) {
+		t.Fatal("a row-less clip inside the grace window was swept (an in-flight save)")
+	}
+	if blobs.has(old) {
+		t.Fatal("an old row-less clip was not swept")
+	}
+}

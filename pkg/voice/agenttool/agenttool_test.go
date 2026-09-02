@@ -43,6 +43,11 @@ func addressed(agentID, text string) voiceevent.AddressRouted {
 // Compile-time assertion: the bridge Engine satisfies the agent seam.
 var _ agent.Engine = (*agenttool.Engine)(nil)
 
+// The streaming seam is discovered by runtime type assertion in the agent
+// package; pin it so a drift fails the build rather than silently falling back
+// to the buffered path.
+var _ agent.StreamingEngine = (*agenttool.Engine)(nil)
+
 // scriptedProvider is a deterministic streaming [llm.Provider] for the bridge
 // tests. Each call to Complete pops the next scripted step and streams it as
 // EventText / EventToolCall deltas followed by EventDone. It records every
@@ -1421,9 +1426,12 @@ func TestEngine_ToolSyntax_ForwardedDeltaNotRetried(t *testing.T) {
 	}
 }
 
-// cancelOnFirstProvider fails the first tool-armed call with a tool-syntax start
-// error but cancels the turn ctx first — so complete's between-attempt ctx check
-// aborts before the retry ever dials.
+// cancelOnFirstProvider fails the first tool-armed call with a tool-syntax STREAM
+// error and cancels the turn ctx as it does — so complete's between-attempt ctx
+// check aborts before the retry ever dials. It must be a stream error, not a
+// start error: retry.Do re-checks the ctx after a failed op and would hand back
+// ctx.Err() instead of the ToolSyntaxError, skipping the tool-syntax branch the
+// test exists to pin.
 type cancelOnFirstProvider struct {
 	mu     sync.Mutex
 	calls  int
@@ -1435,11 +1443,15 @@ func (p *cancelOnFirstProvider) Complete(context.Context, llm.Request) (<-chan l
 	p.calls++
 	n := p.calls
 	p.mu.Unlock()
-	if n == 1 {
-		p.cancel() // barge lands between attempt 1's failure and the retry
-		return nil, &providererr.ToolSyntaxError{Op: "test.Complete", Msg: "tool_use_failed"}
-	}
 	ch := make(chan llm.StreamEvent)
+	if n == 1 {
+		go func() {
+			defer close(ch)
+			ch <- llm.StreamEvent{Type: llm.EventError, ErrClass: llm.ErrClassToolSyntax, Err: "tool_use_failed"}
+			p.cancel() // barge lands between attempt 1's failure and the retry
+		}()
+		return ch, nil
+	}
 	go func() {
 		defer close(ch)
 		ch <- llm.StreamEvent{Type: llm.EventText, Text: "should not reach here "}
@@ -1476,6 +1488,11 @@ func TestEngine_ToolSyntax_CtxCancelBetweenAttemptsAborts(t *testing.T) {
 	}
 	if provErrs != 0 {
 		t.Errorf("provider_errors = %d on a barge cancel between attempts, want 0 (not a fault)", provErrs)
+	}
+	// Attempt 1 must have been classified as tool-syntax (the guard at the top of
+	// the retry branch is what aborted), not swallowed as a plain start error.
+	if got := rec.malformedPaths(); len(got) != 1 {
+		t.Errorf("malformed paths = %v, want exactly one tool-syntax classification", got)
 	}
 }
 
@@ -2164,5 +2181,40 @@ func TestEngine_InventedRoll_OverBudgetPseudoDiceStillRegenerates(t *testing.T) 
 	}
 	if reqs[2].ToolChoice.Mode != llm.ToolChoiceTool || reqs[2].ToolChoice.Tool != "dice" {
 		t.Errorf("regen round-0 tool_choice = %+v, want tool:dice (the forced regeneration must fire)", reqs[2].ToolChoice)
+	}
+}
+
+// TestEngine_UngrantedDice_NeverArms pins the arming rule's other half: dice
+// wording in the utterance arms the hardened path only when the dice Tool is
+// actually GRANTED. Without the grant the invented-roll guard has nothing to
+// force — a forced regen on a loop that never declared the Tool fails the
+// consistency check by construction (two more LLM calls, then a dead turn) —
+// so the plain loop runs and the narration is delivered as-is.
+func TestEngine_UngrantedDice_NeverArms(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19! Du hast Gluck.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleSystem, Text: "You are Bart."},
+		{Role: llm.RoleUser, Text: "Wurfel einen D20 fur mich."},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "Ah, eine 19! Du hast Gluck." {
+		t.Errorf("delivered = %q, want the reply unchanged", got)
+	}
+	prov.mu.Lock()
+	calls := len(prov.reqs)
+	prov.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (no forced regen without the dice grant)", calls)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 0 {
+		t.Errorf("malformed paths = %v, want none", paths)
 	}
 }

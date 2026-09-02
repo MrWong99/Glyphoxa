@@ -60,9 +60,12 @@ describe("downloadBlob", () => {
 
 describe("fetchCampaignExport", () => {
   it("returns the blob and the filename from Content-Disposition on 200", async () => {
-    const blob = new Blob(["bundle-bytes"], { type: "application/gzip" });
+    // A plain string body, not a jsdom Blob: jsdom's Blob and Node's fetch live
+    // in different realms, and Node 22's undici stringifies a foreign Blob to
+    // "[object Blob]" instead of streaming its bytes. The Content-Type header is
+    // what gives the returned Blob its type either way.
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(blob, {
+      new Response("bundle-bytes", {
         status: 200,
         headers: {
           "Content-Type": "application/gzip",
@@ -76,7 +79,13 @@ describe("fetchCampaignExport", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/campaigns/camp-1/export");
     expect(out.filename).toBe("The Prancing Pony.glyphoxa.json.gz");
-    expect(out.blob).toBeInstanceOf(Blob);
+    // Cross-realm again: which Blob class `res.blob()` returns depends on the
+    // Node version (Node 22 hands back Node's, Node 24 jsdom's — which has no
+    // text()/arrayBuffer()), so neither `instanceof` nor the byte-reading
+    // methods are portable. `type` and `size` are the contract the caller
+    // relies on and both realms implement them.
+    expect(out.blob.type).toBe("application/gzip");
+    expect(out.blob.size).toBe("bundle-bytes".length);
     vi.unstubAllGlobals();
   });
 

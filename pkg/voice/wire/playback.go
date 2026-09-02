@@ -18,6 +18,9 @@ import (
 type playback interface {
 	Done() <-chan struct{}
 	Err() error
+	// Stop interrupts the playback and returns once Done is closed
+	// ([gxvoice.Playback.Stop]).
+	Stop()
 }
 
 type sessionPlayer interface {
@@ -123,7 +126,15 @@ func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <
 
 	// Block until this sentence has fully played (or been interrupted) before
 	// returning, so the caller's next PlaySentence does not auto-interrupt it.
-	<-pb.Done()
+	// A cancelled sentence ctx (barge-in, conv-stop, cycle teardown) is ended
+	// HERE with Stop rather than by waiting for disgo's sender poll to notice:
+	// a DAVE-gated or reaped sender never polls again, and a pump wedged on
+	// Done wedges the whole cycle teardown behind it.
+	select {
+	case <-pb.Done():
+	case <-ctx.Done():
+		pb.Stop()
+	}
 	if err := pb.Err(); err != nil && !errors.Is(err, gxvoice.ErrInterrupted) {
 		return fmt.Errorf("wire.PlaySentence: playback: %w", err)
 	}

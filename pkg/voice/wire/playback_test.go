@@ -3,6 +3,7 @@ package wire
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,14 +18,20 @@ import (
 type fakePlayback struct {
 	done chan struct{}
 	err  error
+	once sync.Once
 }
 
 func (f *fakePlayback) Done() <-chan struct{} { return f.done }
 func (f *fakePlayback) Err() error            { return f.err }
 
+// Stop mirrors gxvoice.Playback.Stop: first outcome wins, then Done is closed.
+func (f *fakePlayback) Stop() { f.finish(gxvoice.ErrInterrupted) }
+
 func (f *fakePlayback) finish(err error) {
-	f.err = err
-	close(f.done)
+	f.once.Do(func() {
+		f.err = err
+		close(f.done)
+	})
 }
 
 // fakePlayer records each Play and publishes the created playback over a
@@ -180,5 +187,32 @@ func TestPlaySentence_PlayErrorSurfaces(t *testing.T) {
 func TestPlaySentence_NilChunksRejected(t *testing.T) {
 	if err := playSentence(context.Background(), newFakePlayer(), fakeCodec{}, nil); err == nil {
 		t.Fatal("nil chunks should be rejected")
+	}
+}
+
+// TestPlaySentenceBus_CtxCancelEndsWithoutSenderPoll pins that a cancelled
+// sentence ctx ends the wait with Stop instead of waiting for disgo's sender
+// poll: the fake playback never finishes on its own, exactly like a DAVE-gated
+// or reaped sender, and before the fix this call blocked forever (wedging the
+// pump and the whole cycle teardown behind it).
+func TestPlaySentenceBus_CtxCancelEndsWithoutSenderPoll(t *testing.T) {
+	player := newFakePlayer()
+	codec := framingCodec{frames: [][]byte{{0x01}}}
+	chunks := make(chan tts.AudioChunk)
+	close(chunks)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errc := make(chan error, 1)
+	go func() { errc <- playSentenceBus(ctx, player, codec, chunks, nil, nil, nil) }()
+	<-player.started // Play happened; nothing will ever finish this playback
+	cancel()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, gxvoice.ErrInterrupted) {
+			t.Fatalf("err = %v, want ErrInterrupted", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("playSentenceBus kept waiting for a sender poll that never comes")
 	}
 }

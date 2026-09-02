@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -196,6 +197,12 @@ func (p PGStore) ReadMapImage(ctx context.Context, key string) ([]byte, string, 
 		return nil, "", storage.ErrNotFound
 	}
 	rc, meta, err := p.Blobs.Get(ctx, key)
+	if errors.Is(err, blob.ErrNotFound) {
+		// The seam's contract is storage.ErrNotFound (the keyless branch above):
+		// a row whose bytes are gone exports as a Map without a picture, exactly
+		// like a keyless row, instead of failing the whole backup for one image.
+		return nil, "", storage.ErrNotFound
+	}
 	if err != nil {
 		return nil, "", err
 	}
