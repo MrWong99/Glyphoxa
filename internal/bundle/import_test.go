@@ -1103,3 +1103,30 @@ func nodeInCampaign(t *testing.T, st *storage.Store, id, campaignID uuid.UUID) b
 	}
 	return false
 }
+
+// TestImport_RejectsScriptableMapImageType pins the raster allowlist on the
+// bundle's declared map-image content type. A bundle is a share format
+// (ADR-0053), so the type is untrusted input; the map mount serves it same-origin
+// and an SVG (or HTML) "image" would be stored XSS. The import must fail as a
+// whole — nothing half-applied.
+func TestImport_RejectsScriptableMapImageType(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	b, _, _ := exportSeeded(t, bundle.ExportOptions{IncludeImages: true})
+
+	tainted := 0
+	for i := range b.Campaign.Maps {
+		if b.Campaign.Maps[i].ImageBase64 != "" {
+			b.Campaign.Maps[i].ContentType = "image/svg+xml"
+			tainted++
+		}
+	}
+	if tainted == 0 {
+		t.Fatal("fixture carries no map image to taint")
+	}
+
+	dst := newFakeStore()
+	if _, err := bundle.Import(ctx, dst, uuid.New(), b); err == nil {
+		t.Fatal("import accepted an image/svg+xml map image, want a rejection")
+	}
+}

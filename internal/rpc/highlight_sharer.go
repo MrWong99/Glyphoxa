@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -130,11 +131,26 @@ func (d *DeploymentSharer) ListVoiceChannels(ctx context.Context) ([]discordshar
 	return d.listVoiceFn(ctx, token, guildID, d.log)
 }
 
-// PostClip implements [HighlightSharer].
+// PostClip implements [HighlightSharer]. The destination is re-validated against
+// the linked guild on every share — the channel picker is the SPA's convenience,
+// not the tenancy boundary: with a shared central Bot token (ADR-0057) the token
+// alone can reach any Tenant's guild, so a channel id that is not one of THIS
+// Tenant's text channels is [ErrChannelNotLinked], and a Tenant that never linked
+// a server is [ErrNoGuildLinked].
 func (d *DeploymentSharer) PostClip(ctx context.Context, channelID, caption, filename, contentType string, data []byte) error {
-	token, _, err := d.resolve(ctx)
+	token, guildID, err := d.resolve(ctx)
 	if err != nil {
 		return err
+	}
+	if guildID == "" {
+		return ErrNoGuildLinked
+	}
+	channels, err := d.listFn(ctx, token, guildID, d.log)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(channels, func(c discordshare.Channel) bool { return c.ID == channelID }) {
+		return ErrChannelNotLinked
 	}
 	return d.postFn(ctx, token, channelID, caption, filename, contentType, data, d.log)
 }

@@ -140,6 +140,14 @@ func TestImage_ServesTheBytes(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "image/png" {
 		t.Errorf("content type = %q, want image/png", ct)
 	}
+	// The mount echoes a stored Content-Type same-origin, so it must also carry the
+	// headers that keep a scriptable blob from ever executing (#591 posture).
+	if v := rr.Header().Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", v)
+	}
+	if v := rr.Header().Get("Content-Security-Policy"); v != "default-src 'none'; style-src 'unsafe-inline'" {
+		t.Errorf("Content-Security-Policy = %q", v)
+	}
 }
 
 // TestImage_AMapWithNoPictureIs404 is the regression for the imageless-import

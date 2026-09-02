@@ -519,8 +519,12 @@ func validateImage(data []byte, contentType string, widthPx, heightPx int32) err
 	if len(data) == 0 {
 		return errors.New("no image was uploaded")
 	}
-	if !strings.HasPrefix(contentType, "image/") {
-		return fmt.Errorf("%q is not an image", contentType)
+	// An allowlist of RASTER types, not an image/* prefix check — the portrait
+	// rule (#591 review): image/svg+xml is scriptable, and the map mount serves
+	// the stored Content-Type same-origin, so an SVG map would be stored XSS the
+	// moment its URL is opened as a document.
+	if !rasterImageType(contentType) {
+		return fmt.Errorf("%q is not a supported image type (PNG, JPEG, WebP or GIF)", contentType)
 	}
 	if widthPx <= 0 || heightPx <= 0 {
 		return errors.New("the image's dimensions are missing")

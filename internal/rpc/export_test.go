@@ -9,6 +9,10 @@ import (
 
 // SetShareSeamsForTest overrides the Discord REST seams so a test drives the
 // DeploymentSharer against fakes instead of the live Discord API (#310).
+// ValidAssistPrompt exposes the prompt gate so its rune-vs-byte rule is pinned
+// without driving a whole GeneratePersona call.
+var ValidAssistPrompt = validAssistPrompt
+
 func (d *DeploymentSharer) SetShareSeamsForTest(
 	list func(ctx context.Context, token, guildID string, log *slog.Logger) ([]discordshare.Channel, error),
 	post func(ctx context.Context, token, channelID, caption, filename, contentType string, data []byte, log *slog.Logger) error,

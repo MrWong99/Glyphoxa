@@ -64,9 +64,13 @@ Two other subcommands sit beside the Modes: `glyphoxa migrate` (ADR-0031) and
   with no instance-claiming columns. One Voice Instance per deployment is the v1.0
   shape; orphan rows left by a crash are swept at boot
   (`Manager.ReconcileOrphans`, ADR-0043's "rows are the source of truth" spirit).
-- ADR-0031 says `all` Mode auto-applies migrations at startup. **Not wired.**
-  `storage.MigrateUp` exists and is called only from the `migrate` subcommand
-  (`cmd/glyphoxa/migrate.go`); every Mode assumes a current schema.
+- ADR-0031 says `all` Mode auto-applies migrations at startup. **Wired** (#282):
+  the web/all boot preflight `ensureSchemaReady` (`cmd/glyphoxa/main.go`) runs
+  `autoMigrate` (`cmd/glyphoxa/migrate.go`, `storage.MigrateUp` under the
+  advisory lock) in `all` Mode. A `web`-only replica never migrates — it only
+  verifies the schema is current and refuses to boot with the actionable
+  `migrate up` error when it is behind, so N replicas cannot race the migration.
+  `voice` Mode runs no preflight and assumes a current schema.
 
 ---
 
@@ -413,6 +417,7 @@ serves both Go (`connect-go`) and TypeScript. Shipped services, all under
 - `ProviderService` — Provider Configs, Discord settings, invite resolution, spend caps
 - `SessionService` — session snapshot, Start/Stop, mute, transcript search
 - `VoiceService` — ElevenLabs voice catalog + preview, Groq model catalog, provider health
+- `ChatService` — Butler Planning Threads (ADR-0062): list/get/create/rename/delete, `PlanningExchange`
 
 **Tree vs ADR.** ADR-0015 also lists `TenantService` and a
 `glyphoxa.voice.v1.VoiceControlService` (`claim_session` / `release_session` /
@@ -756,7 +761,7 @@ disagreement is documented rather than discovered.
 | ADR says | The tree does | Why / where |
 |----------|---------------|-------------|
 | ADR-0005: `voice_sessions` claim table with `voice_instance_id` / heartbeat / `LISTEN/NOTIFY` | a per-Campaign session record, no claiming | one Voice Instance in the v1.0 self-host shape; orphans swept at boot |
-| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | five services, all `management.v1` | multi-tenant deferred (ADR-0039); `all` Mode drives sessions in-process |
+| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | six services, all `management.v1` | multi-tenant deferred (ADR-0039); `all` Mode drives sessions in-process |
 | ADR-0010: `/say <text> as:<agent>` | not registered | deferred; `/glyphoxa mute` + `muteall` shipped instead (#211) |
 | ADR-0010: permissions from `tenant_members.role` | operator allowlist membership | `tenant_members` does not exist (ADR-0010 #102 amendment, ADR-0041) |
 | ADR-0010/0024: the Butler answers reasoning commands and voice-address | an undeletable DB row with no code path; it cannot enter the Matcher by construction | `matcherAgent` hardcodes `AgentRole: "character"`; `NewWholeWordMatcher` has no non-test caller (§2.2, §3, §5) |

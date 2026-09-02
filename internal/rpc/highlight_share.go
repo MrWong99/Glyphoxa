@@ -34,6 +34,13 @@ var ErrNoDiscordToken = errors.New("rpc: no Discord bot token saved")
 // CodeFailedPrecondition ("link a Discord server first").
 var ErrNoGuildLinked = errors.New("rpc: no Discord guild linked")
 
+// ErrChannelNotLinked is the sentinel [HighlightSharer.PostClip] returns when the
+// destination is not one of the linked guild's text channels. The channel id is
+// client input, and on a central-token deployment (ADR-0057) the one Bot is a
+// member of EVERY Tenant's guild — an unchecked id would let one Tenant post its
+// clip into another Tenant's server with the platform's own Bot.
+var ErrChannelNotLinked = errors.New("rpc: text channel is not in the linked guild")
+
 // captionMaxRunes bounds the message caption (the Highlight excerpt) so a long
 // excerpt cannot overrun Discord's 2000-char message limit; the headroom leaves
 // room for Discord's own formatting.
@@ -228,6 +235,12 @@ func (s *SessionServer) shareToChannel(
 	if perr := s.sharer.PostClip(ctx, channelID, caption, "highlight.wav", h.ClipContentType, data); perr != nil {
 		if errors.Is(perr, ErrNoDiscordToken) {
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("save a Discord Bot token first"))
+		}
+		if errors.Is(perr, ErrNoGuildLinked) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))
+		}
+		if errors.Is(perr, ErrChannelNotLinked) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("that text channel is not in the linked Discord server"))
 		}
 		return nil, s.discordError("ShareHighlight", perr)
 	}

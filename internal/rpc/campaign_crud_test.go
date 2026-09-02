@@ -647,3 +647,39 @@ func TestDeleteAgent_NoActiveCampaignIsNotFound(t *testing.T) {
 		t.Errorf("code = %v, want NotFound", got)
 	}
 }
+
+// TestCreateAgent_RejectsEmptyName pins the name rule every sibling
+// create/update handler already enforces: a blank or whitespace-only name is
+// CodeInvalidArgument before any store write, not a nameless NPC row (and Node).
+func TestCreateAgent_RejectsEmptyName(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	client := crudClient(t, store)
+
+	for _, name := range []string{"", "   ", "\t\n"} {
+		_, err := client.CreateAgent(context.Background(),
+			connect.NewRequest(&managementv1.CreateAgentRequest{Name: name, Persona: "Mysterious."}))
+		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+			t.Errorf("name %q: code = %v, want InvalidArgument", name, got)
+		}
+	}
+	if len(store.created) != 0 {
+		t.Errorf("store was asked to create %d agents with a blank name", len(store.created))
+	}
+}
+
+// TestUpdateAgent_RejectsEmptyName: the same rule on update, checked before the
+// row lookup so a blank rename never reaches the store.
+func TestUpdateAgent_RejectsEmptyName(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	client := crudClient(t, store)
+
+	_, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: uuid.New().String(), Name: "  "}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}

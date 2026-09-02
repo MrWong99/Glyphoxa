@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -54,7 +55,7 @@ func validAssistPrompt(raw string) (string, *connect.Error) {
 	if p == "" {
 		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("prompt must not be empty"))
 	}
-	if len(p) > maxAssistPromptChars {
+	if utf8.RuneCountInString(p) > maxAssistPromptChars {
 		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is too long"))
 	}
 	return p, nil

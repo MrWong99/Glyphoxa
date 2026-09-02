@@ -371,6 +371,9 @@ func importMaps(
 			if contentType == "" {
 				contentType = "image/png"
 			}
+			if !rasterImageType(contentType) {
+				return fmt.Errorf("bundle: import: map %q: image content type %q is not allowed (PNG, JPEG, WebP or GIF only)", m.Name, contentType)
+			}
 			if err := imgs.WriteMapImage(ctx, key, contentType, data); err != nil {
 				return fmt.Errorf("bundle: import: map %q image: %w", m.Name, err)
 			}
@@ -758,4 +761,17 @@ func createGrants(ctx context.Context, tx ImportStore, agentID uuid.UUID, grants
 		}
 	}
 	return nil
+}
+
+// rasterImageType is the map-image allowlist the upload RPC enforces
+// (internal/rpc/campaign_map.go validateImage): PNG, JPEG, WebP or GIF. A bundle
+// is a SHARE format (ADR-0053), so the content type it declares is untrusted
+// input and gets the same rule — image/svg+xml or text/html would be stored XSS
+// the moment the map mount served it same-origin.
+func rasterImageType(ct string) bool {
+	switch ct {
+	case "image/png", "image/jpeg", "image/webp", "image/gif":
+		return true
+	}
+	return false
 }

@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -603,6 +604,9 @@ func sentRunes(msgs []tool.Message) int {
 type Engine struct {
 	full  *tool.Loop // every granted Tool declared
 	gated *tool.Loop // grants minus the dice Tool
+	// diceGranted records whether the dice Tool is among the grants at all; the
+	// dice gate only arms the hardened path when it is (see [Engine.generate]).
+	diceGranted bool
 
 	// agentID is this Agent's stable identity, stamped onto the turn ctx once per
 	// Generate/GenerateStream via [tool.WithCaller] (S2, #296). A scope-narrowing
@@ -764,8 +768,11 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 	// Per turn (Generate/GenerateStream) the dice gate picks between them so a
 	// non-dice utterance never declares the dice Tool — one round, not two.
 	return &Engine{
-		full:     newLoop(grants),
-		gated:    newLoop(grants.Without(diceToolName)),
+		full:  newLoop(grants),
+		gated: newLoop(grants.Without(diceToolName)),
+		diceGranted: slices.ContainsFunc(grants.Declarations(), func(d tool.Decl) bool {
+			return d.Name == diceToolName
+		}),
 		agentID:  agentID,
 		language: cfg.language,
 		rec:      cfg.rec,
@@ -820,9 +827,14 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 	// resolves the Agent from ctx, never the LLM args.
 	ctx = tool.WithCaller(ctx, e.agentID)
 
-	if !needsDice(e.language, messages) {
+	if !e.diceGranted || !needsDice(e.language, messages) {
 		// Plain turn: dice-less loop, no hardening, stream straight through. This
-		// path is byte-identical to the pre-#399 behaviour.
+		// path is byte-identical to the pre-#399 behaviour. An Agent WITHOUT the
+		// dice grant always takes it, whatever the utterance says: the hardened
+		// path's invented-roll guard forces the dice Tool on regeneration, which
+		// a loop that never declared the Tool cannot satisfy — every regen would
+		// fail the consistency check and the turn would die after three LLM
+		// calls for narrating a number the Agent was never able to roll.
 		msgs := toToolMessages(messages)
 		if onText != nil {
 			return e.gated.RunStream(withRoundCounter(ctx), msgs, onText)

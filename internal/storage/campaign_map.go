@@ -261,7 +261,7 @@ func (s *Store) SetMapImage(ctx context.Context, campaignID, id uuid.UUID, blobK
 // and silently keeps the bytes, which is the failure ADR-0048's lifecycle rule
 // exists to prevent.
 func (s *Store) ListCampaignMapBlobKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.db.Query(ctx,
 		`SELECT blob_key FROM campaign_map WHERE campaign_id = $1 AND blob_key <> '' ORDER BY id`,
 		campaignID)
 	if err != nil {

@@ -2166,3 +2166,38 @@ func TestEngine_InventedRoll_OverBudgetPseudoDiceStillRegenerates(t *testing.T) 
 		t.Errorf("regen round-0 tool_choice = %+v, want tool:dice (the forced regeneration must fire)", reqs[2].ToolChoice)
 	}
 }
+
+// TestEngine_UngrantedDice_NeverArms pins the arming rule's other half: dice
+// wording in the utterance arms the hardened path only when the dice Tool is
+// actually GRANTED. Without the grant the invented-roll guard has nothing to
+// force — a forced regen on a loop that never declared the Tool fails the
+// consistency check by construction (two more LLM calls, then a dead turn) —
+// so the plain loop runs and the narration is delivered as-is.
+func TestEngine_UngrantedDice_NeverArms(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19! Du hast Gluck.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleSystem, Text: "You are Bart."},
+		{Role: llm.RoleUser, Text: "Wurfel einen D20 fur mich."},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "Ah, eine 19! Du hast Gluck." {
+		t.Errorf("delivered = %q, want the reply unchanged", got)
+	}
+	prov.mu.Lock()
+	calls := len(prov.reqs)
+	prov.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (no forced regen without the dice grant)", calls)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 0 {
+		t.Errorf("malformed paths = %v, want none", paths)
+	}
+}

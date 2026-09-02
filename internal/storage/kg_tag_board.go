@@ -30,6 +30,21 @@ const MaxTagRunes = 40
 // then had to return.
 const MaxBoardNameRunes = 120
 
+// validBoardName applies the one board-name rule at every write that carries a
+// name — create, rename and update alike — so the cap cannot be bypassed by the
+// path that happens not to check it: trimmed, non-empty, at most
+// MaxBoardNameRunes. op names the caller in the empty-name error.
+func validBoardName(op, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("storage: %s board: name must not be empty", op)
+	}
+	if len([]rune(name)) > MaxBoardNameRunes {
+		return "", fmt.Errorf("%w: a board name is at most %d characters", ErrInvalidTag, MaxBoardNameRunes)
+	}
+	return name, nil
+}
+
 // MaxTagsPerNode bounds how many an entry may carry — enough for real
 // organization, few enough that the chip row stays readable.
 const MaxTagsPerNode = 20
@@ -221,12 +236,12 @@ type KGBoard struct {
 
 // CreateBoard makes an empty prep board.
 func (s *Store) CreateBoard(ctx context.Context, campaignID uuid.UUID, name string) (KGBoard, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return KGBoard{}, fmt.Errorf("storage: create board: name must not be empty")
+	name, err := validBoardName("create", name)
+	if err != nil {
+		return KGBoard{}, err
 	}
 	var b KGBoard
-	err := s.db.QueryRow(ctx,
+	err = s.db.QueryRow(ctx,
 		`INSERT INTO kg_board (campaign_id, name) VALUES ($1, $2)
 		 RETURNING id, campaign_id, name, created_at, updated_at`, campaignID, name).
 		Scan(&b.ID, &b.CampaignID, &b.Name, &b.CreatedAt, &b.UpdatedAt)
@@ -284,12 +299,9 @@ func (s *Store) SetBoardNodes(ctx context.Context, campaignID, boardID uuid.UUID
 // returned an opaque error — a half-applied save the GM has no way to reason
 // about. A board edit is one edit.
 func (s *Store) UpdateBoard(ctx context.Context, campaignID, id uuid.UUID, name string, nodeIDs []uuid.UUID) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("storage: update board: name must not be empty")
-	}
-	if len([]rune(name)) > MaxBoardNameRunes {
-		return fmt.Errorf("%w: a board name is at most %d characters", ErrInvalidTag, MaxBoardNameRunes)
+	name, err := validBoardName("update", name)
+	if err != nil {
+		return err
 	}
 	return s.InTx(ctx, func(tx *Store) error {
 		tag, err := tx.db.Exec(ctx,
@@ -364,9 +376,9 @@ func (s *Store) setBoardNodesTx(ctx context.Context, campaignID, boardID uuid.UU
 
 // RenameBoard renames a prep board.
 func (s *Store) RenameBoard(ctx context.Context, campaignID, id uuid.UUID, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("storage: rename board: name must not be empty")
+	name, err := validBoardName("rename", name)
+	if err != nil {
+		return err
 	}
 	tag, err := s.db.Exec(ctx,
 		`UPDATE kg_board SET name = $3, updated_at = now() WHERE id = $1 AND campaign_id = $2`,

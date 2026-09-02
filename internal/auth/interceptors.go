@@ -206,8 +206,22 @@ func (p *Policy) Stack(public ...string) *Stack {
 	return &Stack{interceptors: []connect.Interceptor{NewPolicyInterceptor(p, public...)}}
 }
 
-// HandlerOptions returns the connect.HandlerOption that installs the stack on a
-// generated handler, e.g. authServer.Handler(stack.HandlerOptions()...).
+// MaxRequestBytes bounds one Connect request message on every service the stack
+// guards. Without it connect-go reads — and gzip-inflates — an unbounded body
+// BEFORE the policy interceptor runs, so an unauthenticated client could pin
+// the web tier's memory with a multi-gigabyte POST. The largest legitimate
+// message is a map image upload (CreateMap / ReplaceMapImage) at the blob cap of
+// 32 MiB (ADR-0048), which the SPA's JSON transport base64-inflates by 4/3 to
+// ~43 MiB; 48 MiB leaves headroom for the rest of the message. Over the cap,
+// connect answers CodeResourceExhausted without buffering the body.
+const MaxRequestBytes = 48 << 20
+
+// HandlerOptions returns the connect.HandlerOptions that install the stack on a
+// generated handler, e.g. authServer.Handler(stack.HandlerOptions()...): the
+// interceptor chain plus the [MaxRequestBytes] read cap.
 func (s *Stack) HandlerOptions() []connect.HandlerOption {
-	return []connect.HandlerOption{connect.WithInterceptors(s.interceptors...)}
+	return []connect.HandlerOption{
+		connect.WithReadMaxBytes(MaxRequestBytes),
+		connect.WithInterceptors(s.interceptors...),
+	}
 }

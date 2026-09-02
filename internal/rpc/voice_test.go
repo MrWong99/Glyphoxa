@@ -959,3 +959,21 @@ func TestGetProviderHealth_WaitersShareLeaderProbe(t *testing.T) {
 		t.Errorf("store reads = %d, want 4 (exactly one probe launched)", got)
 	}
 }
+
+// TestPreviewVoice_TerminalErrorIsUnavailable pins the #436 stream contract on
+// the preview: a mid-stream failure arrives as the terminal Err chunk, and the
+// audio gathered before it is a truncated clip, not a successful preview.
+func TestPreviewVoice_TerminalErrorIsUnavailable(t *testing.T) {
+	t.Parallel()
+	srv := NewVoiceServer(&fakeVoiceStore{}, voiceTestCipher(t), nil)
+	srv.newSynth = func(string) tts.Synthesizer {
+		return &fakeSynth{chunks: []tts.AudioChunk{
+			{PCM: make([]byte, 480), SampleRate: 24000, Channels: 1},
+			{Err: errors.New("upstream reset")},
+		}}
+	}
+	_, err := srv.PreviewVoice(tenantCtx(), connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v-marcus"}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("err = %v, want Unavailable", err)
+	}
+}

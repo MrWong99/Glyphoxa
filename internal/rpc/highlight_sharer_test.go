@@ -125,7 +125,7 @@ func TestDeploymentSharer_EnvTokenFallback(t *testing.T) {
 			if gotVoiceToken != "central-env-token" || gotVoiceGuild != "guild-42" {
 				t.Fatalf("voice list got token %q guild %q, want the env token + linked guild", gotVoiceToken, gotVoiceGuild)
 			}
-			if err := s.PostClip(shareCtx(), "c", "cap", "highlight.wav", "audio/wav", []byte("x")); err != nil {
+			if err := s.PostClip(shareCtx(), "1", "cap", "highlight.wav", "audio/wav", []byte("x")); err != nil {
 				t.Fatalf("PostClip: %v", err)
 			}
 			if gotPostToken != "central-env-token" {
@@ -152,6 +152,9 @@ func TestDeploymentSharer_EnvTokenWithoutGuildIsNoGuildLinked(t *testing.T) {
 			}
 			if _, err := s.ListVoiceChannels(shareCtx()); !errors.Is(err, rpc.ErrNoGuildLinked) {
 				t.Fatalf("ListVoiceChannels err = %v, want ErrNoGuildLinked", err)
+			}
+			if err := s.PostClip(shareCtx(), "1", "cap", "highlight.wav", "audio/wav", []byte("WAV")); !errors.Is(err, rpc.ErrNoGuildLinked) {
+				t.Fatalf("PostClip err = %v, want ErrNoGuildLinked", err)
 			}
 		})
 	}
@@ -196,10 +199,46 @@ func TestDeploymentSharer_ResolvesTokenAndCalls(t *testing.T) {
 		t.Fatalf("channels = %+v", chs)
 	}
 
-	if err := s.PostClip(shareCtx(), "chan9", "cap", "highlight.wav", "audio/wav", []byte("WAV")); err != nil {
+	if err := s.PostClip(shareCtx(), "1", "cap", "highlight.wav", "audio/wav", []byte("WAV")); err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	if gotToken != "bot-token-xyz" || gotChannel != "chan9" || string(gotData) != "WAV" {
+	if gotToken != "bot-token-xyz" || gotChannel != "1" || string(gotData) != "WAV" {
 		t.Fatalf("post got token=%q channel=%q data=%q", gotToken, gotChannel, gotData)
+	}
+}
+
+// TestDeploymentSharer_PostClipRefusesForeignChannel pins the destination check:
+// a clip may only land in a text channel of the Tenant's LINKED guild. With a
+// central Bot token (ADR-0057) the Bot is a member of every Tenant's guild, so an
+// unchecked client-supplied channel id would be a cross-tenant post.
+func TestDeploymentSharer_PostClipRefusesForeignChannel(t *testing.T) {
+	cipher := testCipher(t)
+	sealed, err := cipher.Seal([]byte("bot-token-xyz"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	deps := fakeDeploymentReader{dep: storage.DeploymentConfig{
+		DiscordBotTokenLast4:      "-xyz",
+		DiscordBotTokenCiphertext: sealed,
+		GuildID:                   "guild-42",
+	}}
+	s := rpc.NewDeploymentSharer(deps, cipher, slog.Default())
+	posted := false
+	s.SetShareSeamsForTest(
+		func(_ context.Context, _, _ string, _ *slog.Logger) ([]discordshare.Channel, error) {
+			return []discordshare.Channel{{ID: "1", Name: "general"}}, nil
+		},
+		func(_ context.Context, _, _, _, _, _ string, _ []byte, _ *slog.Logger) error {
+			posted = true
+			return nil
+		},
+	)
+
+	err = s.PostClip(shareCtx(), "9999", "cap", "highlight.wav", "audio/wav", []byte("WAV"))
+	if !errors.Is(err, rpc.ErrChannelNotLinked) {
+		t.Fatalf("PostClip err = %v, want ErrChannelNotLinked", err)
+	}
+	if posted {
+		t.Fatal("the clip was posted to a channel outside the linked guild")
 	}
 }
