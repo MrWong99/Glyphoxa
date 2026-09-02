@@ -79,11 +79,13 @@ describe("fetchCampaignExport", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/campaigns/camp-1/export");
     expect(out.filename).toBe("The Prancing Pony.glyphoxa.json.gz");
-    // Cross-realm again: `instanceof Blob` compares against jsdom's constructor
-    // while fetch hands back Node's, so assert the Blob contract the caller
-    // relies on (typed bytes) rather than the constructor identity.
+    // Cross-realm again: which Blob class `res.blob()` returns depends on the
+    // Node version (Node 22 hands back Node's, Node 24 jsdom's — which has no
+    // text()/arrayBuffer()), so neither `instanceof` nor the byte-reading
+    // methods are portable. `type` and `size` are the contract the caller
+    // relies on and both realms implement them.
     expect(out.blob.type).toBe("application/gzip");
-    expect(await out.blob.text()).toBe("bundle-bytes");
+    expect(out.blob.size).toBe("bundle-bytes".length);
     vi.unstubAllGlobals();
   });
 
