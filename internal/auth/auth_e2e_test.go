@@ -11,7 +11,9 @@ package auth_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,14 +116,23 @@ func TestAuthEndToEnd(t *testing.T) {
 		t.Fatal("callback did not set session/csrf cookies")
 	}
 
-	// The session row exists for the upserted operator.
-	var rowsBefore int
+	// The session row exists for the upserted operator — keyed by the cookie
+	// secret's digest (storage never stores the secret itself), and the raw
+	// value must not be findable.
+	var rowsBefore, rawRows int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM sessions WHERE token = $1`, sess.Value).Scan(&rowsBefore); err != nil {
+		`SELECT count(*) FROM sessions WHERE token = $1`, sessionDigest(sess.Value)).Scan(&rowsBefore); err != nil {
 		t.Fatalf("count sessions: %v", err)
 	}
 	if rowsBefore != 1 {
 		t.Fatalf("session rows = %d, want 1", rowsBefore)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM sessions WHERE token = $1`, sess.Value).Scan(&rawRows); err != nil {
+		t.Fatalf("count raw sessions: %v", err)
+	}
+	if rawRows != 0 {
+		t.Fatalf("raw cookie secret found in %d session row(s); want the digest only", rawRows)
 	}
 
 	// 2. AuthService over the real store + interceptor stack.
@@ -165,7 +176,7 @@ func TestAuthEndToEnd(t *testing.T) {
 
 	var rowsAfter int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM sessions WHERE token = $1`, sess.Value).Scan(&rowsAfter); err != nil {
+		`SELECT count(*) FROM sessions WHERE token = $1`, sessionDigest(sess.Value)).Scan(&rowsAfter); err != nil {
 		t.Fatalf("count sessions after logout: %v", err)
 	}
 	if rowsAfter != 0 {
@@ -176,4 +187,12 @@ func TestAuthEndToEnd(t *testing.T) {
 	if _, err := store.AuthenticateSession(ctx, sess.Value); err == nil {
 		t.Error("session still authenticates after logout")
 	}
+}
+
+// sessionDigest mirrors storage's at-rest form of a session cookie secret
+// (SHA-256, base64url): the sessions.token column holds the digest, never the
+// secret, so a DB read yields no replayable credential.
+func sessionDigest(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
