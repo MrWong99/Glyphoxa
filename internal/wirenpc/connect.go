@@ -30,6 +30,17 @@ func publishConnectionState(bus *voiceevent.Bus, state voiceevent.ConnectionStat
 	bus.Publish(voiceevent.ConnectionStateChanged{At: time.Now(), State: state, Detail: detail})
 }
 
+// countBargeCancels drives glyphoxa_voice_barge_cancels_total (A10): every
+// confirmed barge the orchestrator announces on bus ([voiceevent.BargeDetected],
+// published by BargeIn exactly when its yield cut a speaking turn) counts once.
+// It returns the unsubscribe; a nil bus or recorder subscribes nothing.
+func countBargeCancels(bus *voiceevent.Bus, m gxvoice.MetricsRecorder, guild string) (unsubscribe func()) {
+	if bus == nil || m == nil {
+		return func() {}
+	}
+	return voiceevent.On(bus, func(voiceevent.BargeDetected) { m.BargeCancelled(guild) })
+}
+
 // connectAndServe runs ONE connect-and-serve cycle: build the Discord client,
 // open the gateway, join the channel, assemble the pipeline, and pump audio
 // until ctx is cancelled or the connection drops. It calls connected() once the
@@ -203,6 +214,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		stallWindow = defaultMediaStallWindow
 	}
 	go newMediaWatchdog(sess.MediaLiveness, cancel, cfg.MediaSuspect, cfg.Metrics, log, guild.String(), stallWindow).run(cycleCtx)
+	defer countBargeCancels(bus, cfg.Metrics, guild.String())()
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
 	// single Pipeline.Run goroutine) and PlaybackSource (called from the playback

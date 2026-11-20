@@ -430,3 +430,178 @@ func TestPersist_DisabledIsNoop(t *testing.T) {
 		t.Fatalf("Finalize with no store = %d, %v; want 0, nil", n, err)
 	}
 }
+
+// persistedText returns the persisted text of lineID, and whether the row exists.
+func persistedText(t *testing.T, store *fakeLineStore, sid uuid.UUID, lineID string) (string, bool) {
+	t.Helper()
+	rows, err := store.ListTranscriptLines(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("ListTranscriptLines: %v", err)
+	}
+	for _, r := range rows {
+		if r.LineID == lineID {
+			return r.Text, true
+		}
+	}
+	return "", false
+}
+
+// TestPersist_UndeliveredSentenceTextDropped is O9/#641: a sentence that never
+// reached the room must not stay in the line's TEXT once another sentence of the
+// same turn delivered — neither in the persisted row nor in the live view
+// (ADR-0012: never record text the room did not hear). Every case ends with the
+// turn's text reduced to what was heard.
+func TestPersist_UndeliveredSentenceTextDropped(t *testing.T) {
+	bart := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
+	cases := []struct {
+		name   string
+		events []voiceevent.Event
+	}{
+		{
+			// The opener start-errored (TTSInvoked, then the stage's TTSStreamFailed,
+			// never FirstAudio) and the turn recovered with a second sentence.
+			name: "start-errored opener then recover",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TTSStreamFailed{At: at(2), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(3), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(4), TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndTTSError},
+			},
+		},
+		{
+			// The opener's stream died before its first chunk, then the turn recovered.
+			name: "stream-failed opener then recover",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TTSStreamFailed{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(5), TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(6), TurnID: "t1", Reason: voiceevent.TurnEndTTSError},
+			},
+		},
+		{
+			// The tail sentence start-errored; the turn ends tts_error.
+			name: "start-errored tail on tts_error",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndTTSError},
+			},
+		},
+		{
+			// The tail produced no audio and no error signal before the turn's own
+			// terminal: stripped at the end.
+			name: "silent tail on completed",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndCompleted},
+			},
+		},
+		{
+			// The producer died after the tail was dispatched but before it played.
+			name: "pending tail on provider_error",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndProviderError},
+			},
+		},
+		{
+			// The session ended with the tail still pending and no TurnEnded at all:
+			// the Finalize sweep drops it.
+			name: "pending tail at session end",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := voiceevent.NewBus()
+			fs := &fakeSessions{id: uuid.New(), active: true}
+			store := newFakeLineStore()
+			r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+			bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "t1", Target: bart})
+			for _, e := range tc.events {
+				bus.Publish(e)
+			}
+			if _, ended := tc.events[len(tc.events)-1].(voiceevent.TurnEnded); ended {
+				v := r.View(fs.id.String())
+				if len(v.Lines) != 1 || v.Lines[0].Text != "Heard." {
+					t.Errorf("live view = %+v, want the one line \"Heard.\"", v.Lines)
+				}
+			}
+			if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+				t.Fatalf("Finalize: %v", err)
+			}
+			got, ok := persistedText(t, store, fs.id, "a:t1")
+			if !ok || got != "Heard." {
+				t.Errorf("persisted a:t1 = %q (present=%v), want \"Heard.\" — text the room never heard was kept", got, ok)
+			}
+		})
+	}
+}
+
+// TestPersist_LateFirstAudioKeepsText is the review's ordering hole: on
+// pipelined sentences 2..N FirstAudio is published by the wire's sender
+// goroutine, so it can land AFTER the next sentence's TTSInvoked and even after
+// TurnEnded{completed}. A healthy reply must keep ALL its text, live and
+// persisted.
+func TestPersist_LateFirstAudioKeepsText(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "t1", Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "One.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Three.", TurnID: "t1"}) // before Two's FirstAudio
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"})                     // Two's, late
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndCompleted})
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"}) // Three's, after the end
+
+	const want = "One. Two. Three."
+	if v := r.View(fs.id.String()); len(v.Lines) != 1 || v.Lines[0].Text != want {
+		t.Errorf("live view = %+v, want %q", v.Lines, want)
+	}
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got, _ := persistedText(t, store, fs.id, "a:t1"); got != want {
+		t.Errorf("persisted a:t1 = %q, want %q", got, want)
+	}
+}
+
+// TestPersist_BargePendingTailKept pins the boundary of the O9 drop: a turn CUT
+// by a barge keeps its in-flight sentence text (#401 tail rounding — its
+// FirstAudio can race the cut), exactly as before.
+func TestPersist_BargePendingTailKept(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "t1", Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit down.", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got, _ := persistedText(t, store, fs.id, "a:t1"); got != "Well met. Sit down." {
+		t.Errorf("persisted a:t1 = %q, want the barge tail kept (#401)", got)
+	}
+}

@@ -52,7 +52,8 @@ type PseudoCall struct {
 //   - well-formed `<function=…>…</function>` — parsed for recoverable args;
 //   - an UNTERMINATED `<function=…` opener with no close (truncation / the model
 //     forgetting the tag) — stripped from the opener to end of text, Args nil
-//     (unrecoverable: the args are incomplete);
+//     (unrecoverable: the args are incomplete); an opener whose name cannot be
+//     read but which IS closed later is stripped only through its closer;
 //   - orphan `</function>` closers left behind when a JSON string arg itself
 //     contained the literal `</function>` — stripped so no garbage is spoken.
 //
@@ -80,14 +81,25 @@ func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 	// Join segments, collapsing whitespace only at the excision joints.
 	clean := joinAtSeams(segs)
 
-	// Unterminated opener: everything from the leftover `<function=` to end of
-	// text is an incomplete call. Strip it (no recovery) and meter it.
-	if idx := strings.Index(clean, pseudoMarker); idx >= 0 {
+	// A leftover `<function=` the well-formed regex skipped: an opener whose name
+	// could not be read, or an unterminated one. Either way it is unrecoverable
+	// (stripped, metered, never executed). When a closer follows, strip only
+	// through it and keep the prose after — the same span the stream scrubber
+	// swallows (#423); with no closer, the call runs to end of text.
+	for {
+		idx := strings.Index(clean, pseudoMarker)
+		if idx < 0 {
+			break
+		}
 		name := ""
 		if m := openerNameRE.FindStringSubmatch(clean[idx:]); m != nil {
 			name = m[1]
 		}
-		clean = strings.TrimRight(clean[:idx], " \t\r\n")
+		if k := strings.Index(clean[idx:], pseudoClose); k >= 0 {
+			clean = joinAtSeams([]string{clean[:idx], clean[idx+k+len(pseudoClose):]})
+		} else {
+			clean = strings.TrimRight(clean[:idx], " \t\r\n")
+		}
 		calls = append(calls, PseudoCall{Name: name, Args: nil})
 	}
 

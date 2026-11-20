@@ -118,6 +118,32 @@ func TestPlaybackPump_CloseStopsWorker(t *testing.T) {
 	}
 }
 
+// TestPlaybackPump_CloseEndsInFlightSentenceWithLiveCtx is #644: a sentence
+// whose OWN ctx never cancels, playing to a sender that is already gone (the
+// moderator-disconnect path — its playback never finishes on its own), must not
+// wedge Close and the cycle teardown behind it: Close ends it.
+func TestPlaybackPump_CloseEndsInFlightSentenceWithLiveCtx(t *testing.T) {
+	p := newFakePlayer()
+	pump := newPump(p, fakeCodec{}, nil, nil)
+
+	_, ro := openChunks()
+	pump.HandleSentence(context.Background(), ro)
+	pb := p.waitPlay(t) // never finished by the test
+
+	closed := make(chan struct{})
+	go func() { pump.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked on an in-flight sentence whose ctx never cancels")
+	}
+	select {
+	case <-pb.Done():
+	default:
+		t.Fatal("the in-flight playback was not stopped by Close")
+	}
+}
+
 // TestPlaybackPump_CloseDrainsQueuedJob pins the teardown contract for a
 // sentence that was enqueued but never dequeued when Close fired: it must be
 // drained (unblocking the tee's lockstep forwarder), not abandoned, and not

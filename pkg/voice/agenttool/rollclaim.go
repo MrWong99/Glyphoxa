@@ -12,20 +12,6 @@ import (
 // post-hoc [claimsRollResult] guard is the enforcement backstop.
 const diceHardeningInstruction = "When asked to roll dice, call the dice tool and report its actual result. Never invent, guess, or roleplay a die result."
 
-// standaloneRollNumber matches a bare 1..100 integer standing on its own word
-// boundaries — the numeric shape a narrated die result takes ("a 19", "eine 19",
-// "a perfect 100"). A number outside 1..100 (a price, a year) mostly falls
-// outside the range, but the detector is recall-biased on purpose (see
-// [claimsRollResult]).
-//
-// Residual: the 1..100 cap misses a 3-digit invented result ("Ergebnis: 120") —
-// a false NEGATIVE. This is deliberate: extending to arbitrary integers would
-// false-POSITIVE on years, quantities, and gold amounts on the far more common
-// non-roll turns, and the cap covers every single die (d100 is the largest
-// standard die). Revisit if live traffic shows the model narrating multi-die SUMS
-// above 100 (e.g. "3d100") without calling the tool.
-var standaloneRollNumber = regexp.MustCompile(`\b([1-9][0-9]?|100)\b`)
-
 // enNumberWord / deNumberWord are the spelled-out number vocabularies the #438
 // spelled-claim patterns capture: 1–20 plus the tens up to 100, in the two
 // campaign languages currently supported. Longer alternatives come first so the
@@ -69,27 +55,48 @@ var numberWordValues = map[string]int{
 	"hundert": 100, "einhundert": 100,
 }
 
+// claimRollNumber matches a bare 1..100 integer standing on its own word
+// boundaries — the numeric shape a narrated die result takes ("a 19", "17! You
+// hit.", "Meine Initiative ist 15"). The guard only runs on dice-ARMED turns where
+// no dice was executed, so recall matters more than precision: every such integer
+// counts, except one directly followed by a unit noun ([unitAfterNumber]).
+//
+// Residual: the 1..100 cap misses a 3-digit invented result ("Ergebnis: 120") —
+// a false NEGATIVE, deliberate (d100 is the largest standard die; years and big
+// amounts sit above it). Revisit if live traffic shows the model narrating
+// multi-die SUMS above 100 without calling the tool.
+var claimRollNumber = regexp.MustCompile(`\b([1-9][0-9]?|100)\b`)
+
+// unitAfterNumber is a currency, time or distance noun (EN/DE, lowercased word
+// prefix) right after a number: "5 Kupferstücke", "20 Goldstücke", "vor 3 Tagen",
+// "40 years", "30 Fuß". Such a number is a quantity, not a die result (O5). It is
+// a prefix match so German compounds and plurals are covered.
+var unitAfterNumber = regexp.MustCompile(`^\s*(gold|silber|silver|kupfer|copper|platin|münz|muenz|taler|krone|dukat|heller|groschen|coin|gp\b|sp\b|cp\b|pp\b|gm\b|piece|tag\b|tage\b|tagen|stunde|minute|sekunde|woche|monat|jahr|nacht|nächte|naechte|uhr\b|day|hour|second|week|month|year|night|o'clock|meile|mile|meter|fuß|fuss|feet|foot|schritt|pace|yard)`)
+
 // claimsRollResult reports whether text reads as a narrated die result (#399,
 // Option C): explicit die notation ("d20", "2w6", "d%") is stripped first — those
-// are the request, not a result — and what remains is checked for a standalone
-// 1..100 integer or a spelled-out number word in a roll-claim context (#438).
-// Language-free and recall-biased: a false positive only costs one regeneration on
-// a turn where the dice Tool was already armed, whereas a false negative would
-// ship an invented number, so the detector leans toward firing.
+// are the request, not a result — and what remains is checked for a 1..100
+// integer that is not a quantity ([unitAfterNumber]) or a spelled-out number word
+// in a roll-claim context (#438). Language-free and recall-biased: a false
+// positive only costs one regeneration on a turn where the dice Tool was already
+// armed, whereas a false negative would ship an invented number.
 func claimsRollResult(text string) bool {
 	return len(claimedRollValues(text)) > 0
 }
 
-// claimedRollValues extracts the roll values text claims (#438): every standalone
-// 1..100 integer (after die notation is stripped) plus every spelled-out number
-// word in a roll-claim context, mapped to its integer. The values feed the
-// regen-consistency check ([rollClaimConsistent]); an empty result means text
-// makes no roll claim.
+// claimedRollValues extracts the roll values text claims (#438): every 1..100
+// integer not followed by a unit noun (after die notation is stripped), then
+// every spelled-out number word in a roll-claim context, mapped to its integer.
+// The values feed the regen-consistency check ([rollClaimConsistent]); an empty
+// result means text makes no roll claim.
 func claimedRollValues(text string) []int {
 	stripped := diceNotation.ReplaceAllString(text, " ")
 	var vals []int
-	for _, m := range standaloneRollNumber.FindAllString(stripped, -1) {
-		if n, err := strconv.Atoi(m); err == nil {
+	for _, loc := range claimRollNumber.FindAllStringIndex(stripped, -1) {
+		if unitAfterNumber.MatchString(strings.ToLower(stripped[loc[1]:])) {
+			continue
+		}
+		if n, err := strconv.Atoi(stripped[loc[0]:loc[1]]); err == nil {
 			vals = append(vals, n)
 		}
 	}

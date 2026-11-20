@@ -20,7 +20,7 @@ func TestProjection_SayLineMatchesLLMTurn(t *testing.T) {
 		At: at(1), TurnID: "s1", Text: "Welcome, travelers.",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Welcome, travelers.", Index: 0, TurnID: "s1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Welcome, travelers.", TurnID: "s1"})
 
 	v := r.View(id)
 	if len(v.Lines) != 1 {
@@ -50,7 +50,7 @@ func TestProjection_SayPersistenceTeeFires(t *testing.T) {
 		At: at(1), TurnID: "s1", Text: "Aye.",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Aye.", Index: 0, TurnID: "s1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Aye.", TurnID: "s1"})
 	// The sentence reached the room: the delivery signal that keeps the row past the
 	// #437 reconcile (ADR-0040 amendment — a zero-delivery turn is retracted).
 	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "s1"})
@@ -81,7 +81,7 @@ func TestProjection_ButlerSayLine(t *testing.T) {
 		At: at(1), TurnID: "s1", Text: "At your service.",
 		Target: voiceevent.AddressTarget{AgentID: "butler-id", AgentRole: "butler", Name: "Glyphoxa"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "At your service.", Index: 0, TurnID: "s1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "At your service.", TurnID: "s1"})
 	// Delivered (#437): without a FirstAudio the row would be reconciled away.
 	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "s1"})
 
@@ -118,7 +118,7 @@ func TestProjection_EnsembleLeadAttributesLine(t *testing.T) {
 		At: at(1), TurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", TurnID: "e1"})
 
 	v := r.View(id)
 	if len(v.Lines) != 1 {
@@ -144,12 +144,12 @@ func TestProjection_EnsembleReactionSeparateLine(t *testing.T) {
 		At: at(1), TurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", TurnID: "e1"})
 	bus.Publish(voiceevent.EnsembleReaction{
 		At: at(3), TurnID: "r1", LeadTurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", Index: 0, TurnID: "r1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", TurnID: "r1"})
 
 	v := r.View(id)
 	if len(v.Lines) != 2 {
@@ -177,7 +177,7 @@ func TestProjection_EnsembleReactionDeclineNoLine(t *testing.T) {
 		At: at(1), TurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", TurnID: "e1"})
 
 	v := r.View(id)
 	if len(v.Lines) != 1 {
@@ -196,16 +196,16 @@ func TestProjection_EnsembleReactionBargeMarksLineEnded(t *testing.T) {
 		At: at(1), TurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", TurnID: "e1"})
 	bus.Publish(voiceevent.EnsembleReaction{
 		At: at(3), TurnID: "r1", LeadTurnID: "e1",
 		Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", Index: 0, TurnID: "r1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", TurnID: "r1"})
 	// A barge cuts the reaction: its sub-turn ends.
 	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "r1", Reason: voiceevent.TurnEndBarge})
 	// A late reaction sentence a barge delivered after the end must be dropped.
-	bus.Publish(voiceevent.TTSInvoked{At: at(6), Sentence: " and clobber!", Index: 1, TurnID: "r1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(6), Sentence: " and clobber!", TurnID: "r1"})
 
 	v := r.View(id)
 	if len(v.Lines) != 2 {

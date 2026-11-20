@@ -424,6 +424,33 @@ func TestChunker_UndeliveredTailDroppedOnBarge(t *testing.T) {
 	}
 }
 
+// TestChunker_LateFirstAudioAfterCompletedCommits: on pipelined sentences the
+// wire publishes FirstAudio from the sender goroutine, so the tail's can land
+// just AFTER the turn's own TurnEnded{completed}. The tail the room heard must
+// still reach the Chunk (it feeds NPC memory) — only a CUT drops the pending tail.
+func TestChunker_LateFirstAudioAfterCompletedCommits(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	c := NewChunker(fwd(t, bus, fs), fs, store, nil, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "One.", at(2))
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(4), TurnID: "t1", Reason: voiceevent.TurnEndCompleted})
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if got := store.all(); len(got) != 1 || got[0].Content != "Bart: One. Two." {
+		t.Fatalf("content = %+v, want \"Bart: One. Two.\"", got)
+	}
+}
+
 // TestChunker_SupersededTurnDropsUndeliveredTail (#443): a turn cut by a
 // different-target floor supersession gets a TurnEnded{superseded}; the chunker
 // must fold it exactly like a barge — the delivered prefix commits, the

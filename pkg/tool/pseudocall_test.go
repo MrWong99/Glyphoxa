@@ -182,6 +182,28 @@ func TestExtractPseudoCallsInnerLiteralCloser(t *testing.T) {
 	}
 }
 
+// TestExtractPseudoCallsNoNameOpenerKeepsTrailingProse is #423 item 2: an opener
+// whose name cannot be read (so the well-formed regex skips it) but which IS
+// closed later is stripped only through its closer — the prose after it is kept,
+// exactly as the stream scrubber speaks it. Unrecoverable (nil Args, no name).
+func TestExtractPseudoCallsNoNameOpenerKeepsTrailingProse(t *testing.T) {
+	in := `a <function= b</function> c`
+	clean, calls := ExtractPseudoCalls(in)
+	if clean != "a c" {
+		t.Errorf("clean = %q, want %q (trailing prose kept)", clean, "a c")
+	}
+	if len(calls) != 1 || calls[0].Name != "" || calls[0].Args != nil {
+		t.Fatalf("calls = %+v, want one unrecoverable no-name call", calls)
+	}
+	var streamed strings.Builder
+	sc := &streamScrubber{out: func(s string) error { streamed.WriteString(s); return nil }}
+	_ = sc.Write(in)
+	_ = sc.Flush()
+	if got := strings.Join(strings.Fields(streamed.String()), " "); got != clean {
+		t.Errorf("stream spoke %q, batch kept %q", got, clean)
+	}
+}
+
 // TestExtractPseudoCallsPreservesMarkdownNewlines — Butler replies are markdown;
 // excising a call must NOT flatten newlines in the untouched prose (a bullet list
 // stays a bullet list).

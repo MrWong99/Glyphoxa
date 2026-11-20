@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -161,11 +160,10 @@ type lane struct {
 	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of this lane's most recent
 	// speech-end, carried onto the flushed utterance's STTFinal (A3).
 	speechEndAt time.Time
-	// curUtteranceID / pendCommit / pendCommitSentAt carry this lane's current
-	// utterance's streaming state from the VAD callbacks to the flush (ADR-0042).
-	curUtteranceID   string
-	pendCommit       <-chan stt.CommitResult
-	pendCommitSentAt time.Time
+	// curUtteranceID / pendCommit carry this lane's current utterance's streaming
+	// state from the VAD callbacks to the flush (ADR-0042).
+	curUtteranceID string
+	pendCommit     *streamCommit
 	// stream is this lane's optional streaming-STT transport; nil = pure batch.
 	stream       *StreamManager
 	streamCancel func()
@@ -196,21 +194,20 @@ const laneReapSweepEvery = 1024
 // enqueue so the worker never reads mutable Segmenter/lane state.
 //
 // On the streaming path (ADR-0042) it additionally carries the utterance's manual
-// commit handle (nil = pure batch), the moment that commit was sent (for the
-// stt_request span), the utterance id (joining the STTFinal to its partials), and
+// commit handle (nil = pure batch; it records when the commit was sent and which
+// session issued it), the utterance id (joining the STTFinal to its partials), and
 // the lane's [StreamManager] (whose awaitCommit resolves the commit — carried on the
 // job so a reaped lane's commit still resolves on the shared worker). The worker
 // prefers the committed text and falls back to the batch recognizer — with these
 // SAME locally-buffered seg frames — on any commit failure.
 type transcribeJob struct {
-	ctx          context.Context
-	seg          []audio.Frame
-	speechEndAt  time.Time
-	commit       <-chan stt.CommitResult
-	commitSentAt time.Time
-	utteranceID  string
-	speakerID    string
-	stream       *StreamManager
+	ctx         context.Context
+	seg         []audio.Frame
+	speechEndAt time.Time
+	commit      *streamCommit
+	utteranceID string
+	speakerID   string
+	stream      *StreamManager
 }
 
 // transcribeQueueDepth is the buffer on the worker's job channel. A flush enqueues
@@ -339,14 +336,9 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		// fires HERE, at the VAD speech-end, never provider-side. The handle is stashed
 		// for the imminent flush to attach to the job.
 		if stream != nil {
-			commit, sentAt, ok := stream.endUtterance()
+			commit, _ := stream.endUtterance() // nil when the utterance never streamed
 			s.mu.Lock()
-			if ok {
-				ln.pendCommit = commit
-				ln.pendCommitSentAt = sentAt
-			} else {
-				ln.pendCommit = nil
-			}
+			ln.pendCommit = commit
 			s.mu.Unlock()
 		}
 	})
@@ -518,7 +510,6 @@ func (s *Segmenter) processLane(ln *lane, f audio.Frame) error {
 	ctx := s.ctx
 	speechEndAt := ln.speechEndAt
 	commit := ln.pendCommit
-	commitSentAt := ln.pendCommitSentAt
 	utteranceID := ln.curUtteranceID
 	stream := ln.stream
 	ln.pendCommit = nil
@@ -529,7 +520,7 @@ func (s *Segmenter) processLane(ln *lane, f audio.Frame) error {
 	if stream != nil {
 		stream.idleFrame(f)
 	}
-	s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID, ln.id, stream)
+	s.dispatchTranscription(ctx, seg, speechEndAt, commit, utteranceID, ln.id, stream)
 	return nil
 }
 
@@ -609,8 +600,7 @@ func (s *Segmenter) reapIdleLanes() {
 		id           string
 		seg          []audio.Frame
 		speechEndAt  time.Time
-		commit       <-chan stt.CommitResult
-		commitSentAt time.Time
+		commit       *streamCommit
 		utteranceID  string
 		stream       *StreamManager
 		streamCancel func()
@@ -626,7 +616,6 @@ func (s *Segmenter) reapIdleLanes() {
 			seg:          ln.buf,
 			speechEndAt:  ln.speechEndAt,
 			commit:       ln.pendCommit,
-			commitSentAt: ln.pendCommitSentAt,
 			utteranceID:  ln.curUtteranceID,
 			stream:       ln.stream,
 			streamCancel: ln.streamCancel,
@@ -647,7 +636,7 @@ func (s *Segmenter) reapIdleLanes() {
 	for _, r := range reap {
 		// Flush a still-buffered utterance so a reaped mid-utterance lane is not lost;
 		// dispatchTranscription is a no-op on an empty buffer.
-		s.dispatchTranscription(ctx, r.seg, r.speechEndAt, r.commit, r.commitSentAt, r.utteranceID, r.id, r.stream)
+		s.dispatchTranscription(ctx, r.seg, r.speechEndAt, r.commit, r.utteranceID, r.id, r.stream)
 		if r.streamCancel != nil {
 			r.streamCancel()
 		}
@@ -677,19 +666,18 @@ func (s *Segmenter) removeLaneOrder(id string) {
 // only if the queue is full (see [transcribeQueueDepth]). A recognizer error is
 // reported by the worker through onError — the side channel that replaces the
 // inline call's return value.
-func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit <-chan stt.CommitResult, commitSentAt time.Time, utteranceID, speakerID string, stream *StreamManager) {
+func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit *streamCommit, utteranceID, speakerID string, stream *StreamManager) {
 	if len(seg) == 0 {
 		return
 	}
 	job := transcribeJob{
-		ctx:          ctx,
-		seg:          seg,
-		speechEndAt:  speechEndAt,
-		commit:       commit,
-		commitSentAt: commitSentAt,
-		utteranceID:  utteranceID,
-		speakerID:    speakerID,
-		stream:       stream,
+		ctx:         ctx,
+		seg:         seg,
+		speechEndAt: speechEndAt,
+		commit:      commit,
+		utteranceID: utteranceID,
+		speakerID:   speakerID,
+		stream:      stream,
 	}
 	// Decide-and-enlist under mu: if teardown has begun (closed) or we were never bound
 	// (jobs nil), transcribe inline; otherwise register as a pending sender BEFORE
@@ -761,7 +749,6 @@ func (s *Segmenter) flushLane(ln *lane) {
 	ln.listening = false
 	ctx := s.ctx
 	commit := ln.pendCommit
-	commitSentAt := ln.pendCommitSentAt
 	utteranceID := ln.curUtteranceID
 	stream := ln.stream
 	ln.pendCommit = nil
@@ -772,15 +759,14 @@ func (s *Segmenter) flushLane(ln *lane) {
 	// or fall to batch if the stream is down. A speech-end already emitted a handle
 	// captured above, so this only fires for a truly mid-utterance end-of-stream.
 	if wasListening && stream != nil {
-		if c, sentAt, ok := stream.endUtterance(); ok {
+		if c, ok := stream.endUtterance(); ok {
 			commit = c
-			commitSentAt = sentAt
 		}
 	}
 
 	// A Flush has no speech-end transition (end-of-stream), so it carries the
 	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
-	s.dispatchTranscription(ctx, seg, time.Time{}, commit, commitSentAt, utteranceID, ln.id, stream)
+	s.dispatchTranscription(ctx, seg, time.Time{}, commit, utteranceID, ln.id, stream)
 }
 
 // transcribe produces one utterance's authoritative STTFinal, carrying the turn's
@@ -808,7 +794,7 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 	ctx = withSpeakerID(ctx, job.speakerID)
 
 	if job.commit != nil && job.stream != nil {
-		if t, ok := job.stream.awaitCommit(job.commit, job.commitSentAt); ok {
+		if t, ok := job.stream.awaitCommit(job.commit); ok {
 			// Committed text is authoritative: publish it as this utterance's STTFinal
 			// with the SAME TurnID minting the batch path uses.
 			s.stt.PublishFinal(ctx, t)
@@ -1010,11 +996,11 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		ctx := voiceevent.WithTurnID(ctx, e.TurnID)
 
 		// Default (no floor): dispatch synchronously on the bus goroutine — the
-		// behaviour every non-barge-in caller relies on. Announce a turn that died of
-		// its own error (a real TTS/provider failure) before producing audio so the
-		// metrics subscriber records the precise reason, not the coarse no-first-audio
-		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
-		// barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
+		// behaviour every non-barge-in caller relies on. Announce the turn's terminal —
+		// its own error (a real TTS/provider failure, #20), completed for a clean
+		// turn, or cancelled when the conversation ctx was torn down under it —
+		// mirroring the floor branch below. The sync path has no barge/supersede, so
+		// nothing else can own the terminal. NOTE: the
 		// mute gate (#211, #225) below lives in the floor branch only. Since #225 the
 		// matcher keeps a muted addressee routable by name (silencing is the reactor
 		// gate's job, not the matcher's), so a route CAN name a muted Agent. Prod
@@ -1023,9 +1009,11 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// reached only by configs wiring neither, and relies on that pairing rather
 		// than on the matcher de-routing muted Agents.
 		if r.floor == nil {
-			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
+			reason := terminalReason(r.dispatchAll(ctx, e))
+			if ctx.Err() != nil {
+				reason = voiceevent.TurnEndCancelled
 			}
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			return
 		}
 		// Muted addressee (#211, AC3): discard the route BEFORE taking the floor, so
@@ -1056,7 +1044,7 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// only folds same-target re-takes (#146): a segment routed to a DIFFERENT
 		// agent inside the window ("Bart, hold the door. Greta, run!") supersedes
 		// instead of vanishing.
-		turnCtx, release, coalesced := r.floor.Take(ctx, e.Target.AgentID)
+		turnCtx, release, coalesced := r.floor.take(ctx, e.Target.AgentID)
 		if coalesced {
 			// The floor's same-utterance grace window folded this late same-target
 			// segment into the turn already speaking (one utterance VAD-split in
@@ -1075,24 +1063,49 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// the mute reason before any goroutine, TTS or transcript — airtight because
 		// the Manager writes the set before publishing MuteChanged.
 		if r.mutes != nil && r.mutes.Muted(e.Target.AgentID) {
-			release()
-			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
+			// The mute reactor may already have cut this turn (its MuteChanged landed
+			// after the pre-Take check and found us holding the floor) and published
+			// the mute terminal; publish ours only if we still held it.
+			if release() {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
+			}
 			return
 		}
 		go func() {
-			defer release()
 			reason := r.dispatchAll(turnCtx, e)
-			// Announce a turn that died of its own error (a real TTS/provider
-			// failure) before producing audio — so the metrics subscriber records
-			// the precise reason, not the coarse no-first-audio catch-all. A turn
-			// cancelled by a barge or a supersede is NOT reported here (ctx.Err() !=
-			// nil): the barge publishes its own TurnEnded, and the subscriber's
-			// first-audio/TTL guards handle the rest. A clean turn reports nothing.
-			if reason != "" && turnCtx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
-			}
+			publishOwnTerminal(bus, e.TurnID, turnCtx, release, reason)
 		}()
 	}
+}
+
+// publishOwnTerminal ends a floor-holding turn with exactly ONE TurnEnded (W1)
+// unless a cutter already did. "Not cut" is decided atomically with the release
+// (held): a barge/mute/supersede racing the turn's end either lands before it
+// (held=false — the cutter publishes) or after it (the floor is already free, so
+// the cutter yields nothing and publishes nothing). A turn that still held the
+// floor reports its own failure reason or completed — or, when its ctx was
+// cancelled from above (the conversation torn down by a reconnect or stop),
+// cancelled, so no "<NPC> is speaking…" outlives it.
+func publishOwnTerminal(bus *voiceevent.Bus, turnID string, turnCtx context.Context, release func() bool, failed voiceevent.TurnEndReason) {
+	live := turnCtx.Err() == nil
+	if !release() {
+		return
+	}
+	reason := voiceevent.TurnEndCancelled
+	if live {
+		reason = terminalReason(failed)
+	}
+	bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: turnID, Reason: reason})
+}
+
+// terminalReason maps dispatchAll's failure reason to the turn's terminal
+// reason: the failure itself, or [voiceevent.TurnEndCompleted] when the turn ran
+// clean. Callers only use it for a turn no cutter ended.
+func terminalReason(failed voiceevent.TurnEndReason) voiceevent.TurnEndReason {
+	if failed == "" {
+		return voiceevent.TurnEndCompleted
+	}
+	return failed
 }
 
 // dispatchAll renders one routing decision under ctx, returning the turn-end
