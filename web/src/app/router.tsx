@@ -174,7 +174,7 @@ const tenantIndexRoute = createRoute({
 // URL acts once instead of pinning the screen. `view` is legacy vocabulary:
 // the Campaign sub-view moved into the path (ADR-0063), and screenRoute's
 // beforeLoad rewrites an old ?view= link onto it.
-export type ScreenSearch = {
+type ScreenSearch = {
   view?: string;
   node?: string;
   session?: string;

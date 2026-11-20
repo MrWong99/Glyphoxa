@@ -357,7 +357,7 @@ export function KnowledgePanel({
             />
             {searchFailed ? (
               <p className="gx-campaign__error" role="alert">
-                {t("knowledge.searchError", { message: searchQuery.error?.message ?? "" })}
+                {t("knowledge.searchError", { message: errorMessage(searchQuery.error) })}
               </p>
             ) : (
               <>

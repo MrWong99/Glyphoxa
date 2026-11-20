@@ -974,7 +974,7 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
       {searching &&
         (searchQuery.isError ? (
           <p className="gx-session__transcript-empty" role="alert">
-            {t("session.couldntSearch", { message: searchQuery.error?.message ?? "" })}
+            {t("session.couldntSearch", { message: errorMessage(searchQuery.error) })}
           </p>
         ) : lines.length > 0 ? (
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">

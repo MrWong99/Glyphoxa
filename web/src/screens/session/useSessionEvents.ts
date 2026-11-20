@@ -48,7 +48,7 @@ export interface Transcript {
 const EMPTY: Transcript = { lines: [], status: "idle", typing: { active: false, label: "" } };
 
 // transcriptKey is the cache key for one session's live transcript.
-export function transcriptKey(id: string) {
+function transcriptKey(id: string) {
   return ["sessionTranscript", id] as const;
 }
 
@@ -68,7 +68,7 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 // snapshot fetch failed with nothing cached, so the screen — a picked past session
 // AND the current/live one — can surface an error instead of masquerading as the
 // empty "start a session" / "Listening…" state (#270).
-export type SessionTranscript = Transcript & { snapshotFailed: boolean };
+type SessionTranscript = Transcript & { snapshotFailed: boolean };
 
 // Patch is one stream frame's edit to the cached Transcript.
 type Patch = (prev: Transcript | undefined) => Transcript;
