@@ -829,14 +829,17 @@ func TestComplete_HostileChunkFlood_EmitsBudgetError(t *testing.T) {
 	}
 }
 
-// TestComplete_DoneThenFlood_EmitsBudgetError pins the budget below the SDK: a
+// TestComplete_DoneThenFlood_TerminatesPromptly pins the post-[DONE] hazard: a
 // hostile gateway sends the [DONE] sentinel FIRST and then floods choice-less
-// frames forever without closing. openai-go's Stream.Next sets done=true on the
-// sentinel and silently drains every later event inside its own loop — it never
-// returns to the adapter, so any guard in the adapter's chunk loop is bypassed.
-// The raw-byte cap on the transport's response body must still terminate the
-// stream with a terminal [llm.EventError] in bounded time.
-func TestComplete_DoneThenFlood_EmitsBudgetError(t *testing.T) {
+// frames forever without closing. openai-go up to v3.43 set done=true on the
+// sentinel and silently drained every later event inside Stream.Next — never
+// returning to the adapter — so only the raw-byte cap on the transport
+// (budgetTransport) ended the stream, as a budget EventError. Since the SDK
+// bump Stream.Next finishes and closes the body ON the sentinel, so the flood
+// is never read at all: the stream must end in bounded time, cleanly, with no
+// event manufactured from the post-sentinel frames. budgetTransport stays as
+// the backstop should a future SDK drain again.
+func TestComplete_DoneThenFlood_TerminatesPromptly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -864,7 +867,6 @@ func TestComplete_DoneThenFlood_EmitsBudgetError(t *testing.T) {
 	}
 
 	deadline := time.After(15 * time.Second)
-	var last llm.StreamEvent
 	for open := true; open; {
 		select {
 		case ev, ok := <-ch:
@@ -872,16 +874,18 @@ func TestComplete_DoneThenFlood_EmitsBudgetError(t *testing.T) {
 				open = false
 				break
 			}
-			last = ev
+			// Either outcome is bounded and safe: nothing at all (the SDK stops
+			// at the sentinel), or the transport budget's terminal error (an SDK
+			// that drains). Content conjured from the flood is neither.
+			if ev.Type != llm.EventError {
+				t.Fatalf("event %+v emitted from a post-[DONE] flood", ev)
+			}
+			if !strings.Contains(ev.Err, "exceeded") {
+				t.Errorf("EventError %q does not name the exceeded budget", ev.Err)
+			}
 		case <-deadline:
-			t.Fatal("stream did not terminate within 15s — post-[DONE] flood bypassed the budget")
+			t.Fatal("stream did not terminate within 15s — post-[DONE] flood was neither ignored nor budgeted")
 		}
-	}
-	if last.Type != llm.EventError {
-		t.Fatalf("last event = %+v, want EventError from the stream budget", last)
-	}
-	if !strings.Contains(last.Err, "exceeded") {
-		t.Errorf("EventError %q does not name the exceeded budget", last.Err)
 	}
 }
 

@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v7
       # Pinned (not floating @v1) so an action release can't change what CI
       # enforces — or publishes — without a reviewed bump.
-      - uses: bufbuild/buf-action@v1.6.0
+      - uses: bufbuild/buf-action@v1.7.0
         with:
           token: ${{ secrets.BUF_REGISTRY_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -50,11 +50,11 @@ jobs:
       - uses: actions/checkout@v7
 
       # Pinned buf CLI (not @latest) so a buf release can't change what CI
-      # generates without a reviewed bump. Matches the local 1.66.0.
+      # generates without a reviewed bump. Matches the local 1.75.0.
       - name: Setup buf
         uses: bufbuild/buf-setup-action@v1.50.0
         with:
-          version: 1.66.0
+          version: 1.75.0
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # buf authenticates to the BSR via BUF_TOKEN. The remote plugins in
@@ -459,7 +459,7 @@ jobs:
       # template-time correctness only. The real cluster e2e (helm install →
       # Postgres Ready → migrate Job Completed) is issue #37's job and is NOT run
       # here, so an unrelated PR's chart feedback stays seconds, not minutes.
-      # Helm >= 3.18 is required: helm-unittest v1.1.1's plugin.yaml uses the
+      # Helm >= 3.18 is required: helm-unittest v1.2.1's plugin.yaml uses the
       # `platformHooks` field, which older Helm (<= 3.17) refuses to parse,
       # leaving the plugin installed-but-unusable. Keep these two pins in step.
       - name: Set up Helm
@@ -471,7 +471,7 @@ jobs:
       # images, and Secret wiring (deploy/charts/glyphoxa/tests/*). Pinned (not
       # @latest) so a plugin release can't silently change what CI enforces.
       - name: Install helm-unittest plugin
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v1.1.1
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v1.2.1
 
       # kubeconform validates the rendered manifests against the upstream
       # Kubernetes JSON schemas — the structural gate `helm lint`/unittest don't
@@ -479,7 +479,7 @@ jobs:
       - name: Install kubeconform
         run: |
           curl -fsSL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
           sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
           kubeconform -v
@@ -645,7 +645,7 @@ jobs:
       # *ast.KeyValueExpr" in internal/poll — the new struct-literal
       # field-selector keys), killing the whole run.
       - name: Install golangci-lint v2
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
       - name: Run golangci-lint
         run: golangci-lint run ./...

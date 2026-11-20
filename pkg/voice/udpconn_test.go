@@ -452,3 +452,87 @@ func TestKeepaliveUDPConnReadsPayloadsLargerThanInitialBuffer(t *testing.T) {
 		}
 	}
 }
+
+// sealPaddedRTP is sealRTP with the RTP padding bit set and pad octets of
+// padding appended to the payload INSIDE the encrypted body, the final octet
+// carrying the count — the layout RFC 3550 §5.1 describes and Discord uses.
+func sealPaddedRTP(t *testing.T, seq uint16, ts, ssrc uint32, payload []byte, pad int) []byte {
+	t.Helper()
+	enc, err := voice.NewEncrypter(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey)
+	if err != nil {
+		t.Fatalf("NewEncrypter: %v", err)
+	}
+	var header [voice.RTPHeaderSize]byte
+	header[0] = voice.RTPVersionPadExtend | rtpPaddingBit
+	header[1] = voice.RTPPayloadType
+	binary.BigEndian.PutUint16(header[2:4], seq)
+	binary.BigEndian.PutUint32(header[4:8], ts)
+	binary.BigEndian.PutUint32(header[8:12], ssrc)
+	body := bytes.Clone(payload)
+	if pad > 0 {
+		body = append(body, make([]byte, pad)...)
+		body[len(body)-1] = byte(pad)
+	}
+	return bytes.Clone(enc.Encrypt(header, body))
+}
+
+// TestKeepaliveUDPConnStripsRTPPadding pins the upstream disgo v0.20.0 fix this
+// reimplementation carries: the padding flag is bit 0x20 of the first header
+// byte (the pinned code tested 0x04, a CSRC-count bit), and the padding sits at
+// the end of the ENCRYPTED payload, so it can only be measured after transport
+// decryption — the pinned code read the count from the last wire byte, which
+// under the rtpsize AEAD modes is the nonce.
+func TestKeepaliveUDPConnStripsRTPPadding(t *testing.T) {
+	t.Parallel()
+	ticks := make(chan time.Time)
+	fc := newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc)
+	open(t, u, fc, 42)
+	defer u.Close()
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey: %v", err)
+	}
+
+	payload := []byte{0x01, 0x02, 0x03, 0x04}
+	fc.reads <- sealPaddedRTP(t, 9, 960, 7, payload, 6)
+	p, err := u.ReadPacket()
+	if err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+	if !bytes.Equal(p.Opus, payload) {
+		t.Fatalf("Opus = %x, want %x (padding must be stripped)", p.Opus, payload)
+	}
+
+	// A padding-only packet carries no media: it is skipped, not delivered as
+	// an empty frame, and the next real packet is what ReadPacket returns.
+	fc.reads <- sealPaddedRTP(t, 10, 960, 7, nil, 8)
+	fc.reads <- sealRTP(t, 11, 1920, 7, payload)
+	p, err = u.ReadPacket()
+	if err != nil {
+		t.Fatalf("ReadPacket after padding-only packet: %v", err)
+	}
+	if p.Sequence != 11 || !bytes.Equal(p.Opus, payload) {
+		t.Fatalf("got seq %d payload %x, want seq 11 payload %x", p.Sequence, p.Opus, payload)
+	}
+	if got := u.packets.Load(); got != 3 {
+		t.Fatalf("packets = %d, want 3 (a padding-only packet still proves liveness)", got)
+	}
+}
+
+func TestStripRTPPadding(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		in, want []byte
+	}{
+		{"empty", nil, nil},
+		{"count covers the tail", []byte{1, 2, 3, 0, 0, 3}, []byte{1, 2, 3}},
+		{"count is the whole payload", []byte{0, 0, 3}, []byte{}},
+		{"zero count is malformed: unchanged", []byte{1, 2, 0}, []byte{1, 2, 0}},
+		{"count past the payload is malformed: unchanged", []byte{1, 2, 9}, []byte{1, 2, 9}},
+	} {
+		if got := stripRTPPadding(tc.in); !bytes.Equal(got, tc.want) {
+			t.Errorf("%s: stripRTPPadding(%v) = %v, want %v", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
