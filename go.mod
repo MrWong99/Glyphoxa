@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	connectrpc.com/connect v1.21.1
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately. pkg/voice/udpconn.go REIMPLEMENTS this pin's voice/udp_conn.go (keepalive transport, ADR-0064/#633): re-diff it against upstream on every bump. v0.20.0 evaluated 2026-11-20 and NOT taken: its handleGatewayClose now calls udp.Close() before re-Open (our transport latches closed and refuses, so fresh-session recovery would die after 30s) and its sender Close now calls OpusFrameProvider.Close() (ours latches into sender-reaping mode) — both need a pkg/voice design change + live soak first. Its RTP padding fix is already ported into udpconn.go.
+	github.com/disgoorg/disgo v0.20.0 // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API and on the exact lifecycle of disgo's voice conn. pkg/voice/udpconn.go REIMPLEMENTS voice/udp_conn.go (keepalive transport, ADR-0064/#633) and pkg/voice/connguard.go hooks the conn's state-update and remove funcs (in-place recovery, ADR-0064 amendment/#659): on every bump re-diff voice/udp_conn.go AND re-read voice/conn.go handleGatewayClose/Close and voice/audio_sender.go Close — the guard assumes removeConnFunc is called only from conn.Close. Bump deliberately, soak live.
 	github.com/disgoorg/godave v0.3.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0

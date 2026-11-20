@@ -14,9 +14,11 @@ import (
 // media transport: it swaps disgo's stock UDP connection for this package's
 // [keepaliveUDPConn] (a keepalive datagram every ~5s for the whole connection
 // lifetime — without it Discord's voice server silently stops routing inbound
-// RTP to a non-speaking Bot after ~13–15 minutes) and registers the
-// voice-gateway event observer that timestamps remote Speaking announcements
-// (the media watchdog's "audio should be flowing" evidence).
+// RTP to a non-speaking Bot after ~13–15 minutes — and a lifecycle that keeps
+// audio flowing across disgo's in-place voice-session recovery), builds every
+// conn through [guardedConnCreate], and registers the voice-gateway event
+// observer that timestamps remote Speaking announcements (the media watchdog's
+// "audio should be flowing" evidence).
 //
 // Pass it to disgo.New alongside [DaveOption] at EVERY client build site — the
 // per-cycle wirenpc client and the standing shared presence client both open
@@ -27,10 +29,16 @@ import (
 // A nil logger discards transport logs; a nil rec discards the keepalive
 // counters (glyphoxa_voice_udp_keepalives_total and friends).
 func TransportOption(logger *slog.Logger, rec MetricsRecorder) bot.ConfigOpt {
-	return bot.WithVoiceManagerConfigOpts(voice.WithConnConfigOpts(
-		voice.WithUDPConnCreateFunc(transportUDPConnCreate(logger, rec)),
-		voice.WithConnEventHandlerFunc(noteSpeakingEvent),
-	))
+	return bot.WithVoiceManagerConfigOpts(
+		// The guard and the transport are one mechanism: the transport treats a
+		// Close as a pause so disgo's in-place recovery keeps its audio, and the
+		// guard is what tells it when a Close was final (connguard.go).
+		voice.WithConnCreateFunc(guardedConnCreate),
+		voice.WithConnConfigOpts(
+			voice.WithUDPConnCreateFunc(transportUDPConnCreate(logger, rec)),
+			voice.WithConnEventHandlerFunc(noteSpeakingEvent),
+		),
+	)
 }
 
 // transportUDPConnCreate is the [voice.UDPConnCreateFunc] TransportOption

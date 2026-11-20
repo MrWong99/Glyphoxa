@@ -36,8 +36,8 @@ github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ3
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e h1:xE9rUv0wiEUgaagdNaHltaJ6ZFkeG/svxfnpxUcDxbU=
-github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e/go.mod h1:ZMGQXsHdnrc7rIgcugi6Ht8sSPOKXwy7WKeNlDGfgKg=
+github.com/disgoorg/disgo v0.20.0 h1:T81/p3heD3DNydk5Jc2/BPivxNmQInv1anSOU+hCEMQ=
+github.com/disgoorg/disgo v0.20.0/go.mod h1:ZMGQXsHdnrc7rIgcugi6Ht8sSPOKXwy7WKeNlDGfgKg=
 github.com/disgoorg/godave v0.3.0 h1:37F3ZuiMd8/EXeoCtTeE8iP2eT2nWsfEa4/ITwoKfe4=
 github.com/disgoorg/godave v0.3.0/go.mod h1:OreAC3hpabr39bMVA+jwOVDq1EUPXH5A0XUBiZaDI1Y=
 github.com/disgoorg/json/v2 v2.0.0 h1:U16yy/ARK7/aEpzjjqK1b/KaqqGHozUdeVw/DViEzQI=
