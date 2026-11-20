@@ -311,6 +311,8 @@ describe("Configuration", () => {
           create(ProviderHealthSchema, {
             provider: "groq",
             status: HealthStatus.DEGRADED,
+            code: "key_rejected",
+            detail: "server fallback text",
           }),
         ],
       }),
@@ -318,6 +320,26 @@ describe("Configuration", () => {
     const groqRow = (await screen.findByLabelText("Groq key")).closest(".gx-provider-row") as HTMLElement;
     expect(await within(groqRow).findByText(/having trouble/i)).toBeInTheDocument();
     expect(within(groqRow).queryByText(/^included$/i)).not.toBeInTheDocument();
+    // The stable code is translated client-side; the server text is only a fallback.
+    expect(within(groqRow).getByText(/the key was rejected/i)).toBeInTheDocument();
+    expect(within(groqRow).queryByText("server fallback text")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the server's detail for a health code it does not know", async () => {
+    renderScreen(
+      mockBackend({
+        saved: { groq: "abcd" },
+        health: [
+          create(ProviderHealthSchema, {
+            provider: "groq",
+            status: HealthStatus.DEGRADED,
+            code: "something_new",
+            detail: "A newer server says hi.",
+          }),
+        ],
+      }),
+    );
+    expect(await screen.findByText("A newer server says hi.")).toBeInTheDocument();
   });
 
   it("gives the planning-chat model row its own overline", async () => {

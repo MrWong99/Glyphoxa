@@ -2827,11 +2827,18 @@ message ProviderHealth {
   string provider = 1;
   // status is the tested liveness.
   HealthStatus status = 2;
-  // detail is a short human-readable note (an error summary when degraded).
+  // detail is a short human-readable note (a GM-facing sentence when
+  // degraded; the raw provider error stays in the server log).
   string detail = 3;
   // bot_tag is the resolved Discord bot tag from the live gateway login
   // (e.g. "Glyphoxa#4823"); set only on the "discord" entry.
   string bot_tag = 4;
+  // code is the stable class of a degraded result, for the screen to translate
+  // (detail is its English fallback): "missing_key", "key_rejected",
+  // "quota_exhausted", "unreachable", "plan_excludes_platform_keys",
+  // "check_failed". Empty when healthy. New codes may be added; an unknown
+  // code renders detail.
+  string code = 5;
 }
 
 // GetProviderHealthRequest is the (empty) request; the tenant is resolved

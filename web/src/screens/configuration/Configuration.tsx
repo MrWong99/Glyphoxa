@@ -556,7 +556,9 @@ function HealthBadge({
         <Badge variant="danger" dot size="sm">
           {t("config.badgeDegraded")}
         </Badge>
-        {health.detail && <span className="gx-health__detail">{health.detail}</span>}
+        {healthDetail(health, t) && (
+          <span className="gx-health__detail">{healthDetail(health, t)}</span>
+        )}
       </span>
     );
   }
@@ -572,6 +574,23 @@ function HealthBadge({
       {t("config.badgeWorking")}
     </Badge>
   );
+}
+
+// The stable failure classes GetProviderHealth reports (ProviderHealth.code),
+// each with its own translated sentence. An unknown code (a newer server)
+// falls back to the server's English detail.
+const HEALTH_CODE_KEYS: Record<string, MessageKey> = {
+  missing_key: "config.healthMissingKey",
+  key_rejected: "config.healthKeyRejected",
+  quota_exhausted: "config.healthQuotaExhausted",
+  unreachable: "config.healthUnreachable",
+  plan_excludes_platform_keys: "config.healthNoPlatformKeys",
+  check_failed: "config.healthCheckFailed",
+};
+
+function healthDetail(health: ProviderHealth, t: (key: MessageKey) => string): string {
+  const key = HEALTH_CODE_KEYS[health.code];
+  return key ? t(key) : health.detail;
 }
 
 // IntegrationBadge renders THIS tenant's standing Discord client health (#489):

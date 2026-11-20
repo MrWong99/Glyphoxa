@@ -1741,6 +1741,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// administer a guild before binding it. Empty when unset (BYOK-only web
 	// deployments): the proof then requires a saved/request token.
 	providerSrv.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
+	// The Discord health probe uses the same central token for a Tenant with
+	// none saved, so a central-Bot table's badge tests the Bot it actually runs.
+	voiceSrv.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
 	providerPath, providerHandler := stack.Handler(providerSrv.Handler)
 	voicePath, voiceHandler := stack.Handler(voiceSrv.Handler)
 	// The recap engine regenerates Butler-flavoured Session recaps on demand

@@ -594,6 +594,8 @@ type countingHealthSeams struct {
 }
 
 func (c *countingHealthSeams) wire(srv *VoiceServer) {
+	// The deployment has every env key, so an unsaved slot is still probed.
+	srv.lookupEnv = func(string) string { return "platform-env-key" }
 	srv.newLister = func(string) tts.VoiceLister {
 		c.lister.Add(1)
 		return &fakeLister{}
