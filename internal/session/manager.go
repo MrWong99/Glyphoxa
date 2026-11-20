@@ -35,6 +35,12 @@ import (
 // can't hang on a slow DB while the run context is already cancelled.
 const endTimeout = 5 * time.Second
 
+// usageFlushInterval is how often a RUNNING session's Usage Ledger is flushed to
+// the usage_ledger table (#660). It bounds what a crash, OOM kill or node
+// restart can lose to one interval of usage, and it is the lag with which the
+// plan-allowance gate and the planning chat see a live session's spend.
+const usageFlushInterval = 60 * time.Second
+
 // Sentinel errors the RPC layer maps onto Connect status codes.
 var (
 	// ErrSessionActive is returned by Start when THIS Tenant already has a running
@@ -139,7 +145,8 @@ type Store interface {
 	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
 }
 
-// UsageWriter persists a session's accumulated Usage Ledger rows at loop exit
+// UsageWriter persists a session's accumulated Usage Ledger rows, every
+// usageFlushInterval while the session runs (#660) and once more at loop exit
 // (ADR-0054). It is a SEPARATE optional seam from [Store] — a deployment that
 // wires no UsageWriter (voice-standalone, tests) records no durable usage, and
 // nothing else changes. [*storage.Store] satisfies it (AddUsage).
@@ -261,7 +268,8 @@ type activeSession struct {
 	// ledger is the session's durable Usage Ledger sink (ADR-0054), non-nil only
 	// when the Manager was wired a UsageWriter. It rides the teed StageMetrics
 	// beside the meter (attribution only, never a gate) and is flushed into the
-	// usage_ledger table at loop exit.
+	// usage_ledger table every usageFlushInterval while the loop runs (#660) and
+	// at loop exit.
 	ledger *billing.Ledger
 	// idle is this session's enrollment in the Voice Instance's Idle Close watchdog
 	// (ADR-0061), non-nil only when the Manager was wired a Guard whose Policy arms
@@ -330,6 +338,9 @@ type Manager struct {
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
+	// usageFlushEvery is the in-session Usage Ledger flush interval (#660);
+	// usageFlushInterval in prod, shrunk in tests.
+	usageFlushEvery time.Duration
 	// maxSessions is the process-wide cap on concurrent live Voice Sessions
 	// (Deps.MaxSessions, #488, ADR-0057's per-process K): a Start when
 	// len(active) == maxSessions is refused with ErrSessionLimit. Always >= 1
@@ -502,6 +513,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		log:                    log,
 		enabled:                enabled,
 		endTimeout:             endTimeout,
+		usageFlushEvery:        usageFlushInterval,
 		maxSessions:            maxSessions,
 		active:                 map[uuid.UUID]*activeSession{},
 		reservations:           map[uuid.UUID]struct{}{},
@@ -657,17 +669,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voi
 	// BEFORE the insert so a failure never strands a 'running' row (#433), and
 	// a read failure fails the start CLOSED.
 	//
-	// ALLOWANCE SNAPSHOT CAVEAT (#488, RE-DOCUMENTED not fixed): the month-to-date
-	// figure is the FLUSHED usage_ledger only. A running session's own spend is not in
-	// it until the ledger flushes at loop exit — and that flush is BEST-EFFORT
-	// (see runLoop: a flush failure only warns). So the real residual is a
-	// flush-undercount, orthogonal to concurrency: whenever a prior session's ledger
-	// flush failed (or has not yet run), THIS Start's remaining-allowance snapshot is
-	// computed against a month-to-date total that understates true spend, so the gate
-	// admits a start it might have refused (or tightens the hard cap less than it
-	// should). It never OVER-refuses. The meter still hard-stops this session at its
-	// own snapshot, and the estimate resets monthly (ADR-0046/0055). A durable
-	// per-Tenant running-total that survives a failed flush is a later epic.
+	// ALLOWANCE SNAPSHOT CAVEAT (#488, narrowed by #660): the month-to-date figure
+	// is the FLUSHED usage_ledger only. A session's ledger is flushed every
+	// usageFlushInterval while it runs and once more at loop exit, so the figure
+	// lags true spend by at most one interval, plus whatever a FAILED flush left
+	// buffered (a failed flush is merged back and retried by the next one; only a
+	// process death loses the unflushed remainder). The gate therefore may admit a
+	// start, or tighten the hard cap slightly less than it should, on an
+	// undercount of up to a minute of usage. It never OVER-refuses. The meter still
+	// hard-stops this session at its own snapshot, and the estimate resets monthly
+	// (ADR-0046/0055).
 	var allowanceRemaining *float64
 	if m.allowance != nil {
 		state, err := m.allowance.AllowanceState(ctx, tenantID)
@@ -805,7 +816,8 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voi
 
 	// Usage Ledger (ADR-0054): when a UsageWriter is wired, the session's metered
 	// usage is additionally bucketed per (day, component, provider, model) for
-	// durable per-Tenant cost attribution — flushed at loop exit, never a gate.
+	// durable per-Tenant cost attribution — flushed every usageFlushInterval while
+	// the loop runs and at loop exit (runLoop), never a gate.
 	// It tees onto whatever StageMetrics already is (the recorder, or the
 	// recorder+meter tee above — TeeUsage composes), so the capture points are
 	// unchanged. No UsageWriter ⇒ no ledger, byte-for-byte today's behavior.
@@ -982,7 +994,13 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	// no longer exists and, worse, holding its close callback alive. Idempotent.
 	defer as.idle.Release()
 
+	// Flush the Usage Ledger periodically while the loop runs (#660). The flusher
+	// is stopped and awaited before the end-of-session flush below, so the two
+	// never race over one batch's retry.
+	stopUsageFlush := m.startUsageFlusher(ctx, as)
+
 	loopErr := m.run(ctx, cfg)
+	stopUsageFlush()
 
 	// End the session's bridge and resolvability IMMEDIATELY — before the
 	// multi-second finalizers (transcript/highlight/chunk flush, CloseVoiceSession)
@@ -1020,6 +1038,23 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	// bounded contexts — otherwise the writes would themselves be cancelled.
 	base := context.WithoutCancel(ctx)
 
+	// END-OF-SESSION ORDER. What must not be lost goes first; what is merely nice
+	// to have goes last. Each step below has its own budget, and the best-effort
+	// finalizers alone can add up to several times endTimeout, more than a short
+	// termination grace period allows, so a SIGKILL has to land on a convenience:
+	//
+	//   1. flush the Usage Ledger          (billing; needs nothing from the others)
+	//   2. drain the transcript            (yields the terminal row's line_count)
+	//   3. write the terminal row
+	//   4. highlights, appearance index, chunk flush   (best-effort)
+	//   5. flush the ledger again          (anything step 4 metered)
+	//
+	// The terminal row stays behind the transcript drain because one write carries
+	// status and line_count together (#143 end-write atomicity) and the recap
+	// surfaces read line_count; a kill inside that one bounded drain leaves the row
+	// 'running', which boot reconciliation closes as orphaned.
+	m.flushUsage(base, as, "flush usage ledger at session end")
+
 	// Drain the live transcript's writer queue and read the authoritative count
 	// BEFORE ending the row, so line_count matches the persisted rows (#74). A
 	// finalize failure logs and falls back to the in-memory count rather than
@@ -1038,10 +1073,42 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		}
 	}
 
+	// A hard-cap trip records a deliberate end_reason override before it cancels the
+	// run ctx (#130): the cancel makes ctx.Err() non-nil, so the clean path below
+	// runs (status 'ended', NOT 'failed' — a policy stop is not a fault, ADR-0046),
+	// but the row still records WHY it stopped. Read under Manager.mu (the trip
+	// writes it there) so the race detector sees the synchronization.
+	m.mu.Lock()
+	override := as.endReasonOverride
+	m.mu.Unlock()
+
+	// A FRESH deadline for the terminal write, regardless of what Finalize consumed
+	// (#143): the row landing terminal is the invariant that matters, which is also
+	// why it is written here, AHEAD of the best-effort finalizers below. One
+	// CloseVoiceSession stamps 'failed' + the readable reason, 'ended' + the policy
+	// override reason (hard cap), or 'ended' + NULL for a clean stop — the single
+	// write preserves #143's end-write atomicity.
+	status := storage.VoiceSessionEnded
+	var endReason *string
+	if failed {
+		status = storage.VoiceSessionFailed
+		reason := failureReason(loopErr)
+		endReason = &reason
+	} else if override != "" {
+		reason := override
+		endReason = &reason
+	}
+	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
+	ended, err := m.store.CloseVoiceSession(endCtx, as.session.ID, status, lineCount, endReason)
+	cancel()
+	if err != nil {
+		m.log.Error("close voice session", "err", err, "voice_session", as.session.ID)
+	}
+
 	// Finalize the Session Highlights pipeline beside the transcript (#308): drain
 	// the Saver's worker (persisting any queued clips) and schedule the 7-day
 	// candidate purge, then unbind. Its OWN budget (like Finalize/chunk flush) — a
-	// slow drain / enqueue logs and never blocks the row from ending. Runs at EVERY
+	// slow drain / enqueue logs and never fails the session end. Runs at EVERY
 	// loop exit (Stop, self-exit, Shutdown), so a session's candidates always get a
 	// purge horizon (ADR-0051). nil (highlights off) is skipped.
 	if m.highlights != nil {
@@ -1071,8 +1138,7 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 
 	// Close the session's open Transcript Chunk (#104, ADR-0011): a lone trailing
 	// utterance is flushed ONLY here, at session end. Best-effort with its OWN
-	// budget (like Finalize) — a flush failure logs and never blocks the row from
-	// ending. Distinct from the line grain above (ADR-0040): the two persist
+	// budget (like Finalize) — a flush failure only logs. Distinct from the line grain above (ADR-0040): the two persist
 	// independently.
 	if m.chunker != nil {
 		chunkCtx, chunkCancel := context.WithTimeout(base, m.endTimeout)
@@ -1082,45 +1148,9 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		chunkCancel()
 	}
 
-	// Flush the session's Usage Ledger into the usage_ledger table (ADR-0054).
-	// Best-effort with its OWN budget, like the finalizers above: a flush failure
-	// loses only this session's usage attribution (an estimates-only ledger) and
-	// never blocks the row from ending.
-	if as.ledger != nil {
-		usageCtx, usageCancel := context.WithTimeout(base, m.endTimeout)
-		if err := as.ledger.Flush(usageCtx, m.usage.AddUsage); err != nil {
-			m.log.Warn("flush usage ledger before end", "err", err, "voice_session", as.session.ID)
-		}
-		usageCancel()
-	}
-
-	// A hard-cap trip records a deliberate end_reason override before it cancels the
-	// run ctx (#130): the cancel makes ctx.Err() non-nil, so the clean path below
-	// runs (status 'ended', NOT 'failed' — a policy stop is not a fault, ADR-0046),
-	// but the row still records WHY it stopped. Read under Manager.mu (the trip
-	// writes it there) so the race detector sees the synchronization.
-	m.mu.Lock()
-	override := as.endReasonOverride
-	m.mu.Unlock()
-
-	// A FRESH deadline for the terminal write, regardless of what Finalize consumed
-	// (#143): the row landing terminal is the invariant that matters. One
-	// CloseVoiceSession stamps 'failed' + the readable reason, 'ended' + the policy
-	// override reason (hard cap), or 'ended' + NULL for a clean stop — the single
-	// write preserves #143's end-write atomicity.
-	status := storage.VoiceSessionEnded
-	var endReason *string
-	if failed {
-		status = storage.VoiceSessionFailed
-		reason := failureReason(loopErr)
-		endReason = &reason
-	} else if override != "" {
-		reason := override
-		endReason = &reason
-	}
-	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
-	defer cancel()
-	ended, err := m.store.CloseVoiceSession(endCtx, as.session.ID, status, lineCount, endReason)
+	// Second ledger flush: usage the finalizers above metered after the first one
+	// (a no-op when they metered nothing).
+	m.flushUsage(base, as, "flush usage ledger after finalizers")
 
 	m.mu.Lock()
 	if err != nil {
@@ -1128,7 +1158,6 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		// Stop surfaces it (#143 Defect A); the startup reconciliation repairs the
 		// row on the next boot. Still clear the active slot — the loop is gone.
 		as.endErr = fmt.Errorf("session: close voice session %s: %w", as.session.ID, err)
-		m.log.Error("close voice session", "err", err, "voice_session", as.session.ID)
 	} else {
 		as.session = ended
 	}
@@ -1136,6 +1165,55 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		delete(m.active, as.tenantID)
 	}
 	m.mu.Unlock()
+}
+
+// flushUsage drains as's Usage Ledger into the usage_ledger table (ADR-0054) on
+// its own endTimeout budget. Best-effort: a failure logs under what and leaves
+// the batch buffered (billing.Ledger merges it back) for the next flush to
+// retry. A session with no ledger is a no-op.
+func (m *Manager) flushUsage(base context.Context, as *activeSession, what string) {
+	if as.ledger == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(base, m.endTimeout)
+	defer cancel()
+	if err := as.ledger.Flush(ctx, m.usage.AddUsage); err != nil {
+		m.log.Warn(what, "err", err, "voice_session", as.session.ID)
+	}
+}
+
+// startUsageFlusher flushes as's Usage Ledger every usageFlushEvery until the
+// returned stop is called or ctx (the run context) is cancelled (#660). stop
+// waits for an in-flight flush to finish, so the caller's own end-of-session
+// flush never overlaps one. Each flush runs detached from the run context: a
+// Stop that lands mid-flush must not abort a write that is already under way.
+// A session with no ledger gets a no-op stop.
+func (m *Manager) startUsageFlusher(ctx context.Context, as *activeSession) (stop func()) {
+	if as.ledger == nil || m.usageFlushEvery <= 0 {
+		return func() {}
+	}
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(m.usageFlushEvery)
+		defer t.Stop()
+		base := context.WithoutCancel(ctx)
+		for {
+			select {
+			case <-quit:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.flushUsage(base, as, "periodic usage ledger flush")
+			}
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
 }
 
 // failureReason renders the persisted end_reason for a failed session (#123): a

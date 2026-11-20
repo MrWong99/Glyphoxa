@@ -20,12 +20,13 @@ type FlushFunc func(ctx context.Context, rows []storage.UsageRow) error
 // Ledger is the durable-usage counterpart of the in-memory spend meter
 // (ADR-0054): an [observe.UsageSink] that buckets a session's metered usage by
 // (day, component, provider, model) with a priced estimate, for the session
-// Manager to flush into the usage_ledger table at session end. Like the meter
+// Manager to flush into the usage_ledger table every minute while the session
+// runs and at session end (#660). Like the meter
 // it rides [observe.TeeUsage] beside the production recorder — zero new
 // pipeline plumbing — and it never gates anything: attribution only.
 //
-// Buffering is in-memory until Flush: a crash loses the unflushed remainder of
-// the session, which the ADR accepts for an estimates-only ledger (the
+// Buffering is in-memory until Flush: a crash loses the usage metered since the
+// last flush (at most one flush interval), which the ADR accepts for an estimates-only ledger (the
 // Prometheus counters still moved).
 type Ledger struct {
 	tenantID uuid.UUID

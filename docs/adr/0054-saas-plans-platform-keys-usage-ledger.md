@@ -117,3 +117,11 @@ attribution-only ("never a gate" stands): the gate is a separate mechanism
 that reads it. And the signup default-plan auto-bind widens the
 operator-CLI-only binding surface by exactly one automated caller; snapshot
 semantics are unchanged, platform-key Plans remain operator-CLI-assigned.*
+
+## Amendment: the ledger is flushed during the session, and first at its end (2026-11-20, #660)
+
+"Flushed once at loop exit" is superseded. A running session's `billing.Ledger` is now flushed every 60 s while the loop runs and again at loop exit. The accepted loss shrinks from "the unflushed session remainder" (in practice the whole session, since nothing was flushed before its end) to at most one interval of usage, and the plan-allowance gate and the planning chat see a live session's spend with at most that lag. `Ledger.Flush` already snapshots, clears and re-merges on failure, so a periodic flush neither double counts nor drops a failed batch.
+
+At loop exit the order is now: flush the ledger, drain the transcript (it yields `line_count`), write the terminal `voice_sessions` row, then the best-effort finalizers (highlights, appearance index, chunk flush), then a second ledger flush for anything those metered. The finalizers each carry their own 5 s budget and together can outlast a termination grace period; a SIGKILL there must cost a convenience, not the session's usage or a row stuck `running`.
+
+The issue's premise that sessions "running concurrently in one tenant" each snapshot the full remaining allowance does not apply: the Manager runs at most one session per Tenant. The real exposure was the crash loss and the planning chat reading a total that excluded the live session.
