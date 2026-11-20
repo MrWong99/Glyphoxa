@@ -65,7 +65,7 @@ const (
 	// or a VAD split of one utterance into two segments — fires a fresh
 	// speech_start while Bart holds the floor. A zero window yields on that instant
 	// and cancels the in-flight TTS POST (the "context canceled" self-cancel that
-	// produced the 20s wait — see docs/latency-investigation/audio-process.md).
+	// produced the 20s wait — see the #19 latency investigation).
 	// 250ms debounces a speaker finishing their own sentence from a genuine
 	// interruption; it is the minimum until per-participant VAD (ADR-0019) can gate
 	// barge on speaker != the turn's addresser.

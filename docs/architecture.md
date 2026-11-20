@@ -5,9 +5,15 @@ govern it, under [docs/adr/](adr/). Domain vocabulary — **Mode**, **Operator**
 **GM**, **Bot**, **Guild**, **Voice Session**, **Butler**, **Character NPC**,
 **Provider Config**, **BYOK**, **Slash Command**, **Knowledge Graph**,
 **Transcript Line**, **Address Detection** — is defined once in
-[CONTEXT.md](../CONTEXT.md) and used here exactly. The decisions ledger lives in
-[DESIGN.md](../DESIGN.md); the self-host setup runbook is
-[docs/configuration.md](configuration.md).
+[CONTEXT.md](../CONTEXT.md) and used here exactly. The ADRs are indexed in
+[docs/README.md](README.md#architecture-decision-records); the self-host setup
+runbook is [docs/configuration.md](configuration.md).
+
+> **Audit status (2026-11-20, against v0.16.0).** §1, §2.2–§2.6, §3, §5, the
+> CI paragraph in §8 and the two closing tables were re-checked against the
+> tree. §4.1–§4.4 still describe the single-Operator MVP web tier (ADR-0039);
+> self-signup (ADR-0055), Player Invitations (ADR-0056) and the per-Tenant
+> presence registry (§5) have since widened it — read those ADRs alongside §4.
 
 **How to read this doc.** ADRs record *decisions*; the tree records what
 *shipped*. Where the two disagree, this doc follows the tree and says so in the
@@ -31,15 +37,15 @@ migrated instance. An explicit `-mode voice`/`web` still overrides it.
 
 | Mode | What the process is | What it runs |
 |------|---------------------|--------------|
-| `voice` | a **Voice Instance** | the Discord Bot + the voice pipeline for one Guild/channel passed as flags; no web API, no Slash Commands |
-| `web` | a **Web Instance** | the Connect RPC API + the embedded SPA. Starts no Voice Session, opens no Discord gateway, and therefore **registers no Slash Commands** |
-| `all` | both, in one process | Web Instance that also owns the standing Discord presence (Slash Commands) and drives the voice loop in-process |
+| `voice` | a **Voice Instance** | with a database and no `-guild`/`-channel`: a **claim-plane worker** in a shared pool (ADR-0057) that claims Voice Session intents, drives them, and serves the Slash Commands while it holds the elected `presence_owner` row. With `-guild`/`-channel` (or `-hardcoded`): the legacy standalone node for one static channel. No web API |
+| `web` | a **Web Instance** | the Connect RPC API + the embedded SPA. Opens no Discord gateway; starts and stops Voice Sessions by writing claim-plane intents a `voice` worker picks up |
+| `all` | both, in one process | Web Instance that also owns the per-Tenant Discord presence (Slash Commands) and drives the voice loop in-process |
 
-**`all` is the only Mode with the whole product in it.** The standing presence and
-the Slash Command surface are built inside `if withVoice` in
-`cmd/glyphoxa/main.go`, so a `web`-only replica serves the console and nothing on
-Discord. This is deliberate — the split-Mode scale path expects exactly one
-Bot-owning process.
+Two deployment shapes follow. **`all`** is the single-process self-host shape
+(compose, systemd, the chart's `web.mode: all`). **`web` + N × `voice`** is the
+split shape the hosted service runs (the chart's default `web.mode: web` plus
+`voice.replicas`): the web tier never touches Discord, and exactly one worker —
+the `presence_owner` election winner — dispatches interactions.
 
 **Audio frames never cross a process boundary** (ADR-0005). The Voice Instance
 opens the Discord voice WebSocket itself and keeps Opus/PCM inside its own
@@ -48,22 +54,35 @@ unaffected (ADR-0014).
 
 In `all` Mode the web handler starts and stops the loop through an in-process
 `internal/session.Manager`, which holds the loop's cancel func — no loopback RPC
-(ADR-0039). A `web`-only replica answers `GetSession` but rejects `StartSession`.
+(ADR-0039). A `web`-only replica uses `session.IntentControl` instead
+(`internal/session/intentcontrol.go`): `StartSession` inserts a
+`voice_session_intents` row and polls until a worker's claim loop
+(`internal/session/claimloop.go`) claims it and reports it live; `StopSession`
+flags the intent and polls for the wind-down. The live controls that need the
+in-memory session (mute, `/say`, replay) degrade in that split.
 
-Two other subcommands sit beside the Modes: `glyphoxa migrate` (ADR-0031) and
-`glyphoxa seed`.
+Other subcommands sit beside the Modes: `glyphoxa migrate` (ADR-0031), `seed`,
+`export`, `billing` (ADR-0054), `user`, and `version` (the stamped release and
+whether the binary links the real Opus codec and DAVE — the untagged
+`make build` does not, see [configuration.md](configuration.md)).
 
 ### Tree vs ADR
 
 - ADR-0005 specifies a `voice_sessions(guild_id PK, voice_instance_id,
-  claimed_at, heartbeat_at)` claim table plus `LISTEN/NOTIFY` handoff. **Not
-  built.** The shipped `voice_sessions` table
-  (`internal/storage/migrations/00006_voice_sessions.sql`,
-  `00008_voice_session_end_reason.sql`) is a per-Campaign session record — `id`,
-  `campaign_id`, `started_at`, `ended_at`, `status`, `line_count`, `end_reason` —
-  with no instance-claiming columns. One Voice Instance per deployment is the v1.0
-  shape; orphan rows left by a crash are swept at boot
-  (`Manager.ReconcileOrphans`, ADR-0043's "rows are the source of truth" spirit).
+  claimed_at, heartbeat_at)` claim table plus `LISTEN/NOTIFY` handoff. What
+  shipped is ADR-0057's claim plane in a separate table:
+  `voice_session_intents` (`00035_voice_session_intents.sql`,
+  `internal/storage/voiceintent.go`) holds one live intent per Tenant, which a
+  worker claims with `FOR UPDATE SKIP LOCKED`, heartbeats while it drives the
+  session, and finishes on stop or drain; an intent whose heartbeat goes stale
+  is reaped, so a dead worker cannot strand a Tenant. `voice_sessions` stays the
+  per-Campaign session record (`id`, `campaign_id`, `started_at`, `ended_at`,
+  `status`, `line_count`, `end_reason`). **Still not built** from ADR-0005:
+  claiming columns on `voice_sessions` itself and `LISTEN/NOTIFY` handoff —
+  workers poll. Crash orphans are swept by `Manager.ReconcileOrphans` at boot
+  and, in the pool, by `ReconcileWorkerOrphanedVoiceSessions`. Rollout notes:
+  [devs/2026-07-19-voice-claim-plane-rollout.md](devs/2026-07-19-voice-claim-plane-rollout.md),
+  [devs/2026-07-20-voice-fleet-rollout.md](devs/2026-07-20-voice-fleet-rollout.md).
 - ADR-0031 says `all` Mode auto-applies migrations at startup. **Wired** (#282):
   the web/all boot preflight `ensureSchemaReady` (`cmd/glyphoxa/main.go`) runs
   `autoMigrate` (`cmd/glyphoxa/migrate.go`, `storage.MigrateUp` under the
@@ -87,7 +106,7 @@ A Voice Session is the Bot's presence in one Discord voice channel, bound to a
 ```
 Discord Opus (DAVE-decrypted)
   → per-speaker Opus decode + resample + reframe   pkg/voice/wire/codec, pkg/voice/wire/codec/dsp
-  → VAD (Silero, ONE shared session — see §2.6)    pkg/voice/vad/silero
+  → VAD (Silero, one session per Speaker Lane, §2.6) pkg/voice/vad/silero
   → STT (batch POST, or streaming websocket)       pkg/voice/stt, pkg/voice/stt/elevenlabs
   → Address Detection (deterministic fuzzy chain)  pkg/voice/address
   → Agent turn (Hot Context → LLM → tool loop)     pkg/voice/agent, pkg/voice/agenttool
@@ -175,9 +194,11 @@ snapshot, sub-millisecond, and fully unit-testable.
 **Tree vs ADR.**
 
 - ADR-0024 says "the Butler defaults `AddressOnly=true` … and responds to
-  voice-address only from the GM." **The Butler cannot enter the Matcher by
-  construction** — see §3. `AddressOnly` is a real matcher capability with zero
-  in-loop users today, and no GM-vs-participant gate exists anywhere.
+  voice-address only from the GM." **Shipped (#280):** the loop loads the
+  Campaign's Butler as an Address-Only Agent (`butlerSpec`,
+  `internal/wirenpc/agentspec.go`), and `orchestrator.WithButlerGMGate` drops a
+  Butler route unless the utterance's Speaker Lane belongs to a GM
+  (`Config.GMSpeaker`). A non-GM naming the Butler gets no reply.
 - Agents carry aliases, and both Address Detection and `/glyphoxa mute` resolve
   them — but the Campaign screen ships **no alias editor**
   (`web/src/screens/campaign/Campaign.tsx` passes `aliases` straight through). The
@@ -200,9 +221,9 @@ Address Detection and retrieval from ingesting words nobody heard.
 
 **Tree vs ADR.** ADR-0012's per-utterance `was_interrupted` /
 `interrupted_by_user_id` fields do not exist: `transcript_line`
-(`00007_transcript_lines.sql`) carries no interruption columns, and
-`BargeDetected` carries only the moment of the cut. Both wait on speaker
-attribution (§2.6).
+(`00007_transcript_lines.sql`) carries no interruption columns. `BargeDetected`
+now names the barging speaker (`SpeakerID`, §2.6), so the attribution is
+available; nothing persists it yet.
 
 ### 2.4 Barge-in
 
@@ -232,13 +253,13 @@ measured **per participant**. Neither ships:
   (`internal/wirenpc/wirenpc.go`), passed once into
   `orchestrator.WithBargeInCoalesce` for the whole Conversation. There is no
   per-Agent knob.
-- It is measured over the **one shared VAD session**, not per participant (§2.6).
-  A non-zero window is therefore load-bearing rather than cosmetic: at zero, the
+- It **is** armed per participant since Speaker Lanes (§2.6):
+  `pkg/voice/orchestrator/barge.go` keys pending windows by `SpeakerID`, so one
+  speaker's burst never completes another speaker's window, and `BargeDetected`
+  names the barging speaker. The 250 ms value predates lanes (at zero, the
   addressing speaker's own continued speech cancelled the turn it had just
-  triggered. 250 ms is documented in-code as *the minimum* until per-participant
-  VAD lands, not as a tuned sensitivity.
-- Consequently the "any human may barge in, and you get `interrupted_by_user_id`
-  for free" property is not realized.
+  triggered) and has not been re-tuned since.
+- `interrupted_by_user_id` is still not persisted (§2.3).
 
 A second window, `floorCoalesceWindow`, guards a different failure: one utterance
 split by VAD into two STT segments would open two turns, the second superseding the
@@ -266,31 +287,28 @@ queued follow-up) is the **design-of-record** and is *not implemented*. Its
 multi-target decision set is reachable today by setting `MaxTargets > 1` or `-1`;
 its turn-taking layer is not built. ADR-0025 is deferred, not superseded.
 
-### 2.6 One shared VAD lane; no speaker attribution
+### 2.6 Speaker Lanes
 
-This is the single most load-bearing gap between the ADRs and the tree, and several
-sections above point back here.
+> ADR-0050 ([per-speaker utterance segmentation](adr/0050-per-speaker-utterance-segmentation.md))
 
-Discord separates speakers on the wire, and the codec honours that: inbound Opus is
-decoded with **one libopus decoder per speaker** (`pkg/voice/wire/codec` — a decoder
-is stateful per Opus stream, so feeding two SSRCs into one produces garbage), and
-`voice.Frame` carries a `UserID`. **That is where speaker identity stops.** The
-decoded PCM feeds **one shared Silero VAD session**, so:
+Discord separates speakers on the wire, and the pipeline keeps them separate.
+Inbound Opus is decoded with **one decoder per speaker** (`pkg/voice/wire/codec`
+— a decoder is stateful per Opus stream), and each speaker gets a **Speaker
+Lane**: its own Silero VAD session (`orchestrator.WithSpeakerLanes`, wired in
+`internal/wirenpc/pipeline.go`) and, with streaming STT, its own STT stream
+(capped by `GLYPHOXA_STT_STREAM_MAX_LANES`). `SpeakerID` — the Discord
+snowflake — rides `VADSpeechStart`/`VADSpeechEnd`, `STTPartial`/`STTFinal` and
+`BargeDetected` (`pkg/voice/voiceevent`).
 
-- Every voice event downstream of VAD is speaker-less. There is no `SpeakerID`
-  field on any event in `pkg/voice/voiceevent`, and no **Speaker Lanes**.
-- Human speech shares **one anonymous lane** in the Transcript: the relay renders
-  every human as `player` (ADR-0039). Only NPC and Butler lines are named, from
-  `AddressTarget.Name`.
-- Barge-in cannot attribute the interrupter (§2.4), and its confirm window cannot
-  distinguish the addressing speaker's own continued speech from a genuine
-  interruption — hence the 250 ms floor.
+Consequences:
 
-ADR-0050 specifies the fix — N Speaker Lanes, `SpeakerID` added additively to
-`STTPartial` / `STTFinal` / `VADSpeechStart` / `BargeDetected` — and is **not
-implemented**. ADR-0051 (Rollover Tape) blocks on it, because per-speaker consent
-exclusion is impossible without lanes. See
-[Design-of-record, not shipped](#design-of-record-not-shipped).
+- The Transcript names humans: `transcript.Relay` resolves each line's
+  `SpeakerID` to a Player Character or the GM (`internal/speaker`, ADR-0050 as
+  amended by ADR-0055) instead of one anonymous `player` lane.
+- Barge-in confirm windows are per speaker (§2.4), and the Butler GM gate
+  (§2.2) keys off the lane's speaker.
+- The Rollover Tape and Highlights (ADR-0051, `internal/tape`,
+  `internal/highlight`) build on the lanes for per-participant consent.
 
 ### 2.7 Provider adapters that exist
 
@@ -323,32 +341,21 @@ One polymorphic `agents` table holds both Agent Roles — `butler` and `characte
 — so one Matcher and one Cast *can* host a mixed roster on one code path. A trigger
 (`00002_auto_butler.sql`) creates exactly one Butler per Campaign.
 
-**Tree vs ADR: the Butler is an undeletable DB row with no code path.** It is
-auto-created by the `00002_auto_butler.sql` trigger with `address_only = true`
-(a partial unique index forbids a second), it is editable in the console — Persona,
-Voice, Tool Grants — and **nothing it holds drives anything**. Three facts, each
-checkable:
-
-- The live loop never loads it. `loadCampaignNPCs` calls `storage.CharacterAgents`
-  (`internal/wirenpc/agentspec.go`), Character NPCs only.
-- **It cannot enter the Matcher by construction, not merely by omission.**
-  Production builds the matcher at `internal/wirenpc/roster.go` via
-  `address.NewMatcher`, and that file's single `address.Agent` derivation site,
-  `matcherAgent`, hardcodes `AgentRole: "character"` for every Agent it registers.
-  `address.NewWholeWordMatcher(butler, npcs)` is the only constructor that accepts
-  a Butler — it panics unless `butler.AgentRole == "butler"` — and it has no
-  non-test caller.
-- No Slash Command reaches it either: `/roll` is answered by the Bot binary
-  invoking the built-in `dice` Tool directly (§5), never by the Butler reasoning.
-
-So the Butler exists in the schema, in the console, and in the ADRs. It does not
-exist at runtime.
+**The Butler is live in the voice loop.** It is auto-created by the
+`00002_auto_butler.sql` trigger with `address_only = true` (a partial unique
+index forbids a second) and is editable in the console — Persona, Voice, Tool
+Grants. The loop loads it alongside the Campaign's Character NPCs
+(`butlerSpec`, `internal/wirenpc/agentspec.go`) as an Address-Only Agent that
+only the GM can voice-address (§2.2). It also answers the Butler planning chat
+in the console (ADR-0062, `ChatService`). `/roll` stays a Bot-binary command
+that runs the built-in `dice` Tool directly, never a Butler turn (§5).
 
 **Tool** is the domain term (`pkg/tool`). A Tool is `{name, input JSON schema,
 handler}`; its *backing* — built-in Go function or an out-of-process MCP Server —
 is an implementation detail behind that interface. The `Registry` is a map.
-v1.0 ships **exactly one** built-in Tool, `dice` (`pkg/tool/dice.go`,
-`pkg/tool/builtins.go`); the MCP Server adapter is not built.
+The built-ins are registered in `pkg/tool/builtins.go`: `dice`,
+`transcript_search`, `kg_query`, `remember_knowledge`, `recap`, and the spatial
+Tools (ADR-0060). The MCP Server adapter is not built.
 
 **Tool Grants** are `{tool_name, config?}` structs, persisted in
 `tool_agent_grant` (`00013_tool_agent_grant.sql`) and editable from the Campaign
@@ -363,17 +370,18 @@ screen. Enforcement is two-layered:
   widen its own scope by crafting arguments.
 
 **Side effects.** Each Tool declares one bit, read-only or side-effecting.
-Read-only Tools (`dice`) execute inline during generation. Side-effecting Tools
-are, per ADR-0030, meant to record intent and flush at turn-commit — **that
-machinery is not built**. `pkg/tool/loop.go` hard-refuses any Tool that is not
-read-only. ADR-0052 subsequently narrows ADR-0030: `remember_knowledge` is to be
-proposal-mediated rather than turn-committed. Neither exists in the tree yet.
+Read-only Tools execute inline during generation. ADR-0030's general mechanism —
+side-effecting Tools record intent and flush at turn-commit — **is not built**:
+`pkg/tool/loop.go` refuses any Tool that is neither read-only nor
+**proposal-mediated**. ADR-0052 is the shipped exception: `remember_knowledge`
+writes a GM-reviewed Knowledge Proposal instead of mutating the Knowledge Graph,
+so it runs inline.
 
 ---
 
 ## 4. The web tier
 
-> ADR-0013 ([SPA: Vite + React 18](adr/0013-spa-vite-react-18.md)) ·
+> ADR-0013 ([SPA: Vite + React — React 19 since the 2026-11 amendment](adr/0013-spa-vite-react-18.md)) ·
 > ADR-0015 ([Buf Connect end-to-end](adr/0015-buf-connect-end-to-end.md)) ·
 > ADR-0014 ([bus + SSE to the browser](adr/0014-grpc-bus-plus-sse.md)) ·
 > ADR-0018 ([TanStack Router + Query + connect-query](adr/0018-tanstack-router-and-query.md)) ·
@@ -383,16 +391,18 @@ proposal-mediated rather than turn-committed. Neither exists in the tree yet.
 
 ### 4.1 Shape
 
-A Vite + React 18 SPA (`web/`) built to `internal/spa/dist` and served from
+A Vite + React 19 SPA (`web/`) built to `internal/spa/dist` and served from
 `embed.FS` by the same binary (`internal/spa`), so the single-binary deployment
-shape survives. Four screens exist on disk (`web/src/screens/`):
+shape survives. The screens (`web/src/screens/`):
 
 | Screen | Purpose |
 |--------|---------|
+| `landing`, `legal` | public landing page; Impressum, privacy policy, terms |
 | `login` | Discord OAuth entry |
+| `onboarding` | create a Tenant after an open-admission signup (ADR-0055) |
 | `configuration` | Provider Configs (BYOK), Discord settings, bot-authorization link, spend caps |
-| `campaign` | Campaigns, Agents, Tool Grants, Knowledge Graph Nodes/Edges |
-| `session` | Start/Stop the Voice Session, live Transcript feed, NPC roster + mute |
+| `campaign` | sub-views in the sidebar, addressed by path (ADR-0063): cast/Agents + Tool Grants, the Knowledge Graph wiki and graph view, Maps, Players |
+| `session` | Start/Stop the Voice Session, live Transcript feed, NPC roster + mute, Highlights |
 
 There is no separate transcripts screen — the live Transcript feed and its search
 live inside `session`. The Campaign screen has no alias editor, so an Agent's
@@ -483,31 +493,43 @@ Setup runbook: [docs/configuration.md](configuration.md).
 > ADR-0047 ([invite resolver + bot authorization](adr/0047-discord-invite-resolver-bot-authorization.md)) ·
 > ADR-0043 ([gateway fatal-vs-transient classification](adr/0043-gateway-fatal-transient-classification.md))
 
-There is exactly **one Bot** identity (one token) for the whole deployment. Its
-gateway client is boot-owned (`internal/presence`) and shared with the voice
-Manager — never a second connection per Voice Session. Commands register per-Guild,
-idempotently, and survive with no Voice Session active.
+The presence is a **per-Tenant registry** of standing gateway clients
+(`internal/presence/clients.go`, `tenants.go`; #489, ADR-0057), keyed by each
+Tenant's resolved Bot token and shared with the voice Manager — never a second
+connection per Voice Session. The token ladder (`wirenpc.ResolveDiscordToken`,
+`internal/wirenpc/credentials.go`): a Tenant's saved BYOK Bot token (decrypted
+with `GLYPHOXA_SECRET`) wins; with none saved, the deployment-wide
+`DISCORD_BOT_TOKEN` is the fallback rung. Central-token Tenants therefore share
+one client serving many Guilds; a BYOK Tenant gets its own client, whose token
+death surfaces for that Tenant only, and a Tenant saving Discord settings
+rebuilds only its own client. Commands register per-Guild, idempotently, and
+survive with no Voice Session active. In the split shape only the
+`presence_owner` election winner dispatches interactions.
 
 Shipped commands (`internal/presence`):
 
 | Command | Who | Handled by |
 |---------|-----|------------|
-| `/roll <dice>` | anyone in the configured Guild | the Bot binary, directly, via the built-in `dice` Tool |
+| `/roll <dice>` | anyone in the Guild | the Bot binary, directly, via the built-in `dice` Tool |
 | `/glyphoxa use <campaign>` | GM only | sets the durable Active Campaign |
-| `/glyphoxa start` / `end` | GM only | the same in-process `session.Manager` the Session screen drives |
+| `/glyphoxa start` / `end` | GM only | the Session Manager (in-process) or a claim-plane intent (split) |
 | `/glyphoxa search <query>` | GM only | tsvector search over the Active Campaign's Transcript Lines |
+| `/glyphoxa recap` | GM only | a recap of the session so far |
 | `/glyphoxa mute <npc>` / `muteall` | GM only | matcher-internal mute state |
+| `/say <text>` | GM only | an NPC speaks the given text in the live session |
+| `/direct as:<npc>` | GM only | a hidden GM note steering that NPC's next replies (ADR-0059) |
+| `/where map:<map>` | GM only | sets the Party Marker so NPCs know their surroundings (ADR-0060) |
 
-**Tree vs ADR.** ADR-0010's `/say <text> as:<agent>` is **not registered**;
-`mute`/`muteall` postdate the ADR. ADR-0010 says the Butler handles a command "when
+**Tree vs ADR.** `mute`/`muteall`, `recap`, `/say`'s final shape, `/direct`
+and `/where` postdate ADR-0010. ADR-0010 says the Butler handles a command "when
 reasoning is required" — no command reaches the Butler today; `/roll` is answered by
 the Bot binary running the built-in `dice` Tool directly (§3). Per the ADR's #102
 amendment, "GM only" in v1.0 means *the invoking Discord User's snowflake is on the
 operator allowlist* — `tenant_members.role` does not exist yet. Discord's own command
 permissions are a UX hint; the server-side check is the only safe place.
 
-Commands are registered only by a process that owns the Bot gateway, i.e. `all`
-Mode (§1). `-mode web` exposes none.
+Commands are registered only by a process that owns Bot gateways: `all` Mode or
+a `voice` worker (§1). `-mode web` exposes none.
 
 Discord REST reads use plain `net/http`, not disgo's rest client, which leaks a
 goroutine per call: `internal/discordtag` (bot tag) and `internal/discordinvite`
@@ -729,7 +751,11 @@ the migration. Secrets come from the environment (`.env` for compose,
 into the image.
 
 CI (`.github/workflows/ci.yml`) gates every PR on `buf · proto · web · test ·
-integration · audio · image · helm · e2e · lint`. The default suite is **keyless**:
+integration · audio · bench · image · helm · e2e · lint`. The `audio` and `lint`
+jobs build the production tags (`opus dave nolibopusfile`), and `audio` also
+vets the `live`/`bench`-tagged files so the scheduled live runs cannot rot
+unseen. `release-image.yml` publishes an image only after the tagged commit's
+`ci.yml` run is green and the built image passes `scripts/container-smoke.sh`. The default suite is **keyless**:
 heavy tests are build-tag isolated and live provider runs are tiered (ADR-0033),
 with cassette-based LLM determinism (ADR-0021, `pkg/voice/voicecassette`,
 `tests/voice-cassettes`).
@@ -744,14 +770,12 @@ the architecture question is already answered.
 
 | ADR | Decision | State in the tree |
 |-----|----------|-------------------|
-| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md). `MaxTargets` reaches the multi-target set; the turn-taking layer is not built. |
-| [0030](adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Side-effecting Tool intents flush at turn-commit | Not built. `pkg/tool/loop.go` hard-refuses non-read-only Tools. |
-| [0048](adr/0048-blob-storage-seam-postgres-v1.md) | a blob-storage seam package, Postgres bytea backend | **Shipped** (§6.6): `internal/blob` seam + Postgres bytea backend (`00021_blob.sql`), 32 MiB cap. No consumer wires it yet — owner-side Delete + retention are Epic 8 / ADR-0051. |
-| [0049](adr/0049-background-job-runner.md) | One DB-backed job runner over a job table | No job table exists. `internal/embedworker` stays a bespoke poll loop, as the ADR allows. |
-| [0050](adr/0050-per-speaker-utterance-segmentation.md) | N Speaker Lanes; `SpeakerID` on voice events | No `SpeakerID` anywhere. Human speech is still one anonymous lane (§2.6). |
-| [0051](adr/0051-rollover-tape-consent-retention.md) | Consent-gated 120 s Rollover Tape; Highlights | No audio is persisted. Blocks on 0048 + 0050. |
-| [0052](adr/0052-kg-write-proposals.md) | Agent KG writes land as GM-reviewed Knowledge Proposals | No proposal table, no `remember_knowledge` Tool. |
-| [0053](adr/0053-campaign-bundle-format.md) | Campaign Bundle: versioned gzipped-JSON export | No bundle package exists; there is no export or import path. |
+| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md). The live matcher is single-target (`MaxTargets` 1); the turn-taking code in `pkg/voice/orchestrator/ensemble.go` is unreachable in production. |
+| [0030](adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Side-effecting Tool intents flush at turn-commit | Not built. `pkg/tool/loop.go` refuses Tools that are neither read-only nor proposal-mediated (ADR-0052). |
+
+ADRs 0048–0053 were listed here until 2026-11; all six have shipped since
+(`internal/blob`, `internal/jobs`, Speaker Lanes §2.6, `internal/tape` +
+`internal/highlight`, Knowledge Proposals, `internal/bundle`).
 
 ## Where the tree and the ADRs disagree
 
@@ -760,14 +784,12 @@ disagreement is documented rather than discovered.
 
 | ADR says | The tree does | Why / where |
 |----------|---------------|-------------|
-| ADR-0005: `voice_sessions` claim table with `voice_instance_id` / heartbeat / `LISTEN/NOTIFY` | a per-Campaign session record, no claiming | one Voice Instance in the v1.0 self-host shape; orphans swept at boot |
-| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | six services, all `management.v1` | multi-tenant deferred (ADR-0039); `all` Mode drives sessions in-process |
-| ADR-0010: `/say <text> as:<agent>` | not registered | deferred; `/glyphoxa mute` + `muteall` shipped instead (#211) |
+| ADR-0005: `voice_sessions` claim table with `voice_instance_id` / heartbeat / `LISTEN/NOTIFY` | a separate, polled `voice_session_intents` claim plane | ADR-0057 superseded the mechanism (§1) |
+| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | six services, all `management.v1` | Tenants are provisioned by OAuth signup (ADR-0055); cross-process session control is the Postgres claim plane, not an RPC |
 | ADR-0010: permissions from `tenant_members.role` | operator allowlist membership | `tenant_members` does not exist (ADR-0010 #102 amendment, ADR-0041) |
-| ADR-0010/0024: the Butler answers reasoning commands and voice-address | an undeletable DB row with no code path; it cannot enter the Matcher by construction | `matcherAgent` hardcodes `AgentRole: "character"`; `NewWholeWordMatcher` has no non-test caller (§2.2, §3, §5) |
-| ADR-0019/0027: per-participant VAD sessions | one shared VAD session over the decoded stream | speaker identity stops at the codec (§2.6) |
-| ADR-0027: per-Agent barge-in confirm window | `bargeConfirmWindow` package const, 250 ms, one per Conversation | `internal/wirenpc/wirenpc.go`; a floor, not a sensitivity (§2.4) |
-| ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field exists | blocks on speaker attribution (§2.3, §2.6) |
+| ADR-0010: the Butler answers reasoning commands | no Slash Command reaches the Butler; it answers GM voice-address and the console planning chat | `/roll` runs the `dice` Tool directly (§3, §5) |
+| ADR-0027: per-Agent barge-in confirm window | `bargeConfirmWindow` package const, 250 ms, armed per speaker | `internal/wirenpc/wirenpc.go` (§2.4) |
+| ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field is persisted | `BargeDetected` carries the speaker; no column stores it (§2.3) |
 | ADR-0023: TTS matrix is ElevenLabs + OpenAI | ElevenLabs only | OpenAI TTS adapter not built |
 | ADR-0011: default embeddings via Ollama; ADR-0004 names more providers | `pkg/voice/embeddings/ollama` only | the only shipped embeddings adapter |
 | ADR-0024: a 4-stage address chain | a 4-heuristic scoring stack | `DefaultHeuristics` adds `ExpertOnRecentWord` (§2.2); `RecentlyInterrupted` is opt-in only (#442) |
@@ -775,8 +797,7 @@ disagreement is documented rather than discovered.
 ## See also
 
 - [CONTEXT.md](../CONTEXT.md) — the domain glossary. Terms in bold here are defined there.
-- [DESIGN.md](../DESIGN.md) — the full ADR ledger and open questions.
-- [docs/adr/](adr/) — all 53 ADRs.
+- [docs/README.md](README.md#architecture-decision-records) — the index of all 64 ADRs.
 - [docs/configuration.md](configuration.md) — environment variables and the self-host setup runbook.
 - [docs/agents/live-npc-run.md](agents/live-npc-run.md) — running a live NPC in `voice` Mode.
 - [docs/devs/voice-tests.md](devs/voice-tests.md) — voice test conventions, cassettes, clips.
