@@ -47,13 +47,13 @@ func requireAllowanceRefusal(t *testing.T, err error) {
 	}
 }
 
-// wrappedAllowance is the sentinel as the engines return it: sometimes bare, sometimes
+// errWrappedAllowance is the sentinel as the engines return it: sometimes bare, sometimes
 // wrapped on the way up. The mappers must read through the wrapping.
-var wrappedAllowance = fmt.Errorf("assist: %w", billing.ErrAllowanceExhausted)
+var errWrappedAllowance = fmt.Errorf("assist: %w", billing.ErrAllowanceExhausted)
 
 func TestAllowanceRefusal_GeneratePersona(t *testing.T) {
 	t.Parallel()
-	client, req := personaErrClient(t, wrappedAllowance)
+	client, req := personaErrClient(t, errWrappedAllowance)
 	_, err := client.GeneratePersona(context.Background(), req)
 	requireAllowanceRefusal(t, err)
 }
@@ -81,7 +81,7 @@ func TestAllowanceRefusal_SuggestMapPins(t *testing.T) {
 	mapID := uuid.New()
 	store.maps[mapID] = storage.CampaignMap{ID: mapID, Name: "Saltmarsh", AnchorNodeID: uuid.NullUUID{UUID: uuid.New(), Valid: true}}
 	store.unpinned = []storage.KGNode{{ID: uuid.New(), Name: "The Snapping Line", Type: storage.KGNodeLocation}}
-	client := genClient(t, store, &fakeMapGen{pickErr: wrappedAllowance})
+	client := genClient(t, store, &fakeMapGen{pickErr: errWrappedAllowance})
 	_, err := client.SuggestMapPins(context.Background(),
 		connect.NewRequest(&managementv1.SuggestMapPinsRequest{MapId: mapID.String()}))
 	requireAllowanceRefusal(t, err)
