@@ -3,10 +3,8 @@
 // channels for the share dialog and uploads a clip as a message attachment — the
 // codebase's first file-attachment path.
 //
-// Like internal/discordinvite and internal/discordtag, the calls are plain
-// net/http against Discord's REST API, deliberately NOT disgo's rest.NewClient:
-// that client's rate limiter starts a cleanup goroutine (`for range ticker.C`)
-// its Close never stops, leaking one goroutine + ticker per call (ADR-0047).
+// The calls go through internal/discordrest (plain net/http against Discord's
+// REST API, never disgo's leaking rest client, ADR-0047).
 //
 // These are LIVE network calls. The RPC layer hides them behind a seam so unit
 // tests fake the sharer and never touch the network; offline tests drive the
@@ -27,16 +25,9 @@ import (
 	"net/textproto"
 	"net/url"
 	"sort"
-	"time"
+
+	"github.com/MrWong99/Glyphoxa/internal/discordrest"
 )
-
-// liveAPIBaseURL is Discord's REST API root, matching the version disgo pins and
-// the sibling discordinvite package.
-const liveAPIBaseURL = "https://discord.com/api/v10"
-
-// userAgent is the DiscordBot form Discord requires of bot REST callers, matching
-// internal/discordinvite / internal/discordtag.
-const userAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)"
 
 // guildTextType is Discord's channel type for a standard text channel
 // (GUILD_TEXT). Voice (2), category (4), announcement (5), and stage (13) are
@@ -78,12 +69,6 @@ type Channel struct {
 	Name string
 }
 
-// httpClient is shared across calls (http.Client is safe for concurrent use); its
-// Timeout is a belt on top of the caller's ctx deadline so a call made without one
-// still cannot hang. A file upload can be larger than an invite read, so the belt
-// is looser than discordinvite's.
-var httpClient = &http.Client{Timeout: 30 * time.Second}
-
 // ListTextChannels lists guildID's text channels (type 0), sorted by position then
 // name, using token (a Discord Bot token). An empty token fails fast (no dial). A
 // ctx deadline bounds the call. log may be nil.
@@ -123,30 +108,7 @@ func listChannelsOfType(ctx context.Context, token, guildID, baseURL string, cha
 	if log == nil {
 		log = slog.Default()
 	}
-	if baseURL == "" {
-		baseURL = liveAPIBaseURL
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		baseURL+"/guilds/"+url.PathEscape(guildID)+"/channels", nil)
-	if err != nil {
-		return nil, fmt.Errorf("discordshare: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bot "+token)
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("discordshare: GET /guilds/channels: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		return nil, ErrNoAccess
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &APIError{Op: "list channels", Status: resp.StatusCode}
-	}
+	baseURL = discordrest.BaseURL(baseURL)
 
 	var channels []struct {
 		ID       string `json:"id"`
@@ -154,8 +116,15 @@ func listChannelsOfType(ctx context.Context, token, guildID, baseURL string, cha
 		Name     string `json:"name"`
 		Position int    `json:"position"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&channels); err != nil {
-		return nil, fmt.Errorf("discordshare: decode channels: %w", err)
+	status, err := discordrest.GetJSON(ctx, token, baseURL+"/guilds/"+url.PathEscape(guildID)+"/channels", &channels)
+	if err != nil {
+		return nil, fmt.Errorf("discordshare: GET /guilds/channels: %w", err)
+	}
+	if status == http.StatusForbidden || status == http.StatusNotFound {
+		return nil, ErrNoAccess
+	}
+	if status != http.StatusOK {
+		return nil, &APIError{Op: "list channels", Status: status}
 	}
 
 	type positioned struct {
@@ -204,9 +173,7 @@ func postFile(ctx context.Context, token, channelID, caption, filename, contentT
 	if log == nil {
 		log = slog.Default()
 	}
-	if baseURL == "" {
-		baseURL = liveAPIBaseURL
-	}
+	baseURL = discordrest.BaseURL(baseURL)
 
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -247,16 +214,14 @@ func postFile(ctx context.Context, token, channelID, caption, filename, contentT
 		return fmt.Errorf("discordshare: close multipart: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		baseURL+"/channels/"+url.PathEscape(channelID)+"/messages", &body)
+	req, err := discordrest.NewRequest(ctx, http.MethodPost,
+		baseURL+"/channels/"+url.PathEscape(channelID)+"/messages", token, &body)
 	if err != nil {
 		return fmt.Errorf("discordshare: build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bot "+token)
-	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := httpClient.Do(req)
+	resp, err := discordrest.UploadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("discordshare: POST /channels/messages: %w", err)
 	}
