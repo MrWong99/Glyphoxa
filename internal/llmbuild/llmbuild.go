@@ -5,8 +5,9 @@
 // and the Recap engine (internal/recap) both use: the BYOK credential resolution
 // ([ResolveKey], moved verbatim from wirenpc under the hybrid policy ADR-0039) and
 // the provider dispatch ([New], groq/anthropic/gemini keyed off
-// provider_config.provider, groq the default per ADR-0036). [FromConfig] bundles
-// the two for callers that hold a *storage.ProviderConfig.
+// provider_config.provider, groq the default per ADR-0036). A caller resolving on
+// behalf of a Tenant goes through [ResolveKeyGated], never the ungated
+// [ResolveKey], or a BYOK Tenant silently spends the deployment's env keys.
 package llmbuild
 
 import (
@@ -86,31 +87,4 @@ func DefaultModel(providerID string) string {
 	default: // "" and groq
 		return groq.DefaultModel
 	}
-}
-
-// FromConfig resolves a Provider Config into a live [llm.Provider] plus the model
-// id the caller should request. It is [ResolveKey] (ComponentLLM) followed by
-// [New] keyed off cfg.Provider; the returned model is cfg.Model (empty lets the
-// adapter pick its default per [llm.Request.Model]). A nil cfg resolves to Groq
-// with an empty env-fallback key and an empty model (the deployment default).
-//
-// FromConfig is UNGATED by the platform-key entitlement (ADR-0054 seam (a)):
-// it is for self-host/deployment-level contexts only. A caller resolving on
-// behalf of a tenant must use [ResolveKeyGated] instead, or a BYOK tenant
-// silently spends the deployment's env keys.
-func FromConfig(cipher *crypto.Cipher, cfg *storage.ProviderConfig) (p llm.Provider, model string, err error) {
-	key, err := ResolveKey(cipher, cfg, storage.ComponentLLM)
-	if err != nil {
-		return nil, "", err
-	}
-	providerID := ""
-	if cfg != nil {
-		providerID = cfg.Provider
-		model = cfg.Model
-	}
-	p, err = New(providerID, key)
-	if err != nil {
-		return nil, "", err
-	}
-	return p, model, nil
 }
