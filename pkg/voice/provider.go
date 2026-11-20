@@ -25,6 +25,15 @@ type switchingProvider struct {
 	// goroutine touch the dead transport, hit its terminal error, and shut
 	// itself down (issue #579); see ProvideOpusFrame.
 	closed atomic.Bool
+
+	// onClose, when set, runs on every Close. [Session] points it at the
+	// inbound dispatcher's Close: since v0.20.0 disgo's audio sender calls
+	// Close on its provider when the sender itself shuts down, which makes a
+	// Close the one signal that outbound audio is gone for good. Ending the
+	// inbound stream turns that into the ordinary "connection is finished"
+	// event the wirenpc cycle already rebuilds on, instead of a Session that
+	// keeps listening but can never speak again.
+	onClose func()
 }
 
 // playSlot binds a [Playback] to its [Source] and the context whose
@@ -104,16 +113,23 @@ func (p *switchingProvider) ProvideOpusFrame() ([]byte, error) {
 	return frame, nil
 }
 
-// Close is called by [Session.Close] after the connection is torn down. It
-// retires any in-flight playback as interrupted so [Playback.Done] always
+// Close has two callers. [Session.Close] calls it after the connection is torn
+// down; disgo's audio sender calls it (v0.20.0 onwards) when the sender shuts
+// itself down. Either way outbound audio on this connection is over.
+//
+// It retires any in-flight playback as interrupted so [Playback.Done] always
 // closes, and flips the provider into its sender-reaping state: every
 // subsequent ProvideOpusFrame poll returns a real silence frame so disgo's
 // sender goroutine — which conn.Close does NOT stop — writes to the dead
-// transport, errors terminally, and exits (issue #579). Callers must therefore
-// only Close AFTER the transport is down, or the poke frames would be audible.
+// transport, errors terminally, and exits (issue #579). [Session.Close] must
+// therefore only call it AFTER the transport is down, or the poke frames would
+// be audible; disgo's own call comes after it has stopped polling. Idempotent.
 func (p *switchingProvider) Close() {
 	p.closed.Store(true)
 	if slot := p.slot.Swap(nil); slot != nil {
 		slot.pb.finish(ErrInterrupted)
+	}
+	if p.onClose != nil {
+		p.onClose()
 	}
 }

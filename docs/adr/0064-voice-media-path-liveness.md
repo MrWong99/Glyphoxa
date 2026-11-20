@@ -103,3 +103,53 @@ above it can ever notice. This ADR decides the three-layer fix.
 - Operators can tune or disable the verdict (`GLYPHOXA_VOICE_MEDIA_STALL_WINDOW`,
   literal `off`), but not the keepalive or the liveness log — there is no
   deployment in which the stock silently-deaf transport is the right choice.
+
+## Amendment 2026-11-20: in-place recovery on disgo v0.20.0 (#659)
+
+disgo v0.20.0 changed what its voice conn does on a session-invalidating
+voice-gateway close (4006, 4009, 4015, a heartbeat timeout, five failed
+resumes): it now closes the UDP transport and re-opens it for a fresh voice
+session **without leaving the channel**, the way the Discord client does. Two
+clauses above assumed the opposite and are superseded:
+
+- **`Close` is no longer terminal; it is a pause.** The transport has three
+  states — open, paused, terminated. A `Close` stops the keepalive loop and
+  closes the socket (nothing leaks) but a later `Open` resumes. While paused,
+  and after a re-`Open` until the new session's key arrives, `Write` drops the
+  frame and reports it written (the RTP counters still advance, so the far
+  side sees packet loss) and `ReadPacket` blocks. Neither returns
+  `net.ErrClosed`: disgo's sender and receiver reap themselves permanently on
+  it, and a recovery that came back connected, deaf and mute would be worse
+  than the rebuild it replaces. A socket retired by a re-`Open` no longer ends
+  the reader either; it moves to the new one. So a voice-session reset costs
+  a gap in the audio, not a LEAVE and a JOIN.
+- **Termination comes from the conn guard, not from `Close`.**
+  `TransportOption` now also installs `guardedConnCreate`
+  (`pkg/voice/connguard.go`), which wraps the two funcs disgo's voice manager
+  hands every conn:
+  - `removeConnFunc` is called only from the last step of the conn's `Close`.
+    The guard treats it as the discard signal and terminates the transport:
+    `Open` is refused (the original straggler-Ready protection), and the
+    audio goroutines get `net.ErrClosed` and reap. That is what ends the
+    cycle when disgo gives up on its own recovery and closes the conn behind
+    our back, and what `Session.Close`'s sender poke (#579) relies on.
+  - the voice-state update func is fenced once the conn is discarded. disgo's
+    recovery runs on its own goroutine for up to 30s and ends in a `Close`,
+    which sends a LEAVE for the whole guild; on a conn the Session already
+    closed, that LEAVE would kick whichever conn serves the guild by then.
+- **A provider closed by disgo ends the cycle.** v0.20.0's sender calls
+  `Close` on its provider when it shuts down. `switchingProvider.Close` now
+  also closes the inbound dispatcher, so a sender that died mid-session is an
+  ordinary "connection finished" event instead of an undetectable mute NPC.
+
+What stays as decided: the keepalive, the counters, the watchdog and its two
+tiers. A recovery that outlasts the stall window still trips the watchdog and
+falls back to a full rebuild; disgo bounds its own attempt at 30s, inside the
+default 45s window. Counters reset on the re-`Open`, which the watchdog
+already reads as a fresh path.
+
+Not covered: a voice-server migration (a lone voice-server update). disgo
+ignores it at the pin and at v0.20.0 alike; recovery waits for Discord to
+close the old websocket and then takes the path above. The first utterance in
+progress when a session resets is lost, and disgo does not re-announce
+Speaking for it.
