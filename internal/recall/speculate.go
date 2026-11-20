@@ -39,6 +39,13 @@ type specCache struct {
 // final's normalized match self-heals a wrong speculation.
 func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	r.mailMu.Lock()
+	if r.pendingFlight != nil {
+		// A final is waiting for the speculator and a turn may be waiting on it; the
+		// next utterance's first interim must not take its slot. The partial is
+		// dropped, which costs nothing: a newer one follows within the stream's tick.
+		r.mailMu.Unlock()
+		return
+	}
 	r.pending = p.Text
 	r.pendingSID = p.SessionID // #487: scope the prefetch to the partial's session
 	r.hasPending = true
@@ -49,15 +56,79 @@ func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	}
 }
 
-// takePending drains the latest-wins mailbox (text + originating session id).
-func (r *Recaller) takePending() (text, sessionID string, ok bool) {
+// flight is one embed-and-prefetch of a FINAL utterance, started the moment the
+// final is published so that it overlaps Address Detection and prompt assembly
+// instead of beginning inside [Recaller.Recall]. Recall joins it rather than
+// embedding the same text a second time; done is closed when the result is in the
+// cache, or will never be (failed, superseded, recaller closed).
+type flight struct {
+	norm       string
+	campaignID uuid.UUID
+	done       chan struct{}
+}
+
+// onFinal is the bus callback for [voiceevent.STTFinal]. On the batch STT path
+// there are no partials, so without it every turn would be a cold inline embed
+// that has to fit the whole budget; with it the embed gets a head start of however
+// long routing takes, and Recall waits on the same call. Like onPartial it must
+// not block: it registers the flight and wakes the speculator.
+func (r *Recaller) onFinal(f voiceevent.STTFinal) {
+	norm := normalize(f.Text)
+	if norm == "" {
+		return
+	}
+	sid, err := uuid.Parse(f.SessionID)
+	if err != nil {
+		return // nothing to scope a prefetch to; Recall embeds inline
+	}
+	vs, ok := r.sessions.Resolve(sid)
+	if !ok {
+		return
+	}
+	if _, hit := r.cacheLookup(norm, vs.CampaignID); hit {
+		return // the partials already speculated this exact text
+	}
+	fl := &flight{norm: norm, campaignID: vs.CampaignID, done: make(chan struct{})}
+
+	r.cacheMu.Lock()
+	r.flight = fl
+	r.cacheMu.Unlock()
+
+	r.mailMu.Lock()
+	superseded := r.pendingFlight
+	r.pending, r.pendingSID, r.pendingFlight, r.hasPending = f.Text, f.SessionID, fl, true
+	r.mailMu.Unlock()
+	if superseded != nil {
+		close(superseded.done) // a newer final replaced it before the speculator ran
+	}
+	select {
+	case r.signal <- struct{}{}:
+	default:
+	}
+}
+
+// flightFor returns the in-flight final speculation for exactly this query, if
+// one is registered.
+func (r *Recaller) flightFor(norm string, campaignID uuid.UUID) *flight {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if fl := r.flight; fl != nil && fl.norm == norm && fl.campaignID == campaignID {
+		return fl
+	}
+	return nil
+}
+
+// takePending drains the latest-wins mailbox (text + originating session id, and
+// the flight when the text is a final).
+func (r *Recaller) takePending() (text, sessionID string, fl *flight, ok bool) {
 	r.mailMu.Lock()
 	defer r.mailMu.Unlock()
 	if !r.hasPending {
-		return "", "", false
+		return "", "", nil, false
 	}
 	r.hasPending = false
-	return r.pending, r.pendingSID, true
+	fl, r.pendingFlight = r.pendingFlight, nil
+	return r.pending, r.pendingSID, fl, true
 }
 
 // speculateLoop is the single speculator goroutine: it wakes on the mailbox
@@ -88,11 +159,15 @@ func (r *Recaller) speculateLoop() {
 // partial inside the interval window would never be embedded — a systematic
 // speculation miss on exactly the utterance the final matches.
 func (r *Recaller) drainAndSpeculate() {
-	text, sid, ok := r.takePending()
+	text, sid, fl, ok := r.takePending()
 	if !ok {
 		return
 	}
 	for {
+		if fl != nil {
+			r.speculateFinal(text, fl)
+			return
+		}
 		wait := r.maybeSpeculate(text, sid)
 		if wait <= 0 {
 			return
@@ -100,10 +175,23 @@ func (r *Recaller) drainAndSpeculate() {
 		if err := r.sleep(r.ctx, wait); err != nil {
 			return // Close cancelled the recaller
 		}
-		if newer, newSID, ok := r.takePending(); ok {
-			text, sid = newer, newSID
+		if newer, newSID, newFl, ok := r.takePending(); ok {
+			text, sid, fl = newer, newSID, newFl
 		}
 	}
+}
+
+// speculateFinal embeds a final utterance and prefetches its world context,
+// then releases whoever is waiting on the flight. A final is never rate-limited
+// or length-gated: a turn is about to ask for exactly this text.
+func (r *Recaller) speculateFinal(text string, fl *flight) {
+	defer close(fl.done)
+	if _, hit := r.cacheLookup(fl.norm, fl.campaignID); hit {
+		return // a partial's speculation for the same text landed meanwhile
+	}
+	r.lastEmbedNorm = fl.norm
+	r.lastEmbedAt = r.now()
+	r.embedAndCache(text, fl.norm, fl.campaignID)
 }
 
 // maybeSpeculate embeds text and prefetches its world-context chunks when the text
@@ -146,13 +234,20 @@ func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 	r.lastEmbedNorm = norm
 	r.lastEmbedAt = now
 
+	r.embedAndCache(text, norm, campaignID)
+	return 0
+}
+
+// embedAndCache embeds text and prefetches its world-context chunks off the turn
+// path, replacing the single-slot cache on success.
+func (r *Recaller) embedAndCache(text, norm string, campaignID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(r.ctx, speculateTimeout)
 	defer cancel()
 
 	vecs, err := r.embedder.Embed(ctx, []string{text})
 	if err != nil || len(vecs) != 1 {
-		r.log.Warn("memory speculation: embed failed; will retry on the next partial", "err", err)
-		return 0
+		r.log.Warn("memory speculation: embed failed; will retry on the next utterance", "err", err)
+		return
 	}
 	// Prefetch world context with the vector. A failure still caches the vector
 	// (worldOK false) so a later hit skips the (expensive) embed and fetches world
@@ -164,7 +259,6 @@ func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 		world = nil
 	}
 	r.storeCache(norm, campaignID, vecs[0], world, worldOK)
-	return 0
 }
 
 // storeCache replaces the single speculated entry (latest utterance only),

@@ -217,3 +217,71 @@ func TestJoin_ValidatesConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestRecorder_PauseBetweenUtterancesIsKept pins the timeline across a pause: a
+// speaker's PTS does not advance while they are silent, so the second utterance
+// arrives with timestamps contiguous to the first. It must land where it was
+// heard, not directly behind the first — otherwise every reply after the first
+// is cut out of the wrong (silent) stretch of the track.
+func TestRecorder_PauseBetweenUtterancesIsKept(t *testing.T) {
+	start := time.Now()
+	r := newRecorder(start, botID)
+	frame := func(i int, at time.Duration) {
+		r.record(gxvoice.Frame{UserID: botID, Opus: silentOpus, PTS: time.Duration(i) * 20 * time.Millisecond}, start.Add(at))
+	}
+	for i := range 10 { // 200 ms of speech from t=0
+		frame(i, time.Duration(i)*20*time.Millisecond)
+	}
+	for i := 10; i < 20; i++ { // 200 ms more, heard 10 s later, PTS contiguous
+		frame(i, 10*time.Second+time.Duration(i-10)*20*time.Millisecond)
+	}
+	tracks := r.tracksSnapshot()
+	if len(tracks) != 1 {
+		t.Fatalf("tracks = %d, want 1", len(tracks))
+	}
+	got := time.Duration(len(tracks[0].PCM)) * time.Second / SampleRate
+	if got < 10*time.Second {
+		t.Errorf("track is %s long, want over 10s: the pause was dropped", got)
+	}
+}
+
+func TestSplitBarge(t *testing.T) {
+	t0 := time.Now()
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	run := func(fromMS, toMS int) []time.Time { // a frame every 20 ms
+		var out []time.Time
+		for ms := fromMS; ms <= toMS; ms += 20 {
+			out = append(out, at(ms))
+		}
+		return out
+	}
+	const gap = 700 * time.Millisecond
+
+	t.Run("reply stops, a new one follows", func(t *testing.T) {
+		arrivals := append(run(0, 1400), run(4000, 5000)...) // barged at 1000
+		cut, resumed, last := splitBarge(arrivals, at(1000), at(6000), gap)
+		if !cut.Equal(at(1400)) || !resumed.Equal(at(4000)) || !last.Equal(at(5000)) {
+			t.Errorf("cut=%s resumed=%s last=%s, want 1400/4000/5000 ms",
+				cut.Sub(t0), resumed.Sub(t0), last.Sub(t0))
+		}
+	})
+	t.Run("reply still running", func(t *testing.T) {
+		cut, _, _ := splitBarge(run(0, 2000), at(1000), at(2100), gap)
+		if !cut.IsZero() {
+			t.Errorf("cut = %s, want none while the Bot keeps talking", cut.Sub(t0))
+		}
+	})
+	t.Run("reply stopped, nothing since", func(t *testing.T) {
+		cut, resumed, _ := splitBarge(run(0, 1200), at(1000), at(3000), gap)
+		if !cut.Equal(at(1200)) || !resumed.IsZero() {
+			t.Errorf("cut=%s resumed-zero=%v, want cut at 1200 ms and no resume", cut.Sub(t0), resumed.IsZero())
+		}
+	})
+	t.Run("bot was already silent when barged", func(t *testing.T) {
+		arrivals := append(run(0, 100), run(3000, 3500)...)
+		cut, resumed, _ := splitBarge(arrivals, at(1000), at(5000), gap)
+		if talkedOver(cut, at(1000)) != 0 || !resumed.Equal(at(3000)) {
+			t.Errorf("talkedOver=%s resumed=%s, want 0 and 3000 ms", talkedOver(cut, at(1000)), resumed.Sub(t0))
+		}
+	})
+}

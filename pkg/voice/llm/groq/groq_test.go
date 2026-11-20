@@ -183,3 +183,44 @@ func bodyModel(t *testing.T, capture atomic.Value) string {
 	}
 	return body.Model
 }
+
+// TestComplete_ReasoningEffort_OnlyForReasoningModels pins the per-model
+// reasoning_effort: the gpt-oss family is asked for "low" (a voice reply needs no
+// long deliberation, and unbounded reasoning once leaked into spoken text), while
+// non-reasoning models get no such field — Groq rejects it there.
+func TestComplete_ReasoningEffort_OnlyForReasoningModels(t *testing.T) {
+	effort := func(t *testing.T, reqModel string) (string, bool) {
+		t.Helper()
+		var cap atomic.Value
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cap.Store(readBody(r))
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)))
+		}))
+		defer srv.Close()
+		ch, err := groq.New("k", groq.WithBaseURL(srv.URL)).Complete(context.Background(), llm.Request{
+			Model:    reqModel,
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+		})
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		drain(ch)
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(cap.Load().([]byte), &body); err != nil {
+			t.Fatalf("request body not JSON: %v", err)
+		}
+		v, ok := body["reasoning_effort"]
+		return string(v), ok
+	}
+
+	for _, model := range []string{"", "openai/gpt-oss-120b", "openai/gpt-oss-20b"} {
+		if v, ok := effort(t, model); !ok || v != `"low"` {
+			t.Errorf("model %q: reasoning_effort = %s (present=%v), want \"low\"", model, v, ok)
+		}
+	}
+	if v, ok := effort(t, "llama-3.1-8b-instant"); ok {
+		t.Errorf("non-reasoning model: reasoning_effort = %s, want omitted", v)
+	}
+}

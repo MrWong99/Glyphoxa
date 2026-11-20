@@ -514,7 +514,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	if provider, _, err := embedworker.ResolveProvider(ctx, store); err != nil {
 		log.Error("voice worker: embeddings provider unavailable; NPC memory recall disabled", "err", err)
 	} else {
-		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{
+			Budget: envDuration(os.Getenv, "GLYPHOXA_RECALL_BUDGET", 0),
+		})
+		go recaller.Warm(ctx)
 		context.AfterFunc(ctx, recaller.Close)
 		deps.Memory = recaller
 	}
@@ -1179,7 +1182,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
 		// Set only in this branch so a keyless deployment leaves Memory a true nil
 		// (recall off), never a typed-nil interface.
-		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{
+			Budget: envDuration(os.Getenv, "GLYPHOXA_RECALL_BUDGET", 0),
+		})
+		go recaller.Warm(ctx)
 		context.AfterFunc(ctx, recaller.Close)
 		deps.Memory = recaller
 	}

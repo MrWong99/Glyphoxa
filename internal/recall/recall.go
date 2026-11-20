@@ -13,7 +13,10 @@
 //     memory injects at effectively zero added latency (a "hit").
 //   - Inline: no usable speculation (mismatch, no partials, batch STT) falls back to
 //     embedding the utterance and running BOTH ANN modes within a hard budget
-//     (~250ms, ADR-0042) inside the turn ctx (a "miss").
+//     (ADR-0042) inside the turn ctx (a "miss"). The embed does not start cold at
+//     Recall: the recaller also subscribes to [voiceevent.STTFinal] and starts it
+//     when the final is published, so it overlaps Address Detection, and Recall
+//     joins that call.
 //
 // A slow or unavailable embeddings/DB path, or the budget elapsing, degrades to a
 // zero [agent.Memory] ("skip", counted). A barge cancels the turn ctx, which
@@ -74,14 +77,18 @@ type Metrics interface {
 type Config struct {
 	// Budget is the hard inline-retrieval budget inside the turn ctx (ADR-0042):
 	// embed + both ANN searches must finish within it or recall degrades to
-	// no-memory. Default 250ms.
+	// no-memory. Default 500ms (GLYPHOXA_RECALL_BUDGET).
 	Budget time.Duration
 	// K is the number of chunks fetched per retrieval mode. Default 3.
 	K int
 }
 
 const (
-	defaultBudget = 250 * time.Millisecond
+	// defaultBudget is the ceiling a turn waits for memory, not the usual cost: a
+	// speculation hit returns in a millisecond or two. It was 250ms until the
+	// 2026-11-20 production check, where one sentence took the CPU-only embeddings
+	// node ~340ms to embed and so NO batch-STT turn ever recalled anything.
+	defaultBudget = 500 * time.Millisecond
 	defaultK      = 3
 
 	// minSpeculateWords is the shortest normalized partial worth embedding: a one-
@@ -95,6 +102,9 @@ const (
 	// provider cannot pin the single speculator goroutine forever (it just misses
 	// the chance to help; the inline path self-heals at the final).
 	speculateTimeout = 5 * time.Second
+	// warmTimeout bounds [Recaller.Warm]: generous, because pulling a model into
+	// memory on a small CPU-only node is the slow case it exists for.
+	warmTimeout = 2 * time.Minute
 )
 
 func (c Config) withDefaults() Config {
@@ -130,10 +140,11 @@ type Recaller struct {
 	specDone    chan struct{} // closed when the speculator goroutine exits
 	speculated  chan struct{} // 1-slot test notify: a speculation pass completed
 
-	mailMu     sync.Mutex
-	pending    string
-	pendingSID string // session id of the latest pending partial (#487)
-	hasPending bool
+	mailMu        sync.Mutex
+	pending       string
+	pendingSID    string  // session id of the latest pending partial (#487)
+	pendingFlight *flight // set when the pending text is a final (see onFinal)
+	hasPending    bool
 
 	// lastEmbed* gate the speculator; touched only by the speculator goroutine.
 	lastEmbedNorm string
@@ -141,6 +152,7 @@ type Recaller struct {
 
 	cacheMu sync.Mutex
 	cache   specCache
+	flight  *flight // the latest final's speculation, joined by Recall
 }
 
 // New builds a Recaller wired to the embeddings provider, the ANN retriever, the
@@ -188,8 +200,22 @@ func newRecaller(embedder embeddings.Provider, retriever Retriever, sessions Ses
 // start subscribes to the bus and launches the speculator goroutine. Called once
 // by [New] (production) or a white-box test after seams are set.
 func (r *Recaller) start(bus *voiceevent.Bus) {
-	r.unsubscribe = voiceevent.On(bus, r.onPartial)
+	offPartial := voiceevent.On(bus, r.onPartial)
+	offFinal := voiceevent.On(bus, r.onFinal)
+	r.unsubscribe = func() { offPartial(); offFinal() }
 	go r.speculateLoop()
+}
+
+// Warm loads the embeddings model before the first turn needs it. A cold local
+// model takes seconds to load — far past the recall budget — and the first
+// utterances of a session would otherwise all degrade to no-memory. Blocking and
+// best-effort: run it in a goroutine at boot.
+func (r *Recaller) Warm(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, warmTimeout)
+	defer cancel()
+	if _, err := r.embedder.Embed(ctx, []string{"warm-up"}); err != nil {
+		r.log.Warn("memory recall: embeddings warm-up failed; the first turns may run without memory", "err", err)
+	}
 }
 
 // sleepCtx blocks for d or until ctx is cancelled, returning ctx.Err() on cancel.
@@ -220,7 +246,7 @@ func (r *Recaller) Close() {
 // rather than stalling. It never returns an error and never panics.
 func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.Memory {
 	// Wall-clock span of the whole call, recorded with every counted outcome (#604):
-	// what the counter cannot say is how much of the 250ms budget a hit or miss
+	// what the counter cannot say is how much of the budget a hit or miss
 	// actually spent. Deliberately time.Now, not the injected r.now seam — that seam
 	// is the speculator's fake clock, which only advances on sleep and would report
 	// every recall as instantaneous.
@@ -257,6 +283,19 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	// (#487): a cross-session partial that happened to normalize identically must
 	// not serve another session's prefetched world chunks.
 	cached, hit := r.cacheLookup(norm, campaignID)
+	if !hit {
+		// The final's own speculation started when the final was published and is
+		// usually still embedding: join it instead of embedding the same text again
+		// behind it (one local model serves both calls in turn).
+		if fl := r.flightFor(norm, campaignID); fl != nil {
+			select {
+			case <-fl.done:
+				cached, hit = r.cacheLookup(norm, campaignID)
+			case <-ctx.Done():
+				return r.degrade(ctx, time.Since(start), fmt.Errorf("embed utterance: %w", ctx.Err()))
+			}
+		}
+	}
 
 	var vec []float32
 	var world []storage.ChunkMatch
