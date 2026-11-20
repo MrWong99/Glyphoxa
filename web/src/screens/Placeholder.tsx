@@ -1,26 +1,28 @@
+import { Link, useParams } from "@tanstack/react-router";
+
 import { Card, CardBody } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 import { useI18n } from "@/i18n";
 
-// Styled "coming soon" placeholder for the Campaign and Session screens. Those
-// screens wire to their RPCs in later stages (#67+); this stage ships only the
-// Configuration screen on the live GetActiveCampaign RPC (ADR-0039). Uses the
-// arcane gx- vocabulary so it reads as part of the design, not a stub.
-// The title arrives pre-translated (the caller picks the key), so this screen
-// only owns its own lede and badge copy.
+// The in-shell "page not found" screen: a /t/:tenantSlug/:screen visit for a
+// screen that does not exist. It says so plainly and links back to Setup, the
+// tenant's landing screen. The title arrives pre-translated (the caller picks
+// the key), so this screen only owns its own lede and link copy.
 export function Placeholder({ title }: { title: string }) {
   const { t } = useI18n();
+  const { tenantSlug } = useParams({ strict: false });
   return (
     <div className="gx-providers">
       <h1>{title}</h1>
       <p className="gx-providers__lede">{t("auth.placeholderLede")}</p>
-      <Card>
-        <CardBody>
-          <Badge variant="neutral" dot size="sm">
-            {t("auth.placeholderSoon")}
-          </Badge>
-        </CardBody>
-      </Card>
+      {tenantSlug && (
+        <Card>
+          <CardBody>
+            <Link to="/t/$tenantSlug/$screen" params={{ tenantSlug, screen: "configuration" }}>
+              {t("auth.placeholderBackToSetup")}
+            </Link>
+          </CardBody>
+        </Card>
+      )}
     </div>
   );
 }
