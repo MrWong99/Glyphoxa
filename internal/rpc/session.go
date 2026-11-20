@@ -167,14 +167,8 @@ func (s *SessionServer) Handler(opts ...connect.HandlerOption) (string, http.Han
 	return managementv1connect.NewSessionServiceHandler(s, opts...)
 }
 
-// tenant resolves the operator's tenant from the auth interceptor's context.
-func (s *SessionServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *SessionServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // GetSession returns the running session when one is live, otherwise the most
 // recent ended session for the active campaign (the screen's last-session

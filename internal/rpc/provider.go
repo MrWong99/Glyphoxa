@@ -265,16 +265,8 @@ func (s *ProviderServer) Handler(opts ...connect.HandlerOption) (string, http.Ha
 	return managementv1connect.NewProviderServiceHandler(s, opts...)
 }
 
-// tenant resolves the operator's tenant the auth interceptor stack put in the
-// context (ADR-0039 thin pass-through). Behind the stack this is always present;
-// a missing tenant is treated as unauthenticated.
-func (s *ProviderServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *ProviderServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // ListProviderConfigs returns the three write-only credential slots (Discord,
 // Groq, ElevenLabs) plus the non-secret Discord IDs. No secret value is read.

@@ -18,7 +18,6 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
@@ -245,13 +244,8 @@ func (s *VoiceServer) Handler(opts ...connect.HandlerOption) (string, http.Handl
 	return managementv1connect.NewVoiceServiceHandler(s, opts...)
 }
 
-func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // ListModels returns the live Groq model catalog for the model select (#227):
 // the OpenAI-compatible GET /models fetched with the tenant's decrypted BYOK key

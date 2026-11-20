@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -126,9 +125,9 @@ func (s *campaignArchive) ArchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.requireOwned(ctx, tenantID, id, "ArchiveCampaign"); err != nil {
 		return nil, err
@@ -159,9 +158,9 @@ func (s *campaignArchive) UnarchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	c, err := s.store.UnarchiveCampaign(ctx, tenantID, id)
@@ -189,9 +188,9 @@ func (s *campaignArchive) DeleteCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.requireOwned(ctx, tenantID, id, "DeleteCampaign"); err != nil {
 		return nil, err

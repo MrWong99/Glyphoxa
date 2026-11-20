@@ -30,9 +30,9 @@ func (s *campaignManagement) ListCampaigns(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListCampaignsRequest],
 ) (*connect.Response[managementv1.ListCampaignsResponse], error) {
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	list := s.store.ListCampaignsInTenant
 	if req.Msg.GetIncludeArchived() {
@@ -65,9 +65,9 @@ func (s *campaignManagement) CreateCampaign(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	id, err := s.store.CreateCampaign(ctx, storage.NewCampaign{
@@ -132,9 +132,9 @@ func (s *campaignManagement) UpdateCampaign(
 		confirmWindows = &v
 	}
 
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	updated, err := s.store.UpdateCampaign(ctx, storage.CampaignUpdate{
@@ -182,9 +182,9 @@ func (s *campaignManagement) SetActiveCampaign(
 	if !ok || u.DiscordUserID == "" {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no operator in context"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Validate the target exists WITHIN THE CALLER'S TENANT before persisting the
