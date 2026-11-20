@@ -38,11 +38,14 @@ const spokenOutputMarkupExemption = " The audio tags described below are the one
 //
 //   - Square brackets are never touched: "[cheerfully]" is an intentional
 //     ElevenLabs v3 audio tag (ADR-0022).
-//   - A "*" or "_" between two letters or digits ("2*3", "M*A*S*H",
-//     "snake_case") or with whitespace on both sides ("3 * 4") is content, and
-//     stays. A run that hugs a word on one side only ("**Wichtig:**", "*lacht*")
-//     is emphasis, and goes — paired or not, since a sentence boundary routinely
-//     separates an opening marker from its closer.
+//   - A "*" or "_" run is emphasis only where it OPENS on a word (after a
+//     space or at the start: "**Wichtig", "*lacht") or CLOSES one — and a closer
+//     counts only if an opener came before it on the line, or if it follows
+//     punctuation ("Gefahr im Verzug.**": the sentence boundary routinely
+//     separates a closer from its opener). Everything else is content and
+//     stays: "2*3", "M*A*S*H", "snake_case", "3 * 4", "5*(2+1)", "F*** off".
+//   - A "- ", "+ " or "> " in front of a digit is a sign, not a bullet or a
+//     quote: "- 5 Grad draußen", "+ 2 auf den Wurf", "> 5 Gold?".
 //   - A numbered list keeps its number ("1. Geh nach Norden"): the number is
 //     speakable and carries the order.
 //
@@ -80,38 +83,53 @@ func scrubFence(line string) string {
 // scrubLineStart strips the block markers markdown recognizes at the start of a
 // line: a "> " blockquote, a "# " … "###### " heading, and a "- " / "* " /
 // "+ " / "• " bullet. Each marker needs the whitespace after it, so "#1",
-// "-5 Grad" and "*lacht*" are left for [scrubEmphasis] or left alone.
+// "-5 Grad" and "*lacht*" are left for [scrubEmphasis] or left alone; and "-",
+// "+" and ">" are left alone in front of a digit, where they are a sign or a
+// comparison the sentence needs ("- 5 Grad draußen").
 func scrubLineStart(line string) string {
-	rest := strings.TrimLeft(line, " \t")
-	for {
-		switch {
-		case strings.HasPrefix(rest, "> "):
-			rest = strings.TrimLeft(rest[1:], " \t")
-			continue
-		case strings.HasPrefix(rest, "#"):
-			n := 0
-			for n < len(rest) && rest[n] == '#' {
-				n++
-			}
-			if n <= 6 && n < len(rest) && (rest[n] == ' ' || rest[n] == '\t') {
-				return strings.TrimLeft(rest[n:], " \t")
-			}
-		case strings.HasPrefix(rest, "- "), strings.HasPrefix(rest, "* "), strings.HasPrefix(rest, "+ "):
-			return strings.TrimLeft(rest[1:], " \t")
-		case strings.HasPrefix(rest, "• "):
-			return strings.TrimLeft(rest[len("•"):], " \t")
-		}
-		break
+	trimmed := strings.TrimLeft(line, " \t")
+	rest := trimmed
+	for strings.HasPrefix(rest, "> ") && !startsWithDigit(rest[1:]) {
+		rest = strings.TrimLeft(rest[1:], " \t")
 	}
-	if len(rest) == len(strings.TrimLeft(line, " \t")) {
+	switch {
+	case strings.HasPrefix(rest, "#"):
+		n := 0
+		for n < len(rest) && rest[n] == '#' {
+			n++
+		}
+		if n <= 6 && n < len(rest) && (rest[n] == ' ' || rest[n] == '\t') {
+			rest = strings.TrimLeft(rest[n:], " \t")
+		}
+	case strings.HasPrefix(rest, "- "), strings.HasPrefix(rest, "+ "):
+		if !startsWithDigit(rest[1:]) {
+			rest = strings.TrimLeft(rest[1:], " \t")
+		}
+	case strings.HasPrefix(rest, "* "):
+		rest = strings.TrimLeft(rest[1:], " \t")
+	case strings.HasPrefix(rest, "• "):
+		rest = strings.TrimLeft(rest[len("•"):], " \t")
+	}
+	if len(rest) == len(trimmed) {
 		return line // nothing stripped: keep the line byte-identical
 	}
 	return rest
 }
 
+// startsWithDigit reports whether the first non-space rune of s is a digit.
+func startsWithDigit(s string) bool {
+	for _, r := range s {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		return unicode.IsDigit(r)
+	}
+	return false
+}
+
 // scrubEmphasis drops the runs of "*" and "_" that markdown would read as
-// emphasis — those touching a word on exactly one side — and keeps the ones that
-// are content (see [scrubSpoken]).
+// emphasis and keeps the ones that are content (see [scrubSpoken] for the
+// rule).
 func scrubEmphasis(line string) string {
 	if !strings.ContainsAny(line, "*_") {
 		return line
@@ -119,6 +137,7 @@ func scrubEmphasis(line string) string {
 	runes := []rune(line)
 	var b strings.Builder
 	b.Grow(len(line))
+	open := 0 // openers dropped on this line and not yet closed
 	for i := 0; i < len(runes); {
 		r := runes[i]
 		if r != '*' && r != '_' {
@@ -130,24 +149,39 @@ func scrubEmphasis(line string) string {
 		for j < len(runes) && runes[j] == r {
 			j++
 		}
-		prev, next := ' ', ' '
-		if i > 0 {
+		atStart, atEnd := i == 0, j == len(runes)
+		var prev, next rune
+		if !atStart {
 			prev = runes[i-1]
 		}
-		if j < len(runes) {
+		if !atEnd {
 			next = runes[j]
 		}
-		wordBefore, wordAfter := isWordRune(prev), isWordRune(next)
-		spaceBefore, spaceAfter := unicode.IsSpace(prev), unicode.IsSpace(next)
-		keep := (wordBefore && wordAfter) || // intraword: math, names, identifiers
-			(spaceBefore && spaceAfter && i > 0 && j < len(runes)) // a free-standing operator
-		if keep {
-			b.WriteString(string(runes[i:j]))
+		opens := (atStart || unicode.IsSpace(prev) || isOpeningPunct(prev)) && !atEnd && isWordRune(next)
+		closes := !atStart && !unicode.IsSpace(prev) && (atEnd || unicode.IsSpace(next) || isClosingPunct(next))
+		switch {
+		case opens:
+			open++
+		case closes && open > 0:
+			open--
+		case closes && !isWordRune(prev):
+			// an orphaned closer behind punctuation: its opener was in the
+			// previous sentence
+		default:
+			b.WriteString(string(runes[i:j])) // content
 		}
 		i = j
 	}
 	return b.String()
 }
+
+// isOpeningPunct reports whether r can stand directly in front of an emphasized
+// word.
+func isOpeningPunct(r rune) bool { return strings.ContainsRune("(\"'„“‚‘«»", r) }
+
+// isClosingPunct reports whether r can stand directly behind an emphasized
+// word.
+func isClosingPunct(r rune) bool { return strings.ContainsRune(".,;:!?)\"'“”‘’«»…", r) }
 
 // isWordRune reports whether r is part of a word for the emphasis test.
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }

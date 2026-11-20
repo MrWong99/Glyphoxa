@@ -2273,3 +2273,68 @@ func TestEngine_Usage_BargedPlaybackIsMeteredWithReportedUsage(t *testing.T) {
 		}
 	}
 }
+
+// exactProvider replays scripted rounds like scriptedProvider, but streams each
+// round's text as ONE delta, byte for byte — no per-word trailing space — the
+// way a provider ends a round on its last token.
+type exactProvider struct {
+	mu    sync.Mutex
+	steps []step
+	next  int
+}
+
+func (p *exactProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	s := step{stop: "end_turn"}
+	if p.next < len(p.steps) {
+		s = p.steps[p.next]
+		p.next++
+	}
+	p.mu.Unlock()
+	ch := make(chan llm.StreamEvent, len(s.calls)+2)
+	if s.text != "" {
+		ch <- llm.StreamEvent{Type: llm.EventText, Text: s.text}
+	}
+	for _, c := range s.calls {
+		ch <- llm.StreamEvent{Type: llm.EventToolCall, ToolCall: c}
+	}
+	ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: s.stop}
+	close(ch)
+	return ch, nil
+}
+
+// TestEngine_ProseBeforeAToolRound_IsNotGluedToTheNextRound pins the round
+// boundary end to end through the real Replier, Engine and tool loop: the model
+// says "Let me check.", calls a Tool that returns in microseconds, and answers.
+// The two rounds' prose reach the stream back to back, so without a separator
+// the room hears one sentence, "Let me check.The dragon sleeps." The Replier
+// runs with its idle flush OFF, so nothing but the stream decides.
+func TestEngine_ProseBeforeAToolRound_IsNotGluedToTheNextRound(t *testing.T) {
+	var seen string
+	reg := tool.NewRegistry()
+	reg.MustRegister(callerCaptureTool{got: &seen})
+	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "capture"})
+	prov := &exactProvider{steps: []step{
+		{text: "Let me check.", calls: []llm.ToolCall{{ID: "c1", Name: "capture", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		{text: "The dragon sleeps.", stop: "end_turn"},
+	}}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Voice: tts.Voice{ProviderID: "elevenlabs", VoiceID: "v1"}},
+		Engine:      agenttool.NewEngine(prov, grants, "bart", "m", 256, 0),
+		Synthesizer: stubSynth{},
+	})
+	var spoken []string
+	if err := r.ReplyStream()(context.Background(), addressed("bart", "What is the dragon doing?"), func(rep orchestrator.Reply) error {
+		spoken = append(spoken, rep.Sentence)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	if seen != "bart" {
+		t.Fatalf("the tool round did not run (caller %q)", seen)
+	}
+	want := []string{"Let me check.", "The dragon sleeps."}
+	if strings.Join(spoken, "|") != strings.Join(want, "|") {
+		t.Errorf("spoken %q, want %q", spoken, want)
+	}
+}

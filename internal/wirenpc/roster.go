@@ -364,6 +364,9 @@ func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine,
 				// The canned stall for a terminal engine failure, in the Campaign
 				// Language — an NPC in a German campaign must not stall in English.
 				FallbackLine: agent.FallbackLineFor(d.language),
+				// Speak a sentence the stream pauses on instead of holding it for
+				// the next delta (off by default so replay tests stay clock-free).
+				SentenceIdleFlush: agent.DefaultSentenceIdleFlush,
 				OnError: func(err error) {
 					d.log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},

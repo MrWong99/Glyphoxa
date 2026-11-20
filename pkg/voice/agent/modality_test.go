@@ -66,7 +66,11 @@ func TestAnswerAsText_PhrasesMatchWholeWords(t *testing.T) {
 		}
 	}
 	// The real requests still win, with any punctuation around them.
-	for _, utterance := range []string{"Schreib das im Chat!", "Post it, please.", "Antworte bitte als Text."} {
+	for _, utterance := range []string{
+		"Schreib das im Chat!", "Post it, please.", "Antworte bitte als Text.",
+		// German compounds of the same request (F9).
+		"Schick mir das als Textnachricht.", "Schreib es bitte im Chatfenster.", "Poste das in den Chat.",
+	} {
 		if !AnswerAsText(utterance, short, false) {
 			t.Errorf("AnswerAsText(%q) = voice, want text", utterance)
 		}

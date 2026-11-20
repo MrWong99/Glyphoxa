@@ -15,7 +15,13 @@ const textLengthThreshold = 400
 // utterance ("post that as text", "in chat"). EN + DE (#297 decision 2: the
 // request can override the size default). Phrases are matched as whole words
 // (see [containsAny]).
-var textRequestPhrases = []string{"as text", "in chat", "post it", "als text", "im chat"}
+var textRequestPhrases = []string{
+	"as text", "in chat", "post it", "as a message",
+	"als text", "im chat", "in den chat", "als nachricht",
+	// German compounds of the same requests. They are listed, not prefix-matched:
+	// a prefix rule would let "im Chateau" back in.
+	"als textnachricht", "im chatfenster", "im textchat", "in den textchat",
+}
 
 // voiceRequestPhrases force spoken delivery when they appear in the addressed
 // utterance ("tell us in voice", "read it aloud", "sag es"). EN + DE.

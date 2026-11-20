@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -326,6 +327,15 @@ type Config struct {
 	// caller narrows it.
 	Retry retry.Policy
 
+	// SentenceIdleFlush is how long the streaming turn lets a reply sit on a
+	// finished-looking sentence before speaking it without waiting for the next
+	// delta (see [sentenceFeed]): the stream paused there — a stalled provider, a
+	// slow tool round — and what follows is no longer one token away. Zero (the
+	// default) or negative turns it off, which makes sentence segmentation a
+	// pure function of the deltas with no wall clock in it — what cassette and
+	// replay tests need. The live wiring sets [DefaultSentenceIdleFlush].
+	SentenceIdleFlush time.Duration
+
 	// FallbackLine is the canned sentence spoken when a turn's Engine fails
 	// TERMINALLY (provider outage, truncation, a hang killed by the turn's own
 	// [Config.TurnTimeout] deadline, an exhausted tool budget with no prose):
@@ -377,16 +387,26 @@ func FallbackLineFor(language string) string {
 	return DefaultFallbackLine
 }
 
-// maxQueuedSentences bounds the streaming turn's sentence queue: how far
-// generation may run ahead of playback. It is far above any real reply (at
-// speaking pace it is well over ten minutes of audio) and exists so a runaway
-// generation cannot buffer without limit — on overrun generation is stopped and
-// what is queued is still spoken (see [Replier.streamTurn]).
-const maxQueuedSentences = 256
+// MaxSpokenRunes caps how much text one streaming turn may queue for speech.
+// Until generation was decoupled from playback the per-turn deadline cut every
+// reply after about a minute of audio by accident; this is the deliberate bound
+// that replaces it. 6000 runes is roughly six to seven minutes of speech — the
+// recap Tool legitimately asks for answers of up to about 3500 — so no real
+// reply reaches it, while a model that will not stop cannot hold the floor (and
+// bill TTS) indefinitely. At the cap generation is stopped and what is queued
+// is spoken; see [Replier.streamTurn].
+const MaxSpokenRunes = 6000
 
-// errReplyOverrun is the generation error of a reply that overran
-// [maxQueuedSentences].
-var errReplyOverrun = errors.New("agent: reply outran playback by more than the sentence queue holds; generation stopped")
+// sentenceQueueCap is the sentence queue's capacity. A sentence costs at least
+// three runes against [MaxSpokenRunes] (a speakable rune, its terminator, the
+// separator), so the rune cap always binds first and a push never finds the
+// queue full.
+const sentenceQueueCap = MaxSpokenRunes/3 + 1
+
+// errReplyTooLong stops the generation of a reply that reached
+// [MaxSpokenRunes]. It is a limit, not a failure: the turn reports it through
+// OnError and ends cleanly on what was queued.
+var errReplyTooLong = errors.New("agent: reply reached the per-turn spoken-text cap; generation stopped")
 
 // Replier is the stateful Agent loop. Each addressed utterance appends a user
 // message and the assistant's reply to a running conversation, so the recent
@@ -831,13 +851,15 @@ type deliveredText struct {
 }
 
 func (d *deliveredText) emit(sentence string) error {
+	// Markdown never reaches the voice (O12). This is the same one-seam argument
+	// as the self-prefix strip below: what is scrubbed here is what TTS speaks,
+	// what history commits and what the Transcript records. The scrub runs FIRST
+	// so a label hidden behind a list or heading marker ("- Mira: Hallo") is at
+	// the start of the sentence by the time the strip looks for it.
+	sentence = scrubSpoken(sentence)
 	if d.selfName != "" {
 		sentence = stripSelfPrefix(d.selfName, sentence)
 	}
-	// Markdown never reaches the voice (O12). This is the same one-seam argument
-	// as the self-prefix strip: what is scrubbed here is what TTS speaks, what
-	// history commits and what the Transcript records.
-	sentence = scrubSpoken(sentence)
 	if !hasSpeakable(sentence) {
 		// The whole sentence WAS the label ("Mira:") or markup ("```json"). There
 		// is nothing to synthesize, and dispatching it would make TTS reject the
@@ -1061,13 +1083,22 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 //   - Deliver-then-commit (ADR-0012). Only sentences dispatch reported delivered
 //     are committed. A sentence still in the queue when the turn is cut was
 //     generated, never spoken, and is dropped.
-//   - Tool side effects (ADR-0030). The engine runs its tool rounds inside
-//     GenerateStream, under ctx, as it always did; this function only changes
-//     who consumes the prose.
+//
+// What changed for Tools (ADR-0030, amendment of 2026-11-20): the engine's
+// rounds are no longer paced by the room. Lockstep meant a tool round after
+// spoken prose only started once that prose had been delivered, so a barge
+// during it prevented the round; now every LLM and tool round runs to completion
+// as fast as the provider allows, even if the players cut the reply after its
+// first sentence. That is safe for what exists — read-only Tools, and
+// remember_knowledge, whose only effect is a GM-reviewed proposal (ADR-0052) —
+// and it is exactly why a future Tool with a real side effect MUST use
+// turn-commit and must never execute inline.
 //
 // A generation that fails or times out mid-reply still has its already-queued
 // sentences spoken (they are what the model said before the failure); only the
-// unterminated tail is dropped. parent's liveness, not ctx's, decides barge
+// unterminated tail is dropped. A reply that reaches [MaxSpokenRunes] is stopped
+// the same way, but that is a limit rather than a failure: it is reported via
+// OnError and the turn ends cleanly. parent's liveness, not ctx's, decides barge
 // silence: the turn's own TurnTimeout expiry reports OnError and — when nothing
 // was attempted — speaks the fallback (#473 review).
 func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string, dispatch func(orchestrator.Reply) error) error {
@@ -1106,27 +1137,32 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name,
 		pipelined: orchestrator.PipelinedDispatch(ctx)}
 
-	// Generation: drain the engine into the queue. A full queue stops generation
-	// (errReplyOverrun) rather than blocking it, which would put playback back
-	// under the generation deadline.
+	// Generation: drain the engine into the queue. The queue never blocks the
+	// generator (that would put playback back under the generation deadline); it
+	// is bounded by the spoken-text cap instead.
 	genCtx, stopGen := context.WithCancel(ctx)
 	defer stopGen()
-	queue := make(chan string, maxQueuedSentences)
+	queue := make(chan string, sentenceQueueCap)
 	genDone := make(chan struct{})
 	var genErr error // written by the generation goroutine; read after <-genDone
 	go func() {
 		defer close(genDone)
 		defer close(queue)
-		// Pushing never blocks: a full queue stops generation instead of stalling
-		// it against playback.
+		// Pushing never blocks: at the cap generation is stopped instead of
+		// stalled against playback.
+		queued := 0 // runes pushed so far, guarded by the feed's lock
 		feed := newSentenceFeed(func(sentence string) error {
+			queued += utf8.RuneCountInString(sentence) + 1
+			if queued > MaxSpokenRunes {
+				return errReplyTooLong
+			}
 			select {
 			case queue <- sentence:
 				return nil
 			default:
-				return errReplyOverrun
+				return errReplyTooLong // unreachable while sentenceQueueCap holds
 			}
-		})
+		}, r.cfg.SentenceIdleFlush)
 		onText := func(delta string) error {
 			// A cancelled turn stops an engine that does not watch ctx itself at
 			// its next delta, as the dispatch error used to.
@@ -1167,6 +1203,14 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	turnErr := cutErr
 	if turnErr == nil {
 		turnErr = genErr
+	}
+	// The spoken-text cap is a limit, not a turn failure: say so, and end the
+	// turn on what was spoken.
+	if errors.Is(turnErr, errReplyTooLong) {
+		if r.cfg.OnError != nil && parent.Err() == nil {
+			r.cfg.OnError(turnErr)
+		}
+		return nil
 	}
 
 	// A cancellation of the CALLER's turn ctx is the expected barge-in path, not
@@ -1353,7 +1397,9 @@ func (r *Replier) appendUser(text string) uint64 {
 // read user A, user B, assistant A — and if turn B assembled its prompt in that
 // window, the model was handed a conversation ENDING on the half-finished answer
 // to the previous question. A turn whose user message is gone (trimmed away
-// while it was still speaking) falls back to the append.
+// while it was still speaking) commits nothing: its place in the conversation
+// no longer exists, and appending the reply at the end would file it under a
+// question it does not answer.
 func (r *Replier) commitSpoken(turn uint64, spoken string) {
 	spoken = strings.TrimSpace(spoken)
 	if spoken == "" {
@@ -1362,12 +1408,15 @@ func (r *Replier) commitSpoken(turn uint64, spoken string) {
 	msg := llm.Message{Role: llm.RoleAssistant, Text: spoken}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	at := len(r.history)
-	for i := len(r.turnOf) - 1; i >= 0 && turn != 0; i-- {
+	at := -1
+	for i := len(r.turnOf) - 1; i >= 0; i-- {
 		if r.turnOf[i] == turn {
 			at = i + 1
 			break
 		}
+	}
+	if at < 0 {
+		return
 	}
 	r.history = slices.Insert(r.history, at, msg)
 	r.turnOf = slices.Insert(r.turnOf, at, turn)

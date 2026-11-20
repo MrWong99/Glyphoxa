@@ -28,15 +28,19 @@ import (
 // emitted when the next delta arrives rather than on its own last token, which
 // is one token of latency; the reply's final sentence comes from
 // [sentenceSplitter.Flush] as it always did, and a stream that PAUSES on a
-// finished sentence (a tool round follows) is settled by [sentenceFeed].
+// finished sentence can be settled by [sentenceFeed]'s idle flush.
 //
-// A single period is additionally NOT a boundary after (see [nonBoundaryDot]):
-// a known abbreviation ("Dr. Faust", "bzw."), a single letter ("z. B.",
-// "J. R. R. Tolkien"), a German ordinal ("am 3. Mai", "im 15. Jahrhundert") or
-// a list number opening a line ("1. Geh nach Norden"). Splitting there is
-// audible — the TTS ends an utterance on "Am dritten." — whereas a missed split
-// only makes one chunk a little longer, so every rule errs towards not
-// splitting. It is a short lexicon, not a linguistic model.
+// A single period is additionally NOT a boundary after (see [classifyDot]):
+// a known abbreviation ("Dr. Faust", "bzw."), a single-letter initial ("z. B.",
+// "J. R. R. Tolkien" — but not the tail of a contraction, "Das war's."), a
+// German ordinal ("am 3. Mai", "der 2. Versuch") or a list number opening a
+// line ("1. Geh nach Norden"). Splitting there is audible — the TTS ends an
+// utterance on "Am dritten." — whereas a missed split only makes one chunk a
+// little longer. It is a short lexicon, not a linguistic model.
+//
+// A sentence that never terminates is cut anyway once it passes
+// [maxSentenceRunes], on whitespace: one TTS request must stay bounded whatever
+// the model does.
 //
 // Not safe for concurrent use: one splitter drives one turn on one goroutine.
 type sentenceSplitter struct {
@@ -92,9 +96,25 @@ func (s *sentenceSplitter) Push(delta string) []string {
 		}
 		// An abbreviation, initial, ordinal or list number: the period belongs
 		// to the token before it, not to the sentence.
-		if j-i == 1 && runes[i] == '.' && nonBoundaryDot(runes[start:i]) {
-			i = j
-			continue
+		if j-i == 1 && runes[i] == '.' {
+			kind := classifyDot(runes[start:i])
+			if kind == dotNeedsNextWord {
+				// "die 20." is an ordinal only in front of the thing it counts
+				// ("die 20. Runde"), so the word after it decides — and that
+				// word must have arrived completely.
+				word, complete := nextWord(runes[j:])
+				if !complete {
+					break
+				}
+				kind = dotEndsSentence
+				if ordinalNouns[strings.ToLower(word)] {
+					kind = dotInsideSentence
+				}
+			}
+			if kind == dotInsideSentence {
+				i = j
+				continue
+			}
 		}
 		// Emit text[start:endOfTerminators], trimmed. Then skip the whitespace.
 		// Skip a run with no speakable content (a stray ".  ." with no letters or
@@ -108,6 +128,26 @@ func (s *sentenceSplitter) Push(delta string) []string {
 		}
 		start = j
 		i = j
+	}
+
+	// An unterminated run-on: cut it on whitespace so no single sentence — one
+	// TTS request, one history line — grows without bound.
+	for len(runes)-start > maxSentenceRunes {
+		cut := start + maxSentenceRunes
+		for k := cut; k > start+maxSentenceRunes/2; k-- {
+			if isSpace(runes[k]) {
+				cut = k
+				break
+			}
+		}
+		sentence := strings.TrimSpace(string(runes[start:cut]))
+		if hasSpeakable(sentence) {
+			out = append(out, sentence)
+		}
+		for cut < len(runes) && isSpace(runes[cut]) {
+			cut++
+		}
+		start = cut
 	}
 
 	// Re-buffer the undecided remainder.
@@ -128,21 +168,52 @@ var dotAbbreviations = map[string]bool{
 	"mt": true, "lt": true, "col": true, "capt": true, "sgt": true,
 }
 
-// ordinalLeads are the lower-cased German words a dotted ordinal follows ("am 3.
-// Mai", "der 2. Versuch"). A number after anything else ("Du hast eine 14.") is
-// a cardinal ending its sentence. English writes no dotted ordinals and none of
-// these words precedes a sentence-final number there, so the rule needs no
-// language switch.
+// maxSentenceRunes is the longest sentence the splitter emits. A model that
+// stops punctuating would otherwise hand TTS one request of unbounded length;
+// past this many runes the text is cut at the last whitespace. It is far longer
+// than a spoken sentence (roughly half a minute of speech), so ordinary replies
+// never reach it.
+const maxSentenceRunes = 400
+
+// ordinalLeads are the lower-cased German words a dotted number is ALWAYS an
+// ordinal after ("am 3. Mai", "im 15. Jahrhundert"). English writes no dotted
+// ordinals and none of these words precedes a sentence-final number there, so
+// the rule needs no language switch.
 var ordinalLeads = map[string]bool{
 	"am": true, "im": true, "vom": true, "zum": true, "zur": true, "beim": true,
-	"der": true, "die": true, "das": true, "den": true, "dem": true, "des": true,
-	"ab": true, "bis": true, "seit": true, "jeden": true, "jedes": true, "jedem": true,
+	"den": true, "dem": true, "des": true, "ab": true, "seit": true,
+	"jeden": true, "jedes": true, "jedem": true,
 }
 
-// nonBoundaryDot reports whether a single period following before (the pending
-// sentence up to the period) belongs to its last token instead of ending the
-// sentence. See the [sentenceSplitter] doc for the cases.
-func nonBoundaryDot(before []rune) bool {
+// ambiguousOrdinalLeads precede an ordinal ("der 2. Versuch", "bis 3. Mai") as
+// readily as a cardinal that ends its sentence ("Ich würfle die 20.", "Warte bis
+// 10."). After one of them the number is an ordinal only when the next word is
+// one of [ordinalNouns].
+var ambiguousOrdinalLeads = map[string]bool{"der": true, "die": true, "das": true, "bis": true}
+
+// ordinalNouns are the lower-cased words that follow a German ordinal: the
+// months and the things one counts by rank.
+var ordinalNouns = map[string]bool{
+	"januar": true, "februar": true, "märz": true, "april": true, "mai": true, "juni": true,
+	"juli": true, "august": true, "september": true, "oktober": true, "november": true, "dezember": true,
+	"jahrhundert": true, "jahrtausend": true, "jahr": true, "monat": true, "woche": true, "tag": true,
+	"stunde": true, "versuch": true, "mal": true, "runde": true, "kapitel": true, "akt": true,
+	"stock": true, "etage": true, "ebene": true, "stufe": true, "grad": true, "klasse": true,
+	"reihe": true, "platz": true, "tür": true, "haus": true,
+}
+
+// dotKind is what a single period means for the sentence it stands in.
+type dotKind int
+
+const (
+	dotEndsSentence   dotKind = iota // a boundary (given whitespace after it)
+	dotInsideSentence                // part of the token before it: abbreviation, initial, ordinal
+	dotNeedsNextWord                 // an ordinal only if one of [ordinalNouns] follows
+)
+
+// classifyDot decides what a single period following before (the pending
+// sentence up to the period) is. See the [sentenceSplitter] doc for the cases.
+func classifyDot(before []rune) dotKind {
 	// The token directly in front of the period: a run of letters or digits.
 	end := len(before)
 	begin := end
@@ -151,13 +222,13 @@ func nonBoundaryDot(before []rune) bool {
 	}
 	token := before[begin:end]
 	if len(token) == 0 {
-		return false
+		return dotEndsSentence
 	}
 	if allDigits(token) {
 		// Only a free-standing number can be an ordinal or a list number
 		// ("Raum B12." is neither).
 		if begin > 0 && !isSpace(before[begin-1]) {
-			return false
+			return dotEndsSentence
 		}
 		// What precedes the number on its own line.
 		lead := before[:begin]
@@ -169,16 +240,52 @@ func nonBoundaryDot(before []rune) bool {
 		}
 		words := strings.Fields(string(lead))
 		if len(words) == 0 {
-			return true // a list number opening the sentence or a line
+			return dotInsideSentence // a list number opening the sentence or a line
 		}
-		return ordinalLeads[strings.ToLower(words[len(words)-1])]
+		switch last := strings.ToLower(words[len(words)-1]); {
+		case ordinalLeads[last]:
+			return dotInsideSentence
+		case ambiguousOrdinalLeads[last]:
+			return dotNeedsNextWord
+		}
+		return dotEndsSentence
+	}
+	// The tail of a contraction or possessive ("don't.", "war's.", "Bob’s.") is
+	// the end of a word, never an initial or an abbreviation.
+	if begin > 0 && isApostrophe(before[begin-1]) {
+		return dotEndsSentence
 	}
 	if len(token) == 1 {
 		// An initial or a spelled-out abbreviation ("z. B.", "e.g."). The English
 		// pronoun is the one single letter that routinely ends a sentence.
-		return token[0] != 'I'
+		if token[0] == 'I' {
+			return dotEndsSentence
+		}
+		return dotInsideSentence
 	}
-	return dotAbbreviations[strings.ToLower(string(token))]
+	if dotAbbreviations[strings.ToLower(string(token))] {
+		return dotInsideSentence
+	}
+	return dotEndsSentence
+}
+
+// isApostrophe reports whether r is one of the apostrophes a contraction is
+// written with.
+func isApostrophe(r rune) bool { return r == '\'' || r == '’' || r == 'ʼ' }
+
+// nextWord returns the first word of after (leading whitespace skipped) and
+// whether it is complete — followed by something that is not a letter. A word
+// the buffer ends on may still be growing.
+func nextWord(after []rune) (word string, complete bool) {
+	i := 0
+	for i < len(after) && isSpace(after[i]) {
+		i++
+	}
+	j := i
+	for j < len(after) && unicode.IsLetter(after[j]) {
+		j++
+	}
+	return string(after[i:j]), j < len(after)
 }
 
 // allDigits reports whether every rune of token is a digit.
@@ -217,7 +324,9 @@ func (s *sentenceSplitter) Settle() string {
 	for i > 0 && isTerminator(runes[i-1]) {
 		i--
 	}
-	if i == end || (end-i == 1 && runes[i] == '.' && nonBoundaryDot(runes[:i])) {
+	// A dot whose meaning hangs on the next word is settled as a sentence end:
+	// the quiet stream is the evidence that no "Runde" is one token away.
+	if i == end || (end-i == 1 && runes[i] == '.' && classifyDot(runes[:i]) == dotInsideSentence) {
 		return ""
 	}
 	sentence := strings.TrimSpace(string(runes))
@@ -228,37 +337,40 @@ func (s *sentenceSplitter) Settle() string {
 	return sentence
 }
 
-// sentenceIdleFlush is how long a streamed reply may sit on a finished-looking
-// sentence before [sentenceFeed] speaks it without waiting for the next delta.
-// Tokens of one generation arrive milliseconds apart, so a gap this long is a
-// real pause — in practice the model wrote "Let me check." and then called a
-// Tool — and holding the sentence back until the next round's text would add
-// the whole tool round to its latency.
-const sentenceIdleFlush = 300 * time.Millisecond
+// DefaultSentenceIdleFlush is the [Config.SentenceIdleFlush] the live wiring
+// uses: how long a streamed reply may sit on a finished-looking sentence before
+// it is spoken without waiting for the next delta. Tokens of one generation
+// arrive milliseconds apart, so a gap this long is a real pause — a stalled
+// stream, or a slow tool round the model announced with "Let me check." — and
+// holding the sentence back would add the whole pause to its latency.
+const DefaultSentenceIdleFlush = 300 * time.Millisecond
 
 // sentenceFeed drives a [sentenceSplitter] from a live stream: it pushes every
-// sentence the deltas complete to push, and settles a sentence the stream
-// pauses on after [sentenceIdleFlush]. The timer is why it carries a lock — the
-// splitter itself is single-goroutine.
+// sentence the deltas complete to push, and — when built with a positive idle
+// interval — settles a sentence the stream pauses on. The timer is why it
+// carries a lock; the splitter itself is single-goroutine.
 type sentenceFeed struct {
-	push func(sentence string) error
+	push     func(sentence string) error
+	interval time.Duration // idle flush interval; <= 0 disables it (no timer at all)
 
 	mu     sync.Mutex
 	split  sentenceSplitter
 	idle   *time.Timer
-	seq    uint64 // bumped per Write; the idle flush fires only for the Write that armed it
-	armed  uint64
+	due    time.Time // when the stream will have been quiet for interval since the last Write
 	closed bool
 	err    error // a push error from the idle flush, surfaced by the next Write/Close
 }
 
 // newSentenceFeed builds a feed delivering sentences to push. push is called
 // with the feed's lock held, from the writer's goroutine or the idle timer's,
-// never concurrently, and must not block.
-func newSentenceFeed(push func(sentence string) error) *sentenceFeed {
-	f := &sentenceFeed{push: push}
-	f.idle = time.AfterFunc(sentenceIdleFlush, f.onIdle)
-	f.idle.Stop()
+// never concurrently, and must not block. interval <= 0 turns the idle flush
+// off: the feed is then a pure function of its deltas, with no wall clock in it.
+func newSentenceFeed(push func(sentence string) error, interval time.Duration) *sentenceFeed {
+	f := &sentenceFeed{push: push, interval: interval}
+	if interval > 0 {
+		f.idle = time.AfterFunc(interval, f.onIdle)
+		f.idle.Stop()
+	}
 	return f
 }
 
@@ -270,25 +382,34 @@ func (f *sentenceFeed) Write(delta string) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.seq++
-	f.idle.Stop()
 	for _, sentence := range f.split.Push(delta) {
 		if err := f.push(sentence); err != nil {
 			f.err = err
 			return err
 		}
 	}
-	f.armed = f.seq
-	f.idle.Reset(sentenceIdleFlush)
+	if f.idle != nil {
+		// Stop cannot recall a callback that has already fired and is waiting
+		// for this lock, so the callback checks due itself.
+		f.due = time.Now().Add(f.interval)
+		f.idle.Reset(f.interval)
+	}
 	return nil
 }
 
-// onIdle is the timer callback: the stream has been quiet since the Write that
-// armed it, so a sentence it ended on is spoken now.
+// onIdle is the timer callback. It settles the pending sentence only if the
+// stream really has been quiet for the whole interval: a callback that fired
+// just as a new delta arrived finds due moved into the future and re-arms for
+// the remainder instead — otherwise a delta gap of about one interval would
+// split "3." from "5 Gold" after all.
 func (f *sentenceFeed) onIdle() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.closed || f.err != nil || f.seq != f.armed {
+	if f.closed || f.err != nil {
+		return
+	}
+	if rest := time.Until(f.due); rest > 0 {
+		f.idle.Reset(rest)
 		return
 	}
 	if sentence := f.split.Settle(); sentence != "" {
@@ -304,7 +425,9 @@ func (f *sentenceFeed) Close(flush bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
-	f.idle.Stop()
+	if f.idle != nil {
+		f.idle.Stop()
+	}
 	if f.err == nil && flush {
 		if tail := f.split.Flush(); tail != "" {
 			f.err = f.push(tail)

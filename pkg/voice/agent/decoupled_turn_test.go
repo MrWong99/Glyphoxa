@@ -260,52 +260,63 @@ func TestReplyStream_GenerationDeadlineMidReply_SpeaksWhatWasGenerated(t *testin
 	}
 }
 
-// TestReplyStream_RunawayGeneration_IsBounded pins the queue bound: a
-// generation that runs arbitrarily far ahead of a stalled playback is stopped
-// once the queue is full instead of buffering without limit, and what was
-// queued is still spoken once playback resumes.
-func TestReplyStream_RunawayGeneration_IsBounded(t *testing.T) {
-	const runaway = 10 * agent.MaxQueuedSentences
-	var pushed atomic.Int32
-	var genErr atomic.Value
-	eng := newFuncStreamEngine(func(ctx context.Context, _ []llm.Message, onText func(string) error) error {
-		for i := range runaway {
-			if err := onText(fmt.Sprintf("Sentence %d. ", i)); err != nil {
-				genErr.Store(err)
-				return err
+// TestReplyStream_RunawayGeneration_IsCappedAndEndsCleanly pins the spoken-text
+// cap (F5): a generation that will not stop is cut off at agent.MaxSpokenRunes
+// — whether it punctuates or not — what was queued is still spoken, and the
+// turn ends cleanly: the limit is reported via OnError but is not a turn
+// failure.
+func TestReplyStream_RunawayGeneration_IsCappedAndEndsCleanly(t *testing.T) {
+	for name, delta := range map[string]string{
+		"punctuated":   "Und noch ein Satz. ",
+		"unterminated": "und immer weiter ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			const runaway = 100 * agent.MaxSpokenRunes // runes the model would produce
+			var generated atomic.Int64
+			var genErr atomic.Value
+			eng := newFuncStreamEngine(func(_ context.Context, _ []llm.Message, onText func(string) error) error {
+				for generated.Load() < runaway {
+					if err := onText(delta); err != nil {
+						genErr.Store(err)
+						return err
+					}
+					generated.Add(int64(len([]rune(delta))))
+				}
+				return nil
+			})
+			var onErr atomic.Value
+			r := agent.NewReplier(agent.Config{
+				Persona:     agent.Persona{AgentID: "bart", Voice: testVoice()},
+				Engine:      eng,
+				Synthesizer: stubSynth{},
+				OnError:     func(err error) { onErr.Store(err) },
+			})
+			var log spokenLog
+			err := r.ReplyStream()(context.Background(), routed("bart", "story"), func(rep orchestrator.Reply) error {
+				<-eng.done // playback is stalled until generation has stopped
+				log.add(rep.Sentence)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("ReplyStream = %v, want nil (the cap is a limit, not a failure)", err)
 			}
-			pushed.Add(1)
-		}
-		return nil
-	})
-	var onErr atomic.Value
-	r := agent.NewReplier(agent.Config{
-		Persona:     agent.Persona{AgentID: "bart", Voice: testVoice()},
-		Engine:      eng,
-		Synthesizer: stubSynth{},
-		OnError:     func(err error) { onErr.Store(err) },
-	})
-	var log spokenLog
-	err := r.ReplyStream()(context.Background(), routed("bart", "story"), func(rep orchestrator.Reply) error {
-		<-eng.done // playback is stalled until generation has stopped
-		log.add(rep.Sentence)
-		return nil
-	})
-	if !errors.Is(err, agent.ErrReplyOverrun) {
-		t.Errorf("ReplyStream = %v, want ErrReplyOverrun", err)
-	}
-	if e, _ := genErr.Load().(error); !errors.Is(e, agent.ErrReplyOverrun) {
-		t.Errorf("generation was stopped with %v, want ErrReplyOverrun", e)
-	}
-	if e, _ := onErr.Load().(error); !errors.Is(e, agent.ErrReplyOverrun) {
-		t.Errorf("OnError = %v, want ErrReplyOverrun", e)
-	}
-	// One sentence may already be in the dispatcher's hands when the queue fills.
-	if n := int(pushed.Load()); n > agent.MaxQueuedSentences+1 {
-		t.Errorf("generation buffered %d sentences, want at most %d", n, agent.MaxQueuedSentences+1)
-	}
-	if n := len(log.get()); n != int(pushed.Load()) {
-		t.Errorf("spoken %d sentences, want all %d that were queued", n, pushed.Load())
+			if e, _ := genErr.Load().(error); !errors.Is(e, agent.ErrReplyTooLong) {
+				t.Errorf("generation was stopped with %v, want ErrReplyTooLong", e)
+			}
+			if e, _ := onErr.Load().(error); !errors.Is(e, agent.ErrReplyTooLong) {
+				t.Errorf("OnError = %v, want ErrReplyTooLong", e)
+			}
+			spoken := 0
+			for _, sentence := range log.get() {
+				spoken += len([]rune(sentence))
+			}
+			if spoken > agent.MaxSpokenRunes || spoken < agent.MaxSpokenRunes/2 {
+				t.Errorf("spoke %d runes, want close to and at most the cap of %d", spoken, agent.MaxSpokenRunes)
+			}
+			if got := assistantTexts(r); len(got) != 1 || len([]rune(got[0])) > agent.MaxSpokenRunes {
+				t.Errorf("committed %d assistant message(s), want the one capped reply", len(got))
+			}
+		})
 	}
 }
 
@@ -369,7 +380,7 @@ func TestReplyStream_SupersededTurnCommit_StaysBehindItsOwnQuestion(t *testing.T
 // before the history commit, while the bracketed audio tag survives verbatim.
 func TestReplyStream_MarkdownNeverReachesTheVoice(t *testing.T) {
 	eng := &fakeStreamEngine{deltas: []string{
-		"[cheerfully] **Willkommen**, Reisende! ", "Ihr braucht:\n", "- ein *scharfes* Schwert\n", "- 3 * 4 Goldstücke. ",
+		"[cheerfully] **Willkommen**, Reisende! ", "Ihr braucht:\n", "- ein *scharfes* Schwert\n", "- genau 3 * 4 Goldstücke. ",
 		"```\n", "## Viel Glück!",
 	}}
 	r := streamReplier(t, eng)
@@ -380,7 +391,7 @@ func TestReplyStream_MarkdownNeverReachesTheVoice(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ReplyStream: %v", err)
 	}
-	want := []string{"[cheerfully] Willkommen, Reisende!", "Ihr braucht:\nein scharfes Schwert\n3 * 4 Goldstücke.", "Viel Glück!"}
+	want := []string{"[cheerfully] Willkommen, Reisende!", "Ihr braucht:\nein scharfes Schwert\ngenau 3 * 4 Goldstücke.", "Viel Glück!"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("dispatched %q\n       want %q", got, want)
 	}
