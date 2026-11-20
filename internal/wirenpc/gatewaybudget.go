@@ -3,7 +3,10 @@ package wirenpc
 import (
 	"context"
 	"encoding/base64"
+	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/events"
@@ -33,19 +36,29 @@ type GatewayBudgetRecorder interface {
 //     receives, not on the session we establish, so this is where the count belongs.
 //   - a Resumed event listener that counts each budget-free RESUME.
 //
-// Returns nil when b is nil so a caller (the borrowed standing-client path, or an
-// env-only bench) can splat the result unconditionally and attach nothing — a
-// borrowed client is instrumented by the presence that owns it, never twice.
+// The identify wrapper also enforces the hard per-application IDENTIFY pacing
+// (see identifyPacer). That is not observability and does not depend on b:
+// with a nil b the wrapper is still installed, counting into a discard
+// recorder, and only the Resumed listener is left out.
 func GatewayBudgetClientOpts(token string, b GatewayBudgetRecorder) []bot.ConfigOpt {
-	if b == nil {
-		return nil
-	}
 	appID := applicationIDFromToken(token)
+	if b == nil {
+		return []bot.ConfigOpt{
+			bot.WithGatewayConfigOpts(gateway.WithIdentifyRateLimiter(newIdentifyCounter(appID, discardGatewayBudget{}))),
+		}
+	}
 	return []bot.ConfigOpt{
 		bot.WithGatewayConfigOpts(gateway.WithIdentifyRateLimiter(newIdentifyCounter(appID, b))),
 		bot.WithEventListeners(resumeListener(b)),
 	}
 }
+
+// discardGatewayBudget is the recorder behind a client built without budget
+// observability: the IDENTIFY pacing still applies, the counts go nowhere.
+type discardGatewayBudget struct{}
+
+func (discardGatewayBudget) RecordIdentify(string) {}
+func (discardGatewayBudget) RecordResume(string)   {}
 
 // resumeListener counts one RESUME per disgo Resumed dispatch, labeled by the
 // client's application id (never the token).
@@ -81,8 +94,95 @@ func (c *identifyCounter) Wait(ctx context.Context, shardID int) error {
 	if err := c.inner.Wait(ctx, shardID); err != nil {
 		return err
 	}
+	// The hard cap comes BEFORE the count: an IDENTIFY that is still waiting
+	// for its turn has not been sent.
+	if err := identifyPacerFor(c.appID).wait(ctx); err != nil {
+		return err
+	}
 	c.budget.RecordIdentify(c.appID)
 	return nil
+}
+
+// IDENTIFY pacing: the last line of defence for the Bot token.
+//
+// Discord allows a token 1000 IDENTIFYs per 24 hours and RESETS the token
+// past that. Everything above this point can be wrong about when to
+// reconnect — on 2026-11-20 disgo could not decode a GUILD_CREATE carrying a
+// channel type it did not know, failed the handshake, and re-identified every
+// four seconds inside its own reconnect loop until the production token was
+// reset 74 minutes after boot. Nothing in this repository was in that loop to
+// stop it. This is the one place every IDENTIFY of every client must pass, so
+// the budget is enforced here, per application and process-wide: a small
+// burst for boot and ordinary reconnects, then a slow refill. A runaway loop
+// is held to [identifyBurst] + 24h/[identifyRefill] = 484 a day whatever its
+// cause; a healthy process never notices.
+const (
+	// identifyBurst is how many IDENTIFYs may go out back to back.
+	identifyBurst = 4
+	// identifyRefill is how long one further IDENTIFY takes to become available.
+	identifyRefill = 3 * time.Minute
+)
+
+// identifyPacer is a token bucket over one application's IDENTIFYs.
+type identifyPacer struct {
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+	now    func() time.Time
+}
+
+func newIdentifyPacer(now func() time.Time) *identifyPacer {
+	return &identifyPacer{tokens: identifyBurst, last: now(), now: now}
+}
+
+// identifyPacers holds one pacer per application id for the life of the
+// process: the standing presence client and any per-cycle voice clients on the
+// same Bot token draw on the same Discord budget, so they share one bucket.
+var identifyPacers sync.Map // appID string → *identifyPacer
+
+func identifyPacerFor(appID string) *identifyPacer {
+	if p, ok := identifyPacers.Load(appID); ok {
+		return p.(*identifyPacer)
+	}
+	p, _ := identifyPacers.LoadOrStore(appID, newIdentifyPacer(time.Now))
+	return p.(*identifyPacer)
+}
+
+// reserve takes one IDENTIFY from the bucket and reports how long the caller
+// must wait before sending it; zero means now. The reservation is made either
+// way, so concurrent callers queue behind each other instead of all waking for
+// the same token.
+func (p *identifyPacer) reserve() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	p.tokens = min(identifyBurst, p.tokens+float64(now.Sub(p.last))/float64(identifyRefill))
+	p.last = now
+	p.tokens--
+	if p.tokens >= 0 {
+		return 0
+	}
+	return time.Duration(-p.tokens * float64(identifyRefill))
+}
+
+// wait blocks until this caller's IDENTIFY may be sent, or ctx ends. A caller
+// that gives up keeps its reservation: the conservative choice, and a
+// cancelled open is rare next to the loop this exists to stop.
+func (p *identifyPacer) wait(ctx context.Context) error {
+	d := p.reserve()
+	if d <= 0 {
+		return nil
+	}
+	slog.Default().Warn("discord gateway IDENTIFY held back to protect the Bot token's 24h budget; something is reconnecting in a loop",
+		"wait", d.Round(time.Second))
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func (c *identifyCounter) Unlock(shardID int) { c.inner.Unlock(shardID) }
