@@ -944,6 +944,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	if err := sweepAllowlistSessions(ctx, store, dev, admission, allow, log); err != nil {
 		return err
 	}
+	// Expired-session housekeeping (#643): one pass now, then daily, in every
+	// posture — allowlist, open and dev mode alike. Rides the process signal
+	// ctx, so SIGTERM stops it.
+	go purgeExpiredSessions(ctx, store, sessionPurgeInterval, log)
 
 	// Signup default plan (ADR-0055): resolved once here, preflighted FATALLY in
 	// `open` mode — a bad slug must fail the boot, not every signup after OAuth.
@@ -1533,8 +1537,13 @@ var plainMountPolicy = map[string]auth.TenantMode{
 	"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
 	// TenantNone: ServeImport resolves the tenant off the session itself
 	// (#291); the POST method already makes the guard demand the CSRF pair.
-	"POST /api/v1/campaigns/import": auth.TenantNone,
+	importMountPattern: auth.TenantNone,
 }
+
+// importMountPattern is the campaign bundle import route — named because two
+// tables key on it: its auth posture above and its upload body deadline in
+// managementMounts.
+const importMountPattern = "POST /api/v1/campaigns/import"
 
 // relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
@@ -1569,11 +1578,16 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// these routes — so the old silent warn-and-continue is gone, replaced by the
 	// fatal preflight in runWeb.
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
+	oauthRedirectURL := os.Getenv("DISCORD_OAUTH_REDIRECT_URL")
 	discord := auth.NewDiscordClient(auth.DiscordConfig{
 		ClientID:     clientID,
 		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("DISCORD_OAUTH_REDIRECT_URL"),
+		RedirectURL:  oauthRedirectURL,
 	})
+	// Cookie Secure is decided ONCE, from the scheme of the public URL the
+	// operator configured, not per request from X-Forwarded-Proto (#662) — a
+	// header any client can set and a proxy may not overwrite.
+	secureCookies := auth.SecureCookies(oauthRedirectURL)
 	// The OAuth callback's admission policy (ADR-0041 / ADR-0055). In allowlist
 	// mode the GLYPHOXA_OPERATOR_IDS allowlist is the single authorization gate:
 	// a Discord User whose snowflake is absent is denied a session before any
@@ -1587,7 +1601,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		SignupPlanSlug: signupPlanSlug,
 		Signup:         store,
 	}, log)
+	oauth.SetSecureCookies(secureCookies)
 	authServer := auth.NewAuthServer(store, store, store, admission, log)
+	authServer.SetSecureCookies(secureCookies)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
@@ -1647,7 +1663,14 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// SAME factory closure as Highlight enrichment and mapgen (ADR-0039 — one
 	// place for the hybrid key policy).
 	campaignSrv.SetPortraitGenerator(portraitgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log))
-	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
+	// CampaignService is the ONE Connect service that takes image uploads
+	// (CreateMap / ReplaceMapImage / SetNodePortrait), so it alone carries the
+	// 48 MiB read cap; every other service keeps the 1 MiB default. connect-go
+	// buffers a request before any interceptor runs, so the large cap sits
+	// behind a header-only session check: a caller without a valid session is
+	// refused before a body byte is read.
+	campaignPath, campaignHandler := campaignSrv.Handler(stack.UploadHandlerOptions()...)
+	campaignHandler = stack.RequireSessionBeforeBody(campaignHandler)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
 	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq
@@ -1813,7 +1836,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Campaign bundle import (#291): multipart upload, operator-gated; the
 		// POST method makes the guard demand the CSRF double-submit (ADR-0016)
 		// the SPA satisfies with the script-readable glyphoxa_csrf cookie.
-		"POST /api/v1/campaigns/import": http.HandlerFunc(bundleHandler.ServeImport),
+		importMountPattern: http.HandlerFunc(bundleHandler.ServeImport),
 	}
 	if len(plainHandlers) != len(plainMountPolicy) {
 		panic(fmt.Sprintf("plain mounts and plainMountPolicy disagree: %d handlers, %d policy rows — every plain mount must declare its posture (#446)",
@@ -1831,8 +1854,10 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	}
 	guarded := auth.MustGuardMounts(policy, rows)
 
+	campaignMount := web.APIMount(campaignPath, campaignHandler)
+	campaignMount.BodyReadTimeout = web.UploadBodyReadTimeout
 	mounts := []web.Mount{
-		web.APIMount(campaignPath, campaignHandler),
+		campaignMount,
 		web.APIMount(authPath, authHandler),
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
@@ -1840,7 +1865,13 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		web.APIMount(chatPath, chatHandler),
 	}
 	for _, g := range guarded {
-		mounts = append(mounts, web.Mount{Path: g.Pattern, Handler: g.Handler})
+		m := web.Mount{Path: g.Pattern, Handler: g.Handler}
+		// The bundle import is the one plain mount that receives a large body
+		// (up to 192 MiB); every other mount keeps the default body deadline.
+		if g.Pattern == importMountPattern {
+			m.BodyReadTimeout = web.UploadBodyReadTimeout
+		}
+		mounts = append(mounts, m)
 	}
 	return append(mounts,
 		// The OAuth redirects are the login carve-out (ADR-0015): public by

@@ -51,7 +51,7 @@ func (f *fakeOAuthStore) ResolveOperatorTenant(_ context.Context, userID uuid.UU
 
 func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) (storage.Session, error) {
 	f.sessions = append(f.sessions, n)
-	return storage.Session{ID: uuid.New(), UserID: n.UserID, Token: n.Token, ExpiresAt: n.ExpiresAt}, nil
+	return storage.Session{ID: uuid.New(), UserID: n.UserID, ExpiresAt: n.ExpiresAt}, nil
 }
 
 // anyTokenAuth accepts any non-empty session token as the seeded dev operator, so
@@ -823,7 +823,7 @@ func TestDevAuthMiddleware(t *testing.T) {
 	h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
 
 	// A request carrying a STALE session cookie must be overwritten, not merged.
-	req := httptest.NewRequest(http.MethodPost, "/api/anything", nil)
+	req := httptest.NewRequest(http.MethodPost, devURL+"/api/anything", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "stale"})
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -865,7 +865,7 @@ func TestDevAuthMiddleware_ReseedsDeadSession(t *testing.T) {
 	h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/anything", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, devURL+"/api/anything", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -893,7 +893,7 @@ func TestDevAuthMiddleware_RefusesProxiedRequests(t *testing.T) {
 			}
 			h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
 
-			req := httptest.NewRequest(http.MethodGet, "/api/anything", nil)
+			req := httptest.NewRequest(http.MethodGet, devURL+"/api/anything", nil)
 			req.Header.Set(header, "203.0.113.7")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -940,7 +940,7 @@ func TestEnableDevMode(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
-	wrap(protected).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/x/events", nil))
+	wrap(protected).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, devURL+"/api/v1/sessions/x/events", nil))
 	if !reached || rec.Code != http.StatusOK {
 		t.Errorf("cookieless request was not auto-authenticated: reached=%v code=%d", reached, rec.Code)
 	}

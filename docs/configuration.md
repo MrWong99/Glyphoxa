@@ -170,7 +170,12 @@ insecure-mode warning. A container port-mapping cannot reach the loopback bind,
 which blunts production misuse — but any **same-host** process still can (a
 reverse proxy pointed at `127.0.0.1`, a `kubectl port-forward`), so dev mode
 additionally **rejects (403) any request carrying proxy headers**
-(`X-Forwarded-For` / `X-Forwarded-Proto` / `Forwarded`). **Never set
+(`X-Forwarded-For` / `X-Forwarded-Proto` / `Forwarded`). Because your own
+browser can also reach the loopback bind on behalf of any page you have open,
+dev mode likewise rejects a request whose `Host` is not `localhost` /
+`127.0.0.1` / `[::1]` (DNS rebinding) or whose `Origin` is not a loopback
+origin (cross-site requests) — so open the instance as `http://localhost:8080`
+or `http://127.0.0.1:8080`, not through a custom hostname. **Never set
 `GLYPHOXA_DEV_MODE` in production.**
 
 Point dev mode at a **throwaway database**: the dev Operator claims the seeded
@@ -337,7 +342,7 @@ meet, degrading recall to no-memory on timeout.
 | `DISCORD_BOT_TOKEN` | `voice` (fatal); web/all fallback | Discord gateway/voice bot token. |
 | `DISCORD_OAUTH_CLIENT_ID` | `web`/`all` | OAuth app client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | `web`/`all` | OAuth app client secret. |
-| `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. |
+| `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. Its scheme also decides the session cookies' `Secure` attribute: `https://…` ⇒ `Secure` cookies, `http://…` ⇒ plain (local dev). |
 | `GLYPHOXA_OPERATOR_IDS` | `web`/`all` | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). Empty, separators-only, or non-numeric entries ⇒ fatal. |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
