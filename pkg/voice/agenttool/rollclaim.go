@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // diceHardeningInstruction is appended to the system prompt on dice-armed turns
@@ -12,19 +13,43 @@ import (
 // post-hoc [claimsRollResult] guard is the enforcement backstop.
 const diceHardeningInstruction = "When asked to roll dice, call the dice tool and report its actual result. Never invent, guess, or roleplay a die result."
 
-// standaloneRollNumber matches a bare 1..100 integer standing on its own word
-// boundaries — the numeric shape a narrated die result takes ("a 19", "eine 19",
-// "a perfect 100"). A number outside 1..100 (a price, a year) mostly falls
-// outside the range, but the detector is recall-biased on purpose (see
-// [claimsRollResult]).
+// A digit in the reply is a claimed roll result only in a ROLL CONTEXT (O5) —
+// otherwise every price, age or headcount on a dice-armed turn ("Das macht 5
+// Kupferstücke", "vor 3 Tagen") forced a pointless regeneration. Two shapes count,
+// both limited to 1..100:
+//   - proximity: the integer sits within [rollCueWindow] words of a roll cue —
+//     a roll/result word ([rollCueWord]) or die notation ("I roll the d20 … 12");
+//   - number-as-noun: an article (+ at most one adjective) directly before it,
+//     with nothing noun-like after — "a 19!", "a perfect 100 on the nose",
+//     "eine 17 gewürfelt" — but not "a 5 gold coin" / "eine 3 Tage alte Karte".
 //
 // Residual: the 1..100 cap misses a 3-digit invented result ("Ergebnis: 120") —
-// a false NEGATIVE. This is deliberate: extending to arbitrary integers would
-// false-POSITIVE on years, quantities, and gold amounts on the far more common
-// non-roll turns, and the cap covers every single die (d100 is the largest
-// standard die). Revisit if live traffic shows the model narrating multi-die SUMS
-// above 100 (e.g. "3d100") without calling the tool.
-var standaloneRollNumber = regexp.MustCompile(`\b([1-9][0-9]?|100)\b`)
+// a false NEGATIVE, deliberate (d100 is the largest standard die). Revisit if
+// live traffic shows the model narrating multi-die SUMS above 100 unrolled.
+const rollCueWindow = 6
+
+// rollToken splits text into words (letters/digits/%) and single punctuation
+// marks, so the claim scan can see word distance and what follows a number.
+var rollToken = regexp.MustCompile(`[\p{L}\p{N}%']+|[^\s\p{L}\p{N}]`)
+
+// rollCueWord is a (lowercased) word that puts nearby digits in a roll context,
+// EN and DE.
+var rollCueWord = regexp.MustCompile(`^(roll|rolls|rolled|rolling|natural|nat|result|results|total|dice|w(ü|ue)rf\p{L}*|gew(ü|ue)rfelt|\p{L}*wurf|\p{L}*wurfs|geworfen|ergebnis\p{L}*|nat(ü|ue)rliche\p{L}*|augen)$`)
+
+// dieNotationToken is a single token of die notation (d20, 2W6, d%), itself a
+// roll cue and never a claimed value.
+var dieNotationToken = regexp.MustCompile(`(?i)^\d*[dw](\d+|%)$`)
+
+// numberArticles open the number-as-noun form; the German ones also allow any
+// lowercase word after the number (German nouns are capitalized), the English
+// ones only [enAfterNumber].
+var numberArticles = map[string]bool{"a": true, "an": true, "ein": true, "eine": true, "einen": true, "einer": true, "einem": true}
+var deNumberArticles = map[string]bool{"ein": true, "eine": true, "einen": true, "einer": true, "einem": true}
+var enAfterNumber = map[string]bool{
+	"on": true, "with": true, "plus": true, "and": true, "for": true, "to": true,
+	"but": true, "so": true, "again": true, "total": true, "this": true, "that": true,
+	"here": true, "there": true, "then": true, "now": true,
+}
 
 // enNumberWord / deNumberWord are the spelled-out number vocabularies the #438
 // spelled-claim patterns capture: 1–20 plus the tens up to 100, in the two
@@ -70,35 +95,113 @@ var numberWordValues = map[string]int{
 }
 
 // claimsRollResult reports whether text reads as a narrated die result (#399,
-// Option C): explicit die notation ("d20", "2w6", "d%") is stripped first — those
-// are the request, not a result — and what remains is checked for a standalone
-// 1..100 integer or a spelled-out number word in a roll-claim context (#438).
-// Language-free and recall-biased: a false positive only costs one regeneration on
-// a turn where the dice Tool was already armed, whereas a false negative would
-// ship an invented number, so the detector leans toward firing.
+// Option C): a 1..100 integer in a roll context (see [rollCueWindow]) or a
+// spelled-out number word in a roll-claim context (#438). Explicit die notation
+// ("d20", "2w6", "d%") is the request, never a result. Language-free (EN and DE
+// cues together): a false positive costs a regeneration on an armed turn, a false
+// negative ships an invented number, so the cues stay broad within a roll context.
 func claimsRollResult(text string) bool {
 	return len(claimedRollValues(text)) > 0
 }
 
-// claimedRollValues extracts the roll values text claims (#438): every standalone
-// 1..100 integer (after die notation is stripped) plus every spelled-out number
-// word in a roll-claim context, mapped to its integer. The values feed the
-// regen-consistency check ([rollClaimConsistent]); an empty result means text
-// makes no roll claim.
+// claimedRollValues extracts the roll values text claims (#438): every 1..100
+// integer in a roll context, then every spelled-out number word in a roll-claim
+// context, mapped to its integer. The values feed the regen-consistency check
+// ([rollClaimConsistent]); an empty result means text makes no roll claim.
 func claimedRollValues(text string) []int {
+	vals := digitRollClaims(text)
 	stripped := diceNotation.ReplaceAllString(text, " ")
-	var vals []int
-	for _, m := range standaloneRollNumber.FindAllString(stripped, -1) {
-		if n, err := strconv.Atoi(m); err == nil {
-			vals = append(vals, n)
-		}
-	}
 	for _, re := range spelledRollClaims {
 		for _, m := range re.FindAllStringSubmatch(stripped, -1) {
 			word := strings.Join(strings.Fields(strings.ToLower(m[1])), " ")
 			if v, ok := numberWordValues[word]; ok {
 				vals = append(vals, v)
 			}
+		}
+	}
+	return vals
+}
+
+// digitRollClaims returns the 1..100 integers text claims as roll results, in
+// order: those within [rollCueWindow] words of a roll cue, and those in the
+// number-as-noun form (see [rollCueWindow] for both shapes).
+func digitRollClaims(text string) []int {
+	type tok struct {
+		s     string // original
+		low   string
+		word  bool // letters/digits, not punctuation
+		cue   bool
+		value int // 1..100 for a claimable integer, else 0
+		wi    int // index among word tokens
+	}
+	var toks []tok
+	wi := 0
+	for _, s := range rollToken.FindAllString(text, -1) {
+		t := tok{s: s, low: strings.ToLower(s)}
+		r := []rune(s)[0]
+		t.word = unicode.IsLetter(r) || unicode.IsDigit(r) || r == '%' || r == '\''
+		if t.word {
+			t.wi = wi
+			wi++
+			switch {
+			case dieNotationToken.MatchString(s):
+				t.cue = true
+			case rollCueWord.MatchString(t.low):
+				t.cue = true
+			default:
+				if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 100 {
+					t.value = n
+				}
+			}
+		}
+		toks = append(toks, t)
+	}
+	var cues []int
+	for _, t := range toks {
+		if t.cue {
+			cues = append(cues, t.wi)
+		}
+	}
+	nearCue := func(w int) bool {
+		for _, c := range cues {
+			if d := c - w; d >= -rollCueWindow && d <= rollCueWindow {
+				return true
+			}
+		}
+		return false
+	}
+	// prevWord returns the index of the token before i when it is a word, or -1
+	// (start of text, or punctuation, which breaks the noun phrase).
+	prevWord := func(i int) int {
+		if i > 0 && toks[i-1].word {
+			return i - 1
+		}
+		return -1
+	}
+	nounForm := func(i int) bool {
+		a := prevWord(i)
+		if a >= 0 && !numberArticles[toks[a].low] {
+			a = prevWord(a) // one adjective: "a perfect 100", "eine glatte 20"
+		}
+		if a < 0 || !numberArticles[toks[a].low] {
+			return false
+		}
+		if i+1 >= len(toks) || !toks[i+1].word {
+			return true // end or punctuation: "a 19!"
+		}
+		next := toks[i+1].s
+		if deNumberArticles[toks[a].low] {
+			return unicode.IsLower([]rune(next)[0]) // a capitalized next word is a noun
+		}
+		return enAfterNumber[toks[i+1].low]
+	}
+	var vals []int
+	for i, t := range toks {
+		if t.value == 0 {
+			continue
+		}
+		if nearCue(t.wi) || nounForm(i) {
+			vals = append(vals, t.value)
 		}
 	}
 	return vals

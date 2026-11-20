@@ -25,9 +25,25 @@ func TestClaimsRollResult(t *testing.T) {
 		{"notation stripped leaves no number", "Ich würfle den W20 für dich.", false},
 		{"english notation stripped", "Let me roll a d20 for you.", false},
 		{"no numbers at all", "The bones are silent tonight, traveler.", false},
-		{"recall bias: non-roll number still fires", "Das macht 20 Goldstücke.", true},
 		{"three-digit non-roll number ignored", "Es kostet 250 Gold.", false},
 		{"hundred is a valid result", "A perfect 100 on the nose.", true},
+
+		// --- O5: a digit is a claim only near a roll word or as a number-noun. ---
+		{"de price", "Das macht 20 Goldstücke.", false},
+		{"de copper", "Das macht 5 Kupferstuecke, mein Freund.", false},
+		{"de days ago", "Vor 3 Tagen kam ein Fremder vorbei.", false},
+		{"de eine N noun", "Ich habe eine 3 Tage alte Karte.", false},
+		{"en years ago", "He died 40 years ago, traveler.", false},
+		{"en rooms", "The inn has 12 rooms and a stable.", false},
+		{"en a N noun", "It's a 5 gold coin.", false},
+		{"en rolled N", "You rolled 19.", true},
+		{"en total", "That's 3 and 4, 7 total!", true},
+		{"en solid N", "Trust me, a solid 17.", true},
+		{"de gewürfelt", "Du hast eine 17 gewürfelt.", true},
+		{"de N gewürfelt", "Du hast 17 gewürfelt.", true},
+		{"de Ergebnis", "Ergebnis: 14.", true},
+		{"de Würfel zeigt", "Der Würfel zeigt eine 6.", true},
+		{"en notation then result", "I roll the d20 and get 12.", true},
 
 		// --- #438: spelled-out numbers in claim contexts (EN). ---
 		{"en natural twenty", "You rolled a natural twenty!", true},
