@@ -134,7 +134,7 @@ func driftMatrix() []driftCell {
 // the guarded mounts use.
 func connectAdapter(t *testing.T, authn auth.Authenticator, tenants auth.TenantResolver) managementv1connect.AuthServiceClient {
 	t.Helper()
-	stack := auth.NewStack(authn, tenants)
+	stack := auth.NewPolicy(authn, tenants).Stack()
 	server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, nil, auth.AdmissionAllowlist, auth.EdgeConfig{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
@@ -165,7 +165,7 @@ func (s *recordingAuthService) GetCurrentUser(ctx context.Context, _ *connect.Re
 func recordingConnectAdapter(t *testing.T, authn auth.Authenticator, tenants auth.TenantResolver) (managementv1connect.AuthServiceClient, *ctxSeen) {
 	t.Helper()
 	seen := &ctxSeen{}
-	stack := auth.NewStack(authn, tenants)
+	stack := auth.NewPolicy(authn, tenants).Stack()
 	mux := http.NewServeMux()
 	mux.Handle(managementv1connect.NewAuthServiceHandler(&recordingAuthService{seen: seen}, stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)

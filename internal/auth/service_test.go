@@ -101,7 +101,7 @@ func (f *fakeRenamer) RenameTenant(_ context.Context, id uuid.UUID, name string)
 // public (unauthenticated-reachable) procedures.
 func newAuthClientWith(t *testing.T, authn auth.Authenticator, del auth.SessionDeleter, tr auth.TenantResolver, namer auth.TenantNamer, ren auth.TenantRenamer, mode auth.AdmissionMode) managementv1connect.AuthServiceClient {
 	t.Helper()
-	stack := auth.NewStack(authn, tr,
+	stack := auth.NewPolicy(authn, tr).Stack(
 		managementv1connect.AuthServiceGetCurrentUserProcedure,
 		managementv1connect.AuthServiceGetAdmissionModeProcedure)
 	server := auth.NewAuthServer(del, namer, ren, mode, auth.EdgeConfig{}, slog.Default())
@@ -459,7 +459,7 @@ func TestLogout_SecureFromConfigNotRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			op := operator()
-			stack := auth.NewStack(fakeAuthN{users: map[string]storage.User{validToken: op}}, fakeTenant{id: uuid.New()})
+			stack := auth.NewPolicy(fakeAuthN{users: map[string]storage.User{validToken: op}}, fakeTenant{id: uuid.New()}).Stack()
 			server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist,
 				auth.EdgeConfig{SecureCookies: tc.secure}, slog.Default())
 			mux := http.NewServeMux()

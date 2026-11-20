@@ -136,7 +136,7 @@ func TestAuthEndToEnd(t *testing.T) {
 	}
 
 	// 2. AuthService over the real store + interceptor stack.
-	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
+	stack := auth.NewPolicy(store, store).Stack(managementv1connect.AuthServiceGetCurrentUserProcedure)
 	server := auth.NewAuthServer(store, store, store, auth.AdmissionAllowlist, auth.EdgeConfig{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
