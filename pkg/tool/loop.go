@@ -145,8 +145,11 @@ type StreamingProvider interface {
 // COMPLETE sentence before its tool call would have that sentence forwarded —
 // the caller's sentence splitter only emits on a terminator, so partial
 // preambles are never spoken; a fully-terminated preamble is the documented
-// residual. If the provider does not implement [StreamingProvider], RunStream
-// falls back to [Loop.Run] and forwards the whole final text once.
+// residual. A round that streamed prose and whose calls are ALL
+// [ProposalMediated] (remember_knowledge: nothing the reply waits for) executes
+// them and ends the turn on that prose — no second, also-spoken answer. If the
+// provider does not implement [StreamingProvider], RunStream falls back to
+// [Loop.Run] and forwards the whole final text once.
 //
 // ctx governs generation and tool execution exactly as [Loop.Run]; cancelling it
 // (barge-in) aborts the in-flight generation and the loop.
@@ -214,6 +217,17 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 			return l.finalAnswer(ctx, round+1, maxRounds, 0, convo, decls, streamer, onText)
 		}
 
+		// The round's prose is ALREADY spoken. When every call in it is
+		// fire-and-forget — proposal-mediated (ADR-0052): its result is a GM-review
+		// row the reply does not depend on — a follow-up generation would only
+		// speak a second answer (O11). Run the calls and end the turn on the prose.
+		if onText != nil && strings.TrimSpace(asst.Text) != "" && l.allProposalMediated(asst.ToolCalls) {
+			for _, call := range asst.ToolCalls {
+				l.fireToolResult(ctx, call.Name, l.execute(ctx, call))
+			}
+			return asst.Text, nil
+		}
+
 		convo = append(convo, Message{
 			Role:      RoleAssistant,
 			Text:      asst.Text,
@@ -240,6 +254,22 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 			return l.finalAnswer(ctx, round+1, maxRounds, failedRounds, convo, decls, streamer, onText)
 		}
 	}
+}
+
+// allProposalMediated reports whether every call names a granted, non-read-only
+// [ProposalMediated] Tool — calls whose results the reply never needs. A
+// read-only Tool (a lookup the answer may build on) or an unknown name is not.
+func (l *Loop) allProposalMediated(calls []ToolCall) bool {
+	for _, call := range calls {
+		t, _, ok := l.grants.resolve(call.Name)
+		if !ok || t.ReadOnly() {
+			return false
+		}
+		if pm, ok := t.(ProposalMediated); !ok || !pm.ProposalMediated() {
+			return false
+		}
+	}
+	return len(calls) > 0
 }
 
 // Run drives the conversation to completion and returns the model's final text.
