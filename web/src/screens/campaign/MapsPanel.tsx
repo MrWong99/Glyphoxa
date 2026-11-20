@@ -235,6 +235,7 @@ function MapView({
         <div
           ref={surfaceRef}
           className="gx-maps__surface"
+          data-placing={placing ? "" : undefined}
           style={{ transform: `scale(${zoom})`, aspectRatio: `${map.widthPx} / ${map.heightPx}` }}
           role="application"
           aria-label={t("campaign.mapSurfaceAria", { name: map.name })}

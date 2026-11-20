@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Design Documents
-    url: https://github.com/MrWong99/glyphoxa/tree/main/docs/design
-    about: Browse the architecture and design documentation.
-  - name: Research Notes
-    url: https://github.com/MrWong99/glyphoxa/tree/main/research
-    about: Check out the research notes on dual-model cascading and related topics.
+  - name: Architecture decisions (ADRs)
+    url: https://github.com/MrWong99/Glyphoxa/tree/main/docs/adr
+    about: Browse the architecture decision records before proposing a design change.
+  - name: Documentation
+    url: https://github.com/MrWong99/Glyphoxa/tree/main/docs
+    about: Configuration, deployment and architecture documentation.

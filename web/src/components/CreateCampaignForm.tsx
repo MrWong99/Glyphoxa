@@ -10,21 +10,33 @@ import { Button } from "@/components/ui/Button";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
+import { SpokenLanguageSelect, SYSTEM_SUGGESTIONS, useSupportedLanguages } from "@/components/SpokenLanguageSelect";
 
 import "./createCampaignForm.css";
 import { errorMessage } from "@/lib/connectError";
 
 // The campaign create form + its create-then-activate flow (#267), shared by the
 // topbar CampaignSwitcher's create mode and the Configuration first-run CTA.
-// Name is required; System/Language are free-text inputs stored EXACTLY as typed
-// (no validation, no vocabulary — that curation is #268 and may retrofit),
-// pre-filled with the seed defaults so a one-click create yields the same
-// campaign `glyphoxa seed` would (ADR-0009 auto-Butler fires server-side).
+// Name is required; System is free text with the same suggestions Campaign
+// settings offers, pre-filled "D&D 5e"; Language is the same registry-backed
+// SELECT Campaign settings uses (SpokenLanguageSelect), defaulting to the
+// current display language when the registry supports it — so a one-click
+// create yields a campaign the settings form would show unchanged (ADR-0009
+// auto-Butler fires server-side).
 
-// The seed defaults CreateCampaign is pre-filled with — the same values the
-// seeder writes, so the web becomes a drop-in first-run path (#267).
-const SEED_SYSTEM = "dnd5e";
-const SEED_LANGUAGE = "en";
+const DEFAULT_SYSTEM = SYSTEM_SUGGESTIONS[0];
+const SYSTEM_DATALIST_ID = "gx-create-system-suggestions";
+
+// defaultLanguage picks the create form's starting Campaign Language: the
+// display language if the registry supports it, else English if supported,
+// else the first registered language. Before the registry answers (or when it
+// failed) the display language rides as-is — the SELECT shows it as a plain
+// option and the server stays the validator.
+function defaultLanguage(display: string, supported: readonly string[]): string {
+  if (supported.length === 0 || supported.includes(display)) return display;
+  if (supported.includes("en")) return "en";
+  return supported[0];
+}
 
 type CampaignFields = { name: string; system: string; language: string };
 
@@ -149,10 +161,14 @@ export function CreateCampaignForm({
   onCancel?: () => void;
   autoFocusName?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [name, setName] = useState("");
-  const [system, setSystem] = useState(SEED_SYSTEM);
-  const [language, setLanguage] = useState(SEED_LANGUAGE);
+  const [system, setSystem] = useState(DEFAULT_SYSTEM);
+  // undefined until the operator picks: the default follows the display
+  // language and the registry answer until then.
+  const [pickedLanguage, setPickedLanguage] = useState<string | undefined>(undefined);
+  const supported = useSupportedLanguages().data?.languages ?? [];
+  const language = pickedLanguage ?? defaultLanguage(lang, supported);
 
   // A created-but-not-activated campaign is retried as a pure activation, so the
   // primary action re-labels and the fields LOCK: the campaign already exists
@@ -186,13 +202,18 @@ export function CreateCampaignForm({
           label={t("components.gameSystemLabel")}
           value={system}
           onChange={(e) => setSystem(e.target.value)}
-          hint={t("components.createSystemHint")}
+          list={SYSTEM_DATALIST_ID}
+          hint={t("components.settingsSystemHint")}
           disabled={locked}
         />
-        <Input
-          label={t("components.spokenLanguageLabel")}
+        <datalist id={SYSTEM_DATALIST_ID}>
+          {SYSTEM_SUGGESTIONS.map((s) => (
+            <option key={s} value={s} />
+          ))}
+        </datalist>
+        <SpokenLanguageSelect
           value={language}
-          onChange={(e) => setLanguage(e.target.value)}
+          onValueChange={setPickedLanguage}
           hint={t("components.createLanguageHint")}
           disabled={locked}
         />

@@ -276,7 +276,7 @@ describe("CampaignSwitcher", () => {
     expect(screen.queryByRole("group", { name: /campaigns/i })).not.toBeInTheDocument();
   });
 
-  it("creates a campaign from the switcher, pre-filled with the seed defaults, and makes it active", async () => {
+  it("creates a campaign from the switcher, pre-filled with the defaults, and makes it active", async () => {
     const calls: Record<string, number> = {};
     renderSwitcher(mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a", calls }));
 
@@ -284,10 +284,13 @@ describe("CampaignSwitcher", () => {
     openPanel();
     fireEvent.click(await screen.findByRole("button", { name: /new campaign/i }));
 
-    // The form seeds System/Language with the seeder's defaults.
+    // The form seeds System with "D&D 5e" (as Campaign settings suggests) and
+    // Language with the display language through the shared registry SELECT.
     const name = await screen.findByLabelText("Name");
-    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("dnd5e");
-    expect((screen.getByLabelText("Spoken language") as HTMLInputElement).value).toBe("en");
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: /spoken language/i })).toHaveTextContent("English (en)"),
+    );
 
     fireEvent.change(name, { target: { value: "Gamma Saga" } });
     fireEvent.click(screen.getByRole("button", { name: /^create campaign$/i }));

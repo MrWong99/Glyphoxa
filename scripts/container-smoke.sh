@@ -148,6 +148,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1b. The image is a VOICE-CAPABLE build: `glyphoxa version` reports both the
+#     real Opus codec and DAVE linked. A build that lost the `opus dave` tags
+#     boots and serves the console but fails every voice session, so this is
+#     the cheapest place to catch it. Also prints the stamped version.
+# ---------------------------------------------------------------------------
+printf '[1b] glyphoxa version reports a voice-capable build\n'
+version_out="$(docker run --rm --network none "$IMAGE" version 2>&1)" || true
+note "version output: $version_out"
+if printf '%s\n' "$version_out" | grep -q 'opus codec: true, dave: true'; then
+	ok 'binary links the real Opus codec and DAVE'
+else
+	bad 'binary is a stub voice build (missing the opus/dave tags) or `version` failed'
+fi
+
+# ---------------------------------------------------------------------------
 # 2. The binary is fully static (issue #468 acceptance criterion): ldd on the
 #    extracted binary must report "not a dynamic executable". A static binary
 #    is the load-bearing property that lets the runtime stage be scratch. CGO

@@ -39,7 +39,14 @@ process — audio never crosses a process boundary).
 
 **A GM wants `all`** — and it is the default, so a bare `glyphoxa` runs it (and
 auto-applies migrations at startup). `web` alone serves the console but registers
-no **Slash Commands** and cannot join voice.
+no **Slash Commands** and cannot join voice; it needs a pool of `voice` workers
+(the hosted split deployment, [ADR-0057](adr/0057-shared-voice-worker-pool-multi-tenant.md)).
+
+The binary must be the **voice-capable build**: `make build-live` (or the
+container image). A plain `make build` / `go build` links stub Opus and DAVE code
+— it serves the console, but every Voice Session fails. Check with
+`./bin/glyphoxa version`: it must report `opus codec: true, dave: true`; a stub
+build also logs a `stub voice build` WARN at boot.
 
 ```sh
 ./bin/glyphoxa            # -mode all is the default
@@ -49,25 +56,21 @@ no **Slash Commands** and cannot join voice.
 
 ```sh
 ./bin/glyphoxa migrate up     # apply the schema; `migrate status|version|down` also exist
-./bin/glyphoxa seed           # idempotent demo Tenant + Campaign + Character NPC
+./bin/glyphoxa seed           # optional: idempotent demo Tenant + Campaign + Character NPC
 ```
 
 `migrate up` needs `$GLYPHOXA_DATABASE_URL` (or `$DATABASE_URL`). `seed`
 additionally needs `$GLYPHOXA_SECRET`, and fails loudly without it.
 
-> **`seed` is mandatory if you want voice in this build.** The voice loop does not
-> load the Active Campaign's roster — it hardcodes the seeded demo Tenant
-> **Glyphoxa Demo** and its Campaign **The Prancing Pony**
-> (`internal/wirenpc/agentspec.go`). Skip the seed, create your own Campaign in
-> the console, press **Start session**, and you get
-> `wirenpc: load NPCs: find tenant: … not found` plus a **Failed** badge.
->
-> Consequence: **the voiced roster is always the seeded Campaign's Character
-> NPCs**, whichever Campaign the console calls Active. See §5a.
+`seed` is optional. It gives you a ready-made Campaign (**Glyphoxa Demo** /
+**The Prancing Pony**) with one Character NPC to try voice with. The voice loop
+voices whichever Campaign is **Active** when the session starts (§5a): its
+Character NPCs plus its **Butler** (`loadCampaignNPCs`,
+`internal/wirenpc/agentspec.go`, #323).
 
-The console *does* offer **Create your first campaign** on the Configuration
-screen when no Campaign exists yet (it mints the Campaign and its **Butler**).
-That path is real for the web tier; it is not enough for voice.
+The console offers **Create your first campaign** on the Configuration screen
+when no Campaign exists yet (it mints the Campaign and its **Butler**); add a
+Character NPC to it (§4a) and it is ready for voice.
 
 ### First login is allowlist-gated
 
@@ -238,14 +241,13 @@ The roster lists the **Butler** first (gold badge, role locked, cannot be delete
 — exactly one per Campaign) then every **Character NPC**. **+ Add NPC** creates
 one named *New NPC* and selects it.
 
-> **The Butler does not speak in this build.** It is a placeholder row: required
-> and undeletable ([ADR-0009](adr/0009-single-agent-table-auto-butler.md)),
-> editable here — and never loaded into a Voice Session. The voice loop's roster
-> is Character NPCs only (`agent_role = 'character'`), so the Butler is never
-> registered for **Address Detection** and has no voice. Naming it out loud does
-> nothing. `/roll` is answered by the built-in `dice` Tool directly, not by the
-> Butler reasoning about it. Everything below about the Butler is about a row you
-> can edit, not an Agent you can talk to.
+> **The Butler answers only the GM, and only by name.** It is required and
+> undeletable ([ADR-0009](adr/0009-single-agent-table-auto-butler.md)), and it is
+> loaded into every Voice Session as an **Address-Only** Agent: it replies when
+> the GM names it out loud and stays silent for everyone else (the GM gate,
+> [ADR-0024](adr/0024-address-detection-deterministic-fuzzy-chain.md) amendment).
+> It also answers the planning chat in the console. `/roll` is answered by the
+> built-in `dice` Tool directly, not by the Butler.
 
 The editor pane on the right holds:
 
@@ -261,11 +263,11 @@ The editor pane on the right holds:
   voice id, so a degraded TTS never wedges the screen.
 - **Address only — waits to be named** — when on, this Character NPC replies only
   when addressed by name; it is excluded from Address Detection's last-speaker and
-  single-NPC fallbacks. The Butler's switch is forced on and disabled — but that
-  is bookkeeping, not behaviour: the Butler is in no roster, so naming it gets no
-  reply either way.
+  single-NPC fallbacks. The Butler's switch is forced on and disabled: it is
+  always Address-Only.
 - **Tools** — the **Tool Grant** toggles. One row per built-in Tool the server
-  exposes (today: `dice`). Granting a Tool is what lets that Agent invoke it. A
+  exposes (`dice`, transcript search, Knowledge Graph query,
+  `remember_knowledge`, recap, and the map Tools). Granting a Tool is what lets that Agent invoke it. A
   Tool that supports per-grant scoping also shows a raw-JSON scope field with a
   **Save scope** button; `dice` supports no scope, so it renders only the switch.
   **Grant changes take effect in the next Voice Session.**
@@ -350,12 +352,10 @@ order: the live Voice Session's Campaign → your durable `/glyphoxa use` select
 → *fail* with a message telling you to run `/glyphoxa use`. There is no
 most-recently-created fallback on the Slash Command surface.
 
-> **The Active Campaign does not choose who speaks — yet.** It binds the
-> `voice_sessions` row, the Transcript, and the mute rail. The *voiced roster* is
-> always the seeded **Glyphoxa Demo** / **The Prancing Pony** Campaign (§1). With
-> two Campaigns you hear the seed Campaign's NPCs while every console surface
-> names the other one — and that Campaign's per-row mute toggles then have nothing
-> to mute. Run your table on the seeded Campaign until this is fixed.
+The Active Campaign chooses who speaks: the session loads that Campaign's
+Character NPCs and Butler, and binds the `voice_sessions` row, the Transcript and
+the mute rail to it. Switching the Active Campaign takes effect at the next
+**Start session**.
 
 The status badge reads **Idle**, **Live** (with a **Connecting…** → **Connected**
 sub-label while the gateway comes up) or **Failed** (with the reason). Beside it,
@@ -391,11 +391,8 @@ all** depending on whether anything is currently unmuted.
 A muted Character NPC **stays in the scene but doesn't speak aloud** — it is still
 part of the Campaign, it just produces no audio. Unmute mid-session at any time.
 
-> Two rows in this rail lie by omission. The **Butler** row is listed and labelled
-> *Butler · voicing*, but the Butler is in no Voice Session roster and never emits
-> audio (§4a) — muting it changes nothing audible. And because the voiced roster is
-> always the seeded Campaign (§5a), a row for an NPC of some *other* Active
-> Campaign has no voice to mute either.
+> The **Butler** row mutes the Butler like any other Agent; remember it only
+> ever speaks when the GM names it (§4a).
 
 The toggles are only actionable while a Voice Session is live; with no session
 every row shows unmuted and disabled. The `/glyphoxa mute` and `/glyphoxa muteall`
@@ -438,16 +435,17 @@ the table:
 Registered per-Guild at boot against the configured Guild, on the Bot's standing
 gateway connection. They are available with **no Voice Session running**.
 
-**They exist only under `-mode all`.** Registration lives in the web tier's boot
-path, guarded on that Instance also driving voice — so `-mode web` registers
-nothing, and `-mode voice` (which never builds the command registry) registers
-nothing either. Run `all`.
+**They are registered by the process that owns the Bot gateways**: `-mode all`
+(self-host), or in the split deployment the `voice` worker currently holding the
+presence-owner election. `-mode web` registers nothing.
 
 Authorization is server-side; Discord's own command-permission settings are a UX
-hint only. In v1.0, **GM only** means *the invoking Discord User's snowflake is on
-`GLYPHOXA_OPERATOR_IDS`* ([ADR-0010](adr/0010-slash-command-surface.md) amendment,
-[ADR-0041](adr/0041-operator-allowlist-access-policy.md)). Interactions from
-outside the configured Guild — including DMs — are refused.
+hint only. **GM only** means *the invoking Discord User is a GM of the Tenant that
+owns the Guild*: that Tenant's operator binding, or a snowflake on
+`GLYPHOXA_OPERATOR_IDS` as a deployment-wide override (`internal/presence/gate.go`,
+#490; [ADR-0010](adr/0010-slash-command-surface.md) amendment,
+[ADR-0055](adr/0055-self-signup-admission-modes.md)). Interactions from a Guild
+no Tenant owns — and DMs — are refused.
 
 | Command | Option | Who | Reply | What it does |
 |---|---|---|---|---|
@@ -458,6 +456,10 @@ outside the configured Guild — including DMs — are refused.
 | `/glyphoxa search <query>` | `query` (string, **required**) | GM only | ephemeral | Searches the Active Campaign's Transcript and quotes the top 5 matching Transcript Lines with speaker and UTC timestamp. Same search path as the Session screen's box. |
 | `/glyphoxa mute <npc>` | `npc` (string, **required**, autocompletes) | GM only | ephemeral | Mutes one Agent's voice in the live Voice Session. Despite the option name it accepts **any** Agent, the Butler included; it resolves the autocomplete value, then an exact name, then an alias. Refused when no Voice Session is active. |
 | `/glyphoxa muteall` | — | GM only | ephemeral | Mutes every Agent's voice in the live Voice Session. Refused when no Voice Session is active. |
+| `/glyphoxa recap` | — | GM only | ephemeral | Summarises the session so far from the Transcript. |
+| `/say <text>` | `text` (string, **required**) | GM only | ephemeral | Makes an NPC speak the given text verbatim in the live Voice Session. |
+| `/direct as:<npc>` | `as` (string, **required**, autocompletes) + the note | GM only | ephemeral | A hidden GM note that steers that NPC's next replies; never heard, never in the Transcript ([ADR-0059](adr/0059-volatile-hot-context-tail-gm-directives.md)). |
+| `/where map:<map>` | `map` (required), `at` (a Pin, optional) | GM only | ephemeral | Sets where the party is, so NPCs know their surroundings ([ADR-0060](adr/0060-maps-and-pins.md)). |
 
 There is deliberately **no unmute Slash Command** — un-muting is done on the
 Session screen's Voice control panel (§5c).
@@ -472,11 +474,12 @@ commands.
 | Symptom | Likely cause |
 |---|---|
 | Login bounces to *not on the operator allowlist* | Your snowflake isn't in `GLYPHOXA_OPERATOR_IDS`. There is no self-enrolment. |
-| The console is a blank page | The web bundle wasn't built before `make build` (configuration.md §3). |
-| No `/glyphoxa` commands in Discord | Running `-mode web` **or `-mode voice`** — only `-mode all` registers them; or no Bot token saved; or no Guild ID saved; or the Bot was authorized without `applications.commands`. Re-save Discord settings to retrigger registration. |
+| The console is a blank page | The web bundle wasn't built before `make build-live` (configuration.md §3). |
+| Session goes **Failed** at once, boot log shows `stub voice build` | The binary was built with `make build` / plain `go build`. Rebuild with `make build-live` (configuration.md §1). |
+| No `/glyphoxa` commands in Discord | Running `-mode web` (it registers none); or no Bot token saved; or no Guild ID saved; or the Bot was authorized without `applications.commands`. Re-save Discord settings to retrigger registration. |
 | *the Bot is not a member of that server* on an invite paste | Step 2b — **Add Glyphoxa to your server**. |
 | **Start session** refuses | Read the message; it names the precondition. |
-| Session flips to **Failed** with `find tenant … not found` / `find campaign … not found` | `glyphoxa seed` was never run. The voice loop loads the seeded **Glyphoxa Demo** / **The Prancing Pony** Campaign, not your Active Campaign (§1, §5a). |
+| Session flips to **Failed** with `no Active Campaign bound` | No Campaign is selected. Pick one in the topbar switcher or run `/glyphoxa use`. |
 | Session goes **Live**, nobody speaks | ElevenLabs badge **Degraded** or **Key needed**; or every Agent is muted; or your NPC is **Address only** and nobody said its Name. |
 | The NPC keeps getting cut off | Someone is barging in (§5d). Table chatter longer than ~250 ms of continuous speech from one person cancels the turn. |
 | Turns stop mid-session | Soft spend cap reached (§3c). The Session screen banner says so. |

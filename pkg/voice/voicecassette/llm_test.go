@@ -78,7 +78,7 @@ func drain(t *testing.T, ch <-chan llm.StreamEvent) (text string, calls []llm.To
 // llm-agent-greet cassette pins.
 func agentLoopRequest() llm.Request {
 	return llm.Request{
-		Model:     "llama-3.3-70b-versatile",
+		Model:     "openai/gpt-oss-120b",
 		MaxTokens: 256,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Text: "You are Bart, the innkeeper.\n\nSpeak plainly."},
@@ -125,7 +125,7 @@ func TestLoadLLM_ToolUseLoop_ReplaysDiceRoundTrip(t *testing.T) {
 	reg.MustRegister(tool.NewDiceWithRand(rand.New(rand.NewPCG(42, 99)))) // same seed as the fixture
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
 
-	eng := agenttool.NewEngine(prov, grants, "", "llama-3.3-70b-versatile", 256, 0)
+	eng := agenttool.NewEngine(prov, grants, "", "openai/gpt-oss-120b", 256, 0)
 	got, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart, the innkeeper.\n\nSpeak plainly."},
 		{Role: llm.RoleUser, Text: "Roll a d20 for my luck."},
@@ -145,7 +145,7 @@ func TestLoadLLM_ToolUseLoop_ReplaysDiceRoundTrip(t *testing.T) {
 func TestLoadLLM_MissingHash_FailsWithRerecordHint(t *testing.T) {
 	prov := voicecassette.LoadLLM(t, "llm-agent-greet")
 	_, err := prov.Complete(context.Background(), llm.Request{
-		Model:    "llama-3.3-70b-versatile",
+		Model:    "openai/gpt-oss-120b",
 		Messages: []llm.Message{{Role: llm.RoleUser, Text: "a prompt never recorded"}},
 	})
 	if err == nil {
