@@ -33,7 +33,11 @@
   align-items: start;
 }
 
-@media (max-width: 720px) {
+/* Stack below 1100px: with the 248px sidebar and page gutters, the 1fr list
+   track next to the fixed 380px editor shrank to ~180px between 881 and
+   1100px (the sidebar only turns off-canvas at 880px) — titles wrapped per
+   word. One column reads better there and on every narrower viewport. */
+@media (max-width: 1100px) {
   .gx-kg-layout {
     grid-template-columns: 1fr;
   }
@@ -506,6 +510,17 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
+}
+
+/* The raw-JSON scope editor sits behind a closed disclosure (power-user only). */
+.gx-editor__tool-advanced > summary {
+  padding-left: var(--spacing-md);
+  color: var(--text-muted);
+  font-size: var(--body-xs);
+  cursor: pointer;
+}
+.gx-editor__tool-advanced[open] > summary {
+  margin-bottom: var(--spacing-xs);
 }
 
 .gx-editor__tool-scope {
@@ -1406,11 +1421,24 @@
     );
 }
 
+/* While a tray entry is armed for placing, the whole surface reads as a target. */
+.gx-maps__surface[data-placing] {
+  cursor: crosshair;
+}
+
 /* Pins sit at NORMALIZED coordinates, so the whole layer is resolution
-   independent and a re-uploaded image keeps every pin. */
+   independent and a re-uploaded image keeps every pin.
+
+   The stored point is the DOT's centre, not the row's: the pin box's top-left
+   sits on the point (left/top %), the row is [dot][label][×] with the dot
+   first, so shifting left by half the dot puts the dot's horizontal centre on
+   the point whatever the label's width, and -50% vertically centres the row —
+   align-items:center puts the dot's vertical centre on the row's. (Centring
+   the whole row with -50%/-50% landed the point somewhere in the label.) */
 .gx-maps__pin {
+  --pin-dot: 12px;
   position: absolute;
-  transform: translate(-50%, -50%);
+  transform: translate(calc(var(--pin-dot) / -2), -50%);
   display: flex;
   align-items: center;
   gap: 3px;
@@ -1418,8 +1446,9 @@
 }
 
 .gx-maps__pin-dot {
-  width: 12px;
-  height: 12px;
+  flex: none;
+  width: var(--pin-dot);
+  height: var(--pin-dot);
   border-radius: 50%;
   border: 2px solid currentColor;
   cursor: grab;

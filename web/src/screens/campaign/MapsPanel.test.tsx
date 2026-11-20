@@ -355,4 +355,17 @@ describe("generated maps", () => {
     // AC3: it arrives UNPLACED. Nothing is on the map until the GM drags it.
     expect(screen.queryByRole("button", { name: /^The Rusty Anchor \(/ })).toBeNull();
   });
+
+  it("arming a tray entry marks the surface as placing (crosshair cursor) until disarmed", async () => {
+    renderGenerate({ suggestions: [] });
+    fireEvent.click(await screen.findByRole("button", { name: /Saltmarsh/ }));
+    const surface = await screen.findByRole("application", { name: /Saltmarsh map/ });
+    expect(surface).not.toHaveAttribute("data-placing");
+
+    const chip = await screen.findByRole("button", { name: /The Rusty Anchor/, pressed: false });
+    fireEvent.click(chip);
+    expect(surface).toHaveAttribute("data-placing");
+    fireEvent.click(screen.getByRole("button", { name: /The Rusty Anchor/, pressed: true }));
+    expect(surface).not.toHaveAttribute("data-placing");
+  });
 });

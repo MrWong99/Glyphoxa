@@ -44,8 +44,7 @@ export const en = {
   "components.namePlaceholder": "e.g. The Sunless Citadel",
   "components.gameSystemLabel": "Game system",
   "components.spokenLanguageLabel": "Spoken language",
-  "components.createSystemHint": "e.g. dnd5e, pf2e",
-  "components.createLanguageHint": "The language your group plays in — e.g. en, de",
+  "components.createLanguageHint": "The language your group plays in — you can change it later.",
   "components.createCampaign": "Create campaign",
   "components.retryActivation": "Retry activation",
   "components.couldntCreateCampaignToast": "Couldn't create the campaign: {message}",
@@ -106,7 +105,7 @@ export const en = {
   "components.discordUserIdDigitsOnly": "A Discord user ID is digits only.",
   "components.fromVoice": "From voice",
   "components.voiceChannelMembers": "Voice channel members",
-  "components.bindsTo": "Binds to {name}.",
+  "components.bindsTo": "Links to {name}.",
   "components.bindHint": "Pick a voice-channel member, or paste a Discord user ID.",
 
   // — SidebarUser / LegalFooter —
@@ -165,9 +164,8 @@ export const de: Record<keyof typeof en, string> = {
   "components.namePlaceholder": "z. B. The Sunless Citadel",
   "components.gameSystemLabel": "Spielsystem",
   "components.spokenLanguageLabel": "Gesprochene Sprache",
-  "components.createSystemHint": "z. B. dnd5e, pf2e",
   "components.createLanguageHint":
-    "Die Sprache, in der eure Gruppe spielt — z. B. en, de",
+    "Die Sprache, in der eure Gruppe spielt — du kannst sie später ändern.",
   "components.createCampaign": "Kampagne erstellen",
   "components.retryActivation": "Aktivierung wiederholen",
   "components.couldntCreateCampaignToast":
