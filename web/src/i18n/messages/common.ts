@@ -21,8 +21,12 @@ export const en = {
   "common.discardChangesConfirm": "Discard changes",
   // The plan-allowance refusal (ADR-0055), shared by every AI feature that
   // spends provider money: drafting, maps, portraits, recaps, previews, sound.
+  // The gate is per PLAN over the UTC calendar month, so the only true remedy
+  // is the reset: a saved key does not lift it and there is no self-service
+  // plan change. chat.errAllowance is the planning chat's wording of the same
+  // refusal; keep the two saying the same things (i18n.test.tsx checks).
   "common.errAllowance":
-    "This month's included usage is used up. AI generation is paused until it resets next month.",
+    "This month's included usage is used up. AI generation is paused until it resets at the start of next month.",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -42,5 +46,5 @@ export const de: Record<keyof typeof en, string> = {
   "common.discardChangesDesc": "Du hast Änderungen, die noch nicht gespeichert sind. Wenn du fortfährst, gehen sie verloren.",
   "common.discardChangesConfirm": "Änderungen verwerfen",
   "common.errAllowance":
-    "Das inklusive Kontingent für diesen Monat ist aufgebraucht. KI-Generierung pausiert, bis es nächsten Monat zurückgesetzt wird.",
+    "Das inklusive Kontingent für diesen Monat ist aufgebraucht. KI-Generierung pausiert, bis es zu Anfang des nächsten Monats zurückgesetzt wird.",
 };

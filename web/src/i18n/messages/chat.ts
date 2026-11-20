@@ -50,7 +50,7 @@ export const en = {
 
   // ── Exchange errors (mapped from the Connect error code) ─────────────────
   "chat.errAllowance":
-    "This month's included usage is used up — the planning chat is paused until next month. Add your own key in Setup to keep chatting.",
+    "This month's included usage is used up. The planning chat is paused until it resets at the start of next month.",
   "chat.errNoKey": "No AI model key is set up for the planning chat. Add one in Setup, then try again.",
   "chat.errGeneric": "That didn't go through — the Butler couldn't answer. Please try again.",
 
@@ -106,7 +106,7 @@ export const de: Record<keyof typeof en, string> = {
 
   // ── Exchange errors ──────────────────────────────────────────────────────
   "chat.errAllowance":
-    "Das inklusive Kontingent für diesen Monat ist aufgebraucht — der Planungs-Chat pausiert bis nächsten Monat. Hinterlege in der Einrichtung einen eigenen Schlüssel, um weiterzuchatten.",
+    "Das inklusive Kontingent für diesen Monat ist aufgebraucht. Der Planungs-Chat pausiert, bis es zu Anfang des nächsten Monats zurückgesetzt wird.",
   "chat.errNoKey":
     "Für den Planungs-Chat ist kein KI-Modell-Schlüssel hinterlegt. Füge in der Einrichtung einen hinzu und versuch es dann noch einmal.",
   "chat.errGeneric": "Das hat nicht geklappt — der Butler konnte nicht antworten. Bitte versuch es noch einmal.",

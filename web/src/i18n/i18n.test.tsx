@@ -74,3 +74,20 @@ describe("i18n", () => {
     expect(en["common.couldntSave"]).toContain("{message}");
   });
 });
+
+// The plan-allowance refusal exists twice — the shared sentence and the
+// planning chat's own — and both describe ONE gate (ADR-0055 gate (b)): per
+// plan, over the UTC calendar month. They must say the same true things.
+describe("allowance refusal copy", () => {
+  it("names the monthly reset and never offers a saved key as the way out, in both languages", async () => {
+    const { de } = await import("./de");
+    for (const key of ["common.errAllowance", "chat.errAllowance"] as const) {
+      expect(en[key]).toMatch(/This month's included usage is used up/);
+      expect(en[key]).toMatch(/start of next month/);
+      expect(en[key]).not.toMatch(/key|Setup|upgrade/i);
+      expect(de[key]).toMatch(/Das inklusive Kontingent für diesen Monat ist aufgebraucht/);
+      expect(de[key]).toMatch(/Anfang des nächsten Monats/);
+      expect(de[key]).not.toMatch(/Schlüssel|Einrichtung|Upgrade/i);
+    }
+  });
+});
