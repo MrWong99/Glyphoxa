@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,22 @@ import (
 type fakeVoiceStore struct {
 	configs map[storage.Component]storage.ProviderConfig
 	dep     *storage.DeploymentConfig
+
+	usageMu sync.Mutex
+	usage   []storage.UsageRow
+}
+
+func (f *fakeVoiceStore) AddUsage(_ context.Context, rows []storage.UsageRow) error {
+	f.usageMu.Lock()
+	defer f.usageMu.Unlock()
+	f.usage = append(f.usage, rows...)
+	return nil
+}
+
+func (f *fakeVoiceStore) usageRows() []storage.UsageRow {
+	f.usageMu.Lock()
+	defer f.usageMu.Unlock()
+	return append([]storage.UsageRow(nil), f.usage...)
 }
 
 func (f *fakeVoiceStore) GetProviderConfigByComponent(_ context.Context, _ uuid.UUID, c storage.Component) (storage.ProviderConfig, error) {
@@ -283,6 +300,66 @@ func TestPreviewVoice_ReturnsPlayableWav(t *testing.T) {
 	}
 	if resp.Msg.GetSampleRate() != 24000 || resp.Msg.GetChannels() != 1 {
 		t.Errorf("rate/channels = %d/%d", resp.Msg.GetSampleRate(), resp.Msg.GetChannels())
+	}
+}
+
+// TestPreviewVoice_RejectsOverlongText (A2): a preview is a sentence or two.
+// Text beyond the cap is refused before any provider is touched.
+func TestPreviewVoice_RejectsOverlongText(t *testing.T) {
+	t.Parallel()
+	store := &fakeVoiceStore{}
+	srv := NewVoiceServer(store, voiceTestCipher(t), nil)
+	synthCalls := 0
+	srv.newSynth = func(string) tts.Synthesizer {
+		synthCalls++
+		return &fakeSynth{chunks: []tts.AudioChunk{{PCM: make([]byte, 480), SampleRate: 24000, Channels: 1}}}
+	}
+
+	// Multi-byte runes: the cap counts characters, not bytes.
+	atCap := strings.Repeat("ä", maxPreviewRunes)
+	if _, err := srv.PreviewVoice(tenantCtx(), connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v", Text: atCap})); err != nil {
+		t.Fatalf("text at the cap (%d runes): %v", maxPreviewRunes, err)
+	}
+	calls := synthCalls
+
+	_, err := srv.PreviewVoice(tenantCtx(), connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v", Text: atCap + "ä"}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("text over the cap: code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if synthCalls != calls {
+		t.Error("an overlong preview reached the TTS provider")
+	}
+}
+
+// TestPreviewVoice_MetersSubmittedCharactersToTheLedger (A2): a preview is paid
+// TTS, so the characters submitted land in the Tenant's Usage Ledger, also when
+// the stream fails after the provider accepted the request (it bills submitted
+// characters either way).
+func TestPreviewVoice_MetersSubmittedCharactersToTheLedger(t *testing.T) {
+	t.Parallel()
+	for name, chunks := range map[string][]tts.AudioChunk{
+		"success":          {{PCM: make([]byte, 480), SampleRate: 24000, Channels: 1}},
+		"mid-stream error": {{Err: errors.New("boom")}},
+	} {
+		store := &fakeVoiceStore{}
+		srv := NewVoiceServer(store, voiceTestCipher(t), nil)
+		srv.newSynth = func(string) tts.Synthesizer { return &fakeSynth{chunks: chunks} }
+		tenantID := uuid.New()
+		ctx := auth.WithTenant(context.Background(), tenantID)
+
+		_, _ = srv.PreviewVoice(ctx, connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v", Text: "Grüß dich"}))
+
+		rows := store.usageRows()
+		if len(rows) != 1 {
+			t.Fatalf("%s: usage rows = %d, want 1", name, len(rows))
+		}
+		r := rows[0]
+		if r.TenantID != tenantID || r.Component != storage.ComponentTTS || r.TTSCharacters != 9 {
+			t.Errorf("%s: usage row = %+v, want tenant %s, component tts, 9 characters", name, r, tenantID)
+		}
+		if r.EstimatedUSD <= 0 {
+			t.Errorf("%s: estimated_usd = %v, want > 0", name, r.EstimatedUSD)
+		}
 	}
 }
 
@@ -584,11 +661,44 @@ func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
 	}
 }
 
-// fakeSessions is a voiceLiveSource whose AnyLive reports a live voice session iff
-// active is true (#150, #488).
-type fakeSessions struct{ active bool }
+// fakeSessions is a voiceLiveSource: active reports a live voice session for
+// EVERY tenant (#150, #488); liveTenant, when set, reports one for that tenant
+// only.
+type fakeSessions struct {
+	active     bool
+	liveTenant uuid.UUID
+}
 
-func (f *fakeSessions) AnyLive() bool { return f.active }
+func (f *fakeSessions) Active(_ context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error) {
+	live := f.active || (f.liveTenant != uuid.Nil && f.liveTenant == tenantID)
+	return storage.VoiceSession{}, live, nil
+}
+
+// TestGetProviderHealth_OtherTenantsSessionDoesNotVouchForThisToken (R5): the
+// Discord short-circuit is per Tenant. Another Tenant's live session runs on
+// another Bot token and proves nothing about this one, so this Tenant's token
+// is still probed (and a broken one still shows as broken).
+func TestGetProviderHealth_OtherTenantsSessionDoesNotVouchForThisToken(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.SetSessions(&fakeSessions{liveTenant: uuid.New()}) // someone ELSE is playing
+
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	if got := seams.discord.Load(); got != 1 {
+		t.Errorf("discord probes = %d, want 1 (another tenant's session must not short-circuit this tenant's check)", got)
+	}
+	for _, p := range resp.Msg.GetProviders() {
+		if p.GetProvider() == "discord" && p.GetDetail() == "live voice session active" {
+			t.Errorf("discord reported a live session for a tenant that has none: %+v", p)
+		}
+	}
+}
 
 // TestGetProviderHealth_ActiveSessionSkipsDiscordProbe pins #150: while a voice
 // session is active, the Discord check short-circuits to healthy WITHOUT
@@ -629,6 +739,10 @@ type blockingVoiceStore struct {
 	release chan struct{}
 	inner   *fakeVoiceStore
 	reads   atomic.Int64 // reads started, so a test can count launched probes
+}
+
+func (b *blockingVoiceStore) AddUsage(ctx context.Context, rows []storage.UsageRow) error {
+	return b.inner.AddUsage(ctx, rows)
 }
 
 func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, id uuid.UUID, c storage.Component) (storage.ProviderConfig, error) {
