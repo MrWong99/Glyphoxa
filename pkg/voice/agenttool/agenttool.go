@@ -851,7 +851,7 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 
 	// Armed turn: harden the system prompt (copied slice) and run BUFFERED so the
 	// guard can rewrite the whole reply before a single number is spoken.
-	msgs := toToolMessages(withDiceHardening(messages))
+	msgs := toToolMessages(withDiceHardening(e.language, messages))
 	called := newCalledTools()
 	text, err := e.full.Run(withCalledTools(withRoundCounter(ctx), called), msgs)
 	if err != nil {
@@ -928,19 +928,20 @@ func (e *Engine) regenWithForcedDice(ctx context.Context, msgs []tool.Message) (
 	}
 }
 
-// withDiceHardening returns messages with [diceHardeningInstruction] appended to
-// the system prompt, on a COPIED slice so the caller's Hot Context is untouched
-// (#399 Option B). If messages[0] is the system message its text is extended;
-// otherwise a system message carrying the instruction is prepended. Applied only
-// on dice-armed turns.
-func withDiceHardening(messages []llm.Message) []llm.Message {
+// withDiceHardening returns messages with the gate language's
+// [diceHardeningInstruction] appended to the system prompt, on a COPIED slice so
+// the caller's Hot Context is untouched (#399 Option B). If messages[0] is the
+// system message its text is extended; otherwise a system message carrying the
+// instruction is prepended. Applied only on dice-armed turns.
+func withDiceHardening(lang string, messages []llm.Message) []llm.Message {
+	instruction := diceHardeningInstruction(lang)
 	if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
 		out := make([]llm.Message, len(messages))
 		copy(out, messages)
-		out[0].Text = out[0].Text + "\n\n" + diceHardeningInstruction
+		out[0].Text = out[0].Text + "\n\n" + instruction
 		return out
 	}
-	return append([]llm.Message{{Role: llm.RoleSystem, Text: diceHardeningInstruction}}, messages...)
+	return append([]llm.Message{{Role: llm.RoleSystem, Text: instruction}}, messages...)
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.
