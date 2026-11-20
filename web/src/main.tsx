@@ -7,6 +7,7 @@ import { router } from "@/app/router";
 import { transport } from "@/lib/transport";
 import { makeQueryClient } from "@/lib/queryClient";
 
+import "@/styles/fonts.css";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
 import "@/styles/components.css";
