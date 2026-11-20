@@ -267,14 +267,27 @@ describe("Configuration", () => {
     expect(screen.getByText(CAMPAIGN.language)).toBeInTheDocument();
   });
 
-  it("shows a Key-needed badge for each unsaved credential", async () => {
+  it("shows Key needed for each required unsaved credential and Optional for the rest", async () => {
     renderScreen();
-    // Four Key-needed badges (discord, groq, elevenlabs, gemini). The
-    // planning-chat slot (#592/ADR-0062) renders NO health badge: the shared
-    // groq probe tests the voice-LLM credential, not the chat_llm key, and a
-    // dedicated chat_llm probe is a follow-up.
-    expect(await screen.findAllByText(/key needed/i)).toHaveLength(4);
+    // Two Key-needed badges (groq, elevenlabs) — a session needs both. Gemini
+    // (images) and the Bot token (only for a BYOK Bot, ADR-0057) read
+    // "Optional". The planning-chat slot (#592/ADR-0062) renders NO health
+    // badge: the shared groq probe tests the voice-LLM credential, not the
+    // chat_llm key, and a dedicated chat_llm probe is a follow-up.
+    expect(await screen.findAllByText(/key needed/i)).toHaveLength(2);
+    expect(screen.getAllByText(/^optional$/i)).toHaveLength(2);
+    const geminiRow = screen.getByLabelText("Gemini key").closest(".gx-provider-row") as HTMLElement;
+    expect(within(geminiRow).getByText(/^optional$/i)).toBeInTheDocument();
+    const botRow = screen.getByLabelText("Bot token key").closest(".gx-provider-row") as HTMLElement;
+    expect(within(botRow).getByText(/^optional$/i)).toBeInTheDocument();
+    expect(within(botRow).getByText(/only needed if you run your own discord bot/i)).toBeInTheDocument();
     expect(screen.queryByText(/working/i)).not.toBeInTheDocument();
+  });
+
+  it("gives the planning-chat model row its own overline", async () => {
+    renderScreen();
+    expect(await screen.findByText("Planning chat model")).toBeInTheDocument();
+    expect(screen.getAllByText("AI model")).toHaveLength(1);
   });
 
   it("surfaces a failed Discord integration to the tenant (#489)", async () => {
@@ -320,7 +333,7 @@ describe("Configuration", () => {
     expect(screen.queryByText(/gm-secret-abcd/)).not.toBeInTheDocument();
   });
 
-  it("saves a provider key write-only: the row masks and the badge turns Healthy", async () => {
+  it("saves a provider key write-only: the row masks and the badge says Saved until a probe answers", async () => {
     renderScreen();
 
     const groqInput = await screen.findByLabelText("Groq key");
@@ -331,10 +344,12 @@ describe("Configuration", () => {
     fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
 
     // After the invalidated list refetches, the row shows a masked value +
-    // Replace and a Healthy badge — derived from key-presence, never the secret.
+    // Replace and a "Saved" badge — derived from key-presence, never the
+    // secret. No probe has reported yet, so it must not claim "Working".
     expect(await within(groqRow).findByText("••••••••")).toBeInTheDocument();
     expect(within(groqRow).getByRole("button", { name: /replace/i })).toBeInTheDocument();
-    expect(within(groqRow).getByText(/working/i)).toBeInTheDocument();
+    expect(within(groqRow).getByText(/^saved$/i)).toBeInTheDocument();
+    expect(within(groqRow).queryByText(/working/i)).not.toBeInTheDocument();
     // The plaintext key never appears in the DOM.
     expect(screen.queryByText(/test-groq-secret-eeee/)).not.toBeInTheDocument();
   });
@@ -505,10 +520,22 @@ describe("Configuration", () => {
         health: [health("elevenlabs", HealthStatus.DEGRADED)],
       }),
     );
-    // ElevenLabs is saved → renders presence-Healthy instantly, then the async
+    // ElevenLabs is saved → renders presence "Saved" instantly, then the async
     // health RPC downgrades it to Degraded.
     const degraded = await screen.findByText(/having trouble/i);
     const row = degraded.closest(".gx-provider-row") as HTMLElement;
+    expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
+  });
+
+  it("upgrades a saved provider's badge to Working only once the probe reports healthy", async () => {
+    renderScreen(
+      mockBackend({
+        saved: { elevenlabs: "abcd" },
+        health: [health("elevenlabs", HealthStatus.HEALTHY)],
+      }),
+    );
+    const working = await screen.findByText(/^working$/i);
+    const row = working.closest(".gx-provider-row") as HTMLElement;
     expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
   });
 
@@ -650,7 +677,7 @@ describe("Configuration invite autofill (#105)", () => {
     // (no picker step — there is no channel picker anymore) and a confirmation
     // line names the resolved guild.
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep.");
+    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep — click “Save Discord settings” to keep it.");
     expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
     // The returned voice channels are NOT rendered — sessions pick their
     // channel on the Session screen.
@@ -792,7 +819,7 @@ describe("Configuration invite autofill (#105)", () => {
     // B supersedes A and resolves immediately → B's fill + confirmation win.
     fireEvent.change(paste, { target: { value: "discord.gg/fastbbb" } });
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from Guild B.");
+    expect(confirmation).toHaveTextContent("Server ID filled in from Guild B — click “Save Discord settings” to keep it.");
     expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
 
     // A's slow resolve lands late — the guard drops it: the Guild ID stays
@@ -800,7 +827,7 @@ describe("Configuration invite autofill (#105)", () => {
     releaseA({ guildId: "111", guildName: "Guild A", voiceChannels: [] });
     await new Promise((r) => setTimeout(r, 50));
     expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
-    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Server ID filled in from Guild B.");
+    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Server ID filled in from Guild B — click “Save Discord settings” to keep it.");
     expect(screen.queryByText(/Guild A/)).not.toBeInTheDocument();
   });
 
@@ -837,7 +864,7 @@ describe("Configuration invite autofill (#105)", () => {
     });
 
     const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep.");
+    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep — click “Save Discord settings” to keep it.");
     expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
   });
 });
