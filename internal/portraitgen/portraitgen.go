@@ -4,7 +4,7 @@
 // It is the third consumer of the image seam #311 built for Session Highlights
 // and #541 reused for generated maps, and it deliberately reuses that seam
 // whole: the same [imagegen.Generator], the same tenant BYOK resolution, the
-// same [spend.PriceOnly] metering ritual. A third image path with its own key
+// same off-session metering seam ([billing.OffSession], #658). A third image path with its own key
 // handling and its own meter would be a third place to get ADR-0039 and
 // ADR-0045 wrong.
 //
@@ -25,9 +25,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -83,14 +83,20 @@ type Result struct {
 type Engine struct {
 	factory GeneratorFactory
 	seeds   SeedReader
-	rec     observe.StageRecorder
-	log     *slog.Logger
+	// metering is the off-session seam every generation is gated and ledgered
+	// through (#658).
+	metering *billing.OffSession
+	rec      observe.StageRecorder
+	log      *slog.Logger
 }
 
 // New builds the engine. A nil recorder discards metrics; a nil logger uses the
-// default. A nil factory or seed reader is a wiring bug and panics at
+// default. A nil factory, seed reader or metering is a wiring bug and panics at
 // construction rather than at the GM's first click.
-func New(factory GeneratorFactory, seeds SeedReader, rec observe.StageRecorder, log *slog.Logger) *Engine {
+func New(factory GeneratorFactory, seeds SeedReader, metering *billing.OffSession, rec observe.StageRecorder, log *slog.Logger) *Engine {
+	if metering == nil {
+		panic("portraitgen: New: nil off-session metering")
+	}
 	if factory == nil {
 		panic("portraitgen: New: nil generator factory")
 	}
@@ -103,7 +109,7 @@ func New(factory GeneratorFactory, seeds SeedReader, rec observe.StageRecorder, 
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{factory: factory, seeds: seeds, rec: rec, log: log}
+	return &Engine{factory: factory, seeds: seeds, metering: metering, rec: rec, log: log}
 }
 
 // Generate produces one portrait draft and meters what it cost.
@@ -125,6 +131,15 @@ func (e *Engine) Generate(ctx context.Context, campaign storage.Campaign, in Inp
 		return Result{}, fmt.Errorf("portraitgen: seed context: %w", err)
 	}
 
+	// The off-session metering seam (#658): an exhausted plan allowance refuses
+	// HERE, before the generator is built or the provider reached, and whatever
+	// the call meters is flushed to the Tenant's Usage Ledger on the way out.
+	call, err := e.metering.Begin(ctx, campaign.TenantID, e.rec)
+	if err != nil {
+		return Result{}, err
+	}
+	defer call.Close(ctx)
+
 	gen, model, err := e.factory(ctx, campaign.TenantID)
 	if err != nil {
 		// ErrNotConfigured and an entitlement refusal both travel intact — the
@@ -143,12 +158,11 @@ func (e *Engine) Generate(ctx context.Context, campaign storage.Campaign, in Inp
 		return Result{}, err
 	}
 
-	// The metering ritual, identical to mapgen and Highlight enrichment
-	// (ADR-0045/0046): PriceOnly tees a caps-free meter onto the production
-	// recorder. Generation is off-session, so it is priced and attributed rather
-	// than cap-gated.
-	priced, estimatedUSD := spend.PriceOnly(e.rec, e.log)
-	priced.LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
+	// Meter on the call's recorder, identical to mapgen and Highlight enrichment
+	// (ADR-0045/0046): priced, forwarded to the production recorder and ledgered.
+	// Generation is off-session, so it is allowance-gated (above) rather than
+	// cap-gated.
+	call.Recorder().LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
 	e.log.Info("portraitgen: portrait generated",
 		"campaign_id", campaign.ID,
 		"tenant_id", campaign.TenantID,
@@ -156,7 +170,7 @@ func (e *Engine) Generate(ctx context.Context, campaign storage.Campaign, in Inp
 		"model", model,
 		"input_tokens", res.PromptTokens,
 		"output_tokens", res.OutputTokens,
-		"estimated_usd", estimatedUSD())
+		"estimated_usd", call.EstimatedUSD())
 
 	return Result{Data: res.Data, ContentType: res.ContentType, Model: model, Prompt: full}, nil
 }

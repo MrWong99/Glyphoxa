@@ -12,6 +12,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/assist"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -65,8 +66,9 @@ func validAssistPrompt(raw string) (string, *connect.Error) {
 // always used. Both handlers here draft content, so they share one subject.
 const assistSubject = "content generation"
 
-// assistEngineErr maps a drafting failure onto its Connect code: a refused
-// platform-key entitlement is an actionable precondition (save a key, ADR-0054);
+// assistEngineErr maps a drafting failure onto its Connect code: an exhausted
+// plan allowance is the shared ResourceExhausted refusal (allowance_error.go); a
+// refused platform-key entitlement is an actionable precondition (save a key, ADR-0054);
 // an unusable model response is CodeUnavailable (a retry may succeed); an
 // upstream rejection is classified by upstream_error.go, shared with the Maps
 // surface; anything left is logged raw and returned as a static CodeUnavailable
@@ -79,6 +81,8 @@ const assistSubject = "content generation"
 // actually means it, where the wording is kept verbatim.
 func assistEngineErr(op string, err error) *connect.Error {
 	switch {
+	case errors.Is(err, billing.ErrAllowanceExhausted):
+		return allowanceExhaustedErr()
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
 		return connect.NewError(connect.CodeFailedPrecondition, llmbuild.ErrNoPlatformKeyEntitlement)
 	case errors.Is(err, assist.ErrUnusableResponse):

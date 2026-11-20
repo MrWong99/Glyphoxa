@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -27,7 +28,7 @@ func TestGeneratePersonaHappyPath(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "```\nYou are Bart, a gruff innkeeper.\n```", capture: func(r llm.Request) { req = r }}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 
 	persona, err := eng.GeneratePersona(context.Background(), c, PersonaInput{
 		AgentName:  "Bart",
@@ -61,7 +62,7 @@ func TestGeneratePersonaHappyPath(t *testing.T) {
 func TestGeneratePersonaUnusable(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "  \n"}, nil
 	}))
 	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); !errors.Is(err, ErrUnusableResponse) {
@@ -75,7 +76,7 @@ func TestGeneratePersonaMetersUsage(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
 	rec := &capRec{}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "You are someone.", usage: &llm.Usage{InputTokens: 42, OutputTokens: 7}}, nil
 	}))
 	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err != nil {
@@ -106,7 +107,7 @@ func TestGeneratePersonaPricesSavedConfigWithoutModel(t *testing.T) {
 	}
 	rec := &capRec{}
 	var req llm.Request
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "You are someone.", usage: &llm.Usage{InputTokens: 42, OutputTokens: 7}, capture: func(r llm.Request) { req = r }}, nil
 	}))
 	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err != nil {
@@ -139,7 +140,7 @@ func TestGenerateKnowledgeHappyPath(t *testing.T) {
 		{"type":"npc","name":"Wilhelmine","body":"A fence.","gm_private":false},
 		{"type":"faction","name":"The Grey Hands","body":"Thieves.","gm_private":true}
 	],"edges":[{"from":0,"to":1,"type":"member_of"}]}`
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: draftJSON, capture: func(r llm.Request) { req = r }}, nil
 	}))
 
@@ -173,7 +174,7 @@ func TestGenerateKnowledgeHappyPath(t *testing.T) {
 func TestGenerateKnowledgeUnusable(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "Sorry, I'd rather not."}, nil
 	}))
 	if _, err := eng.GenerateKnowledge(context.Background(), c, "x"); !errors.Is(err, ErrUnusableResponse) {
@@ -187,7 +188,7 @@ func TestGenerateStreamErrorStillMetersReported(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
 	rec := &capRec{}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial", usage: &llm.Usage{InputTokens: 5, OutputTokens: 2}, errText: "boom"}, nil
 	}))
 	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err == nil {
@@ -204,7 +205,7 @@ func TestGenerateStreamErrorStillMetersReported(t *testing.T) {
 func TestRefusedEntitlementBlocksEnvFallback(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
-	eng := NewEngine(st, nil, observe.Discard{}, nil,
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil,
 		WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 			t.Fatal("provider must not be built when the key resolution is refused")
 			return nil, nil

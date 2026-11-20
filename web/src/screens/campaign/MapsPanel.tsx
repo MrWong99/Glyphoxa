@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { errorMessage } from "@/lib/connectError";
+import { apiErrorMessage, errorMessage } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 import { alphaBg, metaOf } from "./knowledgeVocab";
@@ -341,7 +341,7 @@ function MapView({
         </div>
         {suggest.isError && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            {errorMessage(suggest.error)}
+            {apiErrorMessage(suggest.error, t)}
           </span>
         )}
         {suggested.size > 0 && (
@@ -525,7 +525,7 @@ function NewMapButton({
       draftURL.current = url;
       setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(apiErrorMessage(err, t));
     }
   };
 

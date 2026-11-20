@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -76,7 +77,7 @@ func TestProviderResolutionChain(t *testing.T) {
 			gotID, gotKey = providerID, apiKey
 			return &stubProvider{text: "A recap."}, nil
 		}
-		eng := NewEngine(st, cipher, observe.Discard{}, nil, WithProviderFactory(factory))
+		eng := NewEngine(st, cipher, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 			t.Fatalf("Recap: %v", err)
 		}
@@ -100,7 +101,7 @@ func TestProviderResolutionChain(t *testing.T) {
 			gotID, gotKey = providerID, apiKey
 			return &stubProvider{text: "A recap."}, nil
 		}
-		eng := NewEngine(st, cipher, observe.Discard{}, nil, WithProviderFactory(factory))
+		eng := NewEngine(st, cipher, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 			t.Fatalf("Recap: %v", err)
 		}
@@ -119,7 +120,7 @@ func TestProviderResolutionChain(t *testing.T) {
 			gotID, gotKey = providerID, apiKey
 			return &stubProvider{text: "A recap."}, nil
 		}
-		eng := NewEngine(st, cipher, observe.Discard{}, nil, WithProviderFactory(factory))
+		eng := NewEngine(st, cipher, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 			t.Fatalf("Recap: %v", err)
 		}
@@ -144,7 +145,7 @@ func TestRecapSingleSession(t *testing.T) {
 			sysSeen = req.Messages[0].Text
 		}}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)
@@ -181,7 +182,7 @@ func TestRecapMultiSession(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "session recap"}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{later, earlier})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)
@@ -206,7 +207,7 @@ func TestMixedCampaigns(t *testing.T) {
 	a := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
 	b := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
 
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "x"}, nil
 	}))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{a, b}); err != ErrMixedCampaigns {
@@ -224,7 +225,7 @@ func TestEmptyTranscripts(t *testing.T) {
 	t.Run("single empty -> ErrNoTranscript", func(t *testing.T) {
 		st := newFakeStore()
 		sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), nil)
-		eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
+		eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(okFactory))
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != ErrNoTranscript {
 			t.Fatalf("err = %v, want ErrNoTranscript", err)
 		}
@@ -234,7 +235,7 @@ func TestEmptyTranscripts(t *testing.T) {
 		st := newFakeStore()
 		a := seedSession(st, tenantID, campaignID, "English", butler, time.Now(), nil)
 		b := seedSession(st, tenantID, campaignID, "English", butler, time.Now().Add(time.Hour), nil)
-		eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
+		eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(okFactory))
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{a, b}); err != ErrNoTranscript {
 			t.Fatalf("err = %v, want ErrNoTranscript", err)
 		}
@@ -244,7 +245,7 @@ func TestEmptyTranscripts(t *testing.T) {
 		st := newFakeStore()
 		full := seedSession(st, tenantID, campaignID, "English", butler, time.Now(), sampleLines())
 		empty := seedSession(st, tenantID, campaignID, "English", butler, time.Now().Add(time.Hour), nil)
-		eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
+		eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(okFactory))
 		res, err := eng.Recap(context.Background(), []uuid.UUID{full, empty})
 		if err != nil {
 			t.Fatalf("Recap: %v", err)
@@ -268,7 +269,7 @@ func TestDedupSessions(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", capture: func(llm.Request) { calls++ }}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid, sid})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)
@@ -295,7 +296,7 @@ func TestRecapKeyEntitlementRefused(t *testing.T) {
 	st := newFakeStore()
 	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "The Keeper."}
 	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
-	eng := NewEngine(st, cipher, observe.Discard{}, nil,
+	eng := NewEngine(st, cipher, billingtest.Ungated(), observe.Discard{}, nil,
 		WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 			t.Fatal("provider must not be built when the entitlement refuses")
 			return nil, nil
@@ -322,7 +323,7 @@ func TestRecapKeyEntitlementRefused(t *testing.T) {
 	butler = storage.Agent{Role: storage.AgentRoleButler, Persona: "The Keeper.", LLMProviderConfigID: uuid.NullUUID{UUID: cfg.ID, Valid: true}}
 	sid = seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
 	var gotKey string
-	eng = NewEngine(st, cipher, observe.Discard{}, nil,
+	eng = NewEngine(st, cipher, billingtest.Ungated(), observe.Discard{}, nil,
 		WithProviderFactory(func(_, apiKey string) (llm.Provider, error) {
 			gotKey = apiKey
 			return &stubProvider{text: "A recap."}, nil

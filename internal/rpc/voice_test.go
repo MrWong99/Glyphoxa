@@ -14,6 +14,8 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
@@ -1092,5 +1094,58 @@ func TestPreviewVoice_TerminalErrorIsUnavailable(t *testing.T) {
 	_, err := srv.PreviewVoice(tenantCtx(), connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v-marcus"}))
 	if connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Fatalf("err = %v, want Unavailable", err)
+	}
+}
+
+// TestPreviewVoice_AllowanceGate (#658): a preview is paid TTS on the
+// platform's key for a trial Tenant, so a spent plan allowance refuses it
+// before the provider is reached — with the shared, web-translatable refusal —
+// while a BYOK-plan Tenant under the same gate still gets its preview, and
+// that preview is still ledgered.
+func TestPreviewVoice_AllowanceGate(t *testing.T) {
+	t.Parallel()
+	newSrv := func(metering func(*billingtest.Usage) *billing.OffSession) (*VoiceServer, *billingtest.Usage, *int) {
+		usage := &billingtest.Usage{}
+		srv := NewVoiceServer(&fakeVoiceStore{}, voiceTestCipher(t), nil)
+		srv.SetOffSessionMetering(metering(usage))
+		synthCalls := 0
+		srv.newSynth = func(string) tts.Synthesizer {
+			synthCalls++
+			return &fakeSynth{chunks: []tts.AudioChunk{{PCM: make([]byte, 480), SampleRate: 24000, Channels: 1}}}
+		}
+		return srv, usage, &synthCalls
+	}
+	tenantID := uuid.New()
+	ctx := auth.WithTenant(context.Background(), tenantID)
+	req := func() *connect.Request[managementv1.PreviewVoiceRequest] {
+		return connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v", Text: "Hello"})
+	}
+
+	srv, usage, synthCalls := newSrv(billingtest.Exhausted)
+	_, err := srv.PreviewVoice(ctx, req())
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("exhausted allowance: code = %v (%v), want ResourceExhausted", connect.CodeOf(err), err)
+	}
+	var ce *connect.Error
+	if !errors.As(err, &ce) || ce.Meta().Get(errorReasonHeader) != reasonAllowanceExhausted {
+		t.Errorf("refusal carries no %s=%s metadata: %v", errorReasonHeader, reasonAllowanceExhausted, err)
+	}
+	if *synthCalls != 0 {
+		t.Errorf("TTS provider reached %d times despite an exhausted allowance", *synthCalls)
+	}
+	if n := len(usage.Rows()); n != 0 {
+		t.Errorf("refused preview wrote %d ledger rows", n)
+	}
+
+	srv, usage, synthCalls = newSrv(billingtest.BYOK)
+	if _, err := srv.PreviewVoice(ctx, req()); err != nil {
+		t.Fatalf("BYOK tenant: PreviewVoice = %v", err)
+	}
+	if *synthCalls != 1 {
+		t.Errorf("BYOK tenant: TTS provider reached %d times, want 1", *synthCalls)
+	}
+	row := billingtest.OneRow(t, usage, tenantID, storage.ComponentTTS, "elevenlabs", "")
+	if row.TTSCharacters != 5 {
+		t.Errorf("ledger characters = %d, want 5", row.TTSCharacters)
 	}
 }

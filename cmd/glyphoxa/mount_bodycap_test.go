@@ -58,7 +58,8 @@ func TestManagementMounts_UnauthenticatedLargeBodyIsNeverBuffered(t *testing.T) 
 	store, log := storage.New(nil), slog.New(slog.DiscardHandler)
 	sessions := session.NewIntentControl(store, log, session.IntentControlConfig{})
 	mounts := managementMounts(store, nil, nil, nil, log,
-		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, "", nil)
+		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, "", nil,
+		newOffSessionMetering(auth.AdmissionAllowlist, store, log))
 	mux := http.NewServeMux()
 	services := 0
 	for _, m := range mounts {

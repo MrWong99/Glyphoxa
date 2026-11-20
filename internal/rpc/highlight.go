@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -102,6 +103,15 @@ func (s *SessionServer) SetHighlights(store HighlightStore, blobs highlightBlobs
 // makes SetHighlightSound report CodeUnimplemented.
 func (s *SessionServer) SetSoundEnrichment(factory highlight.SoundGeneratorFactory) {
 	s.soundFactory = factory
+}
+
+// SetOffSessionMetering wires the off-session metering seam (#658) so
+// SetHighlightSound can refuse a request the generation job would only skip:
+// the job runs with no one to tell, so an exhausted plan allowance has to be
+// reported HERE, at the click. Nil (unwired) skips the precheck; the job gates
+// itself either way.
+func (s *SessionServer) SetOffSessionMetering(m *billing.OffSession) {
+	s.metering = m
 }
 
 // notWired is the CodeUnimplemented error a Highlight RPC returns when the server
@@ -362,7 +372,9 @@ func (s *SessionServer) DeleteHighlight(
 // CodeInvalidArgument; a foreign-tenant, cross-campaign, unknown, or unparsable
 // id is CodeNotFound. An unconfigured tenant (no ElevenLabs tts Provider
 // Config) is CodeFailedPrecondition BEFORE any row change, so the UI can say
-// "configure ElevenLabs first" instead of pending forever.
+// "configure ElevenLabs first" instead of pending forever. A Tenant whose plan
+// allowance is exhausted is CodeResourceExhausted, likewise before any row
+// change: the generation job would skip the paid step silently.
 func (s *SessionServer) SetHighlightSound(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetHighlightSoundRequest],
@@ -421,6 +433,17 @@ func (s *SessionServer) SetHighlightSound(
 			}
 			s.log.Error("SetHighlightSound: probe sound factory failed", "err", ferr)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		// Allowance precheck (#658): this request schedules a paid generation it
+		// does not run. Skipped for "" — removing a sound spends nothing.
+		if s.metering != nil {
+			if aerr := s.metering.Check(ctx, tenantID); aerr != nil {
+				if errors.Is(aerr, billing.ErrAllowanceExhausted) {
+					return nil, allowanceExhaustedErr()
+				}
+				s.log.Error("SetHighlightSound: allowance check failed", "err", aerr)
+				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			}
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
@@ -465,6 +466,55 @@ func TestPostureWiringHelpers(t *testing.T) {
 	pa, ok := allowanceForMode(auth.AdmissionOpen, st).(spend.PlanAllowance)
 	if !ok || pa.Reader != spend.AllowanceReader(st) {
 		t.Error("open mode must wire the store-backed PlanAllowance")
+	}
+}
+
+// offSessionFake is the storage the off-session metering seam reads and
+// writes: a plan allowance, a month-to-date total, and the ledger.
+type offSessionFake struct {
+	included *float64
+	monthUSD float64
+	rows     []storage.UsageRow
+}
+
+func (f *offSessionFake) TenantIncludedUsageUSD(context.Context, uuid.UUID) (*float64, error) {
+	return f.included, nil
+}
+
+func (f *offSessionFake) TenantMonthUsageUSD(context.Context, uuid.UUID, time.Time, time.Time) (float64, error) {
+	return f.monthUSD, nil
+}
+
+func (f *offSessionFake) AddUsage(_ context.Context, rows []storage.UsageRow) error {
+	f.rows = append(f.rows, rows...)
+	return nil
+}
+
+// TestOffSessionMeteringPosture pins the seam every off-session paid call runs
+// through (#658) per Admission Mode: `open` refuses a platform-plan Tenant
+// whose allowance is spent and passes a Tenant whose plan carries none (BYOK);
+// `allowlist` (self-host) never gates. Usage is ledgered in every posture.
+func TestOffSessionMeteringPosture(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	five := 5.0
+	spent := func() *offSessionFake { return &offSessionFake{included: &five, monthUSD: 5} }
+
+	if _, err := newOffSessionMetering(auth.AdmissionOpen, spent(), nil).Begin(ctx, uuid.New(), nil); !errors.Is(err, billing.ErrAllowanceExhausted) {
+		t.Errorf("open mode, spent allowance: Begin = %v, want ErrAllowanceExhausted", err)
+	}
+	if _, err := newOffSessionMetering(auth.AdmissionOpen, &offSessionFake{monthUSD: 500}, nil).Begin(ctx, uuid.New(), nil); err != nil {
+		t.Errorf("open mode, plan without an allowance (BYOK): Begin = %v, want nil", err)
+	}
+
+	st := spent()
+	call, err := newOffSessionMetering(auth.AdmissionAllowlist, st, nil).Begin(ctx, uuid.New(), nil)
+	if err != nil {
+		t.Fatalf("allowlist mode must never gate: Begin = %v", err)
+	}
+	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, 10)
+	if err := call.Close(ctx); err != nil || len(st.rows) != 1 {
+		t.Errorf("allowlist mode: Close = %v, ledger rows = %d; want the usage ledgered", err, len(st.rows))
 	}
 }
 

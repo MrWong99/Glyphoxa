@@ -26,7 +26,7 @@ import { PrepBoards } from "../campaign/PrepBoards";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
-import { errorMessage, isNotFound } from "@/lib/connectError";
+import { apiErrorMessage, errorMessage, isNotFound } from "@/lib/connectError";
 import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 
 // The Session screen (#72) drives the live Voice Session from the UI on the live
@@ -571,7 +571,7 @@ export function Session({
   // under a different session. A failure surfaces as a toast (ADR-0017: sonner).
   const [recapResult, setRecapResult] = useState<{ startedMs: number | null; text: string } | null>(null);
   const generateRecap = useMutation(SessionService.method.generateRecap, {
-    onError: (err: Error) => toast.error(t("session.couldntGenerateRecap", { message: errorMessage(err) })),
+    onError: (err: Error) => toast.error(t("session.couldntGenerateRecap", { message: apiErrorMessage(err, t) })),
   });
   // The rendered session the operator is looking at RIGHT NOW, tracked in a ref so
   // the async onSuccess below can compare against it — a ~2min recap may resolve

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
@@ -76,7 +77,7 @@ func TestGenerate_ReturnsADraftAndMetersIt(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
 	rec := &countingRecorder{}
-	e := mapgen.New(factory(gen, "gemini-2.5-flash-image", nil), nil, rec, nil)
+	e := mapgen.New(factory(gen, "gemini-2.5-flash-image", nil), nil, billingtest.Ungated(), rec, nil)
 
 	res, err := e.Generate(context.Background(), campaign, mapgen.Input{Prompt: "a fishing town"})
 	if err != nil {
@@ -106,7 +107,7 @@ func TestGenerate_SeedsFromTheEntrysProseAndResidents(t *testing.T) {
 		node:      storage.KGNode{Name: "Saltmarsh", Body: "A damp fishing town on a grey estuary."},
 		residents: []string{"The Rusty Anchor", "The north gate"},
 	}
-	e := mapgen.New(factory(gen, "m", nil), seeds, nil, nil)
+	e := mapgen.New(factory(gen, "m", nil), seeds, billingtest.Ungated(), nil, nil)
 
 	anchor := uuid.NullUUID{UUID: uuid.New(), Valid: true}
 	res, err := e.Generate(context.Background(), campaign,
@@ -141,7 +142,7 @@ func TestGenerate_SeedsFromTheEntrysProseAndResidents(t *testing.T) {
 func TestGenerate_APrivateAnchorIsNotFound(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := mapgen.New(factory(gen, "m", nil), &fakeSeeds{err: storage.ErrNotFound}, nil, nil)
+	e := mapgen.New(factory(gen, "m", nil), &fakeSeeds{err: storage.ErrNotFound}, billingtest.Ungated(), nil, nil)
 
 	_, err := e.Generate(context.Background(), campaign, mapgen.Input{
 		Prompt: "anything", AnchorNodeID: uuid.NullUUID{UUID: uuid.New(), Valid: true},
@@ -162,7 +163,7 @@ func TestGenerate_TooLargeIsPermanentAndUnmetered(t *testing.T) {
 	gen := okGen()
 	gen.err = imagegen.ErrImageTooLarge
 	rec := &countingRecorder{}
-	e := mapgen.New(factory(gen, "m", nil), nil, rec, nil)
+	e := mapgen.New(factory(gen, "m", nil), nil, billingtest.Ungated(), rec, nil)
 
 	_, err := e.Generate(context.Background(), campaign, mapgen.Input{Prompt: "an enormous continent"})
 	if !errors.Is(err, imagegen.ErrImageTooLarge) {
@@ -177,7 +178,7 @@ func TestGenerate_TooLargeIsPermanentAndUnmetered(t *testing.T) {
 // a provider stack trace.
 func TestGenerate_NoKeyIsAnActionableRefusal(t *testing.T) {
 	t.Parallel()
-	e := mapgen.New(factory(nil, "", mapgen.ErrNotConfigured), nil, nil, nil)
+	e := mapgen.New(factory(nil, "", mapgen.ErrNotConfigured), nil, billingtest.Ungated(), nil, nil)
 	_, err := e.Generate(context.Background(), campaign, mapgen.Input{Prompt: "a town"})
 	if !errors.Is(err, mapgen.ErrNotConfigured) {
 		t.Fatalf("err = %v, want ErrNotConfigured", err)
@@ -188,7 +189,7 @@ func TestGenerate_NoKeyIsAnActionableRefusal(t *testing.T) {
 // deployment's key on a tenant that is not entitled to it (ADR-0054).
 func TestGenerate_EntitlementRefusalTravelsIntact(t *testing.T) {
 	t.Parallel()
-	e := mapgen.New(factory(nil, "", llmbuild.ErrNoPlatformKeyEntitlement), nil, nil, nil)
+	e := mapgen.New(factory(nil, "", llmbuild.ErrNoPlatformKeyEntitlement), nil, billingtest.Ungated(), nil, nil)
 	_, err := e.Generate(context.Background(), campaign, mapgen.Input{Prompt: "a town"})
 	if !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
 		t.Fatalf("err = %v, want the entitlement refusal", err)
@@ -198,7 +199,7 @@ func TestGenerate_EntitlementRefusalTravelsIntact(t *testing.T) {
 func TestGenerate_EmptyPromptIsRefusedBeforeSpending(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := mapgen.New(factory(gen, "m", nil), nil, nil, nil)
+	e := mapgen.New(factory(gen, "m", nil), nil, billingtest.Ungated(), nil, nil)
 	if _, err := e.Generate(context.Background(), campaign, mapgen.Input{Prompt: "   "}); err == nil {
 		t.Fatal("an empty prompt should be refused")
 	}
@@ -217,7 +218,7 @@ func TestGenerate_LongProseIsCutByRunes(t *testing.T) {
 		Name: "Saltmarsh",
 		Body: strings.Repeat("ä", 40_000),
 	}}
-	e := mapgen.New(factory(gen, "m", nil), seeds, nil, nil)
+	e := mapgen.New(factory(gen, "m", nil), seeds, billingtest.Ungated(), nil, nil)
 
 	if _, err := e.Generate(context.Background(), campaign, mapgen.Input{
 		Prompt: "the docks", AnchorNodeID: uuid.NullUUID{UUID: uuid.New(), Valid: true},

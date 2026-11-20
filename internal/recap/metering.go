@@ -25,10 +25,12 @@ type SpendGate interface {
 // cap and Usage Ledger, not only on the process recorder the engine was built
 // with, where it would be invisible to all three.
 type Metering struct {
-	// Rec receives the recap's LLM usage INSTEAD of the engine's own recorder.
-	// It is expected to already forward to the production recorder (the session's
-	// StageMetrics and the chat exchange's recorder both do), so usage is never
-	// counted twice. nil keeps the engine's recorder.
+	// Rec receives the recap's LLM usage INSTEAD of the engine's own metering.
+	// It is expected to already forward to the production recorder AND to the
+	// caller's Usage Ledger (the session's StageMetrics and the chat exchange's
+	// recorder both do), so usage is never counted twice. nil means no caller
+	// meters this recap: the engine then treats it as an off-session paid call
+	// and opens its own gated, ledgered one (billing.OffSession).
 	Rec observe.StageRecorder
 	// Gate, when non-nil, is consulted before any LLM call; a refusal fails the
 	// recap with [ErrSpendCapReached]. nil = no gate (the planning chat checks its
@@ -46,7 +48,8 @@ func WithMetering(ctx context.Context, m Metering) context.Context {
 
 // MeteringFrom returns the [Metering] installed by [WithMetering], or the zero
 // value and false when the ctx carries none (an off-session recap: the slash
-// command, the web recap), which meters on the engine's own recorder.
+// command, the web recap), which the engine gates on the plan allowance and
+// ledgers through billing.OffSession.
 func MeteringFrom(ctx context.Context) (Metering, bool) {
 	m, ok := ctx.Value(meteringKey{}).(Metering)
 	return m, ok

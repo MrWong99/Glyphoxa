@@ -5,15 +5,15 @@
 //
 // The ADR-0062 decisions this package implements:
 //
-//   - Metering: each exchange builds its own caps-free meter (spend.PriceOnly,
-//     the ADR-0046 recap-amendment pattern) TEE'd with a billing.Ledger, and
-//     flushes to the Usage Ledger PER EXCHANGE with Tenant attribution; the
-//     thread/campaign attribution rides a structured log line, matching the
-//     recap/assist posture. Never cap-gated — ADR-0046's live caps are
-//     Voice-Session-only.
-//   - Allowance gate: on platform keys, the ADR-0055 monthly allowance gate is
-//     checked BEFORE each exchange; a refusal is [ErrAllowanceExhausted], a
-//     clear in-chat refusal, never a silent drop. BYOK tenants are metered
+//   - Metering: each exchange opens one call on the off-session metering
+//     seam ([billing.OffSession], the one path every off-session paid call
+//     takes — #658), which prices it on a caps-free meter and flushes to the
+//     Usage Ledger PER EXCHANGE with Tenant attribution; the thread/campaign
+//     attribution rides a structured log line, matching the recap/assist
+//     posture. Never cap-gated — ADR-0046's live caps are Voice-Session-only.
+//   - Allowance gate: the same seam checks the ADR-0055 monthly allowance
+//     BEFORE each exchange; a refusal is [ErrAllowanceExhausted], a clear
+//     in-chat refusal, never a silent drop. BYOK tenants are metered
 //     identically but their plan carries no included allowance, so the same
 //     check passes them through (ADR-0055 scoping).
 //   - Model: the chat-scoped slot — the Butler's chat_llm_provider_config_id,
@@ -44,7 +44,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -59,9 +58,6 @@ const (
 	// exchangeTimeout bounds one whole exchange (all tool rounds; a recap tool
 	// call alone may take up to its own 45s child budget).
 	exchangeTimeout = 180 * time.Second
-	// flushTimeout bounds the post-exchange ledger flush, which runs under
-	// context.WithoutCancel so a client disconnect cannot lose metered usage.
-	flushTimeout = 10 * time.Second
 	// autoTitleRunes is how much of the first user message seeds an unnamed
 	// thread's title.
 	autoTitleRunes = 60
@@ -74,7 +70,11 @@ const (
 // ErrAllowanceExhausted is returned when the tenant's ADR-0055 monthly
 // allowance is spent: the exchange is refused BEFORE any provider call, and
 // the RPC layer surfaces it as a clear in-chat refusal (ADR-0062).
-var ErrAllowanceExhausted = errors.New("planchat: monthly included usage exhausted")
+//
+// It is an ALIAS for the metering seam's sentinel, not a second value: every
+// off-session surface refuses with the same error, and two distinct sentinels
+// would compare unequal under errors.Is and silently kill one mapper's branch.
+var ErrAllowanceExhausted = billing.ErrAllowanceExhausted
 
 // Store is the narrow storage surface the engine needs; *storage.Store
 // satisfies it.
@@ -88,7 +88,6 @@ type Store interface {
 	AppendPlanningMessage(ctx context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error)
 	RenamePlanningThread(ctx context.Context, campaignID, id uuid.UUID, title string) (storage.PlanningThread, error)
 	ListNodeAppearances(ctx context.Context, campaignID, nodeID uuid.UUID, limit int) ([]storage.AppearanceHit, error)
-	AddUsage(ctx context.Context, rows []storage.UsageRow) error
 }
 
 // Searcher is the #591 retrieval surface the tool belt reads; *search.Engine
@@ -96,12 +95,6 @@ type Store interface {
 type Searcher interface {
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, access search.Access, query string, limit int) ([]storage.KGNode, error)
 	SearchTranscripts(ctx context.Context, campaignID uuid.UUID, access search.Access, query string, limit int) (search.TranscriptResults, error)
-}
-
-// AllowanceChecker is the ADR-0055 monthly allowance read; *spend.PlanAllowance
-// satisfies it. nil on the engine means no gate (allowlist/self-host posture).
-type AllowanceChecker interface {
-	AllowanceState(ctx context.Context, tenantID uuid.UUID) (spend.AllowanceState, error)
 }
 
 // ProviderFactory builds the LLM provider for a resolved (providerID, key) —
@@ -130,12 +123,12 @@ type Engine struct {
 	store    Store
 	cipher   *crypto.Cipher
 	search   Searcher
-	writer   tool.KGWriter // knowledge.Adapter — campaign-stamped per exchange
-	recapper tool.Recapper // knowledge.RecapAdapter — same stamping
+	writer   tool.KGWriter       // knowledge.Adapter — campaign-stamped per exchange
+	recapper tool.Recapper       // knowledge.RecapAdapter — same stamping
+	metering *billing.OffSession // gates + ledgers every exchange (#658)
 	metrics  observe.StageRecorder
 	log      *slog.Logger
 
-	allowance   AllowanceChecker                // nil = no gate
 	keyEnt      llmbuild.PlatformKeyEntitlement // nil = everything allowed
 	newProvider ProviderFactory
 	maxRounds   int
@@ -143,12 +136,6 @@ type Engine struct {
 
 // Option configures NewEngine.
 type Option func(*Engine)
-
-// WithAllowance wires the ADR-0055 monthly allowance gate (open admission
-// mode); without it no exchange is ever refused for spend.
-func WithAllowance(a AllowanceChecker) Option {
-	return func(e *Engine) { e.allowance = a }
-}
 
 // WithKeyEntitlement wires the platform-key entitlement (ADR-0054/0055) the
 // env-fallback key resolution consults; nil grants everything (self-host).
@@ -161,12 +148,15 @@ func WithProviderFactory(f ProviderFactory) Option {
 	return func(e *Engine) { e.newProvider = f }
 }
 
-// NewEngine builds the chat engine. store, searcher, writer, and recapper are
-// wiring requirements; cipher may be nil (BYOK saves then fail loudly at key
-// resolution, the keyless posture). metrics/log default to no-op/slog.Default.
-func NewEngine(store Store, cipher *crypto.Cipher, searcher Searcher, writer tool.KGWriter, recapper tool.Recapper, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
-	if store == nil || searcher == nil || writer == nil || recapper == nil {
-		panic("planchat: NewEngine: nil store, searcher, writer, or recapper")
+// NewEngine builds the chat engine. store, searcher, writer, recapper and
+// metering are wiring requirements; metering is the off-session seam that
+// carries the ADR-0055 allowance gate (wired for open admission mode at the
+// composition root) and the Usage Ledger write. cipher may be nil (BYOK saves
+// then fail loudly at key resolution, the keyless posture). metrics/log
+// default to no-op/slog.Default.
+func NewEngine(store Store, cipher *crypto.Cipher, searcher Searcher, writer tool.KGWriter, recapper tool.Recapper, metering *billing.OffSession, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
+	if store == nil || searcher == nil || writer == nil || recapper == nil || metering == nil {
+		panic("planchat: NewEngine: nil store, searcher, writer, recapper, or metering")
 	}
 	if metrics == nil {
 		metrics = observe.Discard{}
@@ -180,6 +170,7 @@ func NewEngine(store Store, cipher *crypto.Cipher, searcher Searcher, writer too
 		search:      searcher,
 		writer:      writer,
 		recapper:    recapper,
+		metering:    metering,
 		metrics:     metrics,
 		log:         log,
 		newProvider: llmbuild.New,
@@ -209,18 +200,20 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		return Result{}, fmt.Errorf("planchat: load thread: %w", err)
 	}
 
-	// The ADR-0055 allowance gate, BEFORE anything spends or persists. A read
-	// error fails closed (the session-start precedent): when the gate cannot be
-	// evaluated, the exchange must not silently spend platform money.
-	if e.allowance != nil {
-		state, err := e.allowance.AllowanceState(ctx, tenantID)
-		if err != nil {
-			return Result{}, fmt.Errorf("planchat: allowance check: %w", err)
+	// Open the exchange's metered call. The ADR-0055 allowance gate runs inside
+	// Begin, BEFORE anything spends or persists, and a read error fails closed
+	// (the session-start precedent): when the gate cannot be evaluated, the
+	// exchange must not silently spend platform money. The call's recorder is
+	// the per-exchange caps-free meter TEE'd with the durable Usage Ledger
+	// (ADR-0062: flush per exchange).
+	call, err := e.metering.Begin(ctx, tenantID, e.metrics)
+	if err != nil {
+		if errors.Is(err, ErrAllowanceExhausted) {
+			return Result{}, err
 		}
-		if state.Exhausted() {
-			return Result{}, ErrAllowanceExhausted
-		}
+		return Result{}, fmt.Errorf("planchat: allowance check: %w", err)
 	}
+	rec := call.Recorder()
 
 	butler, err := e.store.GetButler(ctx, campaign.ID)
 	if err != nil {
@@ -275,12 +268,6 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		}
 	}
 
-	// The per-exchange caps-free meter (ADR-0046 recap-amendment pattern) TEE'd
-	// with the durable Usage Ledger (ADR-0062: flush per exchange).
-	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
-	ledger := billing.NewLedger(tenantID, nil)
-	rec = observe.TeeUsage(rec, ledger)
-
 	registry, err := e.chatTools(campaign.ID)
 	if err != nil {
 		return Result{}, err
@@ -313,19 +300,15 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	answer, runErr := loop.RunStream(runCtx, buildMessages(butler, history, text), ev.Text)
 
 	// Flush + attribute on BOTH paths: usage may have accrued before a failure,
-	// and losing it silently is the one thing the ledger may not do. The flush
-	// runs detached from the (possibly cancelled/disconnected) exchange ctx.
-	flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), flushTimeout)
-	defer cancelFlush()
-	flushErr := ledger.Flush(flushCtx, e.store.AddUsage)
-	if flushErr != nil {
-		e.log.Error("planchat: usage ledger flush failed; usage estimate lost", "tenant_id", tenantID, "err", flushErr)
-	}
+	// and losing it silently is the one thing the ledger may not do. Close
+	// flushes detached from the (possibly cancelled/disconnected) exchange ctx
+	// and logs a failure itself.
+	flushErr := call.Close(ctx)
 	e.log.Info("planchat: llm usage",
 		"tenant_id", tenantID,
 		"campaign_id", campaign.ID,
 		"thread_id", threadID,
-		"estimated_usd", estimatedUSD(),
+		"estimated_usd", call.EstimatedUSD(),
 		"flushed", flushErr == nil,
 		"ok", runErr == nil,
 	)

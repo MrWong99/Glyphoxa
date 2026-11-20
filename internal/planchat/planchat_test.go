@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
@@ -203,8 +204,17 @@ func newTestEngine(t *testing.T, st *fakeStore, provider llm.Provider, opts ...O
 	opts = append(opts, WithProviderFactory(func(string, string) (llm.Provider, error) {
 		return provider, nil
 	}))
-	eng := NewEngine(st, nil, searcher, writer, fakeRecapper{}, nil, nil, opts...)
+	eng := NewEngine(st, nil, searcher, writer, fakeRecapper{}, billing.NewOffSession(st, nil, nil), nil, nil, opts...)
 	return eng, searcher, writer
+}
+
+// withAllowance swaps the engine's metering seam for one carrying the given
+// allowance gate over the same fake ledger — what the composition root wires
+// in open admission mode.
+func withAllowance(a billing.AllowanceChecker) Option {
+	return func(e *Engine) {
+		e.metering = billing.NewOffSession(e.store.(billing.UsageWriter), a, nil)
+	}
 }
 
 // --- tests -------------------------------------------------------------------
@@ -302,7 +312,7 @@ func TestExchange_RecapToolSpendLandsInTheExchangeLedger(t *testing.T) {
 		textDone("Last time, the party met Bart."),
 	}}
 	recapper := &meteringRecapper{}
-	eng := NewEngine(st, nil, &fakeSearcher{}, &fakeWriter{}, recapper, nil, nil,
+	eng := NewEngine(st, nil, &fakeSearcher{}, &fakeWriter{}, recapper, billing.NewOffSession(st, nil, nil), nil, nil,
 		WithProviderFactory(func(string, string) (llm.Provider, error) { return provider, nil }))
 
 	var ev collectEvents
@@ -359,7 +369,7 @@ func TestExchange_AllowanceExhaustedRefusesBeforeAnything(t *testing.T) {
 	campaignID := uuid.New()
 	st := newFakeStore(campaignID)
 	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("never reached")}}
-	eng, _, _ := newTestEngine(t, st, provider, WithAllowance(exhaustedAllowance{}))
+	eng, _, _ := newTestEngine(t, st, provider, withAllowance(exhaustedAllowance{}))
 
 	var ev collectEvents
 	_, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "hi", &ev)
@@ -385,7 +395,7 @@ func TestExchange_AllowanceReadFailureFailsClosed(t *testing.T) {
 	campaignID := uuid.New()
 	st := newFakeStore(campaignID)
 	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("never reached")}}
-	eng, _, _ := newTestEngine(t, st, provider, WithAllowance(erroringAllowance{}))
+	eng, _, _ := newTestEngine(t, st, provider, withAllowance(erroringAllowance{}))
 
 	var ev collectEvents
 	_, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "hi", &ev)

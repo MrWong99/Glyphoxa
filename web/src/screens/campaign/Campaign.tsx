@@ -18,7 +18,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { useI18n, type MessageKey, type TFunc } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
-import { errorMessage, isNotFound } from "@/lib/connectError";
+import { apiErrorMessage, errorMessage, isNotFound } from "@/lib/connectError";
 import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
@@ -480,7 +480,7 @@ function AgentEditor({
       const res = await generate.mutateAsync({ agentId: agent.id, prompt: draftPrompt, name, title });
       setPersona(res.persona);
     } catch (err) {
-      setDraftError(errorMessage(err));
+      setDraftError(apiErrorMessage(err, t));
     }
   };
 
@@ -504,7 +504,7 @@ function AgentEditor({
       const res = await preview.mutateAsync({ voiceId: voice, text: "" });
       await playAudioBlob(res.audio, res.mimeType);
     } catch (err) {
-      setPreviewError(errorMessage(err));
+      setPreviewError(apiErrorMessage(err, t));
     }
   };
 

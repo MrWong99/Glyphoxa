@@ -10,6 +10,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/discordmsg"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -198,6 +199,11 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 		// A normal state (an empty ended session, or one the default filter let
 		// through by a race) — not a failure, so no ERROR log, just a plain reason.
 		return ic.ReplyEphemeral("That session has no transcript to recap.")
+	case errors.Is(err, billing.ErrAllowanceExhausted):
+		// The Tenant's monthly plan allowance is spent (#658): a recap is a paid
+		// call, refused before the provider was reached. A policy refusal, not a
+		// failure — a plain sentence, no ERROR log.
+		return ic.ReplyEphemeral("This month's included usage is used up, so I can't write a recap right now. It resets next month.")
 	case errors.Is(err, context.DeadlineExceeded):
 		// The recapOpTimeout fired: a slow/stuck LLM. Friendly, no raw error, no ERROR
 		// log (an expected slow-path, not a bug).

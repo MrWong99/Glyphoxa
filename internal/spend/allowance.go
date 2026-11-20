@@ -12,11 +12,12 @@ import (
 // tenant's month-to-date estimated usage against the ACTIVE plan's
 // included_usage_usd. The Usage Ledger itself stays attribution-only ("never a
 // gate", ADR-0054) — this is the separate spend-meter-style mechanism that
-// READS it. The decision points live in session.Manager.Start (refuse a start
-// on an exhausted allowance; tighten the session's hard cap to the remainder),
-// exactly the ADR-0046 cap mechanics. Off-session spend (Recap /
-// Highlight-enrich) is not yet tenant-attributed, so the gate has ADR-0054's
-// documented undercount — accepted, not fixed here.
+// READS it. It has two decision points: session.Manager.Start (refuse a start
+// on an exhausted allowance; tighten the session's hard cap to the remainder —
+// exactly the ADR-0046 cap mechanics), and billing.OffSession, the one seam
+// every off-session paid call opens (refuse before the provider is reached;
+// #658, ADR-0054 amendment 2026-11-20). Off-session usage is ledgered by that
+// same seam, so the month-to-date sum the gate reads covers it.
 
 // AllowanceReader is the two storage reads behind the gate. *storage.Store
 // satisfies it.

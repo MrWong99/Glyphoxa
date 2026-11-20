@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
@@ -89,7 +90,7 @@ func TestGenerate_ReturnsADraftAndMetersIt(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
 	rec := &countingRecorder{}
-	e := portraitgen.New(factory(gen, "gemini-2.5-flash-image", nil), &fakeSeeds{node: bart()}, rec, nil)
+	e := portraitgen.New(factory(gen, "gemini-2.5-flash-image", nil), &fakeSeeds{node: bart()}, billingtest.Ungated(), rec, nil)
 
 	res, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()})
 	if err != nil {
@@ -117,7 +118,7 @@ func TestGenerate_ReturnsADraftAndMetersIt(t *testing.T) {
 func TestGenerate_SeedsFromTheEntrysProseAndFacts(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, billingtest.Ungated(), nil, nil)
 
 	res, err := e.Generate(context.Background(), campaign,
 		portraitgen.Input{NodeID: uuid.New(), Prompt: "mid-laugh, holding a tankard"})
@@ -150,7 +151,7 @@ func TestGenerate_SeedsFromTheEntrysProseAndFacts(t *testing.T) {
 func TestGenerate_AnEmptyGMPromptIsFine(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, billingtest.Ungated(), nil, nil)
 
 	if _, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()}); err != nil {
 		t.Fatalf("Generate with no GM prompt: %v", err)
@@ -165,7 +166,7 @@ func TestGenerate_AnEmptyGMPromptIsFine(t *testing.T) {
 func TestGenerate_APrivateEntryIsNotFound(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{err: storage.ErrNotFound}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{err: storage.ErrNotFound}, billingtest.Ungated(), nil, nil)
 
 	_, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()})
 	if !errors.Is(err, storage.ErrNotFound) {
@@ -184,7 +185,7 @@ func TestGenerate_TooLargeIsPermanentAndUnmetered(t *testing.T) {
 	gen := okGen()
 	gen.err = imagegen.ErrImageTooLarge
 	rec := &countingRecorder{}
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, rec, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, billingtest.Ungated(), rec, nil)
 
 	_, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()})
 	if !errors.Is(err, imagegen.ErrImageTooLarge) {
@@ -199,7 +200,7 @@ func TestGenerate_TooLargeIsPermanentAndUnmetered(t *testing.T) {
 // shown a provider stack trace.
 func TestGenerate_NoKeyIsAnActionableRefusal(t *testing.T) {
 	t.Parallel()
-	e := portraitgen.New(factory(nil, "", portraitgen.ErrNotConfigured), &fakeSeeds{node: bart()}, nil, nil)
+	e := portraitgen.New(factory(nil, "", portraitgen.ErrNotConfigured), &fakeSeeds{node: bart()}, billingtest.Ungated(), nil, nil)
 	_, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()})
 	if !errors.Is(err, portraitgen.ErrNotConfigured) {
 		t.Fatalf("err = %v, want ErrNotConfigured", err)
@@ -210,7 +211,7 @@ func TestGenerate_NoKeyIsAnActionableRefusal(t *testing.T) {
 // deployment's key on a tenant that is not entitled to it (ADR-0054).
 func TestGenerate_EntitlementRefusalTravelsIntact(t *testing.T) {
 	t.Parallel()
-	e := portraitgen.New(factory(nil, "", llmbuild.ErrNoPlatformKeyEntitlement), &fakeSeeds{node: bart()}, nil, nil)
+	e := portraitgen.New(factory(nil, "", llmbuild.ErrNoPlatformKeyEntitlement), &fakeSeeds{node: bart()}, billingtest.Ungated(), nil, nil)
 	_, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()})
 	if !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
 		t.Fatalf("err = %v, want the entitlement refusal", err)
@@ -225,7 +226,7 @@ func TestGenerate_LongProseIsCutByRunes(t *testing.T) {
 	gen := okGen()
 	node := bart()
 	node.Body = strings.Repeat("ä", 40_000)
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: node}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: node}, billingtest.Ungated(), nil, nil)
 
 	if _, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()}); err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -248,7 +249,7 @@ func TestGenerate_AspectFloodIsBounded(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		node.Aspects = append(node.Aspects, storage.KGNodeAspect{Key: "k", Value: strings.Repeat("v", 20)})
 	}
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: node}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: node}, billingtest.Ungated(), nil, nil)
 
 	if _, err := e.Generate(context.Background(), campaign, portraitgen.Input{NodeID: uuid.New()}); err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -263,7 +264,7 @@ func TestGenerate_AspectFloodIsBounded(t *testing.T) {
 func TestGenerate_ANilNodeIDIsRefusedBeforeSpending(t *testing.T) {
 	t.Parallel()
 	gen := okGen()
-	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, nil, nil)
+	e := portraitgen.New(factory(gen, "m", nil), &fakeSeeds{node: bart()}, billingtest.Ungated(), nil, nil)
 	if _, err := e.Generate(context.Background(), campaign, portraitgen.Input{}); err == nil {
 		t.Fatal("a nil node id should be refused")
 	}

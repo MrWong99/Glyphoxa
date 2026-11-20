@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -40,7 +41,7 @@ func candidates(names ...string) []storage.KGNode {
 }
 
 func suggester(text *fakeText, seeds mapgen.SeedReader) *mapgen.Engine {
-	return mapgen.New(factory(okGen(), "m", nil), seeds, nil, nil).WithTextCaller(text)
+	return mapgen.New(factory(okGen(), "m", nil), seeds, billingtest.Ungated(), nil, nil).WithTextCaller(text)
 }
 
 var anchorSeeds = &fakeSeeds{
@@ -172,7 +173,7 @@ func TestSuggestPins_BoundsTheCandidateList(t *testing.T) {
 // TestSuggestPins_WithoutATextProviderIsUnavailable rather than guessing.
 func TestSuggestPins_WithoutATextProviderIsUnavailable(t *testing.T) {
 	t.Parallel()
-	e := mapgen.New(factory(okGen(), "m", nil), anchorSeeds, nil, nil)
+	e := mapgen.New(factory(okGen(), "m", nil), anchorSeeds, billingtest.Ungated(), nil, nil)
 	if _, err := e.SuggestPins(context.Background(), campaign, uuid.New(), candidates("A")); err == nil {
 		t.Fatal("suggestions without a text provider should be refused")
 	}

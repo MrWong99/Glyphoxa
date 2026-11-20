@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -202,7 +203,7 @@ func TestEnrichImageHandler_HappyPath(t *testing.T) {
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNGDATA"), ContentType: "image/png", PromptTokens: 40, OutputTokens: 1290}}
 	rec := &provRecorder{}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "gemini-2.5-flash-image", nil), rec, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "gemini-2.5-flash-image", nil), billingtest.Ungated(), rec, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 
 	if err := handler(context.Background(), payload); err != nil {
@@ -241,7 +242,7 @@ func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
 	blobs := newFakeBlobs()
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNGDATA"), ContentType: "image/png", OutputTokens: 1290}}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 
 	var wg sync.WaitGroup
@@ -290,7 +291,7 @@ func TestEnrichImageHandler_ReleasesClaimUnderCancelledCtx(t *testing.T) {
 	// A provider error is a release-then-return exit path.
 	gen := &fakeGen{err: errors.New("provider 503")}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -563,7 +564,7 @@ func TestEnrichImageHandler_Idempotent_AlreadyEnriched(t *testing.T) {
 	blobs := newFakeBlobs()
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("X"), ContentType: "image/png"}}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 	if err := handler(context.Background(), payload); err != nil {
 		t.Fatalf("handler: %v", err)
@@ -576,7 +577,7 @@ func TestEnrichImageHandler_Idempotent_AlreadyEnriched(t *testing.T) {
 func TestEnrichImageHandler_RowGone_Nil(t *testing.T) {
 	store := newFakeEnrichStore()
 	gen := &fakeGen{}
-	handler := EnrichImageHandler(store, newFakeBlobs(), factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, newFakeBlobs(), factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(uuid.New(), uuid.New())
 	if err := handler(context.Background(), payload); err != nil {
 		t.Fatalf("deleted highlight should be a clean nil, got %v", err)
@@ -592,7 +593,7 @@ func TestEnrichImageHandler_NotConfigured_Nil(t *testing.T) {
 	h := seedRow(store, tenantID)
 	blobs := newFakeBlobs()
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(nil, "", ErrImageNotConfigured), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(nil, "", ErrImageNotConfigured), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 	if err := handler(context.Background(), payload); err != nil {
 		t.Fatalf("unconfigured provider should be a clean nil, got %v", err)
@@ -611,7 +612,7 @@ func TestEnrichImageHandler_GeneratorError_ReturnsErr_RowUntouched(t *testing.T)
 	blobs := newFakeBlobs()
 	gen := &fakeGen{err: errors.New("provider 503")}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 	if err := handler(context.Background(), payload); err == nil {
 		t.Fatal("generator error must return an error so the runner retries")
@@ -638,7 +639,7 @@ func TestEnrichImageHandler_NoImage_IsTerminal(t *testing.T) {
 	blobs := newFakeBlobs()
 	gen := &fakeGen{err: fmt.Errorf("generate: %w", imagegen.ErrNoImage)}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 	if err := handler(context.Background(), payload); err != nil {
 		t.Fatalf("handler err = %v, want nil (terminal: the job completes, no retry, no boot re-enqueue)", err)
@@ -682,7 +683,7 @@ func TestEnrichImageHandler_UpstreamFailures_StayRetryable(t *testing.T) {
 			blobs := newFakeBlobs()
 			gen := &fakeGen{err: &imagegen.StatusError{StatusCode: tc.status, Body: `{"error":{"message":"nope"}}`}}
 
-			handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+			handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 			payload, _ := MarshalEnrichImage(h.ID, tenantID)
 			err := handler(context.Background(), payload)
 			if err == nil {
@@ -719,7 +720,7 @@ func TestEnrichImageHandler_Compensation_RowDeletedDuringWrite(t *testing.T) {
 	blobs := newFakeBlobs()
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNG"), ContentType: "image/png", OutputTokens: 1290}}
 
-	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), billingtest.Ungated(), nil, nil)
 	payload, _ := MarshalEnrichImage(h.ID, tenantID)
 	if err := handler(context.Background(), payload); err != nil {
 		t.Fatalf("a row deleted mid-write should be a clean nil, got %v", err)
