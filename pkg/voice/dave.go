@@ -23,8 +23,10 @@ import (
 // Ready once closed (or on a never-E2EE channel): disgo gates its per-session
 // audio sender AND receiver goroutines on DAVE().Ready(), and both of their
 // only exit paths (the net.ErrClosed read, the #581 provider poke) sit behind
-// that gate — an unready session at teardown otherwise strands the receiver's
-// non-blocking poll loop spinning at a full core forever (#586).
+// that gate — an unready session at teardown otherwise strands both goroutines,
+// waking every 20 ms forever, and a never-E2EE channel never moves audio at all
+// (#586; see reapableDaveSession for why disgo v0.20.0's not-ready sleep made
+// this a leak rather than the old full-core spin, but did not remove it).
 func DaveOption() bot.ConfigOpt {
 	return bot.WithVoiceManagerConfigOpts(
 		voice.WithDaveSessionCreateFunc(WrapDaveSessionCreate(davesession.CreateFunc())),
