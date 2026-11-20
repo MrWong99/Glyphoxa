@@ -26,8 +26,8 @@ type FlushFunc func(ctx context.Context, rows []storage.UsageRow) error
 // pipeline plumbing — and it never gates anything: attribution only.
 //
 // Buffering is in-memory until Flush: a crash loses the usage metered since the
-// last flush (at most one flush interval), which the ADR accepts for an estimates-only ledger (the
-// Prometheus counters still moved).
+// last flush (at most one flush interval), which the ADR accepts for an
+// estimates-only ledger (the Prometheus counters still moved).
 type Ledger struct {
 	tenantID uuid.UUID
 	now      func() time.Time

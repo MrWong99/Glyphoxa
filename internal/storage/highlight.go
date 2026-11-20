@@ -18,7 +18,7 @@ import (
 //
 // Read/promote/delete are tenant-scoped (single-operator today, ADR-0039, but the
 // WHERE tenant_id guard is the seam the multi-tenant future keys off). The two
-// sweep helpers — DeleteSessionCandidates (the 7-day purge job) and
+// sweep helpers — PurgeSessionCandidates (the 7-day purge job) and
 // ListCampaignHighlightClipKeys (the campaign hard-delete blob sweep) — scope by
 // session/campaign instead: their callers carry no tenant, only the owning id.
 
