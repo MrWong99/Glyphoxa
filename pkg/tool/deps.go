@@ -130,9 +130,11 @@ type KGWriter interface {
 // target (#411), gathered by the [KGWriter] adapter and judged by the handler:
 //
 //   - Pending is the salient text of every pending Knowledge Proposal addressing
-//     the SAME target (per [ProposalTargetKey]). It is both a dedup candidate set
-//     and the echo list fed back to the model so it can see what it has already
-//     proposed this session and stop repeating itself (ADR-0052 mechanism c).
+//     the SAME target (as the adapter resolves it: anchor node id, else the
+//     subject, resolved onto a Node where one is named). It is both a dedup
+//     candidate set and the echo list fed back to the model so it can see what
+//     it has already proposed this session and stop repeating itself (ADR-0052
+//     mechanism c).
 //   - Established is the target Node's already-canon facts (its body, split into
 //     lines). A re-proposal that matches one creates no row.
 //

@@ -376,7 +376,8 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, agentID string, w tool.
 	return known, nil
 }
 
-// canonicalTargetKey is [tool.ProposalTargetKey] with subject-name → node-id
+// canonicalTargetKey identifies the entity a proposal is ABOUT (anchor node id,
+// else normalized subject, else a new entry's name) with subject-name → node-id
 // resolution layered on: a subject that names a real Node collapses onto the
 // node-id key so own_node and campaign proposals about the same entity unify. An
 // unresolvable name keeps the pure "subj:" key; an empty target yields "".

@@ -33,27 +33,6 @@ func ProposalSalient(w ProposedWrite) string {
 	}
 }
 
-// ProposalTargetKey identifies the entity a proposal is ABOUT, so the guard only
-// compares proposals addressing the same target — a coincidental text clash
-// between two different subjects is never suppressed. An own_node proposal is
-// keyed by its anchor node id (subject is cosmetic there); a campaign fact/edge by
-// its normalized subject; a new entry by its own normalized name. An empty key
-// means "no identifiable target" and the caller skips dedup.
-func ProposalTargetKey(w ProposedWrite) string {
-	if w.NodeID != "" {
-		return "id:" + w.NodeID
-	}
-	if s := textnorm.Normalize(w.Subject); s != "" {
-		return "subj:" + s
-	}
-	if w.Kind == kgvocab.KindNode {
-		if n := textnorm.Normalize(w.Name); n != "" {
-			return "name:" + n
-		}
-	}
-	return ""
-}
-
 // firstKnownMatch returns the raw existing text whose normalized form equals the
 // normalized salient text, or ok=false when the salient is new (or empty). It
 // returns the RAW candidate so the tool result can echo the exact known wording
