@@ -84,7 +84,10 @@ func (s *kgOrganize) SetNodeTags(
 
 	if err := s.store.SetNodeTags(ctx, c.ID, nodeID, req.Msg.GetTags()); err != nil {
 		if errors.Is(err, storage.ErrInvalidTag) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("entry not found"))
 		}
 		slog.Default().Error("SetNodeTags: store write failed", "node_id", nodeID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -114,7 +117,7 @@ func (s *kgOrganize) RenameTag(
 	}
 	if err := s.store.RenameTag(ctx, c.ID, from, to); err != nil {
 		if errors.Is(err, storage.ErrInvalidTag) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
 		slog.Default().Error("RenameTag: store write failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -159,7 +162,7 @@ func (s *kgOrganize) CreateBoard(
 	b, err := s.store.CreateBoard(ctx, c.ID, name)
 	if err != nil {
 		if errors.Is(err, storage.ErrInvalidTag) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
 		slog.Default().Error("CreateBoard: store write failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -203,7 +206,7 @@ func (s *kgOrganize) UpdateBoard(
 				errors.New("board or entry not found in this campaign"))
 		}
 		if errors.Is(err, storage.ErrInvalidTag) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
 		slog.Default().Error("UpdateBoard: save failed", "board_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))

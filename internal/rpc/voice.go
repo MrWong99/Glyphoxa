@@ -710,7 +710,7 @@ func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUI
 	case err == nil:
 		return key, nil
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
-		return "", connect.NewError(connect.CodeFailedPrecondition, llmbuild.ErrNoPlatformKeyEntitlement)
+		return "", connect.NewError(connect.CodeFailedPrecondition, gmError(llmbuild.ErrNoPlatformKeyEntitlement))
 	case cfgPtr != nil && s.cipher == nil:
 		return "", connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))

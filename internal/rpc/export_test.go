@@ -47,3 +47,6 @@ func (s *ProviderServer) SetEnvLookupForTest(fn func(string) string) {
 func (s *ProviderServer) SetVoiceChannelCheckForTest(fn func(ctx context.Context, token, guildID, channelID string) (bool, error)) {
 	s.voiceChannelInGuild = fn
 }
+
+// GMText exposes the GM-facing sentinel-text rewrite.
+var GMText = gmText

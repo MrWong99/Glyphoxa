@@ -2,6 +2,9 @@ package rpc_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -76,6 +79,32 @@ func TestTagsValidation(t *testing.T) {
 			connect.NewRequest(&managementv1.SetNodeTagsRequest{NodeId: uuid.New().String()}))
 		if connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+		}
+	})
+
+	t.Run("an invalid tag reaches the GM without the storage prefix", func(t *testing.T) {
+		store := newFakeOrganizeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		store.tagErr = fmt.Errorf("%w: %q is too long (max 40 characters)", storage.ErrInvalidTag, "x")
+		_, err := organizeClient(t, store).SetNodeTags(context.Background(),
+			connect.NewRequest(&managementv1.SetNodeTagsRequest{NodeId: uuid.New().String()}))
+		var ce *connect.Error
+		if !errors.As(err, &ce) || strings.Contains(ce.Message(), "storage:") {
+			t.Errorf("message = %v, want no package prefix", err)
+		}
+		if !strings.HasPrefix(ce.Message(), "invalid tag:") {
+			t.Errorf("message = %q, want it to keep the sentinel's meaning", ce.Message())
+		}
+	})
+
+	t.Run("an unknown entry is NotFound", func(t *testing.T) {
+		store := newFakeOrganizeStore()
+		store.campaign = storage.Campaign{ID: uuid.New()}
+		store.tagErr = storage.ErrNotFound
+		_, err := organizeClient(t, store).SetNodeTags(context.Background(),
+			connect.NewRequest(&managementv1.SetNodeTagsRequest{NodeId: uuid.New().String()}))
+		if connect.CodeOf(err) != connect.CodeNotFound {
+			t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
 		}
 	})
 

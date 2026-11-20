@@ -89,6 +89,19 @@ func (s *Store) SetNodeTags(ctx context.Context, campaignID, nodeID uuid.UUID, t
 	}
 
 	return s.InTx(ctx, func(tx *Store) error {
+		// An unknown node (or another campaign's) is ErrNotFound for every tag
+		// set: without this an empty save "succeeded" on nothing and a non-empty
+		// one surfaced the FK violation as an internal error (R10). FOR SHARE
+		// holds the node against a concurrent delete until the insert lands.
+		var exists bool
+		if err := tx.db.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM kg_node WHERE id = $1 AND campaign_id = $2 FOR SHARE)`,
+			nodeID, campaignID).Scan(&exists); err != nil {
+			return fmt.Errorf("storage: set node tags %s: check node: %w", nodeID, err)
+		}
+		if !exists {
+			return ErrNotFound
+		}
 		if _, err := tx.db.Exec(ctx,
 			`DELETE FROM kg_node_tag WHERE node_id = $1 AND campaign_id = $2`,
 			nodeID, campaignID); err != nil {

@@ -298,6 +298,14 @@ func TestNodeTags(t *testing.T) {
 		t.Fatalf("SetNodeTags town: %v", err)
 	}
 
+	// An unknown node (or one of another campaign) is ErrNotFound — with tags
+	// it used to be a raw FK violation, without tags a silent success (R10).
+	for name, tags := range map[string][]string{"with tags": {"x"}, "empty": nil} {
+		if err := st.SetNodeTags(ctx, campaignID, uuid.New(), tags); !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("SetNodeTags(unknown node, %s) = %v, want ErrNotFound", name, err)
+		}
+	}
+
 	pairs, err := st.CampaignTags(ctx, campaignID)
 	if err != nil {
 		t.Fatalf("CampaignTags: %v", err)
