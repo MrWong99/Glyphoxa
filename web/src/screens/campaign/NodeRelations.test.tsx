@@ -338,4 +338,32 @@ describe("NodeRelations", () => {
     // Trimmed, because a trailing space is not texture.
     expect(ctx.detailCalls[0].note).toBe("owes you money since the siege");
   });
+
+  it("closes the texture editor after EVERY save of the same relation, not just the first (W13)", async () => {
+    const ctx = renderRelations(npcNode, {
+      outgoing: [
+        create(EdgeSchema, {
+          id: "e1",
+          fromNodeId: "n1",
+          toNodeId: "n2",
+          edgeType: EdgeType.KNOWS,
+          toNodeName: "Mira",
+          toNodeType: NodeType.NPC,
+        }),
+      ],
+    });
+    const toggle = await screen.findByRole("button", { name: /Edit what knows/ });
+
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText("What it's like"), { target: { value: "wary" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByLabelText("What it's like")).not.toBeInTheDocument());
+
+    // Second edit of the SAME relation: it must save and close again.
+    fireEvent.click(toggle);
+    fireEvent.change(await screen.findByLabelText("What it's like"), { target: { value: "hostile" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(ctx.detailCalls).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByLabelText("What it's like")).not.toBeInTheDocument());
+  });
 });

@@ -17,7 +17,7 @@
 // the whitespace that separated it from its neighbours (the renderer puts a
 // single space back).
 
-export type AudioTagSegment = { kind: "text"; text: string } | { kind: "tag"; text: string };
+type AudioTagSegment = { kind: "text"; text: string } | { kind: "tag"; text: string };
 
 // A candidate bracket: no nested brackets or newlines inside.
 const BRACKET = /\[([^[\]\n]{1,40})\]/g;

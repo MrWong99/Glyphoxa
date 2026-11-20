@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useState,
   type ReactNode,
 } from "react";
@@ -41,22 +42,38 @@ export const en = {
 export type MessageKey = keyof typeof en;
 export type Lang = "en" | "de";
 
-// Each fragment's `de` is already compile-checked against its own `en`; this
-// merged map then satisfies Record<MessageKey, string> by construction.
-const de: Record<MessageKey, string> = {
-  ...common.de,
-  ...shell.de,
-  ...components.de,
-  ...configuration.de,
-  ...campaign.de,
-  ...chat.de,
-  ...knowledge.de,
-  ...palette.de,
-  ...session.de,
-  ...auth.de,
+type Catalog = Record<MessageKey, string>;
+
+// English is always in the bundle: it is the key source of truth and the
+// per-key fallback. Every other catalog is fetched the first time its language
+// is used (./de.ts ships as its own chunk), so a visitor only downloads the
+// language they read. Each fragment's `de` is compile-checked against its own
+// `en`, so the assembled map satisfies Catalog by construction.
+const catalogs: Partial<Record<Lang, Catalog>> = { en };
+
+const loaders: Record<Exclude<Lang, "en">, () => Promise<Catalog>> = {
+  de: () => import("./de").then((m) => m.de as Catalog),
 };
 
-const catalogs: Record<Lang, Record<MessageKey, string>> = { en, de };
+const loading = new Map<Lang, Promise<void>>();
+
+// loadCatalog makes a language's strings available; it resolves at once for
+// one that is already in memory and shares one request between concurrent
+// callers. A failed fetch (offline, a chunk a deploy replaced) is forgotten so
+// the next call retries; until then tFor falls back to English per key.
+export function loadCatalog(lang: Lang): Promise<void> {
+  if (lang === "en" || catalogs[lang]) return Promise.resolve();
+  let pending = loading.get(lang);
+  if (!pending) {
+    pending = loaders[lang]()
+      .then((catalog) => {
+        catalogs[lang] = catalog;
+      })
+      .finally(() => loading.delete(lang));
+    loading.set(lang, pending);
+  }
+  return pending;
+}
 
 export const LANGS: readonly Lang[] = ["en", "de"];
 
@@ -75,7 +92,7 @@ function format(template: string, params?: MsgParams): string {
 }
 
 function tFor(lang: Lang): TFunc {
-  const catalog = catalogs[lang];
+  const catalog = catalogs[lang] ?? en;
   return (key, params) => format(catalog[key] ?? en[key], params);
 }
 
@@ -88,7 +105,9 @@ function isLang(v: unknown): v is Lang {
 // Stored choice wins; otherwise the browser's language picks the initial
 // display language (German browsers land in German without touching the
 // picker). jsdom reports "en-US", so unit tests render English by default.
-function detectLang(): Lang {
+// Exported so main.tsx can fetch that language's catalog BEFORE the first
+// render — a German visitor never sees an English frame flash by.
+export function detectLang(): Lang {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (isLang(stored)) return stored;
@@ -110,6 +129,23 @@ const I18nContext = createContext<I18n>({ lang: "en", setLang: () => {}, t: tFor
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>(detectLang);
+  // Steps when a catalog finishes loading, so `t` is rebuilt against it.
+  const [catalogEpoch, catalogArrived] = useReducer((n: number) => n + 1, 0);
+
+  // The safety net behind main.tsx's pre-render load (and the only path in a
+  // tree mounted without it): if the active language's catalog is not in
+  // memory yet, fetch it and re-render when it lands.
+  useEffect(() => {
+    if (catalogs[lang]) return;
+    let live = true;
+    loadCatalog(lang).then(
+      () => live && catalogArrived(),
+      () => {}, // stays on the English fallback; the next language change retries
+    );
+    return () => {
+      live = false;
+    };
+  }, [lang]);
 
   useEffect(() => {
     // Keep the document's lang attribute honest for screen readers and
@@ -121,16 +157,26 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     () => ({
       lang,
       setLang: (next: Lang) => {
-        setLangState(next);
         try {
           localStorage.setItem(STORAGE_KEY, next);
         } catch {
           // storage unavailable — the choice still applies for this visit
         }
+        // Switch once the strings are here, so the screen goes from one
+        // language straight to the other instead of through English. Already
+        // in memory (the common case after the first switch) is synchronous.
+        if (catalogs[next]) {
+          setLangState(next);
+          return;
+        }
+        const apply = () => setLangState(next);
+        void loadCatalog(next).then(apply, apply);
       },
       t: tFor(lang),
     }),
-    [lang],
+    // catalogEpoch: tFor closes over the catalog that was in memory when it ran.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lang, catalogEpoch],
   );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

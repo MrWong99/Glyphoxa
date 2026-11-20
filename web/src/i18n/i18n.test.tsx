@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 
-import { I18nProvider, useI18n, en } from "./index";
+import { I18nProvider, loadCatalog, useI18n, en } from "./index";
 
 // The de catalog's completeness is compile-checked (Record<keyof en, string>
 // per fragment); these tests cover the runtime behavior — interpolation, the
@@ -51,6 +51,21 @@ describe("i18n", () => {
   it("works without a provider (unit-test default is English)", () => {
     render(<Probe />);
     expect(screen.getByTestId("save").textContent).toBe("Save");
+  });
+
+  // The German catalog is assembled in ./de.ts behind a dynamic import (its own
+  // chunk), through `?de`-suffixed imports that hide the fragments' types from
+  // the checker. This is the runtime twin of the per-fragment compile check: a
+  // fragment left out of de.ts would otherwise fall back to English silently.
+  it("the lazily loaded German catalog covers exactly the English keys", async () => {
+    const { de } = await import("./de");
+    expect(Object.keys(de).sort()).toEqual(Object.keys(en).sort());
+    for (const value of Object.values(de)) expect(value).not.toBe("");
+  });
+
+  it("loadCatalog is idempotent and resolves for the bundled language", async () => {
+    await expect(loadCatalog("en")).resolves.toBeUndefined();
+    await expect(Promise.all([loadCatalog("de"), loadCatalog("de")])).resolves.toBeDefined();
   });
 
   it("interpolates {param} placeholders and leaves unknown ones intact", () => {

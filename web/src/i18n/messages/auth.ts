@@ -98,6 +98,15 @@ export const en = {
 
   // ---- Legal page chrome (#518) — the documents themselves stay verbatim ----
   "auth.legalUpdatedLabel": "Last updated:",
+
+  // ---- Router-level error + not-found pages ----
+  "auth.errorTitle": "Something went wrong",
+  "auth.errorLede": "This page ran into an unexpected error. Nothing you saved is lost — try again, or reload the page.",
+  "auth.errorRetry": "Try again",
+  "auth.errorReload": "Reload page",
+  "auth.errorDetails": "Technical details",
+  "auth.notFoundLede": "There is no page at this address.",
+  "auth.notFoundHome": "Back to the start page",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -184,4 +193,12 @@ export const de: Record<keyof typeof en, string> = {
   "auth.placeholderBackToSetup": "Zur Einrichtung",
 
   "auth.legalUpdatedLabel": "Stand:",
+
+  "auth.errorTitle": "Etwas ist schiefgelaufen",
+  "auth.errorLede": "Auf dieser Seite ist ein unerwarteter Fehler aufgetreten. Gespeichertes geht dabei nicht verloren — versuch es noch einmal oder lade die Seite neu.",
+  "auth.errorRetry": "Erneut versuchen",
+  "auth.errorReload": "Seite neu laden",
+  "auth.errorDetails": "Technische Details",
+  "auth.notFoundLede": "Unter dieser Adresse gibt es keine Seite.",
+  "auth.notFoundHome": "Zur Startseite",
 };

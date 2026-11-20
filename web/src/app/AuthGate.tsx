@@ -6,6 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 import { errorMessage, isUnauthenticated } from "@/lib/connectError";
+import { rememberReturnTo } from "@/lib/returnTo";
 import { useI18n } from "@/i18n";
 
 // AuthGate is the SPA boot gate (ADR-0016 / ADR-0039): it probes
@@ -14,6 +15,11 @@ import { useI18n } from "@/i18n";
 // shell), so the sidebar shows the real identity instead of a hardcoded one.
 // retry is off so a 401 redirects immediately rather than after react-query's
 // default backoff.
+//
+// It is also where a session that lapses MID-USE ends up: the query client
+// re-probes GetCurrentUser when any other call comes back Unauthenticated
+// (lib/queryClient.ts), this gate sees the probe fail and redirects. The path
+// being left is parked first so the sign-in lands back on it (lib/returnTo.ts).
 export function AuthGate({ children }: { children: (user: User) => ReactNode }) {
   const { t } = useI18n();
   const navigate = useNavigate();
@@ -27,11 +33,16 @@ export function AuthGate({ children }: { children: (user: User) => ReactNode }) 
 
   useEffect(() => {
     if (unauthenticated) {
+      rememberReturnTo(window.location.pathname + window.location.search);
       void navigate({ to: "/login" });
     }
   }, [unauthenticated, navigate]);
 
-  if (status === "success" && data.user) {
+  // `data`, not `status === "success"`: a background re-probe that fails for a
+  // NON-auth reason (a blip, a restart) flips the status to error while the
+  // operator is still signed in — tearing the whole shell down for that would
+  // discard every screen's state over nothing.
+  if (data?.user && !unauthenticated) {
     return <>{children(data.user)}</>;
   }
 

@@ -15,7 +15,7 @@ import type { MessageKey } from "@/i18n";
 // Nothing here mutates anything (ADR-0052's no-auto-merge posture generalised):
 // every finding is a pointer to the editor, never a button that rewrites the wiki.
 
-export type Finding = {
+type Finding = {
   /** The Node to open in the editor, or "" when the finding is about an Agent. */
   nodeID: string;
   /** The Agent to open on the roster, for findings whose fix is not a Node. */
@@ -30,7 +30,7 @@ export type Finding = {
   detail?: MessageKey;
 };
 
-export type HealthCategory = {
+type HealthCategory = {
   key: string;
   /** Message key for the category heading; translated at render time. */
   title: MessageKey;

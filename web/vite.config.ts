@@ -1,14 +1,57 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { readdirSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath, URL } from "node:url";
+
+// pruneStaleAssets removes the hashed files of EARLIER builds from
+// <outDir>/assets. With emptyOutDir off (see below) every `npm run build` only
+// ever added files there, and `//go:embed all:dist` embeds whatever is on
+// disk — a dev binary quietly carried every bundle ever built on that machine
+// (tens of MB). It touches nothing outside assets/: the tracked placeholder
+// index.html and the copied public files are left to Vite.
+//
+// It runs AFTER this build's files are written, keeping exactly the set Vite
+// just emitted, rather than wiping the directory up front: a build that fails
+// halfway must not leave an index.html whose assets were already deleted
+// (internal/spa.TestEmbeddedIndexReferencesResolve would catch it, but only
+// after the working tree is broken).
+function pruneStaleAssets(): Plugin {
+  let assetsPath = "";
+  let assetsDir = "assets";
+  return {
+    name: "gx-prune-stale-assets",
+    apply: "build",
+    configResolved(config) {
+      assetsDir = config.build.assetsDir;
+      assetsPath = join(resolve(config.root, config.build.outDir), assetsDir);
+    },
+    writeBundle(_options, bundle) {
+      const emitted = new Set(Object.keys(bundle));
+      let present: string[];
+      try {
+        present = readdirSync(assetsPath);
+      } catch {
+        return; // nothing built into assets/ — nothing to prune
+      }
+      for (const name of present) {
+        if (!emitted.has(`${assetsDir}/${name}`)) {
+          rmSync(join(assetsPath, name), { recursive: true, force: true });
+        }
+      }
+    },
+  };
+}
 
 // The built bundle lands in internal/spa/dist so Go's `//go:embed all:dist`
 // picks it up (ADR-0013/0039). emptyOutDir is FALSE: the committed placeholder
 // index.html that keeps `go build` working on a fresh checkout must NOT be
-// deleted by a dev's local `vite build` before it writes the real one.
+// deleted by a dev's local `vite build` before it writes the real one. The
+// stale hashed assets that policy would otherwise pile up are pruned by
+// pruneStaleAssets instead.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), pruneStaleAssets()],
   resolve: {
     alias: {
       "@gen": fileURLToPath(new URL("../gen/ts", import.meta.url)),

@@ -16,6 +16,9 @@ export const en = {
   "common.advancedHint": "Extra options most groups never need — open only if you're looking for something specific.",
   "common.language": "Language",
   "common.displayLanguage": "Display language",
+  "common.discardChangesTitle": "Discard unsaved changes?",
+  "common.discardChangesDesc": "You have edits that haven't been saved yet. If you continue, they are lost.",
+  "common.discardChangesConfirm": "Discard changes",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -31,4 +34,7 @@ export const de: Record<keyof typeof en, string> = {
   "common.advancedHint": "Zusätzliche Optionen, die die meisten Gruppen nie brauchen — nur öffnen, wenn du etwas Bestimmtes suchst.",
   "common.language": "Sprache",
   "common.displayLanguage": "Anzeigesprache",
+  "common.discardChangesTitle": "Ungespeicherte Änderungen verwerfen?",
+  "common.discardChangesDesc": "Du hast Änderungen, die noch nicht gespeichert sind. Wenn du fortfährst, gehen sie verloren.",
+  "common.discardChangesConfirm": "Änderungen verwerfen",
 };

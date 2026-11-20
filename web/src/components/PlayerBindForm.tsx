@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
 
 import type { DiscordVoiceMember } from "@gen/glyphoxa/management/v1/management_pb";
@@ -42,6 +42,7 @@ export function PlayerBindForm({
   onSubmit,
   onCancel,
   onDelete,
+  onDirtyChange,
 }: {
   initial?: PlayerBindFields;
   members: DiscordVoiceMember[];
@@ -51,6 +52,8 @@ export function PlayerBindForm({
   onSubmit: (fields: PlayerBindFields) => void;
   onCancel?: () => void;
   onDelete?: () => void;
+  /** Reports whether the fields differ from `initial` (the saved Character). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useI18n();
   const [name, setName] = useState(initial?.name ?? "");
@@ -90,8 +93,33 @@ export function PlayerBindForm({
 
   const submit = () => {
     if (!canSubmit) return;
-    onSubmit({ name: name.trim(), aliases, discordUserId: discordUserId.trim() });
+    // An alias still sitting in the draft box counts: the GM typed it and
+    // pressed Save, and dropping it because they did not press Enter/Add first
+    // lost the alias without a word.
+    const draft = aliasDraft.trim();
+    const allAliases = draft !== "" && !aliases.includes(draft) ? [...aliases, draft] : aliases;
+    if (draft !== "") {
+      setAliases(allAliases);
+      setAliasDraft("");
+    }
+    onSubmit({ name: name.trim(), aliases: allAliases, discordUserId: discordUserId.trim() });
   };
+
+  // Dirtiness is derived against the live `initial`: the list refetch after a
+  // save updates it, so a saved form reads clean again without bookkeeping.
+  const isDirty =
+    name !== (initial?.name ?? "") ||
+    discordUserId !== (initial?.discordUserId ?? "") ||
+    aliasDraft.trim() !== "" ||
+    aliases.join("\u0000") !== (initial?.aliases ?? []).join("\u0000");
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(
+    () => () => onDirtyChange?.(false), // unmount lifts the guard
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   return (
     <div className="gx-playerform">

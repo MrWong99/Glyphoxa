@@ -89,6 +89,8 @@ export function DiscordLinkAutofill({
     if (!value.trim()) {
       currentCode.current = null;
       setLinkError(null);
+      // The link the confirmation described is gone from the box.
+      setResolvedGuild(null);
       return;
     }
     const parsed = parseDiscordLink(value);
@@ -101,6 +103,10 @@ export function DiscordLinkAutofill({
       // Self-describing: the guild id is in the URL, fill locally with no round-trip.
       currentCode.current = null;
       setLinkError(null);
+      // The id now comes from THIS link, not from the invite resolved earlier:
+      // leaving "Server ID filled in from <that server>" up would name the
+      // wrong server beside a different id.
+      setResolvedGuild(null);
       onFill(parsed.guildId);
       return;
     }
