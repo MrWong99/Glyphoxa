@@ -8,3 +8,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # The console SPA (web/package-lock.json).
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+  # Base images in the Dockerfile (golang build stage; the runtime is scratch).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

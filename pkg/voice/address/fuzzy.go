@@ -28,6 +28,14 @@ type NameMatchConfig struct {
 	// match through the edit net. Default 2.
 	MaxEditDistance int
 
+	// LongNameRunes is the rune length from which the edit-distance net may
+	// spend the full MaxEditDistance (ADR-0024 amendment, 2026-11-20). Below it
+	// the net allows a single edit: two edits on a four-rune name rewrite half
+	// of it ("Bart" → Start/Warte/harte), which is a different word, not a
+	// mishearing. A short name's second edit is still reachable WITH phonetic
+	// agreement ("Meera" for "Mira", "Rolph" for "Rolf"). Default 7.
+	LongNameRunes int
+
 	// PhoneticScore is the similarity awarded when a candidate and a name share
 	// a phonetic code but are not byte-identical. It sits below the exact-match
 	// score of 1.0 so a clean match always outranks a homophone. Default 0.9.
@@ -43,6 +51,9 @@ func (c NameMatchConfig) withDefaults() NameMatchConfig {
 	}
 	if c.MaxEditDistance <= 0 {
 		c.MaxEditDistance = 2
+	}
+	if c.LongNameRunes <= 0 {
+		c.LongNameRunes = 7
 	}
 	if c.PhoneticScore <= 0 {
 		c.PhoneticScore = 0.9
@@ -81,6 +92,11 @@ type fuzzyIndex struct {
 	entries []nameEntry
 	codes   []string // phonetic code per entry, parallel to entries ("" if no encoder)
 	window  int      // effective max window: max(cfg.MaxWindow, longest name)
+	// common is the Campaign Language's everyday-word list ([commonWordsFor]),
+	// consulted only on the address path ([fuzzyIndex.score] with
+	// addressEvidence): a single utterance token that is itself an everyday word
+	// is never accepted as a MISHEARD name. Nil disables the check.
+	common map[string]struct{}
 }
 
 // newFuzzyIndex builds the index for names, where names[i] is the list of
@@ -225,7 +241,7 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 	for i, w := range words {
 		toks[i] = utterToken{text: w}
 	}
-	best, _, _ := idx.score(toks, nil)
+	best, _, _ := idx.score(toks, nil, false)
 	return best
 }
 
@@ -242,7 +258,23 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 // exact hit. toks are the offset utterance tokens and markAfter their gap-marker
 // table from [offsetTokenize]; best/flagged/positions are meaningful only for
 // agents with best > 0.
-func (idx *fuzzyIndex) score(toks []utterToken, markAfter []bool) (best map[int]float64, flagged map[int]bool, positions map[int]int) {
+//
+// addressEvidence selects the Address Detection rule for NON-EXACT hits (ADR-0024
+// amendment, 2026-11-20). An exact name always counts. A fuzzy hit — a phonetic
+// or edit-distance neighbour, or a derived truncation alias — is by construction
+// "a different word that sounds like the name", and everyday speech is full of
+// those; on its own it is not evidence that anybody was addressed. With
+// addressEvidence set such a span counts only when BOTH of these hold:
+//
+//   - it is Vocative-flagged: punctuation-bracketed as a direct address
+//     ("Bard, …", "…, Barth?"), never a word inside a clause ("das Brot");
+//   - it is not a single everyday word of the Campaign Language
+//     ("Great, let's go" is not "Greta, let's go"; see [commonWordsFor]).
+//
+// Without addressEvidence every span counts as before; that is the mention
+// index's mode ([NameIndex]), which asks "was this entry named", not "was it
+// addressed", and has no punctuation to read.
+func (idx *fuzzyIndex) score(toks []utterToken, markAfter []bool, addressEvidence bool) (best map[int]float64, flagged map[int]bool, positions map[int]int) {
 	best = map[int]float64{}
 	flagged = map[int]bool{}
 	positions = map[int]int{}
@@ -300,6 +332,14 @@ func (idx *fuzzyIndex) score(toks []utterToken, markAfter []bool) (best map[int]
 			if s <= 0 {
 				continue
 			}
+			if addressEvidence && s < 1.0 {
+				if !c.flag {
+					continue
+				}
+				if _, everyday := idx.common[c.joined]; everyday && c.start == c.end && !entry.initialOnly {
+					continue
+				}
+			}
 			ai := entry.agentIdx
 			cur, seen := best[ai]
 			switch {
@@ -338,32 +378,48 @@ func (idx *fuzzyIndex) score(toks []utterToken, markAfter []bool) (best map[int]
 // similarity scores one candidate window against one name entry. The tiers,
 // in order: exact byte-equality (1.0); for inputs long enough to fuzz, a shared
 // phonetic code ([NameMatchConfig.PhoneticScore]); otherwise the edit-distance
-// net, scoring 1 − d/maxLen for distances within the bound. Inputs shorter than
-// the rune floor are exact-only and never reach the fuzzy tiers.
+// net, scoring 1 − d/maxLen — one edit for a short name, the full bound from
+// [NameMatchConfig.LongNameRunes]. Inputs shorter than the rune floor are
+// exact-only and never reach the fuzzy tiers.
+//
+// The phonetic tier is deliberately NOT bounded by edit distance. A code drops
+// the vowels and collapses the consonants, so a short name shares its code with
+// plenty of everyday words ("Bart" ≡ bereit/Brot/Pirat, "Mira" ≡ mehr/Meer) —
+// but it also shares it with the cross-orthography renderings the tier exists
+// for ("Yeager" for "Jäger", "nite" for "Knight", #199), which sit three and
+// four edits out, farther than the collisions. Distance cannot tell the two
+// apart; position can, which is why the Address Detector accepts a fuzzy hit
+// only with vocative evidence (see [fuzzyIndex.score]).
 func (idx *fuzzyIndex) similarity(candJoined, candCode, nameJoined, nameCode string) float64 {
 	if candJoined == nameJoined {
 		return 1.0
 	}
 	// The rune floor guards the shorter of the two strings: a 3-rune name must
 	// be matched exactly even by a long candidate, and vice versa.
-	if runeLen(candJoined) < idx.cfg.MinRunes || runeLen(nameJoined) < idx.cfg.MinRunes {
+	shorter, longer := runeLen(candJoined), runeLen(nameJoined)
+	if shorter > longer {
+		shorter, longer = longer, shorter
+	}
+	if shorter < idx.cfg.MinRunes {
 		return 0
 	}
 	if idx.enc != nil && candCode != "" && candCode == nameCode {
 		return idx.cfg.PhoneticScore
 	}
+	// The length gap is a lower bound on the edit distance, so most candidate
+	// windows are rejected here without running the O(n·m) distance.
+	maxEdits := idx.cfg.MaxEditDistance
+	if shorter < idx.cfg.LongNameRunes && maxEdits > 1 {
+		maxEdits = 1
+	}
+	if longer-shorter > maxEdits {
+		return 0
+	}
 	d := matchr.DamerauLevenshtein(candJoined, nameJoined)
-	if d > idx.cfg.MaxEditDistance {
+	if d > maxEdits {
 		return 0
 	}
-	maxLen := runeLen(candJoined)
-	if l := runeLen(nameJoined); l > maxLen {
-		maxLen = l
-	}
-	if maxLen == 0 {
-		return 0
-	}
-	score := 1 - float64(d)/float64(maxLen)
+	score := 1 - float64(d)/float64(longer)
 	// Keep the edit net strictly below a phonetic hit so the tiers stay ordered.
 	if idx.enc != nil && score >= idx.cfg.PhoneticScore {
 		score = idx.cfg.PhoneticScore - 0.01

@@ -14,17 +14,16 @@ The binary runs one Mode at a time via `-mode` (ADR-0005):
 
 | Mode | Serves | Needs |
 |------|--------|-------|
-| `voice` | Discord voice loop only | DB (or `-hardcoded`), `DISCORD_BOT_TOKEN`, provider keys |
-| `web` | Web app + admin API | DB, all three `DISCORD_OAUTH_*`, `GLYPHOXA_OPERATOR_IDS` |
+| `voice` | Discord voice loop: a claim-plane worker (DB, no `-guild`/`-channel`, ADR-0057) or the legacy standalone node (`-guild`/`-channel` or `-hardcoded`) | DB (or `-hardcoded`), `DISCORD_BOT_TOKEN` (or per-Tenant BYOK tokens + `GLYPHOXA_SECRET`), provider keys |
+| `web` | Web app + admin API; Voice Sessions run on `voice` workers via the claim plane | DB, all three `DISCORD_OAUTH_*`, `GLYPHOXA_OPERATOR_IDS` (in `allowlist` Admission Mode) |
 | `all` | `web` + the in-process voice loop | everything for `web` and `voice` |
 
 The binary defaults `-mode` to **`all`** (ADR-0005/ADR-0034, the self-host
 target): a bare `glyphoxa` boots the web tier plus the in-process voice loop and
 **auto-applies the embedded migrations at startup** under the advisory lock
 (ADR-0031) — no manual `migrate up` step. An explicit `-mode voice`/`-mode web`
-still overrides it; `voice` mode continues to demand `-guild`/`-channel`, and a
-web-only replica assumes a current schema (it does **not** auto-migrate, so N
-replicas never race). The OAuth + allowlist gate below applies to **`web` and
+still overrides it; a web-only replica assumes a current schema (it does **not**
+auto-migrate, so N replicas never race). The OAuth + allowlist gate below applies to **`web` and
 `all`** only; `voice` Mode is unaffected.
 
 The fastest way to a running instance is **Docker Compose** (§9) or the
@@ -33,8 +32,14 @@ The fastest way to a running instance is **Docker Compose** (§9) or the
 
 ## 1. Prerequisites
 
-- **Go 1.27+** — the whole stack is pure Go (`CGO_ENABLED=0`, Makefile): no C
-  toolchain, and the binary is fully static.
+- **Go 1.27+**.
+- **A C toolchain (gcc), `pkg-config` and the libopus headers** — `libopus-dev`
+  (Debian/Ubuntu), `opus-devel` (Fedora), `opus` (Arch), or
+  `brew install opus pkg-config` (macOS). The voice-capable build
+  (`make build-live`, tags `opus dave nolibopusfile`) links the outbound Opus
+  encoder against libopus via CGO (ADR-0034 amendment 2026-07-19). DAVE (dave-go)
+  and the Silero VAD are pure Go. The untagged `make build` needs none of this —
+  and **cannot do voice** (see §3).
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go
   binary embeds; without it you get a blank placeholder page (see §3).
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs
@@ -76,11 +81,21 @@ only — is tracked. The OAuth/allowlist values are filled in by §5–§6.
 ```sh
 make proto                        # buf generate → gen/ (Go + TS stubs)
 (cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist (go:embed)
-make build                        # → bin/glyphoxa
+make build-live                   # → bin/glyphoxa, voice-capable
 ```
 
+`make build-live` compiles the production tags (`opus dave nolibopusfile`) —
+the same as the container image, except that libopus is linked dynamically
+here (the Dockerfile links it statically for its `FROM scratch` runtime).
+`make build` is the untagged pure-Go build (`CGO_ENABLED=0`): it serves the
+console, migrations and the CLI subcommands, but links **stub** Opus and DAVE
+code, so every Voice Session fails. A stub binary logs a `stub voice build`
+WARN at boot in `voice`/`all` Mode, and `./bin/glyphoxa version` prints
+`opus codec: false` / `dave: false` for it. Both targets stamp the binary with
+`git describe` (shown by `glyphoxa version` and in the boot log).
+
 Order matters: the Go build imports the generated `gen/` packages, and the web
-bundle must exist **before** `make build` embeds `internal/spa/dist`. Skipping
+bundle must exist **before** `make build-live` embeds `internal/spa/dist`. Skipping
 the web step still compiles — the committed placeholder `index.html` satisfies
 the embed — but serves a **blank page** instead of the login screen.
 
@@ -194,9 +209,12 @@ separate migrate step**.
 
 The `glyphoxa` service pulls the published `ghcr.io/mrwong99/glyphoxa` image
 (built by `release-image.yml` on each release, ADR-0034), so a machine with
-only Docker needs nothing else — no buf, no Node/npm, no local build. The image
-is pinned to an explicit version tag (`:v0.2.0`) in `compose.yml`; to upgrade,
-bump that tag to the release you want and re-run `docker compose pull glyphoxa`:
+only Docker needs nothing else — no buf, no Node/npm, no local build. The tag
+comes from `GLYPHOXA_IMAGE_TAG` and defaults to `latest` (the newest stable
+release). Pin a release for reproducible upgrades by setting
+`GLYPHOXA_IMAGE_TAG=v0.16.0` in the shell or in `.env` (Compose reads it for
+variable substitution), then `docker compose pull glyphoxa`. Never run a
+release below v0.16.0:
 
 ```sh
 cp .env.example .env
@@ -243,7 +261,9 @@ as a non-root user with startup auto-migrate — the full "point it at Postgres 
 keys, `systemctl start`" story (ADR-0034).
 
 ```sh
-# 1. Install the binary (build from source per §3, or copy it out of the image).
+# 1. Install the binary: `make build-live` per §3 (needs the libopus runtime,
+#    e.g. libopus0, on this host), or copy the fully static one out of the image:
+#    docker create --name gx ghcr.io/mrwong99/glyphoxa:latest && docker cp gx:/usr/local/bin/glyphoxa bin/ && docker rm gx
 sudo install -m 0755 bin/glyphoxa /usr/local/bin/glyphoxa
 
 # 2. Create the non-root service user.
@@ -277,9 +297,10 @@ curl -fsS http://127.0.0.1:8080/     # SPA served → login screen reachable
 Validate the unit file itself (no host state needed) with
 `systemd-analyze verify deploy/glyphoxa.service`. The unit is hardened
 (`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`); the
-binary is fully static and self-contained (the Silero VAD runs as a pure-Go
-forward pass embedded in it — nothing is downloaded or cached at runtime), so
-no writable cache directory is needed. `/etc/glyphoxa/env` is required (no `-`
+binary is self-contained (the Silero VAD, migrations and console are embedded —
+nothing is downloaded or cached at runtime), so no writable cache directory is
+needed. The image's binary is fully static; a `make build-live` binary links
+the host's libopus. `/etc/glyphoxa/env` is required (no `-`
 prefix on `EnvironmentFile`): a missing file fails the unit up front rather
 than crash-looping the binary on absent secrets.
 
@@ -343,10 +364,14 @@ meet, degrading recall to no-memory on timeout.
 | `DISCORD_OAUTH_CLIENT_ID` | `web`/`all` | OAuth app client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | `web`/`all` | OAuth app client secret. |
 | `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. Its scheme also decides the session cookies' `Secure` attribute: `https://…` ⇒ `Secure` cookies, `http://…` ⇒ plain (local dev). |
-| `GLYPHOXA_OPERATOR_IDS` | `web`/`all` | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). Empty, separators-only, or non-numeric entries ⇒ fatal. |
+| `GLYPHOXA_OPERATOR_IDS` | `web`/`all` (`allowlist` mode) | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). In `allowlist` Admission Mode the sole login gate: empty, separators-only, or non-numeric entries ⇒ fatal. In `open` mode it is the platform-admin list and may be empty. Also a deployment-wide GM override for Slash Commands and the Butler voice gate. |
+| `GLYPHOXA_ADMISSION_MODE` | optional | Who may complete the Discord login ([ADR-0055](adr/0055-self-signup-admission-modes.md)): `allowlist` (only `GLYPHOXA_OPERATOR_IDS`) or `open` (any Discord User; each signup founds its own Tenant). Unset ⇒ the posture recorded in the database, `allowlist` on a fresh one. Any other value ⇒ fatal. Flipping `open` → `allowlist` and restarting evicts every signup. |
+| `GLYPHOXA_SIGNUP_PLAN_SLUG` | `open` mode | The Plan every open-mode signup is bound to. In `open` mode the boot fails unless it names a synced, non-archived Plan (`glyphoxa billing plans-sync`, [deploy/saas-operations.md](deploy/saas-operations.md)). Ignored in `allowlist` mode. |
+| `GLYPHOXA_MAX_VOICE_SESSIONS` | optional | Process-wide cap on concurrent live Voice Sessions (one per Tenant); default `1`, values < 1 ⇒ 1. A start beyond it is refused with a user-visible error. Raising it is soak-gated for DAVE/central-token deployments (#493). |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
 | `GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD` | optional | Per-application 24h Discord gateway IDENTIFY count above which a structured warning fires (token-reset early-warning, #486). Positive integer; blank/non-numeric/≤0 ⇒ default `500` (below Discord's 1000/token/24h limit). See [deploy/saas-operations.md §7](deploy/saas-operations.md). |
+| `GLYPHOXA_TRUSTED_CLIENT_IP_HEADER` | optional (`web`/`all`) | The one request header your reverse proxy sets to the real client address, **overwriting anything the client sent** — used only for the IP stored on the login session's audit record. Set `CF-Connecting-IP` when the instance is reachable *only* through Cloudflare (e.g. a Cloudflare Tunnel); `deploy/saas/install.sh` asks for it (`GX_TRUSTED_CLIENT_IP_HEADER`) and writes it as `web.extraEnv`. Unset ⇒ no header is trusted: the last `X-Forwarded-For` hop (the one the nearest proxy appended), else the socket peer. Never name a header your proxy merely passes through — a client could then choose its own audit address. |
 | `GLYPHOXA_OLLAMA_URL` | optional | Ollama embeddings endpoint override; default `http://127.0.0.1:11434`. v1.0 embeddings are **Ollama-only** (ADR-0011), so set it wherever the process has no local Ollama — containers and k8s pods (k3d: `http://host.k3d.internal:11434`). The server must serve `nomic-embed-text`. Unreachable ⇒ semantic memory (L2) stalls loudly; nothing else breaks. |
 | `GLYPHOXA_PRIVACY_POLICY_URL` | optional | The deployment's published privacy-policy page. The Bot links it from the transcription disclosure it posts in the voice channel at Voice Session start (#519) — the players at the table are data subjects who may never open the web app. Blank ⇒ the disclosure still posts, without a link. The Helm chart derives it from `ingress.host` + `/privacy` when `privacyPolicyUrl` is unset. |
 | `GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW` | optional | How long a Voice Session may process no audio before the hosting Voice Instance closes it ([ADR-0061](adr/0061-idle-close-voice-session-watchdog.md)). Go duration; default `15m`. The literal `off` disables idle closing — a value that is not a duration is treated as a typo and takes the default, so a resource protection is never switched off by accident. "Audio" is inbound room speech or the Bot being asked to speak (`/say`, voiced recap, Highlight replay); a table that is present but silent for the whole window **is** closed. |
@@ -355,6 +380,20 @@ meet, degrading recall to no-memory on timeout.
 | `GLYPHOXA_VOICE_HEAP_CEILING_MIB` | optional | Go heap footprint in MiB above which the Voice Instance closes the single least-recently-active Voice Session it hosts; default `0` (off). A **process** reading, so with `GLYPHOXA_MAX_VOICE_SESSIONS` > 1 one Tenant's pressure can cost another Tenant their session — deliberate (the alternative at the memory limit is an OOM kill that takes them all), but size it against your own container limit rather than guessing. |
 | `GLYPHOXA_VOICE_GOROUTINE_CEILING` | optional | Process goroutine count above which the Voice Instance sheds its quietest Voice Session; default `0` (off). Same process-wide caveat as the heap ceiling. |
 | `GLYPHOXA_VOICE_MEDIA_STALL_WINDOW` | optional | How long the voice UDP socket may be silent — despite evidence it should be receiving: the server's keepalive echoes ceasing on a socket that had them, or a participant announcing speech with no RTP following — before the media watchdog declares the Discord media path dead and rebuilds the voice connection ([ADR-0064](adr/0064-voice-media-path-liveness.md), #633). Go duration; default `45s`; the speaking tier is doubled while a fresh connection has yet to carry its first packet. The literal `off` disables the verdict (the once-a-minute liveness log keeps running); an unparsable value takes the default. A quiet table can never trip it: quiet stops RTP, never the echoes, and produces no Speaking announcements. |
+| `GLYPHOXA_STT_STREAMING` | optional | Streaming STT opt-in ([ADR-0042](adr/0042-streaming-stt-speculative-memory-recall.md)): ElevenLabs Scribe v2 Realtime over a websocket instead of one batch POST per utterance. Blank or `0`/`false`/`no`/`off` (any case) ⇒ **off** (the default, batch STT); anything else ⇒ on. While a stream is down the session falls back to the batch adapter automatically; local VAD stays the endpointing authority either way. |
+| `GLYPHOXA_STT_STREAM_MAX_LANES` | optional | With streaming on: how many Speaker Lanes beyond the default lane get their own STT stream; past it a lane transcribes by batch. Integer; default `4`; `0` disables per-lane streaming (the default lane keeps its stream); negative/non-numeric ⇒ default. |
+| `GLYPHOXA_ADDRESS_CONTINUATION_WINDOW` | optional | How long an unnamed follow-up stays with the Agent just addressed (the Continuation Window, ADR-0024). Go duration; default `30s`; `0s` ⇒ never continue (every utterance must name its Agent); negative/unparsable ⇒ default. |
+| `GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS` | optional | Arms the execution-trace flight recorder (#607) in every process hosting the voice loop: each turn slower than this many milliseconds dumps the last ~10s of `runtime/trace` (newest 8 kept, at most one per 30s). e.g. `2500` = the p95 SLO. Default off; ~1-2% CPU while armed. The Helm chart's `voice.extraEnv` / `web.extraEnv` is the place to set it. |
+| `GLYPHOXA_FLIGHT_TRACE_DIR` | optional | Where flight-recorder snapshots go; default `$TMPDIR/glyphoxa-flight` (`/tmp/glyphoxa-flight` — the chart mounts a writable emptyDir at `/tmp`). Must be writable. |
+| `GLYPHOXA_TAPE_CONSENT_RECONCILE_INTERVAL` | optional | How often a Voice Instance re-reads Rollover Tape consent from the database, so a grant/revoke made on another pod converges (#492). Go duration; default `5s`; unparsable/≤0 ⇒ default. |
+| `GLYPHOXA_PRESENCE_RECONCILE_INTERVAL` | optional | How often the presence registry re-reconciles every Tenant's standing Discord client and Slash Command registration against the database (catching settings saved on another pod). Go duration; default `30s`; blank/invalid/≤0 ⇒ default. |
+| `GLYPHOXA_PRESENCE_OWNER_INTERVAL` | optional | `voice` worker: how often the `presence_owner` election winner renews its claim (ADR-0057 (c)). Go duration; default `5s`. Keep well under the expiry. |
+| `GLYPHOXA_PRESENCE_OWNER_EXPIRY` | optional | `voice` worker: how long a silent presence owner keeps the row before a challenger takes over interaction dispatch. Go duration; default `15s`. |
+| `GLYPHOXA_VOICE_CLAIM_POLL` | optional | Claim-plane poll cadence (#491): how often a `voice` worker looks for unclaimed Voice Session intents, and how often a `web` tier's Start/Stop polls for the worker's answer. Go duration; default `2s`. |
+| `GLYPHOXA_VOICE_HEARTBEAT_INTERVAL` | optional | `voice` worker: heartbeat cadence for each claimed intent. Go duration; default `5s`. Must sit well under the expiry. |
+| `GLYPHOXA_VOICE_HEARTBEAT_EXPIRY` | optional | When a claimed intent's heartbeat is this stale, its worker is presumed dead and the intent is reaped (worker and web tier use the same horizon). Go duration; default `30s`. |
+| `GLYPHOXA_VOICE_DRAIN_BEAT_CAP` | optional | `voice` worker: how long a session wind-down keeps heartbeating before the worker stops beating for it (bounds a wedged drain). Go duration; default `0` ⇒ 10 × the heartbeat expiry (`300s` at defaults). |
+| `GLYPHOXA_VOICE_CONTROL_BUDGET` | optional | Split deployment (`web` + `voice`): how long a live control relayed to the hosting worker (mute, `/say`, Butler say, #503) waits for its confirmation. Go duration; default `15s` — keep it above the heartbeat interval plus one execution. |
 | `GLYPHOXA_PPROF` | optional | `1` mounts `/debug/pprof` on the observability listener (#586) — including `/debug/pprof/goroutineleak` (Go 1.27+), which reports goroutines blocked on unreachable primitives, i.e. leaks a live pod can name without a rebuild. Off by default: profiles expose goroutine stacks (argument values included) and on-demand CPU profiling burns CPU. The metrics port is cluster-internal (ADR-0032), so this is an operator switch, not a security boundary. |
 | `GLYPHOXA_PPROF_BLOCK_RATE` | optional | With `GLYPHOXA_PPROF=1`: nanoseconds of goroutine blocking per sampled event (`runtime.SetBlockProfileRate`) so `/debug/pprof/block` carries data; e.g. `10000000` ≈ one sample per 10ms blocked. Default off — sampling costs the realtime voice path. Non-numeric/≤0 ⇒ ignored. |
 | `GLYPHOXA_PPROF_MUTEX_FRACTION` | optional | With `GLYPHOXA_PPROF=1`: sample 1/n of mutex contention events (`runtime.SetMutexProfileFraction`) so `/debug/pprof/mutex` carries data. Default off; non-numeric/≤0 ⇒ ignored. |
@@ -367,7 +406,7 @@ meet, degrading recall to no-memory on timeout.
 ## See also
 
 - [ADR-0041](adr/0041-operator-allowlist-access-policy.md) — operator allowlist, no trust-on-first-use, loud-fail/loopback posture (source of truth).
-- [ADR-0039](adr/0039-mvp-ui-backend-single-operator-web-tier.md) — single-operator web tier.
+- [ADR-0039](adr/0039-mvp-ui-backend-single-operator-web-tier.md) — single-operator web tier; [ADR-0055](adr/0055-self-signup-admission-modes.md) — Admission Modes / self-signup; [ADR-0057](adr/0057-shared-voice-worker-pool-multi-tenant.md) — the voice-worker pool and claim plane.
 - [ADR-0016](adr/0016-cookies-discord-only-oauth.md) — cookies + Discord-only OAuth.
 - [ADR-0004](adr/0004-byok-provider-key-matrix.md) — BYOK provider key matrix.
 - [ADR-0034](adr/0034-deployment-artifacts.md) — deployment artifacts (container/Helm).

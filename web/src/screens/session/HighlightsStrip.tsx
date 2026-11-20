@@ -172,7 +172,9 @@ export function HighlightsStrip({
                 </Badge>
               )}
               <time className="gx-highlight__clock">{range}</time>
-              <span className="gx-highlight__score">{fmtScore(h.score, lang)}</span>
+              <span className="gx-highlight__score" title={t("session.scoreLabel", { score: fmtScore(h.score, lang) })}>
+                {t("session.scoreShort", { score: fmtScore(h.score, lang) })}
+              </span>
             </div>
             <blockquote className="gx-highlight__excerpt">{excerpt}</blockquote>
             <p className="gx-highlight__reason">{reason}</p>

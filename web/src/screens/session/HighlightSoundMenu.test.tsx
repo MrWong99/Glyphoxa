@@ -93,7 +93,7 @@ describe("HighlightSoundMenu (#312)", () => {
   it("requests a sting through SetHighlightSound and flips the row to the pending state", async () => {
     const ctx = renderStrip([promoted()]);
     fireEvent.click(await screen.findByRole("button", { name: /add sound/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /^sting$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^sound effect$/i }));
 
     await waitFor(() => expect(ctx.soundCalls).toHaveLength(1));
     expect(ctx.soundCalls[0].id).toBe("h2");
@@ -129,7 +129,7 @@ describe("HighlightSoundMenu (#312)", () => {
       }),
     ]);
     // The collapsed button names the standing choice.
-    fireEvent.click(await screen.findByRole("button", { name: /sound: sting/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /sound: sound effect/i }));
     fireEvent.click(await screen.findByRole("button", { name: /remove sound/i }));
 
     await waitFor(() => expect(ctx.soundCalls).toHaveLength(1));

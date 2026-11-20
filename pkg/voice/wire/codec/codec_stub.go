@@ -10,7 +10,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
-// Codec is the default stub: the real transcoder (pure-Go pion/opus) is built
+// Available reports whether this build links the real Opus transcoder. It is
+// false here (no `-tags opus`): a binary built without the tag cannot carry a
+// voice session, and the boot path warns about it.
+const Available = false
+
+// Codec is the default stub: the real transcoder (pion/opus decode + libopus encode) is built
 // only under `-tags opus`, so without that tag every operation reports
 // [wire.ErrCodecUnavailable]. This keeps the composition root's opt-in
 // structure and the CI job split unchanged, without silently

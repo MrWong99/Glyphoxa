@@ -40,24 +40,19 @@ func TestNameMatch_FlatAboveThreshold(t *testing.T) {
 
 // TestAmbientHeuristics_SuppressedByNameMatch pins the short-circuit: when any
 // Agent is explicitly named this turn, the ambient heuristics contribute
-// nothing, so a name match can never be widened by continuation, interruption,
-// expertise, or the lone-NPC fallback.
+// nothing, so a name match can never be widened by continuation or the lone-NPC
+// fallback.
 func TestAmbientHeuristics_SuppressedByNameMatch(t *testing.T) {
 	now := time.Now()
-	a := agentAt(0, "bart", func(a *Agent) { a.Expertise = []string{"ale"} })
+	a := agentAt(0, "bart", nil)
 	dc := &DecisionContext{
 		Now:            now,
 		anyNameMatched: true,
-		window:         time.Minute,
 		lastAddressed:  map[string]bool{"bart": true},
-		interruptions:  map[string]time.Time{"bart": now},
-		recentWords:    map[string]struct{}{"ale": {}},
 		nonAddressable: 1,
 	}
 	for _, h := range []Heuristic{
 		LastAddressed{Weight: 1},
-		RecentlyInterrupted{Weight: 1, Within: time.Minute},
-		ExpertOnRecentWord{Weight: 1},
 		SoleActiveNPC{Weight: 1},
 	} {
 		if got := h.Score(a, dc); got != 0 {
@@ -77,8 +72,6 @@ func TestHeuristicNames(t *testing.T) {
 	}{
 		{NameMatch{}, "name_match"},
 		{LastAddressed{}, "last_addressed"},
-		{RecentlyInterrupted{}, "recently_interrupted"},
-		{ExpertOnRecentWord{}, "expert_on_recent_word"},
 		{SoleActiveNPC{}, "sole_active_npc"},
 	}
 	seen := map[string]bool{}
@@ -107,52 +100,33 @@ func TestLastAddressed(t *testing.T) {
 	}
 }
 
-func TestRecentlyInterrupted(t *testing.T) {
-	now := time.Now()
+// TestLastAddressed_SpeakerScoped pins the 2026-11-20 scope: the continuation
+// claim belongs to the speaker who opened it. A DIFFERENT known speaker does not
+// continue it; an unknown speaker on either side falls back to the table-wide
+// claim, so a deployment without speaker attribution keeps its behaviour.
+func TestLastAddressed_SpeakerScoped(t *testing.T) {
 	a := agentAt(0, "bart", nil)
-	h := RecentlyInterrupted{Weight: 0.6, Within: 10 * time.Second}
-
-	recent := &DecisionContext{
-		Now:           now,
-		window:        30 * time.Second,
-		interruptions: map[string]time.Time{"bart": now.Add(-5 * time.Second)},
+	h := LastAddressed{Weight: 1}
+	dc := func(speaker, owner string) *DecisionContext {
+		return &DecisionContext{
+			SpeakerID:       speaker,
+			lastAddressed:   map[string]bool{"bart": true},
+			lastAddressedBy: owner,
+		}
 	}
-	if got := h.Score(a, recent); got != 0.6 {
-		t.Errorf("recent interruption = %v, want 0.6", got)
-	}
-
-	stale := &DecisionContext{
-		Now:           now,
-		window:        30 * time.Second,
-		interruptions: map[string]time.Time{"bart": now.Add(-20 * time.Second)},
-	}
-	if got := h.Score(a, stale); got != 0 {
-		t.Errorf("stale interruption = %v, want 0 (outside Within)", got)
-	}
-
-	none := &DecisionContext{Now: now, window: 30 * time.Second, interruptions: map[string]time.Time{}}
-	if got := h.Score(a, none); got != 0 {
-		t.Errorf("no interruption = %v, want 0", got)
-	}
-}
-
-func TestExpertOnRecentWord(t *testing.T) {
-	a := agentAt(0, "bart", func(a *Agent) { a.Expertise = []string{"tavern", "ale", "rooms"} })
-
-	dc := &DecisionContext{recentWords: map[string]struct{}{"tavern": {}, "sword": {}}}
-	if got := (ExpertOnRecentWord{Weight: 0.5}).Score(a, dc); got != 0.5 {
-		t.Errorf("flat expertise hit = %v, want 0.5", got)
-	}
-
-	// PerWord scales by distinct keywords mentioned.
-	dc2 := &DecisionContext{recentWords: map[string]struct{}{"tavern": {}, "ale": {}}}
-	if got := (ExpertOnRecentWord{Weight: 0.5, PerWord: true}).Score(a, dc2); got != 1.0 {
-		t.Errorf("per-word expertise (2 hits) = %v, want 1.0", got)
-	}
-
-	noHit := &DecisionContext{recentWords: map[string]struct{}{"sword": {}}}
-	if got := (ExpertOnRecentWord{Weight: 0.5}).Score(a, noHit); got != 0 {
-		t.Errorf("no expertise mention = %v, want 0", got)
+	for _, c := range []struct {
+		speaker, owner string
+		want           float64
+	}{
+		{"alice", "alice", 1}, // the opener continues
+		{"bob", "alice", 0},   // somebody else does not
+		{"", "alice", 1},      // unattributed utterance: table-wide fallback
+		{"bob", "", 1},        // unattributed opener: table-wide fallback
+		{"", "", 1},
+	} {
+		if got := h.Score(a, dc(c.speaker, c.owner)); got != c.want {
+			t.Errorf("speaker %q on a claim opened by %q scored %v, want %v", c.speaker, c.owner, got, c.want)
+		}
 	}
 }
 

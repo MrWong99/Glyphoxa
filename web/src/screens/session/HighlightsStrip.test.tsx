@@ -143,7 +143,7 @@ describe("HighlightsStrip (#309)", () => {
   it("formats the score in the display language, not the browser's", async () => {
     renderStrip([candidate()]);
     // jsdom reports en-US, so the default render is the English decimal point.
-    expect(await screen.findByText("8.5")).toBeInTheDocument();
+    expect(await screen.findByText("Score 8.5")).toBeInTheDocument();
 
     cleanup();
     // A German operator reads a German decimal comma. The stored choice — not
@@ -151,30 +151,30 @@ describe("HighlightsStrip (#309)", () => {
     // as foreign punctuation beside German copy.
     localStorage.setItem("gx-lang", "de");
     renderStrip([candidate()]);
-    expect(await screen.findByText("8,5")).toBeInTheDocument();
+    expect(await screen.findByText("Wertung 8,5")).toBeInTheDocument();
     localStorage.clear();
   });
 
-  it("shows a candidate's purge hint badge and a Promote action", async () => {
+  it("shows a candidate's purge hint badge and a Keep action", async () => {
     renderStrip([candidate()]);
-    expect(await screen.findByText(/auto-deletes in 7 days/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /promote/i })).toBeInTheDocument();
+    expect(await screen.findByText(/unsaved — deleted in 7 days/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^keep$/i })).toBeInTheDocument();
   });
 
-  it("shows a promoted highlight's Promoted badge and offers no Promote action", async () => {
+  it("shows a promoted highlight's Kept badge and offers no Keep action", async () => {
     renderStrip([promoted()]);
-    expect(await screen.findByText(/^Promoted$/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
-    expect(screen.queryByText(/auto-deletes in 7 days/i)).not.toBeInTheDocument();
+    expect(await screen.findByText(/^Kept$/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^keep$/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/unsaved — deleted in 7 days/i)).not.toBeInTheDocument();
   });
 
   it("promotes a candidate: fires PromoteHighlight with the id and the invalidated list shows it promoted", async () => {
     const ctx = renderStrip([candidate()]);
-    fireEvent.click(await screen.findByRole("button", { name: /promote/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^keep$/i }));
     // The list refetches after invalidate: the candidate is now promoted, so its
-    // purge hint and Promote action are gone.
-    await waitFor(() => expect(screen.getByText(/^Promoted$/)).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    // purge hint and Keep action are gone.
+    await waitFor(() => expect(screen.getByText(/^Kept$/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^keep$/i })).not.toBeInTheDocument();
     expect(ctx.promoteCalls).toHaveLength(1);
     expect(ctx.promoteCalls[0].id).toBe("h1");
   });
@@ -205,7 +205,7 @@ describe("HighlightsStrip (#309)", () => {
       promoted({ id: "h2", imageContentType: "image/png" }),
       candidate({ id: "h1", imageContentType: "" }),
     ]);
-    await screen.findByText(/^Promoted$/);
+    await screen.findByText(/^Kept$/);
     const images = document.querySelectorAll("img");
     expect(images).toHaveLength(1);
     expect(images[0]).toHaveAttribute("src", "/api/v1/highlights/h2/image");
@@ -283,10 +283,10 @@ describe("HighlightsStrip (#309)", () => {
 
   it("surfaces a promote failure as a toast (ADR-0017)", async () => {
     renderStrip([candidate()], {}, { failPromote: true });
-    fireEvent.click(await screen.findByRole("button", { name: /promote/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^keep$/i }));
     await waitFor(() =>
       expect(
-        vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't promote/i.test(String(m))),
+        vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't keep the highlight/i.test(String(m))),
       ).toBe(true),
     );
   });

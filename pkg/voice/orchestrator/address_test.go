@@ -2,10 +2,10 @@ package orchestrator_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -60,7 +60,7 @@ func transcribeClip(t *testing.T, h *voicetest.Harness, clipName, cassetteName s
 // detector's coupling is the STTFinal subscription, not an imperative call.
 func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(address.NewWholeWordMatcher(butlerTarget, []voiceevent.AddressTarget{bartTarget}))
+	d := orchestrator.NewAddressDetector(nameOrButler(butlerTarget, bartTarget))
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "hello-test", "stt-hello-test")
@@ -83,7 +83,7 @@ func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 // default Butler route.
 func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(address.NewWholeWordMatcher(butlerTarget, []voiceevent.AddressTarget{bartTarget}))
+	d := orchestrator.NewAddressDetector(nameOrButler(butlerTarget, bartTarget))
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "bart-test", "stt-bart-test")
@@ -106,6 +106,25 @@ func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 type matchFunc func(text string) []voiceevent.AddressRouted
 
 func (f matchFunc) TargetMatch(text string) []voiceevent.AddressRouted { return f(text) }
+
+// nameOrButler is the minimal test matcher for the detector's own contract: the
+// first npc whose Name appears in the utterance wins, otherwise the Butler. It
+// always returns exactly one decision, so a test that is about the detector's
+// plumbing (subscription, correlation ids, gates) does not also depend on the
+// scoring matcher's policy.
+func nameOrButler(butler voiceevent.AddressTarget, npcs ...voiceevent.AddressTarget) matchFunc {
+	return func(text string) []voiceevent.AddressRouted {
+		target := butler
+		lower := strings.ToLower(text)
+		for _, npc := range npcs {
+			if strings.Contains(lower, strings.ToLower(npc.Name)) {
+				target = npc
+				break
+			}
+		}
+		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: target}}
+	}
+}
 
 // goblinTarget is a Character NPC used only by the custom-matcher tests, to
 // keep them independent of the default matcher's name-matching fixtures.

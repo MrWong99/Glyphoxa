@@ -196,7 +196,7 @@ kubectl create namespace glyphoxa
 ```yaml
 # glyphoxa-values.yaml — chmod 0600, NEVER commit this file
 image:
-  tag: v0.2.0                # pin the release you deploy
+  tag: v0.16.0               # pin the release you deploy (never below v0.16.0)
 
 # openssl rand -base64 32
 appSecret: "<base64-32-bytes>"

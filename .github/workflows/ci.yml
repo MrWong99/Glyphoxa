@@ -144,9 +144,9 @@ jobs:
   # mistake that ships a binary serving a blank page, and that has reached main
   # twice (155772c, 6d6089e). Downloading `spa-dist` here would make that test
   # pass unconditionally and silently retire the guard; the docker builds in
-  # `image`/`e2e` are where the real console gets embedded. `integration` runs
-  # the same untagged test on the same committed tree, so the guard survives one
-  # of these two jobs being changed — retiring it takes both.
+  # `image`/`e2e` are where the real console gets embedded. `integration` also
+  # runs ./internal/spa explicitly on the same committed tree, so the guard
+  # survives one of these two jobs being changed — retiring it takes both.
   test:
     name: build + vet + test
     needs: [proto]
@@ -238,12 +238,26 @@ jobs:
       # daemon, which testcontainers-go drives directly (no `services:` block
       # needed). This job is the auditable "did the DB tests actually run?"
       # gate the ADR requires, kept off the default PR suite.
+      #
+      # Only the packages that HAVE integration-tagged tests run here — the
+      # untagged suite of every other package already ran in `test`, so a
+      # `./...` run just repeated it. ./internal/spa is added explicitly: it is
+      # the second copy of the fresh-clone embed guard (see the `test` job).
       - name: Integration test (with Docker)
         # -timeout 20m: the storage suite spins one pgvector container per test
         # (per-test isolation, ADR-0033) and has outgrown go test's default
         # 10-minute PER-PACKAGE timeout on slower machines. The generous bound
         # only moves the flake ceiling; a hung test still fails the job.
-        run: go test -race -tags=integration -timeout 20m ./...
+        run: |
+          set -euo pipefail
+          pkgs="$(grep -rl --include='*_test.go' '^//go:build integration' . | xargs -n1 dirname | sed 's|^\./||; s|^|./|' | sort -u)"
+          if [ -z "$pkgs" ]; then
+            echo "no integration-tagged test packages found — the discovery grep is broken"
+            exit 1
+          fi
+          echo "integration packages:"; echo "$pkgs"
+          # shellcheck disable=SC2086 # word-splitting the package list is intended
+          go test -race -tags=integration -timeout 20m $pkgs ./internal/spa/
 
   audio:
     name: audio (opus + bench)
@@ -280,6 +294,13 @@ jobs:
         run: |
           go build -tags "opus dave nolibopusfile" ./...
           go vet -tags "opus dave nolibopusfile" ./...
+
+      # The `live` (paid provider runs, record-live.yml / bench-live.yml) and
+      # `bench` tagged files only execute on schedules or by hand, so nothing on
+      # the PR gate compiled them — a refactor could break them unnoticed until
+      # the next weekly run. Vet (= type-check) them here without running them.
+      - name: Vet (live + bench tags, compile-only)
+        run: go vet -tags "opus dave nolibopusfile live bench" ./...
 
       # The opus-tagged unit tests (real codec round-trip, PlaybackSource
       # concurrency, the speech-quality SNR gate) are deterministic and keyless
@@ -646,6 +667,11 @@ jobs:
       # field-selector keys), killing the whole run.
       - name: Install golangci-lint v2
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+
+      # .golangci.yml lints the production tags (`opus dave nolibopusfile`);
+      # the `opus` codec's hraban/opus needs libopus headers to type-check.
+      - name: Install libopus (type-check dep of the opus tag)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libopus-dev
 
       - name: Run golangci-lint
         run: golangci-lint run ./...
