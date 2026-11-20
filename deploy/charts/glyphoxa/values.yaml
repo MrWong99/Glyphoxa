@@ -291,7 +291,16 @@ postgres:
   persistence:
     size: 8Gi
     # storageClassName: ""  # use the cluster default when unset
-  resources: {}
+  # Requests only (no limits): the scheduler reserves room for the database so
+  # it is not the first thing squeezed on a busy node, and a memory limit on
+  # Postgres turns a burst into an OOM-kill. Tune for your data size.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  # Shutdown budget for the fast-shutdown preStop hook (see
+  # templates/postgres-statefulset.yaml): long enough for the final checkpoint.
+  terminationGracePeriodSeconds: 60
 
 # Migrate hook Job (ADR-0031: `glyphoxa migrate up`, advisory-locked). Runs as a
 # Helm pre-install/pre-upgrade hook before any serving workload.
@@ -502,43 +511,49 @@ voice:
     timeoutSeconds: 3
     failureThreshold: 3
 
-  # Execution-trace snapshots on an SLO breach (#607) — NOT wired by this chart,
-  # documented here because enabling it needs a volume, not just an env var.
+  # Execution-trace snapshots on an SLO breach (#607) — off by default.
   #
   # Setting GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS (integer milliseconds, e.g. 2500 =
   # the response_latency p95 SLO) arms a runtime/trace FlightRecorder: every turn
   # slower than the threshold dumps the last ~10s of execution trace to
-  # GLYPHOXA_FLIGHT_TRACE_DIR (default $TMPDIR/glyphoxa-flight), newest 8 kept, at
-  # most one snapshot per 30s. Read one with `go tool trace <file>`.
+  # GLYPHOXA_FLIGHT_TRACE_DIR (default $TMPDIR/glyphoxa-flight, i.e.
+  # /tmp/glyphoxa-flight on the chart's writable /tmp emptyDir), newest 8 kept,
+  # at most one snapshot per 30s. Read one with `go tool trace <file>`.
   #
-  # Armed by every process that hosts the voice hot path: the standalone voice
-  # node, the claim-plane voice worker, and — under `mode: all`, where the web pod
-  # runs the voice loop in-process — the web pod. So under `mode: split` set it on
-  # the voice pod, and under `mode: all` set it on the web pod. A web-only replica
-  # (`mode: split`) ignores the env var entirely: it records no response_latency
-  # span. Arming logs one line ("flight recorder armed", with threshold and dir),
-  # which is how you confirm it took effect.
+  # Armed by every process that hosts the voice hot path: the voice pod (the
+  # standalone node or the claim-plane worker) and — under `web.mode: all`,
+  # where the web pod runs the voice loop in-process — the web pod. A
+  # `web.mode: web` replica ignores the env var: it records no response_latency
+  # span. Arming logs one line ("flight recorder armed", with threshold and
+  # dir), which is how you confirm it took effect. It costs ~1-2% CPU while
+  # armed. To turn it on:
   #
-  # Two costs to accept before arming it: ~1-2% CPU continuously while armed, and
-  # the image is FROM scratch with a read-only root filesystem — so the directory
-  # must be a writable mount or every snapshot fails (logged, harmless). To turn
-  # it on, add to the voice pod by hand:
+  #   voice:            # or web: under web.mode=all
+  #     extraEnv:
+  #       - name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
+  #         value: "2500"
   #
-  #   env:
-  #     - name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
-  #       value: "2500"
-  #     - name: GLYPHOXA_FLIGHT_TRACE_DIR
-  #       value: /flight
-  #   volumeMounts:
-  #     - name: flight
-  #       mountPath: /flight
-  #   volumes:
-  #     - name: flight
-  #       emptyDir:
-  #         sizeLimit: 256Mi
+  # Retrieving a snapshot: the image is FROM scratch — no shell, no tar — so
+  # `kubectl cp` and `kubectl exec` cannot work. Read it from an ephemeral debug
+  # container that shares the pod's process namespace (glyphoxa is PID 1 there;
+  # the sysadmin profile is needed to read another user's /proc/1/root):
   #
-  # emptyDir, not a PVC: the snapshots are a live-incident diagnostic an operator
-  # copies out with `kubectl cp` during the investigation, not a retained artifact.
+  #   kubectl debug -q <pod> --image=busybox:1.36 --target=voice --profile=sysadmin \
+  #     -- ls /proc/1/root/tmp/glyphoxa-flight
+  #   kubectl debug -q -i <pod> --image=busybox:1.36 --target=voice --profile=sysadmin \
+  #     -- cat /proc/1/root/tmp/glyphoxa-flight/<file> > trace.out
+  #
+  # The snapshots live on the pod's emptyDir: a live-incident diagnostic, gone
+  # with the pod, not a retained artifact.
+
+  # Extension points, appended verbatim to the voice container / pod. extraEnv is
+  # a list of EnvVar objects (value or valueFrom); extraVolumes are pod volumes
+  # and extraVolumeMounts their container mounts. The chart always mounts a
+  # writable emptyDir at /tmp (the rootfs is read-only), so do not add a second
+  # mount there.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
 # Web Instance (#118, ADR-0039): the single image run as `glyphoxa -mode web`
 # (or `all`), serving the operator console (SPA) + the Connect API behind a
@@ -546,8 +561,8 @@ voice:
 # after the migrate (-5) and seed (-4) hooks — the schema is current and the demo
 # data seeded before it starts — and it NEVER migrates (EnsureCurrent fails the
 # pod fast if the schema is behind). Unlike voice it also gets a Service (it is
-# k8s-reachable) and reads GLYPHOXA_SECRET (its RPC layer decrypts BYOK provider
-# credentials for Provider Config CRUD, ADR-0004) — which voice never does.
+# k8s-reachable). Both read GLYPHOXA_SECRET: web decrypts BYOK provider
+# credentials (ADR-0004), voice decrypts BYOK bot tokens (ADR-0057 (d)).
 web:
   # Enable/disable the Web Instance (Deployment + Service). ON by default so a
   # bare `helm install` serves the operator console — which means it requires the
@@ -558,12 +573,14 @@ web:
   # For a DB-prep-only or voice-only install, set this false.
   enabled: true
 
-  # Process Mode (ADR-0005). `web` serves the console + Connect API only; `all`
-  # ADDITIONALLY drives the voice loop in-process so the Session screen can
-  # start/stop a live NPC in the same pod (ADR-0039). Cross-pod session control
-  # across a SEPARATE Voice Instance is DEFERRED — the control-RPC transport is
-  # not built — so `all` is a single-pod arrangement, not a multi-replica
-  # backplane. Must be `web` or `all`; any other value fails the render.
+  # Process Mode (ADR-0005). `all` drives the voice loop in-process, so the
+  # Session screen starts/stops a live NPC in this same pod (the self-host
+  # shape). `web` serves the console + Connect API only and controls sessions
+  # through the Postgres claim plane (ADR-0057, #491): Start writes a
+  # voice_session_intents row that a `voice` pod (voice.enabled, run as the
+  # claim-plane worker) claims and drives; the mute/say/replay live controls
+  # are not available from a `web` pod in that split. Must be `web` or `all`;
+  # any other value fails the render.
   mode: web
 
   # Discord OAuth application credentials (ADR-0016/0039) and the mandatory
@@ -624,14 +641,18 @@ web:
   # are treated as 1 by the binary.
   maxVoiceSessions: 1
 
-  # Single replica for v1.0 (ADR-0039): the self-host web tier holds sessions
-  # in-process, and cross-pod session control is deferred, so this is pinned to
-  # one pod. The update strategy tracks the Mode: `web` uses RollingUpdate (no
-  # in-process loop, so an upgrade surge is harmless), while `all` uses Recreate
-  # like voice — it drives a session loop in-process, so two pods would run two
-  # loops on one Discord token AND a surged pod's boot-time orphan sweep would
-  # close the old pod's live session. Scaling out is a design change (a session
-  # backplane), not a value.
+  # Single replica, not a value: under `all` the pod drives sessions in-process,
+  # and a multi-replica `web` tier has never been exercised. Scale voice
+  # capacity with voice.replicas instead. The update strategy tracks the Mode: `web` uses
+  # RollingUpdate (no in-process loop, so an upgrade surge is harmless), while
+  # `all` uses Recreate — two pods would run two loops on one Discord token AND
+  # a surged pod's boot-time orphan sweep would close the old pod's live
+  # session.
+
+  # Shutdown budget (seconds). Under `all` SIGTERM drains the in-process Voice
+  # Sessions — per-session finalizers, the Usage Ledger flush and the terminal
+  # session row — which outlasts the kubelet's 30s default. Always rendered.
+  terminationGracePeriodSeconds: 120
 
   # Optional per-workload image override. When repository/tag are set here they
   # win over the shared top-level `image`; otherwise the web pod runs the same
@@ -670,9 +691,18 @@ web:
       cpu: "1"
       memory: 512Mi
 
+  # Extension points, appended verbatim to the web container / pod. extraEnv is
+  # a list of EnvVar objects (value or valueFrom); extraVolumes are pod volumes
+  # and extraVolumeMounts their container mounts. The chart always mounts a
+  # writable emptyDir at /tmp (the rootfs is read-only), so do not add a second
+  # mount there.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
   # Container securityContext, hardened by default and overridable. The image
-  # runs as USER 65532 (#31); the web tier writes nothing to its rootfs at boot,
-  # so a read-only rootfs holds. Set to {} in a values file to drop the block.
+  # runs as USER 65532 (#31); the rootfs is read-only and /tmp is a
+  # chart-mounted emptyDir. Set to {} in a values file to drop the block.
   securityContext:
     runAsNonRoot: true
     allowPrivilegeEscalation: false

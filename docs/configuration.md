@@ -189,9 +189,12 @@ separate migrate step**.
 
 The `glyphoxa` service pulls the published `ghcr.io/mrwong99/glyphoxa` image
 (built by `release-image.yml` on each release, ADR-0034), so a machine with
-only Docker needs nothing else — no buf, no Node/npm, no local build. The image
-is pinned to an explicit version tag (`:v0.2.0`) in `compose.yml`; to upgrade,
-bump that tag to the release you want and re-run `docker compose pull glyphoxa`:
+only Docker needs nothing else — no buf, no Node/npm, no local build. The tag
+comes from `GLYPHOXA_IMAGE_TAG` and defaults to `latest` (the newest stable
+release). Pin a release for reproducible upgrades by setting
+`GLYPHOXA_IMAGE_TAG=v0.16.0` in the shell or in `.env` (Compose reads it for
+variable substitution), then `docker compose pull glyphoxa`. Never run a
+release below v0.16.0:
 
 ```sh
 cp .env.example .env

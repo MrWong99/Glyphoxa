@@ -190,6 +190,10 @@ spec:
             - name: GLYPHOXA_OLLAMA_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.voice.extraEnv }}
+            # Operator-supplied env (values: voice.extraEnv), appended last.
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.voice.metricsPort }}
@@ -212,6 +216,21 @@ spec:
             failureThreshold: {{ .Values.voice.readinessProbe.failureThreshold }}
           resources:
             {{- toYaml .Values.voice.resources | nindent 12 }}
+          volumeMounts:
+            # Writable scratch under the read-only rootfs: os.TempDir() for
+            # anything the process writes (e.g. the #607 flight recorder's
+            # default $TMPDIR/glyphoxa-flight). Pod-lifetime, node-local.
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.voice.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- with .Values.voice.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

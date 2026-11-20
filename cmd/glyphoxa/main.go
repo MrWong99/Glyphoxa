@@ -136,6 +136,9 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "version":
+			runVersion(os.Stdout)
+			return
 		}
 	}
 
@@ -160,6 +163,8 @@ func main() {
 	// (instrumented in runWeb), so this only bites in standalone `voice` mode where
 	// each cycle dials its own client; the borrow path leaves it unused.
 	cfg.GatewayBudget = gatewayBudget
+
+	logBuildInfo(log, *mode)
 
 	switch *mode {
 	case "voice":
