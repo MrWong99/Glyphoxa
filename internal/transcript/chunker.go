@@ -226,11 +226,18 @@ func (c *Chunker) fold(e voiceevent.Event) {
 	case voiceevent.TTSStreamFailed:
 		c.abortSentence(sid, ev)
 	case voiceevent.TurnEnded:
-		// The turn is finalized: drop its undelivered tail (ADR-0012 — the room
-		// never heard those sentences) and refuse late dispatches.
+		// The turn is finalized: refuse late dispatches. A CUT turn (barge,
+		// supersede, mute, teardown) drops its undelivered tail (ADR-0012 — the
+		// room never heard those sentences). A turn's OWN end keeps it: on
+		// pipelined sentences FirstAudio is published by the wire's sender
+		// goroutine and can land just after TurnEnded{completed}, and a pending
+		// sentence that never gets its FirstAudio never commits anyway.
 		t := c.proj.Turn(sid, ev.TurnID)
 		t.ended = true
-		t.pending = nil
+		switch ev.Reason {
+		case voiceevent.TurnEndBarge, voiceevent.TurnEndSuperseded, voiceevent.TurnEndMute, voiceevent.TurnEndCancelled:
+			t.pending = nil
+		}
 	}
 }
 

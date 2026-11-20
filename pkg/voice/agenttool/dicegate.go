@@ -82,8 +82,24 @@ var deWurfCompound = regexp.MustCompile(`(?i)(\p{L}*?)(wurf|würf|wuerf)`)
 var deWurfNot = map[string]bool{
 	"vor": true, "ent": true, "ein": true, "aus": true, "ab": true, "über": true,
 	"ueber": true, "maul": true, "um": true, "zu": true, "an": true, "nach": true,
-	"rück": true, "rueck": true, "auf": true,
+	"rück": true, "rueck": true, "auf": true, "raus": true, "unter": true,
 }
+
+// wurfPrefixEveryday reports whether a Wurf/würf compound prefix ends in an
+// everyday-compound stem — so "Gesetzentwurf" is caught like "Entwurf".
+func wurfPrefixEveryday(prefix string) bool {
+	p := strings.ToLower(prefix)
+	for d := range deWurfNot {
+		if strings.HasSuffix(p, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// deProbeIdiom is a bare Probe that is no check: the idiom "auf die Probe
+// stellen", or a rehearsal ("Probe mit der Kapelle").
+var deProbeIdiom = regexp.MustCompile(`(?i)\bauf\s+die\s+probe\b|kapelle|\bchor\b|\bband\b|orchester|theater|bühne|buehne|konzert|aufführung|auffuehrung`)
 
 // deProbeCompound captures the prefix of a "-probe" compound
 // (Wahrnehmungsprobe → "wahrnehmungs"); [everydayProbe] are the everyday ones.
@@ -108,33 +124,25 @@ var deProbeOf = map[string]bool{"von": true, "vom": true, "aus": true, "des": tr
 // punctuation).
 var deWerfen = regexp.MustCompile(`(?i)\b(wirf|werft|werfe|werfen)\b([^.!?;]*)`)
 
-// deRollNoun is a capitalized word that is a roll object ("Wirf deinen
-// ANGRIFF", "einen ZWANZIGER", "einen WahrnehmungsCHECK").
-var deRollNoun = regexp.MustCompile(`(?i)^(angriff|schaden|initiative|zwanziger|zehner|zwölfer|zwoelfer|achter|sechser|vierer|hunderter|würfel|wuerfel|treffer|rettung)|(check|probe|wurf|würfe|wuerfe)$`)
+// deThrowEvidence is a word in the clause after a werfen verb that says a THING
+// is being thrown somewhere — a direction particle ("Wirf mir den Schlüssel
+// RÜBER", "Wirf ihn INS Feuer") — or the idiom "einen Blick werfen".
+var deThrowEvidence = regexp.MustCompile(`(?i)^(rüber|rueber|herüber|herueber|hinüber|hinueber|weg|raus|heraus|hinaus|rein|herein|hinein|zurück|zurueck|ins|runter|herunter|hinunter|hoch|blick|blicke)$`)
 
-// werfenArms reports whether a werfen verb reads as (re)rolling. It arms unless
-// the clause after it names a non-roll THING: a capitalized noun that is not a
-// roll object ("Wirf mir den SCHLÜSSEL rüber"). "Wirf das nochmal", "Wirf einen
-// für mich", "Wirf mir bitte auf Wahrnehmung" (a roll ON a skill) all arm.
+// werfenArms reports whether a werfen verb reads as (re)rolling. It ARMS by
+// default — "Wirf Wahrnehmung für mich", "Wirf nochmal, Flo", "Werfen Sie bitte
+// noch einmal" — and stays off only when the clause after the verb carries
+// throw evidence ([deThrowEvidence]).
 func werfenArms(text string) bool {
 	for _, m := range deWerfen.FindAllStringSubmatch(text, -1) {
-		words := strings.Fields(m[2])
-		if len(words) > 6 {
-			words = words[:6]
-		}
-		thing := false
-		for i, w := range words {
-			w = strings.Trim(w, `,"'()`)
-			if strings.EqualFold(w, "auf") && i+1 < len(words) {
-				thing = false // "auf <Skill>": a roll on a skill
+		thrown := false
+		for _, w := range strings.Fields(m[2]) {
+			if deThrowEvidence.MatchString(strings.Trim(w, `,"'()`)) {
+				thrown = true
 				break
 			}
-			r := []rune(w)
-			if len(r) > 0 && unicode.IsUpper(r[0]) && !deRollNoun.MatchString(w) {
-				thing = true
-			}
 		}
-		if !thing {
+		if !thrown {
 			return true
 		}
 	}
@@ -142,12 +150,13 @@ func werfenArms(text string) bool {
 }
 
 // deArms is the German gate beyond the pattern table: any Wurf/Würfel compound
-// except an everyday one (Vorwurf, Entwurf, Maulwurf …), any -probe compound
-// except an everyday one (Kostprobe), a bare "Probe" unless it is a sample OF
-// something, and werfen unless a non-roll thing is thrown ([werfenArms]).
+// except an everyday one (Vorwurf, Gesetzentwurf, Rauswurf, unterwürfig …), any
+// -probe compound except an everyday one (Kostprobe), a bare "Probe" unless it
+// is a sample OF something, the "auf die Probe" idiom or a rehearsal, and werfen
+// unless something is thrown somewhere ([werfenArms]).
 func deArms(text string) bool {
 	for _, m := range deWurfCompound.FindAllStringSubmatch(text, -1) {
-		if !deWurfNot[strings.ToLower(m[1])] {
+		if !wurfPrefixEveryday(m[1]) {
 			return true
 		}
 	}
@@ -156,9 +165,11 @@ func deArms(text string) bool {
 			return true
 		}
 	}
-	for _, m := range deBareProbe.FindAllStringSubmatch(text, -1) {
-		if !deProbeOf[strings.ToLower(m[1])] {
-			return true
+	if !deProbeIdiom.MatchString(text) {
+		for _, m := range deBareProbe.FindAllStringSubmatch(text, -1) {
+			if !deProbeOf[strings.ToLower(m[1])] {
+				return true
+			}
 		}
 	}
 	return werfenArms(text)
