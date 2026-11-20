@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -52,19 +53,22 @@ func cookieValue(h http.Header, name string) string {
 	return c.Value
 }
 
-// headerSecure reports whether the request reached the reverse proxy over TLS,
-// per the X-Forwarded-Proto header. The self-host topology terminates TLS at the
-// proxy (ADR-0039), so the Go process sees cleartext but must still set Secure
-// cookies when the public edge is https.
-func headerSecure(h http.Header) bool {
-	return strings.EqualFold(h.Get("X-Forwarded-Proto"), "https")
-}
-
-// requestSecure reports whether to mark cookies Secure: the request is TLS
-// directly, or was forwarded as https. Local cleartext dev (http://localhost)
-// is correctly non-Secure so the browser still stores the login cookie.
-func requestSecure(r *http.Request) bool {
-	return r.TLS != nil || headerSecure(r.Header)
+// SecureCookies reports whether the session, CSRF and OAuth-state cookies must
+// carry the Secure attribute (ADR-0016), derived ONCE from the deployment's
+// public URL — the configured Discord OAuth redirect URL — rather than from
+// each request. The Go process sits behind a TLS-terminating reverse proxy
+// (ADR-0039) and only ever sees cleartext, so the per-request alternative is
+// the X-Forwarded-Proto header, which any client can set or omit and which a
+// proxy that does not overwrite it passes straight through (#662): a missing
+// header silently downgraded the session cookie to non-Secure. The redirect
+// URL is operator configuration and is by construction the scheme browsers
+// reach the instance on (Discord redirects them to it). An https URL yields
+// Secure cookies; http (local dev, http://localhost) and an unset or
+// unparsable value (GLYPHOXA_DEV_MODE, which needs no OAuth) yield non-Secure
+// ones the browser will still store over cleartext.
+func SecureCookies(oauthRedirectURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(oauthRedirectURL))
+	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
 // sessionCookie builds the HttpOnly session cookie (ADR-0016: HttpOnly, Secure,

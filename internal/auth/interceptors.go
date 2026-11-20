@@ -27,9 +27,10 @@ import (
 // NO_SIDE_EFFECTS reads (e.g. GetActiveCampaign / GetCurrentUser) mutate
 // nothing, and the CSRF cookie is not guaranteed present before the first
 // login. The tenant is [TenantOptional]: some Connect procedures are
-// tenant-agnostic, so a resolve failure proceeds tenantless (logged) and each
-// handler fails on its own terms — unlike the byte mounts (mounts.go), which
-// declare [TenantRequired].
+// tenant-agnostic, so an operator with no bound tenant proceeds tenantless
+// (logged) and each handler fails on its own terms — unlike the byte mounts
+// (mounts.go), which declare [TenantRequired]. A tenant LOOKUP failure is
+// CodeUnavailable on both (#661).
 //
 // It is a full [connect.Interceptor], not a UnaryInterceptorFunc: a
 // UnaryInterceptorFunc's WrapStreamingHandler is a PASS-THROUGH, so mounting a
@@ -166,8 +167,9 @@ func NewCSRFInterceptor() connect.UnaryInterceptorFunc {
 
 // NewTenantInterceptor enforces only the [TenantOptional] tenant resolution:
 // an authenticated operator's bound tenant is resolved server-side (ADR-0039)
-// and injected ([TenantID]); an unauthenticated context or a resolve failure
-// (logged) proceeds without one.
+// and injected ([TenantID]); an unauthenticated context or an operator with no
+// bound tenant (logged) proceeds without one, and a lookup failure is
+// CodeUnavailable.
 func NewTenantInterceptor(tr TenantResolver) connect.UnaryInterceptorFunc {
 	p := NewPolicy(nil, tr)
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
@@ -190,6 +192,7 @@ func NewTenantInterceptor(tr TenantResolver) connect.UnaryInterceptorFunc {
 // [Stack.HandlerOptions]. Every service reuses the same Stack so the gate is
 // identical across services.
 type Stack struct {
+	policy       *Policy
 	interceptors []connect.Interceptor
 }
 
@@ -206,25 +209,78 @@ func NewStack(a Authenticator, tr TenantResolver, public ...string) *Stack {
 // policy instance the plain-mount table ([MustGuardMounts]) enforces, so the
 // two transports cannot gate differently.
 func (p *Policy) Stack(public ...string) *Stack {
-	return &Stack{interceptors: []connect.Interceptor{NewPolicyInterceptor(p, public...)}}
+	return &Stack{policy: p, interceptors: []connect.Interceptor{NewPolicyInterceptor(p, public...)}}
 }
 
-// MaxRequestBytes bounds one Connect request message on every service the stack
-// guards. Without it connect-go reads — and gzip-inflates — an unbounded body
-// BEFORE the policy interceptor runs, so an unauthenticated client could pin
-// the web tier's memory with a multi-gigabyte POST. The largest legitimate
-// message is a map image upload (CreateMap / ReplaceMapImage) at the blob cap of
-// 32 MiB (ADR-0048), which the SPA's JSON transport base64-inflates by 4/3 to
-// ~43 MiB; 48 MiB leaves headroom for the rest of the message. Over the cap,
-// connect answers CodeResourceExhausted without buffering the body.
-const MaxRequestBytes = 48 << 20
+// MaxRequestBytes bounds one Connect request message on every service the
+// stack guards by default. connect-go reads — and gzip-inflates — the whole
+// request body BEFORE the policy interceptor runs, so this cap is what an
+// UNAUTHENTICATED caller can make the web tier buffer per request: without it
+// that is unbounded, and at the old one-size-fits-all 48 MiB it was still a
+// cheap memory-exhaustion lever on every service. No request message outside
+// CampaignService carries bytes, and 1 MiB is far above the largest text
+// message any of them accepts. Over the cap, connect answers
+// CodeResourceExhausted without buffering the body.
+const MaxRequestBytes = 1 << 20
+
+// MaxUploadRequestBytes is the read cap of the ONE service that takes image
+// uploads over Connect (CampaignService: CreateMap / ReplaceMapImage /
+// SetNodePortrait). The largest legitimate message is an image at the blob cap
+// of 32 MiB (ADR-0048), which the SPA's JSON transport base64-inflates by 4/3
+// to ~43 MiB; 48 MiB leaves headroom for the rest of the message. A mount
+// using it must sit behind [Stack.RequireSessionBeforeBody], so only a caller
+// holding a valid session can make the server read that much.
+const MaxUploadRequestBytes = 48 << 20
 
 // HandlerOptions returns the connect.HandlerOptions that install the stack on a
 // generated handler, e.g. authServer.Handler(stack.HandlerOptions()...): the
 // interceptor chain plus the [MaxRequestBytes] read cap.
 func (s *Stack) HandlerOptions() []connect.HandlerOption {
+	return s.handlerOptions(MaxRequestBytes)
+}
+
+// UploadHandlerOptions is [Stack.HandlerOptions] with the
+// [MaxUploadRequestBytes] read cap, for the service that accepts image
+// uploads. Wrap the resulting handler in [Stack.RequireSessionBeforeBody].
+func (s *Stack) UploadHandlerOptions() []connect.HandlerOption {
+	return s.handlerOptions(MaxUploadRequestBytes)
+}
+
+func (s *Stack) handlerOptions(readMax int) []connect.HandlerOption {
 	return []connect.HandlerOption{
-		connect.WithReadMaxBytes(MaxRequestBytes),
+		connect.WithReadMaxBytes(readMax),
 		connect.WithInterceptors(s.interceptors...),
 	}
+}
+
+// RequireSessionBeforeBody rejects a request whose session cookie is missing or
+// invalid BEFORE the Connect handler reads a single body byte. The policy
+// interceptor cannot do this itself — connect-go hands it the request only
+// after the body is buffered and decoded — so the large-cap upload mount needs
+// the session checked one layer out, on the headers alone. It is the session
+// half of the policy only (the interceptor still runs the full gate — CSRF,
+// tenant — on the decoded call), and the principal it resolves rides the
+// request context so the interceptor does not authenticate the same token a
+// second time.
+//
+// It denies EVERY sessionless request, so it must only wrap a service with no
+// public procedures (CampaignService has none; the two public probes live on
+// AuthService). The denial is written in the caller's RPC protocol, with the
+// same code and message the interceptor would have answered.
+func (s *Stack) RequireSessionBeforeBody(next http.Handler) http.Handler {
+	errs := connect.NewErrorWriter()
+	policy := s.policy
+	if policy == nil {
+		// A hand-built zero Stack has no authenticator: fail closed.
+		policy = NewPolicy(nil, nil)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := cookieValue(r.Header, SessionCookieName)
+		u, _, deny := policy.evaluateSession(r.Context(), token, false)
+		if deny != DenyNone {
+			_ = errs.Write(w, r, denialError(deny))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(withVerifiedSession(r.Context(), token, u)))
+	})
 }

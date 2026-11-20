@@ -81,14 +81,16 @@ const (
 	// its handler resolves the tenant off the session itself (#291).
 	TenantNone
 	// TenantOptional resolves the operator's tenant when authenticated and
-	// proceeds tenantless on failure (logged) — the Connect posture, where
-	// some procedures are tenant-agnostic and each handler fails on its own
-	// terms.
+	// proceeds tenantless when the operator has none bound (logged) — the
+	// Connect posture, where some procedures are tenant-agnostic and each
+	// handler fails on its own terms. A resolver FAILURE (anything but
+	// storage.ErrNotFound) still denies as unavailable (#661).
 	TenantOptional
-	// TenantRequired rejects as unauthenticated when the tenant cannot be
-	// resolved — the byte-mount posture (clip/image/SSE/snapshot/export):
+	// TenantRequired rejects as unauthenticated when the operator has no
+	// bound tenant — the byte-mount posture (clip/image/SSE/snapshot/export):
 	// those handlers ALWAYS need a tenant, so this fails fast with the same
-	// code the handler would return anyway.
+	// code the handler would return anyway. A resolver FAILURE is unavailable
+	// (503), not unauthenticated (#661).
 	TenantRequired
 )
 
@@ -120,9 +122,10 @@ const (
 	DenyUnauthenticated
 	// DenyCSRF is the double-submit failure: CodePermissionDenied / 403.
 	DenyCSRF
-	// DenyUnavailable means the session could not be checked at all — the
-	// authenticator failed for a reason other than "no such session" (a DB
-	// outage, a pool timeout): CodeUnavailable / 503. It is NOT an
+	// DenyUnavailable means the session — or the operator's tenant (#661) —
+	// could not be checked at all: the authenticator or tenant resolver failed
+	// for a reason other than "no such row" (a DB outage, a pool timeout):
+	// CodeUnavailable / 503. It is NOT an
 	// unauthenticated answer: a presented token that could not be verified must
 	// not read as "please sign in" (the SPA logs the operator out on that).
 	DenyUnavailable
@@ -193,6 +196,12 @@ func (p *Policy) Evaluate(ctx context.Context, in Input, c Check) Verdict {
 // on both kinds of check: the token was presented and could not be verified,
 // which is neither "signed in" nor "not signed in".
 func (p *Policy) evaluateSession(ctx context.Context, token string, public bool) (storage.User, bool, Denial) {
+	// A pre-body check ([Stack.RequireSessionBeforeBody]) already verified this
+	// exact token for this request: reuse its principal instead of a second
+	// authenticator round trip.
+	if u, ok := verifiedSession(ctx, token); ok {
+		return u, true, DenyNone
+	}
 	if token != "" && p.authn != nil {
 		u, err := p.authn.AuthenticateSession(ctx, token)
 		switch {
@@ -236,18 +245,23 @@ func (p *Policy) evaluateTenant(ctx context.Context, u storage.User, hasUser boo
 		if !hasUser {
 			return uuid.Nil, false, DenyNone
 		}
-		if id, ok := p.resolveTenant(ctx, u); ok {
-			return id, true, DenyNone
+		id, ok, err := p.resolveTenant(ctx, u)
+		if err != nil {
+			return uuid.Nil, false, DenyUnavailable
 		}
-		return uuid.Nil, false, DenyNone
+		return id, ok, DenyNone
 	case TenantRequired:
 		if !hasUser {
 			return uuid.Nil, false, DenyUnauthenticated
 		}
-		if id, ok := p.resolveTenant(ctx, u); ok {
-			return id, true, DenyNone
+		id, ok, err := p.resolveTenant(ctx, u)
+		switch {
+		case err != nil:
+			return uuid.Nil, false, DenyUnavailable
+		case !ok:
+			return uuid.Nil, false, DenyUnauthenticated
 		}
-		return uuid.Nil, false, DenyUnauthenticated
+		return id, true, DenyNone
 	default:
 		return uuid.Nil, false, DenyUnauthenticated
 	}
@@ -255,18 +269,54 @@ func (p *Policy) evaluateTenant(ctx context.Context, u storage.User, hasUser boo
 
 // resolveTenant resolves the operator's bound tenant SERVER-SIDE (ADR-0039
 // thin pass-through) — never from a client header — so the multi-tenant
-// membership check fills in here later without a rewrite. A failure is warned
-// so a downstream 401 is never a blind wall — the exact debugging pain that
-// made #408 need a live repro.
-func (p *Policy) resolveTenant(ctx context.Context, u storage.User) (uuid.UUID, bool) {
+// membership check fills in here later without a rewrite. It distinguishes the
+// two ways a tenant can be missing (#661), exactly as [Policy.evaluateSession]
+// does for the session: ok=false with a nil error means the operator has NO
+// bound tenant (storage.ErrNotFound, or no resolver wired — both answer "no
+// tenant"); a non-nil error means the lookup itself FAILED (a pool timeout, a
+// dropped connection), which callers must answer as [DenyUnavailable] — a
+// transient database error must never read as "please sign in" (the SPA signs
+// the operator out on that) nor let a Connect call proceed tenantless into a
+// misleading handler error. Both outcomes are warned so a downstream denial is
+// never a blind wall — the exact debugging pain that made #408 need a live
+// repro.
+func (p *Policy) resolveTenant(ctx context.Context, u storage.User) (uuid.UUID, bool, error) {
 	if p.tenants == nil {
 		slog.Default().Warn("auth policy: tenant check declared but no TenantResolver wired", "user_id", u.ID)
-		return uuid.Nil, false
+		return uuid.Nil, false, nil
 	}
 	id, err := p.tenants.TenantForUser(ctx, u.ID)
-	if err != nil {
-		slog.Default().Warn("auth policy: no tenant for operator", "user_id", u.ID, "err", err)
-		return uuid.Nil, false
+	switch {
+	case err == nil:
+		return id, true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		slog.Default().Warn("auth policy: no tenant for operator", "user_id", u.ID)
+		return uuid.Nil, false, nil
 	}
-	return id, true
+	slog.Default().Warn("auth policy: resolve tenant", "user_id", u.ID, "err", err)
+	return uuid.Nil, false, err
+}
+
+// verifiedSessionKey carries a session the pre-body check has already verified
+// for this request ([Stack.RequireSessionBeforeBody]). It is unexported and
+// bound to the exact token it was verified for, so nothing outside this
+// package can mint one and a request that somehow presents a different token
+// downstream is authenticated from scratch.
+type verifiedSessionKey struct{}
+
+type verifiedSessionValue struct {
+	token string
+	user  storage.User
+}
+
+func withVerifiedSession(ctx context.Context, token string, u storage.User) context.Context {
+	return context.WithValue(ctx, verifiedSessionKey{}, verifiedSessionValue{token: token, user: u})
+}
+
+func verifiedSession(ctx context.Context, token string) (storage.User, bool) {
+	v, ok := ctx.Value(verifiedSessionKey{}).(verifiedSessionValue)
+	if !ok || token == "" || subtle.ConstantTimeCompare([]byte(v.token), []byte(token)) != 1 {
+		return storage.User{}, false
+	}
+	return v.user, true
 }

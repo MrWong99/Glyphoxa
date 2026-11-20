@@ -61,7 +61,7 @@ func (f *fakeOAuthStore) ResolveOperatorTenant(_ context.Context, userID uuid.UU
 func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) (storage.Session, error) {
 	f.createCalls++
 	f.created = n
-	return storage.Session{ID: uuid.New(), UserID: n.UserID, Token: n.Token, ExpiresAt: n.ExpiresAt}, nil
+	return storage.Session{ID: uuid.New(), UserID: n.UserID, ExpiresAt: n.ExpiresAt}, nil
 }
 
 func TestOAuthLogin_RedirectsAndSetsState(t *testing.T) {
@@ -221,26 +221,50 @@ func TestOAuthCallback_NotAllowlisted_Rejected(t *testing.T) {
 	}
 }
 
-// TestOAuthCallback_SecureAndIPBehindProxy pins the production shape of ADR-0016's
-// Secure attribute: behind the https reverse proxy the request itself is
-// cleartext, so `X-Forwarded-Proto: https` must mark every issued cookie Secure
-// (and its absence must leave local cleartext dev non-Secure), while the first
-// X-Forwarded-For hop is what the session row records as the client IP.
-func TestOAuthCallback_SecureAndIPBehindProxy(t *testing.T) {
+// TestOAuthCallback_SecureFromConfigNotRequest pins the production shape of
+// ADR-0016's Secure attribute (#662): it is fixed at boot from the configured
+// public URL ([auth.SecureCookies]), NOT read off each request. A request
+// claiming `X-Forwarded-Proto: https` must not upgrade a cleartext deployment,
+// and — the dangerous direction — a request WITHOUT the header must not
+// downgrade an https deployment's session cookie to non-Secure.
+func TestOAuthCallback_SecureFromConfigNotRequest(t *testing.T) {
 	t.Parallel()
-	for _, proxied := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct", true: "proxied"}[proxied], func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		redirectURL string
+		forwarded   string
+		want        bool
+	}{
+		{"https deployment, proxy header absent", "https://glyphoxa.example/auth/discord/callback", "", true},
+		{"https deployment, proxy header says http", "https://glyphoxa.example/auth/discord/callback", "http", true},
+		{"cleartext dev, client claims https", "http://localhost:8080/auth/discord/callback", "https", false},
+		{"unset redirect URL (dev mode)", "", "https", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
 			store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
 			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, nil)
+			o.SetSecureCookies(auth.SecureCookies(tc.redirectURL))
+
+			// Login issues the state cookie with the same attribute.
+			loginReq := httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil)
+			if tc.forwarded != "" {
+				loginReq.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			loginRec := httptest.NewRecorder()
+			o.Login(loginRec, loginReq)
+			for _, c := range loginRec.Result().Cookies() {
+				if c.Secure != tc.want {
+					t.Errorf("login cookie %s Secure=%v, want %v", c.Name, c.Secure, tc.want)
+				}
+			}
 
 			form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 			req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
 			req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
-			if proxied {
-				req.Header.Set("X-Forwarded-Proto", "https")
-				req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+			if tc.forwarded != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.forwarded)
 			}
 			rec := httptest.NewRecorder()
 			o.Callback(rec, req)
@@ -252,16 +276,65 @@ func TestOAuthCallback_SecureAndIPBehindProxy(t *testing.T) {
 				t.Fatal("no cookies issued")
 			}
 			for _, c := range cookies {
-				if c.Secure != proxied {
-					t.Errorf("cookie %s Secure=%v, want %v", c.Name, c.Secure, proxied)
+				if c.Secure != tc.want {
+					t.Errorf("cookie %s Secure=%v, want %v", c.Name, c.Secure, tc.want)
 				}
 			}
-			wantIP := req.RemoteAddr
-			if proxied {
-				wantIP = "203.0.113.7"
+		})
+	}
+}
+
+// TestOAuthCallback_SessionAuditIP pins which address the session row records
+// (#662). The FIRST X-Forwarded-For entry is whatever the client typed —
+// proxies append — so it must never be the answer: Cloudflare's own
+// CF-Connecting-IP wins, then the hop our proxy appended (the last one), then
+// the socket peer without its port.
+func TestOAuthCallback_SessionAuditIP(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+		want   string
+	}{
+		{"direct: socket peer, port stripped", http.Header{}, "192.0.2.1"},
+		{
+			"spoofed first hop is ignored; the proxy-appended last hop is recorded",
+			http.Header{"X-Forwarded-For": {"6.6.6.6, 203.0.113.7"}},
+			"203.0.113.7",
+		},
+		{
+			"last hop across repeated X-Forwarded-For header lines",
+			http.Header{"X-Forwarded-For": {"6.6.6.6", "198.51.100.4, 203.0.113.9"}},
+			"203.0.113.9",
+		},
+		{
+			"CF-Connecting-IP wins over X-Forwarded-For",
+			http.Header{"Cf-Connecting-Ip": {"198.51.100.23"}, "X-Forwarded-For": {"6.6.6.6, 10.42.0.1"}},
+			"198.51.100.23",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
+			store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, nil)
+
+			form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+			req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
+			req.RemoteAddr = "192.0.2.1:1234"
+			req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+			for k, vs := range tc.header {
+				for _, v := range vs {
+					req.Header.Add(k, v)
+				}
 			}
-			if store.created.IP != wantIP {
-				t.Errorf("session IP = %q, want %q", store.created.IP, wantIP)
+			rec := httptest.NewRecorder()
+			o.Callback(rec, req)
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+			}
+			if store.created.IP != tc.want {
+				t.Errorf("session IP = %q, want %q", store.created.IP, tc.want)
 			}
 		})
 	}

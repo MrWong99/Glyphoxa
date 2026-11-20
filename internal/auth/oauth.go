@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ type OAuth struct {
 	adm      Admission // the admission policy (ADR-0041 allowlist / ADR-0055 open)
 	ttl      time.Duration
 	redirect string // where the callback sends the browser after login
+	secure   bool   // mark issued cookies Secure (see [SecureCookies])
 	now      func() time.Time
 	log      *slog.Logger
 }
@@ -93,6 +95,12 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Ad
 	}
 }
 
+// SetSecureCookies fixes whether every cookie this flow issues carries the
+// Secure attribute. The composition root derives it once from the configured
+// OAuth redirect URL ([SecureCookies]); the default (false) is the local
+// cleartext-dev posture. Set once at boot, before serving.
+func (o *OAuth) SetSecureCookies(secure bool) { o.secure = secure }
+
 // Login starts the OAuth flow: mint an anti-forgery state nonce, stash it in a
 // short-lived cookie, and 302 to Discord's authorize URL.
 //
@@ -118,14 +126,13 @@ func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
 	if aup {
 		cookieValue += aupStateSuffix
 	}
-	secure := requestSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
 		Value:    cookieValue,
 		Path:     "/",
 		Expires:  o.now().Add(stateCookieTTL),
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   o.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, o.discord.AuthCodeURL(state), http.StatusFound)
@@ -238,7 +245,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secure := requestSecure(r)
+	secure := o.secure
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -305,7 +312,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		return
 	}
 
-	secure := requestSecure(r)
+	secure := o.secure
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -316,12 +323,39 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
-// clientIP extracts the best-effort client IP for the session audit row,
-// preferring the proxy's X-Forwarded-For first hop.
+// clientIP extracts the best-effort client IP for the session audit row. The
+// value is only ever stored (sessions.ip) — nothing authorizes on it — but it
+// should not be something the client simply typed (#662).
+//
+// TRUST ASSUMPTION: the web tier is never reached directly, only through the
+// deployment's reverse proxy (ADR-0039), and that proxy is what makes any of
+// these headers meaningful:
+//
+//   - CF-Connecting-IP, when present, wins. Production sits behind a
+//     Cloudflare Tunnel, and Cloudflare sets this header itself on every
+//     request, replacing whatever the client sent.
+//   - Otherwise the LAST X-Forwarded-For hop: proxies APPEND the peer they
+//     saw, so the rightmost entry is the one our own proxy wrote. The first
+//     entry — which this function used to return — is whatever the client put
+//     in the header.
+//   - Otherwise the socket peer.
+//
+// A deployment exposed without a proxy, or behind a non-Cloudflare proxy that
+// forwards a client-supplied CF-Connecting-IP untouched, records a
+// client-chosen value; that is a misleading audit record for the caller's OWN
+// session and nothing more.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		return strings.TrimSpace(first)
+	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
+		hops := strings.Split(xff[len(xff)-1], ",")
+		if last := strings.TrimSpace(hops[len(hops)-1]); last != "" {
+			return last
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
 	return r.RemoteAddr
 }

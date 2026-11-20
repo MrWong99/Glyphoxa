@@ -44,6 +44,7 @@ type AuthServer struct {
 	tenants  TenantNamer
 	renamer  TenantRenamer
 	mode     AdmissionMode
+	secure   bool // clear cookies with the Secure attribute (see [SecureCookies])
 	log      *slog.Logger
 }
 
@@ -99,6 +100,12 @@ func (s *AuthServer) GetCurrentUser(
 	return connect.NewResponse(resp), nil
 }
 
+// SetSecureCookies fixes whether Logout's cookie-clearing Set-Cookie headers
+// carry the Secure attribute — the same boot-derived value the OAuth flow
+// issues them with ([SecureCookies], [OAuth.SetSecureCookies]). Set once at
+// boot, before serving.
+func (s *AuthServer) SetSecureCookies(secure bool) { s.secure = secure }
+
 // Logout deletes the server-side session row and clears the session + CSRF
 // cookies. It is state-changing, so the auth + CSRF interceptors have already
 // proven a valid session and a matching CSRF token before it runs.
@@ -113,7 +120,7 @@ func (s *AuthServer) Logout(
 		}
 	}
 	resp := connect.NewResponse(&managementv1.LogoutResponse{})
-	secure := headerSecure(req.Header())
+	secure := s.secure
 	resp.Header().Add("Set-Cookie", clearCookie(SessionCookieName, true, secure).String())
 	resp.Header().Add("Set-Cookie", clearCookie(CSRFCookieName, false, secure).String())
 	return resp, nil
