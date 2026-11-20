@@ -171,7 +171,8 @@ func TestReplyStream_Pipelined_CutSentenceNeverCommits(t *testing.T) {
 	d.resolve(t, "Aye.")
 	d.resolve(t, "Two rooms left.")
 	select {
-	case <-done:
+	case err := <-done:
+		t.Logf("turn returned after the cut: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("the turn never returned after the cut")
 	}

@@ -1,103 +1,103 @@
 module github.com/MrWong99/Glyphoxa
 
-go 1.27.0
+go 1.27.4
 
 require (
+	connectrpc.com/connect v1.21.1
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately. pkg/voice/udpconn.go REIMPLEMENTS this pin's voice/udp_conn.go (keepalive transport, ADR-0064/#633): re-diff it against upstream on every bump.
+	github.com/disgoorg/disgo v0.19.7-0.20260716190728-6298d75ebc8e // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; pseudo-version = PR #568 merge (DAVE session close on conn discard, #484) — move to the next tagged release containing it, otherwise bump deliberately. pkg/voice/udpconn.go REIMPLEMENTS this pin's voice/udp_conn.go (keepalive transport, ADR-0064/#633): re-diff it against upstream on every bump. v0.20.0 evaluated 2026-11-20 and NOT taken: its handleGatewayClose now calls udp.Close() before re-Open (our transport latches closed and refuses, so fresh-session recovery would die after 30s) and its sender Close now calls OpusFrameProvider.Close() (ours latches into sender-reaping mode) — both need a pkg/voice design change + live soak first. Its RTP padding fix is already ported into udpconn.go.
+	github.com/disgoorg/godave v0.3.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.10.0
-	github.com/pressly/goose/v3 v3.27.2
-	github.com/testcontainers/testcontainers-go v0.43.0
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
+	github.com/gorilla/websocket v1.5.3
+	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501 // libopus outbound encoder (CGO, -tags opus); pair with -tags nolibopusfile
+	github.com/jackc/pgx/v5 v5.13.0
+	github.com/openai/openai-go/v3 v3.105.0
+	github.com/pion/opus v0.1.1-0.20260714154015-8399d676d1e2 // pinned past v0.1.0: the public Encoder only exists on main; bump deliberately
+	github.com/pressly/goose/v3 v3.30.1
+	github.com/prometheus/client_golang v1.25.0
+	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
+	github.com/thomas-vilte/dave-go v0.5.1 // DAVE/MLS pure Go, used only under -tags dave
+	go.uber.org/goleak v1.3.0
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/Regis24GmbH/go-phonetics.v3 v3.0.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	connectrpc.com/connect v1.20.0
-	github.com/gorilla/websocket v1.5.3
-	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501 // libopus outbound encoder (CGO, -tags opus); pair with -tags nolibopusfile
-	github.com/openai/openai-go/v3 v3.43.0
-	github.com/pion/opus v0.1.1-0.20260714154015-8399d676d1e2 // pinned past v0.1.0: the public Encoder only exists on main; bump deliberately
-	github.com/prometheus/client_golang v1.23.2
-	github.com/thomas-vilte/dave-go v0.5.1 // DAVE/MLS pure Go, used only under -tags dave
-	go.uber.org/goleak v1.3.0
-	google.golang.org/protobuf v1.36.11
-)
-
-require github.com/disgoorg/godave v0.3.0
-
-require (
 	dario.cat/mergo v1.0.2 // indirect
-	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
-	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/Azure/go-ansiterm v0.0.0-20261013165250-51075c6ea6bc // indirect
+	github.com/Microsoft/go-winio v0.6.4 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
-	github.com/containerd/log v0.1.0 // indirect
+	github.com/containerd/log v0.2.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-connections v0.7.0 // indirect
+	github.com/docker/go-connections v0.8.2 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/ebitengine/purego v0.10.0 // indirect
-	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/ebitengine/purego v0.11.3 // indirect
+	github.com/felixge/httpsnoop v1.1.0 // indirect
+	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/klauspost/compress v1.19.0 // indirect
-	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
-	github.com/magiconair/properties v1.8.10 // indirect
-	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.4 // indirect
+	github.com/klauspost/compress v1.20.5 // indirect
+	github.com/kr/text v0.2.0 // indirect
+	github.com/lufia/plan9stats v0.0.0-20261101121723-be84dd9509a0 // indirect
+	github.com/magiconair/properties v1.18.13 // indirect
+	github.com/mfridman/interpolate v0.2.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
-	github.com/moby/go-archive v0.2.0 // indirect
-	github.com/moby/moby/api v1.55.0 // indirect
-	github.com/moby/moby/client v0.5.0 // indirect
+	github.com/moby/go-archive v0.3.3 // indirect
+	github.com/moby/moby/api v1.57.0 // indirect
+	github.com/moby/moby/client v0.6.3 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
-	github.com/moby/sys/sequential v0.6.0 // indirect
-	github.com/moby/sys/user v0.4.0 // indirect
-	github.com/moby/sys/userns v0.1.0 // indirect
+	github.com/moby/sys/sequential v0.7.0 // indirect
+	github.com/moby/sys/user v0.5.0 // indirect
+	github.com/moby/sys/userns v0.2.1 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.70.0 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/pandatix/go-abnf v0.5.5 // indirect
+	github.com/power-devops/perfstat v0.0.0-20260916203055-22a1a467d9f0 // indirect
+	github.com/prometheus/client_model v0.6.3 // indirect
+	github.com/prometheus/common v0.74.0 // indirect
+	github.com/prometheus/procfs v0.23.0 // indirect
+	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/sasha-s/go-csync v0.0.0-20240107134140-fcbab37b09ad // indirect
-	github.com/sethvargo/go-retry v0.3.0 // indirect
-	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/sethvargo/go-retry v0.5.0 // indirect
+	github.com/shirou/gopsutil/v4 v4.26.10 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/thomas-vilte/mls-go v1.6.0 // indirect
-	github.com/tidwall/gjson v1.19.0 // indirect
+	github.com/tidwall/gjson v1.20.5 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
-	github.com/tidwall/pretty v1.2.1 // indirect
-	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/tklauser/go-sysconf v0.3.16 // indirect
-	github.com/tklauser/numcpus v0.11.0 // indirect
+	github.com/tidwall/pretty v1.3.0 // indirect
+	github.com/tidwall/sjson v1.2.11 // indirect
+	github.com/tklauser/go-sysconf v0.4.0 // indirect
+	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
-	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.2 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect
+	go.opentelemetry.io/otel v1.47.0 // indirect
+	go.opentelemetry.io/otel/log v1.47.0 // indirect
+	go.opentelemetry.io/otel/metric v1.47.0 // indirect
+	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	gopkg.in/Regis24GmbH/go-diacritics.v2 v2.0.3 // indirect
 )

@@ -20,9 +20,8 @@
     "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
 
-    "types": ["node", "vitest/globals", "@testing-library/jest-dom"],
+    "types": ["node", "vite/client", "vitest/globals", "@testing-library/jest-dom"],
 
-    "baseUrl": ".",
     "paths": {
       "@gen/*": ["../gen/ts/*"],
       "@/*": ["./src/*"],

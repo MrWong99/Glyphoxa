@@ -38,6 +38,15 @@ const keepalivePacketSize = 8
 // released promptly.
 const retiredSocketLinger = 250 * time.Millisecond
 
+// Masks for the first RTP header byte, bits counted from the most significant
+// as RFC 3550 §5.1 numbers them (0–1 version, 2 padding, 3 extension, 4–7 CSRC
+// count).
+const (
+	rtpPaddingBit    = 0x20
+	rtpExtensionBit  = 0x10
+	rtpCSRCCountMask = 0x0F
+)
+
 // keepaliveUDPConn is this package's implementation of disgo's [voice.UDPConn].
 // It reimplements the pinned disgo udpConnImpl (see go.mod's disgo pin comment;
 // re-diff voice/udp_conn.go on every deliberate bump) because the stock one has
@@ -394,24 +403,21 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 
 		u.packets.Add(1)
 
-		hasPadding := (u.receiveBuffer[0] & 0x04) != 0
-		if hasPadding {
-			paddingLen := int(u.receiveBuffer[n-1])
-			if paddingLen <= 0 || paddingLen > n-voice.RTPHeaderSize {
-				continue
-			}
-			n -= paddingLen
-		}
+		// RTP padding lives at the end of the payload, which is encrypted, so it
+		// cannot be measured until after transport decryption; it is removed
+		// further down (the upstream disgo v0.20.0 fix — the pinned code tested
+		// the wrong header bit and read the count from the last WIRE byte).
+		hasPadding := (u.receiveBuffer[0] & rtpPaddingBit) != 0
 
 		p := voice.Packet{
 			Type:         packetType,
 			Sequence:     binary.BigEndian.Uint16(u.receiveBuffer[2:4]),
 			Timestamp:    binary.BigEndian.Uint32(u.receiveBuffer[4:8]),
 			SSRC:         binary.BigEndian.Uint32(u.receiveBuffer[8:voice.RTPHeaderSize]),
-			HasExtension: (u.receiveBuffer[0] & 0x10) != 0,
+			HasExtension: (u.receiveBuffer[0] & rtpExtensionBit) != 0,
 		}
 
-		cc := int(u.receiveBuffer[0] & 0x0F)
+		cc := int(u.receiveBuffer[0] & rtpCSRCCountMask)
 		headerLen := voice.RTPHeaderSize + (4 * cc)
 		if n < headerLen {
 			continue
@@ -454,6 +460,15 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 
 		decrypted = decrypted[decryptedOffset:]
 
+		if hasPadding {
+			decrypted = stripRTPPadding(decrypted)
+		}
+		// A padding-only packet carries no media: it advances the sequence number
+		// without advancing the timestamp, and has nothing to DAVE-decrypt.
+		if len(decrypted) == 0 {
+			continue
+		}
+
 		userID := godave.UserID(u.ssrcLookup(p.SSRC).String())
 		// Sized by LENGTH (see Write): with the upstream cap-only growth a
 		// high-bitrate channel's >512-byte Opus payloads decoded as corrupted
@@ -469,6 +484,22 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 
 		return &p, nil
 	}
+}
+
+// stripRTPPadding removes RTP padding from a transport-decrypted payload. Per
+// RFC 3550 §5.1 the final octet holds the number of padding octets, itself
+// included. A payload whose count is missing or implausible is returned
+// unchanged rather than truncated, so a malformed packet degrades to a DAVE
+// decrypt failure instead of silent corruption.
+func stripRTPPadding(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	paddingLen := int(payload[len(payload)-1])
+	if paddingLen == 0 || paddingLen > len(payload) {
+		return payload
+	}
+	return payload[:len(payload)-paddingLen]
 }
 
 // sizedBuffer returns buf with len(buf) == n, reusing the backing array when its

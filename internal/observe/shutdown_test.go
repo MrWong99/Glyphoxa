@@ -67,7 +67,8 @@ func TestShutdownOnCancelWaitsForCancel(t *testing.T) {
 
 	cancel()
 	select {
-	case <-serveErr:
+	case err := <-serveErr:
+		t.Logf("Serve returned after cancel: %v", err)
 	case <-time.After(ShutdownGrace + time.Second):
 		t.Fatal("Serve did not return after cancel")
 	}

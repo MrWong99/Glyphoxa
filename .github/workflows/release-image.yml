@@ -37,7 +37,7 @@ jobs:
       - name: Setup buf
         uses: bufbuild/buf-setup-action@v1.50.0
         with:
-          version: 1.66.0
+          version: 1.75.0
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # The remote BSR plugins in buf.gen.yaml are rate-limited for anonymous

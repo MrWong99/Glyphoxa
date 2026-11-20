@@ -106,8 +106,8 @@ func TestPlaySentence_BlocksUntilDone(t *testing.T) {
 
 	// While Done is open, PlaySentence must still be blocked.
 	select {
-	case <-errc:
-		t.Fatal("PlaySentence returned before playback Done closed")
+	case err := <-errc:
+		t.Fatalf("PlaySentence returned (%v) before playback Done closed", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 

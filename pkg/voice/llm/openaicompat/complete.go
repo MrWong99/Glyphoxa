@@ -115,8 +115,8 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 // code — becomes a typed [*providererr.HTTPError] so the retry helper can
 // classify it (a 429/5xx is retryable) via errors.As, exactly like the
 // hand-rolled adapters (#124, ADR-0044). The Op/status/body preserve the
-// operation name, HTTP status, and the SDK's full message (which carries the
-// response body) so the surface stays diagnosable. Any non-HTTP startup failure
+// operation name, HTTP status, and the provider's response body (see
+// [apiErrorText]) so the surface stays diagnosable. Any non-HTTP startup failure
 // (transport, empty request) keeps the plain prose wrap — it is not retryable and
 // needs no status.
 func (c *Client) startError(err error) error {
@@ -125,7 +125,7 @@ func (c *Client) startError(err error) error {
 	// bridge retries the round tool-less rather than the generic retry helper failing
 	// fast on a 4xx (#398). Byte-preserve the SDK message for diagnosability.
 	if isToolSyntaxErr(err) {
-		return &providererr.ToolSyntaxError{Op: c.name + ".Complete", Msg: err.Error()}
+		return &providererr.ToolSyntaxError{Op: c.name + ".Complete", Msg: apiErrorText(err)}
 	}
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) && apiErr.StatusCode != 0 {
@@ -133,10 +133,28 @@ func (c *Client) startError(err error) error {
 			Op:         c.name + ".Complete",
 			StatusCode: apiErr.StatusCode,
 			Status:     http.StatusText(apiErr.StatusCode),
-			Body:       err.Error(),
+			Body:       apiErrorText(err),
 		}
 	}
 	return fmt.Errorf("%s.Complete: %w", c.name, err)
+}
+
+// apiErrorText renders err for the typed provider errors, restoring the
+// provider's response body to the message. openai-go's [*openai.Error].Error()
+// carried it at v3.43; by v3.105 it is a bare status summary ("OpenAI API
+// error: 401 Unauthorized") and the body must be read off RawJSON explicitly.
+// The body is what makes a BYOK failure diagnosable (invalid_api_key vs
+// model_not_found vs a quota code), and it is the provider's own words about
+// the request — it carries no request URL or Authorization header. It is
+// already bounded by [budgetTransport].
+func apiErrorText(err error) string {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		if raw := strings.TrimSpace(apiErr.RawJSON()); raw != "" {
+			return err.Error() + ": " + raw
+		}
+	}
+	return err.Error()
 }
 
 // missingKeyHint renders the actionable tail of the missing-key error, naming the

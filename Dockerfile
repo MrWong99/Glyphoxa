@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------------------
 # Pinned to the exact patch go.mod requires (go-version-file equivalent for the
 # image build; golang:1.27-trixie can lag a fresh patch release behind go.dev).
-ARG GO_VERSION=1.27.0
+ARG GO_VERSION=1.27.4
 
 # ===========================================================================
 # Stage: build — compile the fully static live binary.
