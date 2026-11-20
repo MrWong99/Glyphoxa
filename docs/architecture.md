@@ -151,39 +151,39 @@ the Transcript.
 
 Runs on the **raw** `STTFinal` — no LLM transcript-correction pass in front of it,
 which is what let v1 rewrite NPC names before the matcher saw them. ADR-0024 frames
-it as a four-stage chain (name → last-speaker → single-NPC fallback → none). In the
-tree it is not a chain of early-returns but a **weighted scoring stack** of
-`Heuristic`s, each contributing to a per-Agent score; the highest score wins. What
-production actually runs is `address.DefaultHeuristics()`
-(`pkg/voice/address/matcher.go` — the roster builds the Matcher with `Heuristics`
-nil, which falls back to it), **four** heuristics:
+it as an ordered chain (name → last-speaker → none). In the tree it is not a chain
+of early-returns but a **weighted scoring stack** of `Heuristic`s, each contributing
+to a per-Agent score against a threshold of 1.0. What production runs is
+`address.DefaultHeuristicsWithin(continuationWindow())` (`pkg/voice/address/matcher.go`,
+wired in `internal/wirenpc/roster.go`), **two** heuristics:
 
 | Heuristic | Weight | Mirrors ADR-0024 stage |
 |-----------|--------|------------------------|
-| `NameMatch` | 1.0 (decisive) | 1 — fuzzy name/alias: per-language phonetic encoder, then a Damerau-Levenshtein net, plus derived leading-consonant-truncation aliases (exact-only, utterance-initial) |
-| `LastAddressed` | 1.0 (decisive) | 2 — last-speaker continuation |
-| `ExpertOnRecentWord` | 0.5 (tie-break) | **none — not in ADR-0024** |
-| `SoleActiveNPC` | 1.0 (decisive) | 3 — single active non-Address-Only NPC fallback |
+| `NameMatch` | 1.0 (decisive) | 1 — name/alias: exact in any position; fuzzy (per-language phonetic encoder, then a Damerau-Levenshtein net, plus derived leading-consonant-truncation aliases) **only with vocative evidence** |
+| `LastAddressed` | 1.0 (decisive) | 2 — last-speaker continuation, inside the Continuation Window and only for the speaker who opened the exchange |
 
-Zero score ⇒ no target (ADR-0024 stage 4); the utterance is still transcribed. The
-heuristic with no ADR-0024 stage suppresses itself once any name matched, so it only
-reweights **unnamed** utterances:
+Below the threshold ⇒ no target (the last stage); the utterance is still transcribed.
+Three things from the ADR-0024 amendment of 2026-11-20 shape this:
 
-- `ExpertOnRecentWord` would nudge toward an Agent whose Expertise keywords the table
-  keeps saying — but it is **inert in production**: `matcherAgent`
-  (`internal/wirenpc/roster.go`) never populates `Expertise`, so it always scores 0.
-- `RecentlyInterrupted` (the "we cut them off but still expect them to finish" bias)
-  exists as an opt-in heuristic but is **not** in the default stack (#442): its
-  signal source — `Matcher.NoteInterruption` from the barge path — is deferred to
-  v1.5+ per ADR-0027, so as a default it could never fire.
-  It is dead weight in the shipped stack, not a behavior.
-
-This whole shape — a five-heuristic scoring stack where ADR-0024 documents a
-four-stage chain — is a tree-vs-ADR divergence, logged below.
+- **A fuzzy name is not decisive on its own.** A non-exact hit counts only when its
+  span carries the Vocative Flag ("Bard, …", "…, Barth?") and is not a single
+  everyday word of the Campaign Language (`pkg/voice/address/commonwords.go`).
+  Without that rule a short name's phonetic neighbours ("bereit", "Brot", "more",
+  "great") routed ordinary table talk to NPCs. The precision/recall gate is
+  `pkg/voice/address/corpus_test.go`.
+- **Continuation is speaker-scoped and anchored to the reply.** Only the speaker
+  whose named address opened the claim continues without a name (table-wide when
+  speaker ids are unknown). The `AddressDetector` moves the window's anchor on every
+  `FirstAudio` of a turn it routed (`Matcher.ExtendContinuation`), so the 30s count
+  from the Agent's reply rather than from the address; a Barge-in revokes the claim
+  (`ClearContinuation`, ADR-0027).
+- **No lone-NPC fallback in the shipped stack.** `SoleActiveNPC` exists as an opt-in
+  heuristic only; a lone Character NPC is opened by name like any other. The
+  never-fed `ExpertOnRecentWord` and `RecentlyInterrupted` heuristics were removed.
 
 `Detect` returns a *set*. **`MaxTargets` defaults to 1**, so naming two NPCs in one
 breath fires one turn on the top-scored Agent (ADR-0038). An **Address-Only** Agent
-is reachable only via `NameMatch`; no ambient heuristic (the other four) can ever
+is reachable only via `NameMatch`; no ambient heuristic can ever
 route to it. A muted Agent stays in the fuzzy index and is still matched by name,
 but is likewise excluded from every ambient heuristic — muting must never re-route an
 explicit address to a different NPC.
@@ -792,7 +792,7 @@ disagreement is documented rather than discovered.
 | ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field is persisted | `BargeDetected` carries the speaker; no column stores it (§2.3) |
 | ADR-0023: TTS matrix is ElevenLabs + OpenAI | ElevenLabs only | OpenAI TTS adapter not built |
 | ADR-0011: default embeddings via Ollama; ADR-0004 names more providers | `pkg/voice/embeddings/ollama` only | the only shipped embeddings adapter |
-| ADR-0024: a 4-stage address chain | a 4-heuristic scoring stack | `DefaultHeuristics` adds `ExpertOnRecentWord` (§2.2); `RecentlyInterrupted` is opt-in only (#442) |
+| ADR-0024: an ordered address chain | a 2-heuristic scoring stack (`NameMatch` + `LastAddressed`) | `DefaultHeuristicsWithin` (§2.2); the unfed heuristics were removed and ADR-0024 amended 2026-11-20 |
 
 ## See also
 
