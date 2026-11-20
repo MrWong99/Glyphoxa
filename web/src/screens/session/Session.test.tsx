@@ -1897,8 +1897,8 @@ describe("Session voice-channel picker", () => {
   });
 
   it("Set as default saves voice_channel_id ONLY and disappears once the default matches", async () => {
-    // No stored default → the first channel is auto-picked, which DIFFERS from
-    // the (empty) default, so the affordance shows immediately.
+    // No stored default and nothing remembered → nothing is pre-selected (W2);
+    // the GM's pick DIFFERS from the (empty) default, so the affordance shows.
     const { transport, saveRequests } = channelTransport({ channels: twoChannels });
     render(
       <Providers transport={transport} queryClient={makeQueryClient()}>
@@ -1907,6 +1907,8 @@ describe("Session voice-channel picker", () => {
     );
 
     await screen.findByTestId("channel-picker");
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Voice channel" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "General" }));
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: "Voice channel" })).toHaveTextContent("General"),
     );
