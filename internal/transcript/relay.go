@@ -490,23 +490,6 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// (ADR-0012/0040).
 		t := r.proj.Turn(sid, ev.TurnID)
 		t.target = ev.Target
-	case voiceevent.EnsembleLead:
-		// An Ensemble Turn's elected Lead (#301, ADR-0025): the Lead speaks under the
-		// ensemble's original TurnID, so — like AddressRouted — record WHO answers so
-		// the coalescing TTSInvoked line is attributed to the Lead (a:<turn>, its name +
-		// NPC pill). The losing candidates publish no EnsembleLead and no TTSInvoked, so
-		// they leave no line.
-		t := r.proj.Turn(sid, ev.TurnID)
-		t.target = ev.Target
-	case voiceevent.EnsembleReaction:
-		// An Ensemble Turn's Cross-talk Reaction (#302, ADR-0025): the reactor speaks
-		// under its OWN fresh sub-turn id (ev.TurnID), so — like EnsembleLead — record
-		// WHO reacts, keyed on that id, so the reaction's coalescing TTSInvoked line
-		// lands as a SEPARATE line (a:<rID>, the reactor's name + NPC pill) beneath the
-		// Lead's rather than coalescing into it. A declined Reaction publishes no
-		// EnsembleReaction and no TTSInvoked, so it leaves no line.
-		t := r.proj.Turn(sid, ev.TurnID)
-		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
 		t := r.proj.Turn(sid, ev.TurnID)

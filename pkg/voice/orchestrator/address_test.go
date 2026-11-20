@@ -181,14 +181,13 @@ func TestAddressDetector_CopiesSpeakerIDOntoRouted(t *testing.T) {
 	)
 }
 
-// TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted pins the
-// multi-target half of the TargetMatcher contract under the Ensemble Turn design
-// (ADR-0025, #301): when the matcher returns several decisions the detector makes
-// the set ATOMIC — ONE address.ensemble carrying every target in the matcher's
-// order — rather than N independent address.routed. This REWRITES the former
-// TestAddressDetector_PublishesEveryDecision (which asserted N address.routed): the
-// #301 contract supersedes it, since an Ensemble Turn is one floor-holding unit.
-func TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted(t *testing.T) {
+// TestAddressDetector_MultiDecisionPublishesOnlyTheFirst pins the multi-target
+// half of the TargetMatcher contract: one utterance opens one turn (ADR-0038), so
+// when the matcher returns several decisions the detector publishes only the
+// FIRST — the matcher's best — verbatim, with the utterance's TurnID and
+// SpeakerID. Ensemble Turns, which would have answered the set, are not
+// implemented (ADR-0025).
+func TestAddressDetector_MultiDecisionPublishesOnlyTheFirst(t *testing.T) {
 	h := voicetest.New(t)
 	m := matchFunc(func(text string) []voiceevent.AddressRouted {
 		return []voiceevent.AddressRouted{
@@ -201,15 +200,36 @@ func TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted(t *testing.T) {
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting.", TurnID: "T-m", SpeakerID: "spk-9"})
 
-	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 1)
-	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.EnsembleRouted) bool {
-			return len(e.Targets) == 2 && e.Targets[0] == bartTarget && e.Targets[1] == goblinTarget &&
-				e.TurnID == "T-m" && e.Text == "Bart and the Goblin start fighting." &&
-				e.SpeakerID == "spk-9"
+		func(e voiceevent.AddressRouted) bool {
+			return e.Target == bartTarget && e.TurnID == "T-m" &&
+				e.Text == "Bart and the Goblin start fighting." && e.SpeakerID == "spk-9"
 		},
-		"address.ensemble carrying both targets in matcher order plus the SpeakerID",
+		"address.routed for the first decision, carrying the TurnID and SpeakerID",
+	)
+}
+
+// TestAddressDetector_MultiDecisionSkipsGatedButler pins that "first" means the
+// first decision that SURVIVES the detector's gate: a Butler decision denied by
+// the GM gate does not consume the turn — the next decision is published.
+func TestAddressDetector_MultiDecisionSkipsGatedButler(t *testing.T) {
+	h := voicetest.New(t)
+	m := matchFunc(func(text string) []voiceevent.AddressRouted {
+		return []voiceevent.AddressRouted{
+			{At: time.Now(), Text: text, Target: butlerTarget},
+			{At: time.Now(), Text: text, Target: goblinTarget},
+		}
+	})
+	d := orchestrator.NewAddressDetector(m, orchestrator.WithButlerGMGate(func(string) bool { return false }))
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Glyphoxa and the Goblin.", TurnID: "T-g", SpeakerID: "player"})
+
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool { return e.Target == goblinTarget && e.TurnID == "T-g" },
+		"address.routed → the Goblin, the first decision past the Butler GM gate",
 	)
 }
 

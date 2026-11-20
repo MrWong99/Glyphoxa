@@ -213,11 +213,8 @@ func (f *Floor) take(parent context.Context, agentID string) (ctx context.Contex
 // (`no_audio` turns must not be cancellable). An empty floor is likewise a
 // no-op. Once the guard passes it clears the holder and cancels its ctx.
 // It reports the AgentID of the holder it cut, read in the same critical section
-// as the yield itself so the attribution can never be stale — [Floor.SetHolderAgent]
-// may retarget the holder mid-turn (the Ensemble Lead election) under an unchanged
-// turnID, so reading the agent beforehand would name whoever held the floor then,
-// not whoever was actually cut. It is "" on a no-op yield and on a holder taken
-// with no target.
+// as the yield itself so the attribution can never be stale. It is "" on a no-op
+// yield and on a holder taken with no target.
 func (f *Floor) YieldTurn(turnID string) (agentID string, yielded bool) {
 	f.mu.Lock()
 	if f.cancel == nil || f.holderTurn != turnID || !f.speaking {
@@ -278,22 +275,6 @@ func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
 	f.mu.Unlock()
 	c()
 	return turnID, true
-}
-
-// SetHolderAgent retargets the floor's coalesce anchor and mute-cut key
-// ([Floor.holderAgent]) onto agentID, but only while turnID still holds the floor
-// (holderTurn == turnID AND a turn is held). It is the Ensemble Lead election
-// (#301, ADR-0025): the floor is Taken under the coalesce anchor Targets[0], and
-// once the speculative race elects a Lead the floor must name THAT agent so a
-// per-Agent mute cut ([Floor.YieldAgent], #211) and the coalesce window both key on
-// whoever is actually speaking. A stale turnID — a late election for a turn already
-// superseded/yielded — is a no-op, so it can never retarget a newer holder.
-func (f *Floor) SetHolderAgent(turnID, agentID string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.cancel != nil && f.holderTurn == turnID {
-		f.holderAgent = agentID
-	}
 }
 
 // MarkSpeaking records that the turn identified by turnID has produced its first

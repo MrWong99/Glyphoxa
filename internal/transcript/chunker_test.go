@@ -804,19 +804,20 @@ func TestChunker_BusCallbackNeverBlocks(t *testing.T) {
 	}
 }
 
-// TestChunker_LookaheadReaction_CommitsOnDelivery pins #375 at the chunk tier (happy):
-// with F1+F2 the reaction's TTSInvoked (at release) is followed by its FirstAudio (after
-// playback), so the reaction text is buffered THEN committed — it lands in the chunk.
-func TestChunker_LookaheadReaction_CommitsOnDelivery(t *testing.T) {
+// TestChunker_HeldSentence_CommitsOnDelivery pins the look-ahead lane at the chunk
+// tier (#626, happy): a pre-synthesized sentence's TTSInvoked (published at release)
+// is followed by its FirstAudio (once it plays), so its text is buffered THEN
+// committed — it lands in the chunk.
+func TestChunker_HeldSentence_CommitsOnDelivery(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{Window: time.Hour}) // no auto-close
 
-	// Lead turn delivers.
+	// The turn's first sentence delivers.
 	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: uuid.NewString(), AgentRole: "character", Name: "Bart"}})
 	agentReply(bus, "Te", "Bart leads.", at(1))
-	// Reaction: TTSInvoked (at release) THEN FirstAudio (after playback) — F1/F2 order.
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I disagree.", TurnID: "rID"})
-	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "rID"})
+	// The held next sentence: TTSInvoked (at release) THEN FirstAudio (at playback).
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I disagree.", TurnID: "Te"})
+	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "Te"})
 
 	if err := c.FlushSession(context.Background(), fs.id); err != nil {
 		t.Fatalf("FlushSession: %v", err)
@@ -826,31 +827,33 @@ func TestChunker_LookaheadReaction_CommitsOnDelivery(t *testing.T) {
 	}
 	content := store.all()[0].Content
 	if !strings.Contains(content, "I disagree.") {
-		t.Fatalf("chunk content = %q, want it to contain the delivered reaction text", content)
+		t.Fatalf("chunk content = %q, want it to contain the delivered held sentence", content)
 	}
 }
 
-// TestChunker_LookaheadReaction_DiscardCommitsNoReactionText pins #375's discard win at
-// the chunk tier: a reaction that was pre-rendered but DISCARDED before playback emits
-// NEITHER TTSInvoked{rID} (F1) NOR FirstAudio{rID} (F2), so no reaction text is ever
-// buffered or committed — the chunk holds only the Lead's line.
-func TestChunker_LookaheadReaction_DiscardCommitsNoReactionText(t *testing.T) {
+// TestChunker_HeldSentence_DiscardCommitsNoText pins the look-ahead lane's discard
+// at the chunk tier (#626): a sentence that was pre-synthesized but DISCARDED before
+// playback (a barge) emits NEITHER its TTSInvoked NOR its FirstAudio, so its text is
+// never buffered or committed — the chunk holds only what was spoken.
+func TestChunker_HeldSentence_DiscardCommitsNoText(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{Window: time.Hour})
 
 	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: uuid.NewString(), AgentRole: "character", Name: "Bart"}})
 	agentReply(bus, "Te", "Bart leads.", at(1))
-	// Barge before release: no TTSInvoked{rID}, no FirstAudio{rID} are ever published.
+	// Barge before release: the held sentence's TTSInvoked and FirstAudio are never
+	// published, and the cutter ends the turn.
+	bus.Publish(voiceevent.TurnEnded{At: at(2), TurnID: "Te", Reason: voiceevent.TurnEndBarge})
 
 	if err := c.FlushSession(context.Background(), fs.id); err != nil {
 		t.Fatalf("FlushSession: %v", err)
 	}
 	content := store.all()[0].Content
 	if !strings.Contains(content, "Bart leads.") {
-		t.Fatalf("chunk content = %q, want the Lead's line", content)
+		t.Fatalf("chunk content = %q, want the spoken sentence", content)
 	}
 	if strings.Contains(content, "I disagree.") {
-		t.Fatalf("chunk content = %q, must NOT contain a discarded reaction's text", content)
+		t.Fatalf("chunk content = %q, must NOT contain a discarded sentence's text", content)
 	}
 }
 
@@ -983,25 +986,22 @@ func TestChunker_MidStreamFailureOnOpeningSentenceNoRecovery(t *testing.T) {
 	}
 }
 
-// TestChunker_SayAndEnsembleTurnsAreAttributed pins that a GM /say, an Ensemble
-// Lead and a Cross-talk Reaction — turns that never see AddressRouted — still
-// name their speaker in the chunk and land in participated_agent_ids, like the
-// relay already did. Before, those lines persisted as "NPC: …" with no
-// participant ref, invisible to the NPC-knowledge filter.
-func TestChunker_SayAndEnsembleTurnsAreAttributed(t *testing.T) {
-	bart, gesa, orc := uuid.New(), uuid.New(), uuid.New()
+// TestChunker_SayTurnsAreAttributed pins that a GM /say — a turn that never sees
+// AddressRouted — still names its speaker in the chunk and lands in
+// participated_agent_ids, like the relay already did. Before, those lines
+// persisted as "NPC: …" with no participant ref, invisible to the NPC-knowledge
+// filter.
+func TestChunker_SayTurnsAreAttributed(t *testing.T) {
+	bart, gesa := uuid.New(), uuid.New()
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
 
 	bus.Publish(voiceevent.SpeakRequested{At: at(1), TurnID: "s1",
 		Target: voiceevent.AddressTarget{AgentID: bart.String(), AgentRole: "character", Name: "Bart"}, Text: "Welcome."})
 	agentReply(bus, "s1", "Welcome.", at(2))
-	bus.Publish(voiceevent.EnsembleLead{At: at(3), TurnID: "e1",
-		Target: voiceevent.AddressTarget{AgentID: gesa.String(), AgentRole: "character", Name: "Gesa"}})
-	agentReply(bus, "e1", "I lead.", at(4))
-	bus.Publish(voiceevent.EnsembleReaction{At: at(5), TurnID: "r1", LeadTurnID: "e1",
-		Target: voiceevent.AddressTarget{AgentID: orc.String(), AgentRole: "character", Name: "Orc"}})
-	agentReply(bus, "r1", "I react.", at(6))
+	bus.Publish(voiceevent.SpeakRequested{At: at(3), TurnID: "s2",
+		Target: voiceevent.AddressTarget{AgentID: gesa.String(), AgentRole: "character", Name: "Gesa"}, Text: "Sit down."})
+	agentReply(bus, "s2", "Sit down.", at(4))
 
 	if err := c.FlushSession(context.Background(), fs.id); err != nil {
 		t.Fatalf("FlushSession: %v", err)
@@ -1010,7 +1010,7 @@ func TestChunker_SayAndEnsembleTurnsAreAttributed(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("inserts = %d, want 1", len(got))
 	}
-	want := "Bart: Welcome.\nGesa: I lead.\nOrc: I react."
+	want := "Bart: Welcome.\nGesa: Sit down."
 	if got[0].Content != want {
 		t.Errorf("content = %q,\nwant %q", got[0].Content, want)
 	}
@@ -1018,7 +1018,7 @@ func TestChunker_SayAndEnsembleTurnsAreAttributed(t *testing.T) {
 	for _, id := range got[0].ParticipatedAgentIDs {
 		seen[id] = true
 	}
-	for _, id := range []uuid.UUID{bart, gesa, orc} {
+	for _, id := range []uuid.UUID{bart, gesa} {
 		if !seen[id] {
 			t.Errorf("participated_agent_ids = %v, missing %s", got[0].ParticipatedAgentIDs, id)
 		}

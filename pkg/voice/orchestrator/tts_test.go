@@ -488,9 +488,10 @@ func TestTTS_ConcurrentDispatch_AnnouncesEach(t *testing.T) {
 	}
 }
 
-// TestTTS_Dispatch_LookaheadSkipsInvoke pins F1 (#375): a Dispatch under a
-// PlaybackLookahead ctx does NOT publish TTSInvoked — the reaction's first sentence is announced later, at release, via PublishInvoked —
-// but it is still fully synthesized, drained, and character-metered (ADR-0045).
+// TestTTS_Dispatch_LookaheadSkipsInvoke pins the deferred announce (#626): a
+// Dispatch under a PlaybackLookahead ctx does NOT publish TTSInvoked — the held
+// sentence is announced later, at release, via PublishInvoked — but it is still
+// fully synthesized, drained, and character-metered (ADR-0045).
 func TestTTS_Dispatch_LookaheadSkipsInvoke(t *testing.T) {
 	h := voicetest.New(t)
 	spy := &metricsSpy{}

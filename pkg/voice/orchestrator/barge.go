@@ -206,8 +206,7 @@ func (b *BargeIn) disarmAll() {
 // no-op: no cancel, no BargeDetected. On a real cut it announces the barge —
 // the BargeDetected observability signal (ADR-0027) carrying the barging
 // speaker (sp, ADR-0050) and the CUT Agent — reported by the yield itself, in the
-// critical section that performed it, so a Lead election retargeting the holder
-// mid-window cannot make the attribution stale — and a TurnEnded carrying the cut
+// critical section that performed it — and a TurnEnded carrying the cut
 // turn's TurnID + the barge reason, so the metrics subscriber attributes this
 // turn's death to the barge rather than the coarse no-first-audio catch-all. The
 // AgentID is what lets Address Detection revoke the interrupted Agent's

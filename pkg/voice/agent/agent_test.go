@@ -182,7 +182,7 @@ func deliver(replies []orchestrator.Reply) []orchestrator.Reply {
 
 // lastUserMessage returns the text of the LAST user-role message in msgs — the
 // current utterance. Since ADR-0059 the volatile Hot Context tail (facts,
-// memory, GM directive, cross-talk instruction) trails the conversation as a
+// memory, GM directive) trails the conversation as a
 // system-role message, so "the last message" is no longer necessarily the user
 // line.
 func lastUserText(t *testing.T, msgs []llm.Message) string {
@@ -393,7 +393,7 @@ func TestReplyStream_SpeakerName_PrefixesUserLine(t *testing.T) {
 
 // TestReply_NotAddressed_ReturnsNilAndSkipsProvider pins the AgentID gate: a
 // route targeting a different Agent yields no reply and never calls the LLM, so
-// many Agents' loops can share one bus (the Ensemble Turn building block).
+// many Agents' loops can share one bus (the multi-NPC Cast building block).
 func TestReply_NotAddressed_ReturnsNilAndSkipsProvider(t *testing.T) {
 	prov := &fakeProvider{reply: "should not be produced"}
 	r := agent.NewReplier(agent.Config{
