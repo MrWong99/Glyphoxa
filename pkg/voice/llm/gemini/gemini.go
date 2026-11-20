@@ -23,7 +23,6 @@
 package gemini
 
 import (
-	"net/http"
 	"os"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/openaicompat"
@@ -82,9 +81,7 @@ type Option func(*settings)
 // settings accumulates [Option] state before [New] resolves it into
 // [openaicompat.Option]s.
 type settings struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
+	baseURL string
 
 	// reasoningEffort, when non-empty, is sent as the OpenAI-compat
 	// reasoning_effort field to bound thinking wall-time. Mutually exclusive with
@@ -101,12 +98,6 @@ type settings struct {
 // WithBaseURL overrides the API base URL. Useful for tests (httptest server) and
 // self-hosted gateways.
 func WithBaseURL(u string) Option { return func(s *settings) { s.baseURL = u } }
-
-// WithModel sets the default model used when [llm.Request.Model] is empty.
-func WithModel(m string) Option { return func(s *settings) { s.model = m } }
-
-// WithHTTPClient supplies a custom http.Client (see [openaicompat.WithHTTPClient]).
-func WithHTTPClient(h *http.Client) Option { return func(s *settings) { s.httpClient = h } }
 
 // WithReasoningEffort overrides the reasoning_effort sent to the compat endpoint
 // (bound thinking wall-time). Accepted: "none", "minimal", "low", "medium",
@@ -143,7 +134,6 @@ func New(apiKey string, opts ...Option) *Client {
 	}
 	s := &settings{
 		baseURL:         DefaultBaseURL,
-		model:           DefaultModel,
 		reasoningEffort: DefaultReasoningEffort,
 	}
 	for _, opt := range opts {
@@ -155,11 +145,8 @@ func New(apiKey string, opts ...Option) *Client {
 		openaicompat.WithAPIKey(apiKey),
 		openaicompat.WithAPIKeyEnv(APIKeyEnv),
 		openaicompat.WithBaseURL(s.baseURL),
-		openaicompat.WithModel(s.model),
+		openaicompat.WithModel(DefaultModel),
 		openaicompat.WithDefaultMaxTokens(DefaultMaxTokens),
-	}
-	if s.httpClient != nil {
-		base = append(base, openaicompat.WithHTTPClient(s.httpClient))
 	}
 
 	// Apply the thinking cap (ADR-0035). thinking_budget and reasoning_effort

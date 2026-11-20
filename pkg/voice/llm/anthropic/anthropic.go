@@ -58,12 +58,6 @@ type Option func(*Client)
 // and self-hosted gateways.
 func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
 
-// WithHTTPClient supplies a custom http.Client. The default has no overall
-// timeout because streaming completions are long-lived — but it does bound
-// dialing, TLS, and time-to-first-response-header (see [New]); the per-call
-// deadline for the whole exchange must come from the request context.
-func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
-
 // defaultHTTPClient bounds the connection-establishment phases so a black-holed
 // endpoint fails in seconds instead of hanging a turn. No overall Timeout: that
 // would also cap healthy long-lived SSE streams — the end-to-end bound is the

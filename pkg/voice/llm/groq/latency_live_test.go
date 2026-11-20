@@ -82,7 +82,9 @@ func TestLive_GroqGPTOSS_TTFT(t *testing.T) {
 	}
 	n := 8 // per tier; small — this is the shared deployment key.
 	if v := os.Getenv("GX_GROQ_N"); v != "" {
-		fmt.Sscanf(v, "%d", &n)
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			t.Fatalf("GX_GROQ_N=%q: %v", v, err)
+		}
 	}
 	delay := 2 * time.Second // Groq's RPM is generous; a light delay still smooths bursts.
 	if v := os.Getenv("GX_GROQ_DELAY"); v != "" {
