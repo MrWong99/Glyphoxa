@@ -12,36 +12,6 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 )
 
-// State is the lifecycle phase of a [Session].
-type State uint8
-
-const (
-	// Connecting is the initial state while the voice connection opens.
-	Connecting State = iota
-	// Ready means the connection is open and audio can flow both ways.
-	Ready
-	// Reconnecting is reserved for v1.1 auto-reconnect; never set in v1.
-	Reconnecting
-	// Closed is terminal: the connection is gone and Inbound is closed.
-	Closed
-)
-
-// String renders the State for logs and the [fmt.Stringer] contract.
-func (s State) String() string {
-	switch s {
-	case Connecting:
-		return "connecting"
-	case Ready:
-		return "ready"
-	case Reconnecting:
-		return "reconnecting"
-	case Closed:
-		return "closed"
-	default:
-		return fmt.Sprintf("State(%d)", uint8(s))
-	}
-}
-
 // ErrSenderClosed is returned by [Session.Play] once disgo's audio sender has
 // shut down and closed this Session's provider: nothing polls it any more, so a
 // playback installed there would never finish. The Session is on its way out
@@ -65,11 +35,12 @@ type Session struct {
 	provider   *switchingProvider
 	dispatcher *inboundDispatcher
 
-	state atomic.Uint32 // State
+	// closed is set (under playMu) when Close begins; Play refuses afterwards.
+	closed atomic.Bool
 
 	// playMu serializes Play callers so the "interrupt current, install next"
 	// sequence is atomic with respect to other Play calls, and serializes Play
-	// against Close so a Play that passed the Closed check can never install a
+	// against Close so a Play that passed the closed check can never install a
 	// slot into an already-torn-down provider. The provider's slot swap is
 	// itself atomic; playMu orders the surrounding bookkeeping.
 	playMu  sync.Mutex
@@ -94,7 +65,6 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 	// A provider closed by disgo's sender means the connection can no longer
 	// speak: end the inbound stream so the caller rebuilds (see onClose).
 	s.provider.onClose = s.dispatcher.Close
-	s.state.Store(uint32(Connecting))
 
 	if err := conn.Open(ctx, channel, cfg.selfMute, cfg.selfDeaf); err != nil {
 		return nil, fmt.Errorf("voice: open session for guild %s: %w", guild, err)
@@ -104,7 +74,6 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 	// goroutine, and wiring them on a failed connection would leak.
 	conn.SetOpusFrameProvider(s.provider)
 	conn.SetOpusFrameReceiver(s.dispatcher)
-	s.state.Store(uint32(Ready))
 	// The session is live: bump the sessions gauge (A2). Paired with the
 	// SessionClosed in Close, which the closeOnce guards to fire exactly once.
 	s.metrics.SessionOpened(guild.String())
@@ -118,7 +87,7 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 // exhausted, it is Stopped, or a later Play interrupts it.
 //
 // ctx scopes this playback: cancelling it ends the stream as [ErrInterrupted].
-// Play returns an error only if the Session is already Closed, or disgo's
+// Play returns an error only if the Session is already closed, or disgo's
 // audio sender has shut down ([ErrSenderClosed]).
 func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	if src == nil {
@@ -128,7 +97,7 @@ func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	s.playMu.Lock()
 	defer s.playMu.Unlock()
 
-	if State(s.state.Load()) == Closed {
+	if s.closed.Load() {
 		return nil, fmt.Errorf("voice: Play on closed session for guild %s", s.guild)
 	}
 
@@ -188,16 +157,13 @@ func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 // v1 supports a single consumer.
 func (s *Session) Inbound() <-chan Frame { return s.dispatcher.inbound() }
 
-// State returns the Session's current lifecycle [State].
-func (s *Session) State() State { return State(s.state.Load()) }
-
 // Close leaves the voice channel and releases all resources: it interrupts any
 // current playback, tears down the connection, and closes the [Session.Inbound]
 // channel. It is idempotent and safe to call concurrently with [Session.Play].
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		// Hold playMu for the whole teardown so Close serializes with Play.
-		// Without it, Play could pass its Closed check, lose the CPU while
+		// Without it, Play could pass its closed check, lose the CPU while
 		// Close runs to completion, then install a fresh slot into a provider
 		// whose sender goroutine is gone — a playback whose Done never closes,
 		// permanently wedging anyone waiting on it (e.g. the wire.PlaybackPump
@@ -205,7 +171,7 @@ func (s *Session) Close() error {
 		s.playMu.Lock()
 		defer s.playMu.Unlock()
 
-		s.state.Store(uint32(Closed))
+		s.closed.Store(true)
 
 		// Interrupt the active playback before tearing the connection down so
 		// its Done closes deterministically rather than waiting on disgo's

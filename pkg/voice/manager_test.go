@@ -27,25 +27,25 @@ func TestManagerOpenGetClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if sess.State() != Ready {
-		t.Fatalf("state got %v want Ready", sess.State())
+	if sess.isClosed() {
+		t.Fatal("fresh session reports closed")
 	}
 
-	got, ok := m.Get(testGuild)
+	got, ok := m.session(testGuild)
 	if !ok || got != sess {
 		t.Fatalf("Get returned (%v, %v) want the opened session", got, ok)
 	}
-	if _, ok := m.Get(snowflake.ID(9999)); ok {
+	if _, ok := m.session(snowflake.ID(9999)); ok {
 		t.Fatal("Get on unknown guild should report false")
 	}
 
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if sess.State() != Closed {
-		t.Fatalf("session state after Manager.Close got %v want Closed", sess.State())
+	if !sess.isClosed() {
+		t.Fatal("session not closed after Manager.Close")
 	}
-	if _, ok := m.Get(testGuild); ok {
+	if _, ok := m.session(testGuild); ok {
 		t.Fatal("Get should report false after Close")
 	}
 	if removed := fm.Removed(); len(removed) != 1 || removed[0] != testGuild {
@@ -82,7 +82,7 @@ func TestManagerOpenFailureUnwindsConn(t *testing.T) {
 	if _, err := m.Open(context.Background(), testGuild, testChannel); err == nil {
 		t.Fatal("expected Open to fail")
 	}
-	if _, ok := m.Get(testGuild); ok {
+	if _, ok := m.session(testGuild); ok {
 		t.Fatal("failed Open must not register a session")
 	}
 	// The conn disgo created on our behalf must be removed so it does not leak.
@@ -106,10 +106,10 @@ func TestManagerOpenReplacesExisting(t *testing.T) {
 	if first == second {
 		t.Fatal("re-Open should produce a fresh session")
 	}
-	if first.State() != Closed {
-		t.Fatalf("replaced session state got %v want Closed", first.State())
+	if !first.isClosed() {
+		t.Fatal("replaced session not closed")
 	}
-	got, ok := m.Get(testGuild)
+	got, ok := m.session(testGuild)
 	if !ok || got != second {
 		t.Fatal("Get should return the replacement session")
 	}
@@ -140,7 +140,7 @@ func TestManagerOpenConcurrentSameGuild_NoLeak(t *testing.T) {
 	}
 	wg.Wait()
 
-	winner, ok := m.Get(testGuild)
+	winner, ok := m.session(testGuild)
 	if !ok {
 		t.Fatal("no session left in the manager")
 	}
@@ -148,11 +148,11 @@ func TestManagerOpenConcurrentSameGuild_NoLeak(t *testing.T) {
 		if s == nil || s == winner {
 			continue
 		}
-		if s.State() != Closed {
-			t.Errorf("session %d neither won nor was closed — leaked (state %v)", i, s.State())
+		if !s.isClosed() {
+			t.Errorf("session %d neither won nor was closed — leaked", i)
 		}
 	}
-	if winner.State() == Closed {
+	if winner.isClosed() {
 		t.Error("the winning session is closed")
 	}
 }

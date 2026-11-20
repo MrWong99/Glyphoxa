@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -111,17 +112,19 @@ func TestGuardedConnRecoversInPlaceAndTearsDownOnce(t *testing.T) {
 	defer cancel()
 	provider.swap(&playSlot{pb: newPlayback(cancel), src: endlessSource{}, ctx: ctx})
 
-	payload := []byte{0x01, 0x02, 0x03, 0x04}
+	// The payload's first byte carries the sequence number, so each check knows
+	// it got the packet it just sealed.
 	expectFrame := func(when string, fc *fakePacketConn, seq uint16) {
 		t.Helper()
+		payload := []byte{byte(seq), 0x02, 0x03, 0x04}
 		fc.reads <- sealRTP(t, seq, 960, 9, payload)
 		select {
 		case f, ok := <-dispatcher.inbound():
 			if !ok {
 				t.Fatalf("%s: the inbound stream closed", when)
 			}
-			if f.Sequence != uint32(seq) {
-				t.Fatalf("%s: inbound frame seq = %d, want %d", when, f.Sequence, seq)
+			if !bytes.Equal(f.Opus, payload) {
+				t.Fatalf("%s: inbound frame = %x, want %x", when, f.Opus, payload)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: no inbound frame; the receiver is gone", when)

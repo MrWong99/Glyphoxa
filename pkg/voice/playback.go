@@ -2,10 +2,7 @@ package voice
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
-	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 )
@@ -24,52 +21,6 @@ var ErrInterrupted = errors.New("voice: playback interrupted")
 type Source interface {
 	// NextFrame returns the next Opus frame, or io.EOF when the source is done.
 	NextFrame(ctx context.Context) ([]byte, error)
-}
-
-// OpusReader adapts an io.Reader of length-prefixed Opus frames into a [Source].
-// Each frame is a big-endian uint16 byte length followed by that many bytes of
-// Opus payload — the framing disgo's dca-style streams and our TTS encoder
-// emit. A clean EOF at a frame boundary ends the source; EOF mid-frame is a
-// truncation error.
-//
-// ctx is checked between frames, NOT during a blocking Read: NextFrame runs on
-// disgo's sender goroutine, and a Read that never returns wedges that
-// goroutine beyond the reach of [Playback.Stop] and [Session.Close] — no
-// further outbound audio can flow until it unblocks. r must therefore be
-// memory-backed or otherwise prompt/closable (a file, bytes.Reader, or a pipe
-// whose writer is bounded). Do NOT wrap a network stream directly; buffer it
-// through a goroutine that owns the socket (and can be killed via its own ctx)
-// instead.
-func OpusReader(r io.Reader) Source {
-	return &opusReader{r: r}
-}
-
-type opusReader struct {
-	r      io.Reader
-	header [2]byte
-}
-
-func (o *opusReader) NextFrame(ctx context.Context) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	// A clean EOF reading the length prefix means the stream ended at a frame
-	// boundary; surface it verbatim so the provider treats it as done.
-	if _, err := io.ReadFull(o.r, o.header[:]); err != nil {
-		if err == io.ErrUnexpectedEOF {
-			return nil, fmt.Errorf("voice: truncated Opus length prefix: %w", io.ErrUnexpectedEOF)
-		}
-		return nil, err
-	}
-	n := binary.BigEndian.Uint16(o.header[:])
-	frame := make([]byte, n)
-	if _, err := io.ReadFull(o.r, frame); err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, fmt.Errorf("voice: truncated Opus frame (want %d bytes): %w", n, io.ErrUnexpectedEOF)
-		}
-		return nil, err
-	}
-	return frame, nil
 }
 
 // Playback is a handle to one outbound stream on a [Session]. It is created by

@@ -5,8 +5,8 @@
 // A [Manager] owns one disgo [bot.Client] and a [Session] per Guild. A Session
 // presents a buffered inbound channel of per-speaker Opus [Frame]s for STT, an
 // auto-interrupt-and-replace [Session.Play] returning a first-class [Playback]
-// handle, and explicit [Session.State]/[Session.Close]. Many Guilds run
-// concurrently; each Session is independent.
+// handle, and an explicit [Session.Close]. Many Guilds run concurrently; each
+// Session is independent.
 //
 // Audio never crosses a process boundary here (ADR-0005): a Session talks the
 // Discord voice WebSocket and UDP transport directly. DAVE (ADR-0006) is wired
@@ -14,7 +14,7 @@
 // production but orthogonal to this package's testable surface.
 //
 // Auto-reconnect of the voice connection is out of scope for v1: a Session that
-// loses its connection transitions to [Closed] and the caller re-[Manager.Open]s.
+// loses its connection closes its inbound stream and the caller re-[Manager.Open]s.
 //
 // Usage:
 //
@@ -26,7 +26,7 @@
 //	defer m.Close()
 //
 //	sess, _ := m.Open(ctx, guildID, channelID)
-//	pb, _ := sess.Play(ctx, voice.OpusReader(opusStream))
+//	pb, _ := sess.Play(ctx, src) // src: any voice.Source of 20 ms Opus frames
 //	<-pb.Done()
 //
 //	for frame := range sess.Inbound() {

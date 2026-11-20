@@ -33,14 +33,14 @@ func pkt(seq uint16, ts uint32, ssrc uint32, opus []byte) *voice.Packet {
 }
 
 func TestInboundDispatcher(t *testing.T) {
-	t.Run("frame carries userID, sequence, silence flag", func(t *testing.T) {
+	t.Run("frame carries userID, payload, silence flag", func(t *testing.T) {
 		d := newTestInboundDispatcher("g", 4, discardMetrics{})
 		uid := snowflake.ID(42)
 		_ = d.ReceiveOpusFrame(uid, pkt(7, 0, 1, []byte{0xDE, 0xAD}))
 		_ = d.ReceiveOpusFrame(uid, pkt(8, 960, 1, voice.SilenceAudioFrame))
 
 		got := <-d.inbound()
-		if got.UserID != uid || got.Sequence != 7 || got.Silence {
+		if got.UserID != uid || string(got.Opus) != "\xDE\xAD" || got.Silence {
 			t.Fatalf("voiced frame wrong: %+v", got)
 		}
 		silence := <-d.inbound()
@@ -115,9 +115,9 @@ func TestInboundDispatcher(t *testing.T) {
 		for seq := uint16(1); seq <= 4; seq++ {
 			_ = d.ReceiveOpusFrame(1, pkt(seq, uint32(seq), 1, []byte{byte(seq)}))
 		}
-		var got []uint32
+		var got []byte
 		for range 2 {
-			got = append(got, (<-d.inbound()).Sequence)
+			got = append(got, (<-d.inbound()).Opus[0])
 		}
 		if got[0] != 3 || got[1] != 4 {
 			t.Fatalf("drop-oldest kept %v want [3 4]", got)
