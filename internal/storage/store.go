@@ -70,9 +70,30 @@ func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("storage: commit tx: %w", err)
+		return commitError(err)
 	}
 	return nil
+}
+
+// ErrCommitOutcomeUnknown marks a transaction whose COMMIT was sent but whose
+// result never came back (the context expired or the connection dropped while
+// it was in flight). The server may have committed or not; the caller cannot
+// tell. A caller whose write is NOT idempotent (the additive Usage Ledger
+// upsert) must not blindly retry on it. Every other [Store.InTx] failure means
+// the transaction did not commit.
+var ErrCommitOutcomeUnknown = errors.New("storage: commit outcome unknown")
+
+// commitError classifies a failed COMMIT. The transaction provably did NOT
+// commit when the server answered (a PgError, or ROLLBACK because the
+// transaction was already aborted) or when the request never left the client
+// (pgconn.SafeToRetry). Anything else, a timeout or a broken connection with the
+// COMMIT on the wire, is ambiguous and wraps [ErrCommitOutcomeUnknown].
+func commitError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.Is(err, pgx.ErrTxCommitRollback) || errors.As(err, &pgErr) || pgconn.SafeToRetry(err) {
+		return fmt.Errorf("storage: commit tx: %w", err)
+	}
+	return fmt.Errorf("storage: commit tx: %w: %w", ErrCommitOutcomeUnknown, err)
 }
 
 const campaignColumns = `

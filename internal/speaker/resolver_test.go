@@ -23,16 +23,33 @@ type fakeChars struct {
 
 	// tenantOf maps a campaign to its owning Tenant; a campaign not listed
 	// belongs to defaultTenant. campaignErr fails every GetCampaign.
-	tenantOf    map[uuid.UUID]uuid.UUID
-	campaignErr error
+	tenantOf      map[uuid.UUID]uuid.UUID
+	campaignErr   error
+	campaignCalls int
+}
+
+func (f *fakeChars) campaignCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.campaignCalls
+}
+
+func (f *fakeChars) setCampaignErr(err error) {
+	f.mu.Lock()
+	f.campaignErr = err
+	f.mu.Unlock()
 }
 
 // defaultTenant owns every test campaign that tenantOf does not place elsewhere.
 var defaultTenant = uuid.MustParse("00000000-0000-0000-0000-0000000000aa")
 
 func (f *fakeChars) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
-	if f.campaignErr != nil {
-		return storage.Campaign{}, f.campaignErr
+	f.mu.Lock()
+	f.campaignCalls++
+	err := f.campaignErr
+	f.mu.Unlock()
+	if err != nil {
+		return storage.Campaign{}, err
 	}
 	tenant := defaultTenant
 	if t, ok := f.tenantOf[id]; ok {
@@ -396,25 +413,69 @@ func TestResolverGMLabelIsScopedToTheCampaignsTenant(t *testing.T) {
 }
 
 // TestResolverGMOffUntilTenantKnown: with the Campaign's Tenant unresolved (cold
-// cache, or a failed campaign read) nobody is labelled GM; the next Warm retries.
+// cache, or a failed campaign read) nobody is labelled GM, and a campaign read
+// that keeps failing is retried once per negative TTL, on its own, without
+// re-running the name fill (a Character query and a Discord REST call) at every
+// speech start.
 func TestResolverGMOffUntilTenantKnown(t *testing.T) {
 	campaign := uuid.New()
 	chars := &fakeChars{byKey: map[string]storage.Character{}, campaignErr: errors.New("db down")}
-	r := newTestResolver(t, chars, &fakeNamer{}, gmUser)
+	namer := &fakeNamer{byUser: map[string]string{gmUser: "Guild GM"}}
+	r := newTestResolver(t, chars, namer, gmUser)
+	now := time.Unix(1_800_000_000, 0)
+	r.now = func() time.Time { return now }
 
 	if got := r.Lookup(campaign, gmUser); got.GM {
 		t.Fatalf("cold Lookup = %+v, want GM=false", got)
 	}
-	r.Warm(campaign, gmUser)
-	r.wg.Wait()
-	if got := r.Lookup(campaign, gmUser); got.GM {
-		t.Fatalf("Lookup after a failed campaign read = %+v, want GM=false", got)
+	for i := 0; i < 5; i++ { // five speech starts while the campaign read is down
+		r.Warm(campaign, gmUser)
+		r.wg.Wait()
+	}
+	if got := r.Lookup(campaign, gmUser); got.GM || got.Name != "Guild GM" {
+		t.Fatalf("Lookup after failed campaign reads = %+v, want GM=false Name=Guild GM", got)
+	}
+	if n := chars.campaignCallCount(); n != 1 {
+		t.Errorf("campaign reads = %d, want 1 (a failing read is negatively cached)", n)
+	}
+	if chars.callCount() != 1 || namer.callCount() != 1 {
+		t.Errorf("name fills: %d character queries, %d Discord calls; want 1 each (the tenant retry must not redo the name fill)",
+			chars.callCount(), namer.callCount())
 	}
 
-	chars.campaignErr = nil
-	r.Warm(campaign, gmUser) // tenant still unknown, so this refills despite the cached name
+	// After the negative TTL the read is retried, alone, and the label comes on.
+	chars.setCampaignErr(nil)
+	now = now.Add(ttlNegative + time.Second)
+	r.Warm(campaign, gmUser)
 	r.wg.Wait()
 	if got := r.Lookup(campaign, gmUser); !got.GM {
 		t.Fatalf("Lookup after the campaign read recovered = %+v, want GM=true", got)
+	}
+	if chars.callCount() != 1 || namer.callCount() != 1 {
+		t.Errorf("the tenant retry re-ran the name fill: %d character queries, %d Discord calls", chars.callCount(), namer.callCount())
+	}
+}
+
+// TestResolverSetCampaignTenantLabelsTheFirstLine: with the Tenant announced at
+// session start the GM verdict is right before ANY Warm has run or any store
+// read has returned, so the GM's first line of a session cannot be persisted as
+// a player's.
+func TestResolverSetCampaignTenantLabelsTheFirstLine(t *testing.T) {
+	campaign := uuid.New()
+	chars := &fakeChars{byKey: map[string]storage.Character{}, campaignErr: errors.New("db down")}
+	r := newTestResolver(t, chars, &fakeNamer{}, gmUser)
+
+	r.SetCampaignTenant(campaign, defaultTenant)
+
+	if got := r.Lookup(campaign, gmUser); !got.GM {
+		t.Fatalf("Lookup right after session start = %+v, want GM=true with no Warm at all", got)
+	}
+	if got := r.Lookup(campaign, kiraUser); got.GM {
+		t.Fatalf("player Lookup = %+v, want GM=false", got)
+	}
+	r.Warm(campaign, gmUser)
+	r.wg.Wait()
+	if n := chars.campaignCallCount(); n != 0 {
+		t.Errorf("campaign reads = %d, want 0 (the Tenant was announced)", n)
 	}
 }

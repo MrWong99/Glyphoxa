@@ -219,8 +219,9 @@ func (s *Store) SearchChunksByCampaign(ctx context.Context, campaignID uuid.UUID
 // dependency.
 //
 // The search is EXACT over the Campaign's own rows, deliberately not an HNSW
-// index scan (ADR-0011 amendment 2026-11-20). The HNSW index spans every
-// Campaign of every Tenant; an approximate scan collects the GLOBAL nearest
+// index scan (ADR-0011 amendment 2026-11-20; migration 00057 dropped the global
+// HNSW indexes). A global vector index spans every Campaign of every Tenant; an
+// approximate scan over one collects the GLOBAL nearest
 // hnsw.ef_search (40) candidates and applies the campaign filter afterwards, so
 // as soon as other Campaigns' rows crowd the query's neighbourhood the filter
 // discards every candidate and the search returns nothing. The MATERIALIZED CTE

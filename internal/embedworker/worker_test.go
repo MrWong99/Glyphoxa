@@ -438,7 +438,9 @@ func TestRunDrainsBacklogWithoutSleepingBetweenFullBatches(t *testing.T) {
 		pendingNodes = append(pendingNodes, node("n", "b"))
 	}
 	store := &fakeStore{pending: pending, pendingNodes: pendingNodes}
-	w := New(store, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{BatchSize: 3, Interval: time.Hour})
+	provider := &timingProvider{}
+	const pause = 30 * time.Millisecond
+	w := New(store, provider, "m", nil, discardLog(), Config{BatchSize: 3, Interval: time.Hour, DrainPause: pause})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -455,6 +457,54 @@ func TestRunDrainsBacklogWithoutSleepingBetweenFullBatches(t *testing.T) {
 	}
 	cancel()
 	<-done
+
+	// The drain is paced: between two passes the provider is left idle for
+	// DrainPause, the window a live recall query needs on the shared Ollama.
+	// Each pass makes its chunk call and then its node call back to back, so the
+	// gap that crosses a pass boundary is the one before every chunk call.
+	gaps := provider.gapsBeforeChunkCalls()
+	if len(gaps) < 2 {
+		t.Fatalf("observed %d pass boundaries, want at least 2", len(gaps))
+	}
+	for i, g := range gaps {
+		if g < pause {
+			t.Errorf("pass boundary %d: provider idle for %s, want at least the %s drain pause", i, g, pause)
+		}
+	}
+}
+
+// timingProvider is a deterministic embedder that records when each call
+// started and ended, so a test can measure how long the provider was left idle.
+type timingProvider struct {
+	mu    sync.Mutex
+	calls []providerCall
+}
+
+type providerCall struct {
+	start, end time.Time
+	chunk      bool
+}
+
+func (p *timingProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	start := time.Now()
+	vecs, err := embeddingstest.Deterministic{}.Embed(ctx, texts)
+	p.mu.Lock()
+	// chunk("c") texts are "c"; node texts start with the node name "n".
+	p.calls = append(p.calls, providerCall{start: start, end: time.Now(), chunk: len(texts) > 0 && texts[0] == "c"})
+	p.mu.Unlock()
+	return vecs, err
+}
+
+func (p *timingProvider) gapsBeforeChunkCalls() []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var gaps []time.Duration
+	for i := 1; i < len(p.calls); i++ {
+		if p.calls[i].chunk {
+			gaps = append(gaps, p.calls[i].start.Sub(p.calls[i-1].end))
+		}
+	}
+	return gaps
 }
 
 // TestPassReportsMoreOnlyAfterCleanFullBatch pins the drain signal: a full batch

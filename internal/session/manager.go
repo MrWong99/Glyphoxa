@@ -155,6 +155,11 @@ type UsageWriter interface {
 	AddUsage(ctx context.Context, rows []storage.UsageRow) error
 }
 
+// CampaignTenantSink learns which Tenant owns a Campaign ([Deps.SpeakerTenants]).
+type CampaignTenantSink interface {
+	SetCampaignTenant(campaignID, tenantID uuid.UUID)
+}
+
 // AllowanceChecker snapshots a tenant's monthly plan allowance at Start
 // (ADR-0055 gate (b)). [spend.PlanAllowance] satisfies it; nil = no gate.
 type AllowanceChecker interface {
@@ -333,6 +338,7 @@ type Manager struct {
 	// read. The Manager rebinds it here per session, pinning THIS session's Campaign.
 	// nil leaves the base cfg.SpeakerName untouched (voice-standalone / test).
 	speakerNameForCampaign func(campaignID uuid.UUID, speakerID string) string
+	speakerTenants         CampaignTenantSink // told each session's Campaign→Tenant at Start; nil = not wired
 	// idleGuard is the Voice Instance's Idle Close watchdog (ADR-0061); nil off.
 	// Every Start enrolls its session in it and runLoop releases the enrollment.
 	idleGuard  *idleclose.Guard
@@ -461,6 +467,12 @@ type Deps struct {
 	// their OWN roster instead of a single-active global read. nil leaves the base
 	// cfg.SpeakerName untouched (voice-standalone / test / web-only).
 	SpeakerNameForCampaign func(campaignID uuid.UUID, speakerID string) string
+	// SpeakerTenants, when non-nil, is told which Tenant owns each session's
+	// Campaign at Start, before the loop runs. *speaker.Resolver satisfies it: the
+	// transcript's GM label is scoped to that Tenant, and announcing it here means
+	// the label is right from the session's first line instead of after the
+	// resolver's own asynchronous lookup.
+	SpeakerTenants CampaignTenantSink
 	// MaxSessions is the process-wide cap on concurrent live Voice Sessions (#488,
 	// ADR-0057's per-process K): a Start beyond it is refused ErrSessionLimit. The
 	// zero value (unset) means 1 — today's single-session default, byte-identical
@@ -510,6 +522,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		clients:                deps.Clients,
 		gmSpeakerForTenant:     deps.GMSpeakerForTenant,
 		speakerNameForCampaign: deps.SpeakerNameForCampaign,
+		speakerTenants:         deps.SpeakerTenants,
 		idleGuard:              deps.IdleGuard,
 		log:                    log,
 		enabled:                enabled,
@@ -756,6 +769,12 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voi
 	// here instead of a global snapshot, exactly as bus consumers resolve it from the
 	// event's stamped SessionID.
 	runCtx = NewContext(runCtx, Identity{SessionID: vs.ID, CampaignID: campaignID, TenantID: tenantID})
+
+	// Tell the transcript's speaker resolver whose Campaign this is BEFORE the loop
+	// can produce a line, so the Tenant-scoped GM label is right on the first one.
+	if m.speakerTenants != nil {
+		m.speakerTenants.SetCampaignTenant(campaignID, tenantID)
+	}
 
 	as := &activeSession{
 		campaignID:  campaignID,

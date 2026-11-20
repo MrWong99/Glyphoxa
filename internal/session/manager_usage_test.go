@@ -250,3 +250,54 @@ func TestRunContextCarriesSessionMeteringForRecap(t *testing.T) {
 		t.Errorf("usage flushed to the session ledger = %d, want 55 (charged through the ctx metering)", got)
 	}
 }
+
+// tenantSink records what the Manager announced, and whether the loop had
+// already started when it did.
+type tenantSink struct {
+	mu                 sync.Mutex
+	campaign, tenant   uuid.UUID
+	calls              int
+	loopStartedAlready bool
+	started            chan struct{}
+}
+
+func (s *tenantSink) SetCampaignTenant(campaignID, tenantID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	s.campaign, s.tenant = campaignID, tenantID
+	select {
+	case <-s.started:
+		s.loopStartedAlready = true
+	default:
+	}
+}
+
+// TestStartAnnouncesCampaignTenantBeforeTheLoopRuns: the transcript's GM label is
+// scoped to the Campaign's Tenant, so the Manager hands the resolver that pair
+// before the loop can produce a line. Otherwise the GM's first line of a session
+// could be persisted as a player's.
+func TestStartAnnouncesCampaignTenantBeforeTheLoopRuns(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	sink := &tenantSink{started: runner.started}
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{SpeakerTenants: sink})
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID, ""); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-runner.started
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.calls != 1 || sink.campaign != campaignID || sink.tenant != tenantID {
+		t.Fatalf("announced %d times: campaign %s tenant %s; want once with %s / %s", sink.calls, sink.campaign, sink.tenant, campaignID, tenantID)
+	}
+	if sink.loopStartedAlready {
+		t.Error("the Campaign's Tenant was announced after the loop had started")
+	}
+}

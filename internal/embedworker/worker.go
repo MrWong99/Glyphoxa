@@ -76,6 +76,15 @@ const (
 	defaultInterval    = 10 * time.Second
 	defaultBatchSize   = 16
 	defaultCallTimeout = 60 * time.Second // Ollama's cold model load can take tens of seconds
+	// defaultDrainPause is the breather between two back-to-back drain passes.
+	// The embeddings provider is one CPU-bound Ollama shared with live memory
+	// recall, whose query embedding has a few hundred milliseconds of budget. A
+	// backlog thousands of rows deep (a Campaign Bundle import) drained with no
+	// gap would keep Ollama busy for the better part of an hour, and every live
+	// session's recall would queue behind a batch and time out: NPCs with no
+	// memory for as long as the import embeds. The pause leaves a window after
+	// each batch for a waiting recall query to run.
+	defaultDrainPause = 500 * time.Millisecond
 )
 
 // Config tunes the worker. Zero values fall back to the defaults above.
@@ -88,6 +97,9 @@ type Config struct {
 	// CallTimeout bounds one provider Embed call (derived from the run context).
 	// Default 60s to survive an Ollama cold-start.
 	CallTimeout time.Duration
+	// DrainPause is the wait between two back-to-back passes while a backlog is
+	// being drained (see defaultDrainPause). Default 500ms.
+	DrainPause time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -99,6 +111,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CallTimeout <= 0 {
 		c.CallTimeout = defaultCallTimeout
+	}
+	if c.DrainPause <= 0 {
+		c.DrainPause = defaultDrainPause
 	}
 	return c
 }
@@ -129,20 +144,23 @@ func New(store Store, provider embeddings.Provider, model string, gauge BacklogG
 
 // Run drives the backfill loop until ctx is cancelled, then returns. Each
 // iteration runs one pass; while a pass came back with a FULL batch that was
-// embedded and written cleanly there is more waiting, so the next pass starts at
-// once. Otherwise (backlog drained, a short batch, or any error) it sleeps
-// Interval. Without the drain a backlog shrank by one batch per Interval, 16
-// rows every ten seconds, so a Campaign Bundle import or a model switch took
-// hours to become searchable. A cancel during either the pass (carried into the
-// provider call) or the sleep unwinds promptly. Run blocks, so callers launch it
-// as a goroutine.
+// embedded and written cleanly there is more waiting, so the next pass follows
+// after only DrainPause. Otherwise (backlog drained, a short batch, or any
+// error) it sleeps Interval. Without the drain a backlog shrank by one batch per
+// Interval, 16 rows every ten seconds, so a Campaign Bundle import or a model
+// switch took hours to become searchable. The drain is still not back-to-back:
+// DrainPause yields the shared embeddings provider to live memory recall between
+// batches (see defaultDrainPause). A cancel during the pass (carried into the
+// provider call) or either wait unwinds promptly. Run blocks, so callers launch
+// it as a goroutine.
 func (w *Worker) Run(ctx context.Context) {
 	for ctx.Err() == nil {
+		wait := w.cfg.Interval
 		if w.pass(ctx) {
-			continue
+			wait = w.cfg.DrainPause
 		}
 
-		timer := time.NewTimer(w.cfg.Interval)
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

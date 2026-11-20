@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,5 +175,65 @@ func TestLedgerSoundGeneration(t *testing.T) {
 	}
 	if want := spend.EstimateSoundUSD(observe.ProviderElevenLabs, "music_v1", time.Minute); music.EstimatedUSD != want {
 		t.Errorf("Music estimate = %v, want %v", music.EstimatedUSD, want)
+	}
+}
+
+// TestFlushMergesBackAFailureThatProvablyDidNotCommit: an ordinary flush error
+// means the rows were not written, so they stay buffered and the next flush
+// sends them: nothing is lost.
+func TestFlushMergesBackAFailureThatProvablyDidNotCommit(t *testing.T) {
+	l := NewLedger(uuid.New(), nil)
+	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+
+	if err := l.Flush(context.Background(), func(context.Context, []storage.UsageRow) error {
+		return errors.New("connection refused")
+	}); err == nil {
+		t.Fatal("want the flush error")
+	}
+
+	var sent int64
+	if err := l.Flush(context.Background(), func(_ context.Context, rows []storage.UsageRow) error {
+		for _, r := range rows {
+			sent += r.TTSCharacters
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("retry flush: %v", err)
+	}
+	if sent != 100 {
+		t.Errorf("retried characters = %d, want 100 (a failed batch is retried)", sent)
+	}
+}
+
+// TestFlushDropsABatchWhoseCommitOutcomeIsUnknown: the write is additive, so a
+// batch whose COMMIT may have landed must never be sent again. A periodic flush
+// that timed out mid-commit and retried would otherwise count the same usage
+// twice against the Tenant's allowance.
+func TestFlushDropsABatchWhoseCommitOutcomeIsUnknown(t *testing.T) {
+	l := NewLedger(uuid.New(), nil)
+	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+
+	err := l.Flush(context.Background(), func(context.Context, []storage.UsageRow) error {
+		return fmt.Errorf("storage: commit tx: %w: %w", storage.ErrCommitOutcomeUnknown, context.DeadlineExceeded)
+	})
+	if !errors.Is(err, storage.ErrCommitOutcomeUnknown) {
+		t.Fatalf("err = %v, want it to wrap ErrCommitOutcomeUnknown", err)
+	}
+	if !strings.Contains(err.Error(), "tts chars 100") {
+		t.Errorf("err = %q, want the dropped amounts in it for the operator's log", err)
+	}
+
+	l.TTSCharacters(observe.ProviderElevenLabs, 7) // usage after the ambiguous flush
+	var sent int64
+	if err := l.Flush(context.Background(), func(_ context.Context, rows []storage.UsageRow) error {
+		for _, r := range rows {
+			sent += r.TTSCharacters
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("next flush: %v", err)
+	}
+	if sent != 7 {
+		t.Errorf("next flush sent %d characters, want 7 (the possibly-committed 100 must not be re-sent)", sent)
 	}
 }

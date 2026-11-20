@@ -27,32 +27,24 @@ type fakePurgeStore struct {
 	deleteErr error
 }
 
-// PurgeSessionCandidates mirrors the real store's transaction: hand the candidate
-// keys to drop, and delete the rows only if it succeeds.
-func (f *fakePurgeStore) PurgeSessionCandidates(ctx context.Context, _ uuid.UUID, drop func(context.Context, []string) error) (int, error) {
+// TakeSessionCandidates mirrors the real store: delete the candidate rows and
+// hand back their blob keys.
+func (f *fakePurgeStore) TakeSessionCandidates(_ context.Context, _ uuid.UUID) ([]string, int, error) {
 	if f.listErr != nil {
-		return 0, f.listErr
-	}
-	f.mu.Lock()
-	if f.deleted {
-		f.mu.Unlock()
-		return 0, nil // already purged: idempotent re-run sees nothing
-	}
-	keys := append([]string(nil), f.keys...)
-	f.mu.Unlock()
-
-	if err := drop(ctx, keys); err != nil {
-		return 0, err // rolled back: rows stay
+		return nil, 0, f.listErr
 	}
 	if f.deleteErr != nil {
-		return 0, f.deleteErr
+		return nil, 0, f.deleteErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	*f.events = append(*f.events, "row-delete")
+	if f.deleted {
+		return nil, 0, nil // already purged: idempotent re-run sees nothing
+	}
 	f.deleted = true
-	f.deleteN = len(keys)
-	return len(keys), nil
+	f.deleteN = len(f.keys)
+	return append([]string(nil), f.keys...), len(f.keys), nil
 }
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -62,7 +54,11 @@ func payloadFor(id uuid.UUID) json.RawMessage {
 	return b
 }
 
-func TestPurge_BlobFirstThenRows(t *testing.T) {
+// TestPurge_RowsFirstThenBlobs pins the order that fails safe: the candidate rows
+// are removed (atomically, returning their keys) BEFORE any blob is dropped. A
+// failure after that leaves orphan blobs the boot sweep reclaims; the reverse
+// order could leave rows pointing at deleted clips.
+func TestPurge_RowsFirstThenBlobs(t *testing.T) {
 	var events []string
 	store := &fakePurgeStore{keys: []string{"k1", "k2"}, events: &events}
 	blobs := newFakeBlobs()
@@ -76,15 +72,51 @@ func TestPurge_BlobFirstThenRows(t *testing.T) {
 		t.Fatalf("purge: %v", err)
 	}
 
-	// Every blob delete happens BEFORE the single row delete.
-	if len(events) != 3 || events[2] != "row-delete" {
-		t.Fatalf("blob-first ordering violated: %v", events)
+	if len(events) != 3 || events[0] != "row-delete" {
+		t.Fatalf("rows-first ordering violated: %v", events)
 	}
 	if !store.deleted || store.deleteN != 2 {
 		t.Fatalf("rows not deleted: %+v", store)
 	}
 	if blobs.keys() != 0 {
 		t.Fatalf("clips not dropped: %d left", blobs.keys())
+	}
+}
+
+// failingBlobs fails the delete of one key.
+type failingBlobs struct {
+	*fakeBlobs
+	failKey string
+}
+
+func (f *failingBlobs) Delete(ctx context.Context, key string) error {
+	if key == f.failKey {
+		return errors.New("blob store down")
+	}
+	return f.fakeBlobs.Delete(ctx, key)
+}
+
+// TestPurge_BlobDeleteFailureIsLeftToTheOrphanSweep: once the rows are gone a
+// blob that will not delete is an orphan the boot sweep reclaims. The purge
+// still drops every other blob and completes; failing the job would only retry
+// against rows that no longer exist.
+func TestPurge_BlobDeleteFailureIsLeftToTheOrphanSweep(t *testing.T) {
+	var events []string
+	store := &fakePurgeStore{keys: []string{"k1", "k2", "k3"}, events: &events}
+	blobs := newFakeBlobs()
+	for _, k := range store.keys {
+		blobs.data[k] = []byte("x")
+	}
+
+	h := PurgeHandler(store, &failingBlobs{fakeBlobs: blobs, failKey: "k2"}, testLog())
+	if err := h(context.Background(), payloadFor(uuid.New())); err != nil {
+		t.Fatalf("purge err = %v, want nil (the stranded blob is the orphan sweep's)", err)
+	}
+	if !store.deleted {
+		t.Fatal("rows not deleted")
+	}
+	if _, left := blobs.data["k2"]; !left || blobs.keys() != 1 {
+		t.Fatalf("blobs left = %d, want only the failing k2 (the rest still dropped)", blobs.keys())
 	}
 }
 
@@ -247,21 +279,6 @@ func TestPurge_RowDeleteErrorPropagates(t *testing.T) {
 	h := PurgeHandler(store, blobs, testLog())
 	if err := h(context.Background(), payloadFor(uuid.New())); err == nil {
 		t.Fatal("want error when the row delete fails")
-	}
-}
-
-func TestPurge_BlobDeleteErrorPropagates(t *testing.T) {
-	store := &fakePurgeStore{keys: []string{"k1"}, events: &[]string{}}
-	blobs := newFakeBlobs()
-	blobs.data["k1"] = []byte("a")
-	blobs.deleteErr = errors.New("blob backend down")
-	h := PurgeHandler(store, blobs, testLog())
-	if err := h(context.Background(), payloadFor(uuid.New())); err == nil {
-		t.Fatal("want error when the blob delete fails")
-	}
-	// Blob-first: the row delete must NOT have run after the blob delete failed.
-	if store.deleted {
-		t.Fatal("rows deleted despite a failed blob delete (blob-first violated)")
 	}
 }
 

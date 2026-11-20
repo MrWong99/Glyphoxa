@@ -693,6 +693,9 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 		SpeakerNameForCampaign: func(campaignID uuid.UUID, speakerID string) string {
 			return speakerResolver.Lookup(campaignID, speakerID).Name
 		},
+		// The transcript's GM label is scoped to the Campaign's Tenant: the Manager
+		// announces that pair at Start so the label is right from the first line.
+		SpeakerTenants: speakerResolver,
 		// Process-wide cap on concurrent Voice Sessions (#488, ADR-0057 K).
 		// Default 1; raising it >1 is soak-gated (#493, DAVE).
 		MaxSessions: maxVoiceSessions(os.Getenv),

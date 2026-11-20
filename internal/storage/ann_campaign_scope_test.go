@@ -41,13 +41,26 @@ func annOtherCampaign(t *testing.T, pool *pgxpool.Pool, tenantID uuid.UUID) uuid
 }
 
 // annIndexPreferringStore returns a Store whose connections make the planner
-// PREFER the ordered HNSW index scan (sorting is priced out). On a large
-// multi-tenant table the planner picks that plan on cost alone; a CI-sized table
-// would need hundreds of thousands of 768-dim rows to get there, so the test
-// pins the planner's hand instead. A correct search must return the campaign's
-// rows whatever plan the planner would like best.
+// PREFER an ordered ANN index scan over sorting (sorting is priced out), with
+// the global HNSW indexes migration 00057 dropped put BACK. That is the shape the
+// bug needs: on a large multi-tenant table the planner picks the HNSW plan on
+// cost alone, and a CI-sized table would need hundreds of thousands of 768-dim
+// rows to get there. A correct search must return the campaign's rows whatever
+// index exists and whatever plan the planner would like best, so a future global
+// vector index cannot quietly bring the empty-result bug back.
 func annIndexPreferringStore(t *testing.T, dsn string) *storage.Store {
 	t.Helper()
+	admin := openPool(t, dsn)
+	for _, ddl := range []string{
+		`CREATE INDEX IF NOT EXISTS transcript_chunk_embedding_hnsw_idx
+		    ON transcript_chunk USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS kg_node_embedding_hnsw_idx
+		    ON kg_node USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL`,
+	} {
+		if _, err := admin.Exec(context.Background(), ddl); err != nil {
+			t.Fatalf("recreate hnsw index: %v", err)
+		}
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse dsn: %v", err)

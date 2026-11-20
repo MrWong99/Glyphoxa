@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"sync"
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -138,11 +139,19 @@ func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if ahead {
-		slog.WarnContext(ctx, "storage: database schema is NEWER than this binary; it was migrated by a later release. Queries may fail on changed tables: upgrade this binary, or finish the rollback by migrating down",
-			"db_version", current, "binary_version", target)
+		// Once per process: EnsureCurrent runs at every Voice Session start, and
+		// the condition does not change while the process lives.
+		aheadWarnOnce.Do(func() {
+			slog.WarnContext(ctx, "storage: database schema is NEWER than this binary; it was migrated by a later release. Queries may fail on changed tables: upgrade this binary, or finish the rollback by migrating down",
+				"db_version", current, "binary_version", target)
+		})
 	}
 	return nil
 }
+
+// aheadWarnOnce limits EnsureCurrent's "schema newer than binary" warning to one
+// line per process.
+var aheadWarnOnce sync.Once
 
 // schemaVersionVerdict is EnsureCurrent's decision: a DB behind the binary's
 // embedded migrations is an error (run `migrate up`); a DB ahead of them is
