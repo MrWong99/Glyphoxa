@@ -16,7 +16,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Markdown } from "@/components/ui/Markdown";
 
 import "./planning.css";
-import { errorMessage } from "@/lib/connectError";
+import { errorMessage, isAllowanceExhausted } from "@/lib/connectError";
 
 // The Planning panel (#592, ADR-0062) backs the Campaign screen's "Planning"
 // view: the Butler as a GM-only prep chat over the ChatService RPCs. Threads
@@ -232,19 +232,20 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
     } catch (err) {
       // Our own cancel (the panel went away) is not a failure to report.
       if (abort.signal.aborted) return;
-      const code = ConnectError.from(err).code;
-      const errorKey: MessageKey =
-        code === Code.ResourceExhausted
-          ? "chat.errAllowance"
-          : code === Code.FailedPrecondition
-            ? "chat.errNoKey"
-            : "chat.errGeneric";
+      // The allowance refusal is told apart by its REASON, not by its code:
+      // ResourceExhausted is also what a provider's own 429 arrives as, and
+      // telling the GM their plan is used up when their provider rate-limited
+      // them sends them to the wrong fix.
+      const allowance = isAllowanceExhausted(err);
+      const noKey = ConnectError.from(err).code === Code.FailedPrecondition;
+      const errorKey: MessageKey = allowance ? "chat.errAllowance" : noKey ? "chat.errNoKey" : "chat.errGeneric";
       // Allowance/no-key refusals reject BEFORE the server persists the user
       // message (the ADR-0055 gate runs first), so the GM's text would be lost
       // with the ephemeral state — restore it into the composer for a retry.
-      // On other failures the message was persisted first (ADR-0062) and the
-      // dismiss-refetch will show it, so restoring would duplicate it.
-      if (code === Code.ResourceExhausted || code === Code.FailedPrecondition) {
+      // On other failures — a provider rate limit included — the message was
+      // persisted first (ADR-0062) and the dismiss-refetch will show it, so
+      // restoring would duplicate it.
+      if (allowance || noKey) {
         setDraft((d) => (d === "" ? text : d));
       }
       setStream((s) => (s ? { ...s, errorKey } : s));

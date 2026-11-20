@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
@@ -54,7 +54,8 @@ const recentMessages = [
 // mockTransport wires the ChatService against in-memory threads/messages. The
 // planningExchange stream is an async generator held open on `gate` so a test
 // can observe the mid-stream (disabled) composer before releasing the done frame.
-function mockTransport() {
+// exchangeError, when set, makes the exchange fail with it before any frame.
+function mockTransport(exchangeError?: ConnectError) {
   const messagesByThread = new Map<string, PlanningMessage[]>([
     ["t-recent", [...recentMessages]],
     ["t-older", []],
@@ -78,6 +79,7 @@ function mockTransport() {
         create(CreatePlanningThreadResponseSchema, { thread: threadRecent }),
       async *planningExchange(req) {
         exchangeCalls.push(req);
+        if (exchangeError) throw exchangeError;
         yield create(PlanningExchangeResponseSchema, {
           frame: { case: "text", value: create(PlanningTextDeltaSchema, { delta: "Start with " }) },
         });
@@ -106,8 +108,8 @@ function mockTransport() {
   return { transport, exchangeCalls, release: () => release() };
 }
 
-function renderPanel() {
-  const ctx = mockTransport();
+function renderPanel(exchangeError?: ConnectError) {
+  const ctx = mockTransport(exchangeError);
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
       <PlanningPanel campaignId={CAMPAIGN_ID} />
@@ -115,6 +117,55 @@ function renderPanel() {
   );
   return ctx;
 }
+
+// send types text into the composer and submits it.
+async function send(text: string) {
+  await screen.findByText(/the keeper is a smuggler/);
+  const input = screen.getByRole("textbox", { name: /message to the butler/i });
+  fireEvent.change(input, { target: { value: text } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  return input as HTMLTextAreaElement;
+}
+
+describe("PlanningPanel exchange refusals", () => {
+  it("a spent plan allowance says so, promises nothing a saved key cannot deliver, and gives the message back", async () => {
+    // The refusal as the server sends it (internal/rpc/allowance_error.go).
+    renderPanel(
+      new ConnectError("SERVER ENGLISH", Code.ResourceExhausted, {
+        "Glyphoxa-Error-Reason": "allowance_exhausted",
+      }),
+    );
+    const input = await send("Where should the session open?");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/This month's included usage is used up/);
+    expect(alert).toHaveTextContent(/next month/);
+    // The gate is per plan: a saved key does not lift it, so the copy must not
+    // send the GM to Setup to add one.
+    expect(alert).not.toHaveTextContent(/your own key|Setup/i);
+    // Refused BEFORE the server persisted the message: hand it back for a retry.
+    await waitFor(() => expect(input.value).toBe("Where should the session open?"));
+  });
+
+  it("a provider's own rate limit is not reported as a spent allowance", async () => {
+    // Same Connect code, different condition: the tenant's LLM provider answered
+    // 429 (internal/rpc/upstream_error.go). No allowance reason is attached.
+    renderPanel(
+      new ConnectError(
+        "your LLM provider is out of quota or rate-limited — check your plan, or try again shortly",
+        Code.ResourceExhausted,
+      ),
+    );
+    const input = await send("Where should the session open?");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't answer/);
+    expect(alert).not.toHaveTextContent(/included usage/);
+    // The server persisted the message before calling the provider (ADR-0062),
+    // so restoring it into the composer would duplicate it on a retry.
+    expect(input.value).toBe("");
+  });
+});
 
 describe("PlanningPanel", () => {
   it("renders the thread list and the most recent thread's messages", async () => {
