@@ -247,6 +247,15 @@ func (s *SessionServer) StartSession(
 	if voiceChannelID != "" && !snowflakePattern.MatchString(voiceChannelID) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_channel_id must be a Discord channel id"))
 	}
+	// The picker is the SPA's convenience, not the tenancy boundary (R9): with
+	// a shared central Bot token (ADR-0057) any snowflake would be joinable, so
+	// an explicit pick must be one of THIS Tenant's linked guild's voice
+	// channels — the PostClip posture. Unwired (web-standalone tests) skips.
+	if voiceChannelID != "" {
+		if err := s.checkVoiceChannelLinked(ctx, voiceChannelID); err != nil {
+			return nil, err
+		}
+	}
 
 	campaign, err := s.startCampaign(ctx)
 	if errors.Is(err, storage.ErrNotFound) {

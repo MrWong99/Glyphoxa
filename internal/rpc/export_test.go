@@ -41,3 +41,9 @@ func (s *ProviderServer) SetGuildProofForTest(fn func(ctx context.Context, token
 func (s *ProviderServer) SetEnvLookupForTest(fn func(string) string) {
 	s.lookupEnv = fn
 }
+
+// SetVoiceChannelCheckForTest overrides the R9 Default-Voice-Channel-in-guild
+// seam so SaveDiscordSettings never dials Discord in unit tests.
+func (s *ProviderServer) SetVoiceChannelCheckForTest(fn func(ctx context.Context, token, guildID, channelID string) (bool, error)) {
+	s.voiceChannelInGuild = fn
+}
