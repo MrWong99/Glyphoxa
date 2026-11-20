@@ -425,6 +425,62 @@ func TestGaugeDecreasesToZero(t *testing.T) {
 	}
 }
 
+// TestRunDrainsBacklogWithoutSleepingBetweenFullBatches: a backlog several
+// batches deep is drained in one go. With an hour-long Interval the worker would
+// otherwise embed exactly one batch and sleep.
+func TestRunDrainsBacklogWithoutSleepingBetweenFullBatches(t *testing.T) {
+	var pending []storage.TranscriptChunk
+	for i := 0; i < 10; i++ {
+		pending = append(pending, chunk("c"))
+	}
+	var pendingNodes []storage.KGNode
+	for i := 0; i < 7; i++ {
+		pendingNodes = append(pendingNodes, node("n", "b"))
+	}
+	store := &fakeStore{pending: pending, pendingNodes: pendingNodes}
+	w := New(store, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{BatchSize: 3, Interval: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for store.pendingCount() > 0 || store.pendingNodeCount() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("backlog not drained within one Run cycle: %d chunks, %d nodes left (one batch per Interval)",
+				store.pendingCount(), store.pendingNodeCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
+// TestPassReportsMoreOnlyAfterCleanFullBatch pins the drain signal: a full batch
+// written cleanly asks for an immediate next pass; a short batch, an empty
+// backlog and a failed batch all fall back to the Interval sleep, so a broken
+// provider is never retried in a hot loop.
+func TestPassReportsMoreOnlyAfterCleanFullBatch(t *testing.T) {
+	full := &fakeStore{pending: []storage.TranscriptChunk{chunk("a"), chunk("b"), chunk("c")}}
+	w := New(full, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{BatchSize: 2})
+	if !w.pass(context.Background()) {
+		t.Error("full clean batch: more = false, want true")
+	}
+	if w.pass(context.Background()) {
+		t.Error("short batch (1 of 2): more = true, want false")
+	}
+	if w.pass(context.Background()) {
+		t.Error("empty backlog: more = true, want false")
+	}
+
+	failing := &fakeStore{pending: []storage.TranscriptChunk{chunk("a"), chunk("b")}}
+	wf := New(failing, &flakyProvider{inner: embeddingstest.Deterministic{}}, "m", nil, discardLog(), Config{BatchSize: 2})
+	if wf.pass(context.Background()) {
+		t.Error("failed full batch: more = true, want false (retry at Interval, not in a hot loop)")
+	}
+}
+
 // blockingProvider blocks inside Embed until the context is cancelled, so a test
 // can cancel mid-call and assert the loop unwinds.
 type blockingProvider struct {

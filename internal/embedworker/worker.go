@@ -128,12 +128,19 @@ func New(store Store, provider embeddings.Provider, model string, gauge BacklogG
 }
 
 // Run drives the backfill loop until ctx is cancelled, then returns. Each
-// iteration runs one pass and sleeps Interval; a cancel during either the pass
-// (carried into the provider call) or the sleep unwinds promptly. Run blocks, so
-// callers launch it as a goroutine.
+// iteration runs one pass; while a pass came back with a FULL batch that was
+// embedded and written cleanly there is more waiting, so the next pass starts at
+// once. Otherwise (backlog drained, a short batch, or any error) it sleeps
+// Interval. Without the drain a backlog shrank by one batch per Interval, 16
+// rows every ten seconds, so a Campaign Bundle import or a model switch took
+// hours to become searchable. A cancel during either the pass (carried into the
+// provider call) or the sleep unwinds promptly. Run blocks, so callers launch it
+// as a goroutine.
 func (w *Worker) Run(ctx context.Context) {
 	for ctx.Err() == nil {
-		w.pass(ctx)
+		if w.pass(ctx) {
+			continue
+		}
 
 		timer := time.NewTimer(w.cfg.Interval)
 		select {
@@ -148,10 +155,15 @@ func (w *Worker) Run(ctx context.Context) {
 // pass drains one batch from EACH backlog — Transcript Chunks and Knowledge Graph
 // Nodes (#300) — the two independent so an error draining one never starves the
 // other. Both phases carry the same batch/timeout/dim-validation/retry-forever
-// discipline; each re-claims its own leftover work next pass.
-func (w *Worker) pass(ctx context.Context) {
-	w.passChunks(ctx)
-	w.passNodes(ctx)
+// discipline; each re-claims its own leftover work next pass. It reports whether
+// either phase drained a full batch cleanly, i.e. whether more work is likely
+// waiting and the caller should run the next pass without sleeping. A phase that
+// errored reports false, so a failing provider or database is retried at
+// Interval, never in a hot loop.
+func (w *Worker) pass(ctx context.Context) (more bool) {
+	chunksMore := w.passChunks(ctx)
+	nodesMore := w.passNodes(ctx)
+	return chunksMore || nodesMore
 }
 
 // passChunks claims one batch, embeds it, and writes each vector. An error stops
@@ -159,15 +171,16 @@ func (w *Worker) pass(ctx context.Context) {
 // nothing, while a mid-batch write error keeps the rows already written and
 // leaves the rest NULL. The still-NULL chunks are re-claimed next pass (the
 // retry). The gauge is re-read only after the whole batch of writes succeeds; a
-// short or aborted phase leaves it as the last pass set it.
-func (w *Worker) passChunks(ctx context.Context) {
+// short or aborted phase leaves it as the last pass set it. It reports true when
+// a FULL batch was written cleanly (more is likely waiting).
+func (w *Worker) passChunks(ctx context.Context) (more bool) {
 	chunks, err := w.store.ListUnembeddedChunks(ctx, w.cfg.BatchSize)
 	if err != nil {
 		w.log.Warn("embed backfill: list unembedded chunks failed; retrying next pass", "err", err)
-		return
+		return false
 	}
 	if len(chunks) == 0 {
-		return // backlog drained; the loop sleeps
+		return false // backlog drained; the loop sleeps
 	}
 
 	texts := make([]string, len(chunks))
@@ -177,7 +190,7 @@ func (w *Worker) passChunks(ctx context.Context) {
 
 	vecs, ok := w.embedBatch(ctx, "chunks", texts)
 	if !ok {
-		return
+		return false
 	}
 
 	// Write each row; a failure stops the loop but keeps the rows already written
@@ -187,18 +200,23 @@ func (w *Worker) passChunks(ctx context.Context) {
 		if err := w.store.SetChunkEmbedding(ctx, c.ID, vecs[i], w.model); err != nil {
 			w.log.Warn("embed backfill: set chunk embedding failed; this and later chunks retry next pass",
 				"chunk_id", c.ID, "err", err)
-			return
+			return false
 		}
 	}
+
+	// A full batch means the queue probably holds more: tell Run to come straight
+	// back. Decided before the recount, so a failed gauge read cannot stall a drain.
+	more = len(chunks) == w.cfg.BatchSize
 
 	n, err := w.store.CountUnembeddedChunks(ctx)
 	if err != nil {
 		w.log.Warn("embed backfill: recount chunk backlog failed; gauge left stale", "err", err)
-		return
+		return more
 	}
 	if w.gauge != nil {
 		w.gauge.SetEmbeddingBacklog(n)
 	}
+	return more
 }
 
 // passNodes is the Knowledge Graph Node half of the backfill (#300), mirroring
@@ -209,14 +227,14 @@ func (w *Worker) passChunks(ctx context.Context) {
 // would make duplicate detection blind to the facts GMs most want deduped. A wiki
 // or aspect edit resets the row's embedding (storage.UpdateNode /
 // storage.ReplaceNodeAspects), so it is re-claimed here.
-func (w *Worker) passNodes(ctx context.Context) {
+func (w *Worker) passNodes(ctx context.Context) (more bool) {
 	nodes, err := w.store.ListUnembeddedNodes(ctx, w.cfg.BatchSize)
 	if err != nil {
 		w.log.Warn("embed backfill: list unembedded nodes failed; retrying next pass", "err", err)
-		return
+		return false
 	}
 	if len(nodes) == 0 {
-		return
+		return false
 	}
 
 	texts := make([]string, len(nodes))
@@ -227,7 +245,7 @@ func (w *Worker) passNodes(ctx context.Context) {
 
 	vecs, ok := w.embedBatch(ctx, "nodes", texts)
 	if !ok {
-		return
+		return false
 	}
 
 	for i, n := range nodes {
@@ -237,18 +255,21 @@ func (w *Worker) passNodes(ctx context.Context) {
 		if err := w.store.SetNodeEmbedding(ctx, n.ID, vecs[i], w.model, n.UpdatedAt); err != nil {
 			w.log.Warn("embed backfill: set node embedding failed; this and later nodes retry next pass",
 				"node_id", n.ID, "err", err)
-			return
+			return false
 		}
 	}
+
+	more = len(nodes) == w.cfg.BatchSize
 
 	count, err := w.store.CountUnembeddedNodes(ctx)
 	if err != nil {
 		w.log.Warn("embed backfill: recount node backlog failed; gauge left stale", "err", err)
-		return
+		return more
 	}
 	if w.gauge != nil {
 		w.gauge.SetKGEmbeddingBacklog(count)
 	}
+	return more
 }
 
 // embedBatch runs the shared provider call + validation both phases use: a timeout

@@ -3,6 +3,7 @@ package transcript
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -677,13 +678,15 @@ func TestChunker_HumanOnlyChunkEmptyParticipants(t *testing.T) {
 	}
 }
 
-// TestChunker_GaugeSetFromCount is #104 AC: after each written chunk the gauge is
-// Set to the store's live NULL-embedding count, rising by one per new chunk.
+// TestChunker_GaugeSetFromCount is #104 AC: the gauge is Set from the store's
+// live NULL-embedding count. With the throttle opened wide (1ns) every written
+// chunk refreshes it, rising by one per new chunk; the session flush then
+// re-reads the final count.
 func TestChunker_GaugeSetFromCount(t *testing.T) {
 	store := &fakeChunkStore{}
 	gauge := &fakeGauge{}
 	// MaxUtterances=1 so each STTFinal closes its own chunk.
-	bus, fs, c := newChunker(t, store, gauge, ChunkerConfig{MaxUtterances: 1})
+	bus, fs, c := newChunker(t, store, gauge, ChunkerConfig{MaxUtterances: 1, GaugeRefreshInterval: time.Nanosecond})
 
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "a", TurnID: "t1"})
 	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "b", TurnID: "t2"})
@@ -692,8 +695,40 @@ func TestChunker_GaugeSetFromCount(t *testing.T) {
 	}
 
 	sets := gauge.snapshot()
-	if len(sets) != 2 || sets[0] != 1 || sets[1] != 2 {
-		t.Fatalf("gauge sets = %v, want [1 2] (rises by one per written chunk)", sets)
+	if len(sets) != 3 || sets[0] != 1 || sets[1] != 2 || sets[2] != 2 {
+		t.Fatalf("gauge sets = %v, want [1 2 2] (one per written chunk, then the flush re-read)", sets)
+	}
+}
+
+// TestChunker_GaugeCountIsThrottled: the backlog COUNT is deployment-wide, so it
+// must not run after every chunk insert. A burst of chunk writes inside one
+// throttle interval costs ONE count, and the session flush adds the exact final
+// one so the gauge never ends a session stale.
+func TestChunker_GaugeCountIsThrottled(t *testing.T) {
+	store := &fakeChunkStore{}
+	gauge := &fakeGauge{}
+	bus, fs, c := newChunker(t, store, gauge, ChunkerConfig{MaxUtterances: 1, GaugeRefreshInterval: time.Hour})
+
+	const writes = 6
+	for i := 0; i < writes; i++ {
+		bus.Publish(voiceevent.STTFinal{At: at(i + 1), Text: "x", TurnID: "t" + strconv.Itoa(i)})
+	}
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+
+	if got := store.count(); got != writes {
+		t.Fatalf("chunks written = %d, want %d", got, writes)
+	}
+	store.mu.Lock()
+	counts := store.countCalls
+	store.mu.Unlock()
+	if counts != 2 {
+		t.Errorf("backlog COUNT ran %d times for %d chunk writes, want 2 (one throttled refresh + the flush)", counts, writes)
+	}
+	sets := gauge.snapshot()
+	if len(sets) == 0 || sets[len(sets)-1] != writes {
+		t.Errorf("gauge sets = %v, want the last to be %d (exact at session flush)", sets, writes)
 	}
 }
 
