@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -84,6 +85,9 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		now = time.Now
 	}
 	delay := p.initial
+	// joinTimeouts counts consecutive cycles whose voice join Discord never
+	// answered; any cycle that joined resets it (S15).
+	joinTimeouts := 0
 	for {
 		// connectedAt is written by the callback inside attempt and read after
 		// attempt returns — connectAndServe invokes it synchronously, same
@@ -102,6 +106,17 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		if fe := classifyFatal(err); fe != nil {
 			log.Error("voice connection failed fatally; not retrying", "err", fe, "reason", fe.Reason)
 			return fe
+		}
+		switch {
+		case !connectedAt.IsZero():
+			joinTimeouts = 0
+		case errors.Is(err, errJoinTimeout):
+			joinTimeouts++
+			if joinTimeouts >= maxJoinTimeouts {
+				fe := joinTimeoutFatal(err)
+				log.Error("voice join never answered; ending the session", "err", fe, "reason", fe.Reason, "attempts", joinTimeouts)
+				return fe
+			}
 		}
 		if !connectedAt.IsZero() && now().Sub(connectedAt) >= p.healthyAfter {
 			delay = p.initial // served healthily — forgive past failures (issue #44)

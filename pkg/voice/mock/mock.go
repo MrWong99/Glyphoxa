@@ -12,6 +12,7 @@ package mock
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
@@ -91,6 +92,9 @@ type Conn struct {
 	provider voice.OpusFrameProvider
 	receiver voice.OpusFrameReceiver
 	channel  snowflake.ID
+	// closeDeadline/closeBounded record the ctx Close was given.
+	closeDeadline time.Time
+	closeBounded  bool
 }
 
 // NewConn returns a fake connection that opens successfully.
@@ -124,10 +128,19 @@ func (c *Conn) SetOpusFrameReceiver(r voice.OpusFrameReceiver) {
 
 // Close marks the conn closed; like disgo's Conn.Close it does NOT call the
 // provider/receiver Close — the Session is responsible for that.
-func (c *Conn) Close(context.Context) {
+func (c *Conn) Close(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	c.closeDeadline, c.closeBounded = ctx.Deadline()
+}
+
+// CloseDeadline reports the deadline of the ctx Close was given; ok is false
+// when it had none (the real Close sends a LEAVE under that ctx).
+func (c *Conn) CloseDeadline() (deadline time.Time, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeDeadline, c.closeBounded
 }
 
 // Closed reports whether Close has been called.

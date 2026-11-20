@@ -3,10 +3,15 @@ package wirenpc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
 
@@ -108,8 +113,7 @@ func TestDiscloseSession_OncePerSessionAcrossCycles(t *testing.T) {
 
 // TestDiscloseSession_UnarmedPostsPlainNoticeAndFailureIsBestEffort: an unarmed
 // Campaign still gets the transcription notice — with no consent buttons — and a
-// Discord rejection is swallowed (logged) rather than failing the cycle, and is
-// not retried on the next one.
+// Discord rejection is swallowed (logged) rather than failing the cycle.
 func TestDiscloseSession_UnarmedPostsPlainNoticeAndFailureIsBestEffort(t *testing.T) {
 	spy := &disclosureSpy{err: errors.New("discord said no")}
 	spy.install(t)
@@ -117,10 +121,9 @@ func TestDiscloseSession_UnarmedPostsPlainNoticeAndFailureIsBestEffort(t *testin
 	cfg := Config{CampaignID: uuid.New()}
 	var disclosed sessionOnce
 	discloseSession(context.Background(), nil, snowflake.ID(7), cfg, &disclosed, discard())
-	discloseSession(context.Background(), nil, snowflake.ID(7), cfg, &disclosed, discard())
 
 	if len(spy.posts) != 1 {
-		t.Fatalf("posted %d disclosures, want 1 (a failed post is not retried into a spam loop)", len(spy.posts))
+		t.Fatalf("posted %d disclosures, want 1", len(spy.posts))
 	}
 	if spy.buttons[0] {
 		t.Error("unarmed session got tape consent buttons")
@@ -130,21 +133,102 @@ func TestDiscloseSession_UnarmedPostsPlainNoticeAndFailureIsBestEffort(t *testin
 	}
 }
 
-// TestSessionOnce_FiresExactlyOnce is #519 AC1: the guard that keeps the
-// disclosure to one post per Voice Session however many reconnect cycles the
-// session survives — including when the post itself failed (arming happens
-// before the call, so a rejected post is not retried into a spam loop).
-func TestSessionOnce_FiresExactlyOnce(t *testing.T) {
+// TestDiscloseSession_FailedPostRetriesNextCycle: the disclosure is the only
+// consent surface players see, so a post Discord rejected (a 403 in a locked-down
+// channel, a REST timeout) must be tried again on the next reconnect cycle — and
+// once one lands, never again.
+func TestDiscloseSession_FailedPostRetriesNextCycle(t *testing.T) {
+	spy := &disclosureSpy{err: errors.New("discord said no")}
+	spy.install(t)
+
+	cfg := Config{CampaignID: uuid.New()}
+	var disclosed sessionOnce
+	discloseSession(context.Background(), nil, snowflake.ID(7), cfg, &disclosed, discard())
+	spy.err = nil
+	discloseSession(context.Background(), nil, snowflake.ID(7), cfg, &disclosed, discard())
+	discloseSession(context.Background(), nil, snowflake.ID(7), cfg, &disclosed, discard())
+
+	if len(spy.posts) != 2 {
+		t.Fatalf("posted %d disclosures, want 2 (the failed one retried once, then done)", len(spy.posts))
+	}
+}
+
+// TestDiscloseSession_BoundsThePost: the REST call runs under a deadline, so a
+// Discord that never answers cannot pin the cycle that posts it.
+func TestDiscloseSession_BoundsThePost(t *testing.T) {
+	var deadline time.Time
+	var hasDeadline bool
+	orig := postSessionDisclosure
+	postSessionDisclosure = func(ctx context.Context, _ *bot.Client, _ snowflake.ID, _ uuid.UUID, _ string, _ bool) error {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil
+	}
+	t.Cleanup(func() { postSessionDisclosure = orig })
+
+	var disclosed sessionOnce
+	discloseSession(context.Background(), nil, snowflake.ID(7), Config{CampaignID: uuid.New()}, &disclosed, discard())
+	if !hasDeadline {
+		t.Fatal("disclosure post ran without a deadline")
+	}
+	if time.Until(deadline) > disclosurePostTimeout {
+		t.Errorf("deadline %s away, want at most %s", time.Until(deadline), disclosurePostTimeout)
+	}
+}
+
+// TestDisclosureMessage_SuppressesMentions (S8): the notice carries a configured
+// URL and, for the Butler poster, LLM text — no message the Bot posts may ping.
+func TestDisclosureMessage_SuppressesMentions(t *testing.T) {
+	msg := disclosureMessage(uuid.New(), "@everyone hi", true)
+	assertNoMentions(t, msg.AllowedMentions)
+}
+
+// assertNoMentions fails unless am suppresses every mention type: present, with
+// an empty (non-nil, so it serializes as []) parse list and no allowed ids.
+func assertNoMentions(t *testing.T, am *discord.AllowedMentions) {
+	t.Helper()
+	if am == nil {
+		t.Fatal("AllowedMentions = nil; Discord then parses @everyone/@here/role/user mentions in the content")
+	}
+	if am.Parse == nil || len(am.Parse) != 0 || len(am.Users) != 0 || len(am.Roles) != 0 || am.RepliedUser {
+		t.Errorf("AllowedMentions = %+v, want an empty parse list and nothing allowed", am)
+	}
+}
+
+// TestDisclosureFailureRemedy: a permission rejection names the fix an operator
+// can act on; other failures do not invent one.
+func TestDisclosureFailureRemedy(t *testing.T) {
+	forbidden := &rest.Error{Code: rest.JSONErrorCodeLackPermissionsToPerformAction, Response: &http.Response{StatusCode: http.StatusForbidden}}
+	if got := disclosureFailureRemedy(fmt.Errorf("wrapped: %w", forbidden)); !strings.Contains(got, "Send Messages") {
+		t.Errorf("remedy for a 403 = %q, want it to name the Send Messages permission", got)
+	}
+	if got := disclosureFailureRemedy(errors.New("timeout")); strings.Contains(got, "Send Messages") {
+		t.Errorf("remedy for a timeout = %q, want no permission advice", got)
+	}
+}
+
+// TestSessionOnce_FiresUntilSuccess is #519 AC1: the guard keeps the disclosure
+// to one LANDED post per Voice Session however many reconnect cycles the session
+// survives; a failed attempt does not arm it.
+func TestSessionOnce_FiresUntilSuccess(t *testing.T) {
 	var once sessionOnce
 	calls := 0
 	for range 5 { // five reconnect cycles
-		once.do(func() { calls++ })
+		once.do(func() bool { calls++; return true })
 	}
 	if calls != 1 {
 		t.Errorf("disclosure posted %d times across 5 cycles, want exactly 1", calls)
 	}
 
+	var failing sessionOnce
+	tries := 0
+	for range 3 {
+		failing.do(func() bool { tries++; return false })
+	}
+	if tries != 3 {
+		t.Errorf("a failing side effect ran %d times across 3 cycles, want 3 (retried each cycle)", tries)
+	}
+
 	// A nil guard (a cycle built outside Run) posts nothing rather than panicking.
 	var nilOnce *sessionOnce
-	nilOnce.do(func() { t.Error("nil sessionOnce fired") })
+	nilOnce.do(func() bool { t.Error("nil sessionOnce fired"); return true })
 }

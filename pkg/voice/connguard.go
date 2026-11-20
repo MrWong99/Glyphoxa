@@ -47,6 +47,9 @@ func guardedConnCreate(guildID, userID snowflake.ID, voiceStateUpdateFunc voice.
 	if ku, ok := conn.UDP().(*keepaliveUDPConn); ok {
 		g.transport.Store(ku)
 	}
+	// The gateway is fixed for the conn's life; remember it so discard can drop
+	// its entry from the process-global speakingEvents.
+	g.gateway.Store(&gatewayRef{conn.Gateway()})
 	return conn
 }
 
@@ -54,7 +57,11 @@ func guardedConnCreate(guildID, userID snowflake.ID, voiceStateUpdateFunc voice.
 type connGuard struct {
 	discarded atomic.Bool
 	transport atomic.Pointer[keepaliveUDPConn]
+	gateway   atomic.Pointer[gatewayRef]
 }
+
+// gatewayRef boxes the conn's voice gateway (an interface) for atomic storage.
+type gatewayRef struct{ gw voice.Gateway }
 
 // fence wraps the conn's voice-state update func: it passes through until the
 // conn is discarded and refuses afterwards.
@@ -73,6 +80,11 @@ func (g *connGuard) discard(remove func()) func() {
 		g.discarded.Store(true)
 		if ku := g.transport.Load(); ku != nil {
 			ku.terminate()
+		}
+		// The gateway is unreachable from here on: forget its Speaking
+		// timestamp now instead of leaving it to the age-based prune.
+		if ref := g.gateway.Load(); ref != nil {
+			speakingEvents.forget(ref.gw)
 		}
 		remove()
 	}

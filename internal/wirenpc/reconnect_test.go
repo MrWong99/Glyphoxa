@@ -367,3 +367,54 @@ func equalDelays(a, b []time.Duration) bool {
 	}
 	return true
 }
+
+// TestRunWithReconnect_RepeatedJoinTimeoutIsFatal (S15): a voice join Discord
+// never answers (the Bot cannot Connect to the channel, or the id is not a voice
+// channel) used to be transient forever — the session idled with no Bot until
+// the idle close 15 minutes later. After maxJoinTimeouts in a row it now ends
+// the session failed with a reason the GM can act on.
+func TestRunWithReconnect_RepeatedJoinTimeoutIsFatal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 100, cancel: cancel}
+	p := reconnectPolicy{initial: time.Second, max: 8 * time.Second, factor: 2, sleep: fs.sleep}
+
+	calls := 0
+	err := runWithReconnect(ctx, discardLogger(), p, func(context.Context, func()) error {
+		calls++
+		return fmt.Errorf("wirenpc: join voice channel: %w", errJoinTimeout)
+	})
+
+	var fe *FatalError
+	if !errors.As(err, &fe) || fe.Reason != ReasonVoiceJoinTimeout {
+		t.Fatalf("err = %v, want a FatalError with reason %q", err, ReasonVoiceJoinTimeout)
+	}
+	if calls != maxJoinTimeouts {
+		t.Errorf("attempts = %d, want %d", calls, maxJoinTimeouts)
+	}
+	if !strings.Contains(fe.Error(), "Connect") {
+		t.Errorf("reason %q should tell the GM what to check (the Connect permission)", fe.Error())
+	}
+}
+
+// TestRunWithReconnect_JoinTimeoutCountResetsOnJoin: only CONSECUTIVE join
+// timeouts are fatal — a cycle that joined in between proves the channel works.
+func TestRunWithReconnect_JoinTimeoutCountResetsOnJoin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 2 * maxJoinTimeouts, cancel: cancel}
+	p := reconnectPolicy{initial: time.Second, max: 8 * time.Second, factor: 2, sleep: fs.sleep}
+
+	calls := 0
+	err := runWithReconnect(ctx, discardLogger(), p, func(_ context.Context, connected func()) error {
+		calls++
+		if calls%maxJoinTimeouts == 0 {
+			connected()
+			return errors.New("dropped")
+		}
+		return errJoinTimeout
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want a clean shutdown: no %d join timeouts were consecutive", err, maxJoinTimeouts)
+	}
+}
