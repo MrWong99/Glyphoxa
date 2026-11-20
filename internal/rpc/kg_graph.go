@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -56,12 +55,12 @@ func (s *kgGraph) GetKnowledgeGraph(
 
 	nodes, err := s.store.ListGraphNodes(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetKnowledgeGraph: list nodes failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetKnowledgeGraph: list nodes failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	edges, err := s.store.ListEdges(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetKnowledgeGraph: list edges failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetKnowledgeGraph: list edges failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -130,7 +129,7 @@ func (s *kgGraph) FindDuplicateEntries(
 
 	pairs, err := s.store.SimilarNodePairs(ctx, c.ID, duplicateSimilarityFloor, duplicatePairLimit)
 	if err != nil {
-		slog.Default().Error("FindDuplicateEntries: pair scan failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("FindDuplicateEntries: pair scan failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -139,7 +138,7 @@ func (s *kgGraph) FindDuplicateEntries(
 	// check could not actually give.
 	unembedded, err := s.store.CountUnembeddedNodesInCampaign(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("FindDuplicateEntries: unembedded count failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("FindDuplicateEntries: unembedded count failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 

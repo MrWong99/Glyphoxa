@@ -82,7 +82,7 @@ func (s *knowledgeProposals) ListKnowledgeProposals(
 
 	proposals, err := s.store.ListPendingKnowledgeProposals(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("ListKnowledgeProposals: store list failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("ListKnowledgeProposals: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -118,7 +118,7 @@ func (s *knowledgeProposals) ApproveKnowledgeProposal(
 		if errors.As(err, &blocked) {
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(blocked.Reason))
 		}
-		slog.Default().Error("ApproveKnowledgeProposal: store approve failed", "proposal_id", id, "err", err)
+		s.active.logger().Error("ApproveKnowledgeProposal: store approve failed", "proposal_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
@@ -146,7 +146,7 @@ func (s *knowledgeProposals) RejectKnowledgeProposal(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("proposal already reviewed or gone"))
 	default:
-		slog.Default().Error("RejectKnowledgeProposal: store reject failed", "proposal_id", id, "err", err)
+		s.active.logger().Error("RejectKnowledgeProposal: store reject failed", "proposal_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
@@ -177,7 +177,7 @@ func (s *knowledgeProposals) ListSimilarKnowledge(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("proposal already reviewed or gone"))
 		}
-		slog.Default().Error("ListSimilarKnowledge: get proposal failed", "proposal_id", id, "err", err)
+		s.active.logger().Error("ListSimilarKnowledge: get proposal failed", "proposal_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -185,7 +185,7 @@ func (s *knowledgeProposals) ListSimilarKnowledge(
 
 	nodes, err := s.similarNodes(ctx, c.ID, queryText)
 	if err != nil {
-		slog.Default().Error("ListSimilarKnowledge: similarity search failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("ListSimilarKnowledge: similarity search failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -206,12 +206,12 @@ func (s *knowledgeProposals) similarNodes(ctx context.Context, campaignID uuid.U
 		vecs, err := s.embedder.Embed(embedCtx, []string{queryText})
 		switch {
 		case err != nil || len(vecs) != 1:
-			slog.Default().Warn("ListSimilarKnowledge: embed failed; degrading to fulltext hint",
+			s.active.logger().Warn("ListSimilarKnowledge: embed failed; degrading to fulltext hint",
 				"err", err, "vecs", len(vecs))
 		case len(vecs[0]) != embeddings.Dim:
 			// A wrong-dimension vector would make the ::vector cast in SimilarNodes fail
 			// (CodeInternal). The hint is best-effort — degrade to fulltext instead.
-			slog.Default().Warn("ListSimilarKnowledge: embed returned wrong dimension; degrading to fulltext hint",
+			s.active.logger().Warn("ListSimilarKnowledge: embed returned wrong dimension; degrading to fulltext hint",
 				"want", embeddings.Dim, "got", len(vecs[0]))
 		default:
 			return s.store.SimilarNodes(ctx, campaignID, vecs[0], similarNodesLimit)

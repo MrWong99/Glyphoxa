@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -54,7 +53,7 @@ func (s *kgAppearances) ListNodeAppearances(
 	}
 	hits, err := s.store.ListNodeAppearances(ctx, c.ID, nodeID, storage.MaxAppearances)
 	if err != nil {
-		slog.Default().Error("ListNodeAppearances: store read failed", "node_id", nodeID, "err", err)
+		s.active.logger().Error("ListNodeAppearances: store read failed", "node_id", nodeID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 

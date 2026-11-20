@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 
 	"connectrpc.com/connect"
@@ -78,7 +77,7 @@ func (s *kgPreview) GetAgentFactPreview(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("GetAgentFactPreview: get agent failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("GetAgentFactPreview: get agent failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if agent.CampaignID != c.ID {
@@ -89,7 +88,7 @@ func (s *kgPreview) GetAgentFactPreview(
 
 	linkedNode, linked, err := s.store.AgentLinkedNode(ctx, agentID)
 	if err != nil {
-		slog.Default().Error("GetAgentFactPreview: linked node lookup failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("GetAgentFactPreview: linked node lookup failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -108,7 +107,7 @@ func (s *kgPreview) GetAgentFactPreview(
 
 	nodes, err := s.store.AgentNodeFacts(ctx, agentID)
 	if err != nil {
-		slog.Default().Error("GetAgentFactPreview: agent node facts failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("GetAgentFactPreview: agent node facts failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -154,12 +153,12 @@ func (s *kgPreview) GetRosterReadiness(
 
 	agents, err := s.store.ListAgents(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetRosterReadiness: list agents failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetRosterReadiness: list agents failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	spoke, err := s.store.LastSpokenByAgent(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetRosterReadiness: last-spoken read failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetRosterReadiness: last-spoken read failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	lastSpoke := make(map[string]time.Time, len(spoke))
@@ -181,13 +180,13 @@ func (s *kgPreview) GetRosterReadiness(
 		}
 
 		if _, linked, err := s.store.AgentLinkedNode(ctx, a.ID); err != nil {
-			slog.Default().Error("GetRosterReadiness: linked node lookup failed", "agent_id", a.ID, "err", err)
+			s.active.logger().Error("GetRosterReadiness: linked node lookup failed", "agent_id", a.ID, "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		} else if linked {
 			r.Linked = true
 			nodes, err := s.store.AgentNodeFacts(ctx, a.ID)
 			if err != nil {
-				slog.Default().Error("GetRosterReadiness: agent node facts failed", "agent_id", a.ID, "err", err)
+				s.active.logger().Error("GetRosterReadiness: agent node facts failed", "agent_id", a.ID, "err", err)
 				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 			}
 			p := kgfacts.RenderPreview(nodes)

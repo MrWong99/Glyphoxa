@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -66,13 +65,13 @@ func (s *agentRoster) GetCampaignRoster(
 	if err != nil {
 		// The Butler is auto-created with the campaign (ADR-0009); its absence is
 		// an invariant violation, not a client error. Log raw, return generic.
-		slog.Default().Error("GetCampaignRoster: get butler failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetCampaignRoster: get butler failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
 	chars, err := s.store.CharacterAgents(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetCampaignRoster: list character agents failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetCampaignRoster: list character agents failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -123,7 +122,7 @@ func (s *agentRoster) CreateAgent(
 		Aliases:     m.GetAliases(),
 	})
 	if err != nil {
-		slog.Default().Error("CreateAgent: store create failed", "err", err)
+		s.active.logger().Error("CreateAgent: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -131,7 +130,7 @@ func (s *agentRoster) CreateAgent(
 	// and the canonical persisted shape.
 	created, err := s.store.GetAgent(ctx, id)
 	if err != nil {
-		slog.Default().Error("CreateAgent: read-back failed", "agent_id", id, "err", err)
+		s.active.logger().Error("CreateAgent: read-back failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.CreateAgentResponse{Agent: toProtoAgent(created)}), nil
@@ -172,7 +171,7 @@ func (s *agentRoster) UpdateAgent(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
+		s.active.logger().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if existing.CampaignID != c.ID {
@@ -200,7 +199,7 @@ func (s *agentRoster) UpdateAgent(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("UpdateAgent: store update failed", "agent_id", id, "err", err)
+		s.active.logger().Error("UpdateAgent: store update failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -212,7 +211,7 @@ func (s *agentRoster) UpdateAgent(
 	// (logged), the next matching rename catches up.
 	if existing.Role == storage.AgentRoleCharacter {
 		if rerr := s.store.RenameAgentNode(ctx, c.ID, id, existing.Name, updated.Name); rerr != nil {
-			slog.Default().Warn("UpdateAgent: rename linked node failed", "agent_id", id, "err", rerr)
+			s.active.logger().Warn("UpdateAgent: rename linked node failed", "agent_id", id, "err", rerr)
 		}
 	}
 	return connect.NewResponse(&managementv1.UpdateAgentResponse{Agent: toProtoAgent(updated)}), nil
@@ -246,7 +245,7 @@ func (s *agentRoster) DeleteAgent(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 	default:
-		slog.Default().Error("DeleteAgent: store delete failed", "agent_id", id, "err", err)
+		s.active.logger().Error("DeleteAgent: store delete failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }

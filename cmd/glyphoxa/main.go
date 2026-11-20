@@ -1645,6 +1645,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	)
 
 	campaignSrv := rpc.NewCampaignServer(store)
+	campaignSrv.SetLogger(log)
 	// Map images ride the blob seam (#538, ADR-0048): wired post-construction, like
 	// the other composition-root seams.
 	campaignSrv.SetBlobs(blobStore)

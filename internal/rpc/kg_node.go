@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -139,7 +138,7 @@ func (s *kgNodes) CreateNode(
 		GMPrivate:  m.GetGmPrivate(),
 	}, aspects)
 	if err != nil {
-		slog.Default().Error("CreateNode: store create failed", "err", err)
+		s.active.logger().Error("CreateNode: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.CreateNodeResponse{Node: toProtoNode(created)}), nil
@@ -159,7 +158,7 @@ func (s *kgNodes) ListNodes(
 
 	nodes, err := s.store.ListNodes(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("ListNodes: store list failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("ListNodes: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -218,7 +217,7 @@ func (s *kgNodes) UpdateNode(
 				"this entry now has more than %d facts — a suggestion was approved while you were editing; remove one and save again",
 				kgvocab.MaxAspectsPerNode))
 		}
-		slog.Default().Error("UpdateNode: store update failed", "node_id", id, "err", err)
+		s.active.logger().Error("UpdateNode: store update failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateNodeResponse{Node: toProtoNode(updated)}), nil
@@ -248,7 +247,7 @@ func (s *kgNodes) DeleteNode(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 	case err != nil:
-		slog.Default().Error("DeleteNode: store delete failed", "node_id", id, "err", err)
+		s.active.logger().Error("DeleteNode: store delete failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// A failed blob delete leaves reclaimable bytes, not a broken entry — a
@@ -257,7 +256,7 @@ func (s *kgNodes) DeleteNode(
 	// warning about leaked bytes that never existed (the DeleteMap posture).
 	if s.blobs != nil && portraitKey != "" {
 		if derr := s.blobs.Delete(ctx, portraitKey); derr != nil {
-			slog.Default().Warn("DeleteNode: could not drop portrait blob", "key", portraitKey, "err", derr)
+			s.active.logger().Warn("DeleteNode: could not drop portrait blob", "key", portraitKey, "err", derr)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteNodeResponse{}), nil
@@ -287,7 +286,7 @@ func (s *kgNodes) SearchNodes(
 
 	nodes, err := s.store.SearchNodes(ctx, c.ID, req.Msg.GetQuery(), searchNodesLimit)
 	if err != nil {
-		slog.Default().Error("SearchNodes: store search failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("SearchNodes: store search failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 

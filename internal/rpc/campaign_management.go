@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math"
 	"strings"
 
@@ -40,7 +39,7 @@ func (s *campaignManagement) ListCampaigns(
 	}
 	campaigns, err := list(ctx, tenantID)
 	if err != nil {
-		slog.Default().Error("ListCampaigns: store list failed", "err", err)
+		s.active.logger().Error("ListCampaigns: store list failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -77,7 +76,7 @@ func (s *campaignManagement) CreateCampaign(
 		Language: m.GetLanguage(),
 	})
 	if err != nil {
-		slog.Default().Error("CreateCampaign: store create failed", "err", err)
+		s.active.logger().Error("CreateCampaign: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -86,7 +85,7 @@ func (s *campaignManagement) CreateCampaign(
 	// read-back is tenant-scoped (#473) — the row was just created under this tenant.
 	created, err := s.store.GetCampaignInTenant(ctx, tenantID, id)
 	if err != nil {
-		slog.Default().Error("CreateCampaign: read-back failed", "campaign_id", id, "err", err)
+		s.active.logger().Error("CreateCampaign: read-back failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.CreateCampaignResponse{Campaign: toProtoCampaign(created)}), nil
@@ -154,7 +153,7 @@ func (s *campaignManagement) UpdateCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("UpdateCampaign: store update failed", "campaign_id", id, "err", err)
+		s.active.logger().Error("UpdateCampaign: store update failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateCampaignResponse{Campaign: toProtoCampaign(updated)}), nil
@@ -197,7 +196,7 @@ func (s *campaignManagement) SetActiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("SetActiveCampaign: validate campaign failed", "campaign_id", id, "err", err)
+		s.active.logger().Error("SetActiveCampaign: validate campaign failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// An archived campaign cannot be the Active Campaign (#269): it is excluded from
@@ -214,7 +213,7 @@ func (s *campaignManagement) SetActiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("SetActiveCampaign: store write failed", "campaign_id", id, "err", err)
+		s.active.logger().Error("SetActiveCampaign: store write failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -70,7 +69,7 @@ func (s *campaignMaps) ListMaps(
 	}
 	maps, err := s.store.ListMaps(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("ListMaps: store list failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("ListMaps: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	out := &managementv1.ListMapsResponse{Maps: make([]*managementv1.Map, 0, len(maps))}
@@ -101,30 +100,30 @@ func (s *campaignMaps) GetMapView(
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
 	}
 	if err != nil {
-		slog.Default().Error("GetMapView: load map failed", "map_id", id, "err", err)
+		s.active.logger().Error("GetMapView: load map failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
 	pins, err := s.store.ListPins(ctx, c.ID, id)
 	if err != nil {
-		slog.Default().Error("GetMapView: list pins failed", "map_id", id, "err", err)
+		s.active.logger().Error("GetMapView: list pins failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	ancestors, err := s.store.MapAncestors(ctx, c.ID, id)
 	if err != nil {
-		slog.Default().Error("GetMapView: ancestors failed", "map_id", id, "err", err)
+		s.active.logger().Error("GetMapView: ancestors failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	unpinned, err := s.store.UnpinnedNodes(ctx, c.ID, id)
 	if err != nil {
-		slog.Default().Error("GetMapView: unpinned failed", "map_id", id, "err", err)
+		s.active.logger().Error("GetMapView: unpinned failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// Children come from the campaign's Map list rather than a dedicated query: a
 	// campaign has a handful of Maps, and the list read is already indexed.
 	all, err := s.store.ListMaps(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetMapView: list maps failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("GetMapView: list maps failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -198,7 +197,7 @@ func (s *campaignMaps) CreateMap(
 	mapID := uuid.New()
 	key, err := blob.Key(tenantID, "map", mapID, "image")
 	if err != nil {
-		slog.Default().Error("CreateMap: blob key", "err", err)
+		s.active.logger().Error("CreateMap: blob key", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if err := s.putImage(ctx, key, m.GetContentType(), m.GetImageBytes()); err != nil {
@@ -221,7 +220,7 @@ func (s *campaignMaps) CreateMap(
 		// this insert produced none — so this best-effort delete IS the cleanup. It is
 		// best-effort because the row failure is what the caller must hear about.
 		if derr := s.blobs.Delete(ctx, key); derr != nil {
-			slog.Default().Warn("CreateMap: could not drop orphaned blob", "key", key, "err", derr)
+			s.active.logger().Warn("CreateMap: could not drop orphaned blob", "key", key, "err", derr)
 		}
 		// A parent Map or anchor Node that is not in THIS campaign is the operator
 		// naming something absent, not a server fault.
@@ -229,7 +228,7 @@ func (s *campaignMaps) CreateMap(
 			return nil, connect.NewError(connect.CodeNotFound,
 				errors.New("parent map or anchor entry not found in this campaign"))
 		}
-		slog.Default().Error("CreateMap: store create failed", "err", err)
+		s.active.logger().Error("CreateMap: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.CreateMapResponse{Map: toProtoMap(created)}), nil
@@ -279,7 +278,7 @@ func (s *campaignMaps) UpdateMap(
 	case errors.Is(err, storage.ErrInvalidMapParent):
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("a map cannot contain itself"))
 	case err != nil:
-		slog.Default().Error("UpdateMap: store update failed", "map_id", id, "err", err)
+		s.active.logger().Error("UpdateMap: store update failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateMapResponse{Map: toProtoMap(updated)}), nil
@@ -319,7 +318,7 @@ func (s *campaignMaps) ReplaceMapImage(
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
 	}
 	if err != nil {
-		slog.Default().Error("ReplaceMapImage: load map failed", "map_id", id, "err", err)
+		s.active.logger().Error("ReplaceMapImage: load map failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -328,7 +327,7 @@ func (s *campaignMaps) ReplaceMapImage(
 	// and it makes updated_at a sound cache validator.
 	key, err := blob.Key(tenantID, "map", uuid.New(), "image")
 	if err != nil {
-		slog.Default().Error("ReplaceMapImage: blob key", "err", err)
+		s.active.logger().Error("ReplaceMapImage: blob key", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if err := s.putImage(ctx, key, m.GetContentType(), m.GetImageBytes()); err != nil {
@@ -338,9 +337,9 @@ func (s *campaignMaps) ReplaceMapImage(
 	updated, err := s.store.SetMapImage(ctx, c.ID, id, key, int(m.GetWidthPx()), int(m.GetHeightPx()))
 	if err != nil {
 		if derr := s.blobs.Delete(ctx, key); derr != nil {
-			slog.Default().Warn("ReplaceMapImage: could not drop orphaned blob", "key", key, "err", derr)
+			s.active.logger().Warn("ReplaceMapImage: could not drop orphaned blob", "key", key, "err", derr)
 		}
-		slog.Default().Error("ReplaceMapImage: store update failed", "map_id", id, "err", err)
+		s.active.logger().Error("ReplaceMapImage: store update failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// The row now points at the new bytes, so the old ones are unreachable. A map
@@ -349,7 +348,7 @@ func (s *campaignMaps) ReplaceMapImage(
 	// would warn about leaked bytes on the very action that fixed the map.
 	if existing.BlobKey != "" {
 		if derr := s.blobs.Delete(ctx, existing.BlobKey); derr != nil {
-			slog.Default().Warn("ReplaceMapImage: could not drop superseded blob", "key", existing.BlobKey, "err", derr)
+			s.active.logger().Warn("ReplaceMapImage: could not drop superseded blob", "key", existing.BlobKey, "err", derr)
 		}
 	}
 	return connect.NewResponse(&managementv1.ReplaceMapImageResponse{Map: toProtoMap(updated)}), nil
@@ -376,7 +375,7 @@ func (s *campaignMaps) DeleteMap(
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
 	}
 	if err != nil {
-		slog.Default().Error("DeleteMap: store delete failed", "map_id", id, "err", err)
+		s.active.logger().Error("DeleteMap: store delete failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// A failed blob delete leaves reclaimable bytes, not a broken map — so it is a
@@ -385,7 +384,7 @@ func (s *campaignMaps) DeleteMap(
 	// deleting "" is ErrInvalidKey — a warning about leaked bytes that never existed.
 	if s.blobs != nil && key != "" {
 		if err := s.blobs.Delete(ctx, key); err != nil {
-			slog.Default().Warn("DeleteMap: could not drop image blob", "key", key, "err", err)
+			s.active.logger().Warn("DeleteMap: could not drop image blob", "key", key, "err", err)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteMapResponse{}), nil
@@ -427,7 +426,7 @@ func (s *campaignMaps) CreatePin(
 	case errors.Is(err, storage.ErrInvalidPin):
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("pin position must be within the map"))
 	case err != nil:
-		slog.Default().Error("CreatePin: store create failed", "err", err)
+		s.active.logger().Error("CreatePin: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.CreatePinResponse{Pin: toProtoPin(pin)}), nil
@@ -461,7 +460,7 @@ func (s *campaignMaps) UpdatePin(
 	case errors.Is(err, storage.ErrInvalidPin):
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("pin position must be within the map"))
 	case err != nil:
-		slog.Default().Error("UpdatePin: store update failed", "pin_id", id, "err", err)
+		s.active.logger().Error("UpdatePin: store update failed", "pin_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdatePinResponse{Pin: toProtoPin(pin)}), nil
@@ -486,7 +485,7 @@ func (s *campaignMaps) DeletePin(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("pin not found"))
 	default:
-		slog.Default().Error("DeletePin: store delete failed", "pin_id", id, "err", err)
+		s.active.logger().Error("DeletePin: store delete failed", "pin_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
@@ -507,7 +506,7 @@ func (s *campaignMaps) putImage(ctx context.Context, key, contentType string, da
 		return connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("that image is too large (max %d MiB)", blob.MaxSize>>20))
 	case err != nil:
-		slog.Default().Error("map image: blob put failed", "key", key, "err", err)
+		s.active.logger().Error("map image: blob put failed", "key", key, "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return nil

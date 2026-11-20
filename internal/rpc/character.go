@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -74,7 +73,7 @@ func (s *characterRoster) ListCharacters(
 
 	chars, err := s.store.ListCharacters(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("ListCharacters: store list failed", "campaign_id", c.ID, "err", err)
+		s.active.logger().Error("ListCharacters: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -113,7 +112,7 @@ func (s *characterRoster) CreateCharacter(
 		if errors.Is(err, storage.ErrConflict) {
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		}
-		slog.Default().Error("CreateCharacter: store create failed", "err", err)
+		s.active.logger().Error("CreateCharacter: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// A new speaker→Character mapping: drop the campaign's cached resolutions so the
@@ -171,7 +170,7 @@ func (s *characterRoster) UpdateCharacter(
 		case errors.Is(err, storage.ErrConflict):
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		default:
-			slog.Default().Error("UpdateCharacter: store update failed", "character_id", id, "err", err)
+			s.active.logger().Error("UpdateCharacter: store update failed", "character_id", id, "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	}
@@ -210,7 +209,7 @@ func (s *characterRoster) DeleteCharacter(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("character not found"))
 	default:
-		slog.Default().Error("DeleteCharacter: store delete failed", "character_id", id, "err", err)
+		s.active.logger().Error("DeleteCharacter: store delete failed", "character_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }

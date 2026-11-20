@@ -99,6 +99,18 @@ type activeCampaignSource struct {
 	// another Tenant's session. Nil until SetSessions wires it (unwired = never live).
 	campaignLive func(campaignID uuid.UUID) bool
 	store        activeCampaignResolver
+	// log is the CampaignService's logger, shared by every feature module
+	// through this one instance (CampaignServer.SetLogger). nil = slog.Default.
+	log *slog.Logger
+}
+
+// logger is the CampaignService's injected logger (slog.Default when unset, as
+// in unit tests that build modules directly).
+func (a *activeCampaignSource) logger() *slog.Logger {
+	if a == nil || a.log == nil {
+		return slog.Default()
+	}
+	return a.log
 }
 
 // resolve resolves the operator's Active Campaign via the one shared
@@ -123,7 +135,7 @@ func (a *activeCampaignSource) campaignFor(ctx context.Context, op string, logAr
 		if errors.Is(err, storage.ErrNotFound) {
 			return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
 		}
-		slog.Default().Error(op+": get active campaign failed", append(logArgs, "err", err)...)
+		a.logger().Error(op+": get active campaign failed", append(logArgs, "err", err)...)
 		return storage.Campaign{}, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return c, nil

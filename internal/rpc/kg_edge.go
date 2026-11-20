@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -74,7 +73,7 @@ func (s *kgEdges) UpdateEdgeDetails(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("disposition must be between -2 and +2"))
 	case err != nil:
-		slog.Default().Error("UpdateEdgeDetails: store update failed", "edge_id", id, "err", err)
+		s.active.logger().Error("UpdateEdgeDetails: store update failed", "edge_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.UpdateEdgeDetailsResponse{Edge: toProtoEdge(updated)}), nil
@@ -120,7 +119,7 @@ func (s *kgEdges) CreateEdge(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("edge endpoint not found"))
 	default:
-		slog.Default().Error("CreateEdge: store create failed", "err", err)
+		s.active.logger().Error("CreateEdge: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
@@ -148,7 +147,7 @@ func (s *kgEdges) DeleteEdge(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("edge not found"))
 	default:
-		slog.Default().Error("DeleteEdge: store delete failed", "edge_id", id, "err", err)
+		s.active.logger().Error("DeleteEdge: store delete failed", "edge_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
@@ -177,7 +176,7 @@ func (s *kgEdges) ListNodeEdges(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 		}
-		slog.Default().Error("ListNodeEdges: store read failed", "node_id", nodeID, "err", err)
+		s.active.logger().Error("ListNodeEdges: store read failed", "node_id", nodeID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.ListNodeEdgesResponse{
@@ -230,7 +229,7 @@ func (s *kgEdges) SetNodeAgent(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("node or agent not found"))
 	default:
-		slog.Default().Error("SetNodeAgent: store update failed", "node_id", nodeID, "err", err)
+		s.active.logger().Error("SetNodeAgent: store update failed", "node_id", nodeID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 }
