@@ -34,28 +34,17 @@ import (
 type Mount struct {
 	Path    string
 	Handler http.Handler
-
-	// BodyReadTimeout bounds how long this mount's request BODY may take to
-	// arrive, measured from the moment the handler is entered (#662). Zero
-	// means [DefaultBodyReadTimeout]; the upload mounts (map/portrait images
-	// over Connect, the campaign bundle import) set [UploadBodyReadTimeout].
-	// See [bodyReadDeadline] for why this is a per-mount body deadline and
-	// not a server-wide ReadTimeout.
-	BodyReadTimeout time.Duration
 }
 
 const (
-	// DefaultBodyReadTimeout is the body deadline of an ordinary mount: every
-	// such request is a small JSON/protobuf message (the Connect services cap
-	// it at 1 MiB), so half a minute is generous even on a poor link.
+	// DefaultBodyReadTimeout is how long ANY request's body may take to arrive
+	// (#662). It covers every route on the listener — the mounts, the SPA root
+	// and the /api/ 404 fence alike — and it is what an unauthenticated caller
+	// gets: half a minute, generous for the small JSON/protobuf messages that
+	// are all a sessionless request can legitimately send. The two upload
+	// routes replace it with a longer deadline, but only AFTER their session
+	// check has passed (auth.UploadBodyReadTimeout).
 	DefaultBodyReadTimeout = 30 * time.Second
-	// UploadBodyReadTimeout is the body deadline of a mount that accepts large
-	// uploads (up to 48 MiB over Connect, 192 MiB on the bundle import). It is
-	// sized so a slow home uplink still finishes — 192 MiB in 30 minutes needs
-	// under 1 Mbit/s — while a stalled or trickled upload no longer holds its
-	// connection and goroutine forever. Those mounts are session-gated before
-	// the body is read, so only a signed-in caller can hold one that long.
-	UploadBodyReadTimeout = 30 * time.Minute
 	// idleTimeout closes a keep-alive connection that has sat with no request
 	// for this long. Without it (and with no ReadTimeout to fall back on) an
 	// idle connection is kept open forever. It applies only BETWEEN requests,
@@ -90,6 +79,11 @@ type Config struct {
 	// serves the SPA shell with client-side-routing fallback. Nil leaves "/"
 	// unmounted (the API-only server tests).
 	Root http.Handler
+
+	// BodyReadTimeout overrides [DefaultBodyReadTimeout], the deadline armed on
+	// every request that carries a body. Zero means the default; tests shorten
+	// it.
+	BodyReadTimeout time.Duration
 }
 
 // Server is the web-tier HTTP listener. Build it with [NewServer] and run it
@@ -131,13 +125,18 @@ func NewServer(cfg Config) *Server {
 	// SSE route) still wins over this guard.
 	mux.Handle("/api/", http.NotFoundHandler())
 	for _, m := range cfg.Mounts {
-		mux.Handle(m.Path, bodyReadDeadline(m.BodyReadTimeout, m.Handler))
+		mux.Handle(m.Path, m.Handler)
 	}
 	// The SPA catch-all is registered last at "/"; ServeMux's longest-prefix
 	// match keeps the API mounts (e.g. /api/) ahead of it, so only unmatched
 	// paths reach the SPA fallback.
 	if cfg.Root != nil {
 		mux.Handle("/", cfg.Root)
+	}
+
+	bodyTimeout := cfg.BodyReadTimeout
+	if bodyTimeout <= 0 {
+		bodyTimeout = DefaultBodyReadTimeout
 	}
 
 	// Serve HTTP/1.1 and cleartext HTTP/2 (h2c) on the one port via the Go 1.24+
@@ -150,14 +149,15 @@ func NewServer(cfg Config) *Server {
 	return &Server{
 		srv: &http.Server{
 			Addr:              cfg.Addr,
-			Handler:           noSniff(mux),
+			Handler:           noSniff(bodyReadDeadline(bodyTimeout, mux)),
 			ReadHeaderTimeout: 5 * time.Second,
 			// No WriteTimeout on purpose: it is a whole-response wall clock,
 			// and the SSE transcript tail and the streaming chat exchange
 			// legitimately run for hours. No ReadTimeout either: slow request
-			// BODIES are bounded per mount instead (bodyReadDeadline), since
-			// one process-wide value cannot fit both a 1 MiB RPC and a
-			// 192 MiB upload. Idle connections are bounded by IdleTimeout.
+			// BODIES are bounded per request instead (bodyReadDeadline), since
+			// one process-wide value cannot fit both a stranger's 1 MiB RPC
+			// and a signed-in 192 MiB upload. Idle connections are bounded by
+			// IdleTimeout.
 			IdleTimeout: idleTimeout,
 			Protocols:   protocols,
 		},
@@ -181,14 +181,18 @@ func noSniff(next http.Handler) http.Handler {
 
 // bodyReadDeadline bounds how long a request body may take to arrive (#662):
 // with only ReadHeaderTimeout set, a client could send its headers promptly and
-// then trickle the body — up to 48 MiB on Connect, 192 MiB on the import — one
-// byte at a time, pinning a connection and a goroutine indefinitely.
+// then trickle the body one byte at a time, pinning a connection and a
+// goroutine indefinitely. It wraps the WHOLE mux, not individual mounts: a
+// route nobody thought to wrap (the SPA root, the /api/ 404 fence) accepts a
+// POST with a declared body just as readily as an API mount does, and net/http
+// drains an unread body after the handler returns.
 //
-// It is a per-mount deadline armed through [http.ResponseController] rather
-// than http.Server.ReadTimeout because that is ONE process-wide value: a bound
-// tight enough to mean anything for the 1 MiB Connect messages would cut a
-// legitimate 192 MiB bundle upload on a home uplink, and one loose enough for
-// the upload protects nothing else.
+// It is a deadline armed per request through [http.ResponseController] rather
+// than http.Server.ReadTimeout because the upload routes need a much longer
+// one, and they need it only for callers who have authenticated: this default
+// is armed first, and the auth layer extends it after the session check
+// passes (auth.UploadBodyReadTimeout). One process-wide ReadTimeout cannot
+// express "30 seconds for strangers, 30 minutes for a signed-in upload".
 //
 // The deadline covers the body and nothing after it. net/http clears the
 // connection read deadline itself once the body has been read to EOF (HTTP/1),
@@ -198,9 +202,6 @@ func noSniff(next http.Handler) http.Handler {
 // cancelled. A bodyless request — every GET, the SSE transcript tail included
 // — is never given a deadline at all.
 func bodyReadDeadline(d time.Duration, next http.Handler) http.Handler {
-	if d <= 0 {
-		d = DefaultBodyReadTimeout
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 			// Best effort: a ResponseWriter that cannot set deadlines (a test

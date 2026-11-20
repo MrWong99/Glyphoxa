@@ -41,8 +41,17 @@ func NewMigrationProvider(db *sql.DB) (*goose.Provider, error) {
 		return nil, fmt.Errorf("storage: build migration session locker: %w", err)
 	}
 
+	// WithAllowOutofOrder: migrations are numbered by whoever opens the PR, and
+	// parallel PRs merge in any order, so a database can already be at 00058
+	// when 00056 first reaches it. goose's default refuses that ("found missing
+	// migrations") and would brick `migrate up`; with the option a lower-numbered
+	// migration that is not yet applied is simply applied. Each migration must
+	// therefore be written to hold regardless of its neighbours' order — which
+	// independent PRs' migrations are by construction. The option also makes
+	// HasPending compare the applied SET rather than the highest version, which
+	// [EnsureCurrent] depends on.
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS,
-		goose.WithSessionLocker(locker))
+		goose.WithSessionLocker(locker), goose.WithAllowOutofOrder(true))
 	if err != nil {
 		return nil, fmt.Errorf("storage: build migration provider: %w", err)
 	}
@@ -115,22 +124,33 @@ func Version(ctx context.Context, db *sql.DB) (int64, error) {
 	return v, nil
 }
 
-// EnsureCurrent verifies the DB schema is at the latest known version. web and
-// voice Modes call this at startup and fail fast if the schema is behind
+// EnsureCurrent verifies that EVERY embedded migration has been applied. web
+// and voice Modes call this at startup and fail fast if the schema is behind
 // (ADR-0031) — they never auto-migrate.
+//
+// "Behind" is judged on the applied set, not the highest version: comparing
+// maxima alone called a database current when a lower-numbered migration had
+// merged after a higher one and was never applied — the process then booted
+// against a schema missing that migration.
 func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 	p, err := NewMigrationProvider(db)
 	if err != nil {
 		return err
 	}
-	current, target, err := p.GetVersions(ctx)
+	raw, err := p.Status(ctx)
 	if err != nil {
-		return fmt.Errorf("storage: read versions: %w", err)
+		return fmt.Errorf("storage: read migration status: %w", err)
 	}
-	if current < target {
+	var pending []int64
+	for _, st := range raw {
+		if st.State != goose.StateApplied {
+			pending = append(pending, st.Source.Version)
+		}
+	}
+	if len(pending) > 0 {
 		return fmt.Errorf(
-			"storage: schema out of date (db at version %d, want %d); run `glyphoxa migrate up`",
-			current, target)
+			"storage: schema out of date (%d unapplied migration(s): %v); run `glyphoxa migrate up`",
+			len(pending), pending)
 	}
 	return nil
 }

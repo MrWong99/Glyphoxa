@@ -306,14 +306,14 @@ type User struct {
 }
 
 // Session is a server-side login session (ADR-0016): the row is the authority
-// for the opaque random secret carried in the glyphoxa_session cookie. TokenHash is
+// for the opaque random secret carried in the glyphoxa_session cookie. Token is
 // that secret's SHA-256 digest (base64url) — the plaintext is never stored, so a
 // DB read yields no replayable credential. ExpiresAt gates validity; deleting
 // the row revokes instantly.
 type Session struct {
 	ID         uuid.UUID
 	UserID     uuid.UUID
-	TokenHash  string
+	Token      string
 	CreatedAt  time.Time
 	LastSeenAt time.Time
 	ExpiresAt  time.Time

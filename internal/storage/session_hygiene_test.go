@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func TestAuthenticateSession_DoesNotWriteOnEveryRequest(t *testing.T) {
 	rowVersion := func() (xmin string, lastSeen time.Time) {
 		t.Helper()
 		if err := pool.QueryRow(ctx,
-			`SELECT xmin::text, last_seen_at FROM sessions WHERE token_hash = $1`, tokenDigest("seen-token")).
+			`SELECT xmin::text, last_seen_at FROM sessions WHERE token = $1`, tokenDigest("seen-token")).
 			Scan(&xmin, &lastSeen); err != nil {
 			t.Fatalf("read session row version: %v", err)
 		}
@@ -78,7 +79,7 @@ func TestAuthenticateSession_DoesNotWriteOnEveryRequest(t *testing.T) {
 	// Once last_seen_at is stale, the next authentication refreshes it — once.
 	stale := storage.SessionSeenGranularity + time.Minute
 	if _, err := pool.Exec(ctx,
-		`UPDATE sessions SET last_seen_at = now() - make_interval(secs => $2) WHERE token_hash = $1`,
+		`UPDATE sessions SET last_seen_at = now() - make_interval(secs => $2) WHERE token = $1`,
 		tokenDigest("seen-token"), stale.Seconds()); err != nil {
 		t.Fatalf("backdate last_seen_at: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestPurgeExpiredSessions(t *testing.T) {
 		t.Errorf("purged = %d, want 2 (the two rows expired past the grace)", purged)
 	}
 	remaining := map[string]bool{}
-	rows, err := pool.Query(ctx, `SELECT token_hash FROM sessions`)
+	rows, err := pool.Query(ctx, `SELECT token FROM sessions`)
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
 	}
@@ -191,12 +192,12 @@ func TestPurgeExpiredSessions(t *testing.T) {
 	}
 }
 
-// TestMigration00056_SessionsTokenHash covers the #643 schema step against rows
-// written by the previous schema: expired rows are deleted, the column is
-// renamed with its UNIQUE constraint intact, and a session that was live
-// before the migration still authenticates after it — the rename must not log
-// anyone out. Down restores the old column name.
-func TestMigration00056_SessionsTokenHash(t *testing.T) {
+// TestMigration00056_PurgesExpiredSessions covers the #643 schema step against
+// rows written before it: expired rows are deleted, and a session that was live
+// before the migration still authenticates after it. The column is deliberately
+// NOT renamed (a rename would make the release non-rollbackable); it gains a
+// comment saying it holds a digest. Down leaves the schema usable.
+func TestMigration00056_PurgesExpiredSessions(t *testing.T) {
 	dsn := startPostgres(t)
 	db := openSQL(t, dsn)
 	pool := openPool(t, dsn)
@@ -215,18 +216,11 @@ func TestMigration00056_SessionsTokenHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	// Rows as the pre-00056 schema held them: the digest in a column named
-	// `token`. One live, one expired.
-	insert := func(token string, expires time.Time) {
-		t.Helper()
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3)`,
-			u.ID, tokenDigest(token), expires); err != nil {
+	for token, ttl := range map[string]time.Duration{"live-before": time.Hour, "expired-before": -time.Hour} {
+		if _, err := st.CreateSession(ctx, storage.NewSession{UserID: u.ID, Token: token, ExpiresAt: time.Now().Add(ttl)}); err != nil {
 			t.Fatalf("seed pre-migration session %q: %v", token, err)
 		}
 	}
-	insert("live-before", time.Now().Add(time.Hour))
-	insert("expired-before", time.Now().Add(-time.Hour))
 
 	if _, err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("migrate up to 00056: %v", err)
@@ -240,33 +234,78 @@ func TestMigration00056_SessionsTokenHash(t *testing.T) {
 		t.Errorf("sessions after 00056 = %d, want 1 (the expired row deleted, the live one kept)", n)
 	}
 	if got, err := st.AuthenticateSession(ctx, "live-before"); err != nil || got.ID != u.ID {
-		t.Errorf("session live before the migration: AuthenticateSession = (%v, %v), want its owner — the rename must not sign anyone out", got.ID, err)
+		t.Errorf("session live before the migration: AuthenticateSession = (%v, %v), want its owner", got.ID, err)
 	}
-	if _, err := st.AuthenticateSession(ctx, "expired-before"); !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("expired session after the migration: err = %v, want ErrNotFound", err)
-	}
-	var oldColumn int
+	// Rollback safety: the column an older binary reads is still there, under
+	// the same name, and now documented.
+	var comment *string
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.columns WHERE table_name = 'sessions' AND column_name = 'token'`).
-		Scan(&oldColumn); err != nil {
-		t.Fatalf("inspect columns: %v", err)
+		`SELECT col_description('sessions'::regclass, attnum) FROM pg_attribute
+		  WHERE attrelid = 'sessions'::regclass AND attname = 'token'`).Scan(&comment); err != nil {
+		t.Fatalf("sessions.token is gone or unreadable — an older binary could not authenticate anyone: %v", err)
 	}
-	if oldColumn != 0 {
-		t.Error("sessions.token still exists after 00056")
-	}
-	// The UNIQUE constraint survived the rename: a duplicate digest is refused.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ($1, $2, now() + interval '1 hour')`,
-		u.ID, tokenDigest("live-before")); err == nil {
-		t.Error("a duplicate token_hash was accepted — the UNIQUE constraint was lost in the rename")
+	if comment == nil || !strings.Contains(*comment, "SHA-256") {
+		t.Errorf("sessions.token comment = %v, want it to say the column holds a SHA-256 digest", comment)
 	}
 
-	// Down restores the old name and keeps the surviving row.
 	if _, err := provider.DownTo(ctx, 55); err != nil {
 		t.Fatalf("migrate down to 00055: %v", err)
 	}
 	var kept uuid.UUID
 	if err := pool.QueryRow(ctx, `SELECT user_id FROM sessions WHERE token = $1`, tokenDigest("live-before")).Scan(&kept); err != nil || kept != u.ID {
-		t.Errorf("after Down: lookup by the old column = (%v, %v), want the surviving session", kept, err)
+		t.Errorf("after Down: surviving session lookup = (%v, %v), want its owner", kept, err)
+	}
+}
+
+// TestMigrations_OutOfOrderIsAppliedAndDetected covers what parallel PRs do to
+// the migration sequence: a higher-numbered migration merges and is applied
+// first, then a lower-numbered one arrives. goose's default refuses that
+// outright, and EnsureCurrent used to compare only the highest version — so a
+// web/voice process (which never auto-migrates) booted "current" against a
+// schema missing the late migration. EnsureCurrent must report the gap, and
+// `migrate up` must close it.
+func TestMigrations_OutOfOrderIsAppliedAndDetected(t *testing.T) {
+	dsn := startPostgres(t)
+	db := openSQL(t, dsn)
+	ctx := context.Background()
+
+	provider, err := storage.NewMigrationProvider(db)
+	if err != nil {
+		t.Fatalf("NewMigrationProvider: %v", err)
+	}
+	// The database a deployment has when 00058 shipped before 00056: everything
+	// through 55, then 58, with 56 never applied.
+	if _, err := provider.UpTo(ctx, 55); err != nil {
+		t.Fatalf("migrate up to 00055: %v", err)
+	}
+	if _, err := provider.ApplyVersion(ctx, 58, true); err != nil {
+		t.Fatalf("apply 00058 ahead of 00056: %v", err)
+	}
+	if v, err := storage.Version(ctx, db); err != nil || v != 58 {
+		t.Fatalf("db version = (%d, %v), want 58", v, err)
+	}
+
+	err = storage.EnsureCurrent(ctx, db)
+	if err == nil {
+		t.Fatal("EnsureCurrent passed with migration 00056 unapplied — the highest version alone is not 'current'")
+	}
+	if !strings.Contains(err.Error(), "schema out of date") || !strings.Contains(err.Error(), "56") {
+		t.Errorf("EnsureCurrent error = %q, want it to say the schema is out of date and name 56", err)
+	}
+
+	if err := storage.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp with a lower-numbered migration pending: %v", err)
+	}
+	statuses, err := storage.Status(ctx, db)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	for _, s := range statuses {
+		if !s.Applied {
+			t.Errorf("migration %d still pending after MigrateUp", s.Version)
+		}
+	}
+	if err := storage.EnsureCurrent(ctx, db); err != nil {
+		t.Errorf("EnsureCurrent after MigrateUp: %v", err)
 	}
 }

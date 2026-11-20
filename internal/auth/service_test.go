@@ -104,7 +104,7 @@ func newAuthClientWith(t *testing.T, authn auth.Authenticator, del auth.SessionD
 	stack := auth.NewStack(authn, tr,
 		managementv1connect.AuthServiceGetCurrentUserProcedure,
 		managementv1connect.AuthServiceGetAdmissionModeProcedure)
-	server := auth.NewAuthServer(del, namer, ren, mode, slog.Default())
+	server := auth.NewAuthServer(del, namer, ren, mode, auth.EdgeConfig{}, slog.Default())
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)
@@ -460,8 +460,8 @@ func TestLogout_SecureFromConfigNotRequest(t *testing.T) {
 			t.Parallel()
 			op := operator()
 			stack := auth.NewStack(fakeAuthN{users: map[string]storage.User{validToken: op}}, fakeTenant{id: uuid.New()})
-			server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist, slog.Default())
-			server.SetSecureCookies(tc.secure)
+			server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist,
+				auth.EdgeConfig{SecureCookies: tc.secure}, slog.Default())
 			mux := http.NewServeMux()
 			mux.Handle(server.Handler(stack.HandlerOptions()...))
 			srv := httptest.NewServer(mux)

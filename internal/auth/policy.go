@@ -196,7 +196,7 @@ func (p *Policy) Evaluate(ctx context.Context, in Input, c Check) Verdict {
 // on both kinds of check: the token was presented and could not be verified,
 // which is neither "signed in" nor "not signed in".
 func (p *Policy) evaluateSession(ctx context.Context, token string, public bool) (storage.User, bool, Denial) {
-	// A pre-body check ([Stack.RequireSessionBeforeBody]) already verified this
+	// A pre-body check ([Stack.UploadHandler]) already verified this
 	// exact token for this request: reuse its principal instead of a second
 	// authenticator round trip.
 	if u, ok := verifiedSession(ctx, token); ok {
@@ -298,7 +298,7 @@ func (p *Policy) resolveTenant(ctx context.Context, u storage.User) (uuid.UUID, 
 }
 
 // verifiedSessionKey carries a session the pre-body check has already verified
-// for this request ([Stack.RequireSessionBeforeBody]). It is unexported and
+// for this request ([Stack.UploadHandler]). It is unexported and
 // bound to the exact token it was verified for, so nothing outside this
 // package can mint one and a request that somehow presents a different token
 // downstream is authenticated from scratch.

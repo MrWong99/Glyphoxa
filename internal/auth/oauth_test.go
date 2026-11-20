@@ -67,7 +67,7 @@ func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) 
 func TestOAuthLogin_RedirectsAndSetsState(t *testing.T) {
 	t.Parallel()
 	disc := &fakeDiscord{authBase: "https://discord/authorize"}
-	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, nil)
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
 
 	rec := httptest.NewRecorder()
 	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil))
@@ -104,7 +104,7 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora", GlobalName: "Sora Vance", AvatarURL: "https://cdn/a.png"}}
 	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
 	// The fake user's snowflake IS on the allowlist (multi-value, whitespace-tolerant).
-	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77 99")}, nil)
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77 99")}, auth.EdgeConfig{}, nil)
 
 	// A valid callback presents the state cookie matching the state param + a code.
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
@@ -160,7 +160,7 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 func TestOAuthCallback_BadState_Rejected(t *testing.T) {
 	t.Parallel()
 	store := &fakeOAuthStore{}
-	o := auth.NewOAuth(store, &fakeDiscord{}, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, nil)
+	o := auth.NewOAuth(store, &fakeDiscord{}, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
 
 	// State cookie does not match the state param.
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?code=c&state=mismatch", nil)
@@ -186,7 +186,7 @@ func TestOAuthCallback_NotAllowlisted_Rejected(t *testing.T) {
 	disc := &fakeDiscord{user: auth.DiscordUser{ID: "999", Username: "stranger", GlobalName: "Stranger"}}
 	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
 	// Allowlist holds other snowflakes; "999" is absent.
-	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77")}, nil)
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77")}, auth.EdgeConfig{}, nil)
 
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
@@ -244,8 +244,8 @@ func TestOAuthCallback_SecureFromConfigNotRequest(t *testing.T) {
 			t.Parallel()
 			disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
 			store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
-			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, nil)
-			o.SetSecureCookies(auth.SecureCookies(tc.redirectURL))
+			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")},
+				auth.EdgeConfig{SecureCookies: auth.SecureCookies(tc.redirectURL)}, nil)
 
 			// Login issues the state cookie with the same attribute.
 			loginReq := httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil)
@@ -286,38 +286,56 @@ func TestOAuthCallback_SecureFromConfigNotRequest(t *testing.T) {
 
 // TestOAuthCallback_SessionAuditIP pins which address the session row records
 // (#662). The FIRST X-Forwarded-For entry is whatever the client typed —
-// proxies append — so it must never be the answer: Cloudflare's own
-// CF-Connecting-IP wins, then the hop our proxy appended (the last one), then
-// the socket peer without its port.
+// proxies append — so it must never be the answer. A client-IP header is
+// believed only when the operator configured it as trusted
+// (GLYPHOXA_TRUSTED_CLIENT_IP_HEADER): unconfigured, a client-sent
+// CF-Connecting-IP is just another forgeable header and is ignored.
 func TestOAuthCallback_SessionAuditIP(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name   string
-		header http.Header
-		want   string
+		name    string
+		trusted string
+		header  http.Header
+		want    string
 	}{
-		{"direct: socket peer, port stripped", http.Header{}, "192.0.2.1"},
+		{"direct: socket peer, port stripped", "", http.Header{}, "192.0.2.1"},
 		{
-			"spoofed first hop is ignored; the proxy-appended last hop is recorded",
+			"spoofed first hop is ignored; the proxy-appended last hop is recorded", "",
 			http.Header{"X-Forwarded-For": {"6.6.6.6, 203.0.113.7"}},
 			"203.0.113.7",
 		},
 		{
-			"last hop across repeated X-Forwarded-For header lines",
+			"last hop across repeated X-Forwarded-For header lines", "",
 			http.Header{"X-Forwarded-For": {"6.6.6.6", "198.51.100.4, 203.0.113.9"}},
 			"203.0.113.9",
 		},
 		{
-			"CF-Connecting-IP wins over X-Forwarded-For",
+			"no trusted header configured: a client-sent CF-Connecting-IP is NOT believed", "",
+			http.Header{"Cf-Connecting-Ip": {"6.6.6.6"}, "X-Forwarded-For": {"7.7.7.7, 10.42.0.1"}},
+			"10.42.0.1",
+		},
+		{
+			"configured trusted header wins over X-Forwarded-For", "CF-Connecting-IP",
 			http.Header{"Cf-Connecting-Ip": {"198.51.100.23"}, "X-Forwarded-For": {"6.6.6.6, 10.42.0.1"}},
 			"198.51.100.23",
+		},
+		{
+			"configured trusted header absent: fall back to the last hop", "CF-Connecting-IP",
+			http.Header{"X-Forwarded-For": {"6.6.6.6, 10.42.0.1"}},
+			"10.42.0.1",
+		},
+		{
+			"another proxy's header can be named", "X-Real-IP",
+			http.Header{"X-Real-Ip": {"198.51.100.77"}, "Cf-Connecting-Ip": {"6.6.6.6"}},
+			"198.51.100.77",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
 			store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
-			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, nil)
+			o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")},
+				auth.EdgeConfig{ClientIPHeader: tc.trusted}, nil)
 
 			form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 			req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)

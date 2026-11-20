@@ -1546,8 +1546,8 @@ var plainMountPolicy = map[string]auth.TenantMode{
 }
 
 // importMountPattern is the campaign bundle import route — named because two
-// tables key on it: its auth posture above and its upload body deadline in
-// managementMounts.
+// tables key on it: its auth posture above and its post-auth upload body
+// deadline in managementMounts.
 const importMountPattern = "POST /api/v1/campaigns/import"
 
 // relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
@@ -1589,10 +1589,17 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
 		RedirectURL:  oauthRedirectURL,
 	})
-	// Cookie Secure is decided ONCE, from the scheme of the public URL the
-	// operator configured, not per request from X-Forwarded-Proto (#662) — a
-	// header any client can set and a proxy may not overwrite.
-	secureCookies := auth.SecureCookies(oauthRedirectURL)
+	// What the auth tier is TOLD about the proxy in front of it (#662), instead
+	// of believing forgeable request headers. Cookie Secure is decided once,
+	// from the scheme of the public URL the operator configured, not per
+	// request from X-Forwarded-Proto. The client-IP header the session audit
+	// row trusts is likewise configuration: unset trusts none (last
+	// X-Forwarded-For hop, then the socket peer); a Cloudflare-only deployment
+	// sets GLYPHOXA_TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP.
+	edge := auth.EdgeConfig{
+		SecureCookies:  auth.SecureCookies(oauthRedirectURL),
+		ClientIPHeader: strings.TrimSpace(os.Getenv("GLYPHOXA_TRUSTED_CLIENT_IP_HEADER")),
+	}
 	// The OAuth callback's admission policy (ADR-0041 / ADR-0055). In allowlist
 	// mode the GLYPHOXA_OPERATOR_IDS allowlist is the single authorization gate:
 	// a Discord User whose snowflake is absent is denied a session before any
@@ -1605,10 +1612,8 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		Allowlist:      allowlist,
 		SignupPlanSlug: signupPlanSlug,
 		Signup:         store,
-	}, log)
-	oauth.SetSecureCookies(secureCookies)
-	authServer := auth.NewAuthServer(store, store, store, admission, log)
-	authServer.SetSecureCookies(secureCookies)
+	}, edge, log)
+	authServer := auth.NewAuthServer(store, store, store, admission, edge, log)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
@@ -1671,12 +1676,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// CampaignService is the ONE Connect service that takes image uploads
 	// (CreateMap / ReplaceMapImage / SetNodePortrait), so it alone carries the
 	// 48 MiB read cap; every other service keeps the 1 MiB default. connect-go
-	// buffers a request before any interceptor runs, so the large cap sits
-	// behind a header-only session check: a caller without a valid session is
-	// refused before a body byte is read.
-	campaignPath, campaignHandler := campaignSrv.Handler(stack.UploadHandlerOptions()...)
-	campaignHandler = stack.RequireSessionBeforeBody(campaignHandler)
-	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
+	// buffers a request before any interceptor runs, so stack.UploadHandler
+	// returns the handler already behind a header-only session check: a caller
+	// without a valid session is refused before a body byte is read. The cap
+	// cannot be obtained without that check.
+	campaignPath, campaignHandler := stack.UploadHandler(campaignSrv.Handler)
+	authPath, authHandler := stack.Handler(authServer.Handler)
 	// VoiceService (#70) serves the live provider data the Configuration +
 	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq
 	// model allowlist, and the async provider-health signal — all via the
@@ -1717,8 +1722,8 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// administer a guild before binding it. Empty when unset (BYOK-only web
 	// deployments): the proof then requires a saved/request token.
 	providerSrv.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
-	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
-	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
+	providerPath, providerHandler := stack.Handler(providerSrv.Handler)
+	voicePath, voiceHandler := stack.Handler(voiceSrv.Handler)
 	// The recap engine regenerates Butler-flavoured Session recaps on demand
 	// (#272/#274, gate #271: never persisted). It spends provider money per call
 	// and meters usage, so SessionService.GenerateRecap is CSRF-guarded like a
@@ -1760,7 +1765,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		searchEngine.SetEmbedder(embedProvider, observe.ProviderOllama, embedModel)
 	}
 	sessionSrv.SetSearch(searchEngine)
-	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
+	sessionPath, sessionHandler := stack.Handler(sessionSrv.Handler)
 
 	// Butler planning chat (#592, ADR-0062): the ChatService — thread CRUD plus
 	// the streaming exchange, the first server-streaming RPC on the stack (whose
@@ -1779,7 +1784,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, metrics, log, chatOpts...)
 	chatSrv := rpc.NewChatServer(store, log)
 	chatSrv.SetEngine(chatEngine)
-	chatPath, chatHandler := chatSrv.Handler(stack.HandlerOptions()...)
+	chatPath, chatHandler := stack.Handler(chatSrv.Handler)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
 	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated
@@ -1851,18 +1856,24 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	for _, pattern := range slices.Sorted(maps.Keys(plainHandlers)) {
 		// A handler missing from plainMountPolicy yields the zero TenantMode,
 		// which MustGuardMounts rejects loudly.
-		rows = append(rows, auth.GuardedMount{
+		row := auth.GuardedMount{
 			Pattern: pattern,
 			Tenant:  plainMountPolicy[pattern],
 			Handler: plainHandlers[pattern],
-		})
+		}
+		// The bundle import is the one plain mount that receives a large body
+		// (up to 192 MiB): the guard extends its body deadline once the
+		// session + CSRF gate has passed. Every other mount — and every
+		// unauthenticated caller of this one — keeps the listener default.
+		if pattern == importMountPattern {
+			row.BodyReadTimeout = auth.UploadBodyReadTimeout
+		}
+		rows = append(rows, row)
 	}
 	guarded := auth.MustGuardMounts(policy, rows)
 
-	campaignMount := web.APIMount(campaignPath, campaignHandler)
-	campaignMount.BodyReadTimeout = web.UploadBodyReadTimeout
 	mounts := []web.Mount{
-		campaignMount,
+		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
@@ -1870,13 +1881,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		web.APIMount(chatPath, chatHandler),
 	}
 	for _, g := range guarded {
-		m := web.Mount{Path: g.Pattern, Handler: g.Handler}
-		// The bundle import is the one plain mount that receives a large body
-		// (up to 192 MiB); every other mount keeps the default body deadline.
-		if g.Pattern == importMountPattern {
-			m.BodyReadTimeout = web.UploadBodyReadTimeout
-		}
-		mounts = append(mounts, m)
+		mounts = append(mounts, web.Mount{Path: g.Pattern, Handler: g.Handler})
 	}
 	return append(mounts,
 		// The OAuth redirects are the login carve-out (ADR-0015): public by

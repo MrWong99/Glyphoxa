@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -39,8 +38,8 @@ type OAuth struct {
 	discord  DiscordOAuth
 	adm      Admission // the admission policy (ADR-0041 allowlist / ADR-0055 open)
 	ttl      time.Duration
-	redirect string // where the callback sends the browser after login
-	secure   bool   // mark issued cookies Secure (see [SecureCookies])
+	redirect string     // where the callback sends the browser after login
+	edge     EdgeConfig // proxy facts: cookie Secure, trusted client-IP header
 	now      func() time.Time
 	log      *slog.Logger
 }
@@ -76,8 +75,10 @@ const onboardingRedirect = "/onboarding/create-tenant"
 // User whose snowflake is absent from the allowlist is denied a session at the
 // callback (ADR-0041); in open mode such a User is admitted via the create-only
 // signup transaction instead (ADR-0055). Allowlisted Users keep the
-// claim-or-create login path in BOTH modes.
-func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Admission, log *slog.Logger) *OAuth {
+// claim-or-create login path in BOTH modes. edge is the deployment's proxy
+// configuration ([EdgeConfig]) — required, so cookie security is always an
+// explicit decision of the caller.
+func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Admission, edge EdgeConfig, log *slog.Logger) *OAuth {
 	if appRedirect == "" {
 		appRedirect = "/"
 	}
@@ -88,18 +89,13 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Ad
 		store:    store,
 		discord:  discord,
 		adm:      adm,
+		edge:     edge,
 		ttl:      defaultSessionTTL,
 		redirect: appRedirect,
 		now:      time.Now,
 		log:      log,
 	}
 }
-
-// SetSecureCookies fixes whether every cookie this flow issues carries the
-// Secure attribute. The composition root derives it once from the configured
-// OAuth redirect URL ([SecureCookies]); the default (false) is the local
-// cleartext-dev posture. Set once at boot, before serving.
-func (o *OAuth) SetSecureCookies(secure bool) { o.secure = secure }
 
 // Login starts the OAuth flow: mint an anti-forgery state nonce, stash it in a
 // short-lived cookie, and 302 to Discord's authorize URL.
@@ -132,7 +128,7 @@ func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  o.now().Add(stateCookieTTL),
 		HttpOnly: true,
-		Secure:   o.secure,
+		Secure:   o.edge.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, o.discord.AuthCodeURL(state), http.StatusFound)
@@ -237,7 +233,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		UserID:    user.ID,
 		Token:     sessionToken,
 		ExpiresAt: expires,
-		IP:        clientIP(r),
+		IP:        o.edge.clientIP(r),
 		UA:        r.UserAgent(),
 	}); err != nil {
 		o.log.Error("oauth callback: create session", "err", err)
@@ -245,7 +241,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secure := o.secure
+	secure := o.edge.SecureCookies
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -296,7 +292,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		Session: storage.NewSession{
 			Token:     sessionToken,
 			ExpiresAt: expires,
-			IP:        clientIP(r),
+			IP:        o.edge.clientIP(r),
 			UA:        r.UserAgent(),
 		},
 		AUPAcceptedAt: o.now(),
@@ -312,7 +308,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		return
 	}
 
-	secure := o.secure
+	secure := o.edge.SecureCookies
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -321,41 +317,4 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		dest = onboardingRedirect
 	}
 	http.Redirect(w, r, dest, http.StatusFound)
-}
-
-// clientIP extracts the best-effort client IP for the session audit row. The
-// value is only ever stored (sessions.ip) — nothing authorizes on it — but it
-// should not be something the client simply typed (#662).
-//
-// TRUST ASSUMPTION: the web tier is never reached directly, only through the
-// deployment's reverse proxy (ADR-0039), and that proxy is what makes any of
-// these headers meaningful:
-//
-//   - CF-Connecting-IP, when present, wins. Production sits behind a
-//     Cloudflare Tunnel, and Cloudflare sets this header itself on every
-//     request, replacing whatever the client sent.
-//   - Otherwise the LAST X-Forwarded-For hop: proxies APPEND the peer they
-//     saw, so the rightmost entry is the one our own proxy wrote. The first
-//     entry — which this function used to return — is whatever the client put
-//     in the header.
-//   - Otherwise the socket peer.
-//
-// A deployment exposed without a proxy, or behind a non-Cloudflare proxy that
-// forwards a client-supplied CF-Connecting-IP untouched, records a
-// client-chosen value; that is a misleading audit record for the caller's OWN
-// session and nothing more.
-func clientIP(r *http.Request) string {
-	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); ip != "" {
-		return ip
-	}
-	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
-		hops := strings.Split(xff[len(xff)-1], ",")
-		if last := strings.TrimSpace(hops[len(hops)-1]); last != "" {
-			return last
-		}
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }

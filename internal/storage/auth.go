@@ -242,7 +242,7 @@ type NewSession struct {
 	UA        string
 }
 
-// sessionTokenHash is what the sessions.token_hash column holds: the SHA-256 of the
+// sessionTokenHash is what the sessions.token column holds: the SHA-256 of the
 // cookie secret, base64url. A DB read (a backup, a replica, a dump) therefore
 // yields no replayable credential — the plaintext existed only in the cookie.
 // A plain unsalted hash is sufficient because the input is 256 bits of
@@ -254,16 +254,16 @@ func sessionTokenHash(token string) string {
 }
 
 // CreateSession inserts a session row and returns it. The returned
-// Session.TokenHash is the stored digest, never the cookie secret.
+// Session.Token is the stored digest, never the cookie secret.
 func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, token_hash, expires_at, ip, ua)
+		`INSERT INTO sessions (user_id, token, expires_at, ip, ua)
 		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, user_id, token_hash, created_at, last_seen_at, expires_at, ip, ua`,
+		 RETURNING id, user_id, token, created_at, last_seen_at, expires_at, ip, ua`,
 		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA)
 	var sess Session
 	err := row.Scan(
-		&sess.ID, &sess.UserID, &sess.TokenHash, &sess.CreatedAt,
+		&sess.ID, &sess.UserID, &sess.Token, &sess.CreatedAt,
 		&sess.LastSeenAt, &sess.ExpiresAt, &sess.IP, &sess.UA,
 	)
 	if err != nil {
@@ -298,7 +298,7 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 	row := s.db.QueryRow(ctx,
 		`WITH s AS (
 		     SELECT id, user_id, last_seen_at FROM sessions
-		      WHERE token_hash = $1 AND expires_at > now()
+		      WHERE token = $1 AND expires_at > now()
 		 ), bump AS (
 		     UPDATE sessions SET last_seen_at = now()
 		       FROM s
@@ -323,7 +323,7 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 // DeleteSession removes a session row by token (logout / revocation). Deleting a
 // token that no longer exists is not an error — logout is idempotent.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, sessionTokenHash(token)); err != nil {
+	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, sessionTokenHash(token)); err != nil {
 		return fmt.Errorf("storage: delete session: %w", err)
 	}
 	return nil
