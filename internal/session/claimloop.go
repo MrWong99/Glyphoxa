@@ -205,7 +205,9 @@ func (l *ClaimLoop) tick(ctx context.Context) {
 	}
 	cancelSw()
 
-	for l.mgr.HasCapacity() {
+	// Stop claiming once shutdown begins: a claim made now could only be
+	// released straight back (startClaimed), and claimed again.
+	for ctx.Err() == nil && l.mgr.HasCapacity() {
 		claimCtx, cancelClaim := context.WithTimeout(ctx, dbOpTimeout(l.cfg.Poll))
 		intent, err := l.store.ClaimVoiceSessionIntent(claimCtx, l.instanceID)
 		cancelClaim()
