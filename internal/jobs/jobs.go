@@ -84,6 +84,10 @@ const (
 	// and republishes the backlog gauges — so a sustained enqueue stream can't leave
 	// the metrics stale for the whole drain (a long drain is otherwise silent).
 	drainCheckpoint = 10
+
+	// outcomeWriteTimeout bounds one outcome write (complete / retry / mark-dead).
+	// The write runs detached from the runner context, so it needs its own bound.
+	outcomeWriteTimeout = 5 * time.Second
 )
 
 // Config tunes the runner. Zero values take the defaults.
@@ -226,13 +230,22 @@ func (r *Runner) refreshBacklog(ctx context.Context) {
 // runOne executes one claimed job under a Lease-bounded deadline and routes its
 // result: success completes the job; an error (or a recovered panic) retries it
 // with backoff while attempts remain, else dead-letters it with the last error.
+//
+// The outcome is written on a context DETACHED from ctx. ctx is the runner
+// context, cancelled at shutdown: a handler that finished (or was interrupted)
+// as SIGTERM arrived used to have its outcome write fail on the dead context,
+// leaving the row claimed until the lease ran out (5 minutes) and, for a job
+// that had actually succeeded, running it a second time.
 func (r *Runner) runOne(ctx context.Context, job storage.Job) {
+	outCtx, cancelOut := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+	defer cancelOut()
+
 	handler, ok := r.handlers[job.Kind]
 	if !ok {
 		// Only registered kinds are claimed, so this is defensive; dead-letter rather
 		// than spin, since no handler will ever run it.
 		r.log.Error("job runner: claimed a job with no handler; dead-lettering", "kind", job.Kind, "job_id", job.ID)
-		r.markDead(ctx, job, "no handler registered for kind")
+		r.markDead(outCtx, job, "no handler registered for kind")
 		return
 	}
 
@@ -246,7 +259,7 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	}
 
 	if err == nil {
-		if !r.terminalWrite(job, "complete", r.store.CompleteJob(ctx, job.ID, job.Attempts)) {
+		if !r.terminalWrite(job, "complete", r.store.CompleteJob(outCtx, job.ID, job.Attempts)) {
 			return
 		}
 		if r.metrics != nil {
@@ -258,12 +271,12 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	// Failure. attempts was incremented on claim, so it is this run's attempt number.
 	if job.Attempts >= job.MaxAttempts {
 		r.log.Warn("job runner: job exhausted attempts; dead-lettering", "kind", job.Kind, "job_id", job.ID, "attempts", job.Attempts, "err", err)
-		r.markDead(ctx, job, err.Error())
+		r.markDead(outCtx, job, err.Error())
 		return
 	}
 
 	runAfter := time.Now().Add(backoff(job.Attempts))
-	if !r.terminalWrite(job, "retry", r.store.RetryJob(ctx, job.ID, job.Attempts, err.Error(), runAfter)) {
+	if !r.terminalWrite(job, "retry", r.store.RetryJob(outCtx, job.ID, job.Attempts, err.Error(), runAfter)) {
 		return
 	}
 	if r.metrics != nil {

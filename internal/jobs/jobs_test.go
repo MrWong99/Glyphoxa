@@ -64,9 +64,12 @@ func (f *fakeStore) ClaimJob(_ context.Context, _ []string, lease time.Duration)
 	return j, nil
 }
 
-func (f *fakeStore) CompleteJob(_ context.Context, id uuid.UUID, _ int) error {
+func (f *fakeStore) CompleteJob(ctx context.Context, id uuid.UUID, _ int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err // a real store fails a write on a dead context
+	}
 	if f.terminalErr != nil {
 		return f.terminalErr
 	}
@@ -74,9 +77,12 @@ func (f *fakeStore) CompleteJob(_ context.Context, id uuid.UUID, _ int) error {
 	return nil
 }
 
-func (f *fakeStore) RetryJob(_ context.Context, id uuid.UUID, attempts int, lastError string, runAfter time.Time) error {
+func (f *fakeStore) RetryJob(ctx context.Context, id uuid.UUID, attempts int, lastError string, runAfter time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.terminalErr != nil {
 		return f.terminalErr
 	}
@@ -272,6 +278,40 @@ func TestRunOneFailureAtMaxDeadLetters(t *testing.T) {
 }
 
 // --- superseded claim: a stale terminal write counts no metric ---
+
+// TestRunOneOutcomeSurvivesShutdownCancel (B6): the runner context is cancelled
+// at shutdown. A job whose handler finishes as that happens must still have its
+// outcome recorded; otherwise the row stays claimed until the lease expires and
+// a job that SUCCEEDED is run again.
+func TestRunOneOutcomeSurvivesShutdownCancel(t *testing.T) {
+	store := &fakeStore{}
+	metrics := newFakeMetrics()
+	r := New(store, metrics, testLog(), Config{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Register("test.done", func(context.Context, json.RawMessage) error {
+		cancel() // SIGTERM lands while the handler is finishing its work
+		return nil
+	})
+	r.Register("test.interrupted", func(hctx context.Context, _ json.RawMessage) error {
+		<-hctx.Done() // the handler is cut short by the shutdown
+		return hctx.Err()
+	})
+
+	done := testJob("test.done", 1, 5, `{}`)
+	r.runOne(ctx, done)
+	interrupted := testJob("test.interrupted", 1, 5, `{}`)
+	r.runOne(ctx, interrupted)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.completed) != 1 || store.completed[0] != done.ID {
+		t.Errorf("completed = %v, want the finished job %s recorded despite the cancelled runner context", store.completed, done.ID)
+	}
+	if len(store.retried) != 1 || store.retried[0].id != interrupted.ID {
+		t.Errorf("retried = %+v, want the interrupted job %s released for retry at once, not after its lease", store.retried, interrupted.ID)
+	}
+}
 
 func TestRunOneSupersededCompleteCountsNoOutcome(t *testing.T) {
 	store := &fakeStore{terminalErr: storage.ErrNotFound} // reclaimed by a newer lease
