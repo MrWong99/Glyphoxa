@@ -25,7 +25,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
-import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
+import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 import { errorMessage, isNotFound } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type MessageKey } from "@/i18n";
@@ -395,24 +395,6 @@ export function Configuration() {
       <AdvancedCard title={t("config.spendingLimitsTitle")} hint={t("config.spendingLimitsHint")}>
         <SpendCapsCard />
       </AdvancedCard>
-    </div>
-  );
-}
-
-// FirstCampaignCTA replaces the active-campaign card on a fresh, unseeded install
-// (GetActiveCampaign → CodeNotFound). It runs the shared create-then-activate flow
-// (#267): creating here mints the campaign (auto-Butler, ADR-0009) and selects it,
-// and the sweep re-resolves GetActiveCampaign so this card swaps itself for the
-// live header — no reload, no `glyphoxa seed`.
-function FirstCampaignCTA() {
-  const { t } = useI18n();
-  const create = useCreateCampaign();
-  return (
-    <div className="gx-first-campaign">
-      <span className="gx-overline">{t("config.activeCampaign")}</span>
-      <h2 className="gx-first-campaign__title">{t("config.firstCampaignTitle")}</h2>
-      <p className="gx-first-campaign__lede">{t("config.firstCampaignLede")}</p>
-      <CreateCampaignForm onSubmit={create.submit} pending={create.pending} error={create.error} autoFocusName />
     </div>
   );
 }

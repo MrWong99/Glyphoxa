@@ -25,7 +25,8 @@ import { PrepBoards } from "../campaign/PrepBoards";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
-import { errorMessage } from "@/lib/connectError";
+import { errorMessage, isNotFound } from "@/lib/connectError";
+import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 
 // The Session screen (#72) drives the live Voice Session from the UI on the live
 // SessionService (ADR-0039): Start/Stop call the in-process SessionManager, the
@@ -579,6 +580,24 @@ export function Session({
   // The session the on-screen Recap button covers: the picked past session while
   // browsing one, else the idle ended latest-session summary.
   const viewedSession = viewingPast ? pastSessions.find((s) => s.id === viewedId) : undefined;
+
+  // Zero campaigns (#267): GetActiveCampaign is CodeNotFound and a session can't
+  // start, so the create-first-campaign card replaces the screen instead of
+  // surfacing raw "no active campaign" errors. Creating swaps the live screen in.
+  if (!campaignQ.data && campaignQ.isError && isNotFound(campaignQ.error)) {
+    return (
+      <div className="gx-session">
+        <div className="gx-session__main">
+          <header className="gx-session__header">
+            <h1>{t("session.title")}</h1>
+          </header>
+          <Card accent>
+            <FirstCampaignCTA />
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="gx-session">
