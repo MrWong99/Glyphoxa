@@ -66,6 +66,8 @@ type Client struct {
 	// reasoningEffort, when non-empty, rides as the OpenAI-compat reasoning_effort
 	// field (the ADR-0035 thinking cap for Gemini). Empty omits it.
 	reasoningEffort string
+	// reasoningEffortFor, when set, picks the effort per request model.
+	reasoningEffortFor func(model string) string
 	// extraFields are non-standard top-level body fields merged onto every request
 	// via the SDK's JSON-set escape hatch (e.g. Gemini's
 	// extra_body.google.thinking_config). Nil omits them.
@@ -94,9 +96,11 @@ type settings struct {
 	model           string
 	maxTokens       int
 	reasoningEffort string
-	extraFields     map[string]any
-	includeUsage    bool
-	httpClient      *http.Client
+	// reasoningEffortFor, when set, picks the effort per request model.
+	reasoningEffortFor func(model string) string
+	extraFields        map[string]any
+	includeUsage       bool
+	httpClient         *http.Client
 }
 
 // WithProviderName sets the provider id used in error messages (e.g. "groq").
@@ -131,6 +135,14 @@ func WithHTTPClient(h *http.Client) Option { return func(s *settings) { s.httpCl
 // ADR-0035 thinking cap.
 func WithReasoningEffort(effort string) Option {
 	return func(s *settings) { s.reasoningEffort = effort }
+}
+
+// WithReasoningEffortFor sets reasoning_effort per request model: effortFor
+// returns the effort for a model id, or "" to send none. For gateways that serve
+// reasoning and non-reasoning models behind one endpoint and reject the field on
+// the latter. It takes precedence over [WithReasoningEffort].
+func WithReasoningEffortFor(effortFor func(model string) string) Option {
+	return func(s *settings) { s.reasoningEffortFor = effortFor }
 }
 
 // WithExtraFields sets non-standard top-level request-body fields merged onto
@@ -251,14 +263,15 @@ func New(opts ...Option) *Client {
 	}
 
 	return &Client{
-		name:            s.name,
-		apiKey:          s.apiKey,
-		apiKeyEnvHint:   s.apiKeyEnvHint,
-		model:           s.model,
-		maxTokens:       s.maxTokens,
-		reasoningEffort: s.reasoningEffort,
-		extraFields:     s.extraFields,
-		includeUsage:    s.includeUsage,
-		oai:             openai.NewClient(reqOpts...),
+		name:               s.name,
+		apiKey:             s.apiKey,
+		apiKeyEnvHint:      s.apiKeyEnvHint,
+		model:              s.model,
+		maxTokens:          s.maxTokens,
+		reasoningEffort:    s.reasoningEffort,
+		reasoningEffortFor: s.reasoningEffortFor,
+		extraFields:        s.extraFields,
+		includeUsage:       s.includeUsage,
+		oai:                openai.NewClient(reqOpts...),
 	}
 }
