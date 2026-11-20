@@ -3,6 +3,7 @@ package agenttool
 import (
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
@@ -22,58 +23,72 @@ const diceToolName = "dice"
 var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+\b|%)`)
 
 // diceKeywords maps a gate language (the normalized primary subtag) to the
-// keyword patterns whose match in an utterance marks plausible dice intent.
+// keyword patterns whose match in an utterance marks plausible dice intent; the
+// German table is completed by [deArms] (the cues that need a denylist rather
+// than a pattern).
 //
 // An armed turn is not free: it runs BUFFERED (no streaming, so first audio waits
-// for the whole reply) and arms the invented-roll guard, which can force a
-// regeneration. So the patterns are anchored to roll-shaped PHRASES, not bare
-// substrings (O5: "Vorwurf", "Wirf mir den Schlüssel rüber", "eine Probe von
-// deinem Wein", "did the king die", "take advantage of" and a speaker named
-// Dieter all used to arm). Every pattern still covers the real ttrpg cues — a
-// missed arm withholds the dice Tool when it is genuinely needed. Tune here;
-// adding a language is a data change (one entry), not a logic change. Go's \b is
-// ASCII-only, so no pattern puts \b next to an umlaut.
+// for the whole reply) and arms the invented-roll guard. But a missed arm
+// withholds the dice Tool when it is genuinely needed, so the gate stays
+// RECALL-biased: cues are matched broadly and only the observed everyday
+// false-positive shapes are carved out (O5: "Vorwurf", "Wirf mir den Schlüssel
+// rüber", "eine Probe von deinem Wein", "did the king die", "take advantage of",
+// "rolling hills", a speaker named Dieter). Tune here; adding a language is a
+// data change. Go's \b is ASCII-only, so no pattern puts \b next to an umlaut.
 //
-//   - en: roll inflections as whole words ("rolling" only when it reads as a
-//     roll, not "rolling his eyes" / "rolling hills"), "dice", a determined "die"
-//     ("the die", never "did he die"), advantage only when someone HAS/rolls WITH
-//     it, and the named checks/saves (#438).
-//   - de: würf/wuerf (würfeln, Würfel — also inside compounds like
-//     "Würfelwerkzeug"), "Wurf" and the save/attack -wurf compounds (never
-//     Vorwurf/Entwurf), werfen only with no object other than dice ("Wirf noch
-//     einmal!", not "Wirf mir den Schlüssel"), and Probe as a check: a -probe
-//     compound that is not an everyday one (Kostprobe, Weinprobe …), or a bare
-//     "Probe" that is made/laid down or taken ON a skill.
+//   - en: roll inflections as whole words ("rolling" unless an everyday
+//     collocation follows, [enRollingNot]), "dice", a determined "die" ("the
+//     die", never "did he die"), advantage only when someone HAS/rolls WITH it,
+//     and the named checks/saves (#438).
+//   - de: see [deArms].
 var diceKeywords = map[string][]*regexp.Regexp{
 	"en": {
 		regexp.MustCompile(`(?i)\b(roll|rolls|rolled|dice|saving throws?|initiative|to hit|attack rolls?|ability checks?|skill checks?|(perception|insight|investigation|stealth|athletics|acrobatics|arcana|history|nature|religion|medicine|survival|deception|intimidation|persuasion|performance|sleight of hand|animal handling|strength|dexterity|constitution|intelligence|wisdom|charisma) (check|save)s?)\b`),
-		regexp.MustCompile(`(?i)\brolling\s*([.!?,;]|$|(for|a|an|the|my|your|some|dice|initiative|to|again|now)\b)`),
 		regexp.MustCompile(`(?i)\b(a|the|one|this|that|my|your|each|another)\s+die\b`),
 		regexp.MustCompile(`(?i)\b(with|at|have|has|had|get|gets|got|gain|gains|grant|grants|give|gives)\s+(dis)?advantage\b`),
 	},
 	"de": {
-		regexp.MustCompile(`(?i)(würf|wuerf|initiative|(rettungs|angriffs|schadens|initiativ|todes|treffer|fertigkeits)wurf)`),
-		regexp.MustCompile(`(?i)\bwurf\b`),
-		regexp.MustCompile(`(?i)\bprobe\s+(auf|für|fuer|gegen|ab)\b`),
-		regexp.MustCompile(`(?i)\b(mach|leg|würfl|wuerfl)\p{L}*\s+(\p{L}+\s+){0,2}probe\b`),
+		regexp.MustCompile(`(?i)initiative`),
 	},
 }
 
-// deWerfen is the German throw verb family as a whole word; it arms only when
-// no object other than the dice follows it ([werfenArms]).
-var deWerfen = regexp.MustCompile(`(?i)\b(wirf|werft|werfe|werfen)\b`)
+// enRolling finds "rolling" and the word after it; [enRollingNot] lists the
+// everyday collocations that are no roll ("rolling hills", "rolling his eyes").
+var enRolling = regexp.MustCompile(`(?i)\brolling\b\s*(\p{L}*)`)
 
-// deThrowObject is an object pronoun/determiner right after a werfen verb
-// ("Wirf MIR den Schlüssel", "wirf DAS Seil") — something other than a die is
-// being thrown, possibly after a filler particle ("Wirf MAL den Schlüssel"). "es"
-// is deliberately absent ("Wirf es nochmal" is a re-roll).
-var deThrowObject = regexp.MustCompile(`(?i)^\s*((mal|doch|bitte|jetzt|schnell|kurz|halt|eben|einfach)\s+){0,3}(mir|dir|ihm|ihr|ihn|uns|euch|den|die|das|dem|der|des|ein|eine|einen|einem|einer|mein\p{L}*|dein\p{L}*|sein\p{L}*|unser\p{L}*|eur\p{L}*)\b`)
+var enRollingNot = map[string]bool{
+	"hills": true, "hill": true, "his": true, "her": true, "their": true, "its": true,
+	"eyes": true, "thunder": true, "stone": true, "stones": true, "waves": true,
+	"fog": true, "mist": true, "green": true, "meadows": true, "plains": true,
+	"countryside": true, "landscape": true, "pin": true, "mill": true, "news": true,
+	"blackout": true, "basis": true, "back": true, "down": true, "over": true,
+	"around": true, "along": true, "away": true, "out": true, "up": true, "in": true,
+}
+
+// rollingArms reports whether some "rolling" in text is a roll.
+func rollingArms(text string) bool {
+	for _, m := range enRolling.FindAllStringSubmatch(text, -1) {
+		if !enRollingNot[strings.ToLower(m[1])] {
+			return true
+		}
+	}
+	return false
+}
+
+// deWurfCompound captures the prefix before a Wurf/würf stem ("Stärke" in
+// "Stärkewurf", "" in "Würfel"); [deWurfNot] are the everyday compounds.
+var deWurfCompound = regexp.MustCompile(`(?i)(\p{L}*?)(wurf|würf|wuerf)`)
+
+var deWurfNot = map[string]bool{
+	"vor": true, "ent": true, "ein": true, "aus": true, "ab": true, "über": true,
+	"ueber": true, "maul": true, "um": true, "zu": true, "an": true, "nach": true,
+	"rück": true, "rueck": true, "auf": true,
+}
 
 // deProbeCompound captures the prefix of a "-probe" compound
-// (Wahrnehmungsprobe → "wahrnehmungs").
+// (Wahrnehmungsprobe → "wahrnehmungs"); [everydayProbe] are the everyday ones.
 var deProbeCompound = regexp.MustCompile(`(?i)(\p{L}{3,})probe`)
 
-// everydayProbe are the "-probe" compounds that are no skill check.
 var everydayProbe = map[string]bool{
 	"kost": true, "wein": true, "general": true, "stich": true, "bier": true,
 	"hör": true, "hoer": true, "blut": true, "urin": true, "material": true,
@@ -83,36 +98,97 @@ var everydayProbe = map[string]bool{
 	"speichel": true, "gewebe": true, "luft": true, "erd": true, "haut": true,
 }
 
-// werfenArms reports whether a werfen verb in text reads as (re)rolling: at least
-// one occurrence not followed by a non-dice object.
+// deBareProbe finds a stand-alone "Probe" and the word after it; a sample OF
+// something ("eine Probe von deinem Wein") is no check ([deProbeOf]).
+var deBareProbe = regexp.MustCompile(`(?i)\bprobe\b\s*(\p{L}*)`)
+
+var deProbeOf = map[string]bool{"von": true, "vom": true, "aus": true, "des": true, "deines": true, "deiner": true, "eures": true}
+
+// deWerfen finds a werfen verb and the clause after it (to the next sentence
+// punctuation).
+var deWerfen = regexp.MustCompile(`(?i)\b(wirf|werft|werfe|werfen)\b([^.!?;]*)`)
+
+// deRollNoun is a capitalized word that is a roll object ("Wirf deinen
+// ANGRIFF", "einen ZWANZIGER", "einen WahrnehmungsCHECK").
+var deRollNoun = regexp.MustCompile(`(?i)^(angriff|schaden|initiative|zwanziger|zehner|zwölfer|zwoelfer|achter|sechser|vierer|hunderter|würfel|wuerfel|treffer|rettung)|(check|probe|wurf|würfe|wuerfe)$`)
+
+// werfenArms reports whether a werfen verb reads as (re)rolling. It arms unless
+// the clause after it names a non-roll THING: a capitalized noun that is not a
+// roll object ("Wirf mir den SCHLÜSSEL rüber"). "Wirf das nochmal", "Wirf einen
+// für mich", "Wirf mir bitte auf Wahrnehmung" (a roll ON a skill) all arm.
 func werfenArms(text string) bool {
-	for _, loc := range deWerfen.FindAllStringIndex(text, -1) {
-		if !deThrowObject.MatchString(text[loc[1]:]) {
+	for _, m := range deWerfen.FindAllStringSubmatch(text, -1) {
+		words := strings.Fields(m[2])
+		if len(words) > 6 {
+			words = words[:6]
+		}
+		thing := false
+		for i, w := range words {
+			w = strings.Trim(w, `,"'()`)
+			if strings.EqualFold(w, "auf") && i+1 < len(words) {
+				thing = false // "auf <Skill>": a roll on a skill
+				break
+			}
+			r := []rune(w)
+			if len(r) > 0 && unicode.IsUpper(r[0]) && !deRollNoun.MatchString(w) {
+				thing = true
+			}
+		}
+		if !thing {
 			return true
 		}
 	}
 	return false
 }
 
-// probeCompoundArms reports whether text contains a "-probe" compound that is a
-// skill check (Wahrnehmungsprobe), not an everyday one (Kostprobe).
-func probeCompoundArms(text string) bool {
+// deArms is the German gate beyond the pattern table: any Wurf/Würfel compound
+// except an everyday one (Vorwurf, Entwurf, Maulwurf …), any -probe compound
+// except an everyday one (Kostprobe), a bare "Probe" unless it is a sample OF
+// something, and werfen unless a non-roll thing is thrown ([werfenArms]).
+func deArms(text string) bool {
+	for _, m := range deWurfCompound.FindAllStringSubmatch(text, -1) {
+		if !deWurfNot[strings.ToLower(m[1])] {
+			return true
+		}
+	}
 	for _, m := range deProbeCompound.FindAllStringSubmatch(text, -1) {
 		if !everydayProbe[strings.ToLower(m[1])] {
 			return true
 		}
 	}
-	return false
+	for _, m := range deBareProbe.FindAllStringSubmatch(text, -1) {
+		if !deProbeOf[strings.ToLower(m[1])] {
+			return true
+		}
+	}
+	return werfenArms(text)
 }
+
+// speakerParticles are lowercase words a multi-word display name may contain.
+var speakerParticles = map[string]bool{"von": true, "van": true, "de": true, "der": true, "den": true, "zu": true, "du": true, "of": true, "the": true, "/": true, "-": true, "&": true}
 
 // stripSpeakerPrefix removes the "<Name>: " attribution Hot Context puts on every
 // human line, so the speaker's NAME never arms the gate (a Dieter, a Wurf) — only
-// what they said. A prefix is a short run before the first ": " with no sentence
-// punctuation in it; anything else is returned unchanged.
+// what they said. It must never eat content ("Okay Bart, roll for me: stealth"),
+// so a prefix is: a single token, or up to five name-shaped words (each
+// capitalized or a name particle), with no punctuation. Anything else is returned
+// unchanged — keeping a real name in the text only risks an extra arm.
 func stripSpeakerPrefix(text string) string {
 	i := strings.Index(text, ": ")
-	if i <= 0 || i > 64 || strings.ContainsAny(text[:i], ".!?:\n") {
+	if i <= 0 || i > 64 || strings.ContainsAny(text[:i], ".,!?:;\n") {
 		return text
+	}
+	words := strings.Fields(text[:i])
+	if len(words) == 0 || len(words) > 5 {
+		return text
+	}
+	if len(words) > 1 {
+		for _, w := range words {
+			r := []rune(w)
+			if !unicode.IsUpper(r[0]) && !speakerParticles[strings.ToLower(w)] {
+				return text
+			}
+		}
 	}
 	return text[i+2:]
 }
@@ -160,7 +236,10 @@ func needsDice(lang string, messages []llm.Message) bool {
 			return true
 		}
 	}
-	return gl == "de" && (werfenArms(text) || probeCompoundArms(text))
+	if gl == "de" {
+		return deArms(text)
+	}
+	return rollingArms(text)
 }
 
 // latestUserText returns the Text of the last user-role message, or "" if there

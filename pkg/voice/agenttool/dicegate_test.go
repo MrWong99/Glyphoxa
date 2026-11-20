@@ -128,6 +128,28 @@ func TestNeedsDice_Corpus(t *testing.T) {
 		{"en", "Throw the die for me", true},
 		{"en", "Make a stealth check", true},
 		{"en", "Can you roll?", true},
+		// Review of #674: these must arm.
+		{"de", "Mach einen Stärkewurf", true},
+		{"de", "Weisheitswurf", true},
+		{"de", "Wahrnehmungswurf", true},
+		{"de", "Geschicklichkeitswurf", true},
+		{"de", "Attributswurf", true},
+		{"de", "Probewurf", true},
+		{"de", "Wirf deinen Angriff", true},
+		{"de", "Wirf deinen Schaden", true},
+		{"de", "Wirf das nochmal", true},
+		{"de", "Wirf einen für mich", true},
+		{"de", "Wirf einen Zwanziger", true},
+		{"de", "Wirf mir bitte auf Wahrnehmung", true},
+		{"de", "Wirf einen Wahrnehmungscheck", true},
+		{"de", "Ich möchte eine Probe ablegen", true},
+		{"de", "Das erfordert eine Probe", true},
+		{"de", "Brauche ich dafür eine Probe?", true},
+		{"de", "Mach doch bitte mal eine Probe", true},
+		{"en", "I'm rolling stealth", true},
+		{"en", "Rolling perception", true},
+		{"en", "Are you rolling yet?", true},
+		{"en", "Okay Bart, roll for me: stealth", true},
 
 		// Must NOT arm.
 		{"de", "Wirf mir den Schlüssel rüber", false},
@@ -137,6 +159,9 @@ func TestNeedsDice_Corpus(t *testing.T) {
 		{"de", "Zeit für eine Kostprobe", false},
 		{"de", "Ich unterwerfe mich nicht", false},
 		{"de", "Zeig mir den Entwurf", false},
+		{"de", "Ein Maulwurf gräbt im Garten", false},
+		{"de", "Deine Vorwürfe sind unfair", false},
+		{"de", "Wirf ihn ins Feuer", false},
 		{"de", "Die Wache sieht müde aus", false},
 		{"en", "Did the old king die here?", false},
 		{"en", "I would rather diet than eat that", false},
@@ -151,6 +176,24 @@ func TestNeedsDice_Corpus(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("needsDice(%q, %q) = %v, want %v", tc.lang, text, got, tc.want)
 			}
+		}
+	}
+}
+
+// TestStripSpeakerPrefix: the "<Name>: " attribution is removed, but content
+// that merely contains ": " is never eaten.
+func TestStripSpeakerPrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"Dieter: roll":                    "roll",
+		"luk: roll":                       "roll",
+		"Player / DM: roll":               "roll",
+		"Sir Gregor von Hohenfels: roll":  "roll",
+		"Okay Bart, roll for me: stealth": "Okay Bart, roll for me: stealth",
+		"Okay roll for me: stealth":       "Okay roll for me: stealth",
+		"no prefix here":                  "no prefix here",
+	} {
+		if got := stripSpeakerPrefix(in); got != want {
+			t.Errorf("stripSpeakerPrefix(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
