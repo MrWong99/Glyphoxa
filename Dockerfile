@@ -62,9 +62,12 @@ COPY . .
 # the pure-Go net/user resolvers: statically linked glibc getaddrinfo would
 # dlopen NSS libraries that do not exist in a scratch image, silently breaking
 # DNS. -extldflags "-static" links libopus/libc statically (`-lm` last resolves
-# libopus.a's libm references); `-s -w` strip debug info, matching goreleaser.
+# libopus.a's libm references); `-s -w` strip debug info. VERSION is stamped
+# into main.version (`glyphoxa version`, the boot log); release-image.yml passes
+# the release tag, `make docker-build` passes `git describe`.
+ARG VERSION=dev
 RUN go build -tags "opus dave nolibopusfile netgo osusergo" \
-		-ldflags '-s -w -extldflags "-static -lm"' \
+		-ldflags "-s -w -X main.version=${VERSION} -extldflags '-static -lm'" \
 		-o /out/glyphoxa ./cmd/glyphoxa
 
 # Fail the build immediately if the binary is not fully static (a dynamically

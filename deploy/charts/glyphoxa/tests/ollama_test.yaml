@@ -44,6 +44,21 @@ tests:
           path: spec.ports[0].port
           value: 11434
 
+  - it: keeps the embedding model loaded (OLLAMA_KEEP_ALIVE=-1)
+    # Ollama unloads an idle model after 5 minutes by default; the reload then
+    # blows the recall budget and every recall after a quiet stretch times out.
+    set:
+      ollama:
+        enabled: true
+    template: templates/ollama-deployment.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OLLAMA_KEEP_ALIVE
+            value: "-1"
+
   - it: binds Ollama to all interfaces so the Service can reach it
     # The image's default is loopback; a Service in front of that never answers.
     set:

@@ -23,8 +23,10 @@ The **GM** runs the game from Discord (**Slash Commands**) and from an operator
 web console (Provider Configs, Campaigns, Agents, Knowledge Graph, live
 sessions). Written in Go for native concurrency and a streaming voice pipeline.
 
-> **⚠️ Early Alpha** — under active development; APIs may change between commits.
-> The system overview, including where the code diverges from the ADRs, lives in
+> **Public beta** — running as a hosted, multi-tenant service and self-hostable
+> from the same image. Pre-1.0: the RPC API and configuration may still change
+> between releases (`vX.Y.Z` tags; never run a release below v0.16.0). The system
+> overview, including where the code diverges from the ADRs, lives in
 > [docs/architecture.md](docs/architecture.md).
 
 ## Modes
@@ -35,13 +37,13 @@ One binary, `cmd/glyphoxa`, runs one **Mode** at a time via `-mode`
 
 | Mode | What it runs |
 |------|--------------|
-| `all` (default) | Both halves in one process: the web tier that also owns the standing Discord presence (Slash Commands) and drives the voice loop in-process. Auto-applies migrations at startup. |
-| `web` | A **Web Instance**: the operator console + Connect RPC API. Opens no Discord gateway, so it registers no Slash Commands. Assumes a current schema (no auto-migrate). |
-| `voice` | A **Voice Instance**: the Discord Bot + the voice pipeline for one Guild/channel (requires `-guild`/`-channel`). No web API, no Slash Commands. |
+| `all` (default) | Both halves in one process: the web tier plus the per-Tenant Discord presence (Slash Commands) and the voice loop, in-process. Auto-applies migrations at startup. The self-host shape. |
+| `web` | A **Web Instance**: the operator console + Connect RPC API. Opens no Discord gateway. Starts and stops Voice Sessions through the Postgres claim plane ([ADR-0057](docs/adr/0057-shared-voice-worker-pool-multi-tenant.md)) for a pool of `voice` workers to pick up. Assumes a current schema (no auto-migrate). |
+| `voice` | A **Voice Instance**. With a database and no `-guild`/`-channel` it is a **claim-plane worker**: it claims Voice Session intents, drives them, and — while it holds the elected presence-owner row — serves the Slash Commands (ADR-0057). With `-guild`/`-channel` (or `-hardcoded`) it is the legacy standalone node joining one static channel. No web API. |
 
-`all` is the only Mode with the whole product in it. See
-[docs/architecture.md §1](docs/architecture.md) for the process topology and the
-default-Mode rationale.
+`all` is the single-process deployment; `web` + N × `voice` is the split
+deployment the hosted service runs. See [docs/architecture.md §1](docs/architecture.md)
+for the process topology.
 
 ## 🚀 Quick Start (self-host)
 
@@ -74,15 +76,23 @@ docs/configuration.md §9).
 
 ### Prerequisites
 
-- **Go 1.27+** — the default build is pure Go (`CGO_ENABLED=0`); no C toolchain
+- **Go 1.27+**
+- **A C toolchain (gcc), `pkg-config` and the libopus headers** (`libopus-dev`
+  on Debian/Ubuntu, `opus-devel` on Fedora, `opus` on Arch,
+  `brew install opus pkg-config` on macOS). The voice-capable build links the
+  outbound Opus encoder against libopus via CGO
+  ([ADR-0034 amendment](docs/adr/0034-deployment-artifacts.md)); DAVE/MLS
+  (dave-go) and the Silero VAD (pure-Go forward pass) need nothing native.
 - **Node.js 20+ and npm** — the console bundle is embedded into the binary
 - **[buf](https://buf.build/docs/installation)** — generates the Connect/protobuf stubs
 - **Postgres with the [pgvector](https://github.com/pgvector/pgvector) extension**
-- For an **audible** `voice` loop: `pkg-config` + `libopus-dev` — the outbound
-  Opus encoder links libopus via CGO under `-tags opus` (paired with
-  `nolibopusfile`); DAVE/MLS (dave-go) and the Silero VAD (bespoke pure-Go
-  forward pass) stay in the binary — see
-  [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md)
+
+There are two builds. `make build-live` compiles the production tags
+(`opus dave nolibopusfile`, the same as the container image) and is the one
+that can join a voice channel. `make build` is the untagged pure-Go build: it
+serves the console, migrations and CLI, but links stub Opus/DAVE code, so every
+Voice Session fails — it logs a WARN at boot in `voice`/`all` Mode, and
+`glyphoxa version` shows which build you have.
 
 ### Build & run
 
@@ -95,7 +105,7 @@ source .env                       # the template is shell-sourced (export NAME='
 
 make proto                        # buf generate → gen/
 (cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist
-make build                        # → bin/glyphoxa
+make build-live                   # → bin/glyphoxa (voice-capable; `make build` cannot do voice)
 
 ./bin/glyphoxa migrate up         # apply the schema (seed + explicit -mode web assume it is current)
 ./bin/glyphoxa seed               # seed the demo Tenant/Campaign/NPC (idempotent)
@@ -132,10 +142,11 @@ into the live loop.
 
 ## ✨ What ships today
 
-- 🖥️ **Operator web console** — four screens (`login`, `configuration`,
-  `campaign`, `session`): Provider Configs + Discord settings + spend caps,
-  Campaigns/Agents/Tool Grants/Knowledge Graph, and Start/Stop of a live Voice
-  Session with the live Transcript feed and NPC roster + mute.
+- 🖥️ **Web console** — a public landing page, Discord login and Tenant
+  onboarding, then three Tenant screens: **Configuration** (Provider Configs,
+  Discord settings, spend caps), **Campaign** (cast/Agents, Tool Grants, the
+  Knowledge Graph wiki and graph view, Maps) and **Session** (Start/Stop, the
+  live Transcript feed, NPC roster + mute, Highlights).
 - 🎙️ **Live Character NPCs** — a Voice Session voices a Campaign's Character NPCs
   through a streaming VAD → STT → Address Detection → LLM → TTS pipeline.
 - 💬 **Slash Commands** (registered in `all` Mode) — `/roll <dice>` for anyone in
@@ -157,30 +168,32 @@ into the live loop.
 
 ```
 Glyphoxa/
-├── cmd/glyphoxa/          # Entry point: Modes (voice|web|all) + migrate/seed subcommands
+├── cmd/glyphoxa/          # Entry point: Modes (voice|web|all) + migrate/seed/export/billing/user/version subcommands
 ├── internal/
-│   ├── auth/              # Discord OAuth, operator allowlist, session cookies
-│   ├── presence/          # Standing Discord gateway + Slash Command surface
-│   ├── rpc/               # Connect service handlers (Campaign/Auth/Provider/Session/Voice)
-│   ├── session/           # In-process Voice Session Manager (Start/Stop)
+│   ├── auth/              # Discord OAuth, admission (allowlist/open), session cookies
+│   ├── presence/          # Per-Tenant Discord clients + Slash Command surface
+│   ├── rpc/               # Connect service handlers
+│   ├── session/           # Voice Session Manager, claim-plane worker + intent control
 │   ├── transcript/        # Transcript Line relay (SSE) + Chunk writer
-│   ├── recall/            # NPC memory recall over Transcript Chunks
-│   ├── kgfacts/           # Knowledge Graph facts into Hot Context
+│   ├── recall/ · recap/   # NPC memory recall over Transcript Chunks; session recaps
+│   ├── kgfacts/ · knowledge/ # Knowledge Graph facts into Hot Context; KG authoring
+│   ├── highlight/ · tape/ # Session Highlights and the audio tape they clip from
+│   ├── worldmap/ · mapgen/ # Maps + Pins, generated maps
+│   ├── bundle/            # Campaign Bundle import/export
+│   ├── billing/ · spend/  # Plans + Usage Ledger; spend meter, price map, caps
 │   ├── embedworker/       # Async embedding backfill
-│   ├── spend/             # Spend meter + price map + caps
 │   ├── storage/           # Postgres store, migrations, BYOK crypto
-│   ├── observe/           # slog + Prometheus, /healthz, /readyz
-│   ├── spa/               # Embedded SPA (go:embed internal/spa/dist)
-│   ├── web/               # HTTP server + mounts
+│   ├── observe/           # slog + Prometheus, /healthz, /readyz, flight recorder
+│   ├── spa/ · web/        # Embedded SPA (go:embed internal/spa/dist); HTTP server + mounts
 │   ├── wirenpc/           # Voice-loop composition root against a live Discord session
-│   ├── discordinvite/     # Invite → Guild → voice channel resolution
-│   ├── discordtag/        # Bot tag lookup
-│   └── ci/                # CI helper checks
+│   ├── discord*/          # Discord helpers (invite, guild, tag, messages, sharing)
+│   └── ci/                # Repository invariant tests (workflows, image pins)
 ├── pkg/
-│   ├── tool/              # Tool interface + registry + built-in dice Tool
-│   └── voice/             # Voice pipeline: stt, tts, llm, embeddings, vad, wire, address, agent, orchestrator
+│   ├── tool/              # Tool interface + registry + built-in Tools (dice, recall, KG, …)
+│   ├── kgvocab/           # Knowledge Graph vocabulary
+│   └── voice/             # Voice pipeline: transport, stt, tts, llm, embeddings, vad, wire, address, agent, orchestrator
 ├── proto/                 # Connect/protobuf service definitions (buf)
-├── web/                   # Vite + React 18 SPA (operator console)
+├── web/                   # Vite + React 19 SPA (web console)
 ├── deploy/charts/glyphoxa # Kubernetes Helm chart
 ├── docs/                  # Architecture, configuration, ADRs, agent runbooks
 ├── scripts/ · tests/      # Tooling and integration/e2e tests
@@ -199,8 +212,7 @@ Start at the [documentation index](docs/README.md).
 | [Configuration & self-host setup](docs/configuration.md) | Every environment variable, the `.env` template, Postgres/pgvector, Discord OAuth, the operator allowlist, and the build order. |
 | [GM quickstart](docs/quickstart-gm.md) | From a fresh clone to a talking Character NPC in a Discord voice channel. |
 | [Live NPC run (developer)](docs/agents/live-npc-run.md) | The `voice`-mode live loop, `-hardcoded` NPC, and the `opus`/`dave` build tags. |
-| [ADRs](docs/adr/) | The Architecture Decision Records behind every subsystem. |
-| [Decisions ledger](DESIGN.md) | The full ADR ledger and open questions. |
+| [ADRs](docs/adr/) | The Architecture Decision Records behind every subsystem ([index](docs/README.md#architecture-decision-records)). |
 | [Domain glossary](CONTEXT.md) | The canonical vocabulary used across the codebase and docs. |
 
 ## 🤝 Contributing

@@ -16,9 +16,22 @@ Boot flow: mount → `GET /api/v1/auth/me` → 401 routes to `/login`; no tenant
 
 **Why TanStack on both sides:** same vendor as TanStack Query, same release cadence, integrated examples; one ecosystem to learn. Typed search params are a real ergonomic win for an admin tool heavy on filter URLs (audit log, transcripts, KG, sessions list).
 
+## Amendment (2026-11-20): what is and is not implemented
+
+Audited against the tree (`web/src/app/router.tsx`, `AuthGate.tsx`, `web/src/lib/queryClient.ts`, `transport.ts`):
+
+**Implemented as decided.** `@tanstack/react-router` with a code-based route tree; TanStack Query + `@connectrpc/connect-query` hooks; one root `QueryClient` with `staleTime: 30s` and `refetchOnWindowFocus: true`; the Tenant in the path (`/t/$tenantSlug/...`); typed search params (`validateSearch`) for deep links; a CSRF interceptor on the Connect transport; SSE frames amending the cached snapshot through `queryClient.setQueryData` (`web/src/screens/session/useSessionEvents.ts`); an `/onboarding/create-tenant` route.
+
+**Not implemented.**
+- **Lazy-loaded route components / code splitting** — every screen is imported eagerly; there is one bundle.
+- **Per-route `errorComponent`** for typed Connect errors — errors are handled inside the screens.
+- **The `X-Tenant-Id` header interceptor** — the server resolves the Tenant from the session's operator binding (`auth.TenantResolver`, `internal/auth/policy.go`); the slug in the URL is not sent as a header.
+
+**Changed.** The boot flow calls the Connect procedure `AuthService.GetCurrentUser` (not `GET /api/v1/auth/me`), and an unauthenticated result redirects to `/login` from `AuthGate`; `/t/$tenantSlug/` redirects to the Configuration screen rather than to a remembered last screen.
+
 ## Amendment: how the route-level promises are met (2026-11-20, audit sweep)
 
-The first paragraph promised lazy-loaded route components and a per-route `errorComponent`; until this date neither existed (one 1 MB chunk, and the router's unstyled English defaults on a thrown render or an unmatched URL). They are now met as follows, and two cross-cutting behaviours are added at the same layer:
+This closes the first two "Not implemented" items of the audit amendment above (lazy-loaded routes; `errorComponent`) — that amendment describes the tree just before this change, when there was one 1 MB chunk and the router's unstyled English defaults on a thrown render or an unmatched URL. They are now met as follows, and two cross-cutting behaviours are added at the same layer:
 
 - **Code splitting is per SCREEN, not per route file.** `Configuration`, `Campaign`, `Session` and the three legal pages are `React.lazy` chunks inside their own `Suspense` boundary (so a chunk in flight leaves the shell painted); the shell warms the screen chunks shortly after it mounts. The landing/login pages and the shell stay in the entry bundle. The non-English display catalog is likewise its own chunk, fetched before the first render when it is the active language.
 - **Error and not-found handling is router-level, not per-route**: `defaultErrorComponent`, `defaultNotFoundComponent` and `defaultPendingComponent` (`web/src/app/RouteFallbacks.tsx`), localized. A route may still override; none needs to today.

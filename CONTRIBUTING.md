@@ -7,7 +7,7 @@ you need to get started.
 
 ### Prerequisites
 
-- **Go 1.27+** — the default build is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries. Two exceptions: the **test** targets (`make test`, `make check`) need a host C toolchain (`gcc`) because the race detector requires cgo (`-race` — they still link no native libraries), and **audible** builds (`-tags opus`) additionally need `gcc`, `pkg-config`, and `libopus-dev` — the outbound Opus encoder links libopus via CGO (ADR-0034 amendment 2026-07-19); DAVE and the Silero VAD stay pure Go
+- **Go 1.27+**, plus **`gcc`, `pkg-config` and the libopus headers** (`libopus-dev` / `opus-devel` / `brew install opus pkg-config`). The voice-capable build (`make build-live`, tags `opus dave nolibopusfile`) links the outbound Opus encoder against libopus via CGO (ADR-0034 amendment 2026-07-19), and the test targets need `gcc` because `-race` requires cgo. DAVE and the Silero VAD are pure Go. The untagged `make build` (`CGO_ENABLED=0`) needs no C toolchain but links stub Opus/DAVE code and cannot do voice
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go binary embeds (see the SPA step below)
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs under `gen/` are generated, not committed
 
@@ -26,11 +26,13 @@ cd Glyphoxa
 make proto
 
 # 2. Build the SPA bundle → internal/spa/dist (go:embed). Must run before
-#    `make build` embeds the console; skipping it embeds a blank placeholder.
+#    the Go build embeds the console; skipping it embeds a blank placeholder.
+#    It overwrites the tracked placeholder index.html: run
+#    `git checkout -- internal/spa/dist/` before committing.
 make spa
 
-# 3. Build the binary → bin/glyphoxa
-make build
+# 3. Build the voice-capable binary → bin/glyphoxa (`make build` = stub voice)
+make build-live
 
 # Run all tests with race detector
 make test
@@ -42,17 +44,18 @@ make lint
 make check
 ```
 
-Order matters: `make proto` → `make spa` → `make build`, exactly as
+Order matters: `make proto` → `make spa` → `make build-live`, exactly as
 [docs/configuration.md](docs/configuration.md) §3 mandates.
 
 #### Audible local runs (voice mode)
 
 The audio codec and DAVE/MLS encryption (dave-go) are selected by build tags.
 A default build links stubs — the pipeline wires up but the audio loop exits
-with `wire: audio codec unavailable` on the first frame. For an **audible**
-(and encrypted) live run, install `pkg-config` + `libopus-dev` (the outbound
-Opus encoder is hraban/opus, CGO — ADR-0034 amendment 2026-07-19) and build
-with the audio tags:
+with `wire: audio codec unavailable` on the first frame (the boot log warns
+`stub voice build`, and `glyphoxa version` shows `opus codec: false`). For an
+**audible** (and encrypted) live run, install `pkg-config` + `libopus-dev` (the
+outbound Opus encoder is hraban/opus, CGO — ADR-0034 amendment 2026-07-19) and
+build with the audio tags — `make build-live` runs exactly this:
 
 ```bash
 CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
