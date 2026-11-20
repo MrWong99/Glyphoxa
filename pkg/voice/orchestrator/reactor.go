@@ -997,10 +997,10 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 
 		// Default (no floor): dispatch synchronously on the bus goroutine — the
 		// behaviour every non-barge-in caller relies on. Announce the turn's terminal —
-		// its own error (a real TTS/provider failure, #20) or completed for a clean
-		// turn — so the metrics subscriber records the precise reason, not the coarse
-		// no-first-audio TTL reap, mirroring the floor branch below. The sync path has
-		// no barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
+		// its own error (a real TTS/provider failure, #20), completed for a clean
+		// turn, or cancelled when the conversation ctx was torn down under it —
+		// mirroring the floor branch below. The sync path has no barge/supersede, so
+		// nothing else can own the terminal. NOTE: the
 		// mute gate (#211, #225) below lives in the floor branch only. Since #225 the
 		// matcher keeps a muted addressee routable by name (silencing is the reactor
 		// gate's job, not the matcher's), so a route CAN name a muted Agent. Prod
@@ -1009,10 +1009,11 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// reached only by configs wiring neither, and relies on that pairing rather
 		// than on the matcher de-routing muted Agents.
 		if r.floor == nil {
-			reason := r.dispatchAll(ctx, e)
-			if ctx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(reason)})
+			reason := terminalReason(r.dispatchAll(ctx, e))
+			if ctx.Err() != nil {
+				reason = voiceevent.TurnEndCancelled
 			}
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			return
 		}
 		// Muted addressee (#211, AC3): discard the route BEFORE taking the floor, so
@@ -1062,26 +1063,39 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// the mute reason before any goroutine, TTS or transcript — airtight because
 		// the Manager writes the set before publishing MuteChanged.
 		if r.mutes != nil && r.mutes.Muted(e.Target.AgentID) {
-			release()
-			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
+			// The mute reactor may already have cut this turn (its MuteChanged landed
+			// after the pre-Take check and found us holding the floor) and published
+			// the mute terminal; publish ours only if we still held it.
+			if release() {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
+			}
 			return
 		}
 		go func() {
 			reason := r.dispatchAll(turnCtx, e)
-			// Every turn that took the floor ends with exactly ONE TurnEnded (W1):
-			// its own error reason, or [voiceevent.TurnEndCompleted] for a clean
-			// turn. A turn cut by a barge/mute/supersede is NOT reported here — its
-			// cutter publishes the terminal. "Not cut" is decided atomically with the
-			// release (held): a cut racing the end of dispatchAll either lands before
-			// it (held=false, the cutter reports) or after it (the floor is already
-			// free, so the cutter yields nothing and reports nothing). live excludes a
-			// conversation-shutdown cancel, which publishes no terminal at all.
-			live := turnCtx.Err() == nil
-			if held := release(); held && live {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(reason)})
-			}
+			publishOwnTerminal(bus, e.TurnID, turnCtx, release, reason)
 		}()
 	}
+}
+
+// publishOwnTerminal ends a floor-holding turn with exactly ONE TurnEnded (W1)
+// unless a cutter already did. "Not cut" is decided atomically with the release
+// (held): a barge/mute/supersede racing the turn's end either lands before it
+// (held=false — the cutter publishes) or after it (the floor is already free, so
+// the cutter yields nothing and publishes nothing). A turn that still held the
+// floor reports its own failure reason or completed — or, when its ctx was
+// cancelled from above (the conversation torn down by a reconnect or stop),
+// cancelled, so no "<NPC> is speaking…" outlives it.
+func publishOwnTerminal(bus *voiceevent.Bus, turnID string, turnCtx context.Context, release func() bool, failed voiceevent.TurnEndReason) {
+	live := turnCtx.Err() == nil
+	if !release() {
+		return
+	}
+	reason := voiceevent.TurnEndCancelled
+	if live {
+		reason = terminalReason(failed)
+	}
+	bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: turnID, Reason: reason})
 }
 
 // terminalReason maps dispatchAll's failure reason to the turn's terminal

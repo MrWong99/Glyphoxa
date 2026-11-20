@@ -458,11 +458,12 @@ func TestPersist_UndeliveredSentenceTextDropped(t *testing.T) {
 		events []voiceevent.Event
 	}{
 		{
-			// The opener start-errored (TTSInvoked, never FirstAudio) and the turn
-			// recovered with a second sentence.
+			// The opener start-errored (TTSInvoked, then the stage's TTSStreamFailed,
+			// never FirstAudio) and the turn recovered with a second sentence.
 			name: "start-errored opener then recover",
 			events: []voiceevent.Event{
 				voiceevent.TTSInvoked{At: at(2), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TTSStreamFailed{At: at(2), TurnID: "t1"},
 				voiceevent.TTSInvoked{At: at(3), Sentence: "Heard.", TurnID: "t1"},
 				voiceevent.FirstAudio{At: at(4), TurnID: "t1"},
 				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndTTSError},
@@ -480,14 +481,25 @@ func TestPersist_UndeliveredSentenceTextDropped(t *testing.T) {
 			},
 		},
 		{
-			// The tail sentence start-errored; the turn ends tts_error with nothing
-			// superseding it.
+			// The tail sentence start-errored; the turn ends tts_error.
 			name: "start-errored tail on tts_error",
 			events: []voiceevent.Event{
 				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
 				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
 				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"},
 				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndTTSError},
+			},
+		},
+		{
+			// The tail produced no audio and no error signal before the turn's own
+			// terminal: stripped at the end.
+			name: "silent tail on completed",
+			events: []voiceevent.Event{
+				voiceevent.TTSInvoked{At: at(2), Sentence: "Heard.", TurnID: "t1"},
+				voiceevent.FirstAudio{At: at(3), TurnID: "t1"},
+				voiceevent.TTSInvoked{At: at(4), Sentence: "Never heard.", TurnID: "t1"},
+				voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndCompleted},
 			},
 		},
 		{
@@ -536,6 +548,38 @@ func TestPersist_UndeliveredSentenceTextDropped(t *testing.T) {
 				t.Errorf("persisted a:t1 = %q (present=%v), want \"Heard.\" — text the room never heard was kept", got, ok)
 			}
 		})
+	}
+}
+
+// TestPersist_LateFirstAudioKeepsText is the review's ordering hole: on
+// pipelined sentences 2..N FirstAudio is published by the wire's sender
+// goroutine, so it can land AFTER the next sentence's TTSInvoked and even after
+// TurnEnded{completed}. A healthy reply must keep ALL its text, live and
+// persisted.
+func TestPersist_LateFirstAudioKeepsText(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
+
+	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "t1", Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "One.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Three.", TurnID: "t1"}) // before Two's FirstAudio
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"})                     // Two's, late
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndCompleted})
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"}) // Three's, after the end
+
+	const want = "One. Two. Three."
+	if v := r.View(fs.id.String()); len(v.Lines) != 1 || v.Lines[0].Text != want {
+		t.Errorf("live view = %+v, want %q", v.Lines, want)
+	}
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got, _ := persistedText(t, store, fs.id, "a:t1"); got != want {
+		t.Errorf("persisted a:t1 = %q, want %q", got, want)
 	}
 }
 

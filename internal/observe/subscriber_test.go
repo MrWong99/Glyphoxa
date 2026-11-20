@@ -385,9 +385,11 @@ func TestStageSubscriberTextDeliveredOutcome(t *testing.T) {
 }
 
 // TestStageSubscriberCompletedOutcome pins W1: a clean turn now ends with a
-// TurnEnded{completed}. After first audio it is NOT a second outcome (the turn
-// already counted first_audio); a clean turn that said nothing is the success
-// outcome `completed`, never abandoned — and the TTL reap re-counts neither.
+// TurnEnded{completed}, which records no outcome of its own. After first audio
+// the turn already counted first_audio; a voiced turn that produced NO audio
+// (empty completion, zero TTS chunks) stays the abandoned/no_first_audio failure
+// at the TTL reap; a FirstAudio landing just after the completion (pipelined
+// sentences publish it off the sender goroutine) still counts the success.
 func TestStageSubscriberCompletedOutcome(t *testing.T) {
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
@@ -403,22 +405,29 @@ func TestStageSubscriberCompletedOutcome(t *testing.T) {
 	bus.Publish(voiceevent.FirstAudio{At: clock, TurnID: "spoke"})
 	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "spoke", Reason: voiceevent.TurnEndCompleted})
 
-	// A clean turn whose reply was empty: no audio, still not a failure.
+	// A clean turn of a voiced agent that produced no audio at all.
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "quiet", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "quiet", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "quiet", Reason: voiceevent.TurnEndCompleted})
 
-	// A completed /say (never opened by an STTFinal) is not a voice turn here.
+	// FirstAudio arriving just after the completion still counts.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "late", Reason: voiceevent.TurnEndCompleted})
+	bus.Publish(voiceevent.FirstAudio{At: clock, TurnID: "late"})
+
+	// A completed /say (never opened by an STTFinal) records nothing.
 	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "say-1", Reason: voiceevent.TurnEndCompleted})
 
-	want := []turnOutcomeRec{{TurnFirstAudio, ReasonNone}, {TurnCompleted, ReasonNone}}
+	want := []turnOutcomeRec{{TurnFirstAudio, ReasonNone}, {TurnFirstAudio, ReasonNone}}
 	if got := rec.outcomes(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("turn outcomes = %+v, want %+v", got, want)
 	}
 	clock = base.Add(2 * defaultTurnTTL)
 	sub.Sweep()
-	if got := rec.outcomes(); len(got) != 2 {
-		t.Fatalf("reap re-counted a completed turn: %+v", got)
+	want = append(want, turnOutcomeRec{TurnAbandoned, ReasonNoFirstAudio})
+	if got := rec.outcomes(); len(got) != 3 || got[2] != want[2] {
+		t.Fatalf("after reap outcomes = %+v, want the silent turn abandoned/no_first_audio: %+v", got, want)
 	}
 }
 
@@ -438,6 +447,7 @@ func TestStageSubscriberTurnEndedReasons(t *testing.T) {
 		{"provider_error", voiceevent.TurnEndProviderError, TurnAbandoned, ReasonProviderError},
 		{"mute", voiceevent.TurnEndMute, TurnAbandoned, ReasonMute},
 		{"spend_cap", voiceevent.TurnEndSpendCap, TurnAbandoned, ReasonSpendCap},
+		{"cancelled", voiceevent.TurnEndCancelled, TurnAbandoned, ReasonCancelled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

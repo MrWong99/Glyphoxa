@@ -143,6 +143,10 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		if outcome.IsFault() {
 			s.rec.ProviderError(observe.StageTTS, s.provider)
 		}
+		// Announce the never-started sentence as failed (under a live ctx — a cut
+		// is the cutter's), so the transcript consumers drop its optimistic text
+		// explicitly instead of guessing from a missing FirstAudio (#641 review).
+		s.publishFailed(ctx)
 		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
 	}
 	// Usage metering (#127, ADR-0045): Synthesize accepted the request, so bill the
@@ -170,7 +174,7 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	if streamErr != nil && ctx.Err() == nil {
 		s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeError)
 		s.rec.ProviderError(observe.StageTTS, s.provider)
-		s.bus.Publish(voiceevent.TTSStreamFailed{At: time.Now(), TurnID: voiceevent.TurnIDFrom(ctx)})
+		s.publishFailed(ctx)
 		return fmt.Errorf("orchestrator.TTS.Dispatch: synthesis stream failed mid-delivery: %w", streamErr)
 	}
 	// The channel closed: record the DELIVER span and count the call OK. tts_total is
@@ -186,6 +190,25 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	s.rec.TTSTotal(s.provider, time.Since(start))
 	s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeOK)
 	return nil
+}
+
+// publishFailed announces the sentence Dispatch is failing as
+// [voiceevent.TTSStreamFailed] — unless ctx is cut (the cutter owns the
+// terminal) or the sentence is a held look-ahead one: that one may fail BEFORE
+// its own TTSInvoked is announced at release, so its coordinator publishes the
+// failure once it is known to follow the announcement ([TTS.PublishFailed]).
+func (s *TTS) publishFailed(ctx context.Context) {
+	if ctx.Err() != nil || voiceevent.IsPlaybackLookahead(ctx) {
+		return
+	}
+	s.PublishFailed(voiceevent.TurnIDFrom(ctx))
+}
+
+// PublishFailed announces that the turn's most recently announced sentence
+// failed (start-error or mid-stream) — the [voiceevent.TTSStreamFailed] the
+// pipelined turn publishes for a held sentence after its release.
+func (s *TTS) PublishFailed(turnID string) {
+	s.bus.Publish(voiceevent.TTSStreamFailed{At: time.Now(), TurnID: turnID})
 }
 
 // PublishInvoked announces a look-ahead sentence's [voiceevent.TTSInvoked] at the

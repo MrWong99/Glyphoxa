@@ -279,6 +279,13 @@ type pipelinedTurn struct {
 	turnID string
 	lane   LookaheadPump
 	invoke func(turnID, sentence string)
+	// failed announces a HELD sentence's failure (start-error or mid-stream) as
+	// TTSStreamFailed. The TTS stage cannot: a held sentence can fail before its
+	// TTSInvoked is announced at release, and the transcript consumers pair a
+	// failure with the most recently announced sentence. Published once the
+	// sentence's NotDelivered outcome is read — after its release, before the
+	// next sentence's. Nil is a no-op.
+	failed func(turnID string)
 
 	// seq numbers the per-sentence lane keys within the turn. The lane is keyed per
 	// SENTENCE (#626): a turn-keyed lane would let sentence k+1 consume k's release
@@ -304,7 +311,9 @@ type pipelinedSentence struct {
 // requires a non-nil [Replier.lookahead] — without a pump there is no lane to hold
 // a pre-synthesized sentence in, and the legacy [turnRun] path applies.
 func (r *Replier) newPipelinedTurn(ctx context.Context, turnID string) *pipelinedTurn {
-	return newPipelined(r.newTurn(ctx), turnID, r.lookahead, r.tts.PublishInvoked)
+	p := newPipelined(r.newTurn(ctx), turnID, r.lookahead, r.tts.PublishInvoked)
+	p.failed = r.tts.PublishFailed
+	return p
 }
 
 // newPipelined is the testable core: the turn state machine, the lane, and the
@@ -353,6 +362,7 @@ func (p *pipelinedTurn) dispatch(rep Reply) error {
 		// bypass the lane and leapfrog the sentence being played.
 		if prev.key != "" {
 			p.lane.DiscardLookahead(prev.key)
+			p.announceFailed()
 		}
 		p.release(rep.Sentence, key)
 		return ErrNotDelivered
@@ -398,8 +408,21 @@ func (p *pipelinedTurn) flush() error {
 	<-p.pending.done
 	if p.pending.key != "" {
 		p.lane.DiscardLookahead(p.pending.key)
+		if OutcomeOf(p.pending.err) == SentenceNotDelivered {
+			p.announceFailed()
+		}
 	}
 	return p.pending.err
+}
+
+// announceFailed publishes the failure of the held sentence that was just
+// resolved as NotDelivered — it was released (announced) by its own dispatch
+// call, so the failure follows its TTSInvoked. A cut turn announces nothing:
+// its held sentence may never have been released, and the cutter owns the end.
+func (p *pipelinedTurn) announceFailed() {
+	if p.failed != nil && p.t.ctx.Err() == nil {
+		p.failed(p.turnID)
+	}
 }
 
 // finish maps the producer's return to the turn's terminal reason, exactly as the

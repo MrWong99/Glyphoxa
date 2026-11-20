@@ -141,11 +141,6 @@ const (
 	// (it DID deliver its whole answer), so voiceless/long Butler replies do not
 	// pollute the abandoned rate.
 	TurnTextDelivered TurnOutcome = "text_delivered"
-	// TurnCompleted: the turn ran to its natural end (TurnEnded{completed}) without
-	// ever reaching first audio — the reply said nothing. A SUCCESS, distinct from
-	// abandoned (nothing failed or cut it). A completed turn that DID produce audio
-	// already counted first_audio and is not counted again.
-	TurnCompleted TurnOutcome = "completed"
 )
 
 // TurnReason is the bounded sub-reason label on the turn-lifecycle counter,
@@ -187,6 +182,10 @@ const (
 	// replier refused this NEW turn before it opened (#130) — a deliberate policy
 	// stop, distinct from a fault or a barge.
 	ReasonSpendCap TurnReason = "spend_cap"
+	// ReasonCancelled: the turn held the floor when its conversation was torn
+	// down under it (a reconnect after a media stall or gateway loss, a session
+	// stop) — a cut from above, neither a human interruption nor a provider fault.
+	ReasonCancelled TurnReason = "cancelled"
 )
 
 // MalformedPath is the bounded label naming WHICH detection site caught a

@@ -302,27 +302,33 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 }
 
 // onTurnEnded records the terminal outcome of a turn that ended for a KNOWN
-// reason (completed / text delivered / barge / supersede-coalesced / tts or
-// provider error …), published by the seam that knows the cause. It records the
+// reason (text delivered / barge / supersede-coalesced / teardown / tts or
+// provider error …), published by the seam that knows the cause; a natural
+// completion records nothing (see the first check). It records the
 // outcome+reason once (outcomeDone
 // blocks the TTL reap — and a later end signal — from re-counting it) so the
 // counter attributes WHY a turn died instead of the coarse no-first-audio
 // catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
 // a normal interruption: outcomeDone is already set, so it is ignored.
 //
-// A BARGE or SUPERSEDE cut for a turn this subscriber never OPENED (no prior
-// STTFinal / AddressRouted / TTSInvoked spine) is ignored — that is the #310
-// Highlight voice-replay case: a barge (or a new turn's floor Take, #443)
-// cutting a replay publishes TurnEnded{replayTurnID, barge|superseded}, but a
-// replay runs no STT/LLM/TTS, so the id was never opened; recording it would
-// fabricate a phantom abandoned turn for audio that actually played (the #391
-// class). The guard is NARROW to those two cut reasons on purpose: every OTHER
+// A BARGE, SUPERSEDE or TEARDOWN cut for a turn this subscriber never OPENED (no
+// prior STTFinal / AddressRouted / TTSInvoked spine) is ignored — that is the
+// #310 Highlight voice-replay case: a barge (or a new turn's floor Take, #443,
+// or a reconnect teardown) cutting a replay publishes
+// TurnEnded{replayTurnID, barge|superseded|cancelled}, but a replay runs no
+// STT/LLM/TTS, so the id was never opened; recording it would fabricate a
+// phantom abandoned turn for audio that actually played (the #391 class). The
+// guard is NARROW to those cut reasons on purpose: every OTHER
 // spine-less terminal is a legit sole signal that must still be counted by
 // fabricating the turn — a text-modality Cross-talk Reaction sub-turn's
 // TurnEnded{text_delivered} (#389) and the /say pre-dispatch refusals
 // (directspeech.go) never open a turn yet their outcome is real.
 func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
-	if e.TurnID == "" {
+	// A natural completion carries no outcome of its own: success is keyed on
+	// first audio (recorded whenever it lands — on pipelined sentences it can
+	// arrive just AFTER the completion), and a voiced turn that never produced
+	// audio stays the abandoned/no_first_audio TTL reap it always was.
+	if e.TurnID == "" || e.Reason == voiceevent.TurnEndCompleted {
 		return
 	}
 	var logAttrs []any
@@ -332,15 +338,11 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	t := s.turns[e.TurnID]
 	if t == nil {
 		switch e.Reason {
-		case voiceevent.TurnEndBarge, voiceevent.TurnEndSuperseded:
-			// An unopened barge or supersede cut = a #310 replay cut (a replay runs
-			// no STT/LLM/TTS, so its id has no spine); recording it would fabricate
-			// a phantom abandoned turn for audio that actually played (#391/#443).
-			return
-		case voiceevent.TurnEndCompleted:
-			// An unopened natural completion is a successful GM /say (no STTFinal
-			// spine): its FirstAudio is likewise not counted here, so neither is its
-			// success terminal.
+		case voiceevent.TurnEndBarge, voiceevent.TurnEndSuperseded, voiceevent.TurnEndCancelled:
+			// An unopened cut (barge, supersede, teardown) = a #310 replay cut (a
+			// replay runs no STT/LLM/TTS, so its id has no spine); recording it would
+			// fabricate a phantom abandoned turn for audio that actually played
+			// (#391/#443).
 			return
 		}
 		t = &turnState{}
@@ -370,8 +372,8 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 		return TurnYielded, ReasonSupersessionGrace, "yielded"
 	case voiceevent.TurnEndTextDelivered:
 		return TurnTextDelivered, ReasonNone, "text_delivered"
-	case voiceevent.TurnEndCompleted:
-		return TurnCompleted, ReasonNone, "completed"
+	case voiceevent.TurnEndCancelled:
+		return TurnAbandoned, ReasonCancelled, "abandoned"
 	case voiceevent.TurnEndBarge:
 		return TurnAbandoned, ReasonBarge, "abandoned"
 	case voiceevent.TurnEndSuperseded:

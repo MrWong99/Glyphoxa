@@ -114,9 +114,11 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 		// No floor wired (voice standalone / bench): dispatch synchronously on the bus
 		// goroutine, mirroring the Replier's no-floor branch.
 		if d.floor == nil {
-			if failed := d.dispatch(turnCtx, voice, e.Text); turnCtx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(failed)})
+			reason := terminalReason(d.dispatch(turnCtx, voice, e.Text))
+			if turnCtx.Err() != nil {
+				reason = voiceevent.TurnEndCancelled
 			}
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			return
 		}
 
@@ -137,14 +139,10 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 			return
 		}
 		go func() {
-			failed := d.dispatch(floorCtx, voice, e.Text)
 			// Exactly one terminal per turn (W1), decided atomically with the release
 			// exactly like the Replier's floor branch: a barge/supersede cutting the
 			// /say publishes its own TurnEnded, so it is not double-counted here.
-			live := floorCtx.Err() == nil
-			if held := release(); held && live {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(failed)})
-			}
+			publishOwnTerminal(bus, e.TurnID, floorCtx, release, d.dispatch(floorCtx, voice, e.Text))
 		}()
 	})
 }
