@@ -34,7 +34,34 @@ import (
 type Mount struct {
 	Path    string
 	Handler http.Handler
+
+	// BodyReadTimeout bounds how long this mount's request BODY may take to
+	// arrive, measured from the moment the handler is entered (#662). Zero
+	// means [DefaultBodyReadTimeout]; the upload mounts (map/portrait images
+	// over Connect, the campaign bundle import) set [UploadBodyReadTimeout].
+	// See [bodyReadDeadline] for why this is a per-mount body deadline and
+	// not a server-wide ReadTimeout.
+	BodyReadTimeout time.Duration
 }
+
+const (
+	// DefaultBodyReadTimeout is the body deadline of an ordinary mount: every
+	// such request is a small JSON/protobuf message (the Connect services cap
+	// it at 1 MiB), so half a minute is generous even on a poor link.
+	DefaultBodyReadTimeout = 30 * time.Second
+	// UploadBodyReadTimeout is the body deadline of a mount that accepts large
+	// uploads (up to 48 MiB over Connect, 192 MiB on the bundle import). It is
+	// sized so a slow home uplink still finishes — 192 MiB in 30 minutes needs
+	// under 1 Mbit/s — while a stalled or trickled upload no longer holds its
+	// connection and goroutine forever. Those mounts are session-gated before
+	// the body is read, so only a signed-in caller can hold one that long.
+	UploadBodyReadTimeout = 30 * time.Minute
+	// idleTimeout closes a keep-alive connection that has sat with no request
+	// for this long. Without it (and with no ReadTimeout to fall back on) an
+	// idle connection is kept open forever. It applies only BETWEEN requests,
+	// so the SSE tail and the streaming chat exchange are unaffected.
+	idleTimeout = 2 * time.Minute
+)
 
 // APIMount adapts a generated Connect handler pair — (mountPath, handler) as
 // returned by a service's Handler() method — into a [Mount] under the public
@@ -104,7 +131,7 @@ func NewServer(cfg Config) *Server {
 	// SSE route) still wins over this guard.
 	mux.Handle("/api/", http.NotFoundHandler())
 	for _, m := range cfg.Mounts {
-		mux.Handle(m.Path, m.Handler)
+		mux.Handle(m.Path, bodyReadDeadline(m.BodyReadTimeout, m.Handler))
 	}
 	// The SPA catch-all is registered last at "/"; ServeMux's longest-prefix
 	// match keeps the API mounts (e.g. /api/) ahead of it, so only unmatched
@@ -123,14 +150,66 @@ func NewServer(cfg Config) *Server {
 	return &Server{
 		srv: &http.Server{
 			Addr:              cfg.Addr,
-			Handler:           mux,
+			Handler:           noSniff(mux),
 			ReadHeaderTimeout: 5 * time.Second,
-			Protocols:         protocols,
+			// No WriteTimeout on purpose: it is a whole-response wall clock,
+			// and the SSE transcript tail and the streaming chat exchange
+			// legitimately run for hours. No ReadTimeout either: slow request
+			// BODIES are bounded per mount instead (bodyReadDeadline), since
+			// one process-wide value cannot fit both a 1 MiB RPC and a
+			// 192 MiB upload. Idle connections are bounded by IdleTimeout.
+			IdleTimeout: idleTimeout,
+			Protocols:   protocols,
 		},
 		done: make(chan struct{}),
 		addr: cfg.Addr,
 		log:  log,
 	}
+}
+
+// noSniff stamps X-Content-Type-Options: nosniff on every response the
+// listener serves (#662) — the Connect JSON, the SSE stream, the OAuth
+// redirects and error pages as much as the SPA and the blob mounts, which also
+// set it themselves. Every handler here declares its content type; a browser
+// must never second-guess one into something executable.
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// bodyReadDeadline bounds how long a request body may take to arrive (#662):
+// with only ReadHeaderTimeout set, a client could send its headers promptly and
+// then trickle the body — up to 48 MiB on Connect, 192 MiB on the import — one
+// byte at a time, pinning a connection and a goroutine indefinitely.
+//
+// It is a per-mount deadline armed through [http.ResponseController] rather
+// than http.Server.ReadTimeout because that is ONE process-wide value: a bound
+// tight enough to mean anything for the 1 MiB Connect messages would cut a
+// legitimate 192 MiB bundle upload on a home uplink, and one loose enough for
+// the upload protects nothing else.
+//
+// The deadline covers the body and nothing after it. net/http clears the
+// connection read deadline itself once the body has been read to EOF (HTTP/1),
+// and on HTTP/2 an expired stream deadline only fails further body reads — so
+// a handler that has consumed its body may take as long as it likes to answer
+// (an LLM-backed call, the streaming chat exchange) and its context is not
+// cancelled. A bodyless request — every GET, the SSE transcript tail included
+// — is never given a deadline at all.
+func bodyReadDeadline(d time.Duration, next http.Handler) http.Handler {
+	if d <= 0 {
+		d = DefaultBodyReadTimeout
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+			// Best effort: a ResponseWriter that cannot set deadlines (a test
+			// recorder, an exotic wrapper) serves unbounded rather than failing
+			// the request.
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start binds the listener synchronously (so [Server.Addr] resolves an
