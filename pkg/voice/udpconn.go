@@ -31,11 +31,10 @@ const keepaliveInterval = 5 * time.Second
 // [keepaliveUDPConn.ReadPacket] skips it after counting it (the echoes field).
 const keepalivePacketSize = 8
 
-// retiredSocketLinger is how long a re-Open keeps the previous socket alive
-// before closing it — long enough for disgo's audio sender to finish any Write
-// whose conn snapshot predates the swap (a net.ErrClosed there self-reaps the
-// sender permanently), short enough that a reader parked on the old socket is
-// released promptly.
+// retiredSocketLinger is how long a re-Open over a LIVE socket keeps the
+// previous one alive before closing it — long enough for disgo's audio sender
+// to finish any Write whose conn snapshot predates the swap, short enough that
+// a reader parked on the old socket moves to the new one promptly.
 const retiredSocketLinger = 250 * time.Millisecond
 
 // Masks for the first RTP header byte, bits counted from the most significant
@@ -64,9 +63,29 @@ const (
 //
 //  2. Its Open overwrites the previous socket without closing it, so a reader
 //     blocked in a deadline-less Read on the old socket stays parked forever
-//     after a voice-server migration. This Open closes the old socket first;
-//     the blocked read returns net.ErrClosed, disgo's receiver reaps itself,
-//     and the wirenpc cycle rebuilds cleanly.
+//     after a voice-server migration. This Open retires the old socket, and
+//     ReadPacket carries on reading from the new one.
+//
+//  3. It cannot survive its own conn's recovery. Since disgo v0.20.0 a
+//     session-invalidating voice-gateway close makes the conn Close this
+//     transport and then re-Open it for a fresh voice session, WITHOUT leaving
+//     the channel. On the stock transport the Close hands net.ErrClosed to the
+//     audio sender and receiver, both of which reap themselves permanently —
+//     the conn comes back connected, deaf and mute. Here a Close is a PAUSE
+//     (see the lifecycle below): the reader waits for the next socket, the
+//     writer drops frames like a client on a lossy link, and audio resumes on
+//     the re-Open with nobody in the channel having seen the Bot leave.
+//
+// Lifecycle. Three states, all guarded by connMu:
+//
+//   - open: a live socket and a keepalive loop.
+//   - paused: Close was called (disgo's own recovery, or the first half of a
+//     teardown). No socket, no keepalive loop, nothing leaked. Open resumes.
+//     Write drops; ReadPacket blocks.
+//   - terminated: terminate was called — by the conn guard (connguard.go) when
+//     disgo discards the conn for good. Open is refused, and Write/ReadPacket
+//     return net.ErrClosed, which is the contract disgo's audio goroutines and
+//     [Session.Close]'s reap sequence depend on (#579, #586).
 //
 // It also counts every parsed inbound RTP voice packet (before decryption, so
 // a DAVE key-roll hiccup still proves the media path is alive) — the signal
@@ -93,22 +112,33 @@ type keepaliveUDPConn struct {
 	dial      func(ctx context.Context, network, address string) (net.Conn, error)
 	newTicker func(d time.Duration) (<-chan time.Time, func())
 
+	// conn is the live socket; nil while paused or terminated. Guarded by connMu.
 	conn   net.Conn
 	connMu sync.Mutex
 	// stopKeepalive ends the current keepalive goroutine; non-nil exactly while
 	// one runs. Guarded by connMu.
 	stopKeepalive chan struct{}
-	// closed latches on Close so a straggler voice-gateway Ready dispatched
-	// during teardown cannot revive the transport — a revived Open would dial a
-	// socket and start a keepalive goroutine that nothing ever stops. Guarded
-	// by connMu. A closed transport refuses Open with a clear error; the join
-	// then fails visibly and the caller's retry builds a fresh conn.
-	closed bool
+	// terminated latches in terminate: the conn this transport belongs to was
+	// discarded, so a straggler voice-gateway Ready dispatched during teardown
+	// cannot revive it — a revived Open would dial a socket and start a
+	// keepalive goroutine that nothing ever stops. Guarded by connMu.
+	terminated bool
+	// changed is closed and replaced on every lifecycle transition (Open, Close,
+	// terminate); a ReadPacket waiting out a pause selects on it. Guarded by
+	// connMu.
+	changed chan struct{}
 
+	// encrypter and ssrc belong to the CURRENT voice session and are replaced by
+	// a re-Open (ssrc) and the SetSecretKey that follows it (encrypter), on the
+	// voice-gateway goroutine, while the sender and receiver goroutines are
+	// mid-flight — so both are guarded by connMu and read as a snapshot. The
+	// encrypter is nil from Open until the session's key arrives: frames are
+	// dropped rather than sealed with the previous session's key.
 	encrypter voice.Encrypter
-
-	header    [12]byte
 	ssrc      uint32
+
+	// sequence and timestamp are the outbound RTP counters, touched only by the
+	// single writer.
 	sequence  uint16
 	timestamp uint32
 
@@ -149,21 +179,32 @@ func newKeepaliveUDPConn(daveSession godave.Session, ssrcLookup voice.SsrcLookup
 			t := time.NewTicker(d)
 			return t.C, t.Stop
 		},
+		changed:       make(chan struct{}),
 		receiveBuffer: make([]byte, 1400),
 		decryptBuffer: make([]byte, 512),
 		encryptBuffer: make([]byte, 512),
 	}
 }
 
+// LocalAddr returns the live socket's local address, or nil while there is no
+// socket (paused or terminated).
 func (u *keepaliveUDPConn) LocalAddr() net.Addr {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
+	if u.conn == nil {
+		return nil
+	}
 	return u.conn.LocalAddr()
 }
 
+// RemoteAddr returns the live socket's remote address, or nil while there is
+// no socket (paused or terminated).
 func (u *keepaliveUDPConn) RemoteAddr() net.Addr {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
+	if u.conn == nil {
+		return nil
+	}
 	return u.conn.RemoteAddr()
 }
 
@@ -172,50 +213,63 @@ func (u *keepaliveUDPConn) SetSecretKey(encryptionMode voice.EncryptionMode, sec
 	if err != nil {
 		return fmt.Errorf("failed to create encrypter: %w", err)
 	}
+	u.connMu.Lock()
 	u.encrypter = e
+	u.connMu.Unlock()
 	return nil
 }
 
 func (u *keepaliveUDPConn) SetDeadline(t time.Time) error {
-	u.connMu.Lock()
-	defer u.connMu.Unlock()
-	return u.conn.SetDeadline(t)
+	return u.withSocket(func(c net.Conn) error { return c.SetDeadline(t) })
 }
 
 func (u *keepaliveUDPConn) SetReadDeadline(t time.Time) error {
-	u.connMu.Lock()
-	defer u.connMu.Unlock()
-	return u.conn.SetReadDeadline(t)
+	return u.withSocket(func(c net.Conn) error { return c.SetReadDeadline(t) })
 }
 
 func (u *keepaliveUDPConn) SetWriteDeadline(t time.Time) error {
+	return u.withSocket(func(c net.Conn) error { return c.SetWriteDeadline(t) })
+}
+
+// withSocket runs fn on the live socket, or reports net.ErrClosed when there
+// is none (paused or terminated) instead of dereferencing a nil conn.
+func (u *keepaliveUDPConn) withSocket(fn func(net.Conn) error) error {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
-	return u.conn.SetWriteDeadline(t)
+	if u.conn == nil {
+		return net.ErrClosed
+	}
+	return fn(u.conn)
+}
+
+// notifyLocked wakes every ReadPacket waiting on a lifecycle transition. Caller
+// holds connMu.
+func (u *keepaliveUDPConn) notifyLocked() {
+	close(u.changed)
+	u.changed = make(chan struct{})
 }
 
 // Open dials the voice server and performs Discord's IP discovery, then starts
-// the keepalive loop. disgo calls it more than once on one instance (a voice
-// server migration, a resume-rejected fresh session): each call retires the
-// previous socket and keepalive loop first — see the type doc for why closing
-// the old socket matters.
+// the keepalive loop. disgo calls it more than once on one instance — after a
+// Close when its conn recovers with a fresh voice session, or straight over a
+// live socket — and each call retires whatever socket and keepalive loop are
+// still there. Only a terminated transport refuses.
 func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc uint32) (string, int, error) {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
 
-	if u.closed {
+	if u.terminated {
 		return "", 0, fmt.Errorf("voice: transport already closed; refusing to reopen")
 	}
 
 	u.stopKeepaliveLocked()
 	if old := u.conn; old != nil {
-		// Retire the previous socket on a LINGER, not immediately: disgo's audio
-		// sender may hold a Write-time snapshot of it, and net.ErrClosed makes
-		// the sender PERMANENTLY self-reap (audio_sender handleErr) — a mute NPC
-		// inside a cycle that keeps serving. The linger lets any in-flight write
-		// finish on the old socket (harmlessly, toward the old server); a reader
-		// parked in a deadline-less Read still gets its net.ErrClosed wake, just
-		// a beat later, instead of being stranded forever like disgo strands it.
+		// Retire the previous socket on a LINGER, not immediately, so an
+		// in-flight sender Write holding a snapshot of it finishes on the old
+		// socket (harmlessly, toward the old server) instead of failing. Write
+		// and ReadPacket both tolerate the close when it comes — the linger only
+		// spares a frame; a reader parked in a deadline-less Read on the old
+		// socket gets its wake a beat later and moves to the new one.
 		time.AfterFunc(retiredSocketLinger, func() { _ = old.Close() })
 	}
 
@@ -271,12 +325,12 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 		return "", 0, fmt.Errorf("invalid ssrc in ip discovery response")
 	}
 
-	u.header[0] = voice.RTPVersionPadExtend
-	u.header[1] = voice.RTPPayloadType
-	binary.BigEndian.PutUint32(u.header[8:], ssrc)
-
 	u.ssrc = ssrc
 	u.daveSession.AssignSsrcToCodec(ssrc, godave.CodecOpus)
+	// A (re-)Open always belongs to a NEW voice session (a resume never sends
+	// Ready), whose transport key arrives in the SetSecretKey that follows.
+	// Until then there is nothing valid to seal or open packets with.
+	u.encrypter = nil
 
 	u.conn = conn
 	u.packets.Store(0)
@@ -284,6 +338,7 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 	stop := make(chan struct{})
 	u.stopKeepalive = stop
 	go u.keepaliveLoop(conn, stop)
+	u.notifyLocked()
 
 	return ourAddress, ourPort, nil
 }
@@ -332,18 +387,36 @@ func (u *keepaliveUDPConn) keepaliveLoop(conn net.Conn, stop <-chan struct{}) {
 }
 
 // Write RTP-wraps, DAVE-encrypts, and transport-encrypts one outbound Opus
-// frame — byte-for-byte the pinned disgo implementation, error strings
-// included (internal/observe matches some of them).
+// frame — the disgo implementation's wire format and error strings
+// (internal/observe matches some of them), with this transport's lifecycle:
+//
+//   - terminated: net.ErrClosed, on which disgo's sender reaps itself — the
+//     teardown contract [Session.Close] relies on.
+//   - paused, or open but still waiting for the new session's key: the frame is
+//     DROPPED and reported as written. The RTP counters still advance, so the
+//     receiving side sees ordinary packet loss. Returning an error here would
+//     end the sender for the rest of the connection's life.
 func (u *keepaliveUDPConn) Write(p []byte) (int, error) {
 	u.connMu.Lock()
-	conn := u.conn
+	conn, encrypter, ssrc, terminated := u.conn, u.encrypter, u.ssrc, u.terminated
 	u.connMu.Unlock()
 
-	binary.BigEndian.PutUint16(u.header[2:4], u.sequence)
-	u.sequence++
+	if terminated {
+		return 0, fmt.Errorf("failed to write packet: %w", net.ErrClosed)
+	}
 
-	binary.BigEndian.PutUint32(u.header[4:8], u.timestamp)
+	var header [voice.RTPHeaderSize]byte
+	header[0] = voice.RTPVersionPadExtend
+	header[1] = voice.RTPPayloadType
+	binary.BigEndian.PutUint16(header[2:4], u.sequence)
+	u.sequence++
+	binary.BigEndian.PutUint32(header[4:8], u.timestamp)
 	u.timestamp += voice.OpusFrameSize
+	binary.BigEndian.PutUint32(header[8:], ssrc)
+
+	if conn == nil || encrypter == nil {
+		return len(p), nil
+	}
 
 	// Sized by LENGTH, not capacity — a deliberate divergence from the pinned
 	// disgo udp_conn.go, which only grows cap: every godave.Session bounds its
@@ -351,16 +424,36 @@ func (u *keepaliveUDPConn) Write(p []byte) (int, error) {
 	// 512 bytes. Keep this on the next upstream re-diff.
 	u.encryptBuffer = sizedBuffer(u.encryptBuffer, u.daveSession.MaxEncryptedFrameSize(len(p)))
 
-	n, err := u.daveSession.Encrypt(u.ssrc, p, u.encryptBuffer)
+	n, err := u.daveSession.Encrypt(ssrc, p, u.encryptBuffer)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encrypt packet: %w", err)
 	}
 
-	if _, err = conn.Write(u.encrypter.Encrypt(u.header, u.encryptBuffer[:n])); err != nil {
+	if _, err = conn.Write(encrypter.Encrypt(header, u.encryptBuffer[:n])); err != nil {
+		// The socket closed between the snapshot and the write: a pause or a
+		// re-Open raced this frame. Only a terminated transport may surface
+		// net.ErrClosed to the sender.
+		if errors.Is(err, net.ErrClosed) && !u.isTerminated() {
+			return len(p), nil
+		}
 		return 0, fmt.Errorf("failed to write packet: %w", err)
 	}
 
 	return len(p), nil
+}
+
+// sessionKey returns the current voice session's transport encrypter, nil
+// while there is none (paused, or re-opened and still waiting for the key).
+func (u *keepaliveUDPConn) sessionKey() voice.Encrypter {
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
+	return u.encrypter
+}
+
+func (u *keepaliveUDPConn) isTerminated() bool {
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
+	return u.terminated
 }
 
 func (u *keepaliveUDPConn) Read(p []byte) (int, error) {
@@ -377,14 +470,31 @@ func (u *keepaliveUDPConn) Read(p []byte) (int, error) {
 // decryption: an undecryptable packet still proves RTP is arriving, which is
 // exactly the discrimination the watchdog needs. Keepalive echoes and other
 // non-RTP datagrams fall out at the length/type checks, counting nothing.
+//
+// It follows the transport's lifecycle rather than a single socket: while
+// paused it BLOCKS until the next Open (or terminate), and a socket that is
+// closed or replaced under a parked read is not an error — the loop moves to
+// the current one. net.ErrClosed is returned only once the transport is
+// terminated, which is when disgo's receiver is meant to reap itself.
 func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
-	u.connMu.Lock()
-	conn := u.conn
-	u.connMu.Unlock()
-
 	for {
+		u.connMu.Lock()
+		conn, terminated, changed := u.conn, u.terminated, u.changed
+		u.connMu.Unlock()
+
+		if terminated {
+			return nil, fmt.Errorf("failed to read packet: %w", net.ErrClosed)
+		}
+		if conn == nil {
+			<-changed // paused: wait for the re-Open or the terminate
+			continue
+		}
+
 		n, err := conn.Read(u.receiveBuffer)
 		if err != nil {
+			if u.superseded(conn) {
+				continue // closed or replaced under us; not this reader's error
+			}
 			return nil, fmt.Errorf("failed to read packet: %w", err)
 		}
 
@@ -443,7 +553,17 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 			continue
 		}
 
-		decrypted, err := u.encrypter.Decrypt(p.HeaderSize, u.receiveBuffer[:n])
+		// Read the key only now, AFTER the packet arrived: the read above can
+		// park for a long time, and a key snapshotted before it would still be
+		// the "no key yet" of a fresh re-Open when the first packet lands.
+		encrypter := u.sessionKey()
+		if encrypter == nil {
+			// Media on the new socket ahead of the session's key: counted above
+			// (the path is alive), but not yet decryptable.
+			continue
+		}
+
+		decrypted, err := encrypter.Decrypt(p.HeaderSize, u.receiveBuffer[:n])
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt packet: %w", err)
 		}
@@ -486,6 +606,16 @@ func (u *keepaliveUDPConn) ReadPacket() (*voice.Packet, error) {
 	}
 }
 
+// superseded reports whether conn is no longer the socket a reader should be
+// on: the transport was paused, re-opened onto another socket, or terminated
+// since the reader snapshotted it. The reader then re-evaluates the lifecycle
+// instead of surfacing the dead socket's error.
+func (u *keepaliveUDPConn) superseded(conn net.Conn) bool {
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
+	return u.terminated || u.conn != conn
+}
+
 // stripRTPPadding removes RTP padding from a transport-decrypted payload. Per
 // RFC 3550 §5.1 the final octet holds the number of padding octets, itself
 // included. A payload whose count is missing or implausible is returned
@@ -512,17 +642,46 @@ func sizedBuffer(buf []byte, n int) []byte {
 	return buf[:n]
 }
 
-// Close stops the keepalive loop and closes the socket. The closed socket
-// propagates net.ErrClosed into a blocked ReadPacket / the next Write — the
-// exact contract disgo's audio goroutines and [Session.Close]'s reap sequence
-// depend on (#579, #586).
+// Close PAUSES the transport: it stops the keepalive loop and closes the
+// socket, leaving nothing running, but a later Open resumes it. This is what
+// disgo's conn calls — both when it recovers from a session-invalidating
+// voice-gateway close (Close, then re-Open for a fresh session) and as one
+// step of discarding the conn. Only the second is final, and the conn guard
+// (connguard.go) marks it with terminate; Close alone must not end the audio
+// goroutines, or every in-place recovery would come back deaf and mute.
 func (u *keepaliveUDPConn) Close() error {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
-	u.closed = true
+	return u.closeSocketLocked()
+}
+
+// terminate ends the transport for good: the socket and keepalive loop are
+// closed, Open is refused from here on, and the blocked ReadPacket and the
+// next Write return net.ErrClosed — the contract disgo's audio goroutines and
+// [Session.Close]'s reap sequence depend on (#579, #586). Idempotent. A
+// straggler Open that is mid-dial holds connMu, so terminate runs after it and
+// closes the socket it just opened; one that arrives later is refused.
+func (u *keepaliveUDPConn) terminate() {
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
+	if u.terminated {
+		return
+	}
+	u.terminated = true
+	_ = u.closeSocketLocked()
+}
+
+// closeSocketLocked stops the keepalive loop, closes and forgets the live
+// socket, drops the session key, and wakes a waiting reader. Caller holds
+// connMu.
+func (u *keepaliveUDPConn) closeSocketLocked() error {
 	u.stopKeepaliveLocked()
-	if u.conn == nil {
+	conn := u.conn
+	u.conn = nil
+	u.encrypter = nil
+	u.notifyLocked()
+	if conn == nil {
 		return nil
 	}
-	return u.conn.Close()
+	return conn.Close()
 }

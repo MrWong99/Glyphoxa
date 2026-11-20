@@ -78,6 +78,9 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 		provider:   &switchingProvider{},
 		dispatcher: newInboundDispatcher(guild.String(), cfg.inboundBuffer, cfg.metrics),
 	}
+	// A provider closed by disgo's sender means the connection can no longer
+	// speak: end the inbound stream so the caller rebuilds (see onClose).
+	s.provider.onClose = s.dispatcher.Close
 	s.state.Store(uint32(Connecting))
 
 	if err := conn.Open(ctx, channel, cfg.selfMute, cfg.selfDeaf); err != nil {
@@ -188,12 +191,14 @@ func (s *Session) Close() error {
 		// provider/receiver Close — nor its own AudioSender's (issue #579). Do
 		// ours ourselves so Inbound closes and any straggler playback is
 		// retired, regardless of disgo's goroutine timing. The ORDER matters:
-		// closing the provider after the transport flips it into its
-		// sender-reaping state (see switchingProvider.Close) — the next 20ms
-		// poll hands disgo's sender a silence frame, the write on the dead
-		// transport fails terminally, and the sender goroutine exits instead
-		// of polling forever. The receiver needs no such poke: udp.Close
-		// unblocks its conn.Read with net.ErrClosed and it closes itself.
+		// conn.Close's last step discards the conn, which TERMINATES the
+		// transport (connguard.go) — a plain udp.Close is only a pause.
+		// Closing the provider after that flips it into its sender-reaping
+		// state (see switchingProvider.Close): the next 20ms poll hands disgo's
+		// sender a silence frame, the write on the terminated transport fails
+		// with net.ErrClosed, and the sender goroutine exits instead of polling
+		// forever. The receiver needs no such poke: terminate unblocks its
+		// ReadPacket with net.ErrClosed and it closes itself.
 		s.conn.Close(context.WithoutCancel(context.Background()))
 		s.provider.Close()
 		s.dispatcher.Close()

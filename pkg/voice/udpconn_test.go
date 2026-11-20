@@ -296,18 +296,26 @@ func TestKeepaliveUDPConnReopenRetiresOldSocket(t *testing.T) {
 	}
 
 	open(t, u, fc2, 42)
-	defer u.Close()
-
-	select {
-	case err := <-readErr:
-		if !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("parked read returned %v, want net.ErrClosed", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("re-Open left the old socket's reader parked (the disgo zombie this transport exists to fix)")
-	}
+	defer u.terminate()
 	if got := u.packets.Load(); got != 0 {
 		t.Fatalf("packets after re-Open = %d, want 0 (fresh path, fresh count)", got)
+	}
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey after re-Open: %v", err)
+	}
+
+	// The parked reader must neither stay stranded on the old socket nor
+	// surface its close as an error (disgo's receiver reaps itself for good on
+	// net.ErrClosed): once the old socket is retired it carries on with the
+	// new one and returns the next packet from there.
+	fc2.reads <- sealRTP(t, 2, 1920, 7, []byte{0x05, 0x06, 0x07, 0x08})
+	select {
+	case err := <-readErr:
+		if err != nil {
+			t.Fatalf("parked read returned %v, want the packet from the new socket", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-Open left the old socket's reader parked (the disgo zombie this transport exists to fix)")
 	}
 	if !eventually(func() bool { return fc2.writeCount() >= 2 }) {
 		t.Fatal("no keepalive on the fresh socket after re-Open")
@@ -352,19 +360,170 @@ func TestKeepaliveUDPConnCountsOnlyParsedRTP(t *testing.T) {
 	}
 }
 
-func TestKeepaliveUDPConnRefusesOpenAfterClose(t *testing.T) {
+func TestKeepaliveUDPConnRefusesOpenAfterTerminate(t *testing.T) {
 	t.Parallel()
 	ticks := make(chan time.Time)
 	fc := newFakePacketConn()
 	u := newTestUDPConn(t, nil, ticks, fc)
 	open(t, u, fc, 42)
-	if err := u.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	u.terminate()
 	// A straggler voice-gateway Ready dispatched during teardown must not
 	// revive the transport with a socket and keepalive loop nothing will stop.
 	if _, _, err := u.Open(context.Background(), "198.51.100.1", 443, 42); err == nil {
-		t.Fatal("Open succeeded on a closed transport")
+		t.Fatal("Open succeeded on a terminated transport")
+	}
+}
+
+// rtpWrites counts the RTP voice packets a fake socket has been sent, ignoring
+// the 74-byte discovery request and the 8-byte keepalives.
+func rtpWrites(c *fakePacketConn) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var n int
+	for _, w := range c.writes {
+		if len(w) > voice.RTPHeaderSize && len(w) != 74 && w[1] == voice.RTPPayloadType {
+			n++
+		}
+	}
+	return n
+}
+
+// TestKeepaliveUDPConnCloseIsAPause pins the lifecycle disgo v0.20.0's in-place
+// recovery needs: its conn Closes the transport and re-Opens it for a fresh
+// voice session without leaving the channel. Neither audio direction may see
+// an error across that gap — disgo's sender and receiver both reap themselves
+// permanently on net.ErrClosed — and nothing may be sent with the previous
+// session's key.
+func TestKeepaliveUDPConnCloseIsAPause(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	ticks := make(chan time.Time)
+	fc1, fc2 := newFakePacketConn(), newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc1, fc2)
+	open(t, u, fc1, 42)
+	defer u.terminate()
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey: %v", err)
+	}
+	frame := []byte{0x01, 0x02, 0x03, 0x04}
+	if _, err := u.Write(frame); err != nil {
+		t.Fatalf("Write on the open transport: %v", err)
+	}
+	if got := rtpWrites(fc1); got != 1 {
+		t.Fatalf("RTP packets on the first socket = %d, want 1", got)
+	}
+
+	type read struct {
+		p   *voice.Packet
+		err error
+	}
+	reads := make(chan read, 1)
+	go func() {
+		p, err := u.ReadPacket()
+		reads <- read{p, err}
+	}()
+	if !eventually(func() bool { return fc1.readers.Load() == 1 }) {
+		t.Fatal("reader never parked on the first socket")
+	}
+
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case r := <-reads:
+		t.Fatalf("ReadPacket returned (%v, %v) on a paused transport; it must wait for the re-Open", r.p, r.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if n, err := u.Write(frame); err != nil || n != len(frame) {
+		t.Fatalf("Write on a paused transport = (%d, %v), want the frame dropped as written", n, err)
+	}
+	if err := u.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("SetReadDeadline on a paused transport = %v, want net.ErrClosed", err)
+	}
+	if u.LocalAddr() != nil || u.RemoteAddr() != nil {
+		t.Fatal("a paused transport reported a socket address")
+	}
+
+	open(t, u, fc2, 43)
+	// The new session's key has not arrived: sealing with the old one would
+	// put undecryptable packets on the new path.
+	if n, err := u.Write(frame); err != nil || n != len(frame) {
+		t.Fatalf("Write before the new session key = (%d, %v), want the frame dropped as written", n, err)
+	}
+	if got := rtpWrites(fc2); got != 0 {
+		t.Fatalf("RTP packets on the new socket before its key = %d, want 0", got)
+	}
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey after re-Open: %v", err)
+	}
+
+	if _, err := u.Write(frame); err != nil {
+		t.Fatalf("Write after the re-Open: %v", err)
+	}
+	if got := rtpWrites(fc2); got != 1 {
+		t.Fatalf("RTP packets on the new socket = %d, want 1", got)
+	}
+	sent := fc2.write(fc2.writeCount() - 1)
+	if ssrc := binary.BigEndian.Uint32(sent[8:12]); ssrc != 43 {
+		t.Fatalf("outbound SSRC after the re-Open = %d, want the new session's 43", ssrc)
+	}
+	// Three frames were dropped across the gap; the sequence still advanced for
+	// each, so the far side sees loss, not a rewound stream.
+	if seq := binary.BigEndian.Uint16(sent[2:4]); seq != 3 {
+		t.Fatalf("outbound sequence after the gap = %d, want 3", seq)
+	}
+
+	payload := []byte{0x09, 0x0a, 0x0b, 0x0c}
+	fc2.reads <- sealRTP(t, 7, 960, 9, payload)
+	select {
+	case r := <-reads:
+		if r.err != nil {
+			t.Fatalf("ReadPacket across the pause: %v", r.err)
+		}
+		if !bytes.Equal(r.p.Opus, payload) {
+			t.Fatalf("Opus = %x, want %x from the new socket", r.p.Opus, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the reader never resumed on the re-opened transport")
+	}
+}
+
+// TestKeepaliveUDPConnTerminateEndsBothDirections pins the other half of the
+// lifecycle: once the conn is discarded, the blocked reader and the next write
+// get net.ErrClosed — the signal disgo's audio goroutines reap on, and what
+// Session.Close's sender poke depends on (#579).
+func TestKeepaliveUDPConnTerminateEndsBothDirections(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	ticks := make(chan time.Time)
+	fc := newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc)
+	open(t, u, fc, 42)
+	if err := u.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
+		t.Fatalf("SetSecretKey: %v", err)
+	}
+
+	// A reader waiting out a pause is the one a plain socket close cannot wake.
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	readErr := make(chan error, 1)
+	go func() {
+		_, err := u.ReadPacket()
+		readErr <- err
+	}()
+
+	u.terminate()
+	u.terminate() // idempotent
+
+	select {
+	case err := <-readErr:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("ReadPacket after terminate = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminate left a paused reader blocked")
+	}
+	if _, err := u.Write([]byte{0x01, 0x02, 0x03, 0x04}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write after terminate = %v, want net.ErrClosed", err)
 	}
 }
 
