@@ -130,7 +130,7 @@ func scrubEmphasis(line string) string {
 		for j < len(runes) && runes[j] == r {
 			j++
 		}
-		var prev, next rune = ' ', ' '
+		prev, next := ' ', ' '
 		if i > 0 {
 			prev = runes[i-1]
 		}
