@@ -95,18 +95,6 @@ func (s *nodePortraits) GenerateNodePortrait(
 	}), nil
 }
 
-// rasterImageType allowlists the portrait upload content types (#591 review):
-// raster formats only. image/svg+xml (and anything else scriptable) is
-// deliberately absent — the portrait mount serves blobs same-origin with the
-// stored Content-Type, so a scriptable type would be stored XSS.
-func rasterImageType(ct string) bool {
-	switch ct {
-	case "image/png", "image/jpeg", "image/webp", "image/gif":
-		return true
-	}
-	return false
-}
-
 // SetNodePortrait applies portrait bytes — generated or uploaded — to an entry.
 //
 // Blob FIRST, row second (the CreateMap rule): a row referencing missing bytes
@@ -126,7 +114,7 @@ func (s *nodePortraits) SetNodePortrait(
 	if len(m.GetImageBytes()) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("no image was provided"))
 	}
-	if !rasterImageType(m.GetContentType()) {
+	if !blob.IsRasterImageType(m.GetContentType()) {
 		// An allowlist of RASTER types, not an image/* prefix check (#591 review):
 		// image/svg+xml is scriptable — served same-origin it would be stored XSS
 		// the moment the portrait URL is opened as a document.
