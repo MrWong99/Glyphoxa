@@ -28,14 +28,29 @@ func TestClaimsRollResult(t *testing.T) {
 		{"three-digit non-roll number ignored", "Es kostet 250 Gold.", false},
 		{"hundred is a valid result", "A perfect 100 on the nose.", true},
 
-		// --- O5: a digit is a claim only near a roll word or as a number-noun. ---
+		// --- O5: a digit followed by a currency/time/distance noun is a quantity. ---
 		{"de price", "Das macht 20 Goldstücke.", false},
-		{"de copper", "Das macht 5 Kupferstuecke, mein Freund.", false},
+		{"de copper", "Das macht 5 Kupferstücke, mein Freund.", false},
+		{"de copper ascii", "Das macht 5 Kupferstuecke, mein Freund.", false},
 		{"de days ago", "Vor 3 Tagen kam ein Fremder vorbei.", false},
 		{"de eine N noun", "Ich habe eine 3 Tage alte Karte.", false},
 		{"en years ago", "He died 40 years ago, traveler.", false},
-		{"en rooms", "The inn has 12 rooms and a stable.", false},
 		{"en a N noun", "It's a 5 gold coin.", false},
+		{"de feet", "Die Brücke ist 30 Fuß lang.", false},
+
+		// --- Every other bare 1..100 integer stays a claim (armed turns only). ---
+		{"de initiative", "Meine Initiative ist 15.", true},
+		{"en bare exclaim", "17! You hit.", true},
+		{"en got", "I got 17.", true},
+		{"en hits with", "Your attack hits with 18.", true},
+		{"en to hit", "He attacks you: 18 to hit.", true},
+		{"de crit", "Kritischer Treffer, 20!", true},
+		{"de geschafft", "Geschafft mit 19.", true},
+		{"de komme auf", "Ich komme auf 23.", true},
+		{"de damage", "Der Angriff trifft: 12 Schaden.", true},
+		{"en damage", "The attack hits for 12 damage.", true},
+		{"de AC", "Du triffst mit 18 gegen seine Rüstungsklasse.", true},
+		{"far from cue", "After a long and very tense moment of hesitation in the dark old hall, she finally manages a 14.", true},
 		{"en rolled N", "You rolled 19.", true},
 		{"en total", "That's 3 and 4, 7 total!", true},
 		{"en solid N", "Trust me, a solid 17.", true},
@@ -119,6 +134,12 @@ func TestRollClaimConsistent(t *testing.T) {
 		{"no claim is trivially consistent", "The fates stay silent tonight.", nil, true},
 		{"derived total counts as consistent", "That's 3 and 4 — 7 total!", []string{"Rolled 2d6: [3 4] (total 7)."}, true},
 		{"notation in the result never legitimizes", "A 20, I swear!", []string{"Rolled 1d20: 7."}, false},
+		// A forced regen contradicting the roll in a cue-less shape must NOT pass
+		// as "no claim" (O5 review).
+		{"cue-less contradiction", "Kritischer Treffer, 20!", []string{"Rolled 1d20: 7."}, false},
+		{"cue-less contradiction en", "17! You hit.", []string{"Rolled 1d20: 4."}, false},
+		{"cue-less match", "Ich komme auf 23.", []string{"Rolled 1d20+5: 18 (total 23)."}, true},
+		{"price beside the real roll", "A 7. That'll be 5 gold.", []string{"Rolled 1d20: 7."}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
