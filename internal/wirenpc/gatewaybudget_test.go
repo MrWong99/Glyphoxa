@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/events"
@@ -81,11 +82,13 @@ func TestResumeListenerCounts(t *testing.T) {
 // attaches NOTHING, while the owned path (budget set) attaches the instrumentation
 // opts — so a borrowed standing client is never double-counted.
 func TestGatewayBudgetClientOptsBranching(t *testing.T) {
-	if got := GatewayBudgetClientOpts("tok", nil); got != nil {
-		t.Fatalf("GatewayBudgetClientOpts(nil budget) = %d opts, want 0 (borrowed client attaches nothing)", len(got))
+	// No recorder: the IDENTIFY pacing is still installed (it protects the
+	// token, it is not observability), the Resumed listener is not.
+	if got := GatewayBudgetClientOpts("tok", nil); len(got) != 1 {
+		t.Fatalf("GatewayBudgetClientOpts(nil budget) = %d opts, want 1 (the IDENTIFY pacer alone)", len(got))
 	}
-	if got := GatewayBudgetClientOpts("tok", &budgetSpy{}); len(got) == 0 {
-		t.Fatalf("GatewayBudgetClientOpts(budget) attached nothing, want the instrumentation opts (owned client)")
+	if got := GatewayBudgetClientOpts("tok", &budgetSpy{}); len(got) != 2 {
+		t.Fatalf("GatewayBudgetClientOpts(budget) = %d opts, want 2 (pacer+counter, Resumed listener)", len(got))
 	}
 }
 
@@ -99,5 +102,88 @@ func TestApplicationIDFromToken(t *testing.T) {
 	}
 	if got := applicationIDFromToken("!!!not-base64"); got != "" {
 		t.Fatalf("applicationIDFromToken(bad) = %q, want empty", got)
+	}
+}
+
+// TestIdentifyPacerCapsARunawayLoop is the regression test for the token reset
+// of 2026-11-20: a reconnect loop that IDENTIFYs every four seconds for a day.
+// The pacer must hold what actually goes out far inside Discord's 1000 per 24h.
+func TestIdentifyPacerCapsARunawayLoop(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	p := newIdentifyPacer(func() time.Time { return clock })
+
+	var sent int
+	for elapsed := time.Duration(0); elapsed < 24*time.Hour; {
+		wait := p.reserve()
+		// The loop cannot ask again before its held-back IDENTIFY went out.
+		clock = clock.Add(wait)
+		elapsed += wait
+		if elapsed >= 24*time.Hour {
+			break
+		}
+		sent++
+		clock = clock.Add(4 * time.Second)
+		elapsed += 4 * time.Second
+	}
+
+	if sent > 500 {
+		t.Fatalf("a day-long reconnect loop sent %d IDENTIFYs; Discord resets the token at 1000", sent)
+	}
+	if sent < identifyBurst {
+		t.Fatalf("only %d IDENTIFYs went out; the burst must pass untouched", sent)
+	}
+}
+
+func TestIdentifyPacerBurstThenRefill(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	p := newIdentifyPacer(func() time.Time { return clock })
+
+	for i := range identifyBurst {
+		if wait := p.reserve(); wait != 0 {
+			t.Fatalf("IDENTIFY %d of the burst waited %s, want 0", i+1, wait)
+		}
+	}
+	if wait := p.reserve(); wait != identifyRefill {
+		t.Fatalf("first IDENTIFY past the burst waits %s, want %s", wait, identifyRefill)
+	}
+	// Reservations queue: the next caller waits behind the previous one.
+	if wait := p.reserve(); wait != 2*identifyRefill {
+		t.Fatalf("second IDENTIFY past the burst waits %s, want %s", wait, 2*identifyRefill)
+	}
+
+	// A quiet stretch refills the bucket, but never past the burst.
+	clock = clock.Add(24 * time.Hour)
+	for i := range identifyBurst {
+		if wait := p.reserve(); wait != 0 {
+			t.Fatalf("after a quiet day, IDENTIFY %d waited %s, want 0", i+1, wait)
+		}
+	}
+	if wait := p.reserve(); wait == 0 {
+		t.Fatal("the bucket refilled past its burst")
+	}
+}
+
+func TestIdentifyPacerWaitHonoursContext(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	p := newIdentifyPacer(func() time.Time { return clock })
+	for range identifyBurst {
+		if err := p.wait(context.Background()); err != nil {
+			t.Fatalf("wait inside the burst: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait past the burst with a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
+func TestIdentifyPacerIsSharedPerApplication(t *testing.T) {
+	a1, a2, b := identifyPacerFor("app-pacer-a"), identifyPacerFor("app-pacer-a"), identifyPacerFor("app-pacer-b")
+	if a1 != a2 {
+		t.Fatal("two clients of one application got separate IDENTIFY budgets")
+	}
+	if a1 == b {
+		t.Fatal("two applications share one IDENTIFY budget")
 	}
 }
