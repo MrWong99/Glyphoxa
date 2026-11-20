@@ -110,13 +110,6 @@ func (f *fakeSessionManager) IsCampaignLive(campaignID uuid.UUID) bool {
 	return f.active && f.current.CampaignID == campaignID
 }
 
-// AnyLive satisfies the VoiceServer health seam (#150, #488): any session running.
-func (f *fakeSessionManager) AnyLive() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.active
-}
-
 func (f *fakeSessionManager) SetAgentMute(_ context.Context, tenantID uuid.UUID, agentID string, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

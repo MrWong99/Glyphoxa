@@ -43,10 +43,12 @@ type TenantOperatorLister interface {
 //     GM in every Tenant). This closes ADR-0055's deployment-scope caveat: a
 //     Tenant A operator is no longer GM in Tenant B. It is the authorization
 //     verdict the presence Gate and the per-session Butler gate consume.
-//   - IsGM(id) — the DEPLOYMENT-WIDE union (label-only): id is GM in SOME Tenant,
-//     OR allowlisted. Kept ONLY for the transcript-label path (speaker.Resolver,
-//     which is campaign-keyed and has no Tenant handy) and the standalone voice
-//     node's Butler gate (single-operator, ADR-0039). Never use it to AUTHORIZE a
+//   - IsGM(id) — the DEPLOYMENT-WIDE union: id is GM in SOME Tenant, OR
+//     allowlisted. Kept ONLY as the base Butler voice-address gate
+//     (cfg.GMSpeaker) of a voice process — the standalone voice node's gate
+//     (single-operator, ADR-0039) and the fallback the session Manager overlays
+//     per Start with the Tenant-scoped gate. The transcript GM label
+//     (speaker.Resolver) reads IsGMInTenant. Never use IsGM to AUTHORIZE a
 //     cross-tenant action — that is IsGMInTenant's job.
 //
 // The union is the transitional semantics the self-signup design note requires —
@@ -131,10 +133,11 @@ func (g *GMIdentity) install(bindings []storage.TenantOperatorBinding) {
 }
 
 // IsGM reports the DEPLOYMENT-WIDE verdict: the snowflake is bound as SOME
-// Tenant's operator, or allowlisted (the transitional union, ADR-0055). It is
-// LABEL-ONLY (#490): use it for the transcript GM label (speaker.Resolver, which
-// is campaign-keyed) and the standalone voice node's single-operator Butler gate.
-// To AUTHORIZE a cross-tenant action use IsGMInTenant. It never blocks: an expired
+// Tenant's operator, or allowlisted (the transitional union, ADR-0055). Its only
+// consumer is a voice process's base Butler gate: the standalone voice node's
+// single-operator gate and the fallback the session Manager replaces per Start
+// with the Tenant-scoped one (#490). The transcript GM label and every
+// authorization use IsGMInTenant. It never blocks: an expired
 // snapshot is still served while one background reload runs. The empty
 // (unattributed) speaker is never a GM.
 func (g *GMIdentity) IsGM(discordUserID string) bool {
