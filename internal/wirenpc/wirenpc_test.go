@@ -11,7 +11,7 @@ import (
 // investigation established: the wired barge-in confirm window must be > 0. A
 // zero window lets the addressing user's own continued speech cancel the turn it
 // just triggered (single shared VAD session, no speaker identity), which was the
-// 20s self-cancel (docs/latency-investigation/audio-process.md). This test fails
+// 20s self-cancel (the #19 latency investigation). This test fails
 // loudly if anyone re-introduces a zero barge confirm window for the live loop.
 func TestBargeConfirmWindow_NonZero(t *testing.T) {
 	if bargeConfirmWindow <= 0 {

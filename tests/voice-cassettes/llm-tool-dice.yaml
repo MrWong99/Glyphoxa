@@ -10,17 +10,17 @@
 # Each is keyed by prompt_hash. The second hash depends on the first exchange's
 # tool_call id ("toolu_roll1") and args AND on the live dice result, so those
 # must replay verbatim — change any and exchange 2 misses. Both hashes pin model
-# "llama-3.3-70b-versatile" (Groq, the production LLM per ADR-0036). Re-record
+# "openai/gpt-oss-120b" (Groq, the production default per the ADR-0036 amendment). Re-record
 # against the live Groq API with `-tags=record` (GROQ_API_KEY supplies
 # credentials; the dice seed stays fixed in the test).
 exchanges:
-  - prompt_hash: f95da03d0b253bde411523d540677e72099284dba06ef137d64bfbbd9875fc98
+  - prompt_hash: 697771631c48919b08635781f4e20992fe1b67633904c892299766073cce0bb0
     tool_calls:
       - id: toolu_roll1
         name: dice
         input: '{"count":1,"sides":20}'
     stop_reason: tool_use
-  - prompt_hash: 332b372ab31d70e03a8625f4ce9e18d0da515e7b0b04a9905ec4c7f5ebc1e882
+  - prompt_hash: 7018d282aa0c8645b272deaaf2e5376faabf47e84ca9a66c99374422da23f3c3
     text: "The bones favor you tonight, traveler."
     stop_reason: end_turn
-notes: Hand-authored fixture for the tool-use-loop replay test; prompt_hashes pin model llama-3.3-70b-versatile (Groq); dice rng seeded PCG(42,99), first draw. Both hashes include the #399 dice-hardening instruction the armed turn appends to the system prompt (the utterance "Roll a d20 for my luck" arms the dice gate), so they reflect the hardened system message.
+notes: Hand-authored fixture for the tool-use-loop replay test; prompt_hashes pin model openai/gpt-oss-120b (Groq; moved off the retired llama-3.3-70b-versatile id 2026-11-20, hashes recomputed offline, responses unchanged); dice rng seeded PCG(42,99), first draw. Both hashes include the #399 dice-hardening instruction the armed turn appends to the system prompt (the utterance "Roll a d20 for my luck" arms the dice gate), so they reflect the hardened system message.

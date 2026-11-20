@@ -1,18 +1,18 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { useQuery, useMutation } from "@connectrpc/connect-query";
+import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { CampaignService, type Campaign } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
-import { Select } from "@/components/ui/Select";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { invalidateMethodQueries } from "@/lib/queryClient";
-import { useI18n, type Lang } from "@/i18n";
+import { useI18n } from "@/i18n";
+import { SpokenLanguageSelect, SYSTEM_SUGGESTIONS } from "@/components/SpokenLanguageSelect";
 
 import "./createCampaignForm.css";
 import { errorMessage } from "@/lib/connectError";
@@ -26,30 +26,15 @@ import { errorMessage } from "@/lib/connectError";
 //              opaque server-side, ADR-0039). The suggestions are a static
 //              web-side convenience only.
 //   Language — a SELECT constrained to the registered phonetic encoders
-//              (ListSupportedLanguages → ADR-0024 EncoderRegistry, the sole
-//              language-truth source), so a new encoder appears automatically and
-//              no language list is hardcoded in the web tier.
+//              (SpokenLanguageSelect, shared with the create form), so a new
+//              encoder appears automatically and no language list is
+//              hardcoded in the web tier.
 //
 // A language change mutates NOTHING now — existing Agents' voice settings are
 // untouched (ADR-0009, #224); it takes effect on the next Voice Session, which
 // the static hint under the select states.
 
-const SYSTEM_SUGGESTIONS = ["D&D 5e", "Pathfinder 2e", "Call of Cthulhu"];
 const SYSTEM_DATALIST_ID = "gx-system-suggestions";
-
-// languageLabel renders a code as "<name in the display language> (<code>)" via
-// Intl, falling back to the bare code when the runtime can't name it — so the
-// option list stays readable without a hardcoded language table, and follows
-// the operator's display language rather than always naming languages in
-// English.
-function languageLabel(lang: Lang, code: string): string {
-  try {
-    const name = new Intl.DisplayNames([lang], { type: "language" }).of(code);
-    return name && name !== code ? `${name} (${code})` : code;
-  } catch {
-    return code;
-  }
-}
 
 export function CampaignSettingsForm({
   campaign,
@@ -60,7 +45,7 @@ export function CampaignSettingsForm({
   onSaved: () => void;
   onCancel: () => void;
 }) {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [name, setName] = useState(campaign.name);
   const [system, setSystem] = useState(campaign.system);
@@ -75,31 +60,6 @@ export function CampaignSettingsForm({
   const [highlightConfirm, setHighlightConfirm] = useState(
     campaign.highlightConfirmWindows === 0 ? "" : String(campaign.highlightConfirmWindows),
   );
-
-  // The Campaign Language choices come solely from the registered encoders.
-  // retry:false so a failed load settles into the error hint at once rather than
-  // backing off first — the registry is a cheap in-process read, so a failure is
-  // a real signal to surface, not a transient to hammer through.
-  const langQ = useQuery(CampaignService.method.listSupportedLanguages, {}, { retry: false });
-  const supported = langQ.data?.languages ?? [];
-
-  const options = supported.map((code) => ({ value: code, label: languageLabel(lang, code) }));
-  // A stored language with no registered encoder still rides here as an extra
-  // option so the SELECT can't silently coerce it to a supported one on save.
-  // Only claim "(unsupported)" once the registry has actually LOADED — while the
-  // query is pending or has failed, supported is empty for lack of an answer, not
-  // because the stored language is unregistered, so mislabelling it would be a
-  // lie (and a false claim on every transient). Until then the stored value rides
-  // as a plain option so the SELECT still shows the current selection.
-  if (campaign.language && !supported.includes(campaign.language)) {
-    const registryKnows = langQ.isSuccess;
-    options.push({
-      value: campaign.language,
-      label: registryKnows
-        ? t("components.languageUnsupported", { label: languageLabel(lang, campaign.language) })
-        : languageLabel(lang, campaign.language),
-    });
-  }
 
   // listCampaigns is campaign-INVARIANT (lib/campaignCache.ts), so the sweep
   // skips it — a name/system edit must invalidate it explicitly or the switcher's
@@ -169,23 +129,7 @@ export function CampaignSettingsForm({
             <option key={s} value={s} />
           ))}
         </datalist>
-        <div className="gx-campaign-create__lang">
-          {/* "Spoken language" — the language the group PLAYS in (drives STT/TTS),
-              deliberately distinct from the web tier's display-language picker. */}
-          <Select
-            label={t("components.spokenLanguageLabel")}
-            options={options}
-            value={language}
-            onValueChange={setLanguage}
-            disabled={update.isPending}
-          />
-          <span className="gx-field__hint">{t("components.spokenLanguageHint")}</span>
-          {langQ.isError && (
-            <span className="gx-field__hint gx-field__hint--error" role="alert">
-              {t("components.couldntLoadLanguages", { message: errorMessage(langQ.error) })}
-            </span>
-          )}
-        </div>
+        <SpokenLanguageSelect value={language} onValueChange={setLanguage} disabled={update.isPending} />
       </div>
       {/* Highlight recording (the rollover tape, #412/ADR-0051) lives behind the
           advanced disclosure: consent-gated capture is a power-user opt-in most

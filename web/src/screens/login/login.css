@@ -41,6 +41,13 @@
   color: var(--text-subtle);
 }
 
+/* Onboarding: the one-sentence "what is a table" explainer under the lede. */
+.gx-login__explainer {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
 /* Operator-allowlist rejection banner (ADR-0041, #103). Inline + role=alert —
    the login screen is outside the Toaster host, so no sonner toast here. */
 .gx-login__error {
@@ -59,14 +66,6 @@
 .gx-login__field {
   width: 100%;
   text-align: left;
-}
-
-.gx-login__soon {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  margin-top: 4px;
 }
 
 /* The open-mode AUP/ToS acknowledgment (#518): signing up here is the moment a
