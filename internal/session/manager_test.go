@@ -33,7 +33,7 @@ type fakeStore struct {
 	depReads     int
 	reconciles   int
 	tick         int
-	endErr       error           // injected EndVoiceSession failure (#143 Defect A)
+	endErr       error           // injected CloseVoiceSession failure (#143 Defect A)
 	agents       []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
 	onListAgents func()          // mid-op hook: runs during ListAgents, no store lock held (#448)
 	caps         storage.SpendCaps
@@ -806,7 +806,7 @@ func (slowFinalizer) Finalize(ctx context.Context, _ uuid.UUID) (int, error) {
 }
 
 // TestSlowFinalizeStillEndsRow is #143 Defect B: a Finalize that exhausts the
-// whole end budget must NOT hand EndVoiceSession an already-expired context —
+// whole end budget must NOT hand CloseVoiceSession an already-expired context —
 // the end-write gets its own fresh deadline, so the row still lands 'ended'.
 func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	store := newFakeStore()
@@ -840,7 +840,7 @@ func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	}
 }
 
-// TestStopSurfacesEndWriteFailure is #143 Defect A: when the EndVoiceSession
+// TestStopSurfacesEndWriteFailure is #143 Defect A: when the CloseVoiceSession
 // write fails, Stop must NOT report plain success carrying the stale 'running'
 // row — the caller sees the failure (previously it was log-only and StopSession
 // answered success with status='running').

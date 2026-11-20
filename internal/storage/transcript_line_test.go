@@ -68,9 +68,9 @@ func TestTranscriptLinePersistence(t *testing.T) {
 	}
 
 	// End the session with the authoritative count; line_count matches the rows.
-	ended, err := st.EndVoiceSession(ctx, vs.ID, n)
+	ended, err := st.CloseVoiceSession(ctx, vs.ID, storage.VoiceSessionEnded, n, nil)
 	if err != nil {
-		t.Fatalf("EndVoiceSession: %v", err)
+		t.Fatalf("CloseVoiceSession(ended): %v", err)
 	}
 	if ended.LineCount != 2 {
 		t.Errorf("ended line_count = %d, want 2 (matches rows)", ended.LineCount)

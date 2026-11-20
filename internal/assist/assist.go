@@ -31,7 +31,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -253,12 +252,13 @@ func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llm
 	if err != nil {
 		return nil, nil, fmt.Errorf("assist: build llm provider: %w", err)
 	}
-	// The default path sends request model "" (the adapter fills the Groq
-	// default) but prices on a real model so (groq, "") never misses the price
-	// map (#272 review).
+	// A config without a model sends request model "" (the adapter fills its own
+	// default) but prices on that real model id, for every provider: (provider,
+	// "") misses the price map and is charged at the conservative fallback rate
+	// (#272 review).
 	priceModel := model
-	if providerID == "" {
-		priceModel = groq.DefaultModel
+	if priceModel == "" {
+		priceModel = llmbuild.DefaultModel(providerID)
 	}
 
 	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)

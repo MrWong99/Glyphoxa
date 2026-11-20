@@ -52,3 +52,18 @@ func (m *Manager) SetUsageFlushIntervalForTest(d time.Duration) {
 func (m *Manager) BaseFactsForTest() agent.FactsRecaller {
 	return m.base.Facts
 }
+
+// AnyLive reports whether ANY Voice Session is running in this Manager (a
+// session in its end window, as.ended, no longer counts) — the tests' wait
+// condition for a session to start or wind down. Test-only: production reads
+// per-Tenant liveness (Active) instead.
+func (m *Manager) AnyLive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, as := range m.active {
+		if !as.ended {
+			return true
+		}
+	}
+	return false
+}

@@ -187,18 +187,6 @@ func (f *fakeControlStore) markStaleHeartbeat(id uuid.UUID) {
 // methods that touch the shared intent map.
 func (f *fakeControlStore) intents_mu() *sync.Mutex { return &f.fakeIntentStore.mu }
 
-func (f *fakeControlStore) AnyLiveVoiceSessionIntent(_ context.Context) (bool, error) {
-	f.fakeIntentStore.mu.Lock()
-	defer f.fakeIntentStore.mu.Unlock()
-	for _, i := range f.intents {
-		switch i.Status {
-		case storage.VoiceIntentPending, storage.VoiceIntentClaimed, storage.VoiceIntentLive:
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func newIntentControl(t *testing.T, store session.IntentControlStore) *session.IntentControl {
 	t.Helper()
 	return session.NewIntentControl(store, slog.New(slog.DiscardHandler),

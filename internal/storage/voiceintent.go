@@ -341,8 +341,8 @@ func (s *Store) IsCampaignLiveIntent(ctx context.Context, campaignID uuid.UUID) 
 }
 
 // AnyLiveVoiceSessionIntent reports whether ANY non-terminal intent exists — the
-// split-mode health signal (#491, the claim-plane sibling of Manager.AnyLive) the
-// web tier reads for the Discord health short-circuit.
+// signal the -mode all mixed-deployment boot guard reads (#483 M3): a claim-plane
+// fleet is driving this database.
 func (s *Store) AnyLiveVoiceSessionIntent(ctx context.Context) (bool, error) {
 	var one int
 	err := s.db.QueryRow(ctx,

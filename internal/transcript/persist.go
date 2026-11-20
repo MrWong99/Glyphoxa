@@ -104,7 +104,7 @@ func (r *Relay) writeLine(op *lineOp) {
 
 // Finalize drains the writer queue for a session via a flush barrier and returns
 // the authoritative persisted line_count (#74). The Manager calls it on Stop
-// BEFORE EndVoiceSession, so the recorded count matches the persisted rows. The
+// BEFORE CloseVoiceSession, so the recorded count matches the persisted rows. The
 // barrier rides the SAME queue as the line tees, so FIFO ordering guarantees every
 // line emitted before Finalize has been written when the count runs. Persistence
 // disabled (no store) returns 0.

@@ -168,7 +168,7 @@ type AllowanceChecker interface {
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
 // returns the authoritative persisted line_count (#74, ADR-0040). The Manager
-// calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
+// calls it on Stop / loop exit BEFORE CloseVoiceSession so the recorded count
 // matches the persisted rows. *transcript.Relay satisfies it; defined here (not
 // imported) so the manager does NOT depend on the relay — the relay already
 // resolves each event's session via its Sessions seam (a [Registry], #487), and
@@ -1361,20 +1361,6 @@ func (m *Manager) HasCapacity() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.active)+len(m.reservations) < m.maxSessions
-}
-
-// AnyLive reports whether ANY Voice Session is currently running in this process
-// (#150, #488): the tenant-agnostic health signal the Discord probe reads. A
-// session in its end window (as.ended) no longer counts. Correct at any cap.
-func (m *Manager) AnyLive() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, as := range m.active {
-		if !as.ended {
-			return true
-		}
-	}
-	return false
 }
 
 // Lookup returns the live Voice Session with id sessionID and true, scanning every
