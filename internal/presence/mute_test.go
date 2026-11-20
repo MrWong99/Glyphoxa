@@ -187,7 +187,7 @@ func TestMuteCommand_LocalPathNoDefer(t *testing.T) {
 	if resp.deferred != nil {
 		t.Fatal("local path Deferred, want the pre-#503 immediate reply (AC3)")
 	}
-	if len(resp.replies) != 1 || resp.replies[0].content != "Bart is muted." || !resp.replies[0].ephemeral {
+	if len(resp.replies) != 1 || resp.replies[0].content != muteConfirmation("Bart") || !resp.replies[0].ephemeral {
 		t.Fatalf("local reply = %+v, want the ephemeral 'Bart is muted.'", resp.replies)
 	}
 	if len(pool.agentCalls) != 0 {
@@ -269,7 +269,7 @@ func TestMuteAllCommand_SessionOnAnotherWorker(t *testing.T) {
 	if len(mgr.allCalls) != 0 {
 		t.Fatalf("cross-pod muteall drove the LOCAL manager: %v", mgr.allCalls)
 	}
-	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Muted all 2 Agent voices.") {
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Muted all 2 NPC voices.") {
 		t.Fatalf("confirming followup = %+v, want 'Muted all 2 Agent voices.'", resp.followups)
 	}
 }
@@ -298,7 +298,7 @@ func TestMuteCommand_PoolIdleKeepsPlainGuard(t *testing.T) {
 	if err := cmd.Handle(context.Background(), muteIC(resp, "Bart")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.replies) != 1 || resp.replies[0].content != "No Voice Session is active." {
+	if len(resp.replies) != 1 || resp.replies[0].content != noSessionReply {
 		t.Fatalf("idle-pool reply = %+v, want the plain no-session guard", resp.replies)
 	}
 }

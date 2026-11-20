@@ -3,7 +3,6 @@ package presence
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
@@ -53,7 +52,7 @@ type SayControl interface {
 func SayCommand(mgr SayControl, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "say",
-		Description: "Make an NPC speak the given text in the active Voice Session.",
+		Description: "Make an NPC say the given text in the running voice session.",
 		GMOnly:      true,
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
@@ -68,33 +67,7 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolControl) Command {
 				Autocomplete: true,
 			},
 		},
-		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			vs, active, err := mgr.Active(ctx, ac.TenantID())
-			if err != nil || !active {
-				// No LOCAL session: fall back to the pool's Active (#503) so the roster
-				// still resolves for a session hosted by another worker.
-				if vs, active = poolActive(ctx, pool, ac.TenantID()); !active {
-					return nil, nil // no session anywhere: nothing to puppet, offer nothing
-				}
-			}
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return nil, err
-			}
-			_, focused := ac.Focused()
-			prefix := strings.ToLower(strings.TrimSpace(focused))
-			choices := make([]discord.AutocompleteChoice, 0, len(roster))
-			for _, a := range voiced(roster) {
-				if prefix != "" && !strings.HasPrefix(strings.ToLower(a.Name), prefix) {
-					continue
-				}
-				choices = append(choices, discord.AutocompleteChoiceString{Name: a.Name, Value: a.ID.String()})
-				if len(choices) >= maxAutocompleteChoices {
-					break
-				}
-			}
-			return choices, nil
-		},
+		Autocomplete: npcAutocomplete(mgr, agents, pool),
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
@@ -105,28 +78,31 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolControl) Command {
 				return handleCrossPodSay(ctx, ic, agents, pool)
 			}
 			text, _ := ic.String("text")
-			input, _ := ic.String("as")
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return fmt.Errorf("presence: list agents for say: %w", err) // unexpected → generic reply
+			agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "as")
+			if !ok {
+				return err
 			}
-			agent, found, ambiguous := resolveAgent(voiced(roster), input)
-			if ambiguous {
-				return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-			}
-			if !found {
-				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+			if !hasVoice(agent) {
+				return ic.ReplyEphemeral(voicelessReply(agent.Name))
 			}
 			if err := mgr.SayAs(ctx, ic.TenantID(), agent.ID.String(), text); err != nil {
-				// The expected failures are a session ending between the snapshot and the
-				// publish, or the resolved Agent no longer being in the (now-different)
-				// active Campaign; both surface as the same ephemeral guard rather than a
-				// generic error, so a racing Stop / session swap reads cleanly (mirrors mute).
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return replyLocalControlError(ic, "say", err)
 			}
 			return ic.ReplyEphemeral(fmt.Sprintf("Speaking as %s.", agent.Name))
 		},
 	}
+}
+
+// hasVoice reports whether an NPC can be heard: an empty VoiceID never reaches
+// TTS, so a /say for it would be silently dropped.
+func hasVoice(a storage.Agent) bool {
+	v, err := storage.VoiceFromJSON(a.Voice)
+	return err == nil && v.VoiceID != ""
+}
+
+// voicelessReply answers a /say for an NPC with no voice.
+func voicelessReply(name string) string {
+	return fmt.Sprintf("%s has no voice yet. Pick one in the Cast tab of the web app, then try again.", name)
 }
 
 // handleCrossPodSay is /say's cross-pod branch (#503) — the say sibling of
@@ -135,23 +111,18 @@ func SayCommand(mgr SayControl, agents AgentLister, pool PoolControl) Command {
 func handleCrossPodSay(ctx context.Context, ic *Interaction, agents AgentLister, pool PoolControl) error {
 	vs, live := poolActive(ctx, pool, ic.TenantID())
 	if !live {
-		return ic.ReplyEphemeral("No Voice Session is active.")
+		return ic.ReplyEphemeral(noSessionReply)
 	}
 	if err := ic.Defer(true); err != nil {
 		return fmt.Errorf("presence: defer cross-pod say: %w", err)
 	}
 	text, _ := ic.String("text")
-	input, _ := ic.String("as")
-	roster, err := agents.ListAgents(ctx, vs.CampaignID)
-	if err != nil {
-		return fmt.Errorf("presence: list agents for cross-pod say: %w", err) // generic reply via the registry
+	agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "as")
+	if !ok {
+		return err
 	}
-	agent, found, ambiguous := resolveAgent(voiced(roster), input)
-	if ambiguous {
-		return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-	}
-	if !found {
-		return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+	if !hasVoice(agent) {
+		return ic.ReplyEphemeral(voicelessReply(agent.Name))
 	}
 	err = pool.SayAs(ctx, ic.TenantID(), agent.ID.String(), text)
 	return replyControlOutcome(ic, err, fmt.Sprintf("Speaking as %s.", agent.Name))
