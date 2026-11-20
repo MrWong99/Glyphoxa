@@ -118,7 +118,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Subscription** | A Tenant's binding to a Plan, snapshotting the Plan's slug and monthly price at bind time; at most one active per Tenant, with ended rows as history. The revenue record. | Membership, License |
 | **Key Source** | Where a Plan's provider keys come from: `byok` (the Tenant's own keys, ADR-0004) or `platform` (the deployment's env keys, included in the price). | Key mode, Pooling |
 | **Platform Keys** | The deployment-operated provider credentials (env `*_API_KEY`) serving `platform`-Plan Tenants via the existing env-fallback path (ADR-0039/0054). | Pooled keys, Shared keys, Operator keys (prose ok) |
-| **Usage Ledger** | The durable per-Tenant record of metered provider usage: daily buckets per (component, provider, model) with quantities and a priced ESTIMATE, flushed at Voice Session end (`usage_ledger`). The cost side of billing; never a gate, never billing truth. The `open`-mode monthly allowance gate (ADR-0055) is a separate spend-meter-style mechanism that READS it. | Billing log, Meter (the in-memory ADR-0046 accumulator), Invoice |
+| **Usage Ledger** | The durable per-Tenant record of metered provider usage: daily buckets per (component, provider, model) with quantities and a priced ESTIMATE, flushed during and at the end of a Voice Session and at the end of every off-session paid call (`usage_ledger`). The cost side of billing; never a gate, never billing truth. The `open`-mode monthly allowance gate (ADR-0055) is a separate spend-meter-style mechanism that READS it. | Billing log, Meter (the in-memory ADR-0046 accumulator), Invoice |
 
 ## Process & Deployment
 

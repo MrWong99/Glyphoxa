@@ -179,3 +179,5 @@ undecided and gets its own ADR; the design note scopes both shapes.
   callback is specified in ADR-0056).
 - **ADR-0034** — the Helm chart grows the Admission Mode value and relaxes the
   `operator-ids` requirement for `open` mode only.
+
+*Amended by ADR-0054 (2026-11-20, #658): the "known undercount" above is closed. Off-session paid calls (recap, assist, generated maps and portraits, Highlight image and sound, voice preview, planning chat) are ledgered and checked against gate (b) through one seam, `billing.OffSession`; see the amendment in ADR-0054 for the rule and for what a background job does on an exhausted allowance.*

@@ -339,6 +339,28 @@ describe("generated maps", () => {
     expect(createMap).not.toHaveBeenCalled();
   });
 
+  it("a spent plan allowance shows the app's own sentence, not the server's", async () => {
+    const { createMap } = renderGenerate({
+      // The refusal exactly as the server sends it (allowance_error.go):
+      // ResourceExhausted, an English message, and the reason the web keys on.
+      // The reason has to survive the wire for the translated sentence to show.
+      generateErr: new ConnectError("SERVER ENGLISH — must not be shown", Code.ResourceExhausted, {
+        "Glyphoxa-Error-Reason": "allowance_exhausted",
+      }),
+    });
+    await openGenerateMode();
+    fireEvent.change(screen.getByLabelText(/What should the map show/), {
+      target: { value: "the harbour" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Generate$/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/This month's included usage is used up/);
+    expect(alert).not.toHaveTextContent(/SERVER ENGLISH|resource_exhausted/);
+    expect(screen.queryByAltText("Generated map draft")).toBeNull();
+    expect(createMap).not.toHaveBeenCalled();
+  });
+
   it("suggested pins mark the tray and place nothing", async () => {
     const { suggestMapPins } = renderGenerate({
       suggestions: [{ nodeId: "n-inn", name: "The Rusty Anchor" }],

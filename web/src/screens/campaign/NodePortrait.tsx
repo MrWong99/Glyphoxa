@@ -6,7 +6,7 @@ import { ImagePlus, Sparkles, Trash2 } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
-import { errorMessage } from "@/lib/connectError";
+import { apiErrorMessage, errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
@@ -72,7 +72,7 @@ export function NodePortrait({ node }: { node: Node }) {
       draftURL.current = url;
       setDraft({ bytes: res.imageBytes, contentType: res.contentType, url });
     } catch (e) {
-      setError(t("knowledge.generatePortraitError", { message: errorMessage(e) }));
+      setError(t("knowledge.generatePortraitError", { message: apiErrorMessage(e, t) }));
     }
   };
 

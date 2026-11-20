@@ -171,9 +171,10 @@ func EstimateSoundUSD(provider observe.Provider, model string, d time.Duration) 
 // embeddings provider — the campaign search query-embed pricing (#591). It is a
 // direct estimate rather than a Meter capture point: the ADR-0045 usage trio
 // (LLM/TTS/STT) carries no embeddings kind, ADR-0046 caps are live-session-only
-// (a palette query is never cap-gated), and the off-session ledger flush is the
-// #592 ADR's open decision — so the caller logs this figure, PriceOnly-style,
-// and nothing else consumes it yet. An unknown provider uses the conservative
+// (a palette query is never cap-gated), and embeddings run on the deployment's
+// local Ollama rather than a paid key — so the caller logs this figure and
+// nothing else consumes it; it is deliberately outside the off-session
+// metering seam (billing.OffSession), which exists for paid provider calls. An unknown provider uses the conservative
 // default (over-estimates, mirroring the other price fallbacks).
 func EstimateEmbeddingUSD(provider observe.Provider, tokens int) float64 {
 	p, ok := embeddingPricePerMTok[provider]

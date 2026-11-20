@@ -1155,6 +1155,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// and linked Knowledge Graph entries from a GM prompt — strictly on button
 	// press, preview-first. Same posture as the recap engine: BYOK key via
 	// cipher, env fallback gated by keyEnt, usage metered but never cap-gated.
+	//
 	// Every off-session paid call in this process — assist, generated maps and
 	// portraits, Highlight image/sound enrichment, voice previews, the planning
 	// chat — is gated and ledgered through this ONE seam (#658, ADR-0054

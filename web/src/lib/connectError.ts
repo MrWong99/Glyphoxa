@@ -1,5 +1,7 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 
+import type { TFunc } from "@/i18n";
+
 // Connect error-code predicates — the one home for `ConnectError.from(...).code`
 // checks so screens don't scatter ad-hoc comparisons. ConnectError.from
 // normalizes any thrown value; a non-Connect error resolves to Code.Unknown, so
@@ -32,6 +34,32 @@ export function failedPreconditionMessage(error: unknown): string | null {
 export function errorMessage(err: unknown): string {
   if (err instanceof ConnectError) return err.rawMessage;
   return err instanceof Error ? err.message : String(err);
+}
+
+// ERROR_REASON_HEADER carries a stable, machine-readable refusal reason in a
+// Connect error's metadata (internal/rpc/allowance_error.go). It exists for
+// refusals whose code alone is ambiguous: ResourceExhausted is the plan
+// allowance, a provider's own 429 AND the concurrent-session cap, and each
+// needs a different sentence.
+const ERROR_REASON_HEADER = "Glyphoxa-Error-Reason";
+
+// isAllowanceExhausted reports the server's "this month's plan allowance is
+// spent" refusal (ADR-0055 gate (b)), which every AI feature that spends
+// provider money can return (#658). It matches the reason, never the English
+// message, so the server can reword without breaking this.
+export function isAllowanceExhausted(error: unknown): boolean {
+  const ce = ConnectError.from(error);
+  return ce.code === Code.ResourceExhausted && ce.metadata.get(ERROR_REASON_HEADER) === "allowance_exhausted";
+}
+
+// apiErrorMessage is errorMessage for the surfaces in front of a paid AI call:
+// a refusal the server marks with a known reason is shown as OUR translated
+// sentence (the server's message is English only), anything else as the
+// server's own reason. Use it wherever a generate / recap / preview failure is
+// rendered, so every one of them says the same thing in the GM's language.
+export function apiErrorMessage(err: unknown, t: TFunc): string {
+  if (isAllowanceExhausted(err)) return t("common.errAllowance");
+  return errorMessage(err);
 }
 
 // isNotFound reports the server's CodeNotFound. The campaign surfaces use it as

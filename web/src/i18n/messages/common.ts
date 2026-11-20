@@ -19,6 +19,10 @@ export const en = {
   "common.discardChangesTitle": "Discard unsaved changes?",
   "common.discardChangesDesc": "You have edits that haven't been saved yet. If you continue, they are lost.",
   "common.discardChangesConfirm": "Discard changes",
+  // The plan-allowance refusal (ADR-0055), shared by every AI feature that
+  // spends provider money: drafting, maps, portraits, recaps, previews, sound.
+  "common.errAllowance":
+    "This month's included usage is used up. AI generation is paused until it resets next month.",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -37,4 +41,6 @@ export const de: Record<keyof typeof en, string> = {
   "common.discardChangesTitle": "Ungespeicherte Änderungen verwerfen?",
   "common.discardChangesDesc": "Du hast Änderungen, die noch nicht gespeichert sind. Wenn du fortfährst, gehen sie verloren.",
   "common.discardChangesConfirm": "Änderungen verwerfen",
+  "common.errAllowance":
+    "Das inklusive Kontingent für diesen Monat ist aufgebraucht. KI-Generierung pausiert, bis es nächsten Monat zurückgesetzt wird.",
 };
