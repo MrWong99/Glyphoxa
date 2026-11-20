@@ -11,7 +11,7 @@ import (
 
 // TestMigration00058_ClearsRetiredLlamaModel pins the data repair for Groq's
 // retirement of llama-3.3-70b-versatile: a Provider Config still pinning that id
-// is cleared to '' (the adapter default), while any other saved model is left
+// is cleared to ” (the adapter default), while any other saved model is left
 // alone. Applies the schema up to just before 00058, seeds raw rows, then
 // applies 00058 (the 00016 drift-repair test pattern).
 func TestMigration00058_ClearsRetiredLlamaModel(t *testing.T) {
