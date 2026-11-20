@@ -16,7 +16,9 @@ package silero
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sync"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
@@ -25,10 +27,6 @@ import (
 
 // Compile-time interface assertion.
 var _ vad.Engine = (*Engine)(nil)
-
-// stateSize is the flattened element count of the LSTM state tensor
-// with shape [2, 1, 128].
-const stateSize = 2 * 1 * 128
 
 // supportedSampleRates lists the audio sample rates accepted by Silero VAD v5.
 var supportedSampleRates = map[int]struct{}{
@@ -58,9 +56,10 @@ var parsedModel = sync.OnceValues(func() (*onnxModel, error) {
 // The interface exists so tests can inject a mock implementation and observe
 // the session state machine in isolation.
 type inferencer interface {
-	// infer takes audio samples and LSTM state, returns speech probability and
-	// the updated state for the next frame.
-	infer(samples []float32, sr int64, state []float32) (prob float32, stateN []float32, err error)
+	// infer runs one frame of audio samples and returns its speech
+	// probability. The recurrent LSTM state and audio context live inside the
+	// inferencer and carry over to the next call.
+	infer(samples []float32) (prob float32, err error)
 	// reset clears the inferencer's recurrent state (LSTM state and audio
 	// context) so the next frame starts from a clean slate.
 	reset()
@@ -112,13 +111,6 @@ func New(opts ...Option) (*Engine, error) {
 	return e, nil
 }
 
-// Close releases engine resources. The pure-Go engine holds none — the parsed
-// model is a process-wide read-only singleton — so Close is a no-op kept for
-// interface stability with earlier ONNX-Runtime-backed revisions.
-func (e *Engine) Close() error {
-	return nil
-}
-
 // NewSession creates a new VAD session with the given configuration. The session
 // is immediately ready to accept audio frames via ProcessFrame.
 //
@@ -152,7 +144,7 @@ func validateConfig(cfg vad.Config) error {
 			return fmt.Errorf(
 				"silero: chunk size %d samples (SampleRate=%d, FrameSizeMs=%d) is not supported; "+
 					"valid sizes for %d Hz: %v",
-				chunkSize, cfg.SampleRate, cfg.FrameSizeMs, cfg.SampleRate, allowed)
+				chunkSize, cfg.SampleRate, cfg.FrameSizeMs, cfg.SampleRate, slices.Sorted(maps.Keys(allowed)))
 		}
 	}
 	if cfg.SpeechThreshold < 0 || cfg.SpeechThreshold > 1 {
@@ -206,12 +198,11 @@ func newGoInferencer(sampleRate, chunkSize int) (*goInferencer, error) {
 }
 
 // infer runs a single audio frame through the model. The samples slice must
-// contain exactly chunkSize float32 values. The state and stateN parameters
-// are unused — recurrent state is managed internally — and kept for interface
-// compatibility with the mock inferencer.
-func (g *goInferencer) infer(samples []float32, _ int64, _ []float32) (float32, []float32, error) {
+// contain exactly chunkSize float32 values. The compiled program carries the
+// LSTM state from frame to frame.
+func (g *goInferencer) infer(samples []float32) (float32, error) {
 	if len(samples) != g.chunkSize {
-		return 0, nil, fmt.Errorf("frame has %d samples, want %d", len(samples), g.chunkSize)
+		return 0, fmt.Errorf("frame has %d samples, want %d", len(samples), g.chunkSize)
 	}
 
 	// Fill the model input: [context | new samples].
@@ -224,7 +215,7 @@ func (g *goInferencer) infer(samples []float32, _ int64, _ []float32) (float32, 
 	// Save the last contextSize samples for the next frame.
 	copy(g.context, in[len(in)-len(g.context):])
 
-	return g.prog.output.f[0], nil, nil
+	return g.prog.output.f[0], nil
 }
 
 // reset clears the LSTM state and the inter-frame audio context.
@@ -255,9 +246,6 @@ type session struct {
 	minSpeechFrames  int
 	minSilenceFrames int
 
-	// LSTM state, fed back into the model each frame. Shape [2, 1, 128].
-	lstmState []float32
-
 	// State machine.
 	state        vadState
 	speechCount  int // consecutive frames above SpeechThreshold
@@ -274,7 +262,6 @@ func newSession(cfg vad.Config, inf inferencer, minSpeech, minSilence int) *sess
 		cfg:              cfg,
 		minSpeechFrames:  minSpeech,
 		minSilenceFrames: minSilence,
-		lstmState:        make([]float32, stateSize),
 	}
 }
 
@@ -299,15 +286,9 @@ func (s *session) ProcessFrame(frame audio.Frame) (vad.VADEvent, error) {
 
 	samples := samplesToFloat32(frame.Samples())
 
-	prob, stateN, err := s.inf.infer(samples, int64(s.cfg.SampleRate), s.lstmState)
+	prob, err := s.inf.infer(samples)
 	if err != nil {
 		return vad.VADEvent{}, fmt.Errorf("silero: inference: %w", err)
-	}
-
-	// The real goInferencer manages state internally and returns nil.
-	// The mock inferencer returns a non-nil stateN for test verification.
-	if stateN != nil {
-		s.lstmState = stateN
 	}
 
 	return s.step(float64(prob)), nil
@@ -370,9 +351,6 @@ func (s *session) Reset() {
 	defer s.mu.Unlock()
 
 	s.inf.reset()
-	for i := range s.lstmState {
-		s.lstmState[i] = 0
-	}
 	s.state = stateSilence
 	s.speechCount = 0
 	s.silenceCount = 0

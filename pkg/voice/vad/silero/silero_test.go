@@ -2,6 +2,7 @@ package silero
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,26 +12,13 @@ import (
 
 // ─── Mock inferencer ─────────────────────────────────────────────────────────
 
-// inferCall records a single call to mockInferencer.infer.
-type inferCall struct {
-	samples []float32
-	sr      int64
-	state   []float32
-}
-
 // mockInferencer implements inferencer for unit tests. It returns a fixed
-// probability and identifiable LSTM state so tests can verify state passthrough.
+// probability so tests can drive the session state machine in isolation.
 type mockInferencer struct {
 	mu sync.Mutex
 
 	// prob is the speech probability returned on every infer call.
 	prob float32
-
-	// stateVal is the element value used to fill the returned stateN slice.
-	stateVal float32
-
-	// calls records every infer invocation in order.
-	calls []inferCall
 
 	closed   bool
 	closeErr error
@@ -39,26 +27,10 @@ type mockInferencer struct {
 	resets int
 }
 
-func (m *mockInferencer) infer(samples []float32, sr int64, state []float32) (float32, []float32, error) {
+func (m *mockInferencer) infer([]float32) (float32, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// Record a deep copy so callers can compare per-call state independently.
-	call := inferCall{
-		samples: make([]float32, len(samples)),
-		sr:      sr,
-		state:   make([]float32, len(state)),
-	}
-	copy(call.samples, samples)
-	copy(call.state, state)
-	m.calls = append(m.calls, call)
-
-	// Return a fresh stateN slice filled with the configured value.
-	stateN := make([]float32, stateSize)
-	for i := range stateN {
-		stateN[i] = m.stateVal
-	}
-	return m.prob, stateN, nil
+	return m.prob, nil
 }
 
 func (m *mockInferencer) close() error {
@@ -72,12 +44,6 @@ func (m *mockInferencer) reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resets++
-}
-
-func (m *mockInferencer) callAt(i int) inferCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls[i]
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -284,6 +250,19 @@ func TestValidateConfig_SpeechThresholdOutOfRange(t *testing.T) {
 	}
 }
 
+// The chunk-size error lists the valid sizes as numbers an operator can act
+// on, not Go's map[512:{}] rendering of the internal lookup set.
+func TestValidateConfig_ChunkSizeErrorListsSizes(t *testing.T) {
+	t.Parallel()
+	err := validateConfig(vad.Config{SampleRate: 16000, FrameSizeMs: 30, SpeechThreshold: 0.5, SilenceThreshold: 0.3})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "valid sizes for 16000 Hz: [512]") || strings.Contains(msg, "map[") {
+		t.Errorf("error = %q, want it to list valid sizes as [512]", msg)
+	}
+}
+
 // ─── ProcessFrame edge cases ────────────────────────────────────────────
 
 func TestProcessFrame_FrameConfigMismatch(t *testing.T) {
@@ -422,9 +401,6 @@ func TestNewSession_InitialState(t *testing.T) {
 	}
 	if sess.minSilenceFrames != 10 {
 		t.Errorf("minSilenceFrames = %d, want 10", sess.minSilenceFrames)
-	}
-	if len(sess.lstmState) != stateSize {
-		t.Errorf("lstmState len = %d, want %d", len(sess.lstmState), stateSize)
 	}
 	if sess.closed {
 		t.Error("session should not be closed initially")
@@ -797,49 +773,12 @@ func TestProcessFrame_MinSilenceOne_NoProvisionalStop(t *testing.T) {
 	}
 }
 
-func TestProcessFrame_LSTMStatePassthrough(t *testing.T) {
-	t.Parallel()
-
-	cfg := validConfig()
-	// The mock returns stateN filled with 0.42.
-	m := &mockInferencer{
-		prob:     0.1, // below threshold — stays silent
-		stateVal: 0.42,
-	}
-	sess := makeSession(t, cfg, m, 3, 15)
-	t.Cleanup(func() { _ = sess.Close() })
-
-	frame := silenceFrame(t, cfg)
-
-	// First frame: state should be all zeros (initial state).
-	if _, err := sess.ProcessFrame(frame); err != nil {
-		t.Fatalf("frame 1: %v", err)
-	}
-	call0 := m.callAt(0)
-	for i, v := range call0.state {
-		if v != 0 {
-			t.Errorf("frame 1: state[%d] = %v, want 0 (initial state)", i, v)
-		}
-	}
-
-	// Second frame: state must equal the stateN returned by the first call.
-	if _, err := sess.ProcessFrame(frame); err != nil {
-		t.Fatalf("frame 2: %v", err)
-	}
-	call1 := m.callAt(1)
-	for i, v := range call1.state {
-		if v != m.stateVal {
-			t.Errorf("frame 2: state[%d] = %v, want %v (stateN from frame 1)", i, v, m.stateVal)
-		}
-	}
-}
-
 func TestReset_ClearsState(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfig()
 	const minSpeech = 2
-	m := &mockInferencer{prob: 0.9, stateVal: 0.5}
+	m := &mockInferencer{prob: 0.9}
 	sess := makeSession(t, cfg, m, minSpeech, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
@@ -855,11 +794,6 @@ func TestReset_ClearsState(t *testing.T) {
 	if sess.state != stateSpeaking {
 		t.Fatalf("expected stateSpeaking before reset, got %v", sess.state)
 	}
-	// LSTM state should be non-zero after frames.
-	if sess.lstmState[0] == 0 {
-		t.Error("expected non-zero lstmState before reset")
-	}
-
 	// Reset.
 	sess.Reset()
 
@@ -874,15 +808,8 @@ func TestReset_ClearsState(t *testing.T) {
 		t.Errorf("silenceCount after Reset: %d, want 0", sess.silenceCount)
 	}
 
-	// LSTM state must be zeroed.
-	for i, v := range sess.lstmState {
-		if v != 0 {
-			t.Errorf("lstmState[%d] after Reset: %v, want 0", i, v)
-		}
-	}
-
-	// The inferencer's own recurrent state must have been reset too — the real
-	// engine keeps LSTM state and audio context inside the inferencer.
+	// The inferencer's recurrent state must have been reset — the engine keeps
+	// LSTM state and audio context inside the inferencer.
 	if m.resets != 1 {
 		t.Errorf("inferencer resets after Reset: %d, want 1", m.resets)
 	}

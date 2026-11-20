@@ -125,8 +125,8 @@ func compileProgram(model *onnxModel, sampleRate, inputLen int) (*program, error
 	if output.elems() != 1 {
 		return nil, fmt.Errorf("silero graph: probability output has shape %v, want a single element", output.shape)
 	}
-	if stateN.elems() != stateSize {
-		return nil, fmt.Errorf("silero graph: stateN has shape %v, want %d elements", stateN.shape, stateSize)
+	if stateN.elems() != state.elems() {
+		return nil, fmt.Errorf("silero graph: stateN has shape %v, want %d elements (the state input's)", stateN.shape, state.elems())
 	}
 
 	return &program{input: input, state: state, output: output, stateN: stateN, steps: c.steps}, nil

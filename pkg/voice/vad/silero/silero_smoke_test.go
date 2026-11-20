@@ -46,3 +46,33 @@ func TestEngine_SmokeTest(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkProcessFrame measures one 32 ms / 16 kHz frame through the real
+// pure-Go forward pass plus the session state machine — the per-frame cost
+// every live speaker pays.
+func BenchmarkProcessFrame(b *testing.B) {
+	eng, err := New()
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	cfg := vad.Config{SampleRate: 16000, FrameSizeMs: 32, SpeechThreshold: 0.5, SilenceThreshold: 0.35}
+	sess, err := eng.NewSession(cfg)
+	if err != nil {
+		b.Fatalf("NewSession: %v", err)
+	}
+	b.Cleanup(func() { _ = sess.Close() })
+	pcm := make([]int16, 512)
+	for i := range pcm {
+		pcm[i] = int16((i * 7919) % 2000) // deterministic non-silent signal
+	}
+	frame, err := audio.NewFrame(pcm, cfg.SampleRate, cfg.FrameSizeMs)
+	if err != nil {
+		b.Fatalf("audio.NewFrame: %v", err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sess.ProcessFrame(frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
