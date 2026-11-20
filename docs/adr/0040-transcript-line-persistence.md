@@ -98,3 +98,15 @@ undocumented divergence with the Chunker (which already purged undelivered
 sentences) and keeps the Transcript doctrine singular across both grains:
 **the Transcript records delivered speech, at sentence grain** (sentence-grain
 rounding on barge per #401 stays accepted).
+
+**Amendment (2026-11-20, #641 — sentence grain inside a delivered line):** the
+#437 reconcile applied only to whole lines, so a line that delivered at least
+one sentence kept the text of its never-delivered ones (a start-errored or
+pre-first-audio-failed opener, a tail left pending at a `tts_error` /
+`provider_error` / `completed` end or at session end). The Relay now strips a
+sentence that never reached `FirstAudio` back out of its line — when the next
+sentence is dispatched, on `TTSStreamFailed`, at the turn's own terminal, and
+in the Finalize sweep — and re-UPSERTs the corrected row. A turn CUT by a
+barge, supersede or mute keeps its in-flight sentence's text (its
+`FirstAudio` can race the cut; #401 rounding stays accepted). Every turn now
+ends with exactly one `TurnEnded`, a clean one with reason `completed`.
