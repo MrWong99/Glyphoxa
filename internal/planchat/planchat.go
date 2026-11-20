@@ -49,9 +49,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -254,7 +251,7 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	// model id — the (groq, "") price-map miss the recap engine also guards
 	// against (#272 review).
 	if model == "" {
-		model = defaultModelFor(providerID)
+		model = llmbuild.DefaultModel(providerID)
 	}
 
 	history, err := e.store.ListPlanningMessages(ctx, campaign.ID, threadID)
@@ -374,19 +371,6 @@ func (e *Engine) resolveChatLLMConfig(ctx context.Context, tenantID uuid.UUID, b
 		}
 	}
 	return nil, storage.ComponentChatLLM, nil // env default (Groq, ADR-0036)
-}
-
-// defaultModelFor names the provider's default model so metering never prices
-// on an empty model id. Mirrors llmbuild.New's provider set.
-func defaultModelFor(providerID string) string {
-	switch providerID {
-	case anthropic.ProviderID:
-		return anthropic.DefaultModel
-	case gemini.ProviderID:
-		return gemini.DefaultModel
-	default: // "" and groq
-		return groq.DefaultModel
-	}
 }
 
 // autoTitle derives an unnamed thread's title from its first user message.

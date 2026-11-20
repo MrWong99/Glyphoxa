@@ -31,6 +31,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -715,10 +717,13 @@ func TestLoadSeededNPCs_ModelFallsBackToTenantConfig(t *testing.T) {
 	}
 }
 
-// TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel pins the empty-model edge: a
-// campaign with no LLM provider_config at all leaves spec.model == "" so the
-// adapter default applies (#227 AC2, no defaulting duplicated in wirenpc).
-func TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel(t *testing.T) {
+// TestLoadSeededNPCs_NoLLMConfigYieldsProviderDefaultModel pins the empty-model
+// edge: a campaign with no LLM provider_config at all (every platform-key trial
+// tenant) resolves spec.model to the session provider's default, for the Butler
+// too. The model the engine requests is the model the spend meter prices, so it
+// must be a real id: "" misses the price map and is charged at the conservative
+// fallback, ~30x the real rate.
+func TestLoadSeededNPCs_NoLLMConfigYieldsProviderDefaultModel(t *testing.T) {
 	pool := startDB(t)
 	ctx := context.Background()
 	st := storage.New(pool)
@@ -754,8 +759,25 @@ func TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel(t *testing.T) {
 	if len(specs) != 2 {
 		t.Fatalf("loaded %d specs, want 2 (Character + auto-Butler, #299)", len(specs))
 	}
-	if specs[0].model != "" {
-		t.Errorf("spec.model = %q, want empty (no config → adapter default)", specs[0].model)
+	for _, spec := range specs {
+		if spec.model != groq.DefaultModel {
+			t.Errorf("%s spec.model = %q, want %q (no config: the Groq default, named)", spec.name, spec.model, groq.DefaultModel)
+		}
+	}
+}
+
+// TestDefaultEmptyModels_FollowsSessionProvider pins that the default filled
+// into a model-less spec is the SESSION provider's (one adapter backs the whole
+// Roster), never a hardwired Groq id, and that an explicit model is untouched.
+func TestDefaultEmptyModels_FollowsSessionProvider(t *testing.T) {
+	t.Parallel()
+	specs := []npcSpec{{name: "a"}, {name: "b", model: "explicit"}}
+	defaultEmptyModels(specs, anthropic.ProviderID)
+	if specs[0].model != anthropic.DefaultModel {
+		t.Errorf("empty model = %q, want %q", specs[0].model, anthropic.DefaultModel)
+	}
+	if specs[1].model != "explicit" {
+		t.Errorf("explicit model = %q, want it untouched", specs[1].model)
 	}
 }
 

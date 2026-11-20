@@ -120,6 +120,27 @@ func TestMeteringDefaultPathPricesGroqModel(t *testing.T) {
 	}
 }
 
+// TestMeteringModellessConfigPricesProviderDefault: a saved LLM config that names
+// a provider but no model prices on THAT provider's default model, not on "" (a
+// price-map miss charged at the conservative fallback).
+func TestMeteringModellessConfigPricesProviderDefault(t *testing.T) {
+	st := newFakeStore()
+	tenantID := uuid.New()
+	st.byComponent[tenantID] = storage.ProviderConfig{Provider: "groq", CredentialsLast4: "env"}
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+
+	rec := &capRec{}
+	factory := func(_, _ string) (llm.Provider, error) { return &stubProvider{text: "recap"}, nil }
+	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
+		t.Fatalf("Recap: %v", err)
+	}
+	if len(rec.calls) != 1 || rec.calls[0].model != groq.DefaultModel {
+		t.Fatalf("priced calls = %+v, want one priced on %q", rec.calls, groq.DefaultModel)
+	}
+}
+
 // TestAttributionLogOnFailure: a midway failure still emits the attribution line with
 // ok=false, so metered spend is never orphaned (#272 review).
 func TestAttributionLogOnFailure(t *testing.T) {

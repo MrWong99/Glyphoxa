@@ -31,7 +31,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -202,12 +201,14 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)
 	}
-	// The default path (providerID "") sends request model "" (adapter fills the
-	// Groq default), but the spend sink must price on a real model, else (groq, "")
-	// misses the price map and warn-spams / inflates the estimate (#272 review).
+	// A config without a model sends request model "" (the adapter fills its own
+	// default, which keeps the recorded cassettes stable), but the spend sink must
+	// price on that real model id: (provider, "") misses the price map and
+	// warn-spams / prices at the conservative fallback (#272 review). The default
+	// comes from the one shared helper, for every provider, not just the env path.
 	priceModel := model
-	if providerID == "" {
-		priceModel = groq.DefaultModel
+	if priceModel == "" {
+		priceModel = llmbuild.DefaultModel(providerID)
 	}
 
 	// Metering (gate #271 posture): spend.PriceOnly tees a caps-free meter

@@ -69,6 +69,25 @@ func New(providerID, apiKey string) (llm.Provider, error) {
 	}
 }
 
+// DefaultModel names the model providerID's adapter requests when a Provider
+// Config carries no explicit model, mirroring [New]'s provider set ("" and any
+// unrecognised id resolve to Groq, the deployment LLM per ADR-0036). Callers
+// resolve an empty model through it BEFORE building a request, so the model that
+// is requested and the model the spend meter prices are one and the same: an
+// empty model id misses the price map and is charged at the conservative
+// fallback (~30x the real Groq rate), which exhausted a platform-key trial
+// allowance after a few cents of real spend.
+func DefaultModel(providerID string) string {
+	switch providerID {
+	case anthropic.ProviderID:
+		return anthropic.DefaultModel
+	case gemini.ProviderID:
+		return gemini.DefaultModel
+	default: // "" and groq
+		return groq.DefaultModel
+	}
+}
+
 // FromConfig resolves a Provider Config into a live [llm.Provider] plus the model
 // id the caller should request. It is [ResolveKey] (ComponentLLM) followed by
 // [New] keyed off cfg.Provider; the returned model is cfg.Model (empty lets the

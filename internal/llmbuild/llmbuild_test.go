@@ -249,3 +249,21 @@ func TestEnvFallbackAllowed(t *testing.T) {
 		t.Errorf("EnvFallbackAllowed = (%v, %v), want (true, nil)", ok, err)
 	}
 }
+
+// TestDefaultModel_MirrorsNewsProviderSet pins that every provider id [New]
+// dispatches resolves to that adapter's own default model, and that the empty
+// id (the env default) is Groq. A caller that fills an empty model through this
+// requests and prices one and the same real model id.
+func TestDefaultModel_MirrorsNewsProviderSet(t *testing.T) {
+	t.Parallel()
+	for id, want := range map[string]string{
+		"":                   groq.DefaultModel,
+		groq.ProviderID:      groq.DefaultModel,
+		anthropic.ProviderID: anthropic.DefaultModel,
+		gemini.ProviderID:    gemini.DefaultModel,
+	} {
+		if got := DefaultModel(id); got != want {
+			t.Errorf("DefaultModel(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
