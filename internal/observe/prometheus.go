@@ -16,7 +16,7 @@ const (
 )
 
 // latencyBuckets are sized to the engineering SLO (p50 ≤ 1.2s, p95 ≤ 2.5s,
-// sprint-2-plan §SLO): dense from 50ms through the p95 target, with tail bins to
+// voicebench.EngineeringSLO): dense from 50ms through the p95 target, with tail bins to
 // 5s so a regression past SLO is still observable. Shared by the response-latency
 // and per-stage histograms so a bench number maps 1:1 to a bucket boundary.
 var latencyBuckets = []float64{

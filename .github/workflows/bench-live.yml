@@ -1,7 +1,7 @@
 name: bench-live
 
 # Nightly live-tier latency benchmark (Sprint 2, Epic C2 / ADR-0033 addendum).
-# Drives the real Groq + ElevenLabs stack (ADR-0036: Llama 3.3 70B on Groq is the
+# Drives the real Groq + ElevenLabs stack (ADR-0036 amendment: openai/gpt-oss-120b on Groq is the
 # deployment LLM) through the corpus and asserts the absolute EngineeringSLO
 # (≤1.2s p50 / ≤2.5s p95 on response_latency) — the SAME
 # budgets observe's A2 alert rules use. A breach reds this run as a "latency

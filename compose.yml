@@ -44,8 +44,12 @@ services:
     restart: unless-stopped
 
   glyphoxa:
-    # Bump on each release — release-image.yml publishes v<version> to ghcr.
-    image: ghcr.io/mrwong99/glyphoxa:v0.2.0
+    # Defaults to the newest stable release (release-image.yml moves `latest` on
+    # every non-prerelease v* tag). Pin a release for reproducible upgrades:
+    #   GLYPHOXA_IMAGE_TAG=v0.16.0 docker compose up
+    # Never run a release below v0.16.0. internal/ci pins this default so a
+    # literal version cannot silently rot here again.
+    image: ghcr.io/mrwong99/glyphoxa:${GLYPHOXA_IMAGE_TAG:-latest}
     build:
       # Fallback for `docker compose up --build` from a source checkout — see
       # the file header. NOTE: `--build` tags the local build with the `image:`

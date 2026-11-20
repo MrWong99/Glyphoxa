@@ -5,11 +5,14 @@ package bundle_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -164,6 +168,44 @@ func TestServeImport(t *testing.T) {
 		}
 	})
 
+	t.Run("a value the database refuses is 400 without the database's text", func(t *testing.T) {
+		bad := encodeBundle(t, &bundle.Bundle{
+			FormatVersion: bundle.FormatVersion,
+			Campaign: bundle.Campaign{
+				Name: "Bad Type", System: "dnd5e", Language: "en",
+				Nodes: []bundle.Node{{ID: "n1", Type: "dragon", Name: "Smaug"}},
+			},
+		})
+		body, ct := multipartBundle(t, bad)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("code=%d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "Smaug") || strings.Contains(rec.Body.String(), "kg_node_type") {
+			t.Fatalf("body=%s, want the entry named and the enum name kept out", rec.Body.String())
+		}
+	})
+
+	t.Run("an image-carrying bundle on a handler with no blob store is 400", func(t *testing.T) {
+		withImage := encodeBundle(t, &bundle.Bundle{
+			FormatVersion: bundle.FormatVersion,
+			Campaign: bundle.Campaign{
+				Name: "Pictured", System: "dnd5e", Language: "en",
+				Maps: []bundle.Map{{ID: "m1", Name: "World", ContentType: "image/png", ImageBase64: "iVBORw0KGgo="}},
+			},
+		})
+		body, ct := multipartBundle(t, withImage)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("code=%d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "no blob store") {
+			t.Fatalf("body=%s, want the missing blob store named", rec.Body.String())
+		}
+	})
+
 	t.Run("every import slot busy is 503", func(t *testing.T) {
 		release := bundle.HoldImportSlotsForTest()
 		body, ct := multipartBundle(t, good)
@@ -292,4 +334,68 @@ func TestServeImport(t *testing.T) {
 			t.Errorf("dropped_participant_refs = %d, want 1 (ghost dropped)", payload.DroppedParticipantRefs)
 		}
 	})
+}
+
+// TestServeImportLargeUploadWithoutTempDir is #657: the production image is
+// FROM scratch with a read-only root, so there is no temp directory. FormFile
+// spilled any upload over 32 MiB to one and failed; the streaming multipart
+// reader must import a bundle well past that with TMPDIR pointing nowhere.
+func TestServeImportLargeUploadWithoutTempDir(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	st := storage.New(pool)
+	user, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: "op-big", Name: "Operator"})
+	if err != nil {
+		t.Fatalf("UpsertUser: %v", err)
+	}
+	tenant, err := st.ResolveOperatorTenant(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("ResolveOperatorTenant: %v", err)
+	}
+	h := &bundle.Handler{Store: st, Blobs: blob.NewPostgres(pool)}
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/v1/campaigns/import",
+		auth.RequireSession(fixedAuthN{token: importToken, user: user}, auth.RequireCSRF(http.HandlerFunc(h.ServeImport))))
+
+	// Two incompressible images, each under blob.MaxSize, so the gzipped bundle
+	// is ~40 MiB: past FormFile's 32 MiB in-memory limit, within MaxImportBytes.
+	maps := make([]bundle.Map, 2)
+	for i := range maps {
+		raw := make([]byte, 20<<20)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		maps[i] = bundle.Map{
+			ID: "m" + strconv.Itoa(i), Name: "Map " + strconv.Itoa(i),
+			ContentType: "image/png", ImageBase64: base64.StdEncoding.EncodeToString(raw),
+			WidthPx: 1024, HeightPx: 1024,
+		}
+	}
+	big := encodeBundle(t, &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign:      bundle.Campaign{Name: "Big Backup", System: "dnd5e", Language: "en", Maps: maps},
+	})
+	if len(big) <= 32<<20 {
+		t.Fatalf("bundle is %d MiB compressed; the test needs > 32 MiB", len(big)>>20)
+	}
+
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	body, ct := multipartBundle(t, big)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, authedImport(t, body, ct))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Maps int `json:"maps"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode 200 body: %v", err)
+	}
+	if payload.Maps != 2 {
+		t.Errorf("maps = %d, want 2", payload.Maps)
+	}
+	if _, err := st.FindCampaignByName(ctx, tenant.ID, "Big Backup"); err != nil {
+		t.Fatalf("imported campaign not found: %v", err)
+	}
 }

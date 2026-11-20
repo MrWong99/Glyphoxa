@@ -12,9 +12,10 @@ import "./login.css";
 
 // The Login screen (ADR-0016: Discord-only OAuth). No design handoff exists for
 // it, so this is the minimal gate the self-host operator needs: a "Continue with
-// Discord" link that starts the net/http OAuth carve-out (/auth/discord/login),
-// with Google/GitHub rendered DISABLED + "coming soon" (wired in v1.5+). It is a
-// full-page link, not a Connect call — OAuth is HTML redirects (ADR-0015).
+// Discord" link that starts the net/http OAuth carve-out (/auth/discord/login).
+// Discord is the only provider: no placeholder buttons for providers that
+// don't exist yet. It is a full-page link, not a Connect call — OAuth is HTML
+// redirects (ADR-0015).
 //
 // notAuthorized surfaces an admission rejection: the OAuth callback bounces a
 // denied Discord User back here with ?error=not_authorized. The signal is
@@ -120,15 +121,6 @@ export function Login({
             {t("auth.continueDiscord")}
           </a>
         )}
-
-        <div className="gx-login__soon">
-          <Button variant="secondary" block disabled>
-            {t("auth.continueGoogleSoon")}
-          </Button>
-          <Button variant="secondary" block disabled>
-            {t("auth.continueGithubSoon")}
-          </Button>
-        </div>
       </div>
 
       <LegalFooter />

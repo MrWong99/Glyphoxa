@@ -1,6 +1,10 @@
 package orchestrator_test
 
 import (
+	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,4 +66,61 @@ func TestAddressDetector_EmptyFollowUp_NoLastAddressedRoute(t *testing.T) {
 
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1) // still only the named one
 	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 0)
+}
+
+// logCapture is a slog.Handler recording every record at any level, so a test
+// can assert WHICH level a line is emitted at.
+type logCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *logCapture) WithGroup(string) slog.Handler            { return c }
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	c.records = append(c.records, r)
+	c.mu.Unlock()
+	return nil
+}
+
+// levels returns the level of every captured record whose message contains
+// substr.
+func (c *logCapture) levels(substr string) []slog.Level {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []slog.Level
+	for _, r := range c.records {
+		if strings.Contains(r.Message, substr) {
+			out = append(out, r.Level)
+		}
+	}
+	return out
+}
+
+// TestAddressDetector_NoRouteIsLoggedAtDebug pins the operator's view of "why
+// did nobody answer": an empty final and an utterance that addressed no Agent
+// each leave one Debug line. The empty-final line used to be Info, which at a
+// busy table (a noise burst every few seconds) buried the log.
+func TestAddressDetector_NoRouteIsLoggedAtDebug(t *testing.T) {
+	capture := &logCapture{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := voicetest.New(t)
+	butlerAg, bartAg, goblinAg := scoringAgents()
+	d := newScoringDetector(butlerAg, bartAg, goblinAg)
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "  ", TurnID: "T-noise"})
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "let us all roll for initiative", TurnID: "T-chat"})
+
+	for _, msg := range []string{"empty STT final", "utterance routed nowhere"} {
+		got := capture.levels(msg)
+		if len(got) != 1 || got[0] != slog.LevelDebug {
+			t.Errorf("log lines matching %q have levels %v, want exactly one at DEBUG", msg, got)
+		}
+	}
 }

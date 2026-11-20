@@ -1,7 +1,8 @@
-/* Base elements + gx- utilities (ADR-0017) — ported verbatim from
+/* Base elements + gx- utilities (ADR-0017) — ported from
  * web/design-handoff/2026-06-24/tokens/base.css. Arcane theme defaults +
- * gx-namespaced utilities (.gx-wash / .gx-runegrid / .gx-overline /
- * .gx-gradient-text / .gx-display / .gx-mono).
+ * the gx-namespaced utilities the app uses (.gx-overline / .gx-gradient-text);
+ * the handoff's unused .gx-wash / .gx-runegrid / .gx-display / .gx-mono were
+ * dropped (their tokens stay in tokens.css).
  */
 
 *,
@@ -103,18 +104,6 @@ pre {
 
 /* ---- Utilities ---------------------------------------------------------- */
 
-/* Atmospheric page wash — drop on a full-bleed wrapper */
-.gx-wash {
-  background-color: var(--surface-void);
-  background-image: var(--wash-arcane);
-}
-
-/* Faint rune-grid texture overlay */
-.gx-runegrid {
-  background-image: var(--rune-grid);
-  background-size: var(--rune-grid-size);
-}
-
 /* Runic small-caps eyebrow */
 .gx-overline {
   font-family: var(--font-base);
@@ -131,15 +120,6 @@ pre {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-}
-
-.gx-display {
-  font-family: var(--font-display);
-}
-
-.gx-mono {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
 }
 
 /* Boot placeholder — AuthGate / RootEntry / CreateTenant render this bare div

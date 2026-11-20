@@ -107,6 +107,7 @@ function NameTenantCard({ initialName }: { initialName: string }) {
         </span>
         <h1 className="gx-login__wordmark gx-gradient-text">{t("auth.onboardingTitle")}</h1>
         <p className="gx-login__lede">{t("auth.onboardingLede")}</p>
+        <p className="gx-login__explainer">{t("auth.onboardingTableExplainer")}</p>
 
         <div className="gx-login__field">
           <Input

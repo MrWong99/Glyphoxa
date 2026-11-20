@@ -91,7 +91,7 @@ describe("SessionBindAffordance", () => {
     fireEvent.change(await screen.findByLabelText("Character name"), { target: { value: "Borin" } });
     // Bind via the free-text snowflake fallback.
     fireEvent.change(screen.getByLabelText("Discord user ID"), { target: { value: "222222222222222222" } });
-    fireEvent.click(screen.getByRole("button", { name: /create & bind/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create & link/i }));
 
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]).toEqual({ name: "Borin", discordUserId: "222222222222222222" });

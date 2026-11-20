@@ -14,26 +14,25 @@ type DecisionContext struct {
 	Utterance string
 	// Words is the tokenized, lowercased utterance (see tokenize).
 	Words []string
+	// SpeakerID identifies who spoke the utterance (the Speaker Lane's Discord
+	// snowflake, ADR-0050). Empty when the caller could not attribute it — the
+	// text-only [Matcher.TargetMatch] path and the unattributed default lane.
+	SpeakerID string
 
-	// window bounds how far back "recent" reaches for both words and
-	// interruptions.
-	window time.Duration
-
-	nameScores      map[int]float64      // agent index → fuzzy name similarity
-	anyNameMatched  bool                 // did any agent clear the name threshold this turn
-	lastAddressed   map[string]bool      // agentID → addressed on the previous turn
-	lastAddressedAt time.Time            // when that decision was taken (zero: never)
-	interruptions   map[string]time.Time // agentID → most recent interruption
-	recentWords     map[string]struct{}  // distinct words within the window, incl. current
-	nonAddressable  int                  // count of active, non-AddressOnly agents
+	nameScores      map[int]float64 // agent index → fuzzy name similarity
+	anyNameMatched  bool            // did any agent clear the name threshold this turn
+	lastAddressed   map[string]bool // agentID → holds the continuation claim
+	lastAddressedAt time.Time       // the claim's anchor (zero: never addressed)
+	lastAddressedBy string          // SpeakerID that opened the claim ("" unknown)
+	nonAddressable  int             // count of active, non-AddressOnly agents
 }
 
 // AnyNameMatched reports whether some Agent was explicitly named this turn (its
 // fuzzy similarity cleared the [NameMatch] threshold). The ambient heuristics —
-// continuation, interruption, expertise, single-NPC fallback — return zero when
-// this is true, so an explicit name short-circuits them exactly as ADR-0024's
-// ordered chain does: name match wins outright and the fallbacks never widen
-// the addressed set behind it.
+// continuation, single-NPC fallback — return zero when this is true, so an
+// explicit name short-circuits them exactly as ADR-0024's ordered chain does:
+// name match wins outright and the fallbacks never widen the addressed set
+// behind it.
 func (dc *DecisionContext) AnyNameMatched() bool { return dc.anyNameMatched }
 
 // NameScore returns the fuzzy name-match similarity in [0,1] computed for the
@@ -42,23 +41,28 @@ func (dc *DecisionContext) AnyNameMatched() bool { return dc.anyNameMatched }
 // consults.
 func (dc *DecisionContext) NameScore(agentIdx int) float64 { return dc.nameScores[agentIdx] }
 
-// WasLastAddressed reports whether agentID was among the targets addressed on
-// the immediately preceding turn — the continuation signal (ADR-0024
-// "last-speaker continuation"). It ignores WHEN that happened; see
-// [DecisionContext.AddressedWithin] for the bounded form the shipped
-// [LastAddressed] heuristic uses.
-func (dc *DecisionContext) WasLastAddressed(agentID string) bool { return dc.lastAddressed[agentID] }
-
-// AddressedWithin reports whether agentID was among the targets addressed on the
-// immediately preceding turn AND that turn is no older than d. A non-positive d
-// means "no time bound" and matches [DecisionContext.WasLastAddressed] exactly,
-// which keeps a hand-built stack that predates the continuation window behaving
-// as it always did.
+// AddressedWithin reports whether agentID holds the continuation claim for THIS
+// speaker and the claim's anchor is no older than d — the continuation signal
+// (ADR-0024 "last-speaker continuation"). A non-positive d means "no time
+// bound".
 //
-// The timestamp is per DECISION, not per Agent: the matcher replaces its whole
+// The claim is speaker-scoped (ADR-0024 amendment, 2026-11-20): it belongs to
+// the speaker whose named address opened it, so only that speaker continues
+// without a name. Somebody else at the table talking — to another player, to
+// the GM, to nobody — is not continuing a conversation they were never in. The
+// scope applies only when BOTH speakers are known; an unattributed utterance or
+// an unattributed opener keeps the pre-amendment table-wide behaviour, so a
+// deployment without Speaker Lanes loses nothing.
+//
+// The anchor is per CLAIM, not per Agent: the matcher replaces its whole
 // last-addressed set atomically, so every member of a set shares one instant.
+// It is the later of the routing decision and the addressed Agent's last
+// audible reply activity ([Matcher.ExtendContinuation]).
 func (dc *DecisionContext) AddressedWithin(agentID string, d time.Duration) bool {
 	if !dc.lastAddressed[agentID] {
+		return false
+	}
+	if !sameSpeaker(dc.SpeakerID, dc.lastAddressedBy) {
 		return false
 	}
 	if d <= 0 {
@@ -67,29 +71,11 @@ func (dc *DecisionContext) AddressedWithin(agentID string, d time.Duration) bool
 	return !dc.lastAddressedAt.IsZero() && dc.Now.Sub(dc.lastAddressedAt) <= d
 }
 
-// InterruptedWithin reports whether agentID was interrupted (barged in on) at
-// some point within d of [DecisionContext.Now]. A non-positive d never matches.
-func (dc *DecisionContext) InterruptedWithin(agentID string, d time.Duration) bool {
-	if d <= 0 {
-		return false
-	}
-	at, ok := dc.interruptions[agentID]
-	if !ok {
-		return false
-	}
-	return dc.Now.Sub(at) <= d
-}
-
-// MentionedRecently reports whether word (compared case-insensitively after
-// tokenization) appears among the words spoken within the recency window,
-// including the current utterance.
-func (dc *DecisionContext) MentionedRecently(word string) bool {
-	for _, w := range tokenize(word) {
-		if _, ok := dc.recentWords[w]; ok {
-			return true
-		}
-	}
-	return false
+// sameSpeaker reports whether speakerID may act on a continuation claim opened
+// by owner. Two KNOWN, different speakers are the only pair that may not; an
+// unknown on either side falls back to the table-wide claim.
+func sameSpeaker(speakerID, owner string) bool {
+	return speakerID == "" || owner == "" || speakerID == owner
 }
 
 // NonAddressableCount returns the number of currently active Agents that are
@@ -120,6 +106,11 @@ type Heuristic interface {
 // 0.9, ADR-0024's core case) crosses the same address threshold a crisp name
 // does — recognizing the name at all is what addresses the Agent.
 //
+// The similarity it reads has already been through the address-evidence rule
+// ([fuzzyIndex.score]): a non-exact hit is in the score map only when it stood
+// in vocative position, so this heuristic never sees an everyday word that
+// merely sounds like the name.
+//
 // It is also the heuristic the matcher's AddressOnly gate keys off: an
 // AddressOnly Agent (the Butler by default) is eligible only when its name
 // similarity reaches this Threshold, so ambient roleplay never routes to it.
@@ -143,17 +134,19 @@ func (h NameMatch) Score(a Agent, dc *DecisionContext) float64 {
 	return h.Weight
 }
 
-// LastAddressed rewards the Agent addressed on the previous turn, so a
-// follow-up utterance with no fresh name ("and then what happened?") stays with
-// the same Agent (ADR-0024 "last-speaker continuation").
+// LastAddressed rewards the Agent the SAME speaker addressed last, so that
+// speaker's follow-up with no fresh name ("and then what happened?") stays with
+// it (ADR-0024 "last-speaker continuation"). See
+// [DecisionContext.AddressedWithin] for the speaker scope.
 //
-// Within bounds how long that claim survives (ADR-0024 amendment, 2026-07-27).
-// Unbounded continuation was the live "the NPC answers everything" defect: with
-// no time bound the Agent named once at the start of a session kept scoring the
-// full decisive weight on EVERY unnamed utterance from EVERY speaker for the
-// rest of the session, so players talking to each other kept waking it. A
-// conversation the table has walked away from is over; a zero or negative
-// Within restores the old unbounded behaviour for callers that want it.
+// Within bounds how long that claim survives (ADR-0024 amendment, 2026-07-27),
+// measured from the claim's anchor: the routing decision, moved forward by the
+// addressed Agent's reply while it is audibly answering. Unbounded continuation
+// was the live "the NPC answers everything" defect: the Agent named once at the
+// start of a session kept scoring the full decisive weight on EVERY unnamed
+// utterance for the rest of the session. A conversation the table has walked
+// away from is over; a zero or negative Within restores the old unbounded
+// behaviour for callers that want it.
 type LastAddressed struct {
 	Weight float64
 	Within time.Duration
@@ -173,74 +166,18 @@ func (h LastAddressed) Score(a Agent, dc *DecisionContext) float64 {
 	return h.Weight
 }
 
-// RecentlyInterrupted rewards an Agent that was barged in on within Within of
-// now: a participant who cut the Agent off is very likely still talking to it,
-// so the next utterance should land back on that Agent even without a name.
-// Interruptions are fed to the matcher via [Matcher.NoteInterruption].
-//
-// It is NOT part of [DefaultHeuristics] (#442): nothing in production calls
-// NoteInterruption yet — the signal would come from the barge path, and
-// ADR-0027 defers that wiring to v1.5+. Until then it is opt-in only.
-type RecentlyInterrupted struct {
-	Weight float64
-	Within time.Duration
-}
-
-// Name implements [Heuristic].
-func (RecentlyInterrupted) Name() string { return "recently_interrupted" }
-
-// Score implements [Heuristic].
-func (h RecentlyInterrupted) Score(a Agent, dc *DecisionContext) float64 {
-	if dc.AnyNameMatched() {
-		return 0
-	}
-	within := h.Within
-	if within <= 0 {
-		within = dc.window
-	}
-	if dc.InterruptedWithin(a.Target.AgentID, within) {
-		return h.Weight
-	}
-	return 0
-}
-
-// ExpertOnRecentWord rewards an Agent whose Expertise keywords were mentioned
-// recently: when the table keeps saying "tavern" and "ale", the innkeeper NPC
-// who is the expert on those words is the likely addressee even before anyone
-// says his name. Matching is exact (post-tokenization) for determinism.
-type ExpertOnRecentWord struct {
-	Weight float64
-	// PerWord, when true, scales the contribution by how many distinct
-	// expertise keywords were mentioned rather than awarding a flat Weight on
-	// the first hit. Capped at Weight × len(Expertise) either way.
-	PerWord bool
-}
-
-// Name implements [Heuristic].
-func (ExpertOnRecentWord) Name() string { return "expert_on_recent_word" }
-
-// Score implements [Heuristic].
-func (h ExpertOnRecentWord) Score(a Agent, dc *DecisionContext) float64 {
-	if dc.AnyNameMatched() {
-		return 0
-	}
-	hits := 0
-	for _, kw := range a.Expertise {
-		if dc.MentionedRecently(kw) {
-			hits++
-			if !h.PerWord {
-				return h.Weight
-			}
-		}
-	}
-	return h.Weight * float64(hits)
-}
-
 // SoleActiveNPC rewards a non-AddressOnly Agent when it is the only one active:
 // with a single Character NPC in the Voice Session, an unaddressed utterance
-// most likely targets it (ADR-0024 "single active NPC fallback"). It is the
-// scoring stack's parity with the dumb matcher's lone-NPC behaviour, expressed
-// as just another pluggable heuristic.
+// most likely targets it (ADR-0024 "single active NPC fallback").
+//
+// It is NOT part of [DefaultHeuristicsWithin]. The 2026-07-27 amendment demoted
+// it from decisive to a 0.5 corroborating hint because at full weight a lone NPC
+// answered every utterance anybody made; the only signal it could corroborate
+// (expert-on-recent-word) was never fed in production and was removed
+// 2026-11-20, which left the hint unable to reach the address threshold with
+// anything. It stays as an opt-in for a caller that wants a lone NPC to take
+// unaddressed speech — and for the tests that observe the ambient pool through
+// it.
 type SoleActiveNPC struct {
 	Weight float64
 }

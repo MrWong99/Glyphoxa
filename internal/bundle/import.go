@@ -3,10 +3,13 @@ package bundle
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
@@ -98,11 +101,18 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 	// row that names them and no sweep that would ever find them.
 	var written []string
 	imgs, _ := st.(MapImageWriter)
+	if bs, ok := imgs.(interface{ hasBlobStore() bool }); ok && !bs.hasBlobStore() {
+		// A PGStore always implements MapImageWriter, blob backend or not; one
+		// without a backend can write no bytes, so it gets the no-writer path — an
+		// image-carrying bundle is a 400 naming why, not a 500 from WriteMapImage.
+		imgs = nil
+	}
 
 	err := st.InTx(ctx, func(tx ImportStore) error {
 		return importInTx(ctx, tx, tenantID, b, imgs, &written, &res)
 	})
 	if err != nil {
+		err = classifyContentError(err)
 		// The sweep runs on a DETACHED context. The most likely way an
 		// images-included import fails is the client disconnecting or timing out
 		// mid-transaction — which cancels this very ctx, so a sweep that inherited
@@ -135,6 +145,63 @@ func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (Im
 // of Deletes against a store that is either responding or is not, and the caller
 // is already returning an error.
 const blobSweepTimeout = 15 * time.Second
+
+// contentSentinels are the storage validation errors a write can only hit
+// because of a value the bundle carried: the import writes into a campaign it
+// just minted, so there is no other row for a write to collide with.
+var contentSentinels = []error{
+	storage.ErrInvalidEdge,
+	storage.ErrConflict,
+	storage.ErrInvalidDisposition,
+	storage.ErrNoteTooLong,
+	storage.ErrInvalidPin,
+	storage.ErrInvalidTag,
+	storage.ErrAspectsFull,
+	storage.ErrInvalidMapParent,
+}
+
+// classifyContentError marks a failed import's error as the bundle's fault
+// (ErrInvalidBundle, a 400) when the bundle's own content caused it: a storage
+// validation sentinel, or Postgres refusing a value — SQLSTATE class 22 (data
+// exception: a bad enum value, an over-long string, a NUL byte) or 23
+// (integrity constraint: a CHECK, a duplicate). Anything else — a lost
+// connection, a cancelled context — stays the server's error.
+func classifyContentError(err error) error {
+	if errors.Is(err, ErrInvalidBundle) {
+		return err
+	}
+	for _, s := range contentSentinels {
+		if errors.Is(err, s) {
+			return fmt.Errorf("%w: %w", ErrInvalidBundle, err)
+		}
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (strings.HasPrefix(pgErr.Code, "22") || strings.HasPrefix(pgErr.Code, "23")) {
+		return &dbRefusedError{err: err, pgErr: pgErr}
+	}
+	return err
+}
+
+// dbRefusedError is a bundle value Postgres refused. Its message is surfaced to
+// the client verbatim (importErrorMessage), so it keeps the importer's own
+// context — which names the bundle entry — but drops the database's text, which
+// names schema objects.
+type dbRefusedError struct {
+	err   error
+	pgErr *pgconn.PgError
+}
+
+func (e *dbRefusedError) Error() string {
+	ctx := strings.TrimSuffix(e.err.Error(), e.pgErr.Error())
+	ctx = strings.TrimRight(ctx, ": ")
+	if ctx == e.err.Error() || ctx == "" {
+		// The pg text is not a clean suffix; say nothing rather than leak it.
+		return fmt.Sprintf("%s: a value was refused by the database (SQLSTATE %s)", ErrInvalidBundle, e.pgErr.Code)
+	}
+	return fmt.Sprintf("%s: %s: a value was refused by the database (SQLSTATE %s)", ErrInvalidBundle, ctx, e.pgErr.Code)
+}
+
+func (e *dbRefusedError) Unwrap() []error { return []error{ErrInvalidBundle, e.err} }
 
 // importInTx runs the whole ingest against the tx-bound seam (see [Import]). It is
 // split out so the transaction body reads top-to-bottom: campaign → Butler merge
@@ -506,8 +573,8 @@ func importPlanningThreads(ctx context.Context, tx ImportStore, campaignID uuid.
 		for j := range pt.Messages {
 			m := &pt.Messages[j]
 			if m.Role != storage.PlanningRoleUser && m.Role != storage.PlanningRoleAssistant {
-				return fmt.Errorf("bundle: import: planning thread %q message %d has invalid role %q (want %q or %q)",
-					pt.Title, j, m.Role, storage.PlanningRoleUser, storage.PlanningRoleAssistant)
+				return fmt.Errorf("%w: planning thread %q message %d has invalid role %q (want %q or %q)",
+					ErrInvalidBundle, pt.Title, j, m.Role, storage.PlanningRoleUser, storage.PlanningRoleAssistant)
 			}
 			if _, err := tx.AppendPlanningMessage(ctx, campaignID, created.ID, m.Role, m.Content); err != nil {
 				return fmt.Errorf("bundle: import: planning thread %q message %d: %w", pt.Title, j, err)
@@ -679,7 +746,7 @@ func mergeButler(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *A
 		return fmt.Errorf("bundle: import: get trigger-created butler: %w", err)
 	}
 	if _, err := storage.VoiceFromJSON(a.Voice); err != nil {
-		return fmt.Errorf("bundle: import: butler voice: %w", err)
+		return fmt.Errorf("%w: butler voice: %w", ErrInvalidBundle, err)
 	}
 	if _, err := tx.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:                    butler.ID,
@@ -723,7 +790,7 @@ func mergeButler(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *A
 // server-side and depends on bundle order (deterministic).
 func createCharacterAgent(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *Agent, res *ImportResult) error {
 	if _, err := storage.VoiceFromJSON(a.Voice); err != nil {
-		return fmt.Errorf("bundle: import: agent %q voice: %w", a.Name, err)
+		return fmt.Errorf("%w: agent %q voice: %w", ErrInvalidBundle, a.Name, err)
 	}
 	agentID, err := tx.CreateAgent(ctx, storage.NewAgent{
 		CampaignID:            campaignID,
