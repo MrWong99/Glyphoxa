@@ -22,6 +22,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -829,6 +830,20 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID, voi
 		}
 		cfg.StageMetrics = observe.TeeUsage(base, ledger)
 		as.ledger = ledger
+	}
+
+	// Hand the session's metering to the recap engine through the run context
+	// (the Butler's recap Tool descends from it): the engine is one process-wide
+	// value built on the process recorder, so without this a recap run inside the
+	// session spent LLM tokens that never reached this session's meter, hard cap
+	// or Usage Ledger. cfg.StageMetrics is by now the recorder + meter + ledger
+	// tee; the gate is the same meter the turn gate uses.
+	if cfg.StageMetrics != nil {
+		metering := recap.Metering{Rec: cfg.StageMetrics}
+		if as.meter != nil {
+			metering.Gate = as.meter
+		}
+		runCtx = recap.WithMetering(runCtx, metering)
 	}
 
 	// Bind the Highlights pipeline to this session before the loop (and its

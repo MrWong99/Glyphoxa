@@ -42,6 +42,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/llmcall"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -302,6 +303,10 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	// bounded by the exchange timeout.
 	runCtx := knowledge.WithCampaign(ctx, campaign.ID)
 	runCtx = tool.WithCaller(runCtx, butler.ID.String())
+	// The recap Tool's own LLM calls are this exchange's spend: hand the shared
+	// recap engine this exchange's recorder so they reach its Usage Ledger and
+	// estimate instead of only the process recorder.
+	runCtx = recap.WithMetering(runCtx, recap.Metering{Rec: rec})
 	runCtx, cancel := context.WithTimeout(runCtx, exchangeTimeout)
 	defer cancel()
 

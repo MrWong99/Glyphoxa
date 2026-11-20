@@ -3,6 +3,7 @@ package recap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -213,5 +214,63 @@ func TestNeverReadsCaps(t *testing.T) {
 	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap must succeed without any cap surface: %v", err)
+	}
+}
+
+// refusingGate is a spend gate past its cap.
+type refusingGate struct{}
+
+func (refusingGate) AllowTurn() bool { return false }
+
+// TestRecapChargesTheCallersMeteringFromContext (A1): the engine is one shared
+// process-wide value, so a recap run from inside a live session or a chat
+// exchange must charge THAT caller's recorder (its spend meter, hard cap and
+// Usage Ledger hang off it), not the process recorder the engine was built with.
+func TestRecapChargesTheCallersMeteringFromContext(t *testing.T) {
+	st := newFakeStore()
+	tenantID := uuid.New()
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+
+	process, caller := &capRec{}, &capRec{}
+	factory := func(_, _ string) (llm.Provider, error) {
+		return &stubProvider{text: "recap", usage: &llm.Usage{InputTokens: 40, OutputTokens: 9}}, nil
+	}
+	eng := NewEngine(st, nil, process, nil, WithProviderFactory(factory))
+
+	ctx := WithMetering(context.Background(), Metering{Rec: caller})
+	if _, err := eng.Recap(ctx, []uuid.UUID{sid}); err != nil {
+		t.Fatalf("Recap: %v", err)
+	}
+	if len(caller.calls) != 1 || caller.calls[0].in != 40 || caller.calls[0].out != 9 {
+		t.Errorf("caller's recorder calls = %+v, want the one (40,9) completion", caller.calls)
+	}
+	if len(process.calls) != 0 {
+		t.Errorf("process recorder calls = %+v, want none (the caller's recorder already forwards to it; a second record double counts)", process.calls)
+	}
+}
+
+// TestRecapRefusedByCallersSpendGate (A1): a caller past its spend cap gets no
+// recap, and no LLM call is made on its behalf.
+func TestRecapRefusedByCallersSpendGate(t *testing.T) {
+	st := newFakeStore()
+	tenantID := uuid.New()
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+
+	rec := &capRec{}
+	calls := 0
+	factory := func(_, _ string) (llm.Provider, error) {
+		return &stubProvider{text: "recap", capture: func(llm.Request) { calls++ }}, nil
+	}
+	eng := NewEngine(st, nil, nil, nil, WithProviderFactory(factory))
+
+	ctx := WithMetering(context.Background(), Metering{Rec: rec, Gate: refusingGate{}})
+	_, err := eng.Recap(ctx, []uuid.UUID{sid})
+	if !errors.Is(err, ErrSpendCapReached) {
+		t.Fatalf("Recap err = %v, want ErrSpendCapReached", err)
+	}
+	if calls != 0 || len(rec.calls) != 0 {
+		t.Errorf("provider calls = %d, metered = %+v; want no LLM call past the cap", calls, rec.calls)
 	}
 }

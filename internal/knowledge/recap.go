@@ -39,6 +39,11 @@ var recapToolTimeout = 45 * time.Second
 // the turn's dead ctx would surface nothing speakable.
 const recapTookTooLong = "The recap took too long to put together — try again in a moment, or ask the GM to run /glyphoxa recap for the full text."
 
+// recapSpendCapReached is the friendly tool-result text when the session's spend
+// cap refuses the recap ([recap.ErrSpendCapReached]). A result, not an error, for
+// the reason recapTookTooLong is one: the Butler needs something to say.
+const recapSpendCapReached = "This session has reached its spend cap, so I can't put a recap together right now. The GM can run /glyphoxa recap after the session."
+
 // errNoRecappableSession is the friendly failure when no ended, non-empty Voice
 // Session exists to recap (idle history, or only running/empty rows). The Tool
 // handler surfaces it to the LLM as a plain reason, not a crash.
@@ -89,6 +94,12 @@ func NewRecap(eng RecapEngine, store RecapStore) *RecapAdapter {
 // friendly error; recap.ErrNoTranscript is mapped to the same friendly error (a race
 // let an empty row through). The recap prose is returned verbatim for the Tool to
 // relay.
+//
+// The recap's LLM spend is the CALLER's: the engine charges the [recap.Metering]
+// the ctx carries (the live session's meter, cap and ledger, installed on the run
+// context by the session Manager; the chat exchange's recorder, installed by
+// planchat), and a session past its spend cap gets a friendly refusal instead of
+// an unmetered completion.
 func (a *RecapAdapter) RecapLastSessions(ctx context.Context, n int) (string, error) {
 	campaignID, ok := campaignFromContext(ctx)
 	if !ok {
@@ -117,6 +128,9 @@ func (a *RecapAdapter) RecapLastSessions(ctx context.Context, n int) (string, er
 	res, err := a.eng.Recap(ctx, ids)
 	if errors.Is(err, recap.ErrNoTranscript) {
 		return "", errNoRecappableSession
+	}
+	if errors.Is(err, recap.ErrSpendCapReached) {
+		return recapSpendCapReached, nil
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		// The recapToolTimeout child fired (a slow/stuck LLM), NOT a barge-in

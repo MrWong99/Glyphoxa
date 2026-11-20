@@ -10,6 +10,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -202,5 +203,50 @@ func TestSessionEndWritesLedgerAndTerminalRowBeforeBestEffortFinalizers(t *testi
 		if got := probe.statusAt[step]; got != storage.VoiceSessionEnded {
 			t.Errorf("row status when the %s finalizer ran = %q, want %q (terminal row must land first)", step, got, storage.VoiceSessionEnded)
 		}
+	}
+}
+
+// recapMeteringRunner is a loop runner that, like the Butler's recap Tool, reads
+// the recap metering off its run context and charges usage to it.
+type recapMeteringRunner struct {
+	started chan struct{}
+	found   bool
+	gated   bool
+}
+
+func (r *recapMeteringRunner) run(ctx context.Context, _ wirenpc.Config) error {
+	if m, ok := recap.MeteringFrom(ctx); ok && m.Rec != nil {
+		r.found = true
+		r.gated = m.Gate != nil
+		m.Rec.TTSCharacters(observe.ProviderElevenLabs, 55)
+	}
+	close(r.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestRunContextCarriesSessionMeteringForRecap (A1): the run context a session's
+// Tools descend from carries the session's own metering, so the shared recap
+// engine charges this session's Usage Ledger (and meter) instead of only the
+// process recorder.
+func TestRunContextCarriesSessionMeteringForRecap(t *testing.T) {
+	store := newFakeStore()
+	runner := &recapMeteringRunner{started: make(chan struct{})}
+	usage := &fakeUsageWriter{}
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Usage: usage})
+
+	tenantID := uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, uuid.New(), ""); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-runner.started
+	if _, err := mgr.Stop(context.Background(), tenantID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !runner.found {
+		t.Fatal("run context carries no recap metering")
+	}
+	if got := usage.flushedChars(); got != 55 {
+		t.Errorf("usage flushed to the session ledger = %d, want 55 (charged through the ctx metering)", got)
 	}
 }

@@ -212,9 +212,22 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	}
 
 	// Metering (gate #271 posture): spend.PriceOnly tees a caps-free meter
-	// alongside the production recorder — usage is recorded and priced, but the
-	// engine never reads a cap or calls AllowTurn (ADR-0046 is live-session-only).
-	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
+	// alongside the recorder so the attribution line below has an estimate. The
+	// recorder is the CALLER's when the ctx carries one ([WithMetering]: a recap
+	// run from a live session's Tool or a planning chat exchange is that caller's
+	// spend, and must reach its meter, hard cap and Usage Ledger), else the
+	// engine's own process recorder (an off-session recap, which has no cap:
+	// ADR-0046 is live-session-only).
+	base := e.metrics
+	if m, ok := MeteringFrom(ctx); ok {
+		if m.Gate != nil && !m.Gate.AllowTurn() {
+			return Result{}, ErrSpendCapReached
+		}
+		if m.Rec != nil {
+			base = m.Rec
+		}
+	}
+	rec, estimatedUSD := spend.PriceOnly(base, e.log)
 	caller := &llmcall.Caller{
 		Ctx:        ctx,
 		Provider:   provider,
