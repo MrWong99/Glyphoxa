@@ -6,6 +6,32 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
+// Yield cancels whatever turn holds the floor, speaking or not, and reports its
+// TurnID — a test-only unconditional cut standing in for a barge/mute (production
+// cuts through [Floor.YieldTurn] / [Floor.YieldAgent], which guard the holder).
+func (f *Floor) Yield() (turnID string, yielded bool) {
+	f.mu.Lock()
+	c := f.cancel
+	turnID = f.holderTurn
+	f.cancel = nil
+	f.holderTurn = ""
+	f.holderAgent = ""
+	f.speaking = false
+	f.mu.Unlock()
+	if c == nil {
+		return "", false
+	}
+	c()
+	return turnID, true
+}
+
+// Active reports whether a turn currently holds the floor (test-only probe).
+func (f *Floor) Active() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancel != nil
+}
+
 // BindSupersedeTerminal exposes the floor's supersede-terminal wiring (#443) for
 // the floor unit tests (external test package). Production installs it from the
 // floor-sharing reactors' Bind.

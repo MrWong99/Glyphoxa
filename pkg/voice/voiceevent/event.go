@@ -364,14 +364,11 @@ func (SpeakRequested) EventName() string { return "speak.requested" }
 // whose Synthesize start-errors (empty VoiceID, auth failure) still emits
 // TTSInvoked, the invoked-but-never-spoke signal (#20). It announces the dispatch
 // attempt, not a success: whether the sentence was actually spoken is signalled by
-// [FirstAudio], not here.
-//
-// Index is 0-based within the current turn and increments per dispatch attempt on
-// the same stage.
+// [FirstAudio], not here. Consumers coalesce a turn's sentences by arrival order
+// within the TurnID.
 type TTSInvoked struct {
 	At       time.Time
 	Sentence string
-	Index    int
 	// TurnID is the correlation id of the turn this sentence belongs to (A3),
 	// threaded from the reply reactor; see [STTFinal.TurnID].
 	TurnID string

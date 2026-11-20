@@ -88,7 +88,7 @@ func TestStageSubscriberHeadlineAndStages(t *testing.T) {
 	speechEnd := base
 	bus.Publish(voiceevent.STTFinal{At: base.Add(700 * time.Millisecond), Text: "hi", TurnID: "T1", SpeechEndAt: speechEnd})
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(750 * time.Millisecond), TurnID: "T1", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1200 * time.Millisecond), TurnID: "T1", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1200 * time.Millisecond), TurnID: "T1"})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1500 * time.Millisecond), TurnID: "T1"})
 	// First opus on the wire lands AFTER first-audio-to-pump (codec encode + pacing).
 	bus.Publish(voiceevent.FirstOpus{At: base.Add(1600 * time.Millisecond), TurnID: "T1"})
@@ -193,7 +193,7 @@ func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 	for i := 0; i < 3; i++ {
 		at := base.Add(time.Duration(i+1) * 100 * time.Millisecond)
-		bus.Publish(voiceevent.TTSInvoked{At: at, TurnID: "T", Index: i})
+		bus.Publish(voiceevent.TTSInvoked{At: at, TurnID: "T"})
 		bus.Publish(voiceevent.FirstAudio{At: at.Add(50 * time.Millisecond), TurnID: "T"})
 		bus.Publish(voiceevent.FirstOpus{At: at.Add(80 * time.Millisecond), TurnID: "T"})
 	}
@@ -218,10 +218,10 @@ func TestStageSubscriberTTFBPairsLatestNotStale(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 
 	// Sentence 0: synthesized but zero chunks → TTSInvoked, no FirstAudio.
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(100 * time.Millisecond), TurnID: "T", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(100 * time.Millisecond), TurnID: "T"})
 	// Sentence 1: serial dispatch means its invoke comes AFTER sentence 0's, then
 	// its FirstAudio. Correct ttfb = 1200 − 1000 = 200ms (its own invoke).
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1000 * time.Millisecond), TurnID: "T", Index: 1})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1000 * time.Millisecond), TurnID: "T"})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1200 * time.Millisecond), TurnID: "T"})
 
 	if len(rec.ttsTTFB) != 1 {
@@ -262,7 +262,7 @@ func TestStageSubscriberSweepReapsAbandonedTurns(t *testing.T) {
 
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "dead", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "dead", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: clock, TurnID: "dead", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: clock, TurnID: "dead"})
 	// never a FirstAudio.
 
 	if got := sub.Sweep(); got != 0 {
@@ -300,10 +300,10 @@ func TestStageSubscriberFirstAudioOutcome(t *testing.T) {
 
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "live", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "live", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(400 * time.Millisecond), TurnID: "live", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(400 * time.Millisecond), TurnID: "live"})
 	bus.Publish(voiceevent.FirstAudio{At: clock.Add(600 * time.Millisecond), TurnID: "live"})
 	// A second sentence's first audio must NOT re-count the outcome.
-	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(900 * time.Millisecond), TurnID: "live", Index: 1})
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(900 * time.Millisecond), TurnID: "live"})
 	bus.Publish(voiceevent.FirstAudio{At: clock.Add(1000 * time.Millisecond), TurnID: "live"})
 
 	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnFirstAudio || got[0].reason != ReasonNone {

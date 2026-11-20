@@ -57,7 +57,7 @@ type Floor struct {
 	// TurnID after a [Floor.Take] superseded a live holder (#443) — the Take is
 	// the only seam that knows the cause, so it publishes the cut turn's
 	// terminal. Installed by [Floor.bindSupersedeTerminal] from the floor-sharing
-	// reactors' Bind. The barge/mute paths ([Floor.Yield] and friends) clear the
+	// reactors' Bind. The barge/mute paths ([Floor.YieldTurn], [Floor.YieldAgent]) clear the
 	// holder before any new Take, and a released (completed) turn cleared its
 	// cancel, so this fires ONLY for a genuine mid-flight supersession — never a
 	// second terminal for a turn that already got one from its cutter.
@@ -128,7 +128,7 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 // coalesced is false.
 //
 // The turn's TurnID is recovered from parent ([voiceevent.TurnIDFrom]) and held
-// so [Floor.Yield] can attribute a barge to the turn it cancelled.
+// so [Floor.YieldTurn] can attribute a barge to the turn it cancelled.
 func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Context, release func(), coalesced bool) {
 	ctx, rel, coalesced := f.take(parent, agentID)
 	return ctx, func() { rel() }, coalesced
@@ -200,28 +200,6 @@ func (f *Floor) take(parent context.Context, agentID string) (ctx context.Contex
 	return ctx, release, false
 }
 
-// Yield cancels the turn currently holding the floor and reports whether one was
-// held, along with that turn's TurnID. It is the barge-in action: yielded=true
-// means an Agent was actually speaking and has now been cut (and turnID is the
-// turn that was cut, so the caller can attribute the barge); yielded=false means
-// the floor was free, so nothing was interrupted (turnID is empty and no
-// BargeDetected/TurnEnded should be emitted).
-func (f *Floor) Yield() (turnID string, yielded bool) {
-	f.mu.Lock()
-	c := f.cancel
-	turnID = f.holderTurn
-	f.cancel = nil
-	f.holderTurn = ""
-	f.holderAgent = ""
-	f.speaking = false
-	f.mu.Unlock()
-	if c == nil {
-		return "", false
-	}
-	c()
-	return turnID, true
-}
-
 // YieldTurn cancels the turn holding the floor ONLY when turnID is that turn
 // AND it is audibly speaking ([Floor.Speaking]), reporting whether it did. It
 // is the barge fire path's Gate-1 re-check (#432, ADR-0027): the confirm
@@ -233,7 +211,7 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 // speech was aimed at a turn that no longer exists, and cancelling the new
 // turn would be exactly the pre-audio self-cancel Gate 1 exists to prevent
 // (`no_audio` turns must not be cancellable). An empty floor is likewise a
-// no-op. Mechanically identical to [Floor.Yield] once the guard passes.
+// no-op. Once the guard passes it clears the holder and cancels its ctx.
 // It reports the AgentID of the holder it cut, read in the same critical section
 // as the yield itself so the attribution can never be stale — [Floor.SetHolderAgent]
 // may retarget the holder mid-turn (the Ensemble Lead election) under an unchanged
@@ -282,7 +260,7 @@ func (f *Floor) SpeakingTurn() (turnID string, speaking bool) {
 // Unlike the barge gate ([Floor.Speaking]) this deliberately ignores f.speaking:
 // a mute is a deliberate GM action that kills a held-but-silent pre-audio turn
 // too (the LLM "thinking" phase), so a just-muted Agent never starts speaking
-// after the fact (AC2). Mechanically identical to [Floor.Yield] once the holder
+// after the fact (AC2). Mechanically identical to [Floor.YieldTurn] once the holder
 // matches — the same forward-boundary hard cut (ADR-0027) — differing only in the
 // holder-match guard.
 func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
@@ -318,17 +296,6 @@ func (f *Floor) SetHolderAgent(turnID, agentID string) {
 	}
 }
 
-// Active reports whether a turn currently holds the floor (a turn is in flight,
-// from its [Floor.Take] until release/Yield — which spans the pre-audio LLM phase
-// as well as playback). It is a point-in-time read; callers must tolerate the
-// floor being taken or yielded immediately afterward. For the "is the Agent
-// AUDIBLY speaking" question the barge gate asks, use [Floor.Speaking].
-func (f *Floor) Active() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.cancel != nil
-}
-
 // MarkSpeaking records that the turn identified by turnID has produced its first
 // audible frame, so the floor's current holder counts as audibly speaking for the
 // barge gate ([Floor.Speaking]). It is driven by the audible-on-wire signal
@@ -349,7 +316,7 @@ func (f *Floor) MarkSpeaking(turnID string) {
 // This is the barge gate (ADR-0027): a human speech_start is a barge only while
 // the Agent is actually speaking, not during the held-but-silent pre-audio LLM
 // phase (where the speech is the addressing user's own continued/over-split
-// utterance, not an interruption). Point-in-time, like [Floor.Active].
+// utterance, not an interruption). A point-in-time read.
 func (f *Floor) Speaking() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -162,7 +162,7 @@ func TestTTS_DispatchPublishesInvokedOnStartError(t *testing.T) {
 	}
 
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.TTSInvoked) bool { return e.Sentence == sentence && e.Index == 0 },
+		func(e voiceevent.TTSInvoked) bool { return e.Sentence == sentence },
 		"tts.invoked published for a start-errored sentence",
 	)
 }
@@ -450,18 +450,16 @@ func TestTTS_HelloTest_DispatchesSentence(t *testing.T) {
 
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.TTSInvoked) bool {
-			return e.Sentence == sentence && e.Index == 0
+			return e.Sentence == sentence
 		},
-		"tts.invoked with sentence "+sentence+" at index 0",
+		"tts.invoked with sentence "+sentence,
 	)
 }
 
-// TestTTS_ConcurrentDispatch_AssignsUniqueIndices pins that the per-turn index
-// is assigned race-free: concurrent Dispatch calls (an Ensemble Turn or a
-// barge-in canceller, both anticipated on the stage) must each publish a
-// distinct index covering exactly 0..N-1, never a duplicate or a gap. Run under
-// -race it also guards the nextIndex field itself.
-func TestTTS_ConcurrentDispatch_AssignsUniqueIndices(t *testing.T) {
+// TestTTS_ConcurrentDispatch_AnnouncesEach pins that concurrent Dispatch calls
+// (the pre-synthesis pipeline runs two sentences of one turn at once, #626) each
+// publish exactly one TTSInvoked. Run under -race it also guards the stage.
+func TestTTS_ConcurrentDispatch_AnnouncesEach(t *testing.T) {
 	h := voicetest.New(t)
 	stage := orchestrator.NewTTS(h.Bus, closedChanSynth{})
 	voice := voicetest.LiveElevenLabsVoice()
@@ -479,28 +477,19 @@ func TestTTS_ConcurrentDispatch_AssignsUniqueIndices(t *testing.T) {
 	}
 	wg.Wait()
 
-	seen := make(map[int]bool, n)
+	invoked := 0
 	for _, e := range h.Events() {
-		if inv, ok := e.(voiceevent.TTSInvoked); ok {
-			if seen[inv.Index] {
-				t.Errorf("duplicate TTS index %d", inv.Index)
-			}
-			seen[inv.Index] = true
+		if _, ok := e.(voiceevent.TTSInvoked); ok {
+			invoked++
 		}
 	}
-	if len(seen) != n {
-		t.Fatalf("saw %d distinct indices, want %d", len(seen), n)
-	}
-	for i := range n {
-		if !seen[i] {
-			t.Errorf("missing index %d (indices must be a gapless 0..%d)", i, n-1)
-		}
+	if invoked != n {
+		t.Fatalf("saw %d TTSInvoked, want %d (one per Dispatch)", invoked, n)
 	}
 }
 
 // TestTTS_Dispatch_LookaheadSkipsInvoke pins F1 (#375): a Dispatch under a
-// PlaybackLookahead ctx does NOT publish TTSInvoked and does NOT reserve an index —
-// the reaction's first sentence is announced later, at release, via PublishInvoked —
+// PlaybackLookahead ctx does NOT publish TTSInvoked — the reaction's first sentence is announced later, at release, via PublishInvoked —
 // but it is still fully synthesized, drained, and character-metered (ADR-0045).
 func TestTTS_Dispatch_LookaheadSkipsInvoke(t *testing.T) {
 	h := voicetest.New(t)
@@ -527,11 +516,9 @@ func TestTTS_Dispatch_LookaheadSkipsInvoke(t *testing.T) {
 	}
 }
 
-// TestTTS_PublishInvoked_MonotonicIndex pins F1 (#375): PublishInvoked emits a
-// TTSInvoked carrying the given turn id + sentence and a monotonically increasing
-// index drawn from the SAME counter Dispatch uses, so a released look-ahead sentence
-// takes a distinct in-turn slot.
-func TestTTS_PublishInvoked_MonotonicIndex(t *testing.T) {
+// TestTTS_PublishInvoked pins F1 (#375): PublishInvoked emits a TTSInvoked
+// carrying the given turn id + sentence, after any earlier Dispatch's.
+func TestTTS_PublishInvoked(t *testing.T) {
 	h := voicetest.New(t)
 	var got []voiceevent.TTSInvoked
 	voiceevent.On(h.Bus, func(e voiceevent.TTSInvoked) { got = append(got, e) })
@@ -539,7 +526,6 @@ func TestTTS_PublishInvoked_MonotonicIndex(t *testing.T) {
 	synth := &flakySynth{}
 	stage := orchestrator.NewTTS(h.Bus, synth)
 
-	// A normal dispatch takes index 0; PublishInvoked then takes index 1.
 	if err := stage.Dispatch(voiceevent.WithTurnID(context.Background(), "T"), "First.", voicetest.LiveElevenLabsVoice()); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -550,9 +536,6 @@ func TestTTS_PublishInvoked_MonotonicIndex(t *testing.T) {
 	}
 	if got[1].TurnID != "R" || got[1].Sentence != "Reaction." {
 		t.Fatalf("PublishInvoked event = %+v, want TurnID=R Sentence=Reaction.", got[1])
-	}
-	if got[1].Index <= got[0].Index {
-		t.Fatalf("PublishInvoked index %d not > Dispatch index %d (must be monotonic)", got[1].Index, got[0].Index)
 	}
 	if got[1].At.IsZero() {
 		t.Fatal("PublishInvoked event has zero At")

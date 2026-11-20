@@ -101,9 +101,9 @@ func TestProjection_LinesAndOrder(t *testing.T) {
 		At: at(2), Text: "Hello Bart", TurnID: "t1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", Index: 0, TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
 	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "What'll it be?", Index: 1, TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "What'll it be?", TurnID: "t1"})
 	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"})
 	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
 
