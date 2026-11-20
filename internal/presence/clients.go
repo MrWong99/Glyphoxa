@@ -166,6 +166,12 @@ type Clients struct {
 	mu       sync.Mutex
 	entries  map[string]*clientEntry
 	tenants  map[uuid.UUID]*tenantState
+	// rebuilds paces gateway opens per Bot token (rebuild.go): every open sends
+	// an IDENTIFY, and Discord resets a token that sends 1000 in 24 hours.
+	// Guarded by mu.
+	rebuilds map[string]*rebuildState
+	// now is the clock the rebuild pacing reads; a test seam.
+	now func() time.Time
 	// closed marks the registry torn down (#483 L7). Written by Close under BOTH
 	// ensureMu and mu; read by EnsureTenant under ensureMu. Close takes ensureMu
 	// first so an in-flight ensure finishes (or fails) BEFORE the teardown — an
@@ -190,6 +196,8 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 		reconcile: reconcileInterval(),
 		entries:   map[string]*clientEntry{},
 		tenants:   map[uuid.UUID]*tenantState{},
+		rebuilds:  map[string]*rebuildState{},
+		now:       time.Now,
 	}
 	// The budget opts are read at build time (each Ensure that builds/rebuilds an
 	// entry's client), so a SetGatewayBudget between NewClients and the first
@@ -296,12 +304,22 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	// goroutine (finding 3).
 	rebuilt := false
 	var client *bot.Client
+	// Every build below sends an IDENTIFY. A gateway that keeps dying, or a
+	// token Discord refuses, must not be re-opened on every 30s reconcile and
+	// every Voice Session start (rebuild.go).
+	if entry == nil || entry.client.Load() == nil {
+		if wait := c.rebuildWait(token); wait > 0 {
+			return fmt.Errorf("%w: next attempt in %s", ErrRebuildBackoff, wait.Round(time.Second))
+		}
+	}
 	switch {
 	case entry == nil:
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
+			c.noteOpenFailed(token, err)
 			return err
 		}
+		c.noteOpened(token)
 		entry = &clientEntry{token: token, refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
 		entry.client.Store(cl)
 		client = cl
@@ -312,8 +330,10 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	case entry.client.Load() == nil:
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
+			c.noteOpenFailed(token, err)
 			return err
 		}
+		c.noteOpened(token)
 		c.mu.Lock()
 		entry.registeredGuilds = map[string]bool{}
 		c.mu.Unlock()
@@ -494,7 +514,13 @@ func (c *Clients) EnsureAll(ctx context.Context) error {
 	}
 	for _, dep := range deps {
 		if err := c.EnsureTenant(ctx, dep.TenantID); err != nil {
-			c.log.Warn("presence: ensure tenant at boot failed; standing by", "tenant", dep.TenantID, "err", err)
+			if errors.Is(err, ErrRebuildBackoff) {
+				// Expected on every reconcile tick while a token is being paced;
+				// the death or the failed open that started it was already logged.
+				c.log.Debug("presence: standing client rebuild is backing off", "tenant", dep.TenantID, "err", err)
+				continue
+			}
+			c.log.Warn("presence: ensure tenant failed; standing by", "tenant", dep.TenantID, "err", err)
 		}
 	}
 	return nil
@@ -624,6 +650,7 @@ func (c *Clients) invalidate(dead *bot.Client, cause error) {
 		return
 	}
 	entry.registeredGuilds = map[string]bool{}
+	wait := c.noteDiedLocked(entry.token, cause)
 	if fe := wirenpc.ClassifyFatal(cause); fe != nil {
 		detail := fe.Error()
 		for id := range entry.refs {
@@ -633,7 +660,7 @@ func (c *Clients) invalidate(dead *bot.Client, cause error) {
 		}
 	}
 	c.mu.Unlock()
-	c.log.Warn("presence: standing gateway died; invalidating standing client", "err", cause)
+	c.log.Warn("presence: standing gateway died; invalidating standing client", "err", cause, "next_attempt_in", wait.Round(time.Second))
 	c.closeClient(dead)
 }
 

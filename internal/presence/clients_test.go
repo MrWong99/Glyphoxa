@@ -100,6 +100,14 @@ type clientsRig struct {
 	regs        []regCall
 	openErr     error
 	registerErr error
+	clock       time.Time // the registry's clock; move it with advance
+}
+
+// advance moves the registry's clock forward (rebuild pacing reads it).
+func (r *clientsRig) advance(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clock = r.clock.Add(d)
 }
 
 func newClientsRig(t *testing.T, envToken string) *clientsRig {
@@ -112,8 +120,13 @@ func newClientsRig(t *testing.T, envToken string) *clientsRig {
 	reg := NewRegistry(NewGate(gmInTenants{}, fakeTenants{}), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 
-	rig := &clientsRig{cipher: cipher, store: store}
+	rig := &clientsRig{cipher: cipher, store: store, clock: time.Unix(1_800_000_000, 0)}
 	c := NewClients(store, cipher, reg, envToken, nil)
+	c.now = func() time.Time {
+		rig.mu.Lock()
+		defer rig.mu.Unlock()
+		return rig.clock
+	}
 	c.build = func(token string) (*bot.Client, error) {
 		rig.mu.Lock()
 		defer rig.mu.Unlock()
@@ -368,8 +381,8 @@ func TestCentralClientSurvivesOneTenantTokenSwap(t *testing.T) {
 	}
 }
 
-// (5) invalidate B on a terminal token death → B failed with detail, A ok; the
-// next ClientForTenant(B) re-ensures.
+// (5) invalidate B on a terminal token death → B failed with detail, A ok; B is
+// re-ensured only once the pacing for a terminal failure has run out.
 func TestInvalidateMarksTenantFailedAndReEnsures(t *testing.T) {
 	rig := newClientsRig(t, "")
 	ctx := context.Background()
@@ -391,10 +404,24 @@ func TestInvalidateMarksTenantFailedAndReEnsures(t *testing.T) {
 		t.Fatalf("A status = %+v, want ok (unaffected)", st)
 	}
 
-	// The next borrow re-ensures B (rebuild).
+	// A refused token is not retried on the next borrow: every retry is an
+	// IDENTIFY that cannot succeed.
 	buildsBefore := rig.numBuilds()
+	if _, err := rig.c.ClientForTenant(ctx, b); !errors.Is(err, ErrRebuildBackoff) {
+		t.Fatalf("ClientForTenant(B) right after a terminal death = %v, want ErrRebuildBackoff", err)
+	}
+	if rig.numBuilds() != buildsBefore {
+		t.Fatalf("a terminal death was rebuilt immediately: builds=%d, want %d", rig.numBuilds(), buildsBefore)
+	}
+	if _, err := rig.c.ClientForTenant(ctx, a); err != nil {
+		t.Fatalf("ClientForTenant(A) while B backs off: %v (pacing is per token)", err)
+	}
+
+	// Once the wait is over the borrow re-ensures B (rebuild), so a fix made on
+	// Discord's side takes effect without a restart.
+	rig.advance(rebuildMaxDelay)
 	if _, err := rig.c.ClientForTenant(ctx, b); err != nil {
-		t.Fatalf("ClientForTenant(B) after invalidate: %v", err)
+		t.Fatalf("ClientForTenant(B) after the backoff: %v", err)
 	}
 	if rig.numBuilds() != buildsBefore+1 {
 		t.Errorf("B did not re-ensure: builds=%d, want %d", rig.numBuilds(), buildsBefore+1)
@@ -416,13 +443,14 @@ func TestClientForTenantSelfHealsAfterFailure(t *testing.T) {
 	if err := rig.c.EnsureTenant(ctx, a); err == nil {
 		t.Fatal("first EnsureTenant = nil, want the open error")
 	}
-	// The blip persists on the immediate retry too: the self-heal re-ensure
-	// surfaces the still-failing open error rather than a stale client.
-	if _, err := rig.c.ClientForTenant(ctx, a); err == nil {
-		t.Fatal("ClientForTenant during the blip = nil, want the surfaced open error")
+	// An immediate retry is paced, not sent: it surfaces an error rather than a
+	// stale client, without another open.
+	if _, err := rig.c.ClientForTenant(ctx, a); !errors.Is(err, ErrRebuildBackoff) {
+		t.Fatalf("ClientForTenant during the blip = %v, want ErrRebuildBackoff", err)
 	}
 
 	rig.openErr = nil
+	rig.advance(rebuildBaseDelay)
 	c, err := rig.c.ClientForTenant(ctx, a)
 	if err != nil {
 		t.Fatalf("ClientForTenant after blip clears: %v", err)
@@ -622,5 +650,103 @@ func TestCloseBlocksLateEnsure(t *testing.T) {
 	}
 	if rig.numBuilds() != 1 {
 		t.Fatalf("builds after post-Close ensure = %d, want still 1 (no leaked gateway)", rig.numBuilds())
+	}
+}
+
+// TestRebuildPacingBoundsIdentifiesPerDay is the regression test for the
+// production token reset of 2026-11-20: a standing gateway that dies again
+// right after every open used to be rebuilt on every reconcile tick, about
+// 2,880 IDENTIFYs a day against Discord's limit of 1,000. Paced, a full day of
+// that failure must stay far inside the budget.
+func TestRebuildPacingBoundsIdentifiesPerDay(t *testing.T) {
+	rig := newClientsRig(t, "")
+	ctx := context.Background()
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+
+	const tick = 30 * time.Second
+	for elapsed := time.Duration(0); elapsed < 24*time.Hour; elapsed += tick {
+		// One reconcile tick; whenever it yields a client, that gateway dies.
+		if client, err := rig.c.ClientForTenant(ctx, a); err == nil {
+			rig.c.invalidate(client, errors.New("gateway closed"))
+		}
+		rig.advance(tick)
+	}
+
+	if got := rig.numBuilds(); got > 100 {
+		t.Fatalf("a day of a flapping gateway opened it %d times; Discord resets the token at 1000", got)
+	}
+	if got := rig.numBuilds(); got < 40 {
+		t.Fatalf("a day of a flapping gateway was only retried %d times; the pacing must keep trying", got)
+	}
+}
+
+// A failed open is paced exactly like a death: the same loop, entered before
+// the client ever came up.
+func TestRebuildPacingBoundsFailedOpens(t *testing.T) {
+	rig := newClientsRig(t, "")
+	ctx := context.Background()
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	rig.openErr = errors.New("gateway unreachable")
+
+	const tick = 30 * time.Second
+	for elapsed := time.Duration(0); elapsed < 24*time.Hour; elapsed += tick {
+		_ = rig.c.EnsureTenant(ctx, a)
+		rig.advance(tick)
+	}
+	if got := rig.numBuilds(); got > 100 {
+		t.Fatalf("a day of failing opens attempted %d; Discord resets the token at 1000", got)
+	}
+}
+
+func TestRebuildPacingDoublesAndForgivesAHealthyClient(t *testing.T) {
+	rig := newClientsRig(t, "")
+	ctx := context.Background()
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	blip := errors.New("gateway closed")
+
+	die := func() {
+		t.Helper()
+		client, err := rig.c.ClientForTenant(ctx, a)
+		if err != nil {
+			t.Fatalf("ClientForTenant: %v", err)
+		}
+		rig.c.invalidate(client, blip)
+	}
+	waitIs := func(want time.Duration) {
+		t.Helper()
+		if got := rig.c.rebuildWait("tok-A"); got != want {
+			t.Fatalf("rebuild wait = %s, want %s", got, want)
+		}
+	}
+
+	die()
+	waitIs(30 * time.Second)
+	rig.advance(30 * time.Second)
+	die()
+	waitIs(time.Minute)
+	rig.advance(time.Minute)
+	die()
+	waitIs(2 * time.Minute)
+
+	// A client that then serves for a while has earned a fresh count: its next
+	// death is a first failure again.
+	rig.advance(2 * time.Minute)
+	if _, err := rig.c.ClientForTenant(ctx, a); err != nil {
+		t.Fatalf("ClientForTenant after the backoff: %v", err)
+	}
+	rig.advance(rebuildHealthyAfter)
+	die()
+	waitIs(30 * time.Second)
+}
+
+func TestRebuildDelayCaps(t *testing.T) {
+	if got := rebuildDelay(1); got != rebuildBaseDelay {
+		t.Fatalf("rebuildDelay(1) = %s, want %s", got, rebuildBaseDelay)
+	}
+	if got := rebuildDelay(1000); got != rebuildMaxDelay {
+		t.Fatalf("rebuildDelay(1000) = %s, want the %s cap", got, rebuildMaxDelay)
 	}
 }
