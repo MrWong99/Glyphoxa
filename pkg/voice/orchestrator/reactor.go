@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -161,11 +160,10 @@ type lane struct {
 	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of this lane's most recent
 	// speech-end, carried onto the flushed utterance's STTFinal (A3).
 	speechEndAt time.Time
-	// curUtteranceID / pendCommit / pendCommitSentAt carry this lane's current
-	// utterance's streaming state from the VAD callbacks to the flush (ADR-0042).
-	curUtteranceID   string
-	pendCommit       <-chan stt.CommitResult
-	pendCommitSentAt time.Time
+	// curUtteranceID / pendCommit carry this lane's current utterance's streaming
+	// state from the VAD callbacks to the flush (ADR-0042).
+	curUtteranceID string
+	pendCommit     *streamCommit
 	// stream is this lane's optional streaming-STT transport; nil = pure batch.
 	stream       *StreamManager
 	streamCancel func()
@@ -196,21 +194,20 @@ const laneReapSweepEvery = 1024
 // enqueue so the worker never reads mutable Segmenter/lane state.
 //
 // On the streaming path (ADR-0042) it additionally carries the utterance's manual
-// commit handle (nil = pure batch), the moment that commit was sent (for the
-// stt_request span), the utterance id (joining the STTFinal to its partials), and
+// commit handle (nil = pure batch; it records when the commit was sent and which
+// session issued it), the utterance id (joining the STTFinal to its partials), and
 // the lane's [StreamManager] (whose awaitCommit resolves the commit — carried on the
 // job so a reaped lane's commit still resolves on the shared worker). The worker
 // prefers the committed text and falls back to the batch recognizer — with these
 // SAME locally-buffered seg frames — on any commit failure.
 type transcribeJob struct {
-	ctx          context.Context
-	seg          []audio.Frame
-	speechEndAt  time.Time
-	commit       <-chan stt.CommitResult
-	commitSentAt time.Time
-	utteranceID  string
-	speakerID    string
-	stream       *StreamManager
+	ctx         context.Context
+	seg         []audio.Frame
+	speechEndAt time.Time
+	commit      *streamCommit
+	utteranceID string
+	speakerID   string
+	stream      *StreamManager
 }
 
 // transcribeQueueDepth is the buffer on the worker's job channel. A flush enqueues
@@ -339,14 +336,9 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		// fires HERE, at the VAD speech-end, never provider-side. The handle is stashed
 		// for the imminent flush to attach to the job.
 		if stream != nil {
-			commit, sentAt, ok := stream.endUtterance()
+			commit, _ := stream.endUtterance() // nil when the utterance never streamed
 			s.mu.Lock()
-			if ok {
-				ln.pendCommit = commit
-				ln.pendCommitSentAt = sentAt
-			} else {
-				ln.pendCommit = nil
-			}
+			ln.pendCommit = commit
 			s.mu.Unlock()
 		}
 	})
@@ -518,7 +510,6 @@ func (s *Segmenter) processLane(ln *lane, f audio.Frame) error {
 	ctx := s.ctx
 	speechEndAt := ln.speechEndAt
 	commit := ln.pendCommit
-	commitSentAt := ln.pendCommitSentAt
 	utteranceID := ln.curUtteranceID
 	stream := ln.stream
 	ln.pendCommit = nil
@@ -529,7 +520,7 @@ func (s *Segmenter) processLane(ln *lane, f audio.Frame) error {
 	if stream != nil {
 		stream.idleFrame(f)
 	}
-	s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID, ln.id, stream)
+	s.dispatchTranscription(ctx, seg, speechEndAt, commit, utteranceID, ln.id, stream)
 	return nil
 }
 
@@ -609,8 +600,7 @@ func (s *Segmenter) reapIdleLanes() {
 		id           string
 		seg          []audio.Frame
 		speechEndAt  time.Time
-		commit       <-chan stt.CommitResult
-		commitSentAt time.Time
+		commit       *streamCommit
 		utteranceID  string
 		stream       *StreamManager
 		streamCancel func()
@@ -626,7 +616,6 @@ func (s *Segmenter) reapIdleLanes() {
 			seg:          ln.buf,
 			speechEndAt:  ln.speechEndAt,
 			commit:       ln.pendCommit,
-			commitSentAt: ln.pendCommitSentAt,
 			utteranceID:  ln.curUtteranceID,
 			stream:       ln.stream,
 			streamCancel: ln.streamCancel,
@@ -647,7 +636,7 @@ func (s *Segmenter) reapIdleLanes() {
 	for _, r := range reap {
 		// Flush a still-buffered utterance so a reaped mid-utterance lane is not lost;
 		// dispatchTranscription is a no-op on an empty buffer.
-		s.dispatchTranscription(ctx, r.seg, r.speechEndAt, r.commit, r.commitSentAt, r.utteranceID, r.id, r.stream)
+		s.dispatchTranscription(ctx, r.seg, r.speechEndAt, r.commit, r.utteranceID, r.id, r.stream)
 		if r.streamCancel != nil {
 			r.streamCancel()
 		}
@@ -677,19 +666,18 @@ func (s *Segmenter) removeLaneOrder(id string) {
 // only if the queue is full (see [transcribeQueueDepth]). A recognizer error is
 // reported by the worker through onError — the side channel that replaces the
 // inline call's return value.
-func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit <-chan stt.CommitResult, commitSentAt time.Time, utteranceID, speakerID string, stream *StreamManager) {
+func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit *streamCommit, utteranceID, speakerID string, stream *StreamManager) {
 	if len(seg) == 0 {
 		return
 	}
 	job := transcribeJob{
-		ctx:          ctx,
-		seg:          seg,
-		speechEndAt:  speechEndAt,
-		commit:       commit,
-		commitSentAt: commitSentAt,
-		utteranceID:  utteranceID,
-		speakerID:    speakerID,
-		stream:       stream,
+		ctx:         ctx,
+		seg:         seg,
+		speechEndAt: speechEndAt,
+		commit:      commit,
+		utteranceID: utteranceID,
+		speakerID:   speakerID,
+		stream:      stream,
 	}
 	// Decide-and-enlist under mu: if teardown has begun (closed) or we were never bound
 	// (jobs nil), transcribe inline; otherwise register as a pending sender BEFORE
@@ -761,7 +749,6 @@ func (s *Segmenter) flushLane(ln *lane) {
 	ln.listening = false
 	ctx := s.ctx
 	commit := ln.pendCommit
-	commitSentAt := ln.pendCommitSentAt
 	utteranceID := ln.curUtteranceID
 	stream := ln.stream
 	ln.pendCommit = nil
@@ -772,15 +759,14 @@ func (s *Segmenter) flushLane(ln *lane) {
 	// or fall to batch if the stream is down. A speech-end already emitted a handle
 	// captured above, so this only fires for a truly mid-utterance end-of-stream.
 	if wasListening && stream != nil {
-		if c, sentAt, ok := stream.endUtterance(); ok {
+		if c, ok := stream.endUtterance(); ok {
 			commit = c
-			commitSentAt = sentAt
 		}
 	}
 
 	// A Flush has no speech-end transition (end-of-stream), so it carries the
 	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
-	s.dispatchTranscription(ctx, seg, time.Time{}, commit, commitSentAt, utteranceID, ln.id, stream)
+	s.dispatchTranscription(ctx, seg, time.Time{}, commit, utteranceID, ln.id, stream)
 }
 
 // transcribe produces one utterance's authoritative STTFinal, carrying the turn's
@@ -808,7 +794,7 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 	ctx = withSpeakerID(ctx, job.speakerID)
 
 	if job.commit != nil && job.stream != nil {
-		if t, ok := job.stream.awaitCommit(job.commit, job.commitSentAt); ok {
+		if t, ok := job.stream.awaitCommit(job.commit); ok {
 			// Committed text is authoritative: publish it as this utterance's STTFinal
 			// with the SAME TurnID minting the batch path uses.
 			s.stt.PublishFinal(ctx, t)

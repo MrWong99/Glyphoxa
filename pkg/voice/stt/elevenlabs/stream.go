@@ -278,10 +278,11 @@ func (s *stream) Send(frame audio.Frame) error {
 		return nil
 	}
 	if err := s.enqueue(wsWrite{audioB64: base64.StdEncoding.EncodeToString(chunk)}); err != nil {
-		// The flush could not be queued (queue full or session dead). Put the
-		// bytes back at the front of the aggregation buffer so no audio is
-		// dropped — a later flush retries them. Send is single-goroutine, so no
-		// concurrent Send appended behind us.
+		// The flush could not be queued, so the session is dead (a full queue
+		// kills it, see enqueue). Put the bytes back at the front of the
+		// aggregation buffer anyway so the buffer stays a faithful record of the
+		// unsent audio. Send is single-goroutine, so no concurrent Send appended
+		// behind us.
 		s.aggMu.Lock()
 		s.agg = append(chunk, s.agg...)
 		s.aggMu.Unlock()
@@ -341,7 +342,14 @@ func (s *stream) Close() error {
 var errStreamClosed = fmt.Errorf("stt stream closed")
 
 // enqueue offers a write to the write pump without blocking. It returns the
-// session's death error once dead, or a recoverable queue-full error.
+// session's death error once dead.
+//
+// A full queue is FATAL (#639 B): the writes already accepted ahead of the
+// rejected one still reach the provider once the pump unblocks, so the
+// provider's buffered audio no longer lines up with the utterance the caller is
+// about to commit — the next commit would transcribe this utterance's tail
+// again. The session is shut down (never blocking: shutdown only closes the
+// connection) and the caller falls back to batch and redials.
 func (s *stream) enqueue(w wsWrite) error {
 	select {
 	case s.writeCh <- w:
@@ -350,7 +358,8 @@ func (s *stream) enqueue(w wsWrite) error {
 		if de := s.deadErr.Load(); de != nil {
 			return de
 		}
-		return &stt.StreamError{Code: stt.CodeQueueFull, Fatal: false, Err: fmt.Errorf("write queue full")}
+		s.shutdown(&stt.StreamError{Code: stt.CodeQueueFull, Fatal: true, Err: fmt.Errorf("write queue full")})
+		return s.deadErr.Load()
 	}
 }
 
@@ -360,7 +369,9 @@ func (s *stream) shutdown(cause *stt.StreamError) {
 	s.closeOnce.Do(func() {
 		s.deadErr.Store(cause)
 		close(s.stopCh)
-		_ = s.conn.Close()
+		if s.conn != nil { // nil only in pump-less unit tests
+			_ = s.conn.Close()
+		}
 	})
 }
 

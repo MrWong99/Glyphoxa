@@ -93,8 +93,9 @@ const (
 	CodeSampleRateMismatch = "sample_rate_mismatch"
 
 	// CodeQueueFull marks a non-blocking Send or Commit that could not enqueue
-	// because the internal write queue is full (backpressure). Recoverable: the
-	// caller may retry once the write pump drains.
+	// because the internal write queue is full (backpressure). Fatal (#639): the
+	// writes queued ahead of it still reach the provider, so its buffered audio
+	// no longer lines up with the caller's utterance — reopen the session.
 	CodeQueueFull = "queue_full"
 )
 
