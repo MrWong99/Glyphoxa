@@ -349,7 +349,7 @@ func TestStartAlreadyActive(t *testing.T) {
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("already-active reply = %+v, want one ephemeral error", resp.followups)
 	}
-	if !strings.Contains(strings.ToLower(resp.followups[0].content), "already active") {
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "already running") {
 		t.Errorf("already-active reply = %q, want a clear 'already active' message", resp.followups[0].content)
 	}
 }
@@ -478,6 +478,37 @@ func TestEndStopPending(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(resp.followups[0].content), "try again") {
 		t.Errorf("stop-pending reply = %q, want a retryable hint", resp.followups[0].content)
+	}
+}
+
+// TestSessionOps_TimeoutReadsAsTakingLonger (S7): the slash budget used to equal
+// the claim plane's 30s stop budget, so the command's own ctx usually expired
+// first and the GM got the generic failure instead of the "taking longer"
+// reply. The budget now outlasts the plane's, and a deadline that still wins
+// is answered the same friendly way.
+func TestSessionOps_TimeoutReadsAsTakingLonger(t *testing.T) {
+	plane := session.NewIntentControl(nil, nil, session.IntentControlConfig{})
+	if sessionOpTimeout <= plane.StopBudget() || sessionOpTimeout <= plane.StartBudget() {
+		t.Fatalf("sessionOpTimeout %s must outlast the claim plane's start/stop budgets (%s/%s)",
+			sessionOpTimeout, plane.StartBudget(), plane.StopBudget())
+	}
+
+	end := &fakeVoice{stopErr: context.DeadlineExceeded}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(EndCommand(end))
+	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "taking longer") {
+		t.Errorf("end on a deadline = %+v, want the 'taking longer' reply", resp.followups)
+	}
+
+	c := campaign("Lost Mine")
+	store := &fakeSessionStore{forUser: &c}
+	start := &fakeVoice{startErr: context.DeadlineExceeded}
+	reg = testRegistry(testGuild, operatorID)
+	reg.Register(StartCommand(store, start))
+	resp = dispatchAs(reg, "glyphoxa start", operatorID, nil)
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "taking longer") {
+		t.Errorf("start on a deadline = %+v, want the 'taking longer' reply", resp.followups)
 	}
 }
 

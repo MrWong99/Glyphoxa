@@ -57,43 +57,17 @@ const maxAutocompleteChoices = 25
 func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "glyphoxa mute",
-		Description: "Mute one NPC voice in the active Voice Session.",
+		Description: "Mute one NPC in the running voice session.",
 		GMOnly:      true,
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
 				Name:         "npc",
-				Description:  "The NPC (or Butler) to mute.",
+				Description:  "The NPC to mute.",
 				Required:     true,
 				Autocomplete: true,
 			},
 		},
-		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			vs, active, err := mgr.Active(ctx, ac.TenantID())
-			if err != nil || !active {
-				// No LOCAL session: fall back to the pool's Active (#503) so the roster
-				// still resolves for a session hosted by another worker.
-				if vs, active = poolActive(ctx, pool, ac.TenantID()); !active {
-					return nil, nil // no session anywhere: nothing to mute, offer nothing
-				}
-			}
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return nil, err
-			}
-			_, focused := ac.Focused()
-			prefix := strings.ToLower(strings.TrimSpace(focused))
-			choices := make([]discord.AutocompleteChoice, 0, len(roster))
-			for _, a := range voiced(roster) {
-				if prefix != "" && !strings.HasPrefix(strings.ToLower(a.Name), prefix) {
-					continue
-				}
-				choices = append(choices, discord.AutocompleteChoiceString{Name: a.Name, Value: a.ID.String()})
-				if len(choices) >= maxAutocompleteChoices {
-					break
-				}
-			}
-			return choices, nil
-		},
+		Autocomplete: npcAutocomplete(mgr, agents, pool),
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
@@ -103,28 +77,27 @@ func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command
 				// claim plane (#503); else the plain no-session guard.
 				return handleCrossPodMute(ctx, ic, agents, pool)
 			}
-			input, _ := ic.String("npc")
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return fmt.Errorf("presence: list agents for mute: %w", err) // unexpected → generic reply
-			}
-			agent, found, ambiguous := resolveAgent(voiced(roster), input)
-			if ambiguous {
-				return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-			}
-			if !found {
-				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+			agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "npc")
+			if !ok {
+				return err
 			}
 			if _, err := mgr.SetAgentMute(ctx, ic.TenantID(), agent.ID.String(), true); err != nil {
-				// The expected failures are a session ending between the snapshot and the
-				// write, or the resolved Agent no longer being in the (now-different)
-				// active Campaign; both surface as the same ephemeral guard rather than a
-				// generic error, so a racing Stop / session swap reads cleanly.
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return replyLocalControlError(ic, "mute", err)
 			}
-			return ic.ReplyEphemeral(fmt.Sprintf("%s is muted.", agent.Name))
+			return ic.ReplyEphemeral(muteConfirmation(agent.Name))
 		},
 	}
+}
+
+// muteConfirmation words a single mute. Discord has no unmute command (#211):
+// the reply says where un-muting lives.
+func muteConfirmation(name string) string {
+	return fmt.Sprintf("%s is muted. Unmute on the Session screen in the web app.", name)
+}
+
+// muteAllConfirmation words a mute-all, with the same pointer to un-muting.
+func muteAllConfirmation(n int) string {
+	return fmt.Sprintf("Muted all %d NPC voices. Unmute on the Session screen in the web app.", n)
 }
 
 // MuteAllCommand builds /glyphoxa muteall (#211, ADR-0010 GM-only): it mutes every
@@ -136,13 +109,13 @@ func MuteCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command
 func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Command {
 	return Command{
 		Path:        "glyphoxa muteall",
-		Description: "Mute every NPC voice in the active Voice Session.",
+		Description: "Mute every NPC in the running voice session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			if _, active, err := mgr.Active(ctx, ic.TenantID()); err != nil || !active {
 				// Cross-pod branch (#503): the session may be hosted by another worker.
 				if _, poolLive := poolActive(ctx, pool, ic.TenantID()); !poolLive {
-					return ic.ReplyEphemeral("No Voice Session is active.")
+					return ic.ReplyEphemeral(noSessionReply)
 				}
 				// Defer FIRST: the relay polls the hosting worker past Discord's 3s
 				// deadline. The confirmation lands only on the worker's terminal row.
@@ -150,13 +123,13 @@ func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Comm
 					return fmt.Errorf("presence: defer cross-pod muteall: %w", err)
 				}
 				ids, err := pool.SetAllMute(ctx, ic.TenantID(), true)
-				return replyControlOutcome(ic, err, fmt.Sprintf("Muted all %d Agent voices.", len(ids)))
+				return replyControlOutcome(ic, err, muteAllConfirmation(len(ids)))
 			}
 			ids, err := mgr.SetAllMute(ctx, ic.TenantID(), true)
 			if err != nil {
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return replyLocalControlError(ic, "muteall", err)
 			}
-			return ic.ReplyEphemeral(fmt.Sprintf("Muted all %d Agent voices.", len(ids)))
+			return ic.ReplyEphemeral(muteAllConfirmation(len(ids)))
 		},
 	}
 }
@@ -170,25 +143,17 @@ func MuteAllCommand(mgr SessionMuter, agents AgentLister, pool PoolControl) Comm
 func handleCrossPodMute(ctx context.Context, ic *Interaction, agents AgentLister, pool PoolControl) error {
 	vs, live := poolActive(ctx, pool, ic.TenantID())
 	if !live {
-		return ic.ReplyEphemeral("No Voice Session is active.")
+		return ic.ReplyEphemeral(noSessionReply)
 	}
 	if err := ic.Defer(true); err != nil {
 		return fmt.Errorf("presence: defer cross-pod mute: %w", err)
 	}
-	input, _ := ic.String("npc")
-	roster, err := agents.ListAgents(ctx, vs.CampaignID)
-	if err != nil {
-		return fmt.Errorf("presence: list agents for cross-pod mute: %w", err) // generic reply via the registry
-	}
-	agent, found, ambiguous := resolveAgent(voiced(roster), input)
-	if ambiguous {
-		return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-	}
-	if !found {
-		return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+	agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "npc")
+	if !ok {
+		return err
 	}
 	_, err = pool.SetAgentMute(ctx, ic.TenantID(), agent.ID.String(), true)
-	return replyControlOutcome(ic, err, fmt.Sprintf("%s is muted.", agent.Name))
+	return replyControlOutcome(ic, err, muteConfirmation(agent.Name))
 }
 
 // resolveAgent resolves a /glyphoxa mute npc value to a roster Agent (#211):

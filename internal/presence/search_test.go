@@ -2,6 +2,7 @@ package presence
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -87,7 +88,10 @@ func TestSearchCommandQuotesTopMatches(t *testing.T) {
 		t.Errorf("search limit = %d, want %d", store.gotLimit, transcriptSearchLimit)
 	}
 	body := resp.followups[0].content
-	for _, want := range []string{"Bart (NPC)", "18:00:02", "Well met, traveller.", "Player / DM", "Where is the dragon?"} {
+	// The time is Discord timestamp markup, so each reader sees date and time in
+	// their own timezone (hits span sessions; a bare UTC time of day was ambiguous).
+	stamp := fmt.Sprintf("<t:%d:f>", time.Date(2026, 6, 27, 18, 0, 2, 0, time.UTC).Unix())
+	for _, want := range []string{"Bart (NPC)", stamp, "Well met, traveller.", "Player / DM", "Where is the dragon?"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("reply missing %q; got:\n%s", want, body)
 		}

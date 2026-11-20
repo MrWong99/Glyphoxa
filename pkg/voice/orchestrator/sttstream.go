@@ -360,7 +360,8 @@ func (m *StreamManager) addStreamed(f audio.Frame) {
 
 // send streams one voiced frame to the session. On any send error the utterance is
 // marked dead (it falls back to batch with the Segmenter's locally-buffered frames)
-// and, if the error is fatal, the dead session is dropped and the maintainer nudged.
+// and, if the error is fatal — or leaves already-streamed audio uncommitted, see
+// [StreamManager.streamFailed] — the session is dropped and the maintainer nudged.
 // A no-op once the utterance is dead or the session is down.
 func (m *StreamManager) send(f audio.Frame) {
 	m.mu.Lock()
@@ -384,11 +385,20 @@ func (m *StreamManager) send(f audio.Frame) {
 	m.addStreamed(f) // voiced frame accepted → bill it (#127)
 }
 
+// streamCommit is one utterance's in-flight manual commit: the channel it resolves
+// on, when it was sent (the stt_request span start), and the session that issued
+// it — so a commit that never resolves can retire exactly that session (#639).
+type streamCommit struct {
+	ch      <-chan stt.CommitResult
+	sentAt  time.Time
+	session stt.Stream
+}
+
 // endUtterance closes the utterance. When it streamed live to a healthy session it
-// requests the manual commit and returns the resolving channel plus the sent-at
-// time; ok is false when the utterance never streamed (session down at begin, or a
-// send died), meaning the caller transcribes it via the pure batch path.
-func (m *StreamManager) endUtterance() (commit <-chan stt.CommitResult, sentAt time.Time, ok bool) {
+// requests the manual commit and returns its handle; ok is false when the
+// utterance never streamed (session down at begin, or a send died), meaning the
+// caller transcribes it via the pure batch path.
+func (m *StreamManager) endUtterance() (commit *streamCommit, ok bool) {
 	m.mu.Lock()
 	m.utterOpen = false
 	dead := m.utterDead
@@ -404,14 +414,14 @@ func (m *StreamManager) endUtterance() (commit <-chan stt.CommitResult, sentAt t
 		m.metrics.STTAudioSeconds(m.provider, streamed)
 	}
 	if dead || s == nil {
-		return nil, time.Time{}, false
+		return nil, false
 	}
 	ch, err := s.Commit()
 	if err != nil {
 		m.streamFailed(s, err)
-		return nil, time.Time{}, false
+		return nil, false
 	}
-	return ch, m.now(), true
+	return &streamCommit{ch: ch, sentAt: m.now(), session: s}, true
 }
 
 // awaitCommit waits up to commitTimeout for a streamed commit to resolve. On a
@@ -419,12 +429,16 @@ func (m *StreamManager) endUtterance() (commit <-chan stt.CommitResult, sentAt t
 // healthy session forgives past failures), and returns ok=true — the authoritative
 // streamed text. On a provider error or a timeout it returns ok=false so the caller
 // falls back to the batch adapter with the same locally-buffered frames.
-func (m *StreamManager) awaitCommit(ch <-chan stt.CommitResult, sentAt time.Time) (stt.Transcript, bool) {
+//
+// A timeout additionally retires the session that issued the commit (#639): the
+// adapter resolves commits strictly FIFO, so an unanswered commit left at the head
+// of its queue would make every later commit resolve one utterance behind.
+func (m *StreamManager) awaitCommit(c *streamCommit) (stt.Transcript, bool) {
 	timer := time.NewTimer(m.commitTimeout)
 	defer timer.Stop()
 	select {
-	case res := <-ch:
-		m.metrics.STTRequest(m.provider, m.now().Sub(sentAt))
+	case res := <-c.ch:
+		m.metrics.STTRequest(m.provider, m.now().Sub(c.sentAt))
 		if res.Err != nil {
 			// Provider health (#125): a resolved-but-failed commit is a stt-stage error.
 			m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeError)
@@ -440,11 +454,32 @@ func (m *StreamManager) awaitCommit(ch <-chan stt.CommitResult, sentAt time.Time
 		// series exists to surface, and the batch adapter records its call on failure
 		// as well (batch parity). The provider-call counter mirrors it with a
 		// timeout outcome plus the error-only sibling (#125).
-		m.metrics.STTRequest(m.provider, m.now().Sub(sentAt))
+		m.metrics.STTRequest(m.provider, m.now().Sub(c.sentAt))
 		m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeTimeout)
 		m.metrics.ProviderError(observe.StageSTT, m.provider)
+		m.retireSession(c.session)
 		return stt.Transcript{}, false
 	}
+}
+
+// retireSession drops s as the live session — only if it still IS the live one,
+// so a stale timeout after a redial never kills the fresh session — nudges the
+// maintainer to redial, and closes s off the caller's goroutine (Close waits for
+// the adapter's pumps, which may be mid-write). A nil s is a no-op.
+func (m *StreamManager) retireSession(s stt.Stream) {
+	if s == nil {
+		return
+	}
+	m.mu.Lock()
+	current := m.stream == s
+	if current {
+		m.stream = nil
+	}
+	m.mu.Unlock()
+	if current {
+		m.pokeMaintainer()
+	}
+	go func() { _ = s.Close() }()
 }
 
 // onPartial publishes a streamed interim hypothesis as [voiceevent.STTPartial],
@@ -471,6 +506,11 @@ func (m *StreamManager) onPartial(text string) {
 // streamFailed records a send/commit failure against session s: the utterance is
 // marked batch, an auth-class code jumps the backoff to the cap, and a fatal error
 // on the still-current session drops it and nudges the maintainer to re-establish.
+//
+// A RECOVERABLE error after this utterance already streamed audio poisons the
+// session too (#639 B): the audio it accepted is never committed (the utterance
+// now goes batch), so the provider would fold it into the NEXT utterance's
+// commit. The session is retired like a fatal one, and closed off the audio loop.
 func (m *StreamManager) streamFailed(s stt.Stream, err error) {
 	var se *stt.StreamError
 	isSE := errors.As(err, &se)
@@ -481,10 +521,19 @@ func (m *StreamManager) streamFailed(s stt.Stream, err error) {
 	if isSE && authClassCodes[se.Code] {
 		m.backoff = m.backoffMax
 	}
-	poke := false
-	if fatal && m.stream == s {
+	poisoned := !fatal && m.streamedDur > 0
+	m.mu.Unlock()
+	if poisoned {
+		m.retireSession(s)
+		return
+	}
+	if !fatal {
+		return
+	}
+	m.mu.Lock()
+	poke := m.stream == s
+	if poke {
 		m.stream = nil
-		poke = true
 	}
 	m.mu.Unlock()
 	if poke {
@@ -495,7 +544,8 @@ func (m *StreamManager) streamFailed(s stt.Stream, err error) {
 // noteAuthBackoff jumps the backoff to the cap when err is an auth-class provider
 // error observed off the audio loop (a commit resolving fatal on the worker). It
 // does not touch the session pointer — the worker may be resolving an old
-// utterance's commit while the maintainer has already moved on.
+// utterance's commit while the maintainer has already moved on (the commit
+// timeout path retires by identity instead, see [StreamManager.retireSession]).
 func (m *StreamManager) noteAuthBackoff(err error) {
 	var se *stt.StreamError
 	if errors.As(err, &se) && authClassCodes[se.Code] {

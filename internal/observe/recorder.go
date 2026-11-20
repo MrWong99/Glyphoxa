@@ -182,6 +182,10 @@ const (
 	// replier refused this NEW turn before it opened (#130) — a deliberate policy
 	// stop, distinct from a fault or a barge.
 	ReasonSpendCap TurnReason = "spend_cap"
+	// ReasonCancelled: the turn held the floor when its conversation was torn
+	// down under it (a reconnect after a media stall or gateway loss, a session
+	// stop) — a cut from above, neither a human interruption nor a provider fault.
+	ReasonCancelled TurnReason = "cancelled"
 )
 
 // MalformedPath is the bounded label naming WHICH detection site caught a

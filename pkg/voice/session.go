@@ -2,10 +2,12 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/disgoorg/snowflake/v2"
 )
@@ -39,6 +41,17 @@ func (s State) String() string {
 		return fmt.Sprintf("State(%d)", uint8(s))
 	}
 }
+
+// ErrSenderClosed is returned by [Session.Play] once disgo's audio sender has
+// shut down and closed this Session's provider: nothing polls it any more, so a
+// playback installed there would never finish. The Session is on its way out
+// (its inbound stream closes too) and the caller should rebuild it.
+var ErrSenderClosed = errors.New("voice: audio sender closed; the session can no longer play")
+
+// sessionLeaveTimeout bounds the LEAVE voice-state update [Session.Close]
+// sends through conn.Close. Close holds playMu meanwhile, so a main gateway
+// that never accepts the update must not wedge every later Play or Close.
+const sessionLeaveTimeout = 5 * time.Second
 
 // Session is the Bot's presence in one Guild's voice channel: an outbound
 // playback slot and a buffered inbound stream of per-speaker [Frame]s. Obtain
@@ -105,7 +118,8 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 // exhausted, it is Stopped, or a later Play interrupts it.
 //
 // ctx scopes this playback: cancelling it ends the stream as [ErrInterrupted].
-// Play returns an error only if the Session is already Closed.
+// Play returns an error only if the Session is already Closed, or disgo's
+// audio sender has shut down ([ErrSenderClosed]).
 func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	if src == nil {
 		return nil, fmt.Errorf("voice: Play requires a non-nil Source")
@@ -138,6 +152,19 @@ func (s *Session) Play(ctx context.Context, src Source) (*Playback, error) {
 	// interrupted playback would be counted twice.
 	if prev := s.provider.swap(slot); prev != nil {
 		prev.pb.Stop()
+	}
+	// disgo's sender closes the provider when it shuts down, and nothing polls
+	// a closed provider: a slot installed there would never finish. Checked
+	// AFTER the swap because the provider's Close flips closed before it
+	// retires the active slot — so either Close's retire sees this slot, or
+	// this load sees closed. Never both missed.
+	if s.provider.closed.Load() {
+		if s.provider.clear(slot) {
+			pb.finish(ErrInterrupted)
+		}
+		stopWatch()
+		cancel()
+		return nil, fmt.Errorf("%w (guild %s)", ErrSenderClosed, s.guild)
 	}
 	s.current.Store(pb)
 	s.metrics.PlaybackStarted(s.guild.String())
@@ -199,7 +226,10 @@ func (s *Session) Close() error {
 		// with net.ErrClosed, and the sender goroutine exits instead of polling
 		// forever. The receiver needs no such poke: terminate unblocks its
 		// ReadPacket with net.ErrClosed and it closes itself.
-		s.conn.Close(context.WithoutCancel(context.Background()))
+		// Bounded: conn.Close sends the LEAVE under this ctx while playMu is held.
+		leaveCtx, cancelLeave := context.WithTimeout(context.Background(), sessionLeaveTimeout)
+		s.conn.Close(leaveCtx)
+		cancelLeave()
 		s.provider.Close()
 		s.dispatcher.Close()
 		// Sessions gauge -1 (A2), inside closeOnce so it pairs exactly once with

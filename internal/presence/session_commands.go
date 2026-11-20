@@ -19,11 +19,24 @@ import (
 // no longer carries Discord's 3s deadline; the manager Start/Stop — which can
 // wait on the voice loop unwinding and the ended_at write — runs under this
 // explicit budget instead of an open-ended one. It sits comfortably inside
-// Discord's minutes-long follow-up window.
-const sessionOpTimeout = 30 * time.Second
+// Discord's minutes-long follow-up window, and outlasts the claim plane's own
+// 20s/30s start/stop budgets (S7): at 30s it tied the stop budget, so this ctx
+// usually expired first and the plane's ErrStopPending — the "taking longer"
+// reply — never reached the GM.
+const sessionOpTimeout = 45 * time.Second
+
+// Replies for a start/end the voice worker has not confirmed in time.
+const (
+	startSlowReply = "Starting the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment."
+	stopSlowReply  = "Ending the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment."
+)
 
 // discordChoiceLimit is Discord's hard cap on autocomplete choices per response.
 const discordChoiceLimit = 25
+
+// noActiveCampaignReply answers every slash command that needs an active
+// campaign when the GM has not picked one.
+const noActiveCampaignReply = "No active campaign yet. Run `/glyphoxa use campaign:<name>` first."
 
 // ErrNoActiveCampaign is returned by resolveActiveCampaign when neither a live
 // Voice Session nor the operator's durable /glyphoxa use selection resolves a
@@ -73,7 +86,7 @@ type VoiceControl interface {
 func UseCommand(store SessionStore) Command {
 	return Command{
 		Path:        "glyphoxa use",
-		Description: "Set the Active Campaign.",
+		Description: "Set the active campaign.",
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
 				Name:         "campaign",
@@ -87,7 +100,7 @@ func UseCommand(store SessionStore) Command {
 			input, _ := ic.String("campaign")
 			input = strings.TrimSpace(input)
 			if input == "" {
-				return ic.ReplyEphemeral("Name a campaign, e.g. /glyphoxa use campaign:<name>.")
+				return ic.ReplyEphemeral("Name a campaign, e.g. `/glyphoxa use campaign:<name>`.")
 			}
 			// Tenant-scoped: only the invoking Tenant's own campaigns are matchable, so
 			// a free-text name or a pasted foreign UUID can never select another
@@ -103,7 +116,7 @@ func UseCommand(store SessionStore) Command {
 			if err := store.SetActiveCampaign(ctx, ic.UserID(), c.ID); err != nil {
 				return fmt.Errorf("presence: set active campaign: %w", err)
 			}
-			return ic.ReplyEphemeral(fmt.Sprintf("Active Campaign set to %q.", c.Name))
+			return ic.ReplyEphemeral(fmt.Sprintf("Active campaign set to %q.", c.Name))
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			_, typed := ac.Focused()
@@ -126,7 +139,7 @@ func UseCommand(store SessionStore) Command {
 func StartCommand(store SessionStore, voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa start",
-		Description: "Start the voice session for the Active Campaign.",
+		Description: "Start the voice session for the active campaign.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			if err := ic.Defer(true); err != nil {
@@ -137,7 +150,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 
 			c, err := resolveActiveCampaign(ctx, store, voice, ic.TenantID(), ic.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
-				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
+				return ic.ReplyEphemeral(noActiveCampaignReply)
 			}
 			if err != nil {
 				return fmt.Errorf("presence: resolve active campaign: %w", err)
@@ -149,7 +162,9 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 				}
 				return fmt.Errorf("presence: start voice session: %w", err)
 			}
-			return ic.ReplyEphemeral(fmt.Sprintf("Voice session running for %q.", c.Name))
+			// Start returns once the session is accepted, before the Bot has joined
+			// the voice channel: say so, rather than claim it is already running.
+			return ic.ReplyEphemeral(fmt.Sprintf("Starting the voice session for %q. The Bot is joining the voice channel; the Session screen in the web app shows when it's in.", c.Name))
 		},
 	}
 }
@@ -163,7 +178,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 func EndCommand(voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa end",
-		Description: "End the active voice session.",
+		Description: "End the running voice session.",
 		GMOnly:      true,
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			if err := ic.Defer(true); err != nil {
@@ -178,12 +193,16 @@ func EndCommand(voice VoiceControl) Command {
 			// #490 cross-tenant guard collapses into the keyed op (no Snapshot pre-check).
 			if _, err := voice.Stop(ctx, ic.TenantID()); err != nil {
 				if errors.Is(err, session.ErrNoActiveSession) {
-					return ic.ReplyEphemeral("No voice session is running.")
+					return ic.ReplyEphemeral(noSessionReply)
 				}
 				if errors.Is(err, session.ErrStopPending) {
 					// Split/worker mode (#491): the stop was requested but the worker has
-					// not confirmed it within the budget. Retryable, not a failure.
-					return ic.ReplyEphemeral("Ending the voice session is taking longer than expected — the worker hasn't confirmed the stop yet. Try again in a moment.")
+					// not confirmed it within the budget. Retryable, not a failure. Our
+					// own deadline winning means the same thing.
+					return ic.ReplyEphemeral(stopSlowReply)
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					return ic.ReplyEphemeral(stopSlowReply)
 				}
 				return fmt.Errorf("presence: stop voice session: %w", err)
 			}
@@ -237,30 +256,30 @@ func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceC
 func startErrorMessage(err error) (string, bool) {
 	switch {
 	case errors.Is(err, session.ErrSessionActive):
-		return "A voice session is already active — /glyphoxa end it first.", true
+		return "A voice session is already running. End it with `/glyphoxa end` first.", true
 	case errors.Is(err, session.ErrSessionLimit):
 		// #488: the process is at its concurrent-session cap
 		// (GLYPHOXA_MAX_VOICE_SESSIONS). A distinct, user-visible refusal — retryable
 		// once another Tenant's session ends.
-		return "The server is already running the maximum number of concurrent voice sessions — try again once one ends.", true
+		return "Glyphoxa is already running as many voice sessions as it can host. Try again once one ends.", true
 	case errors.Is(err, session.ErrDiscordNotConfigured):
-		return "Discord isn't configured yet — link the Guild on the web Configuration screen, then pick a voice channel on the Session screen and save it as the default.", true
+		return "Discord isn't set up yet. Link your Discord server on the web Configuration screen, then pick a voice channel on the Session screen and save it as the default.", true
 	case errors.Is(err, session.ErrDiscordTokenMissing):
-		return "No Discord bot token is configured — add it on the web Configuration screen.", true
+		return "No Discord bot token is set up. Add it on the web Configuration screen.", true
 	case errors.Is(err, session.ErrDiscordTokenUndecryptable):
-		return "The saved Discord bot token could not be decrypted; check the server $GLYPHOXA_SECRET (ADR-0004).", true
+		return "The saved Discord bot token can't be read any more. Save it again on the web Configuration screen.", true
 	case errors.Is(err, session.ErrVoiceUnavailable):
-		return "Voice isn't available in this deployment mode.", true
+		return "Voice sessions aren't available on this Glyphoxa installation.", true
 	case errors.Is(err, session.ErrManagerClosed):
-		return "The server is shutting down — try again shortly.", true
-	case errors.Is(err, session.ErrIntentPending):
+		return "Glyphoxa is restarting. Try again in a moment.", true
+	case errors.Is(err, session.ErrIntentPending), errors.Is(err, context.DeadlineExceeded):
 		// Split/worker mode (#491): the intent is queued but no worker claimed it
-		// within the budget. Retryable, not a failure.
-		return "Starting the voice session is taking longer than expected — no worker has claimed it yet. Try again in a moment.", true
+		// within the budget (or our own deadline won). Retryable, not a failure.
+		return startSlowReply, true
 	case errors.Is(err, session.ErrIntentCancelled):
 		// Split/worker mode (#491): the start was cancelled before any worker claimed
 		// it — a distinct outcome from a still-queued pending.
-		return "The voice session start was cancelled before a worker picked it up.", true
+		return "The voice session start was cancelled before it began.", true
 	default:
 		return "", false
 	}

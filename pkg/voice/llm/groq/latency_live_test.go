@@ -9,9 +9,9 @@
 // ADR-0036 moved the default LLM off gemini-2.5-flash; the #424 amendment then
 // moved it off llama-3.3-70b-versatile and onto openai/gpt-oss-120b on Groq's
 // LPU after a live A/B (cleaner tool calls, natural German, cheaper). Unlike the
-// prior llama default, gpt-oss-120b IS reasoning-capable, and the default path
-// sends no reasoning_effort — so its reasoning tokens share the 1024
-// DefaultMaxTokens budget. The #424 A/B accepted a higher first_audio
+// prior llama default, gpt-oss-120b IS reasoning-capable; its reasoning tokens share the 1024
+// DefaultMaxTokens budget (since 2026-11-20 the preset sends reasoning_effort
+// "low" for the gpt-oss family, see groq.ReasoningEffort). The #424 A/B accepted a higher first_audio
 // (~1.9–3.5 s vs llama's ~1.4–2.0 s) as within budget. This test measures the
 // LLM-stage half of that: it reports the wall-time DISTRIBUTION (p50/p95/p99) of
 // time-to-first-content-token and total completion across two prompt tiers,

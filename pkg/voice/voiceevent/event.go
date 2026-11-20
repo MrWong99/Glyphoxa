@@ -364,14 +364,11 @@ func (SpeakRequested) EventName() string { return "speak.requested" }
 // whose Synthesize start-errors (empty VoiceID, auth failure) still emits
 // TTSInvoked, the invoked-but-never-spoke signal (#20). It announces the dispatch
 // attempt, not a success: whether the sentence was actually spoken is signalled by
-// [FirstAudio], not here.
-//
-// Index is 0-based within the current turn and increments per dispatch attempt on
-// the same stage.
+// [FirstAudio], not here. Consumers coalesce a turn's sentences by arrival order
+// within the TurnID.
 type TTSInvoked struct {
 	At       time.Time
 	Sentence string
-	Index    int
 	// TurnID is the correlation id of the turn this sentence belongs to (A3),
 	// threaded from the reply reactor; see [STTFinal.TurnID].
 	TurnID string
@@ -385,12 +382,14 @@ type TTSInvoked struct {
 // EventName implements [Event].
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
-// TTSStreamFailed marks a sentence whose synthesis stream terminated ABNORMALLY
-// mid-delivery (#436): the provider accepted the dispatch (its [TTSInvoked]
-// fired, possibly its FirstAudio too) but the stream died before the last chunk,
-// so the room heard at most a fragment. Published by the orchestrator TTS stage
-// under a live turn ctx only — a barge cutting the stream is the caller's cut,
-// not a failure, and publishes nothing here. Consumers use it to keep the
+// TTSStreamFailed marks a sentence that failed: its synthesis never started (a
+// start-error) or its stream terminated ABNORMALLY mid-delivery (#436) — its
+// [TTSInvoked] fired, possibly its FirstAudio too, but the room heard at most a
+// fragment. It always refers to the turn's most recently announced sentence: it
+// is published after that sentence's TTSInvoked and before the next one's (by
+// the orchestrator TTS stage, or — for a held look-ahead sentence — by the
+// pipelined turn once the sentence is released). Published under a live turn ctx
+// only — a barge cutting the stream is the caller's cut, not a failure. Consumers use it to keep the
 // deliver-then-commit record honest: the Transcript Chunker retracts (or never
 // commits) the failed sentence so the Chunk grain agrees with Agent history,
 // which omits it (ADR-0012's bias — never record text the room did not hear).
@@ -510,20 +509,39 @@ const (
 	// vanished (which the TTL sweep would otherwise miscount as
 	// abandoned/no_first_audio).
 	TurnEndTextDelivered TurnEndReason = "text_delivered"
+	// TurnEndCompleted: the turn ran to its natural end — the producer finished,
+	// every dispatched sentence resolved, and nothing cut it (a routed reply, a
+	// /say, a Highlight replay). Consumers no longer infer the end from silence:
+	// the transcript relay drops its "<NPC> is speaking…" label on it. It says
+	// nothing about audio — a voiced turn that produced none is still a failure to
+	// the metrics subscriber, which keys success on first audio.
+	TurnEndCompleted TurnEndReason = "completed"
+	// TurnEndCancelled: the turn held the floor but its context was cancelled from
+	// ABOVE — the conversation was torn down (a reconnect cycle after a media
+	// stall or gateway loss, a session stop) — rather than by a barge, mute or
+	// supersede. A cut like those (the relay keeps the in-flight sentence text),
+	// but neither a success nor a provider failure.
+	TurnEndCancelled TurnEndReason = "cancelled"
 )
 
-// TurnEnded marks a turn that ended for a known reason — distinct from a turn
-// that simply vanished (reaped by the metrics TTL sweep with no signal). It
-// carries the turn's TurnID and the precise [TurnEndReason] so the metrics
-// subscriber records WHY a turn died (barge vs supersede vs tts/provider error)
-// rather than the coarse "no first audio" catch-all. Text is the dropped
+// TurnEnded marks a turn's end with its precise [TurnEndReason]: the success
+// terminals ([TurnEndCompleted], [TurnEndTextDelivered]) and the failure/cut
+// reasons (barge vs supersede vs tts/provider error …), so the metrics subscriber
+// records WHY a turn ended rather than the coarse "no first audio" catch-all, and
+// the transcript relay knows when an Agent stopped speaking. A turn that vanished
+// with no signal at all is reaped by the metrics TTL sweep. Text is the dropped
 // transcript, set only for [TurnEndSupersedeCoalesced]; empty otherwise.
 //
-// Published by the seam that knows the cause: the [orchestrator.Replier]
-// (supersede-coalesced, tts/provider error) and the [orchestrator.BargeIn]
-// (barge). The subscriber treats first-audio as terminal, so a TurnEnded arriving
-// AFTER first audio (e.g. a barge mid-playback) is a normal interruption and does
-// not re-count the turn.
+// Published by the seam that knows the cause: the [orchestrator.Replier],
+// [orchestrator.DirectSpeech] and [orchestrator.ClipReplay] (completed,
+// cancelled, supersede-coalesced, tts/provider error, mute, spend cap), the
+// [orchestrator.Floor] (superseded), the mute reactor (mute) and the
+// [orchestrator.BargeIn] (barge). Every routed reply, /say and replay ends with
+// exactly one. Ensemble Turns are the exception: a clean Lead or Reaction ends
+// with none, and a barged Reaction ends with two (see orchestrator/ensemble.go).
+// The subscriber treats first-audio as terminal, so a TurnEnded arriving AFTER
+// first audio (e.g. a barge mid-playback, or the natural completion) does not
+// re-count the turn.
 type TurnEnded struct {
 	At     time.Time
 	TurnID string

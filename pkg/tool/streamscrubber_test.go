@@ -116,6 +116,28 @@ func TestStreamScrubberLongDivergingRunFlushed(t *testing.T) {
 	}
 }
 
+// TestStreamScrubberOrphanCloserSuppressed is #423 item 1: a JSON string arg that
+// contains the literal closer ends the swallow early, so the call's REAL closer
+// arrives in prose mode. It must be dropped like the batch ReplaceAll drops it —
+// never spoken — at every split point, and the stream must match the batch scrub.
+func TestStreamScrubberOrphanCloserSuppressed(t *testing.T) {
+	full := `Note this <function=note {"text":"a </function> tag"}</function> done`
+	batch, _ := ExtractPseudoCalls(full)
+	for i := 0; i <= len(full); i++ {
+		got := collect(t, []string{full[:i], full[i:]})
+		if strings.Contains(got, "</function") || strings.Contains(got, "<function") {
+			t.Fatalf("split at %d leaked a marker to TTS: %q", i, got)
+		}
+		if strings.Join(strings.Fields(got), " ") != strings.Join(strings.Fields(batch), " ") {
+			t.Fatalf("split at %d: stream %q diverges from batch %q", i, got, batch)
+		}
+	}
+	// A partial closer that never completes is ordinary prose.
+	if got := collect(t, []string{"a </func", "tor b"}); got != "a </functor b" {
+		t.Errorf("diverging partial closer mangled: %q", got)
+	}
+}
+
 func TestStreamScrubberPlainProsePassesThrough(t *testing.T) {
 	got := collect(t, []string{"Hello ", "there, ", "friend."})
 	if got != "Hello there, friend." {

@@ -207,7 +207,7 @@ func TestStreamManager_BeginSendsPreRollThenLiveFrames(t *testing.T) {
 		}
 	}
 
-	commit, _, ok := m.endUtterance()
+	commit, ok := m.endUtterance()
 	if !ok || commit == nil {
 		t.Fatalf("endUtterance = (nil? %v, ok=%v); want a commit handle for a live utterance", commit == nil, ok)
 	}
@@ -234,7 +234,7 @@ func TestStreamManager_MetersStreamedAudioSecondsAtEndUtterance(t *testing.T) {
 	m.send(streamFrame(t, 3))
 	m.send(streamFrame(t, 4))
 	m.send(streamFrame(t, 5)) // 3 voiced frames
-	if _, _, ok := m.endUtterance(); !ok {
+	if _, ok := m.endUtterance(); !ok {
 		t.Fatal("endUtterance ok=false on a healthy utterance")
 	}
 
@@ -268,7 +268,7 @@ func TestStreamManager_MetersOnlyStreamedAudioWhenUtteranceDies(t *testing.T) {
 	fs.mu.Unlock()
 	m.send(streamFrame(t, 3)) // fails → utterance dead
 
-	if _, _, ok := m.endUtterance(); ok {
+	if _, ok := m.endUtterance(); ok {
 		t.Fatal("endUtterance ok=true after a fatal send; want batch fallback (ok=false)")
 	}
 	got := spy.audioSeconds()
@@ -289,7 +289,7 @@ func TestStreamManager_PureBatchUtteranceMetersNoStreamedAudio(t *testing.T) {
 	m.idleFrame(streamFrame(t, 1))
 	m.beginUtterance(time.Now()) // pure batch: nothing streamed
 	m.send(streamFrame(t, 2))    // no-op
-	if _, _, ok := m.endUtterance(); ok {
+	if _, ok := m.endUtterance(); ok {
 		t.Fatal("endUtterance ok=true with no session; want batch (ok=false)")
 	}
 	if got := spy.audioSeconds(); len(got) != 0 {
@@ -369,7 +369,7 @@ func TestStreamManager_SendFailureMakesUtteranceBatch(t *testing.T) {
 	m.beginUtterance(time.Now())
 	m.send(streamFrame(t, 1))
 
-	if _, _, ok := m.endUtterance(); ok {
+	if _, ok := m.endUtterance(); ok {
 		t.Fatal("endUtterance ok=true after a fatal send; want batch fallback (ok=false)")
 	}
 	m.mu.Lock()
@@ -394,7 +394,7 @@ func TestStreamManager_StreamDownAtBeginIsBatch(t *testing.T) {
 
 	m.beginUtterance(time.Now())
 	m.send(streamFrame(t, 1)) // no-op: utterance already batch
-	if _, _, ok := m.endUtterance(); ok {
+	if _, ok := m.endUtterance(); ok {
 		t.Fatal("endUtterance ok=true with no session; want batch (ok=false)")
 	}
 	select {
@@ -417,7 +417,7 @@ func TestStreamManager_AwaitCommitSuccess(t *testing.T) {
 
 	ch := make(chan stt.CommitResult, 1)
 	ch <- stt.CommitResult{Transcript: stt.Transcript{Text: "roll a d20"}}
-	tr, ok := m.awaitCommit(ch, time.Now())
+	tr, ok := m.awaitCommit(&streamCommit{ch: ch, sentAt: time.Now()})
 	if !ok || tr.Text != "roll a d20" {
 		t.Fatalf("awaitCommit = (%q, %v); want (roll a d20, true)", tr.Text, ok)
 	}
@@ -451,7 +451,7 @@ func TestStreamManager_AwaitCommitEmptyIsFinal(t *testing.T) {
 	m := NewStreamManager(&fakeStreamingRecognizer{}, WithCommitTimeout(time.Second))
 	ch := make(chan stt.CommitResult, 1)
 	ch <- stt.CommitResult{Transcript: stt.Transcript{Text: ""}}
-	tr, ok := m.awaitCommit(ch, time.Now())
+	tr, ok := m.awaitCommit(&streamCommit{ch: ch, sentAt: time.Now()})
 	if !ok {
 		t.Fatal("empty commit treated as a fallback; want ok=true (empty text is a valid final)")
 	}
@@ -472,7 +472,7 @@ func TestStreamManager_AwaitCommitTimesOut(t *testing.T) {
 	ch := make(chan stt.CommitResult) // never resolves
 
 	start := time.Now()
-	if _, ok := m.awaitCommit(ch, time.Now()); ok {
+	if _, ok := m.awaitCommit(&streamCommit{ch: ch, sentAt: time.Now()}); ok {
 		t.Fatal("awaitCommit ok=true on a stalled commit; want false → batch fallback")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -489,6 +489,113 @@ func TestStreamManager_AwaitCommitTimesOut(t *testing.T) {
 	}
 	if errs != 1 {
 		t.Errorf("provider_errors = %d on a commit timeout, want 1", errs)
+	}
+}
+
+// TestStreamManager_AwaitCommitTimeout_RetiresSessionAndRedials is #639 A: a
+// commit the provider never answers (e.g. it replied with a droppable error frame
+// instead) stays at the head of the adapter's FIFO, so every later commit would
+// resolve one slot behind. The timeout therefore retires the session that ISSUED
+// the commit — dropped, closed, maintainer nudged to redial — but never a newer
+// session the maintainer already installed.
+func TestStreamManager_AwaitCommitTimeout_RetiresSessionAndRedials(t *testing.T) {
+	stale := &fakeStream{} // Commit leaves the commit pending forever
+	m := NewStreamManager(&fakeStreamingRecognizer{}, WithCommitTimeout(20*time.Millisecond))
+	m.stream = stale
+	m.bus = voiceevent.NewBus()
+
+	m.beginUtterance(time.Now())
+	m.send(streamFrame(t, 1))
+	c, ok := m.endUtterance()
+	if !ok {
+		t.Fatal("endUtterance ok=false on a live utterance")
+	}
+	if _, ok := m.awaitCommit(c); ok {
+		t.Fatal("awaitCommit ok=true on a never-answered commit; want the batch fallback")
+	}
+	m.mu.Lock()
+	cur := m.stream
+	m.mu.Unlock()
+	if cur != nil {
+		t.Fatal("the desynchronized session is still installed; the next commit would resolve against the wrong FIFO slot")
+	}
+	select {
+	case <-m.poke:
+	default:
+		t.Error("the maintainer was not nudged to redial after retiring the session")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		stale.mu.Lock()
+		closed := stale.closed
+		stale.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retired session was never closed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A stale timeout for an OLD session must not kill the fresh one.
+	fresh := &fakeStream{}
+	m.mu.Lock()
+	m.stream = fresh
+	m.mu.Unlock()
+	old := &streamCommit{ch: make(chan stt.CommitResult), sentAt: time.Now(), session: stale}
+	if _, ok := m.awaitCommit(old); ok {
+		t.Fatal("awaitCommit ok=true on a stalled commit")
+	}
+	m.mu.Lock()
+	cur = m.stream
+	m.mu.Unlock()
+	if cur != fresh {
+		t.Fatal("a stale commit timeout retired the freshly redialed session")
+	}
+}
+
+// TestStreamManager_RecoverableSendFailureAfterAudio_RetiresSession is #639 B on
+// the manager side: a send error the adapter calls recoverable, arriving after the
+// utterance already streamed audio, leaves that audio uncommitted at the provider
+// (the utterance goes batch) — the next utterance's commit would replay it. The
+// session is retired; before any audio streamed the same error is harmless.
+func TestStreamManager_RecoverableSendFailureAfterAudio_RetiresSession(t *testing.T) {
+	recoverable := &stt.StreamError{Code: stt.CodeSampleRateMismatch, Fatal: false, Err: errors.New("bad frame")}
+
+	fs := &fakeStream{}
+	m := NewStreamManager(&fakeStreamingRecognizer{})
+	m.stream = fs
+	m.bus = voiceevent.NewBus()
+	m.beginUtterance(time.Now())
+	m.send(streamFrame(t, 1)) // accepted: audio now sits at the provider
+	fs.mu.Lock()
+	fs.sendErr = recoverable
+	fs.mu.Unlock()
+	m.send(streamFrame(t, 2))
+
+	m.mu.Lock()
+	cur := m.stream
+	m.mu.Unlock()
+	if cur != nil {
+		t.Fatal("a session holding this utterance's uncommitted audio survived; the next commit would replay it")
+	}
+	if _, ok := m.endUtterance(); ok {
+		t.Fatal("endUtterance ok=true after a failed send; want the batch fallback")
+	}
+
+	// Nothing streamed yet: the recoverable error leaves the session alone.
+	clean := &fakeStream{sendErr: recoverable}
+	m2 := NewStreamManager(&fakeStreamingRecognizer{}, WithPreRoll(0))
+	m2.stream = clean
+	m2.bus = voiceevent.NewBus()
+	m2.beginUtterance(time.Now())
+	m2.send(streamFrame(t, 1))
+	m2.mu.Lock()
+	cur = m2.stream
+	m2.mu.Unlock()
+	if cur != clean {
+		t.Fatal("a recoverable error before any audio streamed retired the session")
 	}
 }
 
@@ -536,7 +643,7 @@ func TestStreamManager_AwaitCommitErrorFallsBack(t *testing.T) {
 	m.backoff = 8 * time.Second
 	ch := make(chan stt.CommitResult, 1)
 	ch <- stt.CommitResult{Err: &stt.StreamError{Code: "commit_throttled", Fatal: false, Err: errors.New("throttled")}}
-	if _, ok := m.awaitCommit(ch, time.Now()); ok {
+	if _, ok := m.awaitCommit(&streamCommit{ch: ch, sentAt: time.Now()}); ok {
 		t.Fatal("awaitCommit ok=true on a commit error; want false → batch fallback")
 	}
 	// #125: a commit error moves provider_calls with outcome=error PLUS one error,

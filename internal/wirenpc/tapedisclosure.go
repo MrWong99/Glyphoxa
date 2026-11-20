@@ -77,7 +77,7 @@ func ParseTapeConsentCustomID(customID string) (campaignID uuid.UUID, granted, o
 const tapeDisclosureContent = "**Session Highlights are enabled.** With your consent, this session's audio is " +
 	"kept in a short (~2 minute) rolling buffer so memorable moments can be clipped for the GM's review. " +
 	"Only players who press **Consent** have their audio kept — press it to opt in, or **Revoke** to opt out at any time. " +
-	"No audio clip leaves this server without an explicit GM action."
+	"No clip is shared anywhere unless the GM chooses to share it."
 
 // The tape disclosure is no longer posted on its own: since #519 it rides the
 // single session-start disclosure message (sessiondisclosure.go), which carries
@@ -91,6 +91,12 @@ const (
 	tapeConsentRevokedReply = "You've opted out of Session Highlights. Your audio won't be recorded, and anything already buffered is discarded."
 	tapeConsentFailedReply  = "Sorry — could not update your choice. Please try again."
 )
+
+// TapeConsentTimeout bounds a consent button's storage write. Both handlers
+// (the all-mode presence and the voice-mode listener) reply only after the write,
+// and Discord drops an interaction not answered within 3s, so the write gets
+// the same 2.5s the slash-command dispatch allows a handler.
+const TapeConsentTimeout = 2500 * time.Millisecond
 
 // TapeConsentPublisher routes a consent event to the live Voice Session running a
 // Campaign (#487): the presence/all-web topology wires *session.Registry so the
@@ -172,6 +178,17 @@ func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, pub TapeConse
 	return tapeConsentRevokedReply, true
 }
 
+// ApplyTapeConsentPress is [ApplyTapeConsent] for a live button press: the
+// storage write runs under [TapeConsentTimeout], so a slow DB cannot outlive
+// Discord's 3s interaction deadline (past it the reply fails and the presser
+// sees "interaction failed"). A timed-out write answers with the apologetic
+// reply like any other storage failure.
+func ApplyTapeConsentPress(store TapeConsentStore, pub TapeConsentPublisher, log *slog.Logger, customID, userID string) (reply string, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), TapeConsentTimeout)
+	defer cancel()
+	return ApplyTapeConsent(ctx, store, pub, time.Now, log, customID, userID)
+}
+
 // tapeConsentListener builds the component-interaction listener the STANDALONE
 // voice-mode client carries (#306, finding 5): with no boot-owned presence in that
 // topology, the per-cycle client itself must answer the disclosure's buttons, or
@@ -183,11 +200,11 @@ func tapeConsentListener(store TapeConsentStore, bus *voiceevent.Bus, log *slog.
 		return nil
 	}
 	return func(e *events.ComponentInteractionCreate) {
-		reply, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, log, e.Data.CustomID(), e.User().ID.String())
+		reply, ok := ApplyTapeConsentPress(store, BusPublisher{Bus: bus}, log, e.Data.CustomID(), e.User().ID.String())
 		if !ok {
 			return
 		}
-		msg := discord.MessageCreate{Content: reply, Flags: discord.MessageFlagEphemeral}
+		msg := discord.MessageCreate{Content: reply, Flags: discord.MessageFlagEphemeral, AllowedMentions: NoMentions()}
 		if err := e.CreateMessage(msg); err != nil && log != nil {
 			log.Warn("wirenpc: reply to tape consent button", "err", err)
 		}

@@ -28,13 +28,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
-// npcMatcher builds the Address Detection matcher for one NPC. With a single
-// non-Address-Only Character NPC and no addressable Butler it uses the scoring
-// Matcher (ADR-0024): the NPC gets a name/alias match AND the single-NPC
-// fallback, so both a named utterance ("Bart, …") and an unnamed one route to it.
-// The whole-word matcher is deliberately not used: it requires a Butler as its
-// unconditional fallback, which this slice does not have, and would leave the NPC
-// silent on every unnamed utterance.
+// npcMatcher builds the Address Detection matcher for one NPC: the scoring
+// Matcher (ADR-0024) over that single non-Address-Only Character NPC, with the
+// shipped stack. The NPC is opened by a name/alias match ("Bart, …"), after which
+// the speaker's unnamed follow-ups continue into it inside the Continuation
+// Window; there is no lone-NPC fallback, so an unnamed utterance with no open
+// exchange routes nowhere.
 //
 // Multi-NPC wiring goes through [Roster.AddNPC] (the matcher's roster grows past
 // the first agent via [address.Matcher.Add]); this single-agent constructor is

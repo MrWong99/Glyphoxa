@@ -7,7 +7,8 @@ import "strings"
 // [ExtractPseudoCalls]: as deltas arrive it forwards prose to out but withholds
 // any tail that is still a prefix of [pseudoMarker]; once the full marker
 // appears it swallows through the matching [pseudoClose] and then RESUMES
-// forwarding, so trailing prose after the call is still spoken (batch parity). It
+// forwarding, so trailing prose after the call is still spoken (batch parity); an
+// orphan [pseudoClose] met in prose is dropped like the batch scrub drops it. It
 // NEVER parses or executes — recovery is driven off the batch-scrubbed
 // accumulated text so there is a single source of truth and no dual-parse drift.
 type streamScrubber struct {
@@ -16,7 +17,8 @@ type streamScrubber struct {
 	out func(string) error
 
 	// held is the current trailing run that is still a proper prefix of
-	// pseudoMarker and therefore withheld pending more input.
+	// pseudoMarker (or of an orphan pseudoClose) and therefore withheld pending
+	// more input.
 	held string
 
 	// swallowing is set between a completed pseudoMarker and its pseudoClose; all
@@ -79,14 +81,19 @@ func (sc *streamScrubber) writeProse(s string) (done bool, rest string, err erro
 			s = s[idx:]
 		}
 
-		// s now starts with '<'. How much of it matches the marker?
+		// s now starts with '<'. How much of it matches the opener — or an orphan
+		// closer, left in prose when a JSON string arg contained the literal and
+		// ended the swallow early (#423; the batch scrub drops every orphan too)?
 		n := commonPrefixLen(s, pseudoMarker)
+		c := commonPrefixLen(s, pseudoClose)
 		switch {
 		case n == len(pseudoMarker):
 			sc.swallowing = true
 			return false, s[len(pseudoMarker):], nil
-		case n == len(s):
-			// Proper prefix of the marker (≤ 9 bytes) — hold pending more input.
+		case c == len(pseudoClose):
+			s = s[len(pseudoClose):] // orphan closer: drop it, keep scanning
+		case n == len(s) || c == len(s):
+			// Proper prefix of a marker (≤ 10 bytes) — hold pending more input.
 			sc.held = s
 			return true, "", nil
 		default:

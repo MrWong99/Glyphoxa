@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,9 +17,9 @@ import (
 // on the shared bus.
 //
 // Per ADR-0021's TTS cassette policy this stage's observable contract is the
-// dispatch signal, not the audio: synthesized chunks are drained and dropped
-// here. Playback wiring (resampler, Opus encoder, Discord transport) attaches
-// on top in a later tracer bullet.
+// dispatch signal, not the audio: the chunks it sees are drained and dropped
+// here. Live playback rides on the synthesizer itself — wire.TeeSynthesizer
+// forwards each chunk to the playback pump in lockstep with this drain.
 type TTS struct {
 	bus         *voiceevent.Bus
 	synthesizer tts.Synthesizer
@@ -40,9 +39,6 @@ type TTS struct {
 	// never retried because audio may already have been dispatched (re-speak risk).
 	// Zero value is a valid retries-on policy; [WithTTSRetry] threads the shared one.
 	retry retry.Policy
-
-	mu        sync.Mutex
-	nextIndex int
 }
 
 // TTSOption configures a [TTS] at construction. [WithTTSMetrics] opts the
@@ -90,8 +86,7 @@ func NewTTS(bus *voiceevent.Bus, synthesizer tts.Synthesizer, opts ...TTSOption)
 }
 
 // Dispatch hands one sentence to the configured synthesizer and publishes a
-// [voiceevent.TTSInvoked] event identifying the sentence and its 0-based
-// position in the turn.
+// [voiceevent.TTSInvoked] event identifying the sentence and its turn.
 //
 // TTSInvoked is published BEFORE the [tts.Synthesizer.Synthesize] call — it
 // announces the dispatch attempt, not a success. A sentence whose Synthesize
@@ -104,42 +99,23 @@ func NewTTS(bus *voiceevent.Bus, synthesizer tts.Synthesizer, opts ...TTSOption)
 // Per ADR-0022 callers must drain the returned audio channel to release the
 // implementation's goroutines; this stage drains and discards the chunks
 // itself (per ADR-0021's TTS cassette policy the audio is not observable to
-// tests).
-//
-// Forward-looking shape — when the playback pipeline lands, the drain loop
-// becomes a forward into the resampler/aligner that feeds the Opus encoder
-// driving Discord (ADR-0005: audio stays in-process). The bus event remains
-// the same dispatch signal; production consumers attach to it for
-// turn-tracking, the SSE relay (ADR-0014), and barge-in (Q13.5 open) —
-// barge-in cancels ctx, the synthesizer closes the channel mid-stream, the
-// forward loop unwinds, and ADR-0012's deliver-then-commit boundary decides
-// which already-spoken sentences become committed Transcript entries.
-// nextIndex is 0-based within the current turn; turn-taking (later tracer
-// bullet) will scope a fresh TTS per Agent reply rather than reset this one
-// in place.
+// tests). In production the synthesizer is the wire tee, so the drain is paced
+// by playback: Dispatch returns when the sentence has been delivered (or cut).
+// A barge cancels ctx, the synthesizer closes the channel mid-stream, and
+// ADR-0012's deliver-then-commit boundary (the turn module) decides which
+// sentences count as delivered.
 func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) error {
-	// Assign the per-turn index under the lock so concurrent dispatches (an
-	// Ensemble Turn or a barge-in canceller, both anticipated below) get
-	// distinct, monotonically increasing indices. The index counts dispatch
-	// attempts within the turn, assigned before Synthesize so a start-errored
-	// sentence still consumes its slot and stays visible.
 	// Look-ahead pre-render (#375, F1): a sentence held in the pump's look-ahead lane
 	// must NOT announce itself yet — TTSInvoked at pre-render time would make the relay
 	// persist a line under the reaction's id BEFORE its EnsembleReaction attributes who
 	// spoke (a misattributed "NPC" line) and make the chunker buffer text a barge could
-	// still discard. So skip the publish AND the index reservation here; the coordinator
-	// announces the sentence at release via [TTS.PublishInvoked]. Everything else — retry,
-	// synthesis, drain, char metering (ADR-0045), tts_total — is byte-identical.
+	// still discard. So skip the publish here; the coordinator announces the sentence at
+	// release via [TTS.PublishInvoked]. Everything else — retry, synthesis, drain, char
+	// metering (ADR-0045), tts_total — is byte-identical.
 	if !voiceevent.IsPlaybackLookahead(ctx) {
-		s.mu.Lock()
-		index := s.nextIndex
-		s.nextIndex++
-		s.mu.Unlock()
-
 		s.bus.Publish(voiceevent.TTSInvoked{
 			At:       time.Now(),
 			Sentence: sentence,
-			Index:    index,
 			TurnID:   voiceevent.TurnIDFrom(ctx),
 		})
 	}
@@ -167,6 +143,10 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		if outcome.IsFault() {
 			s.rec.ProviderError(observe.StageTTS, s.provider)
 		}
+		// Announce the never-started sentence as failed (under a live ctx — a cut
+		// is the cutter's), so the transcript consumers drop its optimistic text
+		// explicitly instead of guessing from a missing FirstAudio (#641 review).
+		s.publishFailed(ctx)
 		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
 	}
 	// Usage metering (#127, ADR-0045): Synthesize accepted the request, so bill the
@@ -194,7 +174,7 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	if streamErr != nil && ctx.Err() == nil {
 		s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeError)
 		s.rec.ProviderError(observe.StageTTS, s.provider)
-		s.bus.Publish(voiceevent.TTSStreamFailed{At: time.Now(), TurnID: voiceevent.TurnIDFrom(ctx)})
+		s.publishFailed(ctx)
 		return fmt.Errorf("orchestrator.TTS.Dispatch: synthesis stream failed mid-delivery: %w", streamErr)
 	}
 	// The channel closed: record the DELIVER span and count the call OK. tts_total is
@@ -212,26 +192,33 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	return nil
 }
 
+// publishFailed announces the sentence Dispatch is failing as
+// [voiceevent.TTSStreamFailed] — unless ctx is cut (the cutter owns the
+// terminal) or the sentence is a held look-ahead one: that one may fail BEFORE
+// its own TTSInvoked is announced at release, so its coordinator publishes the
+// failure once it is known to follow the announcement ([TTS.PublishFailed]).
+func (s *TTS) publishFailed(ctx context.Context) {
+	if ctx.Err() != nil || voiceevent.IsPlaybackLookahead(ctx) {
+		return
+	}
+	s.PublishFailed(voiceevent.TurnIDFrom(ctx))
+}
+
+// PublishFailed announces that the turn's most recently announced sentence
+// failed (start-error or mid-stream) — the [voiceevent.TTSStreamFailed] the
+// pipelined turn publishes for a held sentence after its release.
+func (s *TTS) PublishFailed(turnID string) {
+	s.bus.Publish(voiceevent.TTSStreamFailed{At: time.Now(), TurnID: turnID})
+}
+
 // PublishInvoked announces a look-ahead sentence's [voiceevent.TTSInvoked] at the
 // moment it is RELEASED to play (#375, F1), not when it was pre-rendered — so the
 // relay attributes its line only AFTER the reaction's EnsembleReaction names the
-// speaker, and the chunker buffers its text only once it is committed to play. It
-// draws the in-turn Index from the SAME monotonic counter [Dispatch] uses.
-//
-// NOTE: because the look-ahead sentence is dispatched (synthesized) BEFORE the Lead's
-// later sentences but ANNOUNCED here after them, its Index can be numerically greater
-// than a Lead sentence that dispatched later — nothing consumes TTSInvoked ordering by
-// Index within a turn (the relay/chunker coalesce by arrival), so this is accepted.
+// speaker, and the chunker buffers its text only once it is committed to play.
 func (s *TTS) PublishInvoked(turnID, sentence string) {
-	s.mu.Lock()
-	index := s.nextIndex
-	s.nextIndex++
-	s.mu.Unlock()
-
 	s.bus.Publish(voiceevent.TTSInvoked{
 		At:       time.Now(),
 		Sentence: sentence,
-		Index:    index,
 		TurnID:   turnID,
 	})
 }

@@ -14,10 +14,20 @@ import (
 
 // embedRequest is the POST /api/embed body. Ollama's batch embed endpoint takes
 // a string array in `input` and returns one vector per element.
+//
+// keep_alive pins the model in memory. Ollama unloads an idle model after five
+// minutes by default, and a reload takes seconds — longer than the memory-recall
+// budget of a live turn — so a table that paused for a few minutes would lose NPC
+// memory on its next turns. Worse, a caller that gives up mid-load makes Ollama
+// abort the load, so short-deadline callers alone never get the model back.
 type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model     string   `json:"model"`
+	Input     []string `json:"input"`
+	KeepAlive int      `json:"keep_alive"`
 }
+
+// keepAliveForever is Ollama's "never unload" keep_alive value (any negative number).
+const keepAliveForever = -1
 
 // embedResponse is the POST /api/embed response. `embeddings` carries one
 // vector per input, in input order.
@@ -40,7 +50,7 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, nil
 	}
 
-	body, err := json.Marshal(embedRequest{Model: c.model, Input: texts})
+	body, err := json.Marshal(embedRequest{Model: c.model, Input: texts, KeepAlive: keepAliveForever})
 	if err != nil {
 		return nil, fmt.Errorf("ollama.Embed: marshal request: %w", err)
 	}

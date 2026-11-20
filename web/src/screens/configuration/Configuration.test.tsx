@@ -305,6 +305,24 @@ describe("Configuration", () => {
     expect(screen.getByText(/invalid_bot_token/)).toBeInTheDocument();
   });
 
+  it("shows a reconnecting Discord integration as a warning, not connected (#642)", async () => {
+    renderScreen(
+      mockBackend({
+        integrationState: "reconnecting",
+        integrationDetail: "Lost the connection to Discord; next attempt in 2m0s.",
+      }),
+    );
+    expect(await screen.findByText(/reconnecting to discord/i)).toBeInTheDocument();
+    expect(screen.getByText(/next attempt in 2m0s/)).toBeInTheDocument();
+    expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
+  });
+
+  it("never shows an unknown integration state as connected (#642)", async () => {
+    renderScreen(mockBackend({ integrationState: "something-new" }));
+    await screen.findByText(CAMPAIGN.name);
+    expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
+  });
+
   it("shows no integration badge in the waiting/web-only state (#489)", async () => {
     renderScreen();
     // Default mock leaves integrationState empty → nothing rendered.

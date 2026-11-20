@@ -49,7 +49,7 @@ func TestSystemPrompt_NilMemory_ByteIdenticalToToday(t *testing.T) {
 	if sys.Role != llm.RoleSystem {
 		t.Fatalf("first message role = %q, want system", sys.Role)
 	}
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
+	want := "You are Bart, the innkeeper.\n\n" + agent.SpokenOutputRuleWithMarkup + "\n\n" + sentinelMarkup
 	if sys.Text != want {
 		t.Errorf("nil-memory system prompt not byte-identical to today:\n got %q\nwant %q", sys.Text, want)
 	}

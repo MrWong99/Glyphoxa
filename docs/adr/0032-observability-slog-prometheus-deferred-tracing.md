@@ -19,3 +19,15 @@ So v2 keeps what worked (slog), keeps the cheap high-value half of the metrics s
 - **Full OTel from day one (logs+metrics+traces via the OTel SDK)** — rejected. This is precisely v1's sprawl; pays distributed-tracing cost in a single-binary deployment.
 - **slog only, no metrics** — rejected. Turn latency and provider error rates are operational must-haves for a real-time voice product; a `/metrics` surface is cheap and the self-host target can point any Prometheus at it.
 - **OTel logs bridge / `slog` → OTel handler** — deferred, not adopted. Reasonable once tracing exists (to correlate logs↔spans), but premature before there are spans to correlate.
+
+**Amendment (2026-11-20 — the turn-outcome label set):** `glyphoxa_voice_turn_total`
+carries two bounded labels. `outcome` ∈ {`first_audio`, `abandoned`, `yielded`,
+`text_delivered`}; `reason` ∈ {`none`, `no_first_audio`, `supersession_grace`,
+`barge`, `superseded`, `tts_error`, `provider_error`, `mute`, `spend_cap`,
+`cancelled`}. Success is keyed on first audio (or a delivered text answer); the
+`TurnEnded{completed}` a clean turn now publishes records NO outcome of its own,
+so a voiced turn that produced no audio still ends `abandoned`/`no_first_audio`
+at the TTL reap. `cancelled` is a turn whose conversation was torn down under it
+(a reconnect, a session stop) — neither a human interruption nor a provider
+fault. The set is defined in `internal/observe/recorder.go`; add a value there
+and here together.

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -90,7 +91,11 @@ func (r *ClipReplay) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func
 		// No floor wired (voice standalone / bench): dispatch synchronously on the bus
 		// goroutine, mirroring the DirectSpeech no-floor branch.
 		if r.floor == nil {
-			r.dispatch(turnCtx, e.ClipKey)
+			reason := terminalReason(r.dispatch(turnCtx, e.ClipKey))
+			if turnCtx.Err() != nil {
+				reason = voiceevent.TurnEndCancelled
+			}
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			return
 		}
 
@@ -101,35 +106,41 @@ func (r *ClipReplay) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func
 		// folds the second replay: it is dropped silently (release + return) while its
 		// ShareHighlight RPC still returns success — an accepted de-dupe (a rapid repeat
 		// replays once, not twice), not an error path.
-		floorCtx, release, coalesced := r.floor.Take(turnCtx, replayFloorKey)
+		floorCtx, release, coalesced := r.floor.take(turnCtx, replayFloorKey)
 		if coalesced {
 			release()
 			return
 		}
 		go func() {
-			defer release()
-			r.dispatch(floorCtx, e.ClipKey)
+			// One terminal per replay (W1), exactly like the Replier: completed,
+			// provider_error for an unloadable clip, cancelled on a teardown — or
+			// none of ours when a barge/supersede cut it (the cutter publishes).
+			publishOwnTerminal(bus, e.TurnID, floorCtx, release, r.dispatch(floorCtx, e.ClipKey))
 		}()
 	})
 }
 
-// dispatch loads the clip and streams its chunks to the playback sink under ctx.
-// A load error ends the turn without touching the sink (the floor is released by
-// the caller's defer). Chunks are produced on THIS goroutine — the sink pulls on
-// its own — respecting a barge that cancels ctx mid-clip.
-func (r *ClipReplay) dispatch(ctx context.Context, clipKey string) {
+// dispatch loads the clip and streams its chunks to the playback sink under ctx,
+// returning [voiceevent.TurnEndProviderError] when the clip could not be loaded
+// (the sink is never touched) and "" otherwise. Chunks are produced on THIS
+// goroutine — the sink pulls on its own — respecting a barge that cancels ctx
+// mid-clip.
+func (r *ClipReplay) dispatch(ctx context.Context, clipKey string) voiceevent.TurnEndReason {
 	if ctx.Err() != nil {
-		return
+		return ""
 	}
 	chunks, err := r.load(ctx, clipKey)
 	if err != nil {
 		if r.onError != nil {
 			r.onError(err)
 		}
-		return
+		if ctx.Err() != nil {
+			return ""
+		}
+		return voiceevent.TurnEndProviderError
 	}
 	if len(chunks) == 0 {
-		return
+		return ""
 	}
 
 	ch := make(chan tts.AudioChunk)
@@ -141,9 +152,10 @@ func (r *ClipReplay) dispatch(ctx context.Context, clipKey string) {
 		select {
 		case <-ctx.Done():
 			close(ch) // barge mid-clip: stop writing, let the sink drain-and-stop
-			return
+			return ""
 		case ch <- c:
 		}
 	}
 	close(ch)
+	return ""
 }

@@ -42,7 +42,7 @@ func TestDirective_NilRecaller_ByteIdentical(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("message count = %d, want 2 (system + user, no volatile tail)", len(msgs))
 	}
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
+	want := "You are Bart, the innkeeper.\n\n" + agent.SpokenOutputRuleWithMarkup + "\n\n" + sentinelMarkup
 	if msgs[0].Text != want {
 		t.Errorf("nil-directive system prompt not byte-identical:\n got %q\nwant %q", msgs[0].Text, want)
 	}

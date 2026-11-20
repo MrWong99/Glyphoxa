@@ -132,8 +132,20 @@ func TestSend_WriteQueueFull_RestoresAggregatedAudio(t *testing.T) {
 	if !errors.As(lastErr, &se) || se.Code != stt.CodeQueueFull {
 		t.Fatalf("error = %v, want a *StreamError with code %q", lastErr, stt.CodeQueueFull)
 	}
-	if se.Fatal {
-		t.Error("queue-full should be recoverable, not Fatal")
+	// #639 B: the chunks already accepted into the queue would still be written
+	// once the pump unblocks, leaving this utterance's audio uncommitted at the
+	// provider and replayed into the NEXT commit. Queue-full therefore kills the
+	// session; the caller redials and this utterance falls back to batch.
+	if !se.Fatal {
+		t.Error("queue-full must be Fatal: the session's provider-side audio is out of sync")
+	}
+	select {
+	case <-s.stopCh:
+	default:
+		t.Error("queue-full did not shut the session down")
+	}
+	if de := s.deadErr.Load(); de == nil || de.Code != stt.CodeQueueFull {
+		t.Errorf("death cause = %v, want the queue-full error", de)
 	}
 
 	// All four frames' bytes must still be buffered for a later flush.

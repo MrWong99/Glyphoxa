@@ -70,33 +70,7 @@ func DirectCommand(mgr DirectControl, agents AgentLister, pool PoolControl) Comm
 				MaxValue:    intPtr(directMaxTurns),
 			},
 		},
-		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
-			vs, active, err := mgr.Active(ctx, ac.TenantID())
-			if err != nil || !active {
-				// No LOCAL session: fall back to the pool's Active (#503) so the roster
-				// still resolves for a session hosted by another worker.
-				if vs, active = poolActive(ctx, pool, ac.TenantID()); !active {
-					return nil, nil // no session anywhere: nothing to direct, offer nothing
-				}
-			}
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return nil, err
-			}
-			_, focused := ac.Focused()
-			prefix := strings.ToLower(strings.TrimSpace(focused))
-			choices := make([]discord.AutocompleteChoice, 0, len(roster))
-			for _, a := range voiced(roster) {
-				if prefix != "" && !strings.HasPrefix(strings.ToLower(a.Name), prefix) {
-					continue
-				}
-				choices = append(choices, discord.AutocompleteChoiceString{Name: a.Name, Value: a.ID.String()})
-				if len(choices) >= maxAutocompleteChoices {
-					break
-				}
-			}
-			return choices, nil
-		},
+		Autocomplete: npcAutocomplete(mgr, agents, pool),
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
@@ -107,23 +81,12 @@ func DirectCommand(mgr DirectControl, agents AgentLister, pool PoolControl) Comm
 			}
 			note, _ := ic.String("note")
 			turns64, _ := ic.Int("turns")
-			input, _ := ic.String("as")
-			roster, err := agents.ListAgents(ctx, vs.CampaignID)
-			if err != nil {
-				return fmt.Errorf("presence: list agents for direct: %w", err) // unexpected → generic reply
-			}
-			agent, found, ambiguous := resolveAgent(voiced(roster), input)
-			if ambiguous {
-				return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-			}
-			if !found {
-				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+			agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "as")
+			if !ok {
+				return err
 			}
 			if err := mgr.DirectAs(ctx, ic.TenantID(), agent.ID.String(), strings.TrimSpace(note), int(turns64)); err != nil {
-				// Expected failures: the session ended between the snapshot and the
-				// write, or the resolved Agent left the (now-different) active Campaign
-				// — the same ephemeral guard /say gives (mirrors mute).
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return replyLocalControlError(ic, "direct", err)
 			}
 			return ic.ReplyEphemeral(directConfirmation(agent.Name, strings.TrimSpace(note), int(turns64)))
 		},
@@ -136,24 +99,16 @@ func DirectCommand(mgr DirectControl, agents AgentLister, pool PoolControl) Comm
 func handleCrossPodDirect(ctx context.Context, ic *Interaction, agents AgentLister, pool PoolControl) error {
 	vs, live := poolActive(ctx, pool, ic.TenantID())
 	if !live {
-		return ic.ReplyEphemeral("No Voice Session is active.")
+		return ic.ReplyEphemeral(noSessionReply)
 	}
 	if err := ic.Defer(true); err != nil {
 		return fmt.Errorf("presence: defer cross-pod direct: %w", err)
 	}
 	note, _ := ic.String("note")
 	turns64, _ := ic.Int("turns")
-	input, _ := ic.String("as")
-	roster, err := agents.ListAgents(ctx, vs.CampaignID)
-	if err != nil {
-		return fmt.Errorf("presence: list agents for cross-pod direct: %w", err) // generic reply via the registry
-	}
-	agent, found, ambiguous := resolveAgent(voiced(roster), input)
-	if ambiguous {
-		return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
-	}
-	if !found {
-		return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
+	agent, ok, err := targetNPC(ctx, ic, agents, vs.CampaignID, "as")
+	if !ok {
+		return err
 	}
 	err = pool.DirectAs(ctx, ic.TenantID(), agent.ID.String(), strings.TrimSpace(note), int(turns64))
 	return replyControlOutcome(ic, err, directConfirmation(agent.Name, strings.TrimSpace(note), int(turns64)))

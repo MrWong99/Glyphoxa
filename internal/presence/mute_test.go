@@ -187,7 +187,7 @@ func TestMuteCommand_LocalPathNoDefer(t *testing.T) {
 	if resp.deferred != nil {
 		t.Fatal("local path Deferred, want the pre-#503 immediate reply (AC3)")
 	}
-	if len(resp.replies) != 1 || resp.replies[0].content != "Bart is muted." || !resp.replies[0].ephemeral {
+	if len(resp.replies) != 1 || resp.replies[0].content != muteConfirmation("Bart") || !resp.replies[0].ephemeral {
 		t.Fatalf("local reply = %+v, want the ephemeral 'Bart is muted.'", resp.replies)
 	}
 	if len(pool.agentCalls) != 0 {
@@ -222,7 +222,8 @@ func TestMuteCommand_SessionOnAnotherWorker(t *testing.T) {
 }
 
 // TestMuteCommand_RelayFailureSurfaces covers sequence (14): a relay failure
-// posts the REAL error text — never a silent no-op — and an unconfirmed relay
+// is answered as a failure (its real cause logged, never a raw Go error in the
+// GM's chat) — never a silent no-op — and an unconfirmed relay
 // (ErrControlPending) posts the honest not-confirmed wording, no phantom success.
 func TestMuteCommand_RelayFailureSurfaces(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
@@ -233,8 +234,11 @@ func TestMuteCommand_RelayFailureSurfaces(t *testing.T) {
 	if err := MuteCommand(&fakeMuter{}, lister, pool).Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "tts exploded") {
-		t.Fatalf("failure followup = %+v, want the real error text", resp.followups)
+	if len(resp.followups) != 1 || resp.followups[0].content != controlFailedReply {
+		t.Fatalf("failure followup = %+v, want the failure reply", resp.followups)
+	}
+	if strings.Contains(resp.followups[0].content, "tts exploded") {
+		t.Fatalf("failure followup %q leaks the raw error", resp.followups[0].content)
 	}
 
 	pool = &fakePool{live: true, muteErr: session.ErrControlPending}
@@ -269,7 +273,7 @@ func TestMuteAllCommand_SessionOnAnotherWorker(t *testing.T) {
 	if len(mgr.allCalls) != 0 {
 		t.Fatalf("cross-pod muteall drove the LOCAL manager: %v", mgr.allCalls)
 	}
-	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Muted all 2 Agent voices.") {
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "Muted all 2 NPC voices.") {
 		t.Fatalf("confirming followup = %+v, want 'Muted all 2 Agent voices.'", resp.followups)
 	}
 }
@@ -298,7 +302,7 @@ func TestMuteCommand_PoolIdleKeepsPlainGuard(t *testing.T) {
 	if err := cmd.Handle(context.Background(), muteIC(resp, "Bart")); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.replies) != 1 || resp.replies[0].content != "No Voice Session is active." {
+	if len(resp.replies) != 1 || resp.replies[0].content != noSessionReply {
 		t.Fatalf("idle-pool reply = %+v, want the plain no-session guard", resp.replies)
 	}
 }

@@ -19,3 +19,17 @@ Implementing #127 (E6, under the ADR-0004 amendment and ADR-0042) required decid
 ## Relationship to other ADRs
 
 ADR-0004 (amendment 2026-07-04 defines the metering mandate), ADR-0042 (STT duration cost), ADR-0032 (label bounds), ADR-0021 (additive event, cassette stability), ADR-0046 (spend meter consumes these capture points).
+
+## Amendment: a turn barged during playback is metered in full (2026-11-20)
+
+"Error/barge paths record provider-reported usage if received, otherwise
+nothing" is unchanged, but what reaches that path changed. The Agent turn used
+to read the provider stream in lockstep with playback, so a turn barged or
+superseded while it was being *spoken* was still parked mid-stream, never read
+the trailing usage chunk, and recorded nothing — although the provider had
+generated, and billed, the whole reply. Generation is now drained independently
+of playback (ADR-0012 amendment of the same date), so such a turn's round
+completes normally and its reported usage is metered like any other. The
+"otherwise nothing" branch is left for a turn cut while the provider was still
+generating: the request is cancelled, no usage chunk is sent, and none is
+invented.
