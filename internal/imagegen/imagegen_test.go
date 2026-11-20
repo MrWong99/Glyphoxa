@@ -231,8 +231,8 @@ func TestGemini_Generate_NoInlineData(t *testing.T) {
 	defer srv.Close()
 
 	gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
-	if _, err := gen.Generate(context.Background(), "x"); err == nil {
-		t.Fatal("want error when no inline image data, got nil")
+	if _, err := gen.Generate(context.Background(), "x"); !errors.Is(err, imagegen.ErrNoImage) {
+		t.Fatalf("err = %v, want ErrNoImage (typed: callers treat a refusal as permanent)", err)
 	}
 }
 
