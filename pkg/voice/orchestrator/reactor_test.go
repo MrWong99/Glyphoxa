@@ -481,28 +481,41 @@ func TestReplier_CrossTargetAddressWithinWindowSupersedes(t *testing.T) {
 	// CUT turn must get EXACTLY ONE terminal with the supersede reason (#443) —
 	// previously it got none and every consumer TTL-reaped its state.
 	var bartEnded, gretaEnded []voiceevent.TurnEnded
-	for _, ev := range h.Events() {
-		e, ok := ev.(voiceevent.TurnEnded)
-		if !ok {
-			continue
-		}
-		switch e.TurnID {
-		case "seg-bart":
-			bartEnded = append(bartEnded, e)
-		case "seg-greta":
-			gretaEnded = append(gretaEnded, e)
+	collect := func() {
+		bartEnded, gretaEnded = nil, nil
+		for _, ev := range h.Events() {
+			e, ok := ev.(voiceevent.TurnEnded)
+			if !ok {
+				continue
+			}
+			switch e.TurnID {
+			case "seg-bart":
+				bartEnded = append(bartEnded, e)
+			case "seg-greta":
+				gretaEnded = append(gretaEnded, e)
+			}
 		}
 	}
+	// Greta's own terminal lands when her goroutine releases the floor; wait for
+	// it, then give a stray second terminal a beat to show up.
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		if collect(); len(gretaEnded) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	collect()
 	if len(bartEnded) != 1 {
 		t.Fatalf("the superseded seg-bart got %d TurnEnded, want exactly one (#443): %+v", len(bartEnded), bartEnded)
 	}
 	if bartEnded[0].Reason != voiceevent.TurnEndSuperseded {
 		t.Fatalf("seg-bart terminal reason = %q, want %q", bartEnded[0].Reason, voiceevent.TurnEndSuperseded)
 	}
-	// The superseding turn proceeded cleanly: at most its own completed terminal
-	// (W1; it may not have landed yet), and in particular not a coalesced drop.
-	if len(gretaEnded) > 1 || (len(gretaEnded) == 1 && gretaEnded[0].Reason != voiceevent.TurnEndCompleted) {
-		t.Fatalf("the superseding seg-greta must end cleanly (completed only), got %+v", gretaEnded)
+	// The superseding turn proceeded cleanly: exactly its own completed terminal
+	// (W1), and in particular not a coalesced drop.
+	if len(gretaEnded) != 1 || gretaEnded[0].Reason != voiceevent.TurnEndCompleted {
+		t.Fatalf("the superseding seg-greta must end with exactly one completed, got %+v", gretaEnded)
 	}
 }
 
