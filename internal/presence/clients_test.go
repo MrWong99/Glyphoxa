@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -483,12 +484,6 @@ func TestGuildChangeClearsOldRegistersNew(t *testing.T) {
 	if rig.c.GuildForTenant(a) != "GA2" {
 		t.Errorf("GuildForTenant = %q, want GA2", rig.c.GuildForTenant(a))
 	}
-	if rig.c.KnownGuild("GA") {
-		t.Errorf("KnownGuild(GA) still true after guild change")
-	}
-	if !rig.c.KnownGuild("GA2") {
-		t.Errorf("KnownGuild(GA2) false after guild change")
-	}
 }
 
 // (10) EnsureAll seeds every saved row; one broken token is logged non-fatal and
@@ -518,25 +513,6 @@ func TestEnsureAllSeedsAllRowsOneBrokenNonFatal(t *testing.T) {
 	// A is live regardless of B's failure.
 	if st := rig.c.IntegrationStatus(a); st.State != IntegrationOK {
 		t.Errorf("A status = %q, want ok despite B failing", st.State)
-	}
-}
-
-// KnownGuild backs the interim Gate check: a resolved Tenant's Guild is known, a
-// DM and an unknown Guild are not.
-func TestKnownGuild(t *testing.T) {
-	rig := newClientsRig(t, "")
-	a := uuid.New()
-	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
-	mustEnsure(t, rig.c, a)
-
-	if !rig.c.KnownGuild("GA") {
-		t.Errorf("KnownGuild(GA) = false, want true")
-	}
-	if rig.c.KnownGuild("") {
-		t.Errorf("KnownGuild(DM) = true, want false")
-	}
-	if rig.c.KnownGuild("nope") {
-		t.Errorf("KnownGuild(unknown) = true, want false")
 	}
 }
 
@@ -619,7 +595,7 @@ func TestConcurrentEnsureInvalidateBorrow(t *testing.T) {
 			rig.c.invalidate(cl, &websocket.CloseError{Code: 4004, Text: "Authentication failed"})
 		}
 	})
-	spin(func() { rig.c.IntegrationStatus(a); rig.c.KnownGuild("GA") })
+	spin(func() { rig.c.IntegrationStatus(a); rig.c.GuildForTenant(a) })
 
 	time.Sleep(50 * time.Millisecond)
 	close(stop)
@@ -748,5 +724,169 @@ func TestRebuildDelayCaps(t *testing.T) {
 	}
 	if got := rebuildDelay(1000); got != rebuildMaxDelay {
 		t.Fatalf("rebuildDelay(1000) = %s, want the %s cap", got, rebuildMaxDelay)
+	}
+}
+
+// hangOpen makes the rig's gateway open block until its ctx ends — an
+// unreachable Discord, where disgo's Open retries for as long as the ctx lives.
+// opened is signalled once per open that started.
+func (r *clientsRig) hangOpen(opened chan<- struct{}) {
+	r.c.open = func(ctx context.Context, _ *bot.Client) error {
+		if opened != nil {
+			opened <- struct{}{}
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// TestClientForTenantCancelsWhileEnsureBlocked (#642): an ensure stuck on one
+// Tenant's open must not trap another caller on the gate past its own ctx.
+func TestClientForTenantCancelsWhileEnsureBlocked(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a, b := uuid.New(), uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	rig.store.set(b, rig.savedDep(t, "GB", "tok-B"))
+	opened := make(chan struct{}, 1)
+	rig.hangOpen(opened)
+	t.Cleanup(rig.c.Close)
+
+	go func() { _ = rig.c.EnsureTenant(context.Background(), a) }()
+	<-opened // tenant A now holds the gate inside its open
+
+	ctxB, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := rig.c.ClientForTenant(ctxB, b)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ClientForTenant(B) = %v, want its own ctx deadline", err)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("ClientForTenant(B) waited %s behind tenant A's open, want it to give up on its own deadline", waited)
+	}
+}
+
+// TestEnsureAllBoundsEachTenant (#642): a Tenant whose open never returns is cut
+// off at the open bound, so the reconcile still reaches the next Tenant — and
+// the timeout is not counted as a pacing failure, so the next ensure retries.
+func TestEnsureAllBoundsEachTenant(t *testing.T) {
+	rig := newClientsRig(t, "")
+	rig.c.openTimeout = 20 * time.Millisecond
+	a, b := uuid.New(), uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	rig.store.set(b, rig.savedDep(t, "GB", "tok-B"))
+	rig.c.open = func(ctx context.Context, _ *bot.Client) error {
+		rig.mu.Lock()
+		hang := rig.buildTokens[len(rig.buildTokens)-1] == "tok-A"
+		rig.mu.Unlock()
+		if hang {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); _ = rig.c.EnsureAll(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EnsureAll did not return: a hung open pinned the reconcile")
+	}
+	if rig.c.clientFor(b) == nil {
+		t.Error("tenant B has no client: the reconcile never reached it")
+	}
+	if wait := rig.c.rebuildWait("tok-A"); wait != 0 {
+		t.Errorf("a timed-out open was paced (%s); it says nothing about the token and must retry on the next ensure", wait)
+	}
+	if st := rig.c.IntegrationStatus(a); st.State != IntegrationReconnecting {
+		t.Errorf("tenant A status = %+v, want reconnecting while its client is down", st)
+	}
+}
+
+// TestRunSeedsWithoutWaitingForTheTicker (#642): the boot seed now happens on
+// Run's own goroutine, so Run must ensure every Tenant at once rather than
+// after the first reconcile interval.
+func TestRunSeedsWithoutWaitingForTheTicker(t *testing.T) {
+	rig := newClientsRig(t, "")
+	rig.c.reconcile = time.Hour
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rig.c.Run(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for rig.c.clientFor(a) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not seed the registry before its first tick")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestCloseUnwindsAHungOpen (#642): Close cancels the registry's lifetime, so
+// an ensure stuck in an open on an unreachable Discord unwinds instead of
+// holding shutdown up for the whole outage.
+func TestCloseUnwindsAHungOpen(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	opened := make(chan struct{}, 1)
+	rig.hangOpen(opened)
+
+	go func() { _ = rig.c.EnsureTenant(context.Background(), a) }()
+	<-opened
+
+	closed := make(chan struct{})
+	go func() { defer close(closed); rig.c.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked behind an ensure stuck in a gateway open")
+	}
+}
+
+// TestCloseDoesNotWaitOutAStuckClientClose (S9): disgo's gateway Close blocks
+// while an open waits on the IDENTIFY pacer (minutes); shutdown gives each
+// close a bound and moves on.
+func TestCloseDoesNotWaitOutAStuckClientClose(t *testing.T) {
+	rig := newClientsRig(t, "")
+	rig.c.closeTimeout = 20 * time.Millisecond
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	mustEnsure(t, rig.c, a)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	rig.c.closeClient = func(*bot.Client) { <-release }
+
+	closed := make(chan struct{})
+	go func() { defer close(closed); rig.c.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on a client whose own Close never returned")
+	}
+}
+
+// TestIntegrationStatusReportsReconnecting (S11): a Tenant whose standing
+// gateway died (not terminally) is not "ok" while the rebuild is pending.
+func TestIntegrationStatusReportsReconnecting(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	mustEnsure(t, rig.c, a)
+	if st := rig.c.IntegrationStatus(a); st.State != IntegrationOK {
+		t.Fatalf("status with a live client = %+v, want ok", st)
+	}
+
+	rig.c.invalidate(rig.c.clientFor(a), errors.New("gateway closed"))
+	st := rig.c.IntegrationStatus(a)
+	if st.State != IntegrationReconnecting {
+		t.Fatalf("status after the gateway died = %+v, want reconnecting", st)
+	}
+	if !strings.Contains(st.Detail, "30s") {
+		t.Errorf("detail %q should say when the next attempt is due", st.Detail)
 	}
 }

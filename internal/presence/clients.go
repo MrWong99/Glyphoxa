@@ -52,7 +52,34 @@ const (
 	// token's gateway close 4004 / REST 401, ADR-0043). Visible only to this
 	// Tenant; other Tenants are untouched.
 	IntegrationFailed = "failed"
+	// IntegrationReconnecting: a Bot token is resolved but its standing client is
+	// not up — its gateway died, or the open failed or timed out, and the next
+	// attempt is pending (paced per token, rebuild.go). Not terminal.
+	IntegrationReconnecting = "reconnecting"
 )
+
+// Ensure bounds (#642).
+const (
+	// openTimeout bounds one standing-client gateway open. disgo's Open retries
+	// a dial or handshake error with no cap of its own for as long as its ctx
+	// lives, so an unreachable Discord would otherwise hold the ensure gate for
+	// the whole outage.
+	openTimeout = 60 * time.Second
+	// ensureTimeout bounds one Tenant's ensure inside EnsureAll (DB read, open,
+	// command registration), so one Tenant's outage never stops the reconcile
+	// from visiting the others.
+	ensureTimeout = 60 * time.Second
+	// closeTimeout bounds one standing client's Close. disgo's gateway Close
+	// takes the connection lock a pending open holds while it waits for the
+	// IDENTIFY pacer — which can be minutes — so a close is given this long and
+	// then left to finish in the background (S9).
+	closeTimeout = 5 * time.Second
+)
+
+// errOpenAborted marks a gateway open that ran out of time (openTimeout or the
+// caller's ctx) rather than failing. It does not count toward the rebuild
+// pacing: nothing was learned about the token, and the next ensure retries.
+var errOpenAborted = errors.New("presence: gateway open timed out or was cancelled")
 
 // IntegrationStatus is one Tenant's Discord integration health: a state code plus
 // a human detail (the classified failure prose when State is "failed").
@@ -156,14 +183,26 @@ type Clients struct {
 	// transport itself is attached unconditionally.
 	voiceMetrics gxvoice.MetricsRecorder
 
-	// ensureMu serializes EnsureTenant/EnsureAll so builds and registrations never
-	// overlap; it is held ACROSS gateway/REST I/O. mu guards the entries/tenants
-	// maps and their non-atomic fields and is NEVER held across I/O — the read-hot
-	// client pointers are atomics, so invalidate (on disgo's gateway goroutine)
-	// takes only mu briefly and never blocks on an in-flight ensure's network I/O
-	// (mirrors the old singleton's CAS design).
-	ensureMu sync.Mutex
-	mu       sync.Mutex
+	// ensureSem (capacity 1) serializes EnsureTenant/EnsureAll so builds and
+	// registrations never overlap; it is held ACROSS gateway/REST I/O. It is a
+	// semaphore rather than a mutex so a waiter honours its own ctx (#642): a
+	// Voice Session start queued behind another Tenant's slow open gives up on
+	// its own deadline instead of waiting the open out. mu guards the
+	// entries/tenants maps and their non-atomic fields and is NEVER held across
+	// I/O — the read-hot client pointers are atomics, so invalidate (on disgo's
+	// gateway goroutine) takes only mu briefly and never blocks on an in-flight
+	// ensure's network I/O (mirrors the old singleton's CAS design).
+	ensureSem chan struct{}
+	// life is the registry's own lifetime: every ensure's I/O runs under it as
+	// well as its caller's ctx, and Close cancels it first, so an open stuck on
+	// an unreachable Discord (or waiting out the IDENTIFY pacer) unwinds at
+	// shutdown instead of holding Close up.
+	life     context.Context
+	stopLife context.CancelFunc
+	// openTimeout / closeTimeout are the consts above; fields so tests shrink them.
+	openTimeout  time.Duration
+	closeTimeout time.Duration
+	mu           sync.Mutex
 	entries  map[string]*clientEntry
 	tenants  map[uuid.UUID]*tenantState
 	// rebuilds paces gateway opens per Bot token (rebuild.go): every open sends
@@ -172,11 +211,12 @@ type Clients struct {
 	rebuilds map[string]*rebuildState
 	// now is the clock the rebuild pacing reads; a test seam.
 	now func() time.Time
-	// closed marks the registry torn down (#483 L7). Written by Close under BOTH
-	// ensureMu and mu; read by EnsureTenant under ensureMu. Close takes ensureMu
-	// first so an in-flight ensure finishes (or fails) BEFORE the teardown — an
-	// ensure that overlapped Close could otherwise re-insert a fresh gateway into
-	// a registry every other path believes closed, leaking it forever.
+	// closed marks the registry torn down (#483 L7). Written by Close while
+	// holding BOTH the ensure gate and mu; read by EnsureTenant under the gate.
+	// Close cancels life and then takes the gate, so an in-flight ensure unwinds
+	// (or finishes) BEFORE the teardown — an ensure that overlapped Close could
+	// otherwise re-insert a fresh gateway into a registry every other path
+	// believes closed, leaking it forever.
 	closed bool
 }
 
@@ -187,17 +227,23 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	life, stopLife := context.WithCancel(context.Background())
 	c := &Clients{
-		store:     store,
-		cipher:    cipher,
-		reg:       reg,
-		envToken:  envToken,
-		log:       log,
-		reconcile: reconcileInterval(),
-		entries:   map[string]*clientEntry{},
-		tenants:   map[uuid.UUID]*tenantState{},
-		rebuilds:  map[string]*rebuildState{},
-		now:       time.Now,
+		store:        store,
+		cipher:       cipher,
+		reg:          reg,
+		envToken:     envToken,
+		log:          log,
+		reconcile:    reconcileInterval(),
+		ensureSem:    make(chan struct{}, 1),
+		life:         life,
+		stopLife:     stopLife,
+		openTimeout:  openTimeout,
+		closeTimeout: closeTimeout,
+		entries:      map[string]*clientEntry{},
+		tenants:      map[uuid.UUID]*tenantState{},
+		rebuilds:     map[string]*rebuildState{},
+		now:          time.Now,
 	}
 	// The budget opts are read at build time (each Ensure that builds/rebuilds an
 	// entry's client), so a SetGatewayBudget between NewClients and the first
@@ -253,9 +299,18 @@ func reconcileInterval() time.Duration {
 // (no token) detaches the Tenant; a resolved token builds or reuses the entry for
 // that token, adds this Tenant's ref, and PUTs the command surface for this
 // Tenant's Guild. A repeat with the same token and Guild does nothing.
+//
+// Waiting for the ensure gate honours ctx (#642), and the work itself runs
+// under ctx AND the registry's lifetime, so Close is never held up by it.
 func (c *Clients) EnsureTenant(ctx context.Context, tenantID uuid.UUID) error {
-	c.ensureMu.Lock()
-	defer c.ensureMu.Unlock()
+	select {
+	case c.ensureSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("presence: waiting to ensure tenant %s: %w", tenantID, ctx.Err())
+	case <-c.life.Done():
+		return nil // closed: see below
+	}
+	defer func() { <-c.ensureSem }()
 
 	// A closed registry ensures nothing (#483 L7): a late reconcile/refresher
 	// racing shutdown must not re-open a gateway Close can never reap.
@@ -265,6 +320,9 @@ func (c *Clients) EnsureTenant(ctx context.Context, tenantID uuid.UUID) error {
 	if closed {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(c.life, cancel)()
 
 	dep, err := c.store.GetDeploymentConfig(ctx, tenantID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -287,7 +345,7 @@ func (c *Clients) EnsureTenant(ctx context.Context, tenantID uuid.UUID) error {
 }
 
 // reconcileTenant does the token/guild reconciliation for one Tenant under
-// ensureMu. Gateway/REST I/O (buildOpen, register) runs without mu held.
+// the ensure gate. Gateway/REST I/O (buildOpen, register) runs without mu held.
 func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token, guild string) error {
 	c.mu.Lock()
 	var prevToken, prevGuild string
@@ -316,7 +374,8 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	case entry == nil:
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
-			c.noteOpenFailed(token, err)
+			c.noteOpenFailed(tenantID, token, err)
+			c.bindUnopened(tenantID, prevToken, token, guild)
 			return err
 		}
 		c.noteOpened(token)
@@ -330,7 +389,8 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	case entry.client.Load() == nil:
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
-			c.noteOpenFailed(token, err)
+			c.noteOpenFailed(tenantID, token, err)
+			c.bindUnopened(tenantID, prevToken, token, guild)
 			return err
 		}
 		c.noteOpened(token)
@@ -409,6 +469,24 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	return nil
 }
 
+// bindUnopened records a Tenant's token and Guild when its client could not be
+// opened, so IntegrationStatus reports it reconnecting rather than "waiting"
+// for a token it has (S11). Only a Tenant with no other live binding is
+// recorded: one still refing a previous token's entry keeps that state, since
+// its ref is found through it (detachFromEntry). No entry ref is taken.
+func (c *Clients) bindUnopened(tenantID uuid.UUID, prevToken, token, guild string) {
+	if prevToken != "" && prevToken != token {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ts := c.tenants[tenantID]; ts != nil && ts.failure != "" {
+		ts.token, ts.guild = token, guild
+		return
+	}
+	c.tenants[tenantID] = &tenantState{token: token, guild: guild}
+}
+
 // entryGuilds is the union of every ref-Tenant's Guild on entry plus thisGuild
 // (skipping empty), for the rebuild re-registration.
 func (c *Clients) entryGuilds(entry *clientEntry, thisTenant uuid.UUID, thisGuild string) map[string]bool {
@@ -446,17 +524,43 @@ func (c *Clients) guildUsedByOther(entry *clientEntry, thisTenant uuid.UUID, gui
 }
 
 // buildOpen builds and opens a client, closing it on an open failure so a failed
-// ensure leaks nothing.
+// ensure leaks nothing. The open is bounded by openTimeout; one that ran out of
+// time (or whose ctx was cancelled) is reported as errOpenAborted.
 func (c *Clients) buildOpen(ctx context.Context, token string) (*bot.Client, error) {
 	client, err := c.build(token)
 	if err != nil {
 		return nil, fmt.Errorf("presence: build Discord client: %w", err)
 	}
-	if err := c.open(ctx, client); err != nil {
-		c.closeClient(client)
+	openCtx, cancel := context.WithTimeout(ctx, c.openTimeout)
+	defer cancel()
+	if err := c.open(openCtx, client); err != nil {
+		c.closeBounded(client)
+		if openCtx.Err() != nil {
+			return nil, fmt.Errorf("presence: open gateway: %w: %w", errOpenAborted, err)
+		}
 		return nil, fmt.Errorf("presence: open gateway: %w", err)
 	}
 	return client, nil
+}
+
+// closeBounded closes a standing client, giving up waiting after closeTimeout
+// (S9): disgo's gateway Close blocks on the connection lock an open holds
+// while it waits for the IDENTIFY pacer, which can be minutes. The close keeps
+// running in the background and finishes once that open lets go.
+func (c *Clients) closeBounded(client *bot.Client) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.closeClient(client)
+	}()
+	t := time.NewTimer(c.closeTimeout)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		c.log.Warn("presence: standing client close is still blocked; finishing it in the background",
+			"app_id", client.ApplicationID, "waited", c.closeTimeout)
+	}
 }
 
 // setWaiting moves a Tenant to the wait-state (no token) and releases its client
@@ -493,7 +597,7 @@ func (c *Clients) detachFromEntry(token string, tenantID uuid.UUID) {
 	}
 	c.mu.Unlock()
 	if toClose != nil {
-		c.closeClient(toClose)
+		c.closeBounded(toClose)
 	}
 }
 
@@ -504,7 +608,7 @@ func (c *Clients) detachFromEntry(token string, tenantID uuid.UUID) {
 //
 // TODO(#489): EnsureAll only ADDS/updates Tenants present in the config table; it
 // never reconciles a DELETED deployment_config row — a removed Tenant's ref +
-// KnownGuild entry persist until process restart. Latent today (there is no
+// Guild binding persist until process restart. Latent today (there is no
 // deployment-config delete path), so it is left for the reconcile to grow a
 // "prune tenants absent from the list" pass when a delete path lands.
 func (c *Clients) EnsureAll(ctx context.Context) error {
@@ -513,7 +617,12 @@ func (c *Clients) EnsureAll(ctx context.Context) error {
 		return fmt.Errorf("presence: list deployment configs: %w", err)
 	}
 	for _, dep := range deps {
-		if err := c.EnsureTenant(ctx, dep.TenantID); err != nil {
+		// Bounded per Tenant (#642): one Tenant's unreachable Discord must not
+		// stop the reconcile from reaching the rest.
+		tctx, cancel := context.WithTimeout(ctx, ensureTimeout)
+		err := c.EnsureTenant(tctx, dep.TenantID)
+		cancel()
+		if err != nil {
 			if errors.Is(err, ErrRebuildBackoff) {
 				// Expected on every reconcile tick while a token is being paced;
 				// the death or the failed open that started it was already logged.
@@ -526,10 +635,20 @@ func (c *Clients) EnsureAll(ctx context.Context) error {
 	return nil
 }
 
-// Run polls a periodic full reconcile every reconcile interval until ctx is
-// cancelled, so a Tenant added/changed out of band (a raw DB write, or a missed
-// refresher) still converges (#489; the interval is wired by #491 later).
+// Run seeds the registry from every saved deployment config at once (the boot
+// seed, ADR-0039 presence-before-request), then polls a periodic full
+// reconcile every reconcile interval until ctx is cancelled, so a Tenant
+// added/changed out of band (a raw DB write, or a missed refresher) still
+// converges (#489).
+//
+// Boot runs it on its own goroutine (#642): the seed opens one gateway per Bot
+// token, and an unreachable Discord must delay neither the web listener nor a
+// worker's claim loop. Until a Tenant's client is up, a Voice Session start
+// ensures it on demand (ClientForTenant).
 func (c *Clients) Run(ctx context.Context) {
+	if err := c.EnsureAll(ctx); err != nil {
+		c.log.Warn("presence: initial seed failed; retrying on the reconcile interval", "err", err)
+	}
 	t := time.NewTicker(c.reconcile)
 	defer t.Stop()
 	for {
@@ -590,28 +709,11 @@ func (c *Clients) GuildForTenant(tenantID uuid.UUID) string {
 	return ""
 }
 
-// KnownGuild reports whether guildID is the configured Guild of ANY resolved
-// Tenant. It was #489's interim Gate check; #490 superseded that with the storage
-// TenantResolver (which maps a Guild to its OWNING Tenant), so the
-// Gate no longer calls this. Retained as an in-memory Guild-membership probe for
-// the reconcile tests. A DM ("") is never known.
-func (c *Clients) KnownGuild(guildID string) bool {
-	if guildID == "" {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, ts := range c.tenants {
-		if ts.guild == guildID {
-			return true
-		}
-	}
-	return false
-}
-
 // IntegrationStatus is a Tenant's Discord integration health: "waiting" with no
-// resolved token, "failed" (+ detail) after a terminal token death (#489), else
-// "ok". A failure on one Tenant's BYOK token never changes another's.
+// resolved token, "failed" (+ detail) after a terminal token death (#489),
+// "reconnecting" (+ when the next attempt is due) while its standing client is
+// down and being re-opened (S11), else "ok". A failure on one Tenant's BYOK
+// token never changes another's.
 func (c *Clients) IntegrationStatus(tenantID uuid.UUID) IntegrationStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -621,6 +723,15 @@ func (c *Clients) IntegrationStatus(tenantID uuid.UUID) IntegrationStatus {
 	}
 	if ts.failure != "" {
 		return IntegrationStatus{State: IntegrationFailed, Detail: ts.failure}
+	}
+	if entry := c.entries[ts.token]; entry == nil || entry.client.Load() == nil {
+		detail := "Reconnecting to Discord."
+		if st := c.rebuilds[ts.token]; st != nil {
+			if wait := st.notBefore.Sub(c.now()); wait > 0 {
+				detail = fmt.Sprintf("Lost the connection to Discord; next attempt in %s.", wait.Round(time.Second))
+			}
+		}
+		return IntegrationStatus{State: IntegrationReconnecting, Detail: detail}
 	}
 	return IntegrationStatus{State: IntegrationOK}
 }
@@ -659,21 +770,27 @@ func (c *Clients) invalidate(dead *bot.Client, cause error) {
 			}
 		}
 	}
+	tenants := make([]uuid.UUID, 0, len(entry.refs))
+	for id := range entry.refs {
+		tenants = append(tenants, id)
+	}
 	c.mu.Unlock()
-	c.log.Warn("presence: standing gateway died; invalidating standing client", "err", cause, "next_attempt_in", wait.Round(time.Second))
-	c.closeClient(dead)
+	c.log.Warn("presence: standing gateway died; invalidating standing client",
+		"err", cause, "app_id", dead.ApplicationID, "tenants", tenants, "next_attempt_in", wait.Round(time.Second))
+	c.closeBounded(dead)
 }
 
 // Close tears down every standing client. Called after the voice Manager's
-// shutdown so a live session releases its borrowed client first. It takes
-// ensureMu FIRST (#483 L7): an in-flight EnsureTenant could otherwise Store a
-// freshly-opened gateway into an entry AFTER Close swept the maps — a leaked
-// gateway no path would ever close. Waiting out the in-flight ensure is bounded:
-// its network I/O rides the process ctx, already cancelled by shutdown. The
-// closed flag then keeps any later ensure a no-op.
+// shutdown so a live session releases its borrowed client first. It cancels the
+// registry's lifetime, which unwinds an in-flight ensure's open (#642), and then
+// takes the ensure gate (#483 L7): an in-flight EnsureTenant could otherwise
+// Store a freshly-opened gateway into an entry AFTER Close swept the maps — a
+// leaked gateway no path would ever close. The closed flag then keeps any later
+// ensure a no-op. Each client close is bounded by closeTimeout (S9).
 func (c *Clients) Close() {
-	c.ensureMu.Lock()
-	defer c.ensureMu.Unlock()
+	c.stopLife()
+	c.ensureSem <- struct{}{}
+	defer func() { <-c.ensureSem }()
 	c.mu.Lock()
 	c.closed = true
 	var toClose []*bot.Client
@@ -686,7 +803,7 @@ func (c *Clients) Close() {
 	c.entries = map[string]*clientEntry{}
 	c.mu.Unlock()
 	for _, cl := range toClose {
-		c.closeClient(cl)
+		c.closeBounded(cl)
 	}
 }
 

@@ -555,10 +555,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.DirectCommand(mgr, store, intentControl),
 		presence.WhereCommand(mgr, store),
 	)
-	if err := clients.EnsureAll(ctx); err != nil {
-		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
-	}
-	go clients.Run(ctx)
+	// Seed + reconcile the standing clients in the background (#642): Run ensures
+	// every Tenant at once, and an unreachable Discord must not hold up the claim
+	// loop below — a claimed session ensures its Tenant's client on demand.
+	startPresence(ctx, clients)
 
 	// Presence-owner election (#492, ADR-0057 (c)): runs beside the claim loop on the
 	// SAME instanceID, flipping the Registry active only while this Instance owns the
@@ -590,6 +590,15 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		clients.Close,
 	)
 	return nil
+}
+
+// startPresence seeds and then reconciles the standing Discord clients on
+// their own goroutine and returns at once (#642). The seed opens one gateway
+// per Bot token, and disgo retries an unreachable Discord for as long as it is
+// allowed to: run synchronously it kept the web listener from binding (and a
+// worker's claim loop from starting) for the whole outage.
+func startPresence(ctx context.Context, clients *presence.Clients) {
+	go clients.Run(ctx)
 }
 
 // voiceDeps is the buildVoiceDeps set (#491): the session Manager's
@@ -1326,15 +1335,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		)
 		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
 		// Session), one standing client per distinct Bot token (#489, ADR-0039
-		// presence-before-request). Non-fatal per Tenant: a bad or absent token
-		// leaves that Tenant in the wait-state and the RPC refresher retries on its
-		// next save, without blocking the others. Then a background poll reconciles
-		// out-of-band changes (a raw DB write / a missed refresher) on the interval.
-		if err := clients.EnsureAll(ctx); err != nil {
-			log.Warn("presence: initial seed failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
-		go clients.Run(ctx)
+		// presence-before-request), then reconcile out-of-band changes (a raw DB
+		// write / a missed refresher) on the interval. Non-fatal per Tenant: a bad
+		// or absent token leaves that Tenant in the wait-state without blocking the
+		// others. On its own goroutine (#642): the seed opens Discord gateways, and
+		// an unreachable Discord must not keep the web listener below from binding.
+		startPresence(ctx, clients)
 	}
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
@@ -1349,10 +1355,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var presenceRefresh func(tenantID uuid.UUID)
 	if clients != nil {
 		presenceRefresh = func(tenantID uuid.UUID) {
-			// Bound the ensure: EnsureTenant holds the registry's ensureMu across
-			// gateway + REST I/O, so a Tenant whose Discord endpoint hangs would
-			// otherwise pin the lock and stall EVERY other Tenant's save + Voice
-			// Session start behind it (finding 4). 60s is well past a healthy open.
+			// Bound the ensure: EnsureTenant holds the registry's ensure gate across
+			// gateway + REST I/O, and this save's ensure waits behind any other one
+			// in flight. 60s is well past a healthy open.
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			if err := clients.EnsureTenant(ctx, tenantID); err != nil {
