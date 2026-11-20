@@ -13,7 +13,9 @@ import (
 // non-retryable Discord gateway/REST rejection the reconnect loop must NOT keep
 // backing off against. They are part of the observable failure contract — the
 // session's persisted end_reason and the SSE connection.state Detail carry them —
-// so keep the set small and the values stable.
+// so keep the set small and the values stable. ReasonVoiceJoinTimeout
+// (connect.go) is the one reason the reconnect loop assigns itself rather than
+// classifying from a Discord rejection.
 const (
 	// ReasonInvalidBotToken: the Bot token was rejected. Gateway close 4004
 	// (Authentication failed) or REST 401 (Unauthorized).

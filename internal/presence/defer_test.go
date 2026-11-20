@@ -41,6 +41,40 @@ func TestDispatchDeferExtendsDeadline(t *testing.T) {
 	}
 }
 
+// slowDeferResponder takes delay to acknowledge a Defer.
+type slowDeferResponder struct {
+	fakeResponder
+	delay time.Duration
+}
+
+func (s *slowDeferResponder) deferResponse(ephemeral bool) error {
+	time.Sleep(s.delay)
+	return s.fakeResponder.deferResponse(ephemeral)
+}
+
+// TestDispatchDeferIsNotCancelledMidFlight (#642 review): when the shared
+// first-response budget runs out WHILE the Defer is being sent, Discord has
+// accepted the Defer and expects the follow-up — the handler's ctx must still
+// be live.
+func TestDispatchDeferIsNotCancelledMidFlight(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	reg.responseTimeout = 20 * time.Millisecond
+
+	var ctxErr error
+	reg.Register(Command{Path: "slowdefer", Handle: func(ctx context.Context, ic *Interaction) error {
+		if err := ic.Defer(true); err != nil {
+			return err
+		}
+		ctxErr = ctx.Err()
+		return ic.Followup("done", true)
+	}})
+	reg.dispatch(context.Background(), "slowdefer", &Interaction{guildID: testGuild, resp: &slowDeferResponder{delay: 60 * time.Millisecond}})
+
+	if ctxErr != nil {
+		t.Errorf("handler ctx after a Defer that straddled the deadline = %v, want live", ctxErr)
+	}
+}
+
 // TestDispatchDeferredHandlerErrorRepliesViaFollowup pins issue #1b: after a
 // Defer the interaction is already acknowledged, so the Registry's generic error
 // reply must go through Followup — a fresh CreateMessage would be a Discord 40060

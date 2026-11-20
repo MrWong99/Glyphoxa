@@ -15,6 +15,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -2216,5 +2217,124 @@ func TestEngine_UngrantedDice_NeverArms(t *testing.T) {
 	}
 	if paths := rec.malformedPaths(); len(paths) != 0 {
 		t.Errorf("malformed paths = %v, want none", paths)
+	}
+}
+
+// TestEngine_Usage_BargedPlaybackIsMeteredWithReportedUsage pins O7 through the
+// real Replier: the provider's usage chunk TRAILS the text, and the turn is
+// barged (or superseded — the same ctx cancel) while its first sentence is still
+// playing. Generation is drained independently of playback, so by then the round
+// has completed and its provider-reported usage is metered in full. When the
+// stream was consumed in lockstep with playback the adapter was still parked in
+// onText, never read the usage chunk, and the barged turn cost nothing on the
+// Usage Ledger.
+func TestEngine_Usage_BargedPlaybackIsMeteredWithReportedUsage(t *testing.T) {
+	prov := usageProvider{text: "One. Two. Three.", usage: &llm.Usage{InputTokens: 321, OutputTokens: 12}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "bart", "test-model", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Voice: tts.Voice{ProviderID: "elevenlabs", VoiceID: "v1"}},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	playing := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- r.ReplyStream()(ctx, addressed("bart", "Tell me a story."), func(orchestrator.Reply) error {
+			close(playing) // the first sentence is on air…
+			<-ctx.Done()   // …until the barge cuts it
+			return ctx.Err()
+		})
+	}()
+	<-playing
+
+	// The round finishes while the first sentence is still playing.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(rec.tokenSpans()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("ReplyStream = %v, want nil on a barge", err)
+	}
+
+	toks := rec.tokenSpans()
+	want := llmTokensRec{provider: observe.ProviderGroq, model: "test-model", in: 321, out: 12}
+	if len(toks) != 1 || toks[0] != want {
+		t.Fatalf("LLMTokens = %+v, want exactly [%+v] (the provider-reported usage of the barged turn)", toks, want)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Errorf("barged turn committed %q, want nothing (no sentence was delivered)", m.Text)
+		}
+	}
+}
+
+// exactProvider replays scripted rounds like scriptedProvider, but streams each
+// round's text as ONE delta, byte for byte — no per-word trailing space — the
+// way a provider ends a round on its last token.
+type exactProvider struct {
+	mu    sync.Mutex
+	steps []step
+	next  int
+}
+
+func (p *exactProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	s := step{stop: "end_turn"}
+	if p.next < len(p.steps) {
+		s = p.steps[p.next]
+		p.next++
+	}
+	p.mu.Unlock()
+	ch := make(chan llm.StreamEvent, len(s.calls)+2)
+	if s.text != "" {
+		ch <- llm.StreamEvent{Type: llm.EventText, Text: s.text}
+	}
+	for _, c := range s.calls {
+		ch <- llm.StreamEvent{Type: llm.EventToolCall, ToolCall: c}
+	}
+	ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: s.stop}
+	close(ch)
+	return ch, nil
+}
+
+// TestEngine_ProseBeforeAToolRound_IsNotGluedToTheNextRound pins the round
+// boundary end to end through the real Replier, Engine and tool loop: the model
+// says "Let me check.", calls a Tool that returns in microseconds, and answers.
+// The two rounds' prose reach the stream back to back, so without a separator
+// the room hears one sentence, "Let me check.The dragon sleeps." The Replier
+// runs with its idle flush OFF, so nothing but the stream decides.
+func TestEngine_ProseBeforeAToolRound_IsNotGluedToTheNextRound(t *testing.T) {
+	var seen string
+	reg := tool.NewRegistry()
+	reg.MustRegister(callerCaptureTool{got: &seen})
+	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "capture"})
+	prov := &exactProvider{steps: []step{
+		{text: "Let me check.", calls: []llm.ToolCall{{ID: "c1", Name: "capture", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		{text: "The dragon sleeps.", stop: "end_turn"},
+	}}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Voice: tts.Voice{ProviderID: "elevenlabs", VoiceID: "v1"}},
+		Engine:      agenttool.NewEngine(prov, grants, "bart", "m", 256, 0),
+		Synthesizer: stubSynth{},
+	})
+	var spoken []string
+	if err := r.ReplyStream()(context.Background(), addressed("bart", "What is the dragon doing?"), func(rep orchestrator.Reply) error {
+		spoken = append(spoken, rep.Sentence)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	if seen != "bart" {
+		t.Fatalf("the tool round did not run (caller %q)", seen)
+	}
+	want := []string{"Let me check.", "The dragon sleeps."}
+	if strings.Join(spoken, "|") != strings.Join(want, "|") {
+		t.Errorf("spoken %q, want %q", spoken, want)
 	}
 }

@@ -1,8 +1,13 @@
 package presence
 
 import (
+	"encoding/base64"
 	"errors"
+	"strings"
 	"time"
+
+	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
@@ -74,12 +79,42 @@ func (c *Clients) noteOpened(token string) {
 	}
 }
 
-// noteOpenFailed records a build or gateway open that failed for token.
-func (c *Clients) noteOpenFailed(token string, cause error) {
+// noteOpenFailed records a build or gateway open that failed for token —
+// including one that ran out of time or was cancelled (#642). A timed-out open
+// must count: retried on every reconcile pass, each attempt re-queued in the
+// IDENTIFY pacer faster than its refill, so the pacer's hold kept growing and
+// no open could ever outwait it. Counted, the retries spread out (30s, 1m, 2m,
+// ...) past the refill and the token connects once Discord is back. It also
+// records the Tenant's pending binding for IntegrationStatus, failed outright
+// when Discord refused the token for good.
+func (c *Clients) noteOpenFailed(tenantID uuid.UUID, token string, cause error) {
+	appID := applicationID(token)
+	u := unopenedState{token: token}
+	if fe := wirenpc.ClassifyFatal(cause); fe != nil {
+		u.failure = fe.Error()
+	}
 	c.mu.Lock()
 	wait := c.noteFailureLocked(token, cause)
+	c.unopened[tenantID] = u
 	c.mu.Unlock()
-	c.log.Warn("presence: standing client open failed; pacing the next attempt", "err", cause, "next_attempt_in", wait.Round(time.Second))
+	c.log.Warn("presence: standing client open failed; pacing the next attempt",
+		"err", cause, "app_id", appID, "tenant", tenantID, "next_attempt_in", wait.Round(time.Second))
+}
+
+// applicationID derives the public application id from a Bot token's first
+// dot-segment (base64 of the snowflake), for operator log lines — the token
+// itself is never logged. "" for an unparseable token.
+func applicationID(token string) string {
+	first, _, _ := strings.Cut(token, ".")
+	raw, err := base64.RawStdEncoding.DecodeString(first)
+	if err != nil {
+		return ""
+	}
+	id, err := snowflake.Parse(string(raw))
+	if err != nil {
+		return ""
+	}
+	return id.String()
 }
 
 // noteDiedLocked records that token's standing gateway died and returns the

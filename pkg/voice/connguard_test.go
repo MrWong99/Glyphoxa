@@ -156,7 +156,9 @@ func TestGuardedConnRecoversInPlaceAndTearsDownOnce(t *testing.T) {
 	if !eventually(func() bool { return rtpWrites(fc2) > 0 }) {
 		t.Fatal("after recovery: disgo's sender never wrote to the new socket")
 	}
-	sent := fc2.write(fc2.writeCount() - 1)
+	// The last write may be a keepalive (8 bytes), which the transport sends on
+	// the same socket concurrently: read the SSRC off the last AUDIO packet.
+	sent := lastRTPWrite(fc2)
 	if ssrc := binary.BigEndian.Uint32(sent[8:12]); ssrc != 43 {
 		t.Fatalf("after recovery: outbound SSRC = %d, want 43", ssrc)
 	}

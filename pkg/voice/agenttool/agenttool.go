@@ -264,7 +264,7 @@ type attemptKind int
 
 const (
 	kindSuccess   attemptKind = iota // clean EventDone
-	kindBarge                        // onText returned an error mid-drain (downstream cancel)
+	kindBarge                        // onText returned an error mid-drain (the consumer stopped generation)
 	kindStartErr                     // Complete could not start (retry.Do exhausted / non-retryable)
 	kindStreamErr                    // terminal EventError (may carry a tool-syntax class)
 	kindTruncated                    // stream ended without EventDone, ctx still live
@@ -529,8 +529,15 @@ func (a providerAdapter) recordOutcome(ctx context.Context, round int, start tim
 		return res.msg, nil
 
 	case kindBarge:
-		// The round produced output before a downstream cancel: record it, and meter
-		// only the provider-reported usage if it already arrived (never an estimate).
+		// The round produced output before its consumer stopped it: record it, and
+		// meter only the provider-reported usage if it already arrived (never an
+		// estimate). This is the rare path since the Replier drains generation
+		// independently of playback (agent.Replier.streamTurn): a turn barged or
+		// superseded while it is being SPOKEN has normally finished generating, so
+		// its round ended kindSuccess and its real usage is metered in full. What
+		// still lands here or in kindCtxErr is a turn cut while the provider was
+		// still generating — the request is cancelled, the trailing usage chunk is
+		// never sent, and ADR-0045 forbids inventing one.
 		a.rec.LLMRound(a.provName, round, len(res.msg.ToolCalls) > 0, time.Since(start))
 		a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
 		a.recordReportedUsage(res.haveUsage, res.usage)

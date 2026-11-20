@@ -309,6 +309,20 @@ func (f *fakeIntentStore) FinishVoiceSessionIntent(_ context.Context, id uuid.UU
 	return *i, nil
 }
 
+func (f *fakeIntentStore) ReleaseVoiceSessionIntent(_ context.Context, id uuid.UUID, instanceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i, ok := f.intents[id]
+	if !ok || i.InstanceID != instanceID || i.Status != storage.VoiceIntentClaimed || i.StopRequested {
+		return storage.ErrNotFound
+	}
+	i.Status = storage.VoiceIntentPending
+	i.InstanceID = ""
+	i.ClaimedAt = nil
+	i.HeartbeatAt = nil
+	return nil
+}
+
 // ReapDeadVoiceSessionIntents models the real reaper (#505): a claimed/live row
 // whose heartbeat is staler than expiry flips 'dead'. reapReturns is added to
 // the reported count (drives the reconcile-after-reap logging path).
@@ -580,6 +594,62 @@ func TestClaimLoop_StartRefusalCarriesFailCode(t *testing.T) {
 	}
 	if !errors.Is(sentinel, session.ErrDiscordNotConfigured) {
 		t.Fatalf("decoded sentinel = %v, want ErrDiscordNotConfigured", sentinel)
+	}
+}
+
+// cancelOnClaimStore cancels the loop's ctx right after a claim lands — a
+// SIGTERM between the claim and the Manager start.
+type cancelOnClaimStore struct {
+	*fakeIntentStore
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClaimStore) ClaimVoiceSessionIntent(ctx context.Context, instanceID string) (storage.VoiceSessionIntent, error) {
+	i, err := c.fakeIntentStore.ClaimVoiceSessionIntent(ctx, instanceID)
+	if err == nil {
+		c.cancel()
+	}
+	return i, err
+}
+
+// TestClaimLoop_ShutdownBeforeStartReleasesIntent (S13): a claim whose start
+// was cut short by this worker's shutdown is not a failed start — the intent
+// goes back to 'pending' for another worker instead of telling the GM it failed.
+func TestClaimLoop_ShutdownBeforeStartReleasesIntent(t *testing.T) {
+	mstore := newFakeStore()
+	mstore.dep = storage.DeploymentConfig{} // the start fails, as it would on a cancelled ctx
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	istore := cancelOnClaimStore{newFakeIntentStore(), cancel}
+	loop := newClaimLoop(t, istore, mgr)
+
+	intent := istore.add(uuid.New(), uuid.New())
+	loop.TickForTest(ctx)
+
+	got := istore.get(intent.ID)
+	if got.Status != storage.VoiceIntentPending || got.InstanceID != "" {
+		t.Fatalf("intent = {status %q, instance %q}, want released back to pending", got.Status, got.InstanceID)
+	}
+}
+
+// TestClaimLoop_ShutdownBeforeStartAfterStopRequestFails: once the GM asked to
+// stop, a cut-short claim is not handed out again; it finishes as before.
+func TestClaimLoop_ShutdownBeforeStartAfterStopRequestFails(t *testing.T) {
+	mstore := newFakeStore()
+	mstore.dep = storage.DeploymentConfig{}
+	mgr := newManager(t, mstore, newBlockingRunner().run, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	istore := cancelOnClaimStore{newFakeIntentStore(), cancel}
+	loop := newClaimLoop(t, istore, mgr)
+
+	intent := istore.add(uuid.New(), uuid.New())
+	istore.requestStop(intent.ID)
+	loop.TickForTest(ctx)
+
+	if got := istore.get(intent.ID).Status; got != storage.VoiceIntentFailed {
+		t.Fatalf("intent status = %q, want failed (a stop was requested, so it must not be released)", got)
 	}
 }
 

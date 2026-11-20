@@ -26,3 +26,11 @@ Tool execution shares the turn's `context.Context`, so barge-in cancellation tea
 ## Amendment: `remember_knowledge` is proposal-mediated, turn-commit narrowed (2026-07-07, #298)
 
 **ADR-0052** routes Agent KG writes through a GM-reviewed proposal queue: the Tool's only effect is inserting a `pending` proposal row at execution time, so it needs neither intent recording nor commit-time flushing (a barged reply still yields its proposal — the Agent heard the fact; the GM review is the safety net). Turn-commit remains the specified mechanism for future Tools whose effects must be atomic with the spoken utterance, and the `pkg/tool/loop.go` hard-refusal stays for any side-effecting Tool that is not proposal-mediated.
+
+## Amendment: tool rounds are no longer paced by delivery (2026-11-20)
+
+Until now the streaming Agent turn consumed the provider stream in lockstep with playback, which gated tool use on the room by accident: a tool round that followed spoken prose ("Let me check.") only started once that prose had been delivered, so a barge during it cancelled the turn before the round ran. Generation is now drained independently of playback (ADR-0012 amendment of the same date), so **every LLM round and every tool round of a turn runs to completion as fast as the provider allows, even if the players cut the reply after its first sentence** — unless the barge lands while generation is still in flight, which cancels it as before.
+
+For the Tools that exist this changes nothing that matters. Read-only Tools were always allowed to run speculatively. `remember_knowledge` is proposal-mediated (the amendment above, ADR-0052): its only effect is a `pending` proposal a GM reviews, and that amendment already accepts a barged reply yielding its proposal — it now also yields it when the reply was cut before the sentence that preceded the call was heard.
+
+It does harden one rule. Delivery no longer stands between the model and a Tool's execution at all, so **any future side-effecting Tool that is not proposal-mediated MUST go through turn-commit** (record the intent during generation, execute only once the turn's delivered text commits). Inline execution of such a Tool is not merely speculative now; it is unconditional. The hard refusal in `pkg/tool/loop.go` for a side-effecting, non-proposal-mediated Tool stays the enforcement.

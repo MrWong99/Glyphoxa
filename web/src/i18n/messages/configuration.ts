@@ -52,6 +52,7 @@ export const en = {
 
   // Standing Discord integration badge (#489).
   "config.discordIntegrationFailed": "Discord connection failed",
+  "config.discordIntegrationReconnecting": "Reconnecting to Discord",
   "config.botConnected": "Bot connected",
 
   // Discord connection card.
@@ -146,6 +147,7 @@ export const de: Record<keyof typeof en, string> = {
   "config.badgeDegraded": "Hat Probleme",
 
   "config.discordIntegrationFailed": "Discord-Verbindung fehlgeschlagen",
+  "config.discordIntegrationReconnecting": "Verbindet neu mit Discord",
   "config.botConnected": "Bot verbunden",
 
   "config.discordTitle": "Discord-Verbindung",

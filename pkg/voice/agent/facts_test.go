@@ -39,7 +39,7 @@ func TestSystemPrompt_NilFacts_ByteIdenticalToToday(t *testing.T) {
 	r.Reply()(t.Context(), routed("bart", "Hello, innkeeper."))
 
 	sys := prov.lastRequest(t).Messages[0].Text
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
+	want := "You are Bart, the innkeeper.\n\n" + agent.SpokenOutputRuleWithMarkup + "\n\n" + sentinelMarkup
 	if sys != want {
 		t.Errorf("nil-facts prompt not byte-identical:\n got %q\nwant %q", sys, want)
 	}
@@ -64,7 +64,7 @@ func TestSystemPrompt_EmptyFacts_ByteIdenticalToToday(t *testing.T) {
 		t.Errorf("facts recaller args = (calls %d, agent %q), want (1, bart)", rec.calls, rec.agentID)
 	}
 	sys := prov.lastRequest(t).Messages[0].Text
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
+	want := "You are Bart, the innkeeper.\n\n" + agent.SpokenOutputRuleWithMarkup + "\n\n" + sentinelMarkup
 	if sys != want {
 		t.Errorf("empty-facts prompt not byte-identical:\n got %q\nwant %q", sys, want)
 	}

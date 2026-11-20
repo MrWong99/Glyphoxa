@@ -1,27 +1,41 @@
 // Package agent assembles an Agent's spoken turn: the production
 // [orchestrator.ReplyFunc] the voice pipeline stubs with a cassette in tests.
 //
-// Per ADR-0019 the production ReplyFunc is "the Agent loop" — Hot Context
-// assembly (recent Transcript + KG-facts placeholder + Persona) plus the LLM
-// dispatch. This package builds that loop on top of [llm.Provider] and a
-// [tts.Synthesizer] (for the Voice's audio-markup instruction), and exposes it
-// as a ReplyFunc consumable by [orchestrator.WithReply].
+// Per ADR-0019 the production reply strategy is "the Agent loop" — Hot Context
+// assembly plus the LLM dispatch. Hot Context is a session-constant system
+// prompt (Persona, table roster, spoken-output and audio-markup rules), the
+// bounded recent Transcript, and a volatile tail carrying this turn's KG facts,
+// party location, recalled memory and GM directive (ADR-0059). This package
+// builds that loop on top of an [Engine] and a [tts.Synthesizer] (for the
+// Voice's audio-markup instruction) and exposes it as the streaming
+// [orchestrator.StreamReplyFunc] production wires ([Replier.ReplyStream]) and
+// its batch twin ([Replier.Reply]); a [Cast] multiplexes several Agents onto
+// one conversation.
 //
-// Tool-use seam (ADR-0028): the loop does ONE LLM call per turn in v1.0 and
-// returns the spoken text. It does not execute tools — that is the tool-use
-// loop owned by the tool framework. The seam is the [llm] message vocabulary:
-// the [Replier] holds the running conversation as a []llm.Message, which is
-// exactly where the tool-use loop will later insert assistant tool_use turns
-// and tool-role result turns between this turn's user message and the final
-// assistant reply.
+// Tool-use seam (ADR-0028): this package never executes Tools and does not
+// import pkg/tool. The [Engine] interface is the seam — the default engine makes
+// one [llm.Provider] completion per turn, while the tool-backed engine the
+// wiring installs (pkg/voice/agenttool) runs the whole tool-use loop, as many
+// LLM rounds as the Tools need, and hands back only the final spoken text. The
+// tool_use and tool-result messages of those rounds live inside the engine for
+// the duration of the turn; the [Replier]'s history holds user and assistant
+// text messages only.
+//
+// Generation and playback are decoupled on the streaming path: the engine's
+// text is drained into a sentence queue as fast as the provider produces it,
+// and a dispatcher delivers the queue to TTS at speaking pace. The per-turn
+// deadline ([Config.TurnTimeout]) therefore bounds generation, not how long the
+// reply takes to say.
 package agent
 
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -83,10 +97,12 @@ type Engine interface {
 // done. The tool-backed engine implements this by streaming the final
 // (no-tool-call) round; tool-call rounds happen first and produce no spoken text.
 //
-// GenerateStream returns the full accumulated answer text (for the history /
-// fallback). onText is called on the calling goroutine, in order; an error it
-// returns (a barge-in cancel surfaced through the dispatch callback) aborts
-// generation promptly. A nil onText is treated as a plain [Engine.Generate].
+// GenerateStream returns the full accumulated answer text. onText is called on
+// the calling goroutine, in order, and never blocks on playback: the Replier
+// queues the text and speaks it from another goroutine ([Replier.streamTurn]).
+// An error it returns — the turn was cancelled, or the reply overran the
+// sentence queue — must abort generation promptly. A nil onText is treated as a
+// plain [Engine.Generate].
 // When an Engine does not implement this, the Replier falls back to the batch
 // path and segments the complete text after the fact.
 type StreamingEngine interface {
@@ -193,11 +209,15 @@ type Config struct {
 	// lets the Provider choose. Optional.
 	MaxTokens int
 
-	// HistoryTurns bounds the recent Transcript carried into Hot Context: the
-	// last HistoryTurns user/assistant messages are kept, older ones dropped.
-	// Zero means unbounded (keep the whole conversation). This is the recent-
-	// Transcript half of Hot Context (CONTEXT.md "Hot Context") — the loop owns
-	// it because a [orchestrator.ReplyFunc] is handed only the current
+	// HistoryTurns bounds the recent Transcript carried into Hot Context, in
+	// user/assistant messages. The window is trimmed in BLOCKS, not one message
+	// per append: it grows to twice HistoryTurns and is then cut back to the most
+	// recent HistoryTurns, moved forward to start on a user message (see
+	// [trimHistory]). A window that slid on every append would change the start
+	// of the conversation each turn and defeat the provider's prefix cache
+	// (ADR-0059). Zero means unbounded (keep the whole conversation). This is the
+	// recent-Transcript half of Hot Context (CONTEXT.md "Hot Context") — the loop
+	// owns it because a [orchestrator.ReplyFunc] is handed only the current
 	// utterance, not the history.
 	HistoryTurns int
 
@@ -206,10 +226,14 @@ type Config struct {
 	// no reply and is surfaced here. A nil OnError drops the error silently.
 	OnError func(error)
 
-	// TurnTimeout bounds one turn's LLM work (including any tool-use rounds a
-	// tool-backed Engine runs). The turn's context is cancelled when it elapses,
-	// unwinding the in-flight provider call; the deadline error goes to OnError
-	// and the turn speaks the canned [Config.FallbackLine] (the caller's ctx is
+	// TurnTimeout bounds one turn's GENERATION: Hot Context recall plus the LLM
+	// work (including any tool-use rounds a tool-backed Engine runs). It does not
+	// bound playback — on the streaming path the reply is drained from the
+	// provider as it is generated and spoken from a queue afterwards, so an
+	// answer that takes minutes to say is not cut off by it. When it elapses the
+	// in-flight provider call is unwound; the deadline error goes to OnError,
+	// whatever was generated before it is still spoken, and a turn that had
+	// nothing to say speaks the canned [Config.FallbackLine] (the caller's ctx is
 	// still live — a hung provider is a terminal failure, not a barge). Zero
 	// applies [DefaultTurnTimeout]; negative disables the deadline (the turn is
 	// still cancellable via the caller's ctx, e.g. barge-in).
@@ -303,13 +327,23 @@ type Config struct {
 	// caller narrows it.
 	Retry retry.Policy
 
+	// SentenceIdleFlush is how long the streaming turn lets a reply sit on a
+	// finished-looking sentence before speaking it without waiting for the next
+	// delta (see [sentenceFeed]): the stream paused there — a stalled provider, a
+	// slow tool round — and what follows is no longer one token away. Zero (the
+	// default) or negative turns it off, which makes sentence segmentation a
+	// pure function of the deltas with no wall clock in it — what cassette and
+	// replay tests need. The live wiring sets [DefaultSentenceIdleFlush].
+	SentenceIdleFlush time.Duration
+
 	// FallbackLine is the canned sentence spoken when a turn's Engine fails
 	// TERMINALLY (provider outage, truncation, a hang killed by the turn's own
 	// [Config.TurnTimeout] deadline, an exhausted tool budget with no prose):
 	// after OnError, the turn dispatches this one line in the Persona's Voice so
 	// the room hears something instead of dead air, and reports the turn
 	// delivered rather than abandoned. It is NEVER committed to history — it is
-	// not the model's words. Empty selects [DefaultFallbackLine]. It is never
+	// not the model's words. Empty selects [DefaultFallbackLine]; the live wiring
+	// passes [FallbackLineFor] the Campaign Language. It is never
 	// spoken on a barge/ctx-cancel of the CALLER's turn ctx (a superseded turn
 	// stays silent — the turn's own TurnTimeout expiry is a terminal failure,
 	// not a barge, and DOES speak), never once a sentence dispatch was ATTEMPTED
@@ -321,16 +355,58 @@ type Config struct {
 	FallbackLine string
 }
 
-// DefaultTurnTimeout is the per-turn LLM deadline applied when
-// [Config.TurnTimeout] is zero. A voice turn that takes this long is dead in
-// conversational terms anyway; the deadline exists so a hung provider can never
-// wedge the reply path forever.
+// DefaultTurnTimeout is the per-turn generation deadline applied when
+// [Config.TurnTimeout] is zero. A reply that has not finished GENERATING after
+// this long is dead in conversational terms; the deadline exists so a hung
+// provider can never wedge the reply path forever.
 const DefaultTurnTimeout = 60 * time.Second
 
 // DefaultFallbackLine is the spoken fallback applied when [Config.FallbackLine]
 // is empty: the in-character stall an Agent utters when its Engine failed
 // terminally and there is no reply text to speak.
 const DefaultFallbackLine = "Hm... give me a moment, my thoughts wandered."
+
+// fallbackLines are the canned stalls by Campaign Language (primary subtag).
+// English is [DefaultFallbackLine].
+var fallbackLines = map[string]string{
+	"de": "Hm... einen Moment, ich habe gerade den Faden verloren.",
+}
+
+// FallbackLineFor returns the canned fallback line for a Campaign Language
+// (CONTEXT.md): the line in that language when one is shipped, else
+// [DefaultFallbackLine]. language is a BCP 47-style tag; only its primary
+// subtag is consulted ("de-AT" → "de"), case-insensitively. The result is what
+// the wiring sets as [Config.FallbackLine], so an NPC in a German campaign does
+// not stall in English.
+func FallbackLineFor(language string) string {
+	primary, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(language)), "-")
+	primary, _, _ = strings.Cut(primary, "_")
+	if line, ok := fallbackLines[primary]; ok {
+		return line
+	}
+	return DefaultFallbackLine
+}
+
+// MaxSpokenRunes caps how much text one streaming turn may queue for speech.
+// Until generation was decoupled from playback the per-turn deadline cut every
+// reply after about a minute of audio by accident; this is the deliberate bound
+// that replaces it. 6000 runes is roughly six to seven minutes of speech — the
+// recap Tool legitimately asks for answers of up to about 3500 — so no real
+// reply reaches it, while a model that will not stop cannot hold the floor (and
+// bill TTS) indefinitely. At the cap generation is stopped and what is queued
+// is spoken; see [Replier.streamTurn].
+const MaxSpokenRunes = 6000
+
+// sentenceQueueCap is the sentence queue's capacity. A sentence costs at least
+// three runes against [MaxSpokenRunes] (a speakable rune, its terminator, the
+// separator), so the rune cap always binds first and a push never finds the
+// queue full.
+const sentenceQueueCap = MaxSpokenRunes/3 + 1
+
+// errReplyTooLong stops the generation of a reply that reached
+// [MaxSpokenRunes]. It is a limit, not a failure: the turn reports it through
+// OnError and ends cleanly on what was queued.
+var errReplyTooLong = errors.New("agent: reply reached the per-turn spoken-text cap; generation stopped")
 
 // Replier is the stateful Agent loop. Each addressed utterance appends a user
 // message and the assistant's reply to a running conversation, so the recent
@@ -342,19 +418,25 @@ const DefaultFallbackLine = "Hm... give me a moment, my thoughts wandered."
 // synchronously in one goroutine (see [voiceevent.Bus]), so turns run strictly
 // one after another. Under [orchestrator.WithBargeIn] each turn runs on its own
 // goroutine, and a superseded turn's unwind may briefly overlap the superseding
-// turn: the superseded turn's delivered-prefix commit can append to history
-// AFTER the superseding turn appended its user message. The window is bounded
-// (milliseconds vs STT latency) and self-healing — every append is atomic under
-// the mutex, so messages are never torn or lost, only ordered late. Callers may
-// rely on Floor exclusivity (no two turns of this Agent are ever audible at
-// once); they may NOT rely on strict history append ordering across a
-// supersede.
+// turn: its delivered-prefix commit can land AFTER the superseding turn
+// recorded its user message. Every assistant commit is therefore ANCHORED to its
+// own turn's user message ([Replier.commitSpoken]) rather than appended at the
+// end, so the history always reads user, its reply, next user — a late commit
+// can never leave the conversation ending on the previous turn's assistant
+// text, which the next generation would read as its own half-finished answer.
+// Callers may rely on Floor exclusivity (no two turns of this Agent are ever
+// audible at once) and on that ordering.
 type Replier struct {
 	cfg    Config
 	engine Engine // resolved at construction: cfg.Engine, or the default built from cfg.Provider
 
 	mu      sync.Mutex
 	history []llm.Message // user/assistant turns only; system prompt is rebuilt each call
+	// turnOf[i] is the turn that produced history[i] (kept in lockstep with
+	// history); lastTurn is the last id handed out. It is what lets an assistant
+	// commit find its own user message — see [Replier.commitSpoken].
+	turnOf   []uint64
+	lastTurn uint64
 }
 
 // NewReplier constructs a [Replier]. cfg.Synthesizer must be non-nil, and one
@@ -505,24 +587,18 @@ func (r *Replier) withTurnTimeout(ctx context.Context) (context.Context, context
 // fallback. parent is the caller's PRE-timeout turn ctx, the fallback's
 // silence gate (#473 review).
 func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []orchestrator.Reply {
-	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: r.userLine(speakerID, text)})
-	r.trimHistoryLocked()
-	r.mu.Unlock()
+	turn := r.appendUser(r.userLine(speakerID, text))
 
-	// Recall + facts + directive run BETWEEN the two lock sections, never under
+	// The Hot Context recallers run BETWEEN the two lock sections, never under
 	// r.mu: they are network-/DB-adjacent and must not hold the loop's lock across
 	// the call (ADR-0042). All respect ctx, so a barge cancels them. Recall keys on
 	// the RAW utterance, never the attributed line (the speculative-recall match).
 	// The directive consult CONSUMES a turn of its budget — this is a committed
 	// reply path (ADR-0059).
-	mem := r.recall(ctx, text)
-	facts := r.facts(ctx)
-	directive := r.directive(ctx, true)
-	location := r.location(ctx)
+	in := r.gather(ctx, text, true)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts, directive, location)
+	messages := r.hotContextLocked(in)
 	r.mu.Unlock()
 
 	reply, err := r.engine.Generate(ctx, messages)
@@ -549,7 +625,7 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 	return []orchestrator.Reply{{
 		Sentence:    reply,
 		Voice:       r.cfg.Persona.Voice,
-		OnDelivered: func() { r.commitSpoken(reply) },
+		OnDelivered: func() { r.commitSpoken(turn, reply) },
 	}}
 }
 
@@ -591,19 +667,16 @@ func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (str
 	history = append(history, llm.Message{Role: llm.RoleUser, Text: userLine})
 	history = trimHistory(history, r.cfg.HistoryTurns)
 
-	// Recall + facts + directive run under ctx, never mutating loop state (they
-	// never did). Recall keys on the RAW utterance (ADR-0042), not the attributed
-	// line. The directive consult only PEEKS (consume=false): a draft that loses
-	// the Lead race must not burn a turn of the budget (ADR-0059).
-	mem := r.recall(ctx, text)
-	facts := r.facts(ctx)
-	directive := r.directive(ctx, false)
-	location := r.location(ctx)
+	// The recallers run under ctx, never mutating loop state (they never did).
+	// Recall keys on the RAW utterance (ADR-0042), not the attributed line. The
+	// directive consult only PEEKS (consume=false): a draft that loses the Lead
+	// race must not burn a turn of the budget (ADR-0059).
+	in := r.gather(ctx, text, false)
 
 	msgs := make([]llm.Message, 0, len(history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), directiveBlock(directive))
+	msgs = appendVolatileTail(msgs, factsBlock(in.facts), locationBlock(in.location), memoryBlock(in.mem), directiveBlock(in.directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -673,8 +746,7 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 			if err := r.cfg.TextSink(ctx, draft); err != nil {
 				return "", err
 			}
-			r.appendUser(commitText)
-			r.commitSpoken(draft)
+			r.commitSpoken(r.appendUser(commitText), draft)
 			return draft, orchestrator.ErrTextDelivered
 		}
 	}
@@ -686,11 +758,12 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 	// NOTHING — ADR-0012: "If zero sentences were delivered the utterance is not
 	// logged at all."
 	var split sentenceSplitter
+	var turn uint64 // set by the lazy user-append; read only past d.wait()
 	d := &deliveredText{
 		dispatch:         dispatch,
 		voice:            r.cfg.Persona.Voice,
 		selfName:         r.cfg.Persona.Name,
-		onFirstDelivered: func() { r.appendUser(commitText) },
+		onFirstDelivered: func() { turn = r.appendUser(commitText) },
 		pipelined:        orchestrator.PipelinedDispatch(ctx),
 	}
 
@@ -712,7 +785,7 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 	}
 
 	d.wait()
-	r.commitSpoken(d.text())
+	r.commitSpoken(turn, d.text())
 
 	// A cancel is the expected barge path (the whole ensemble was torn down), not a
 	// turn failure; surface only a genuine dispatch error under a live ctx.
@@ -778,14 +851,20 @@ type deliveredText struct {
 }
 
 func (d *deliveredText) emit(sentence string) error {
+	// Markdown never reaches the voice (O12). This is the same one-seam argument
+	// as the self-prefix strip below: what is scrubbed here is what TTS speaks,
+	// what history commits and what the Transcript records. The scrub runs FIRST
+	// so a label hidden behind a list or heading marker ("- Mira: Hallo") is at
+	// the start of the sentence by the time the strip looks for it.
+	sentence = scrubSpoken(sentence)
 	if d.selfName != "" {
 		sentence = stripSelfPrefix(d.selfName, sentence)
-		if !hasSpeakable(sentence) {
-			// The whole sentence WAS the label ("Mira:"). There is nothing to
-			// synthesize, and dispatching it would make TTS reject the request; the
-			// turn keeps producing, so the reply arrives intact minus its label.
-			return nil
-		}
+	}
+	if !hasSpeakable(sentence) {
+		// The whole sentence WAS the label ("Mira:") or markup ("```json"). There
+		// is nothing to synthesize, and dispatching it would make TTS reject the
+		// request; the turn keeps producing, so the reply arrives intact minus it.
+		return nil
 	}
 	rep := orchestrator.Reply{Sentence: sentence, Voice: d.voice}
 	if d.pipelined {
@@ -903,20 +982,17 @@ func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadNam
 	// not the composite — the cross-talk line is context, not a new topic. The
 	// directive consult only PEEKS (a reaction that stays silent must not burn a
 	// turn of the budget, ADR-0059).
-	mem := r.recall(ctx, userText)
-	facts := r.facts(ctx)
-	directive := r.directive(ctx, false)
+	in := r.gather(ctx, userText, false)
 
 	// The crossTalkInstruction rides the volatile tail, NOT the stable system
 	// prompt (ADR-0059): appended there it would fork the cached prefix right
 	// after the Persona, invalidating the whole history for the provider's
 	// prefix cache. In the tail it sits with the other per-turn content —
 	// before the directive, which keeps the strongest recency slot.
-	location := r.location(ctx)
 	msgs := make([]llm.Message, 0, len(history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), crossTalkInstruction, directiveBlock(directive))
+	msgs = appendVolatileTail(msgs, factsBlock(in.facts), locationBlock(in.location), memoryBlock(in.mem), crossTalkInstruction, directiveBlock(in.directive))
 
 	reply, err := r.engine.Generate(ctx, msgs)
 	if err != nil {
@@ -966,12 +1042,14 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 		if e.Target.AgentID != r.cfg.Persona.AgentID {
 			return nil // not addressed to this Agent
 		}
-		// Bound the streaming turn with the same per-turn deadline as the batch
-		// path: production wires this path, and without it a thinking-then-stalling
-		// provider completion runs unbounded (the Gemini client has no overall HTTP
-		// timeout by design), so a wedged turn would never produce first audio.
-		// The PRE-timeout parent is kept as the fallback gates' silence judge
-		// (#473 review, see [Replier.Reply]).
+		// Bound the streaming turn's GENERATION with the same per-turn deadline as
+		// the batch path: production wires this path, and without it a
+		// thinking-then-stalling provider completion runs unbounded (the Gemini
+		// client has no overall HTTP timeout by design), so a wedged turn would
+		// never produce first audio. The PRE-timeout parent is what playback runs
+		// under and the fallback gates' silence judge (#473 review, see
+		// [Replier.Reply]): the deadline must not cut a reply that is merely long
+		// to say.
 		parent := ctx
 		if parent == nil {
 			parent = context.Background()
@@ -983,36 +1061,58 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 }
 
 // streamTurn runs one streaming Agent turn: it assembles Hot Context, drives the
-// [StreamingEngine] over ctx, segments the streamed text into sentences, and
-// hands each to dispatch as it completes. ctx is the per-turn context, so a
-// barge-in cancel both ends the LLM generation and stops further dispatch.
+// [StreamingEngine], segments the streamed text into sentences, and hands each
+// to dispatch.
 //
-// History (ADR-0012, deliver-then-commit): only the text actually emitted to the
-// pump is committed to the conversation history. A turn cut mid-stream by a
-// barge-in records what Bart already said, not the untruncated completion he
-// would have said — so the next turn's Hot Context reflects what the user heard.
+// Generation and playback are DECOUPLED. A generation goroutine drains the
+// engine under ctx (the [Config.TurnTimeout] child) as fast as the provider
+// produces text, pushing each finished sentence onto a bounded queue; the
+// calling goroutine is the dispatcher, delivering the queue to dispatch one
+// sentence at a time, at speaking pace, under the caller's turn ctx. Consuming
+// the provider stream in lockstep with playback — the earlier shape — put the
+// whole reply's PLAYBACK under the generation deadline, so any answer longer
+// than a minute of audio was cut off mid-sentence and reported as a provider
+// error, and a barged turn never read the provider's trailing usage chunk.
 //
-// parent is the caller's PRE-timeout turn ctx: the terminal-error branch judges
-// barge silence by ITS liveness, so the turn's own TurnTimeout expiry still
-// reports OnError and speaks the fallback (#473 review).
+// What still holds, exactly as before:
+//
+//   - Cancellation. parent is the caller's turn ctx; a barge, mute or supersede
+//     cancels it, and ctx with it. The dispatcher stops at the first sentence
+//     dispatch reports cut and cancels generation; the generation goroutine is
+//     joined before the turn returns, so nothing outlives it.
+//   - Deliver-then-commit (ADR-0012). Only sentences dispatch reported delivered
+//     are committed. A sentence still in the queue when the turn is cut was
+//     generated, never spoken, and is dropped.
+//
+// What changed for Tools (ADR-0030, amendment of 2026-11-20): the engine's
+// rounds are no longer paced by the room. Lockstep meant a tool round after
+// spoken prose only started once that prose had been delivered, so a barge
+// during it prevented the round; now every LLM and tool round runs to completion
+// as fast as the provider allows, even if the players cut the reply after its
+// first sentence. That is safe for what exists — read-only Tools, and
+// remember_knowledge, whose only effect is a GM-reviewed proposal (ADR-0052) —
+// and it is exactly why a future Tool with a real side effect MUST use
+// turn-commit and must never execute inline.
+//
+// A generation that fails or times out mid-reply still has its already-queued
+// sentences spoken (they are what the model said before the failure); only the
+// unterminated tail is dropped. A reply that reaches [MaxSpokenRunes] is stopped
+// the same way, but that is a limit rather than a failure: it is reported via
+// OnError and the turn ends cleanly. parent's liveness, not ctx's, decides barge
+// silence: the turn's own TurnTimeout expiry reports OnError and — when nothing
+// was attempted — speaks the fallback (#473 review).
 func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string, dispatch func(orchestrator.Reply) error) error {
-	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: r.userLine(speakerID, text)})
-	r.trimHistoryLocked()
-	r.mu.Unlock()
+	turn := r.appendUser(r.userLine(speakerID, text))
 
-	// Recall + facts + directive between the lock sections (see [Replier.turn]):
-	// outside r.mu, under ctx, each degrading to nothing rather than stalling the
+	// The recallers run between the lock sections (see [Replier.turn]): outside
+	// r.mu, under ctx, each degrading to nothing rather than stalling the
 	// streaming turn. Recall keys on the RAW utterance, never the attributed line
 	// (ADR-0042). The directive consult CONSUMES a turn of its budget — this is
 	// the committed reply path production wires (ADR-0059).
-	mem := r.recall(ctx, text)
-	facts := r.facts(ctx)
-	directive := r.directive(ctx, true)
-	location := r.location(ctx)
+	in := r.gather(ctx, text, true)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem, facts, directive, location)
+	messages := r.hotContextLocked(in)
 	r.mu.Unlock()
 
 	// TextSink installed (the Butler, #299): decide modality on the WHOLE answer, so
@@ -1020,13 +1120,13 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	// text-modality answer posts via the sink with zero TTS dispatch; a spoken one
 	// is sentence-split and dispatched. See [Replier.textModalityTurn].
 	if r.cfg.TextSink != nil {
-		return r.textModalityTurn(ctx, parent, text, messages, dispatch)
+		return r.textModalityTurn(ctx, parent, turn, text, messages, dispatch)
 	}
 
 	streamer, ok := r.engine.(StreamingEngine)
 	if !ok {
 		// Non-streaming engine: fall back to one completion, then dispatch it whole.
-		return r.fallbackTurn(ctx, parent, messages, dispatch)
+		return r.fallbackTurn(ctx, parent, turn, messages, dispatch)
 	}
 
 	// Deliver-then-commit via the shared emitter (ADR-0012, #444): a sentence
@@ -1034,41 +1134,92 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	// fully synthesized under a live turn ctx. A dispatch rejected because the
 	// turn was cancelled (mute/barge) never reaches the spoken text: the room
 	// never heard it.
-	var split sentenceSplitter
 	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice, selfName: r.cfg.Persona.Name,
 		pipelined: orchestrator.PipelinedDispatch(ctx)}
 
-	onText := func(delta string) error {
-		for _, sentence := range split.Push(delta) {
-			if err := d.emit(sentence); err != nil {
-				return err // ctx cancelled (barge-in) or a hard dispatch failure
+	// Generation: drain the engine into the queue. The queue never blocks the
+	// generator (that would put playback back under the generation deadline); it
+	// is bounded by the spoken-text cap instead.
+	genCtx, stopGen := context.WithCancel(ctx)
+	defer stopGen()
+	queue := make(chan string, sentenceQueueCap)
+	genDone := make(chan struct{})
+	var genErr error // written by the generation goroutine; read after <-genDone
+	go func() {
+		defer close(genDone)
+		defer close(queue)
+		// Pushing never blocks: at the cap generation is stopped instead of
+		// stalled against playback.
+		queued := 0 // runes pushed so far, guarded by the feed's lock
+		feed := newSentenceFeed(func(sentence string) error {
+			queued += utf8.RuneCountInString(sentence) + 1
+			if queued > MaxSpokenRunes {
+				return errReplyTooLong
 			}
+			select {
+			case queue <- sentence:
+				return nil
+			default:
+				return errReplyTooLong // unreachable while sentenceQueueCap holds
+			}
+		}, r.cfg.SentenceIdleFlush)
+		onText := func(delta string) error {
+			// A cancelled turn stops an engine that does not watch ctx itself at
+			// its next delta, as the dispatch error used to.
+			if err := genCtx.Err(); err != nil {
+				return err
+			}
+			return feed.Write(delta)
+		}
+		_, err := streamer.GenerateStream(genCtx, messages, onText)
+		// Flush the trailing sentence of a COMPLETE generation. A failed or
+		// cancelled one ended mid-sentence: its tail must not be spoken. Close
+		// also retires the feed's idle timer BEFORE the queue is closed below.
+		if cerr := feed.Close(err == nil); err == nil {
+			err = cerr
+		}
+		genErr = err
+	}()
+
+	// Dispatch: deliver the queue in order. emit returns an error only for a CUT
+	// (barge/mute/supersede, or a dispatch that aborts the turn) — then nothing
+	// more is delivered and generation is cancelled.
+	var cutErr error
+	for sentence := range queue {
+		if err := d.emit(sentence); err != nil {
+			cutErr = err
+			break
+		}
+	}
+	stopGen()
+
+	// Commit as soon as delivery is settled, BEFORE joining the generation
+	// goroutine: a superseded turn's commit should land at once, not after its
+	// provider call unwinds.
+	d.wait()
+	r.commitSpoken(turn, d.text())
+	<-genDone
+
+	turnErr := cutErr
+	if turnErr == nil {
+		turnErr = genErr
+	}
+	// The spoken-text cap is a limit, not a turn failure: say so, and end the
+	// turn on what was spoken.
+	if errors.Is(turnErr, errReplyTooLong) {
+		if r.cfg.OnError != nil && parent.Err() == nil {
+			r.cfg.OnError(turnErr)
 		}
 		return nil
 	}
-
-	_, genErr := streamer.GenerateStream(ctx, messages, onText)
-
-	// Flush the trailing unterminated sentence — unless generation was cancelled,
-	// in which case the partial tail was never spoken and must not be dispatched.
-	if genErr == nil && ctx.Err() == nil {
-		if tail := split.Flush(); tail != "" {
-			if err := d.emit(tail); err != nil {
-				genErr = err
-			}
-		}
-	}
-
-	d.wait()
-	r.commitSpoken(d.text())
 
 	// A cancellation of the CALLER's turn ctx is the expected barge-in path, not
 	// a turn failure: report only a genuine engine error — which includes the
 	// turn's OWN TurnTimeout expiry (the parent stays live; a hung provider is a
 	// terminal failure, not a barge — #473 review).
-	if genErr != nil && parent.Err() == nil {
+	if turnErr != nil && parent.Err() == nil {
 		if r.cfg.OnError != nil {
-			r.cfg.OnError(genErr)
+			r.cfg.OnError(turnErr)
 		}
 		// Terminal engine error before ANY dispatch was ATTEMPTED: speak the
 		// canned fallback and report the turn delivered (nil) rather than
@@ -1080,7 +1231,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 		if !d.attempted && r.speakFallback(parent, dispatch) {
 			return nil
 		}
-		return genErr
+		return turnErr
 	}
 	return nil
 }
@@ -1089,7 +1240,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 // one completion and dispatches the whole reply as a single sentence, mirroring
 // the batch [Replier.turn] so a non-streaming engine still speaks. parent is
 // the caller's PRE-timeout turn ctx, the fallback's silence gate (#473 review).
-func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+func (r *Replier) fallbackTurn(ctx, parent context.Context, turn uint64, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	reply, err := r.engine.Generate(ctx, messages)
 	if err != nil {
 		if parent.Err() == nil {
@@ -1121,7 +1272,7 @@ func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Messa
 		pipelined: orchestrator.PipelinedDispatch(ctx)}
 	err = d.emit(reply)
 	d.wait()
-	r.commitSpoken(d.text())
+	r.commitSpoken(turn, d.text())
 	if orchestrator.OutcomeOf(err) == orchestrator.SentenceCut {
 		return err
 	}
@@ -1147,7 +1298,7 @@ func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Messa
 // branch stays silent on success (first audio is its terminal signal). parent
 // is the caller's PRE-timeout turn ctx, the fallback's silence gate (#473
 // review).
-func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+func (r *Replier) textModalityTurn(ctx, parent context.Context, turn uint64, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	answer, err := r.engine.Generate(ctx, messages)
 	if err != nil {
 		if parent.Err() == nil {
@@ -1176,7 +1327,7 @@ func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string
 		if err := r.cfg.TextSink(ctx, answer); err != nil {
 			return err
 		}
-		r.commitSpoken(answer)
+		r.commitSpoken(turn, answer)
 		// Signal a text-delivered terminal outcome (#299): this turn dispatched no
 		// TTS, so it reaches no first audio. Returning the sentinel lets the reactor
 		// publish TurnEnded(text_delivered) — a SUCCESS — instead of the metrics TTL
@@ -1192,19 +1343,19 @@ func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string
 	for _, sentence := range split.Push(answer) {
 		if err := d.emit(sentence); err != nil {
 			d.wait()
-			r.commitSpoken(d.text())
+			r.commitSpoken(turn, d.text())
 			return err
 		}
 	}
 	if tail := split.Flush(); tail != "" {
 		if err := d.emit(tail); err != nil {
 			d.wait()
-			r.commitSpoken(d.text())
+			r.commitSpoken(turn, d.text())
 			return err
 		}
 	}
 	d.wait()
-	r.commitSpoken(d.text())
+	r.commitSpoken(turn, d.text())
 	return nil
 }
 
@@ -1218,29 +1369,57 @@ func (r *Replier) HistorySnapshot() []llm.Message {
 	return append([]llm.Message(nil), r.history...)
 }
 
-// appendUser appends the utterance as a user message under the history lock and
-// trims to [Config.HistoryTurns]. It is the single user-append site shared by the
-// streaming/batch turns' eager append, [Replier.SpeakDraft]'s deliver-then-commit
-// lazy append, and its text-modality branch (#389).
-func (r *Replier) appendUser(text string) {
+// appendUser appends the utterance as a user message under the history lock,
+// trims to [Config.HistoryTurns], and returns the id of the turn it opens — the
+// anchor [Replier.commitSpoken] places that turn's assistant reply behind. It is
+// the single user-append site shared by the streaming/batch turns' eager append,
+// [Replier.SpeakDraft]'s deliver-then-commit lazy append, and its text-modality
+// branch (#389).
+func (r *Replier) appendUser(text string) uint64 {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastTurn++
 	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.turnOf = append(r.turnOf, r.lastTurn)
 	r.trimHistoryLocked()
-	r.mu.Unlock()
+	return r.lastTurn
 }
 
 // commitSpoken records the text actually delivered to the pump as the assistant
-// turn in history (ADR-0012). An empty string — a turn cancelled before any
+// message of turn (ADR-0012). An empty string — a turn cancelled before any
 // sentence was spoken — records nothing, so a barged-out turn leaves no phantom
 // assistant message.
-func (r *Replier) commitSpoken(spoken string) {
+//
+// The message is placed directly behind its OWN turn's user message, not at the
+// end of the history. The two differ only when a superseded turn commits its
+// delivered prefix after the superseding turn already recorded its user line
+// (barge-in runs each turn on its own goroutine): appended, the history would
+// read user A, user B, assistant A — and if turn B assembled its prompt in that
+// window, the model was handed a conversation ENDING on the half-finished answer
+// to the previous question. A turn whose user message is gone (trimmed away
+// while it was still speaking) commits nothing: its place in the conversation
+// no longer exists, and appending the reply at the end would file it under a
+// question it does not answer.
+func (r *Replier) commitSpoken(turn uint64, spoken string) {
 	spoken = strings.TrimSpace(spoken)
 	if spoken == "" {
 		return
 	}
+	msg := llm.Message{Role: llm.RoleAssistant, Text: spoken}
 	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleAssistant, Text: spoken})
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	at := -1
+	for i := len(r.turnOf) - 1; i >= 0; i-- {
+		if r.turnOf[i] == turn {
+			at = i + 1
+			break
+		}
+	}
+	if at < 0 {
+		return
+	}
+	r.history = slices.Insert(r.history, at, msg)
+	r.turnOf = slices.Insert(r.turnOf, at, turn)
 }
 
 // providerEngine is the default [Engine]: one [llm.Provider] completion per
@@ -1350,12 +1529,61 @@ func (r *Replier) location(ctx context.Context) string {
 	return strings.TrimSpace(r.cfg.Location.Location(ctx, r.cfg.Persona.AgentID))
 }
 
+// hotInputs is one turn's volatile Hot Context: what the four recallers
+// returned, each zero when its recaller is unconfigured or degraded.
+type hotInputs struct {
+	mem       Memory
+	facts     []string
+	directive string
+	location  string
+}
+
+// gather consults the four Hot Context recallers — memory, KG facts, GM
+// directive, party location — CONCURRENTLY and returns what each produced. They
+// are independent reads (an embedding search, three DB lookups), each bounded by
+// its own budget and each degrading to nothing on its own, so running them one
+// after another only added their latencies together on the path to first audio.
+// The order the results are RENDERED in is fixed by [appendVolatileTail]'s
+// callers and does not depend on which recaller answers first.
+//
+// text is the RAW utterance memory recall keys on; consume marks a committed
+// reply path for the directive's turn budget (see [DirectiveRecaller]). A turn
+// with at most one recaller configured runs it inline, with no goroutine.
+func (r *Replier) gather(ctx context.Context, text string, consume bool) hotInputs {
+	var in hotInputs
+	var jobs []func()
+	if r.cfg.Memory != nil {
+		jobs = append(jobs, func() { in.mem = r.recall(ctx, text) })
+	}
+	if r.cfg.Facts != nil {
+		jobs = append(jobs, func() { in.facts = r.facts(ctx) })
+	}
+	if r.cfg.Directive != nil {
+		jobs = append(jobs, func() { in.directive = r.directive(ctx, consume) })
+	}
+	if r.cfg.Location != nil {
+		jobs = append(jobs, func() { in.location = r.location(ctx) })
+	}
+	if len(jobs) == 0 {
+		return in
+	}
+	// Each job writes its own field of in; the WaitGroup is the only
+	// synchronization they need. The last one runs on the calling goroutine.
+	var wg sync.WaitGroup
+	for _, job := range jobs[:len(jobs)-1] {
+		wg.Go(job)
+	}
+	jobs[len(jobs)-1]()
+	wg.Wait()
+	return in
+}
+
 // hotContextLocked assembles the Hot Context message list for one call: the
-// STABLE system prompt (Persona + roster + audio-markup instruction), the recent
-// Transcript (the bounded history), and — LAST — the volatile tail message
-// carrying this turn's KG facts, recalled memory, and GM directive (each
-// nil/zero when unconfigured or degraded; an all-empty tail appends no message).
-// Caller holds r.mu.
+// STABLE system prompt (Persona + roster + spoken-output and audio-markup
+// rules), the recent Transcript (the bounded history), and — LAST — the
+// volatile tail message carrying this turn's KG facts, party location, recalled
+// memory, and GM directive (each zero when unconfigured or degraded; an
+// all-empty tail appends no message). Caller holds r.mu.
 //
 // The stable-prefix / volatile-tail split is deliberate (ADR-0059): the default
 // provider's prefix cache (Groq, automatic — no cache_control API) matches
@@ -1365,11 +1593,11 @@ func (r *Replier) location(ctx context.Context) string {
 // the ENTIRE history missed the cache each turn. With the volatile content
 // trailing the append-only history, the whole conversation up to the previous
 // turn stays cache-hittable — lower TTFT, half-priced cached tokens.
-func (r *Replier) hotContextLocked(mem Memory, facts []string, directive, location string) []llm.Message {
+func (r *Replier) hotContextLocked(in hotInputs) []llm.Message {
 	msgs := make([]llm.Message, 0, len(r.history)+2)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
 	msgs = append(msgs, r.history...)
-	return appendVolatileTail(msgs, factsBlock(facts), locationBlock(location), memoryBlock(mem), directiveBlock(directive))
+	return appendVolatileTail(msgs, factsBlock(in.facts), locationBlock(in.location), memoryBlock(in.mem), directiveBlock(in.directive))
 }
 
 // appendVolatileTail appends the volatile Hot Context tail — the given blocks
@@ -1400,13 +1628,13 @@ func appendVolatileTail(msgs []llm.Message, blocks ...string) []llm.Message {
 // of every request (ADR-0059) — in slot order: the Persona, the
 // speaker-attribution section (the table roster — see [Config.PlayerCharacters];
 // rendered ONLY when a SpeakerName resolver is wired, since it describes the
-// "Name: text" prefix that resolver produces), and the Voice's provider-specific
+// "Name: text" prefix that resolver produces), the [spokenOutputRule] (for an
+// Agent whose every reply is spoken), and the Voice's provider-specific
 // audio-markup instruction from [tts.Synthesizer.AudioMarkupPrompt] (required by
 // ADR-0022). Everything here is fixed at session start; the per-turn content
-// (KG facts, recalled memory, GM directive) rides the volatile tail message
-// instead ([appendVolatileTail]) so the provider's prefix cache survives across
-// turns. An unset roster omits its block entirely, leaving the prompt
-// byte-identical to the pre-roster path.
+// (KG facts, party location, recalled memory, GM directive) rides the volatile
+// tail message instead ([appendVolatileTail]) so the provider's prefix cache
+// survives across turns. An unset roster omits its block entirely.
 func (r *Replier) systemPrompt() string {
 	var b strings.Builder
 	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
@@ -1430,7 +1658,19 @@ func (r *Replier) systemPrompt() string {
 		}
 		b.WriteString(selfPrefixRule)
 	}
-	if markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice); markup != "" {
+	markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice)
+	// Spoken-output rule (O12): only for an Agent that never answers in text —
+	// voiced, and without a TextSink (see [spokenOutputRule]).
+	if r.cfg.Persona.Voice.VoiceID != "" && r.cfg.TextSink == nil {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(spokenOutputRule)
+		if markup != "" {
+			b.WriteString(spokenOutputMarkupExemption)
+		}
+	}
+	if markup != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
@@ -1569,24 +1809,56 @@ func speakerRosterBlock(players, npcs []string) string {
 	return b.String()
 }
 
-// trimHistoryLocked drops the oldest user/assistant turns so at most
-// HistoryTurns remain, keeping the most recent. A zero or negative
-// HistoryTurns means unbounded. Caller holds r.mu.
+// trimHistoryLocked applies [trimHistory] to the live history and its turn
+// index. Caller holds r.mu.
 func (r *Replier) trimHistoryLocked() {
-	r.history = trimHistory(r.history, r.cfg.HistoryTurns)
+	cut := trimCut(r.history, r.cfg.HistoryTurns)
+	if cut == 0 {
+		return
+	}
+	r.history = append([]llm.Message(nil), r.history[cut:]...)
+	r.turnOf = append([]uint64(nil), r.turnOf[cut:]...)
 }
 
-// trimHistory keeps at most the last keep user/assistant messages of history,
-// re-slicing onto a fresh backing array when it trims (so the dropped turns can be
-// GC'd and the retained slice does not pin the whole conversation). A zero or
-// negative keep means unbounded, and a history already within the bound is returned
-// unchanged (same backing) — so the live [Replier.trimHistoryLocked] path is
-// byte-for-byte identical while [Replier.Draft] can trim a history COPY too.
+// trimHistory bounds history to roughly keep user/assistant messages, trimming
+// in BLOCKS with hysteresis: nothing is dropped until the history has grown past
+// twice keep, and then it is cut back to the most recent keep in one step. The
+// trimmed window is moved forward to begin on a user message.
+//
+// Both properties are there for the provider. A window that slides one message
+// per append starts on a different message every turn — from the ninth exchange
+// on, with keep 16 — so the request's cacheable prefix (ADR-0059) ends right
+// after the system prompt and the whole history is re-billed each turn; trimmed
+// in blocks, the prefix is stable for keep/2 exchanges at a time. And a window
+// that opens on an assistant message (or, were tool messages ever kept here, on
+// a tool result cut off from its call) is a conversation no provider is obliged
+// to accept: starting on a user message is the one cut that can never split a
+// reply from its question or a tool result from its call.
+//
+// It re-slices onto a fresh backing array when it trims (so the dropped turns
+// can be GC'd), and returns history unchanged (same backing) when it does not. A
+// zero or negative keep means unbounded.
 func trimHistory(history []llm.Message, keep int) []llm.Message {
-	if keep <= 0 || len(history) <= keep {
+	cut := trimCut(history, keep)
+	if cut == 0 {
 		return history
 	}
-	trimmed := make([]llm.Message, keep)
-	copy(trimmed, history[len(history)-keep:])
-	return trimmed
+	return append([]llm.Message(nil), history[cut:]...)
+}
+
+// trimCut returns how many leading messages [trimHistory] drops: 0 while the
+// history is within the hysteresis band, else the index of the first user
+// message at or after len-keep. A window holding no user message at all keeps
+// the plain len-keep cut.
+func trimCut(history []llm.Message, keep int) int {
+	if keep <= 0 || len(history) <= 2*keep {
+		return 0
+	}
+	cut := len(history) - keep
+	for i := cut; i < len(history); i++ {
+		if history[i].Role == llm.RoleUser {
+			return i
+		}
+	}
+	return cut
 }

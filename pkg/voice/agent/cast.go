@@ -19,9 +19,15 @@ import (
 // floor on every AddressRouted (reactor.go), so binding several independent
 // repliers on one shared floor would corrupt floor state — they would each take
 // and release the floor for the same turn. Routing a single addressed turn to a
-// single Replier keeps the floor's one-turn-at-a-time invariant intact, which is
-// why single-target is the safe default and the speculative fan-out / multiple
-// floors of an Ensemble Turn (ADR-0025) is deferred.
+// single Replier keeps the floor's one-turn-at-a-time invariant intact; that
+// routed path ([Cast.ReplyStream]) is what the live wiring uses.
+//
+// The Cast also implements the Ensemble Turn seams (ADR-0025) — speculative
+// drafts ([Cast.Draft]/[Cast.Speak]), the Cross-talk Reaction
+// ([Cast.React]/[Cast.SpeakReaction]) and the all-drafts-failed fallback
+// ([Cast.SpeakFallback]) — for [orchestrator]'s ensemble coordinator, which owns
+// the floor for the whole unit. They are built and tested, but no production
+// wiring installs the coordinator yet.
 //
 // A route whose AgentID names no current member dispatches nothing and yields nil
 // — the right answer when the matcher selected an Agent the Cast does not hold, or

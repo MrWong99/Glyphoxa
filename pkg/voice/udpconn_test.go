@@ -388,6 +388,19 @@ func rtpWrites(c *fakePacketConn) int {
 	return n
 }
 
+// lastRTPWrite returns the most recent audio packet written to c, skipping the
+// 8-byte keepalives the transport interleaves on the same socket.
+func lastRTPWrite(c *fakePacketConn) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.writes) - 1; i >= 0; i-- {
+		if w := c.writes[i]; len(w) > voice.RTPHeaderSize && len(w) != 74 && w[1] == voice.RTPPayloadType {
+			return w
+		}
+	}
+	return nil
+}
+
 // TestKeepaliveUDPConnCloseIsAPause pins the lifecycle disgo v0.20.0's in-place
 // recovery needs: its conn Closes the transport and re-Opens it for a fresh
 // voice session without leaving the channel. Neither audio direction may see
@@ -462,7 +475,7 @@ func TestKeepaliveUDPConnCloseIsAPause(t *testing.T) {
 	if got := rtpWrites(fc2); got != 1 {
 		t.Fatalf("RTP packets on the new socket = %d, want 1", got)
 	}
-	sent := fc2.write(fc2.writeCount() - 1)
+	sent := lastRTPWrite(fc2) // not the last write: a keepalive may have followed it
 	if ssrc := binary.BigEndian.Uint32(sent[8:12]); ssrc != 43 {
 		t.Fatalf("outbound SSRC after the re-Open = %d, want the new session's 43", ssrc)
 	}

@@ -209,6 +209,16 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 			return asst.Text, nil
 		}
 
+		// Prose streamed in a tool-calling round ("Let me check.") is followed
+		// by the NEXT round's prose with nothing in between, so a consumer that
+		// segments the stream would read "Let me check.The dragon sleeps." as
+		// one sentence. One space marks the round boundary.
+		if onText != nil && strings.TrimSpace(asst.Text) != "" {
+			if err := onText(" "); err != nil {
+				return "", err
+			}
+		}
+
 		if round >= maxRounds {
 			convo = appendBudgetExhausted(convo, asst)
 			return l.finalAnswer(ctx, round+1, maxRounds, 0, convo, decls, streamer, onText)

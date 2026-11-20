@@ -96,7 +96,7 @@ func (c *identifyCounter) Wait(ctx context.Context, shardID int) error {
 	}
 	// The hard cap comes BEFORE the count: an IDENTIFY that is still waiting
 	// for its turn has not been sent.
-	if err := identifyPacerFor(c.appID).wait(ctx); err != nil {
+	if err := identifyPacerFor(c.appID).Wait(ctx); err != nil {
 		return err
 	}
 	c.budget.RecordIdentify(c.appID)
@@ -123,41 +123,61 @@ const (
 	identifyRefill = 3 * time.Minute
 )
 
-// identifyPacer is a token bucket over one application's IDENTIFYs.
-type identifyPacer struct {
+// IdentifyRefill is how long the pacer takes to make one more IDENTIFY
+// available once its burst is spent — the longest a single open waits on it
+// when no other open of the same application is queued ahead. Callers that
+// bound a gateway open size the bound past it, or such an open can never
+// outwait the pacer.
+const IdentifyRefill = identifyRefill
+
+// IdentifyPacer is a token bucket over one application's IDENTIFYs. Exported
+// so callers that pace their own opens on top of it can be tested against the
+// real bucket; production code reaches it only through
+// [GatewayBudgetClientOpts].
+type IdentifyPacer struct {
 	mu     sync.Mutex
 	tokens float64
 	last   time.Time
 	now    func() time.Time
+	appID  string
 }
 
-func newIdentifyPacer(now func() time.Time) *identifyPacer {
-	return &identifyPacer{tokens: identifyBurst, last: now(), now: now}
+// NewIdentifyPacer builds a full bucket on the given clock.
+func NewIdentifyPacer(now func() time.Time) *IdentifyPacer {
+	return &IdentifyPacer{tokens: identifyBurst, last: now(), now: now}
 }
 
 // identifyPacers holds one pacer per application id for the life of the
 // process: the standing presence client and any per-cycle voice clients on the
 // same Bot token draw on the same Discord budget, so they share one bucket.
-var identifyPacers sync.Map // appID string → *identifyPacer
+var identifyPacers sync.Map // appID string → *IdentifyPacer
 
-func identifyPacerFor(appID string) *identifyPacer {
+func identifyPacerFor(appID string) *IdentifyPacer {
 	if p, ok := identifyPacers.Load(appID); ok {
-		return p.(*identifyPacer)
+		return p.(*IdentifyPacer)
 	}
-	p, _ := identifyPacers.LoadOrStore(appID, newIdentifyPacer(time.Now))
-	return p.(*identifyPacer)
+	fresh := NewIdentifyPacer(time.Now)
+	fresh.appID = appID
+	p, _ := identifyPacers.LoadOrStore(appID, fresh)
+	return p.(*IdentifyPacer)
 }
 
-// reserve takes one IDENTIFY from the bucket and reports how long the caller
-// must wait before sending it; zero means now. The reservation is made either
-// way, so concurrent callers queue behind each other instead of all waking for
-// the same token.
-func (p *identifyPacer) reserve() time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// refillLocked tops the bucket up for the time since the last call. Caller
+// holds mu.
+func (p *IdentifyPacer) refillLocked() {
 	now := p.now()
 	p.tokens = min(identifyBurst, p.tokens+float64(now.Sub(p.last))/float64(identifyRefill))
 	p.last = now
+}
+
+// Reserve takes one IDENTIFY from the bucket and reports how long the caller
+// must wait before sending it; zero means now. The reservation is made either
+// way, so concurrent callers queue behind each other instead of all waking for
+// the same token.
+func (p *IdentifyPacer) Reserve() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refillLocked()
 	p.tokens--
 	if p.tokens >= 0 {
 		return 0
@@ -165,20 +185,33 @@ func (p *identifyPacer) reserve() time.Duration {
 	return time.Duration(-p.tokens * float64(identifyRefill))
 }
 
-// wait blocks until this caller's IDENTIFY may be sent, or ctx ends. A caller
-// that gives up keeps its reservation: the conservative choice, and a
-// cancelled open is rare next to the loop this exists to stop.
-func (p *identifyPacer) wait(ctx context.Context) error {
-	d := p.reserve()
+// Refund returns a reservation whose IDENTIFY was never sent (never past the
+// burst). Callers queued behind it keep the waits they were given — the
+// conservative direction — but the next reservation is not charged for it.
+func (p *IdentifyPacer) Refund() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refillLocked()
+	p.tokens = min(identifyBurst, p.tokens+1)
+}
+
+// Wait blocks until this caller's IDENTIFY may be sent, or ctx ends. A caller
+// that gives up gets its reservation back (no IDENTIFY was sent): keeping it
+// meant a bounded open that kept timing out in the pacer spent 3 minutes of
+// budget per attempt while the refill gives back one per 3 minutes, so the
+// hold grew without end and no later open could ever outwait it.
+func (p *IdentifyPacer) Wait(ctx context.Context) error {
+	d := p.Reserve()
 	if d <= 0 {
 		return nil
 	}
 	slog.Default().Warn("discord gateway IDENTIFY held back to protect the Bot token's 24h budget; something is reconnecting in a loop",
-		"wait", d.Round(time.Second))
+		"app_id", p.appID, "wait", d.Round(time.Second))
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+		p.Refund()
 		return ctx.Err()
 	case <-t.C:
 		return nil

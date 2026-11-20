@@ -14,17 +14,20 @@ import (
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
-// interactionTimeout bounds a handler's work well under Discord's 3s
-// initial-response deadline: past it Discord drops the interaction token and the
-// reply fails. Every dispatched handler runs on a context deadlined to this.
+// interactionTimeout bounds an interaction's work until its first response, well
+// under Discord's 3s initial-response deadline: past it Discord drops the
+// interaction token and the reply fails. It is ONE budget, started when dispatch
+// begins and shared by the Gate's authorization and the handler (S6) — the two
+// used to get 2s and 2.5s back to back, 4.5s in the worst case.
 const interactionTimeout = 2500 * time.Millisecond
 
-// gateAuthTimeout bounds the Gate's Guild→Tenant DB read (#490) so a hung DB can
-// never pin the disgo event goroutine — dispatch runs there before the first-response
-// watchdog is armed. Well under Discord's 3s deadline; a timeout fails closed as a
-// clean ErrWrongGuild reject.
+// gateAuthTimeout caps the Gate's Guild→Tenant DB read (#490) inside that budget,
+// so a slow DB still leaves the handler time to answer: a timeout fails closed as
+// a clean ErrWrongGuild reject.
 const gateAuthTimeout = 2 * time.Second
 
 // commandGroup is the single grouped-command prefix v1.0 ships (ADR-0010):
@@ -236,16 +239,19 @@ func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
 		// owner) answers it; replying here would double-respond the user.
 		return
 	}
+	// One first-response deadline for the whole interaction (S6): the Gate and the
+	// handler draw on the same budget, so the first reply always beats Discord's 3s.
+	deadline := time.Now().Add(r.responseTimeout)
+	ic.log = r.log
 	cmd, ok := r.lookup(key)
 	if !ok {
 		_ = ic.ReplyEphemeral("Unknown command.")
 		r.log.Warn("presence: unknown slash command", "command", key)
 		return
 	}
-	// Authorize does a Guild→Tenant DB read (#490); bound it well under Discord's 3s
-	// deadline and OFF the base ctx (this runs on the disgo event goroutine, so a hung
-	// DB must not stall it — the watchdog below is not armed yet).
-	authCtx, authCancel := context.WithTimeout(base, gateAuthTimeout)
+	// Authorize does a Guild→Tenant DB read (#490); bound it inside the budget (this
+	// runs on the disgo event goroutine, so a hung DB must not stall it).
+	authCtx, authCancel := context.WithDeadline(base, earlier(deadline, time.Now().Add(gateAuthTimeout)))
 	tenantID, err := r.gate.Authorize(authCtx, ic.guildID, ic.userID, cmd.GMOnly)
 	authCancel()
 	if err != nil {
@@ -263,7 +269,7 @@ func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
 	// user instead of a Discord 40060 ("already acknowledged") on CreateMessage.
 	ctx, cancel := context.WithCancel(base)
 	defer cancel()
-	watchdog := time.AfterFunc(r.responseTimeout, cancel)
+	watchdog := time.AfterFunc(time.Until(deadline), cancel)
 	defer watchdog.Stop()
 	ic.onDefer = func() { watchdog.Stop() }
 	if err := cmd.Handle(ctx, ic); err != nil {
@@ -307,7 +313,9 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 	if !ok || cmd.Autocomplete == nil {
 		return empty
 	}
-	authCtx, authCancel := context.WithTimeout(base, gateAuthTimeout)
+	// The same single budget as dispatch (S6): authorization and choices together.
+	deadline := time.Now().Add(r.responseTimeout)
+	authCtx, authCancel := context.WithDeadline(base, earlier(deadline, time.Now().Add(gateAuthTimeout)))
 	tenantID, err := r.gate.Authorize(authCtx, ac.guildID, ac.userID, cmd.GMOnly)
 	authCancel()
 	if err != nil {
@@ -316,7 +324,7 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 	// Tenant-scope the autocomplete so a command's campaign choices are leak-free
 	// (a foreign Tenant's campaigns never appear, #490).
 	ac.tenantID = tenantID
-	ctx, cancel := context.WithTimeout(base, r.responseTimeout)
+	ctx, cancel := context.WithDeadline(base, deadline)
 	defer cancel()
 	choices, err := cmd.Autocomplete(ctx, ac)
 	if err != nil {
@@ -382,6 +390,17 @@ type Interaction struct {
 	// onDefer is installed by dispatch to stop the first-response watchdog when
 	// the handler Defers; nil when the Interaction is invoked outside dispatch.
 	onDefer func()
+	// log is the Registry's logger, set by dispatch; nil outside dispatch
+	// (handler tests), where logger() discards.
+	log *slog.Logger
+}
+
+// logger is the logger a handler reports unexpected failures on.
+func (ic *Interaction) logger() *slog.Logger {
+	if ic.log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return ic.log
 }
 
 // GuildID is the Guild the interaction happened in, or "" for a DM.
@@ -458,14 +477,19 @@ func (ic *Interaction) sendPostDefer(content string, ephemeral bool) error {
 // slow handler time past the 3s deadline; it later sends the real reply with
 // Followup (or Reply, which routes to Followup once deferred). Defer also stops
 // the dispatch first-response watchdog so the handler's own work is not killed.
+//
+// The watchdog is stopped BEFORE the Defer goes out: the gate may have used
+// most of the shared first-response budget, and a watchdog firing while
+// Discord is accepting the Defer would leave the handler holding a dead ctx
+// for work Discord now expects it to finish.
 func (ic *Interaction) Defer(ephemeral bool) error {
+	if ic.onDefer != nil {
+		ic.onDefer()
+	}
 	if err := ic.resp.deferResponse(ephemeral); err != nil {
 		return err
 	}
 	ic.deferred = true
-	if ic.onDefer != nil {
-		ic.onDefer()
-	}
 	return nil
 }
 
@@ -591,17 +615,33 @@ func (r *eventResponder) followup(content string, ephemeral bool) error {
 // flag: the original's visibility (set at Defer time) is preserved regardless.
 func (r *eventResponder) editOriginal(content string) error {
 	_, err := r.event.Client().Rest.UpdateInteractionResponse(
-		r.event.ApplicationID(), r.event.Token(), discord.MessageUpdate{Content: &content})
+		r.event.ApplicationID(), r.event.Token(), placeholderEdit(content))
 	return err
 }
 
+// placeholderEdit builds the edit that resolves a deferred placeholder, with
+// mentions suppressed like every other reply (see ephemeralMessage).
+func placeholderEdit(content string) discord.MessageUpdate {
+	return discord.MessageUpdate{Content: &content, AllowedMentions: wirenpc.NoMentions()}
+}
+
 // ephemeralMessage builds a MessageCreate, flagged ephemeral when requested.
+// Every reply suppresses mentions (S8): replies quote transcript lines, LLM
+// recaps and NPC names, and a public one must never ping the server.
 func ephemeralMessage(content string, ephemeral bool) discord.MessageCreate {
-	mc := discord.MessageCreate{Content: content}
+	mc := discord.MessageCreate{Content: content, AllowedMentions: wirenpc.NoMentions()}
 	if ephemeral {
 		mc.Flags = mc.Flags.Add(discord.MessageFlagEphemeral)
 	}
 	return mc
+}
+
+// earlier returns the earlier of two instants.
+func earlier(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // snowflakePtrString renders an optional Guild snowflake as a string, "" for a
