@@ -121,14 +121,14 @@ func TestAuthEndToEnd(t *testing.T) {
 	// value must not be findable.
 	var rowsBefore, rawRows int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM sessions WHERE token = $1`, sessionDigest(sess.Value)).Scan(&rowsBefore); err != nil {
+		`SELECT count(*) FROM sessions WHERE token_hash = $1`, sessionDigest(sess.Value)).Scan(&rowsBefore); err != nil {
 		t.Fatalf("count sessions: %v", err)
 	}
 	if rowsBefore != 1 {
 		t.Fatalf("session rows = %d, want 1", rowsBefore)
 	}
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM sessions WHERE token = $1`, sess.Value).Scan(&rawRows); err != nil {
+		`SELECT count(*) FROM sessions WHERE token_hash = $1`, sess.Value).Scan(&rawRows); err != nil {
 		t.Fatalf("count raw sessions: %v", err)
 	}
 	if rawRows != 0 {
@@ -176,7 +176,7 @@ func TestAuthEndToEnd(t *testing.T) {
 
 	var rowsAfter int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM sessions WHERE token = $1`, sessionDigest(sess.Value)).Scan(&rowsAfter); err != nil {
+		`SELECT count(*) FROM sessions WHERE token_hash = $1`, sessionDigest(sess.Value)).Scan(&rowsAfter); err != nil {
 		t.Fatalf("count sessions after logout: %v", err)
 	}
 	if rowsAfter != 0 {
@@ -190,7 +190,7 @@ func TestAuthEndToEnd(t *testing.T) {
 }
 
 // sessionDigest mirrors storage's at-rest form of a session cookie secret
-// (SHA-256, base64url): the sessions.token column holds the digest, never the
+// (SHA-256, base64url): the sessions.token_hash column holds the digest, never the
 // secret, so a DB read yields no replayable credential.
 func sessionDigest(raw string) string {
 	sum := sha256.Sum256([]byte(raw))

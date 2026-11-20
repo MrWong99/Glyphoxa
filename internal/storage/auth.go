@@ -242,7 +242,7 @@ type NewSession struct {
 	UA        string
 }
 
-// sessionTokenHash is what the sessions.token column holds: the SHA-256 of the
+// sessionTokenHash is what the sessions.token_hash column holds: the SHA-256 of the
 // cookie secret, base64url. A DB read (a backup, a replica, a dump) therefore
 // yields no replayable credential — the plaintext existed only in the cookie.
 // A plain unsalted hash is sufficient because the input is 256 bits of
@@ -254,16 +254,16 @@ func sessionTokenHash(token string) string {
 }
 
 // CreateSession inserts a session row and returns it. The returned
-// Session.Token is the stored digest, never the cookie secret.
+// Session.TokenHash is the stored digest, never the cookie secret.
 func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, token, expires_at, ip, ua)
+		`INSERT INTO sessions (user_id, token_hash, expires_at, ip, ua)
 		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, user_id, token, created_at, last_seen_at, expires_at, ip, ua`,
+		 RETURNING id, user_id, token_hash, created_at, last_seen_at, expires_at, ip, ua`,
 		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA)
 	var sess Session
 	err := row.Scan(
-		&sess.ID, &sess.UserID, &sess.Token, &sess.CreatedAt,
+		&sess.ID, &sess.UserID, &sess.TokenHash, &sess.CreatedAt,
 		&sess.LastSeenAt, &sess.ExpiresAt, &sess.IP, &sess.UA,
 	)
 	if err != nil {
@@ -272,26 +272,44 @@ func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error
 	return sess, nil
 }
 
-// AuthenticateSession validates a session token and returns the owning user. It
-// bumps last_seen_at as a side effect of a successful, non-expired lookup, in a
-// single round trip. A missing or expired token yields ErrNotFound — the RPC
-// layer maps that to CodeUnauthenticated. A SUSPENDED owner yields the same
-// ErrNotFound: this is the ADR-0055 per-request authorization re-check, and it
-// lives in this query because every gated request on both transports funnels
-// through here — suspension takes effect on the very next request with zero
-// extra round trips. The session row is not deleted (suspension is
-// non-destructive; unsuspending restores the same token).
+// SessionSeenGranularity is how stale sessions.last_seen_at may get before
+// AuthenticateSession refreshes it. last_seen_at is an audit column ("when was
+// this session last used"), not part of validation, so minute-level precision
+// is all it needs — while bumping it on EVERY authenticated request turned
+// each read RPC, SSE reconnect and image fetch into a row UPDATE: a write, a
+// WAL record and a dead tuple per request on the hottest row in the schema.
+const SessionSeenGranularity = 5 * time.Minute
+
+// AuthenticateSession validates a session token and returns the owning user,
+// in a single round trip. As a side effect of a successful, non-expired lookup
+// it refreshes last_seen_at — but only once it is older than
+// [SessionSeenGranularity], so the common request is a pure read. A missing or
+// expired token yields ErrNotFound — the RPC layer maps that to
+// CodeUnauthenticated. A SUSPENDED owner yields the same ErrNotFound: this is
+// the ADR-0055 per-request authorization re-check, and it lives in this query
+// because every gated request on both transports funnels through here —
+// suspension takes effect on the very next request with zero extra round
+// trips. The session row is not deleted (suspension is non-destructive;
+// unsuspending restores the same token).
 func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, error) {
+	// `bump` is a data-modifying CTE: Postgres runs it exactly once whether or
+	// not the outer query reads it, and it matches no row — so writes nothing —
+	// while last_seen_at is still fresh.
 	row := s.db.QueryRow(ctx,
 		`WITH s AS (
+		     SELECT id, user_id, last_seen_at FROM sessions
+		      WHERE token_hash = $1 AND expires_at > now()
+		 ), bump AS (
 		     UPDATE sessions SET last_seen_at = now()
-		      WHERE token = $1 AND expires_at > now()
-		      RETURNING user_id
+		       FROM s
+		      WHERE sessions.id = s.id
+		        AND s.last_seen_at < now() - make_interval(secs => $2)
 		 )
 		 SELECT u.id, u.discord_user_id, u.name, u.avatar, u.role,
 		        u.created_at, u.updated_at, u.suspended_at, u.aup_accepted_at
 		   FROM users u JOIN s ON s.user_id = u.id
-		  WHERE u.suspended_at IS NULL`, sessionTokenHash(token))
+		  WHERE u.suspended_at IS NULL`,
+		sessionTokenHash(token), SessionSeenGranularity.Seconds())
 	u, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
@@ -305,10 +323,33 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 // DeleteSession removes a session row by token (logout / revocation). Deleting a
 // token that no longer exists is not an error — logout is idempotent.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, sessionTokenHash(token)); err != nil {
+	if _, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, sessionTokenHash(token)); err != nil {
 		return fmt.Errorf("storage: delete session: %w", err)
 	}
 	return nil
+}
+
+// ExpiredSessionGrace is how long an expired session row is kept before
+// [Store.PurgeExpiredSessions] deletes it: long enough that "why was I signed
+// out last night" can still be answered from the row, short enough that the
+// table tracks the live session count.
+const ExpiredSessionGrace = 24 * time.Hour
+
+// PurgeExpiredSessions deletes every session row that expired more than
+// [ExpiredSessionGrace] ago and returns how many went (#643). An expired row
+// can never authenticate again (AuthenticateSession filters on expires_at), so
+// this is pure housekeeping — but nothing else ever removed one, and each row
+// carries the IP address and user agent captured at login, so without it the
+// table kept personal data indefinitely. The web tier runs it at boot and once
+// a day; it is idempotent and safe to run from every replica.
+func (s *Store) PurgeExpiredSessions(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM sessions WHERE expires_at < now() - make_interval(secs => $1)`,
+		ExpiredSessionGrace.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("storage: purge expired sessions: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // RevokeSessionsOutsideAllowlist deletes every session whose owning user's

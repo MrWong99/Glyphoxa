@@ -84,8 +84,8 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	// The cookie secret is never stored: the row (and the returned Session)
 	// carries its digest, so a DB read yields no replayable credential.
-	if sess.Token == "opaque-token-1" || sess.Token == "" {
-		t.Fatalf("stored token = %q, want the digest of the cookie secret", sess.Token)
+	if sess.TokenHash == "opaque-token-1" || sess.TokenHash == "" {
+		t.Fatalf("stored token hash = %q, want the digest of the cookie secret", sess.TokenHash)
 	}
 
 	// Valid token resolves to the owning user.

@@ -57,7 +57,7 @@ func (f *fakeSignup) ProvisionSignup(_ context.Context, p storage.SignupParams) 
 	return storage.SignupResult{
 		User:    storage.User{ID: uuid.New(), DiscordUserID: p.User.DiscordUserID},
 		Tenant:  storage.Tenant{ID: uuid.New(), Name: p.TenantName},
-		Session: storage.Session{Token: p.Session.Token},
+		Session: storage.Session{ExpiresAt: p.Session.ExpiresAt},
 		Created: f.created,
 	}, nil
 }
