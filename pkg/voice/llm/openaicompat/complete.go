@@ -80,8 +80,12 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 		// are declared (the llm.Request contract: ToolChoice is inert with no tools).
 		params.ToolChoice = toToolChoice(req.ToolChoice)
 	}
-	if c.reasoningEffort != "" {
-		params.ReasoningEffort = openai.ReasoningEffort(c.reasoningEffort)
+	effort := c.reasoningEffort
+	if c.reasoningEffortFor != nil {
+		effort = c.reasoningEffortFor(model)
+	}
+	if effort != "" {
+		params.ReasoningEffort = openai.ReasoningEffort(effort)
 	}
 	if c.includeUsage {
 		// Ask for the trailing usage chunk (token metering, #127). Preset-gated: a

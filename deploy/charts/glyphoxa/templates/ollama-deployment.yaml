@@ -60,6 +60,13 @@ spec:
             # could never reach.
             - name: OLLAMA_HOST
               value: {{ printf "0.0.0.0:%d" (int .Values.ollama.port) | quote }}
+            # Keep the embedding model loaded forever. Ollama's default unloads a
+            # model after 5 idle minutes, and the next embed then pays the load
+            # (seconds) — far beyond the recall budget, so every recall after a
+            # quiet stretch timed out and the cancel aborted the load (seen in
+            # production). This pod serves only the one small embedding model.
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
           {{- with .Values.ollama.model }}
           lifecycle:
             postStart:

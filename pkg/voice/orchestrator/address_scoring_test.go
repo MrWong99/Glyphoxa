@@ -12,18 +12,16 @@ import (
 
 // scoringAgents mirrors the TB7/TB8 fixtures as the richer [address.Agent]s the
 // scoring matcher consumes: the Butler is AddressOnly (reachable only by name),
-// Bart and the Goblin are Character NPCs. Bart carries tavern Expertise so the
-// expert-on-word heuristic has something to bite on.
+// Bart and the Goblin are Character NPCs.
 func scoringAgents() (butlerAg, bartAg, goblinAg address.Agent) {
 	butlerAg = address.Agent{Target: butlerTarget, AddressOnly: true}
-	bartAg = address.Agent{Target: bartTarget, Expertise: []string{"special", "tavern", "ale"}}
+	bartAg = address.Agent{Target: bartTarget}
 	goblinAg = address.Agent{Target: goblinTarget}
 	return
 }
 
 // newScoringDetector wires the scoring matcher (English) into a detector for
-// the given agents, the production-shaped alternative to the default whole-word
-// matcher.
+// the given agents, the production-shaped matcher.
 func newScoringDetector(agents ...address.Agent) *orchestrator.AddressDetector {
 	m := address.NewMatcher(address.Config{Language: "en"}, agents...)
 	return orchestrator.NewAddressDetector(m)
@@ -85,9 +83,8 @@ func TestScoringMatcher_BartTest_RoutesToCharacterNPC(t *testing.T) {
 }
 
 // TestScoringMatcher_Mishearing_RoutesToNPC drives a misheard transcript
-// straight onto the bus (no cassette needed) to show the payoff over the
-// default matcher: "bard" is heard for "Bart", which the default whole-word
-// matcher would miss and silently route to the Butler, while the scoring
+// straight onto the bus (no cassette needed) to show the payoff of fuzzy
+// matching: "bard" is heard for "Bart" in vocative position, and the scoring
 // matcher recognizes the homophone and routes to Bart.
 func TestScoringMatcher_Mishearing_RoutesToNPC(t *testing.T) {
 	h := voicetest.New(t)

@@ -2,6 +2,17 @@ version: "2"
 
 run:
   timeout: 5m
+  # Lint the PRODUCTION build (the image's tags), not the stub build: the real
+  # Opus codec, DAVE wiring and their tests only compile under these tags, so an
+  # untagged run never sees them. The `opus` tag needs pkg-config + libopus-dev
+  # (CI's lint job installs them). The integration/live/bench tag sets are not
+  # linted yet: enabling them surfaced 3 errcheck findings in test files plus 2
+  # bench-only `unused` helpers (2026-11-20) that their package owners should
+  # clear first.
+  build-tags:
+    - opus
+    - dave
+    - nolibopusfile
 
 formatters:
   enable:

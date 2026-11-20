@@ -477,11 +477,9 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 			// Address detection: the Butler is the default route; Jamalaka is an
 			// active NPC who is never named, so every utterance routes to the Butler.
 			detector := orchestrator.NewAddressDetector(
-				address.NewWholeWordMatcher(
+				nameOrButler(
 					voiceevent.AddressTarget{AgentID: "but1", AgentRole: "butler", Name: "Glyphoxa Butler"},
-					[]voiceevent.AddressTarget{
-						{AgentID: "distraction", AgentRole: "character", Name: "Jamalaka"},
-					},
+					voiceevent.AddressTarget{AgentID: "distraction", AgentRole: "character", Name: "Jamalaka"},
 				),
 			)
 

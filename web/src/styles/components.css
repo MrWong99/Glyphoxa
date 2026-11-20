@@ -930,10 +930,6 @@ textarea.gx-input {
   color: var(--text-strong);
   margin-top: 2px;
 }
-.gx-provider-row__select {
-  flex: 1;
-  max-width: 240px;
-}
 /* Health badge + its visible failure detail (Configuration). The detail used
  * to hide in a title-attr tooltip — unreachable by keyboard/touch. */
 .gx-health {
@@ -1050,8 +1046,7 @@ textarea.gx-input {
   .gx-provider-row {
     flex-wrap: wrap;
   }
-  .gx-provider-row .gx-select-field,
-  .gx-provider-row__select {
+  .gx-provider-row .gx-select-field {
     min-width: 0;
     max-width: none;
     flex: 1 1 100%;
@@ -1066,7 +1061,6 @@ textarea.gx-input {
   }
 
   /* Two-up grids drop to a single column. */
-  .gx-discord__ids,
   .gx-editor__grid {
     grid-template-columns: 1fr;
   }

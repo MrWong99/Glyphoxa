@@ -32,31 +32,25 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+# Core dumps (core.<pid>) — a crashed node/vitest worker has dropped these into web/.
+core.[0-9]*
 
 # Build
 /build/
 /glyphoxa
-/glyphoxa-web
-deployments/compose/config.yaml
 
 # Helm dependency artifacts
-deploy/helm/*/charts/
-deploy/helm/*/Chart.lock
+deploy/charts/*/charts/
+deploy/charts/*/Chart.lock
 
 # Worktrees
 .worktrees/
-
-# Zhi plugin build artifacts
-deploy/zhi/plugin/zhi-config-glyphoxa
-deploy/zhi/plugin/dist/
 
 # Generated protobuf/Connect/ES stubs (buf generate; produced in CI + Docker build)
 /gen/
 
 # Web frontend
 web/node_modules/
-web/.next/
-web/dist/
 .claude/
 
 # Embedded SPA bundle (internal/spa/dist). The real `npm run build` emits

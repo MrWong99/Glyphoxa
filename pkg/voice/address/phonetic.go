@@ -1,24 +1,23 @@
-// Package address holds the Voice Session's Address Detection matchers — the
-// algorithms behind the orchestrator's TargetMatcher seam that decide which
-// Agent(s) an utterance targets. It ships two: [WholeWordMatcher], the
-// dependency-free whole-word default, and [Matcher], the scoring engine
-// (ADR-0024) — a deterministic, fuzzy, heuristic-scored alternative.
+// Package address holds the Voice Session's Address Detection matcher — the
+// algorithm behind the orchestrator's TargetMatcher seam that decides which
+// Agent(s) an utterance targets: [Matcher], the deterministic scoring engine
+// (ADR-0024).
 //
-// Where the WholeWordMatcher does a case-insensitive whole-word match on each
-// Character NPC's display Name and falls back to the Butler unconditionally,
-// this package matches every Agent — Butler included — fuzzily (phonetic +
-// edit-distance), then scores each candidate with a stack of pluggable
-// [Heuristic]s. An Agent is addressed when its total score crosses a
+// It matches every Agent — Butler included — by name: exactly, or fuzzily
+// (phonetic + edit-distance) when the misheard name stands in vocative
+// position. Each candidate is then scored by a small stack of pluggable
+// [Heuristic]s — the name match, and the speaker's last-addressed
+// continuation. An Agent is addressed when its total score crosses a
 // configurable threshold; several Agents crossing at once yields the
 // multi-target set that drives an Ensemble Turn (ADR-0025).
 //
 // The whole pipeline is a pure function over a per-utterance [DecisionContext]
-// plus the matcher's own conversational state (last addressee, recent words,
-// recent interruptions). It uses no LLM and no vendor in the hot path, so it
-// stays sub-millisecond and fully unit-testable (ADR-0024 "Why deterministic").
+// plus the matcher's own conversational state (who was addressed last, by
+// whom, and when). It uses no LLM and no vendor in the hot path, so it stays
+// sub-millisecond and fully unit-testable (ADR-0024 "Why deterministic").
 //
-// Both adapters satisfy the orchestrator's TargetMatcher seam and are handed to
-// orchestrator.NewAddressDetector; see [WholeWordMatcher] and [Matcher].
+// The same name-matching core is exported for out-of-turn callers as
+// [NameIndex].
 package address
 
 import (

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -73,6 +74,17 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 		// megabytes (#547).
 		IncludeImages: r.URL.Query().Get("include_images") == "true",
 	}
+
+	// An export builds the whole Bundle in memory — base64 images included — and
+	// then marshals it, so it takes the same process-wide slot an import does:
+	// the pod has room for one bundle in flight, whichever direction it travels.
+	release, ok := acquireImportSlot()
+	if !ok {
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "another campaign import or export is in progress; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 
 	// GetCampaign resolves name (for the filename), existence AND tenant
 	// ownership (both 404, #439) before any bytes are written, so a missing or
@@ -148,10 +160,14 @@ type importResponse struct {
 // double-submit (403, ADR-0016) — this handler assumes both have passed and
 // reads the operator from the context.
 //
-// The request body is capped by [MaxImportBytes] (ADR-0048's
-// 32 MiB constant used purely as a request cap — blob.Store is NOT involved, the
-// bundle never lands in object storage) BEFORE anything reads it, so an oversized
-// upload is a clean 413 rather than an OOM. A malformed bundle or a newer/older
+// The request body is capped by [MaxImportBytes] (192 MiB compressed, ADR-0053 —
+// purely a request cap; the bundle never lands in object storage) BEFORE anything
+// reads it, so an oversized upload is a clean 413 rather than an OOM. The
+// "bundle" part is STREAMED into [Decode] straight off the multipart body (#657):
+// nothing is buffered to memory or spilled to a temp file first, which matters
+// because the production image is FROM scratch with a read-only root and has no
+// writable temp directory. A bundle that inflates past the decode cap or the
+// gzip-bomb ratio guard is 413 too. A malformed bundle or a newer/older
 // unsupported format_version is 400 with a message naming both versions
 // (ADR-0053 §7); the import runs SYNCHRONOUSLY (ADR-0049, no job row) and does NOT
 // auto-activate the imported campaign (ADR-0053 §7 — the UI offers the switch).
@@ -161,31 +177,43 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 	release, ok := acquireImportSlot()
 	if !ok {
 		w.Header().Set("Retry-After", "30")
-		writeImportError(w, http.StatusServiceUnavailable, "another import is in progress; retry shortly")
+		writeImportError(w, http.StatusServiceUnavailable, "another campaign import or export is in progress; retry shortly")
 		return
 	}
 	defer release()
+	// A declared length over the cap is refused before a byte is read. Streaming
+	// means the body is no longer read to the end up front, so without this an
+	// over-cap upload whose first bytes do not parse would answer 400, not 413.
+	if r.ContentLength > importLimit {
+		http.Error(w, "bundle exceeds maximum upload size", http.StatusRequestEntityTooLarge)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, importLimit)
 
-	file, _, err := r.FormFile("bundle")
+	part, err := bundlePart(r)
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if isMaxBytes(err) {
 			http.Error(w, "bundle exceeds maximum upload size", http.StatusRequestEntityTooLarge)
 			return
 		}
 		writeImportError(w, http.StatusBadRequest, "missing or invalid bundle upload")
 		return
 	}
-	defer file.Close()
 
-	b, err := Decode(file)
+	b, err := Decode(part)
 	if err != nil {
-		// The size cap surfaces at FormFile above (it reads the multipart body), so
-		// Decode never sees a MaxBytesError. Decode already wraps
+		// The upload cap now surfaces HERE: the part is read inside Decode, so the
+		// MaxBytesReader's error arrives through it. Decode already wraps
 		// ErrNewerFormat/ErrUnsupportedFormat with a message naming both versions;
 		// a plain parse failure is an opaque bad request.
-		writeImportError(w, http.StatusBadRequest, importErrorMessage(err))
+		switch {
+		case isMaxBytes(err):
+			http.Error(w, "bundle exceeds maximum upload size", http.StatusRequestEntityTooLarge)
+		case errors.Is(err, ErrTooLarge):
+			writeImportError(w, http.StatusRequestEntityTooLarge, err.Error())
+		default:
+			writeImportError(w, http.StatusBadRequest, importErrorMessage(err))
+		}
 		return
 	}
 
@@ -241,6 +269,31 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		Chunks:                 res.Chunks,
 		DroppedParticipantRefs: res.DroppedParticipantRefs,
 	})
+}
+
+// bundlePart walks the multipart body to its "bundle" part and returns it
+// unread. Parts before it are skipped (NextPart discards them, bounded by the
+// MaxBytesReader); a body with no such part is an error.
+func bundlePart(r *http.Request) (io.Reader, error) {
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return nil, err // io.EOF: no "bundle" part at all
+		}
+		if p.FormName() == "bundle" {
+			return p, nil
+		}
+	}
+}
+
+// isMaxBytes reports whether err is (or wraps) the request-body cap firing.
+func isMaxBytes(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
 }
 
 // importErrorMessage surfaces the version-refusal message (which names both

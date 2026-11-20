@@ -15,3 +15,16 @@ Boot flow: mount → `GET /api/v1/auth/me` → 401 routes to `/login`; no tenant
 - **Hand-rolled** — rejected. The prototype's routing pattern lacks URL sync, deep-linking, and code splitting.
 
 **Why TanStack on both sides:** same vendor as TanStack Query, same release cadence, integrated examples; one ecosystem to learn. Typed search params are a real ergonomic win for an admin tool heavy on filter URLs (audit log, transcripts, KG, sessions list).
+
+## Amendment (2026-11-20): what is and is not implemented
+
+Audited against the tree (`web/src/app/router.tsx`, `AuthGate.tsx`, `web/src/lib/queryClient.ts`, `transport.ts`):
+
+**Implemented as decided.** `@tanstack/react-router` with a code-based route tree; TanStack Query + `@connectrpc/connect-query` hooks; one root `QueryClient` with `staleTime: 30s` and `refetchOnWindowFocus: true`; the Tenant in the path (`/t/$tenantSlug/...`); typed search params (`validateSearch`) for deep links; a CSRF interceptor on the Connect transport; SSE frames amending the cached snapshot through `queryClient.setQueryData` (`web/src/screens/session/useSessionEvents.ts`); an `/onboarding/create-tenant` route.
+
+**Not implemented.**
+- **Lazy-loaded route components / code splitting** — every screen is imported eagerly; there is one bundle.
+- **Per-route `errorComponent`** for typed Connect errors — errors are handled inside the screens.
+- **The `X-Tenant-Id` header interceptor** — the server resolves the Tenant from the session's operator binding (`auth.TenantResolver`, `internal/auth/policy.go`); the slug in the URL is not sent as a header.
+
+**Changed.** The boot flow calls the Connect procedure `AuthService.GetCurrentUser` (not `GET /api/v1/auth/me`), and an unauthenticated result redirects to `/login` from `AuthGate`; `/t/$tenantSlug/` redirects to the Configuration screen rather than to a remembered last screen.

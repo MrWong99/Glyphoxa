@@ -131,7 +131,7 @@ fi
 # inverse of semver, so an rc→GA update would be refused and a GA→rc downgrade
 # waved through); mapping the semver '-' to dpkg-style '~' (which sorts before
 # the bare version) restores semver order for the v1.2.3[-suffix] tags this
-# repo cuts (.goreleaser.yml: prerelease auto). Downgrades are not a symmetric
+# repo cuts (release-image.yml publishes v1.2.3-rc1-style prereleases too). Downgrades are not a symmetric
 # operation here: an open-admission deployment rolled back across the ADR-0055
 # boundary boots in allowlist posture and evicts every signup (see
 # saas-operations.md, rollback caveat).

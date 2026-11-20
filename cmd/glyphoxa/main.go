@@ -136,6 +136,9 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "version":
+			runVersion(os.Stdout)
+			return
 		}
 	}
 
@@ -160,6 +163,8 @@ func main() {
 	// (instrumented in runWeb), so this only bites in standalone `voice` mode where
 	// each cycle dials its own client; the borrow path leaves it unused.
 	cfg.GatewayBudget = gatewayBudget
+
+	logBuildInfo(log, *mode)
 
 	switch *mode {
 	case "voice":
@@ -514,7 +519,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	if provider, _, err := embedworker.ResolveProvider(ctx, store); err != nil {
 		log.Error("voice worker: embeddings provider unavailable; NPC memory recall disabled", "err", err)
 	} else {
-		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{
+			Budget: envDuration(os.Getenv, "GLYPHOXA_RECALL_BUDGET", 0),
+		})
+		go recaller.Warm(ctx)
 		context.AfterFunc(ctx, recaller.Close)
 		deps.Memory = recaller
 	}
@@ -1176,10 +1184,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// reserved Hot Context memory slot; a slow/unavailable path degrades
 		// to no-memory within the turn budget. Bound to the run ctx — AfterFunc drops
 		// the bus subscription and stops the speculator on shutdown. In web-only mode
-		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
+		// the Manager starts no sessions, so the recaller stays dormant (bus idle)
+		// apart from the one warm-up embed.
 		// Set only in this branch so a keyless deployment leaves Memory a true nil
 		// (recall off), never a typed-nil interface.
-		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{
+			Budget: envDuration(os.Getenv, "GLYPHOXA_RECALL_BUDGET", 0),
+		})
+		go recaller.Warm(ctx)
 		context.AfterFunc(ctx, recaller.Close)
 		deps.Memory = recaller
 	}
