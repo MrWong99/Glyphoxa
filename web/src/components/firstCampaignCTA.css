@@ -1,0 +1,21 @@
+/* First-run call-to-action (#267): on a fresh, unseeded install GetActiveCampaign
+ * is CodeNotFound, so this create form replaces the error state on Setup,
+ * Campaign and Session — the web, not `glyphoxa seed`, is the first-run path. */
+.gx-first-campaign {
+  padding: var(--spacing-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+}
+.gx-first-campaign__title {
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.gx-first-campaign__lede {
+  margin: 0 0 var(--spacing-xs);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}

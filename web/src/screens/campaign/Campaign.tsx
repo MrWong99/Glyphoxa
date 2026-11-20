@@ -16,9 +16,10 @@ import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
-import { useI18n } from "@/i18n";
+import { useI18n, type MessageKey, type TFunc } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
-import { errorMessage } from "@/lib/connectError";
+import { errorMessage, isNotFound } from "@/lib/connectError";
+import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import type { CampaignView } from "./views";
@@ -67,6 +68,9 @@ type CampaignProps = {
   onOpenTranscriptLine?: (sessionID: string, lineID: string) => void;
 };
 
+// CodeNotFound is the settled zero-campaign answer, not a transient.
+const rosterRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
+
 // useCampaignEpoch counts Active Campaign CHANGES: it stays 0 while the first
 // campaign id arrives (undefined → id is a load, not a switch) and steps each
 // time a different id replaces a known one. It is the remount key for
@@ -90,7 +94,9 @@ function useCampaignEpoch(campaignID: string | undefined): number {
 // the switch, and "Add entries" would write that draft into the new campaign.
 // Remounting on the campaign id drops all of it at once.
 export function Campaign(props: CampaignProps = {}) {
-  const { data } = useQuery(CampaignService.method.getCampaignRoster, {});
+  // Same retry rule as the screen's own observer of this query: whichever
+  // observer mounts first decides how the fetch retries, and this one does.
+  const { data } = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
   const epoch = useCampaignEpoch(data?.campaign?.id);
   return <CampaignScreen key={epoch} {...props} />;
 }
@@ -104,7 +110,13 @@ function CampaignScreen({
 }: CampaignProps) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data, status, error } = useQuery(CampaignService.method.getCampaignRoster, {});
+  // CodeNotFound is the settled zero-campaign answer, not a transient: don't
+  // sit through the default retries before showing the first-campaign card.
+  const { data, status, error } = useQuery(
+    CampaignService.method.getCampaignRoster,
+    {},
+    { retry: rosterRetry },
+  );
   const roster = useMemo(() => data?.roster ?? [], [data]);
 
   // Live ElevenLabs voice catalog (#70). The query is non-blocking: a missing
@@ -193,6 +205,24 @@ function CampaignScreen({
 
   const campaign = data?.campaign;
   const npcs = roster.filter((a) => !isButler(a));
+
+  // Zero campaigns (#267): every campaign-scoped read is CodeNotFound, so the
+  // create-first-campaign card stands in for the whole screen instead of a raw
+  // "no active campaign" error in each panel. Creating swaps the live screen in.
+  if (!data && status === "error" && isNotFound(error)) {
+    return (
+      <div className="gx-campaign-screen">
+        <header className="gx-campaign-screen__header">
+          <div className="gx-campaign-screen__title-row">
+            <h1>{t("campaign.fallbackTitle")}</h1>
+          </div>
+        </header>
+        <Card accent>
+          <FirstCampaignCTA />
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="gx-campaign-screen">
@@ -326,7 +356,7 @@ function CampaignScreen({
                 </Badge>
               ) : (
                 a.addressOnly && (
-                  <Badge variant="neutral" size="sm">
+                  <Badge variant="neutral" size="sm" title={t("campaign.badgeAddressOnlyTitle")}>
                     {t("campaign.badgeAddressOnly")}
                   </Badge>
                 )
@@ -684,11 +714,31 @@ function ToolGrants({ agentId }: { agentId: string }) {
   );
 }
 
+// TOOL_LABEL_KEYS maps a voice Tool's wire name (pkg/tool Name()) onto a
+// friendly label; a Tool this map doesn't know still renders, de-snake_cased,
+// rather than leaking underscores (the planning chat does the same, chat.ts).
+const TOOL_LABEL_KEYS: Record<string, MessageKey> = {
+  dice: "campaign.toolDice",
+  recap: "campaign.toolRecap",
+  kg_query: "campaign.toolKgQuery",
+  transcript_search: "campaign.toolTranscriptSearch",
+  remember_knowledge: "campaign.toolRememberKnowledge",
+  locate_entity: "campaign.toolLocateEntity",
+  whats_nearby: "campaign.toolWhatsNearby",
+};
+
+function toolLabel(t: TFunc, toolName: string): string {
+  const key = TOOL_LABEL_KEYS[toolName];
+  return key ? t(key) : toolName.replace(/_/g, " ");
+}
+
 // ToolRow is one Tool's grant toggle plus, for a Tool that supports a per-grant
 // scope (ADR-0029), an inline scope editor. dice supports no scope, so only the
 // on/off Switch renders for it; a scope-supporting Tool also exposes a raw-JSON
-// scope field that round-trips through UpdateToolGrant's config. The Switch is
-// disabled while its mutation is in flight so a grant can't be double-submitted.
+// scope field that round-trips through UpdateToolGrant's config, tucked behind a
+// closed "Advanced" disclosure since raw JSON is power-user territory. The
+// Switch is disabled while its mutation is in flight so a grant can't be
+// double-submitted.
 function ToolRow({
   agentId,
   grant,
@@ -700,11 +750,12 @@ function ToolRow({
 }) {
   const { t } = useI18n();
   const [scope, setScope] = useState(grant.config);
+  const label = toolLabel(t, grant.toolName);
 
   const update = useMutation(CampaignService.method.updateToolGrant, {
     onSuccess: () => onChanged(),
     onError: (err) =>
-      toast.error(t("campaign.toolUpdateError", { tool: grant.toolName, message: errorMessage(err) })),
+      toast.error(t("campaign.toolUpdateError", { tool: label, message: errorMessage(err) })),
   });
 
   // The grant Switch never carries the local scope draft (#215): turning a grant
@@ -723,7 +774,7 @@ function ToolRow({
     <div className="gx-editor__tool">
       <div className="gx-editor__tool-head">
         <Switch
-          label={grant.toolName}
+          label={label}
           checked={grant.granted}
           disabled={update.isPending}
           onCheckedChange={toggle}
@@ -733,18 +784,20 @@ function ToolRow({
       {/* Scope editor only for Tools that support one AND are granted; dice does
           not, so it renders no scope editor (#117). */}
       {grant.supportsScope && grant.granted && (
-        <div className="gx-editor__tool-scope">
-          {/* toolName is a wire value and stays untranslated inside the label. */}
-          <Input
-            label={t("campaign.toolScopeLabel", { tool: grant.toolName })}
-            value={scope}
-            onChange={(e) => setScope(e.target.value)}
-            placeholder='{"scope":"self"}'
-          />
-          <Button variant="secondary" size="sm" onClick={saveScope} disabled={update.isPending}>
-            {t("campaign.toolScopeSave")}
-          </Button>
-        </div>
+        <details className="gx-editor__tool-advanced">
+          <summary>{t("campaign.toolScopeAdvanced")}</summary>
+          <div className="gx-editor__tool-scope">
+            <Input
+              label={t("campaign.toolScopeLabel", { tool: label })}
+              value={scope}
+              onChange={(e) => setScope(e.target.value)}
+              placeholder='{"scope":"self"}'
+            />
+            <Button variant="secondary" size="sm" onClick={saveScope} disabled={update.isPending}>
+              {t("campaign.toolScopeSave")}
+            </Button>
+          </div>
+        </details>
       )}
     </div>
   );

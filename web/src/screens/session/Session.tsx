@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
@@ -16,6 +16,7 @@ import { Select } from "@/components/ui/Select";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { InlineMarkdown, Markdown } from "@/components/ui/Markdown";
+import { splitAudioTags } from "@/lib/audioTags";
 import { useSessionEvents, formatClock, type LineKind } from "./useSessionEvents";
 import { readLastVoiceChannel, rememberVoiceChannel } from "./lastVoiceChannel";
 import { VoicePanel } from "./VoicePanel";
@@ -25,7 +26,8 @@ import { PrepBoards } from "../campaign/PrepBoards";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
-import { errorMessage } from "@/lib/connectError";
+import { errorMessage, isNotFound } from "@/lib/connectError";
+import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 
 // The Session screen (#72) drives the live Voice Session from the UI on the live
 // SessionService (ADR-0039): Start/Stop call the in-process SessionManager, the
@@ -63,8 +65,26 @@ export function sessionRefetchInterval(query: { state: { data?: { active?: boole
 // disabled there so a spoken "asterisk" transcribed as * can never reformat a
 // player's words. Shared by the live transcript and the search-hit rows —
 // both render the same lines, so they must not diverge.
+//
+// Agent lines may also carry expressive-TTS audio tags ("[cheerfully]Hier ist…",
+// ElevenLabs v3): those render as a subdued stage direction, separated from the
+// spoken words by a space, instead of raw bracket text glued to the sentence.
 function lineText(kind: LineKind | string, text: string) {
-  return kind === "npc" || kind === "butler" ? <InlineMarkdown text={text} /> : text;
+  if (kind !== "npc" && kind !== "butler") return text;
+  const segs = splitAudioTags(text);
+  if (segs.length === 1 && segs[0].kind === "text") return <InlineMarkdown text={text} />;
+  return segs.map((seg, i) => (
+    <Fragment key={i}>
+      {i > 0 && " "}
+      {seg.kind === "tag" ? (
+        <span className="gx-line__direction" data-testid="audio-tag">
+          {seg.text}
+        </span>
+      ) : (
+        <InlineMarkdown text={seg.text} />
+      )}
+    </Fragment>
+  ));
 }
 
 // tsMs converts a protobuf Timestamp to epoch milliseconds, or null when unset.
@@ -584,6 +604,24 @@ export function Session({
   // browsing one, else the idle ended latest-session summary.
   const viewedSession = viewingPast ? pastSessions.find((s) => s.id === viewedId) : undefined;
 
+  // Zero campaigns (#267): GetActiveCampaign is CodeNotFound and a session can't
+  // start, so the create-first-campaign card replaces the screen instead of
+  // surfacing raw "no active campaign" errors. Creating swaps the live screen in.
+  if (!campaignQ.data && campaignQ.isError && isNotFound(campaignQ.error)) {
+    return (
+      <div className="gx-session">
+        <div className="gx-session__main">
+          <header className="gx-session__header">
+            <h1>{t("session.title")}</h1>
+          </header>
+          <Card accent>
+            <FirstCampaignCTA />
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="gx-session">
       <div className="gx-session__main">
@@ -612,9 +650,13 @@ export function Session({
               {t(connectingKey)}
             </span>
           )}
-          <span className="gx-session__timer" data-testid="elapsed">
-            {formatElapsed(elapsed)}
-          </span>
+          {/* The clock only means something while a session runs; idle, a
+              frozen 00:00:00 reads as a stuck timer. */}
+          {active && (
+            <span className="gx-session__timer" data-testid="elapsed">
+              {formatElapsed(elapsed)}
+            </span>
+          )}
         </div>
 
         <div className="gx-session__actions">
@@ -719,6 +761,7 @@ export function Session({
               iconStart={<ScrollText size={15} />}
               onClick={() => runRecap(session)}
               disabled={generateRecap.isPending}
+              title={t("session.recapHint")}
               data-testid="recap-button"
             >
               {t("session.recap")}
@@ -748,6 +791,7 @@ export function Session({
               iconStart={<ScrollText size={15} />}
               onClick={() => runRecap(viewedSession)}
               disabled={generateRecap.isPending}
+              title={t("session.recapHint")}
               data-testid="recap-button"
             >
               {t("session.recap")}
@@ -914,6 +958,7 @@ function RecapView({
       <div className="gx-session__recap-pending" role="status" data-testid="recap-pending">
         <Loader2 size={15} className="gx-spin" aria-hidden="true" />
         <span>{t("session.generatingRecap")}</span>
+        <span className="gx-session__recap-hint">{t("session.recapHint")}</span>
       </div>
     );
   }

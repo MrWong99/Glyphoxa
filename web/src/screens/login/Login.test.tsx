@@ -52,11 +52,11 @@ describe("Login", () => {
     expect(link).toHaveAttribute("href", "/auth/discord/login");
   });
 
-  it("renders Google and GitHub as disabled coming-soon slots", async () => {
+  it("offers Discord only — no permanently disabled coming-soon providers", async () => {
     await renderLogin(<Login />);
-    expect(screen.getByRole("button", { name: /google/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /github/i })).toBeDisabled();
-    expect(screen.getAllByText(/coming soon/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("button", { name: /google/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /github/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument();
   });
 
   it("shows a friendly not-authorized banner when notAuthorized is set", async () => {

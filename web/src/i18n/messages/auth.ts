@@ -20,12 +20,12 @@ export const en = {
   "auth.consentMid": " and have read the ",
   "auth.consentPost": ".",
   "auth.continueDiscord": "Continue with Discord",
-  "auth.continueGoogleSoon": "Continue with Google · coming soon",
-  "auth.continueGithubSoon": "Continue with GitHub · coming soon",
 
   // ---- Onboarding: name-your-table step (ADR-0055) ----
   "auth.onboardingTitle": "Welcome to Glyphoxa",
   "auth.onboardingLede": "Your table is ready — give it a name.",
+  "auth.onboardingTableExplainer":
+    "A table is your group's own space in Glyphoxa: its campaigns, NPCs, Discord server and settings all live there.",
   "auth.onboardingNameLabel": "Name your table",
   "auth.onboardingLoadError": "Couldn't load your account. Please reload to try again.",
   "auth.onboardingSaveError":
@@ -91,10 +91,10 @@ export const en = {
     "Sessions are transcribed — the bot says so in the voice channel before it starts — and audio recording is opt-in per player. Details in the ",
   "auth.transcribedNotePost": ".",
 
-  // ---- Placeholder screen + router notFound ----
+  // ---- Placeholder (in-shell not-found) screen + router notFound ----
   "auth.notFoundTitle": "Not found",
-  "auth.placeholderLede": "This screen is coming in a later update.",
-  "auth.placeholderSoon": "coming soon",
+  "auth.placeholderLede": "This page doesn't exist — the link may be outdated or mistyped.",
+  "auth.placeholderBackToSetup": "Go to Setup",
 
   // ---- Legal page chrome (#518) — the documents themselves stay verbatim ----
   "auth.legalUpdatedLabel": "Last updated:",
@@ -120,11 +120,11 @@ export const de: Record<keyof typeof en, string> = {
   "auth.consentMid": " und habe die ",
   "auth.consentPost": " gelesen.",
   "auth.continueDiscord": "Weiter mit Discord",
-  "auth.continueGoogleSoon": "Weiter mit Google · bald verfügbar",
-  "auth.continueGithubSoon": "Weiter mit GitHub · bald verfügbar",
 
   "auth.onboardingTitle": "Willkommen bei Glyphoxa",
   "auth.onboardingLede": "Dein Tisch ist bereit — gib ihm einen Namen.",
+  "auth.onboardingTableExplainer":
+    "Ein Tisch ist der eigene Bereich deiner Gruppe in Glyphoxa: Dort liegen ihre Kampagnen, NPCs, der Discord-Server und alle Einstellungen.",
   "auth.onboardingNameLabel": "Name deines Tisches",
   "auth.onboardingLoadError":
     "Dein Konto konnte nicht geladen werden. Lade die Seite neu und versuch es noch einmal.",
@@ -189,8 +189,8 @@ export const de: Record<keyof typeof en, string> = {
   "auth.transcribedNotePost": ".",
 
   "auth.notFoundTitle": "Nicht gefunden",
-  "auth.placeholderLede": "Dieser Bereich kommt mit einem späteren Update.",
-  "auth.placeholderSoon": "bald verfügbar",
+  "auth.placeholderLede": "Diese Seite gibt es nicht — der Link ist vielleicht veraltet oder vertippt.",
+  "auth.placeholderBackToSetup": "Zur Einrichtung",
 
   "auth.legalUpdatedLabel": "Stand:",
 
