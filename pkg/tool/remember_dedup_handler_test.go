@@ -7,13 +7,16 @@ import (
 	"testing"
 )
 
-// AC1: an exact/normalized re-proposal of an existing PENDING proposal for the
-// same target creates no row and the tool reports it is already noted, echoing the
-// known wording so the model learns it.
+// AC1: an exact/normalized re-proposal of the agent's OWN existing PENDING
+// proposal for the same target creates no row and the tool reports it is already
+// noted, echoing the known wording so the model learns it.
 func TestRememberKnowledge_DedupAgainstPending(t *testing.T) {
 	w := &fakeKGWriter{
 		ownRef: KGNodeRef{ID: "node-1", Name: "Gesa"}, ownOK: true,
-		known: KnownForTarget{Pending: []string{"Gesa ist die Schwester von Arturus."}},
+		known: KnownForTarget{
+			Pending:    []string{"Gesa ist die Schwester von Arturus."},
+			OwnPending: []string{"Gesa ist die Schwester von Arturus."},
+		},
 	}
 	rk := NewRememberKnowledge(w)
 	ctx := WithCaller(context.Background(), "agent-9")
@@ -85,6 +88,41 @@ func TestRememberKnowledge_DoubleRememberYieldsOneRow(t *testing.T) {
 	}
 	if len(w.created) != 1 {
 		t.Fatalf("double-remember created %d rows, want exactly 1", len(w.created))
+	}
+}
+
+// A8: a proposal that duplicates ANOTHER Agent's pending proposal creates no
+// second row, but the calling Agent must not be able to tell. "Already noted"
+// there would let a player-facing NPC confirm, by guessing, what the Butler or
+// another NPC has filed for the GM. The answer is the same as for a fresh save.
+func TestRememberKnowledge_OtherAgentsPendingIsNotRevealed(t *testing.T) {
+	const secret = "Der König ist ein Gestaltwandler."
+	fresh := &fakeKGWriter{ownRef: KGNodeRef{ID: "node-1", Name: "Gesa"}, ownOK: true}
+	dup := &fakeKGWriter{
+		ownRef: KGNodeRef{ID: "node-1", Name: "Gesa"}, ownOK: true,
+		// Pending for the target, authored by someone else: NOT in OwnPending.
+		known: KnownForTarget{Pending: []string{secret}},
+	}
+	args := json.RawMessage(`{"kind":"fact","fact":"der könig ist ein gestaltwandler"}`)
+	ctx := WithCaller(context.Background(), "agent-9")
+
+	wantOut, err := NewRememberKnowledge(fresh).Execute(ctx, args, cfgOwnNode)
+	if err != nil {
+		t.Fatalf("fresh Execute: %v", err)
+	}
+	gotOut, err := NewRememberKnowledge(dup).Execute(ctx, args, cfgOwnNode)
+	if err != nil {
+		t.Fatalf("duplicate Execute: %v", err)
+	}
+
+	if len(dup.created) != 0 {
+		t.Errorf("created %d rows, want 0 (still deduplicated against the other Agent's pending proposal)", len(dup.created))
+	}
+	if gotOut != wantOut {
+		t.Errorf("result reveals another Agent's pending proposal:\n got %q\nwant %q (identical to a fresh save)", gotOut, wantOut)
+	}
+	if strings.Contains(gotOut, secret) {
+		t.Errorf("result echoes the other Agent's wording: %q", gotOut)
 	}
 }
 

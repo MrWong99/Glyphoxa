@@ -229,13 +229,24 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 	// Write-time dedup (#411, ADR-0052 mechanism a): suppress an exact/normalized
 	// re-proposal of something already pending for this target or already canon on
 	// its Node, and feed the agent its OWN pending proposals so it stops repeating
-	// itself (never another Agent's — see KnownForTarget). The read is best-effort — a KG hiccup must never drop the NPC's
+	// itself. The read is best-effort — a KG hiccup must never drop the NPC's
 	// memory — so it FAILS OPEN to creating the row.
+	//
+	// What the agent is TOLD depends on whose knowledge matched. A match against
+	// canon or its own pending proposal says so ("Already noted"). A match against
+	// ANOTHER Agent's pending proposal still creates no row, but answers exactly
+	// like a fresh save: "already known" there would be an oracle, letting a
+	// player-facing NPC confirm, guess by guess, what the Butler or another NPC
+	// has filed for the GM (a secret from the planning chat, say, ADR-0062).
 	var known KnownForTarget
 	if k, err := rk.dst.ExistingKnowledge(ctx, CallerID(ctx), w); err == nil {
 		known = k
-		if matched, dup := firstKnownMatch(ProposalSalient(w), append(known.Established, known.Pending...)); dup {
+		salient := ProposalSalient(w)
+		if matched, dup := firstKnownMatch(salient, append(append([]string(nil), known.Established...), known.OwnPending...)); dup {
 			return alreadyNotedResult(matched, known.OwnPending), nil
+		}
+		if _, dup := firstKnownMatch(salient, known.Pending); dup {
+			return notedResult(known.OwnPending), nil
 		}
 	} else {
 		// Fail OPEN: a KG read hiccup must never drop the NPC's memory. Warn so a
