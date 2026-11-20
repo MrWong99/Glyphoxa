@@ -8,10 +8,8 @@
 package nodeportrait
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -111,41 +109,16 @@ func (s *Server) ServePortrait(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	rc, meta, err := s.blobs.Get(req.Context(), key)
-	if errors.Is(err, blob.ErrNotFound) {
-		// The row and its bytes should agree, but a reconciliation race must not
-		// 500.
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		s.log.Error("node portrait: fetch blob", "err", err, "node", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		s.log.Error("node portrait: read blob", "err", err, "node", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if meta.ContentType != "" {
-		w.Header().Set("Content-Type", meta.ContentType)
-	}
-	// Defence in depth for user-supplied bytes served same-origin (#591 review):
-	// uploads are allowlisted to raster types, but a blob stored before that
-	// allowlist (or through any future writer) must still never execute. nosniff
-	// pins the declared type; the CSP neuters a scriptable document (SVG) if one
-	// is ever opened directly.
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	// A portrait is immutable for a given row version: a replace writes a NEW
-	// blob key. updated_at is therefore a sound validator and lets the browser
-	// cache the image across list re-renders.
-	http.ServeContent(w, req, "", updatedAt, bytes.NewReader(data))
+	// blob key, and updated_at moves with it. blob.Serve turns the pair into
+	// the validators, answers a still-fresh revalidation without fetching the
+	// bytes, and stamps the nosniff/CSP hardening every byte mount shares
+	// (#591 review: uploads are allowlisted to raster types, but a blob stored
+	// before that allowlist — or through any future writer — must still never
+	// execute).
+	if err := blob.Serve(w, req, s.blobs, key, blob.ServeOptions{ModTime: updatedAt}); err != nil {
+		s.log.Error("node portrait: serve blob", "err", err, "node", id)
+	}
 }
 
 func (s *Server) resolveCampaign(ctx context.Context) (uuid.UUID, bool, error) {

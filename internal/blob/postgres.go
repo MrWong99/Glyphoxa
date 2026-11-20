@@ -1,7 +1,6 @@
 package blob
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -78,8 +77,10 @@ func (p *Postgres) Put(ctx context.Context, key, contentType string, r io.Reader
 	return nil
 }
 
-// Get returns the blob's bytes (buffered into an in-memory ReadCloser) and Meta,
-// or ErrNotFound. An invalid key is ErrInvalidKey and never reaches SQL.
+// Get returns the blob's bytes and Meta, or ErrNotFound. bytea arrives as one
+// []byte, so the body is a [Reader] over exactly that slice — seekable, which
+// lets [Serve] stream it with no second copy. An invalid key is ErrInvalidKey
+// and never reaches SQL.
 func (p *Postgres) Get(ctx context.Context, key string) (io.ReadCloser, Meta, error) {
 	if _, err := ValidateKey(key); err != nil {
 		return nil, Meta{}, err
@@ -100,7 +101,7 @@ func (p *Postgres) Get(ctx context.Context, key string) (io.ReadCloser, Meta, er
 		return nil, Meta{}, fmt.Errorf("blob: get %s: %w", key, err)
 	}
 	meta := Meta{ContentType: contentType, Size: size, CreatedAt: createdAt}
-	return io.NopCloser(bytes.NewReader(raw)), meta, nil
+	return NewReader(raw), meta, nil
 }
 
 // List returns the keys of every blob whose key begins with prefix, ascending.

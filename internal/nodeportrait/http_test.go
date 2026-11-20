@@ -151,6 +151,24 @@ func TestPortrait_ServesTheBytes(t *testing.T) {
 	if v := rr.Header().Get("Content-Security-Policy"); v == "" {
 		t.Error("no Content-Security-Policy on a user-content byte response")
 	}
+	// Operator-only bytes: cacheable by the browser alone, revalidated on every
+	// use against a validator derived from the (immutable) blob key (R3).
+	if cc := rr.Header().Get("Cache-Control"); cc != "private, no-cache" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "private, no-cache")
+	}
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag — a replaced portrait writes a new blob key, which is the validator")
+	}
+
+	// Replaying the validator is a 304 with no body.
+	again := portraitRequest(t, tenantID, id.String())
+	again.Header.Set("If-None-Match", etag)
+	rr = httptest.NewRecorder()
+	srv.ServePortrait(rr, again)
+	if rr.Code != http.StatusNotModified || rr.Body.Len() != 0 {
+		t.Errorf("revalidation: status=%d with %d body bytes, want an empty 304", rr.Code, rr.Body.Len())
+	}
 }
 
 // TestPortrait_ANodeWithNoPortraitIs404: most Nodes carry no portrait, and
