@@ -477,14 +477,19 @@ func (ic *Interaction) sendPostDefer(content string, ephemeral bool) error {
 // slow handler time past the 3s deadline; it later sends the real reply with
 // Followup (or Reply, which routes to Followup once deferred). Defer also stops
 // the dispatch first-response watchdog so the handler's own work is not killed.
+//
+// The watchdog is stopped BEFORE the Defer goes out: the gate may have used
+// most of the shared first-response budget, and a watchdog firing while
+// Discord is accepting the Defer would leave the handler holding a dead ctx
+// for work Discord now expects it to finish.
 func (ic *Interaction) Defer(ephemeral bool) error {
+	if ic.onDefer != nil {
+		ic.onDefer()
+	}
 	if err := ic.resp.deferResponse(ephemeral); err != nil {
 		return err
 	}
 	ic.deferred = true
-	if ic.onDefer != nil {
-		ic.onDefer()
-	}
 	return nil
 }
 

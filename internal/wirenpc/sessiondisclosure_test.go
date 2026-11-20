@@ -68,14 +68,16 @@ func TestSessionDisclosureContent_CombinesWithTape(t *testing.T) {
 type disclosureSpy struct {
 	posts   []string
 	buttons []bool
+	nonces  []string
 	err     error
 }
 
 func (s *disclosureSpy) install(t *testing.T) {
 	t.Helper()
 	orig := postSessionDisclosure
-	postSessionDisclosure = func(_ context.Context, _ *bot.Client, _ snowflake.ID, _ uuid.UUID, content string, withButtons bool) error {
+	postSessionDisclosure = func(_ context.Context, _ *bot.Client, _ snowflake.ID, _ uuid.UUID, content string, withButtons bool, nonce string) error {
 		s.posts = append(s.posts, content)
+		s.nonces = append(s.nonces, nonce)
 		s.buttons = append(s.buttons, withButtons)
 		return s.err
 	}
@@ -151,6 +153,14 @@ func TestDiscloseSession_FailedPostRetriesNextCycle(t *testing.T) {
 	if len(spy.posts) != 2 {
 		t.Fatalf("posted %d disclosures, want 2 (the failed one retried once, then done)", len(spy.posts))
 	}
+	// The retry reuses the session's nonce, enforced, so a first post that did
+	// land (its answer lost) is not posted twice.
+	if spy.nonces[0] == "" || spy.nonces[0] != spy.nonces[1] || len(spy.nonces[0]) > 25 {
+		t.Errorf("nonces = %q, want one non-empty nonce (at most 25 chars) shared by both attempts", spy.nonces)
+	}
+	if msg := disclosureMessage(uuid.New(), "x", false, spy.nonces[0]); !msg.EnforceNonce || msg.Nonce != spy.nonces[0] {
+		t.Errorf("disclosure message nonce=%q enforce=%v, want the nonce enforced", msg.Nonce, msg.EnforceNonce)
+	}
 }
 
 // TestDiscloseSession_BoundsThePost: the REST call runs under a deadline, so a
@@ -159,7 +169,7 @@ func TestDiscloseSession_BoundsThePost(t *testing.T) {
 	var deadline time.Time
 	var hasDeadline bool
 	orig := postSessionDisclosure
-	postSessionDisclosure = func(ctx context.Context, _ *bot.Client, _ snowflake.ID, _ uuid.UUID, _ string, _ bool) error {
+	postSessionDisclosure = func(ctx context.Context, _ *bot.Client, _ snowflake.ID, _ uuid.UUID, _ string, _ bool, _ string) error {
 		deadline, hasDeadline = ctx.Deadline()
 		return nil
 	}
@@ -178,7 +188,7 @@ func TestDiscloseSession_BoundsThePost(t *testing.T) {
 // TestDisclosureMessage_SuppressesMentions (S8): the notice carries a configured
 // URL and, for the Butler poster, LLM text — no message the Bot posts may ping.
 func TestDisclosureMessage_SuppressesMentions(t *testing.T) {
-	msg := disclosureMessage(uuid.New(), "@everyone hi", true)
+	msg := disclosureMessage(uuid.New(), "@everyone hi", true, "")
 	assertNoMentions(t, msg.AllowedMentions)
 }
 

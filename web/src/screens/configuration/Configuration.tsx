@@ -548,12 +548,22 @@ function HealthBadge({
 
 // IntegrationBadge renders THIS tenant's standing Discord client health (#489):
 // the per-tenant registry reports "ok" (client up), "waiting" (no Bot token yet),
-// or "failed" (the token was rejected terminally — revoked/invalid) with a
-// human detail. Empty state (web-only mode, no standing presence) renders nothing.
+// "reconnecting" (a token is set but the client is down and being re-opened,
+// #642) or "failed" (the token was rejected terminally — revoked/invalid), the
+// last two with a human detail. Empty state (web-only mode, no standing
+// presence) and any state this build does not know render nothing — only an
+// explicit "ok" may claim the Bot is connected.
 function IntegrationBadge({ state, detail }: { state: string; detail: string }) {
   const { t } = useI18n();
-  if (state === "" || state === "waiting") {
-    return null;
+  if (state === "reconnecting") {
+    return (
+      <span className="gx-health">
+        <Badge variant="warning" dot size="sm">
+          {t("config.discordIntegrationReconnecting")}
+        </Badge>
+        {detail && <span className="gx-health__detail">{detail}</span>}
+      </span>
+    );
   }
   if (state === "failed") {
     return (
@@ -564,6 +574,9 @@ function IntegrationBadge({ state, detail }: { state: string; detail: string }) 
         {detail && <span className="gx-health__detail">{detail}</span>}
       </span>
     );
+  }
+  if (state !== "ok") {
+    return null;
   }
   return (
     <Badge variant="success" dot size="sm">

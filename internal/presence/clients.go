@@ -63,23 +63,22 @@ const (
 	// openTimeout bounds one standing-client gateway open. disgo's Open retries
 	// a dial or handshake error with no cap of its own for as long as its ctx
 	// lives, so an unreachable Discord would otherwise hold the ensure gate for
-	// the whole outage.
-	openTimeout = 60 * time.Second
+	// the whole outage. It is longer than the IDENTIFY pacer's single hold
+	// (wirenpc.IdentifyRefill): an open that has to wait its turn in the pacer
+	// can outwait it instead of always timing out just short of its IDENTIFY.
+	// An open that does time out is a failure like any other (rebuild.go), so
+	// the next attempt is paced, not immediate.
+	openTimeout = wirenpc.IdentifyRefill + time.Minute
 	// ensureTimeout bounds one Tenant's ensure inside EnsureAll (DB read, open,
 	// command registration), so one Tenant's outage never stops the reconcile
-	// from visiting the others.
-	ensureTimeout = 60 * time.Second
+	// from visiting the others. It leaves the open its full bound.
+	ensureTimeout = openTimeout + time.Minute
 	// closeTimeout bounds one standing client's Close. disgo's gateway Close
 	// takes the connection lock a pending open holds while it waits for the
 	// IDENTIFY pacer — which can be minutes — so a close is given this long and
 	// then left to finish in the background (S9).
 	closeTimeout = 5 * time.Second
 )
-
-// errOpenAborted marks a gateway open that ran out of time (openTimeout or the
-// caller's ctx) rather than failing. It does not count toward the rebuild
-// pacing: nothing was learned about the token, and the next ensure retries.
-var errOpenAborted = errors.New("presence: gateway open timed out or was cancelled")
 
 // IntegrationStatus is one Tenant's Discord integration health: a state code plus
 // a human detail (the classified failure prose when State is "failed").
@@ -128,6 +127,12 @@ type clientEntry struct {
 	client           atomic.Pointer[bot.Client] // nil = dead/rebuilding
 	refs             map[uuid.UUID]struct{}
 	registeredGuilds map[string]bool
+}
+
+// unopenedState is a Tenant's token whose first open has not succeeded yet.
+type unopenedState struct {
+	token   string
+	failure string // the classified terminal failure, "" while merely retrying
 }
 
 // tenantState is one Tenant's resolved binding: the token its client is keyed by,
@@ -205,6 +210,13 @@ type Clients struct {
 	mu           sync.Mutex
 	entries      map[string]*clientEntry
 	tenants      map[uuid.UUID]*tenantState
+	// unopened records, per Tenant, a resolved token whose client could not be
+	// opened yet (and the classified terminal failure, if the open was refused
+	// for good). It is read ONLY by IntegrationStatus (S11): the Tenant holds no
+	// entry ref and has no binding in tenants, so nothing borrows a client or
+	// clears a Guild through it. Guarded by mu; cleared on a successful ensure
+	// or the wait-state.
+	unopened map[uuid.UUID]unopenedState
 	// rebuilds paces gateway opens per Bot token (rebuild.go): every open sends
 	// an IDENTIFY, and Discord resets a token that sends 1000 in 24 hours.
 	// Guarded by mu.
@@ -243,6 +255,7 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 		entries:      map[string]*clientEntry{},
 		tenants:      map[uuid.UUID]*tenantState{},
 		rebuilds:     map[string]*rebuildState{},
+		unopened:     map[uuid.UUID]unopenedState{},
 		now:          time.Now,
 	}
 	// The budget opts are read at build time (each Ensure that builds/rebuilds an
@@ -375,7 +388,6 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
 			c.noteOpenFailed(tenantID, token, err)
-			c.bindUnopened(tenantID, prevToken, token, guild)
 			return err
 		}
 		c.noteOpened(token)
@@ -390,7 +402,6 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
 			c.noteOpenFailed(tenantID, token, err)
-			c.bindUnopened(tenantID, prevToken, token, guild)
 			return err
 		}
 		c.noteOpened(token)
@@ -426,6 +437,7 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	c.mu.Lock()
 	entry.refs[tenantID] = struct{}{}
 	c.tenants[tenantID] = &tenantState{token: token, guild: guild}
+	delete(c.unopened, tenantID)
 	c.mu.Unlock()
 
 	// Clear this Tenant's stale OLD-Guild commands when its Guild changed on the
@@ -469,24 +481,6 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	return nil
 }
 
-// bindUnopened records a Tenant's token and Guild when its client could not be
-// opened, so IntegrationStatus reports it reconnecting rather than "waiting"
-// for a token it has (S11). Only a Tenant with no other live binding is
-// recorded: one still refing a previous token's entry keeps that state, since
-// its ref is found through it (detachFromEntry). No entry ref is taken.
-func (c *Clients) bindUnopened(tenantID uuid.UUID, prevToken, token, guild string) {
-	if prevToken != "" && prevToken != token {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if ts := c.tenants[tenantID]; ts != nil && ts.failure != "" {
-		ts.token, ts.guild = token, guild
-		return
-	}
-	c.tenants[tenantID] = &tenantState{token: token, guild: guild}
-}
-
 // entryGuilds is the union of every ref-Tenant's Guild on entry plus thisGuild
 // (skipping empty), for the rebuild re-registration.
 func (c *Clients) entryGuilds(entry *clientEntry, thisTenant uuid.UUID, thisGuild string) map[string]bool {
@@ -525,7 +519,7 @@ func (c *Clients) guildUsedByOther(entry *clientEntry, thisTenant uuid.UUID, gui
 
 // buildOpen builds and opens a client, closing it on an open failure so a failed
 // ensure leaks nothing. The open is bounded by openTimeout; one that ran out of
-// time (or whose ctx was cancelled) is reported as errOpenAborted.
+// time (or whose ctx was cancelled) fails like any other.
 func (c *Clients) buildOpen(ctx context.Context, token string) (*bot.Client, error) {
 	client, err := c.build(token)
 	if err != nil {
@@ -535,9 +529,6 @@ func (c *Clients) buildOpen(ctx context.Context, token string) (*bot.Client, err
 	defer cancel()
 	if err := c.open(openCtx, client); err != nil {
 		c.closeBounded(client)
-		if openCtx.Err() != nil {
-			return nil, fmt.Errorf("presence: open gateway: %w: %w", errOpenAborted, err)
-		}
 		return nil, fmt.Errorf("presence: open gateway: %w", err)
 	}
 	return client, nil
@@ -572,6 +563,7 @@ func (c *Clients) setWaiting(tenantID uuid.UUID) {
 		prevToken = prev.token
 	}
 	c.tenants[tenantID] = &tenantState{}
+	delete(c.unopened, tenantID)
 	c.mu.Unlock()
 	if prevToken != "" {
 		c.detachFromEntry(prevToken, tenantID)
@@ -717,6 +709,12 @@ func (c *Clients) GuildForTenant(tenantID uuid.UUID) string {
 func (c *Clients) IntegrationStatus(tenantID uuid.UUID) IntegrationStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if u, ok := c.unopened[tenantID]; ok {
+		if u.failure != "" {
+			return IntegrationStatus{State: IntegrationFailed, Detail: u.failure}
+		}
+		return IntegrationStatus{State: IntegrationReconnecting, Detail: c.reconnectDetailLocked(u.token)}
+	}
 	ts := c.tenants[tenantID]
 	if ts == nil || ts.token == "" {
 		return IntegrationStatus{State: IntegrationWaiting}
@@ -725,15 +723,19 @@ func (c *Clients) IntegrationStatus(tenantID uuid.UUID) IntegrationStatus {
 		return IntegrationStatus{State: IntegrationFailed, Detail: ts.failure}
 	}
 	if entry := c.entries[ts.token]; entry == nil || entry.client.Load() == nil {
-		detail := "Reconnecting to Discord."
-		if st := c.rebuilds[ts.token]; st != nil {
-			if wait := st.notBefore.Sub(c.now()); wait > 0 {
-				detail = fmt.Sprintf("Lost the connection to Discord; next attempt in %s.", wait.Round(time.Second))
-			}
-		}
-		return IntegrationStatus{State: IntegrationReconnecting, Detail: detail}
+		return IntegrationStatus{State: IntegrationReconnecting, Detail: c.reconnectDetailLocked(ts.token)}
 	}
 	return IntegrationStatus{State: IntegrationOK}
+}
+
+// reconnectDetailLocked words when token's next open is due. Caller holds mu.
+func (c *Clients) reconnectDetailLocked(token string) string {
+	if st := c.rebuilds[token]; st != nil {
+		if wait := st.notBefore.Sub(c.now()); wait > 0 {
+			return fmt.Sprintf("Lost the connection to Discord; next attempt in %s.", wait.Round(time.Second))
+		}
+	}
+	return "Reconnecting to Discord."
 }
 
 // invalidate drops a standing client whose gateway died unexpectedly and — when

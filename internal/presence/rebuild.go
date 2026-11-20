@@ -79,20 +79,23 @@ func (c *Clients) noteOpened(token string) {
 	}
 }
 
-// noteOpenFailed records a build or gateway open that failed for token. An
-// open that merely ran out of time or was cancelled (errOpenAborted) is not
-// counted (#642): it says nothing about the token, and pacing it would leave a
-// Tenant without slash commands for up to rebuildMaxDelay after a slow
-// Discord recovers. The IDENTIFY pacer still caps what such retries can send.
+// noteOpenFailed records a build or gateway open that failed for token —
+// including one that ran out of time or was cancelled (#642). A timed-out open
+// must count: retried on every reconcile pass, each attempt re-queued in the
+// IDENTIFY pacer faster than its refill, so the pacer's hold kept growing and
+// no open could ever outwait it. Counted, the retries spread out (30s, 1m, 2m,
+// ...) past the refill and the token connects once Discord is back. It also
+// records the Tenant's pending binding for IntegrationStatus, failed outright
+// when Discord refused the token for good.
 func (c *Clients) noteOpenFailed(tenantID uuid.UUID, token string, cause error) {
 	appID := applicationID(token)
-	if errors.Is(cause, errOpenAborted) {
-		c.log.Warn("presence: standing client open timed out; retrying on the next ensure",
-			"err", cause, "app_id", appID, "tenant", tenantID)
-		return
+	u := unopenedState{token: token}
+	if fe := wirenpc.ClassifyFatal(cause); fe != nil {
+		u.failure = fe.Error()
 	}
 	c.mu.Lock()
 	wait := c.noteFailureLocked(token, cause)
+	c.unopened[tenantID] = u
 	c.mu.Unlock()
 	c.log.Warn("presence: standing client open failed; pacing the next attempt",
 		"err", cause, "app_id", appID, "tenant", tenantID, "next_attempt_in", wait.Round(time.Second))

@@ -2,6 +2,8 @@ package wirenpc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -92,8 +94,13 @@ func NoMentions() *discord.AllowedMentions {
 // withConsentButtons attaches the tape's Consent/Revoke action row (#306) — the
 // buttons are stateless (the Campaign rides their custom ids), so the single
 // message stays interactive for the whole session, including across reconnects.
-func disclosureMessage(campaignID uuid.UUID, content string, withConsentButtons bool) discord.MessageCreate {
-	msg := discord.MessageCreate{Content: content, AllowedMentions: NoMentions()}
+//
+// nonce, when set, is sent with enforce_nonce: Discord then answers a repeat
+// of the same nonce from the Bot with the message it already created instead
+// of posting a second one, so a retry after a post whose response was lost
+// (it landed, we never heard) does not double the notice.
+func disclosureMessage(campaignID uuid.UUID, content string, withConsentButtons bool, nonce string) discord.MessageCreate {
+	msg := discord.MessageCreate{Content: content, AllowedMentions: NoMentions(), Nonce: nonce, EnforceNonce: nonce != ""}
 	if withConsentButtons {
 		msg.Components = []discord.LayoutComponent{
 			discord.NewActionRow(
@@ -110,8 +117,8 @@ func disclosureMessage(campaignID uuid.UUID, content string, withConsentButtons 
 //
 // It is a package var so tests substitute a spy and connectAndServe stays free
 // of a live Discord REST.
-var postSessionDisclosure = func(ctx context.Context, client *bot.Client, channel snowflake.ID, campaignID uuid.UUID, content string, withConsentButtons bool) error {
-	if _, err := client.Rest.CreateMessage(channel, disclosureMessage(campaignID, content, withConsentButtons), rest.WithCtx(ctx)); err != nil {
+var postSessionDisclosure = func(ctx context.Context, client *bot.Client, channel snowflake.ID, campaignID uuid.UUID, content string, withConsentButtons bool, nonce string) error {
+	if _, err := client.Rest.CreateMessage(channel, disclosureMessage(campaignID, content, withConsentButtons, nonce), rest.WithCtx(ctx)); err != nil {
 		return fmt.Errorf("wirenpc: post session disclosure: %w", err)
 	}
 	return nil
@@ -146,7 +153,7 @@ func discloseSession(ctx context.Context, client *bot.Client, channel snowflake.
 		content := sessionDisclosureContent(cfg.PrivacyPolicyURL, tapeArmed)
 		postCtx, cancel := context.WithTimeout(ctx, disclosurePostTimeout)
 		defer cancel()
-		if err := postSessionDisclosure(postCtx, client, channel, cfg.CampaignID, content, tapeArmed); err != nil {
+		if err := postSessionDisclosure(postCtx, client, channel, cfg.CampaignID, content, tapeArmed, disclosed.nonceValue()); err != nil {
 			log.Error("players were not shown the transcription notice: posting it to the voice channel's text chat failed",
 				"err", err, "channel", channel, "campaign", cfg.CampaignID, "tape_armed", tapeArmed,
 				"remedy", disclosureFailureRemedy(err))
@@ -161,13 +168,32 @@ func discloseSession(ctx context.Context, client *bot.Client, channel snowflake.
 // cycle; cycles are strictly sequential on one goroutine (runWithReconnect), so
 // no lock is needed. A nil receiver never fires — the paths that build a cycle
 // outside Run stay unchanged.
-type sessionOnce struct{ done bool }
+type sessionOnce struct {
+	done  bool
+	nonce string // one per Voice Session, shared by every retry (see disclosureMessage)
+}
+
+// nonceValue is this session's disclosure nonce, minted on first use: 20 hex
+// characters, inside Discord's 25-character nonce limit. A nil guard has none.
+func (o *sessionOnce) nonceValue() string {
+	if o == nil {
+		return ""
+	}
+	if o.nonce == "" {
+		var b [10]byte
+		_, _ = rand.Read(b[:])
+		o.nonce = hex.EncodeToString(b[:])
+	}
+	return o.nonce
+}
 
 // do runs f until it reports success, once per reconnect cycle at most: the
 // guard arms only when f returns true, so a disclosure Discord rejected is
 // retried on the next cycle (players must see it), while one that landed is
 // never repeated. Cycles are backed off, so a persistent rejection costs one
-// attempt per reconnect, not a spam loop.
+// attempt per reconnect, not a spam loop. A post that landed but whose answer
+// was lost is retried with the same nonce, which Discord deduplicates for a
+// few minutes; only a reconnect later than that could still post it twice.
 func (o *sessionOnce) do(f func() bool) {
 	if o == nil || o.done {
 		return

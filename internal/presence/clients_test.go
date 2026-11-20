@@ -16,6 +16,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 // regCall records one commandRegistrar invocation.
@@ -768,7 +769,8 @@ func TestClientForTenantCancelsWhileEnsureBlocked(t *testing.T) {
 
 // TestEnsureAllBoundsEachTenant (#642): a Tenant whose open never returns is cut
 // off at the open bound, so the reconcile still reaches the next Tenant — and
-// the timeout is not counted as a pacing failure, so the next ensure retries.
+// the timeout counts as a failure, so the next attempt is paced rather than
+// re-queued in the IDENTIFY pacer on every pass (see TestTimedOutOpensConverge).
 func TestEnsureAllBoundsEachTenant(t *testing.T) {
 	rig := newClientsRig(t, "")
 	rig.c.openTimeout = 20 * time.Millisecond
@@ -796,8 +798,8 @@ func TestEnsureAllBoundsEachTenant(t *testing.T) {
 	if rig.c.clientFor(b) == nil {
 		t.Error("tenant B has no client: the reconcile never reached it")
 	}
-	if wait := rig.c.rebuildWait("tok-A"); wait != 0 {
-		t.Errorf("a timed-out open was paced (%s); it says nothing about the token and must retry on the next ensure", wait)
+	if wait := rig.c.rebuildWait("tok-A"); wait != rebuildBaseDelay {
+		t.Errorf("rebuild wait after a timed-out open = %s, want %s: a timed-out open is paced like any failure", wait, rebuildBaseDelay)
 	}
 	if st := rig.c.IntegrationStatus(a); st.State != IntegrationReconnecting {
 		t.Errorf("tenant A status = %+v, want reconnecting while its client is down", st)
@@ -888,5 +890,160 @@ func TestIntegrationStatusReportsReconnecting(t *testing.T) {
 	}
 	if !strings.Contains(st.Detail, "30s") {
 		t.Errorf("detail %q should say when the next attempt is due", st.Detail)
+	}
+}
+
+// pacedGateway models disgo's Open against an outage with the REAL IDENTIFY
+// pacer on a virtual clock: Open retries (1s, 2s, 4s, ... up to 60s apart),
+// every try first takes a pacer reservation (spent even when the dial is then
+// refused, as in disgo), a try that would wait past the open's bound gives up
+// and is refunded (wirenpc.IdentifyPacer.Wait), and the first try after the
+// outage IDENTIFYs and succeeds.
+type pacedGateway struct {
+	clock      time.Time
+	pacer      *wirenpc.IdentifyPacer
+	upAt       time.Time
+	identifies int
+	tries      int // pacer reservations kept (dials attempted)
+}
+
+func (g *pacedGateway) open(bound time.Duration) error {
+	start := g.clock
+	delay := time.Second
+	for {
+		g.clock = g.clock.Add(delay)
+		if g.clock.Sub(start) >= bound {
+			g.clock = start.Add(bound)
+			return context.DeadlineExceeded
+		}
+		delay = min(2*delay, 60*time.Second)
+		if d := g.pacer.Reserve(); d > 0 {
+			if g.clock.Add(d).Sub(start) >= bound {
+				g.pacer.Refund()
+				g.clock = start.Add(bound)
+				return context.DeadlineExceeded
+			}
+			g.clock = g.clock.Add(d)
+		}
+		g.tries++
+		if g.clock.Before(g.upAt) {
+			continue // refused dial
+		}
+		g.identifies++
+		return nil
+	}
+}
+
+// runPaced drives Run's reconcile (every 30s, virtual) against g until a client
+// is up or until has elapsed; it returns when the client came up (0 = never).
+func runPaced(t *testing.T, g *pacedGateway, until time.Duration) time.Duration {
+	t.Helper()
+	rig := newClientsRig(t, "")
+	rig.c.now = func() time.Time { return g.clock }
+	rig.c.open = func(context.Context, *bot.Client) error { return g.open(rig.c.openTimeout) }
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+
+	begin := g.clock
+	tick := g.clock
+	for g.clock.Sub(begin) < until {
+		_ = rig.c.EnsureAll(context.Background())
+		if rig.c.clientFor(a) != nil {
+			return g.clock.Sub(begin)
+		}
+		for !tick.After(g.clock) {
+			tick = tick.Add(30 * time.Second)
+		}
+		g.clock = tick
+	}
+	return 0
+}
+
+// TestTimedOutOpensConverge is the regression test for the #642 review's
+// lockout: bounded opens that each re-queued in the IDENTIFY pacer (and kept
+// their reservation when they gave up) grew the pacer's hold by ~3 minutes per
+// ~1 minute attempt, so after a 35s outage no open ever reached Discord again.
+// With timed-out opens paced and abandoned reservations refunded, the registry
+// must be connected within minutes of Discord coming back, with one IDENTIFY.
+func TestTimedOutOpensConverge(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	g := &pacedGateway{clock: start, pacer: wirenpc.NewIdentifyPacer(func() time.Time { return start }), upAt: start.Add(35 * time.Second)}
+	g.pacer = wirenpc.NewIdentifyPacer(func() time.Time { return g.clock })
+
+	at := runPaced(t, g, time.Hour)
+	if at == 0 {
+		t.Fatalf("no client after an hour; a 35s outage locked the token out (%d tries, %d IDENTIFYs)", g.tries, g.identifies)
+	}
+	if at > 10*time.Minute {
+		t.Errorf("connected %s after boot, want within 10 minutes of a 35s outage", at)
+	}
+	if g.identifies != 1 {
+		t.Errorf("IDENTIFYs = %d, want exactly 1", g.identifies)
+	}
+}
+
+// TestTimedOutOpensStayInsideTheIdentifyCeiling: a day of Discord being
+// unreachable must not draw more IDENTIFY reservations than the pacer's own
+// ceiling (burst + 24h/refill), the most any earlier build could spend.
+func TestTimedOutOpensStayInsideTheIdentifyCeiling(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	g := &pacedGateway{clock: start, upAt: start.Add(1000 * time.Hour)}
+	g.pacer = wirenpc.NewIdentifyPacer(func() time.Time { return g.clock })
+
+	if at := runPaced(t, g, 24*time.Hour); at != 0 {
+		t.Fatal("connected during a permanent outage")
+	}
+	ceiling := 4 + int(24*time.Hour/wirenpc.IdentifyRefill)
+	if g.tries > ceiling {
+		t.Errorf("a day of outage spent %d IDENTIFY reservations, want at most the pacer ceiling %d", g.tries, ceiling)
+	}
+}
+
+// TestFirstOpenRejectedTokenShowsFailed (#642 review): a token Discord refuses
+// at the very first open (close 4004) is failed, not "reconnecting".
+func TestFirstOpenRejectedTokenShowsFailed(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	rig.openErr = fmt.Errorf("failed to open gateway connection: %w", &websocket.CloseError{Code: 4004, Text: "Authentication failed"})
+	if err := rig.c.EnsureTenant(context.Background(), a); err == nil {
+		t.Fatal("EnsureTenant with a refused token = nil")
+	}
+	st := rig.c.IntegrationStatus(a)
+	if st.State != IntegrationFailed || !strings.Contains(st.Detail, "invalid_bot_token") {
+		t.Errorf("status = %+v, want failed with the classified reason", st)
+	}
+}
+
+// TestUnopenedTenantBorrowsNothing (#642 review): a Tenant whose own open
+// failed must not end up borrowing a client another Tenant opened on the same
+// token without holding a ref — the client would close under its session when
+// that other Tenant left.
+func TestUnopenedTenantBorrowsNothing(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a, b := uuid.New(), uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-S"))
+	rig.store.set(b, rig.savedDep(t, "GB", "tok-S"))
+	rig.openErr = errors.New("dial refused")
+	_ = rig.c.EnsureTenant(context.Background(), a)
+	rig.openErr = nil
+	rig.advance(rebuildMaxDelay)
+	mustEnsure(t, rig.c, b)
+
+	if rig.c.clientFor(a) != nil {
+		rig.c.mu.Lock()
+		_, ref := rig.c.entries["tok-S"].refs[a]
+		rig.c.mu.Unlock()
+		if !ref {
+			t.Fatal("tenant A borrows the shared client without holding a ref")
+		}
+	}
+	// A's own next ensure takes its ref properly.
+	mustEnsure(t, rig.c, a)
+	rig.c.mu.Lock()
+	_, ref := rig.c.entries["tok-S"].refs[a]
+	rig.c.mu.Unlock()
+	if !ref || rig.c.IntegrationStatus(a).State != IntegrationOK {
+		t.Fatalf("after its own ensure tenant A ref=%v status=%+v, want a ref and ok", ref, rig.c.IntegrationStatus(a))
 	}
 }

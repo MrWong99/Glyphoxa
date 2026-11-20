@@ -397,6 +397,54 @@ func TestRunWithReconnect_RepeatedJoinTimeoutIsFatal(t *testing.T) {
 	}
 }
 
+// TestRunWithReconnect_JoinTimeoutsAfterAJoinAreNotFatal (#642 review): a
+// session that has joined once is in a Discord outage when joins later time
+// out — a voice-region failover produces three in about 93s — and must keep
+// retrying rather than die after hours of healthy play.
+func TestRunWithReconnect_JoinTimeoutsAfterAJoinAreNotFatal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 2 * maxJoinTimeouts, cancel: cancel}
+	p := reconnectPolicy{initial: time.Second, max: 8 * time.Second, factor: 2, sleep: fs.sleep}
+
+	calls := 0
+	err := runWithReconnect(ctx, discardLogger(), p, func(_ context.Context, connected func()) error {
+		calls++
+		if calls == 1 {
+			connected()
+			return errors.New("dropped")
+		}
+		return errJoinTimeout
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want retries until shutdown: the session joined before its join timeouts", err)
+	}
+	if calls <= maxJoinTimeouts+1 {
+		t.Errorf("attempts = %d, want the loop to keep retrying past %d join timeouts", calls, maxJoinTimeouts)
+	}
+}
+
+// TestRunWithReconnect_JoinTimeoutsMustBeConsecutive: a cycle that failed some
+// other way between join timeouts breaks the run.
+func TestRunWithReconnect_JoinTimeoutsMustBeConsecutive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 3 * maxJoinTimeouts, cancel: cancel}
+	p := reconnectPolicy{initial: time.Second, max: 8 * time.Second, factor: 2, sleep: fs.sleep}
+
+	calls := 0
+	err := runWithReconnect(ctx, discardLogger(), p, func(context.Context, func()) error {
+		calls++
+		if calls%maxJoinTimeouts == 0 {
+			return errors.New("gateway hiccup")
+		}
+		return errJoinTimeout
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want no fatal: no %d join timeouts were consecutive", err, maxJoinTimeouts)
+	}
+}
+
 // TestRunWithReconnect_JoinTimeoutCountResetsOnJoin: only CONSECUTIVE join
 // timeouts are fatal — a cycle that joined in between proves the channel works.
 func TestRunWithReconnect_JoinTimeoutCountResetsOnJoin(t *testing.T) {

@@ -356,10 +356,12 @@ const defaultJoinTimeout = 30 * time.Second
 var errJoinTimeout = errors.New("wirenpc: no voice server answer within the join timeout")
 
 // ReasonVoiceJoinTimeout is the [FatalError] reason for a voice join Discord
-// never answered [maxJoinTimeouts] cycles in a row. One unanswered join can be a
-// blip; three in a row is a channel the Bot cannot join (no Connect permission,
-// not a voice channel, outside the server), and retrying it forever only leaves
-// the session idling without a Bot until the idle close.
+// never answered [maxJoinTimeouts] cycles in a row before the session ever
+// joined. One unanswered join can be a blip; three in a row on a session that
+// never got in is a channel the Bot cannot join (no Connect permission, not a
+// voice channel, outside the server), and retrying it forever only leaves the
+// session idling without a Bot until the idle close. Once a session has joined,
+// join timeouts are a Discord outage and stay transient (runWithReconnect).
 const ReasonVoiceJoinTimeout = "voice_join_timeout"
 
 // maxJoinTimeouts is how many consecutive join timeouts end the session.
