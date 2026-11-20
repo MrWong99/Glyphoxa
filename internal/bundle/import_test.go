@@ -704,8 +704,8 @@ func TestImportRoundTripWithHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertTranscriptChunk: %v", err)
 	}
-	if _, err := src.EndVoiceSession(ctx, vs1.ID, 2); err != nil {
-		t.Fatalf("EndVoiceSession 1: %v", err)
+	if _, err := src.CloseVoiceSession(ctx, vs1.ID, storage.VoiceSessionEnded, 2, nil); err != nil {
+		t.Fatalf("CloseVoiceSession(ended) 1: %v", err)
 	}
 	// Session 2: one line.
 	vs2, err := src.CreateVoiceSession(ctx, srcCID)
@@ -718,8 +718,8 @@ func TestImportRoundTripWithHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Upsert m1: %v", err)
 	}
-	if _, err := src.EndVoiceSession(ctx, vs2.ID, 1); err != nil {
-		t.Fatalf("EndVoiceSession 2: %v", err)
+	if _, err := src.CloseVoiceSession(ctx, vs2.ID, storage.VoiceSessionEnded, 1, nil); err != nil {
+		t.Fatalf("CloseVoiceSession(ended) 2: %v", err)
 	}
 
 	b, err := bundle.Export(ctx, bundle.PGStore{Store: src}, srcCID, bundle.ExportOptions{IncludeHistory: true})

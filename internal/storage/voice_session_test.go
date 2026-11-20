@@ -62,9 +62,9 @@ func TestVoiceSessionLifecycle(t *testing.T) {
 	}
 
 	// Stop: ended_at set, status ended, line_count recorded.
-	ended, err := st.EndVoiceSession(ctx, vs.ID, 7)
+	ended, err := st.CloseVoiceSession(ctx, vs.ID, storage.VoiceSessionEnded, 7, nil)
 	if err != nil {
-		t.Fatalf("EndVoiceSession: %v", err)
+		t.Fatalf("CloseVoiceSession(ended): %v", err)
 	}
 	if ended.Status != storage.VoiceSessionEnded {
 		t.Errorf("ended status = %q, want ended", ended.Status)
@@ -210,8 +210,8 @@ func TestReconcileOrphanedVoiceSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVoiceSession (clean): %v", err)
 	}
-	if _, err := st.EndVoiceSession(ctx, clean.ID, 3); err != nil {
-		t.Fatalf("EndVoiceSession (clean): %v", err)
+	if _, err := st.CloseVoiceSession(ctx, clean.ID, storage.VoiceSessionEnded, 3, nil); err != nil {
+		t.Fatalf("CloseVoiceSession(ended) (clean): %v", err)
 	}
 
 	// The orphan: still 'running', no live loop (this "process" just booted).
@@ -313,10 +313,10 @@ func TestCloseVoiceSessionFailed(t *testing.T) {
 	}
 }
 
-// TestEndVoiceSessionDelegatesToEnded is #123: EndVoiceSession stays a thin
-// delegating wrapper over CloseVoiceSession — a normal stop still lands 'ended'
-// with a NULL end_reason (distinguishable from both orphaned and failed).
-func TestEndVoiceSessionDelegatesToEnded(t *testing.T) {
+// TestCloseVoiceSessionCleanEnd is #123: a normal stop (CloseVoiceSession with
+// VoiceSessionEnded and no reason) lands 'ended' with a NULL end_reason
+// (distinguishable from both orphaned and failed).
+func TestCloseVoiceSessionCleanEnd(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
@@ -326,9 +326,9 @@ func TestEndVoiceSessionDelegatesToEnded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVoiceSession: %v", err)
 	}
-	ended, err := st.EndVoiceSession(ctx, vs.ID, 4)
+	ended, err := st.CloseVoiceSession(ctx, vs.ID, storage.VoiceSessionEnded, 4, nil)
 	if err != nil {
-		t.Fatalf("EndVoiceSession: %v", err)
+		t.Fatalf("CloseVoiceSession(ended): %v", err)
 	}
 	if ended.Status != storage.VoiceSessionEnded || ended.EndedAt == nil {
 		t.Errorf("ended = %+v, want ended with ended_at", ended)
@@ -341,16 +341,16 @@ func TestEndVoiceSessionDelegatesToEnded(t *testing.T) {
 	}
 }
 
-// TestEndVoiceSessionNotFound asserts ending an unknown id is ErrNotFound (the
+// TestCloseVoiceSessionNotFound asserts closing an unknown id is ErrNotFound (the
 // RPC maps it accordingly).
-func TestEndVoiceSessionNotFound(t *testing.T) {
+func TestCloseVoiceSessionNotFound(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, _ := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	if _, err := st.EndVoiceSession(ctx, uuid.New(), 0); !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("EndVoiceSession(random) = %v, want ErrNotFound", err)
+	if _, err := st.CloseVoiceSession(ctx, uuid.New(), storage.VoiceSessionEnded, 0, nil); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("CloseVoiceSession(random) = %v, want ErrNotFound", err)
 	}
 	if _, err := st.GetVoiceSession(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("GetVoiceSession(random) = %v, want ErrNotFound", err)

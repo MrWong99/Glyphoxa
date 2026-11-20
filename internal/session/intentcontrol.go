@@ -31,7 +31,6 @@ type IntentControlStore interface {
 	GetLiveVoiceSessionIntentForTenant(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSessionIntent, error)
 	GetVoiceSession(ctx context.Context, id uuid.UUID) (storage.VoiceSession, error)
 	IsCampaignLiveIntent(ctx context.Context, campaignID uuid.UUID) (bool, error)
-	AnyLiveVoiceSessionIntent(ctx context.Context) (bool, error)
 	// ReapVoiceSessionIntentIfExpired marks the given claimed/live intent dead when
 	// its heartbeat is stale — the zero-worker escape (#491 review item 4): Start
 	// unblocks a Tenant whose prior worker died and left a claimed/live row no tick
@@ -353,17 +352,6 @@ func (c *IntentControl) IsCampaignLive(campaignID uuid.UUID) bool {
 	return live
 }
 
-// AnyLive reports whether any intent is live in the pool — the split-mode Discord
-// health short-circuit (#491, the claim-plane sibling of Manager.AnyLive).
-func (c *IntentControl) AnyLive() bool {
-	live, err := c.store.AnyLiveVoiceSessionIntent(context.Background())
-	if err != nil {
-		c.log.Warn("intent control: any-live health read", "err", err)
-		return false
-	}
-	return live
-}
-
 // The live-session controls below relay through the claim plane (#503): the
 // requester writes a voice_session_controls row the HOSTING worker drains on its
 // heartbeat tick, and polls it to a terminal status — the stop_requested
@@ -494,7 +482,7 @@ func (c *IntentControl) cancelPendingControl(id uuid.UUID) {
 // not the default it resolved to at claim time). Defensive today — the member
 // lister that consumes this seam is wired only where presence runs in-process
 // (the Manager path); it reads on a detached background ctx like the sibling
-// IsCampaignLive/AnyLive claim-plane reads, and errors degrade to false (the
+// IsCampaignLive claim-plane read, and errors degrade to false (the
 // members read is a soft feature).
 func (c *IntentControl) ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool) {
 	live, err := c.store.GetLiveVoiceSessionIntentForTenant(context.Background(), tenantID)
