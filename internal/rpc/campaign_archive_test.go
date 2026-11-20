@@ -167,9 +167,11 @@ type fakeClipSweeper struct {
 	portraitKeys []string
 	deleted      []string
 	listErr      error
+	listed       int // how many key listings were requested, across all kinds
 }
 
 func (f *fakeClipSweeper) CampaignClipKeys(context.Context, uuid.UUID) ([]string, error) {
+	f.listed++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -177,6 +179,7 @@ func (f *fakeClipSweeper) CampaignClipKeys(context.Context, uuid.UUID) ([]string
 }
 
 func (f *fakeClipSweeper) CampaignMapImageKeys(context.Context, uuid.UUID) ([]string, error) {
+	f.listed++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -184,6 +187,7 @@ func (f *fakeClipSweeper) CampaignMapImageKeys(context.Context, uuid.UUID) ([]st
 }
 
 func (f *fakeClipSweeper) CampaignPortraitKeys(context.Context, uuid.UUID) ([]string, error) {
+	f.listed++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -444,5 +448,91 @@ func TestSetActiveCampaign_ArchivedRefused(t *testing.T) {
 	// The archived target must never be persisted as a selection.
 	if len(store.setActiveCalls) != 0 {
 		t.Errorf("archived target must not persist a selection: %+v", store.setActiveCalls)
+	}
+}
+
+// TestArchiveDelete_ForeignCampaignIsNotFoundBeforeTheLiveGuard is the R8
+// regression. liveGuard scans every Tenant's live sessions by bare campaign
+// id, and it used to run BEFORE anything tenant-scoped: a caller holding
+// another Tenant's campaign id got FailedPrecondition ("backs the live Voice
+// Session") while it was live and NotFound otherwise — an existence and
+// liveness oracle across the tenant boundary. A campaign outside the caller's
+// Tenant must be NotFound whether or not it is live, with no write attempted.
+func TestArchiveDelete_ForeignCampaignIsNotFoundBeforeTheLiveGuard(t *testing.T) {
+	t.Parallel()
+	foreign := uuid.New()
+	for _, live := range []bool{true, false} {
+		store := newFakeArchiveStore()
+		store.notOwned = map[uuid.UUID]bool{foreign: true}
+		var sessions *fakeSessionManager
+		if live {
+			sessions = liveMgr(foreign)
+		}
+		client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), sessions)
+
+		_, err := client.ArchiveCampaign(context.Background(),
+			connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: foreign.String()}))
+		if got := connect.CodeOf(err); got != connect.CodeNotFound {
+			t.Errorf("ArchiveCampaign(foreign, live=%v): code = %v, want NotFound", live, got)
+		}
+		_, err = client.DeleteCampaign(context.Background(),
+			connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: foreign.String()}))
+		if got := connect.CodeOf(err); got != connect.CodeNotFound {
+			t.Errorf("DeleteCampaign(foreign, live=%v): code = %v, want NotFound", live, got)
+		}
+		if len(store.archiveCalls) != 0 || len(store.deleteCalls) != 0 {
+			t.Errorf("live=%v: a write was attempted on a foreign campaign (archive=%v delete=%v)",
+				live, store.archiveCalls, store.deleteCalls)
+		}
+	}
+}
+
+// TestDeleteCampaign_ForeignCampaignBlobKeysAreNeverListed is the other half
+// of R8: DeleteCampaign listed the campaign's blob keys — by bare campaign id,
+// through three unscoped listers — before the tenant-scoped delete refused. A
+// foreign id must be turned away before a single key is read.
+func TestDeleteCampaign_ForeignCampaignBlobKeysAreNeverListed(t *testing.T) {
+	t.Parallel()
+	foreign := uuid.New()
+	store := newFakeArchiveStore()
+	store.notOwned = map[uuid.UUID]bool{foreign: true}
+	sweeper := &fakeClipSweeper{keys: []string{"foreign-clip"}, mapKeys: []string{"foreign-map"}}
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
+	srv.SetCampaignBlobSweeper(sweeper)
+
+	_, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: foreign.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("code = %v, want NotFound", got)
+	}
+	if sweeper.listed != 0 {
+		t.Errorf("blob keys of a foreign campaign were listed %d time(s) before the tenant check", sweeper.listed)
+	}
+	if len(sweeper.deleted) != 0 || store.deleteJobKind != "" {
+		t.Errorf("a foreign campaign's blobs were swept (%v) or a sweep job enqueued (%q)", sweeper.deleted, store.deleteJobKind)
+	}
+}
+
+// TestArchiveDelete_OwnLiveCampaignStillRefused keeps the guard itself: the
+// caller's OWN campaign, live, is still FailedPrecondition — the ownership
+// check goes in front of the live guard, it does not replace it.
+func TestArchiveDelete_OwnLiveCampaignStillRefused(t *testing.T) {
+	t.Parallel()
+	own := uuid.New()
+	store := newFakeArchiveStore()
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(own))
+
+	_, err := client.ArchiveCampaign(context.Background(),
+		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: own.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("ArchiveCampaign(own, live): code = %v, want FailedPrecondition", got)
+	}
+	_, err = client.DeleteCampaign(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: own.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		t.Errorf("DeleteCampaign(own, live): code = %v, want FailedPrecondition", got)
+	}
+	if len(store.ownershipChecks) != 2 {
+		t.Errorf("ownership checks = %v, want one per call", store.ownershipChecks)
 	}
 }

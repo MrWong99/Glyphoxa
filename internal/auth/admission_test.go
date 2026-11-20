@@ -57,7 +57,7 @@ func (f *fakeSignup) ProvisionSignup(_ context.Context, p storage.SignupParams) 
 	return storage.SignupResult{
 		User:    storage.User{ID: uuid.New(), DiscordUserID: p.User.DiscordUserID},
 		Tenant:  storage.Tenant{ID: uuid.New(), Name: p.TenantName},
-		Session: storage.Session{Token: p.Session.Token},
+		Session: storage.Session{ExpiresAt: p.Session.ExpiresAt},
 		Created: f.created,
 	}, nil
 }
@@ -74,7 +74,7 @@ func signupCallback(t *testing.T, adm auth.Admission, store *fakeOAuthStore, du 
 func signupCallbackWithCookie(t *testing.T, adm auth.Admission, store *fakeOAuthStore, du auth.DiscordUser, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
 	disc := &fakeDiscord{user: du}
-	o := auth.NewOAuth(store, disc, "/", adm, nil)
+	o := auth.NewOAuth(store, disc, "/", adm, auth.EdgeConfig{}, nil)
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
 	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: cookie})
@@ -262,7 +262,7 @@ func TestOAuthCallback_OpenModeMisconfigured_FailsClosed(t *testing.T) {
 func TestOAuthLogin_OpenMode_RequiresAcknowledgment(t *testing.T) {
 	t.Parallel()
 	adm := auth.Admission{Mode: auth.AdmissionOpen, SignupPlanSlug: "beta-trial", Signup: &fakeSignup{}}
-	o := auth.NewOAuth(&fakeOAuthStore{}, &fakeDiscord{}, "/", adm, nil)
+	o := auth.NewOAuth(&fakeOAuthStore{}, &fakeDiscord{}, "/", adm, auth.EdgeConfig{}, nil)
 
 	rec := httptest.NewRecorder()
 	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil))
@@ -284,7 +284,7 @@ func TestOAuthLogin_OpenMode_AcknowledgmentRidesStateCookie(t *testing.T) {
 	t.Parallel()
 	disc := &fakeDiscord{authBase: "https://discord/authorize"}
 	adm := auth.Admission{Mode: auth.AdmissionOpen, SignupPlanSlug: "beta-trial", Signup: &fakeSignup{}}
-	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", adm, nil)
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", adm, auth.EdgeConfig{}, nil)
 
 	rec := httptest.NewRecorder()
 	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login?aup=1", nil))

@@ -36,7 +36,12 @@ type campaignArchive struct {
 // (#269); *storage.Store satisfies it. Delete cascades in one statement; Archive
 // clears any durable selection pointing at the campaign.
 type campaignArchiveStore interface {
-	// All four are TENANT-SCOPED (#473): they match (id, tenant_id), so a
+	// GetCampaignInTenant is the ownership check Archive and Delete run FIRST:
+	// everything they do before the scoped write — the live-session guard, the
+	// blob-key listing — is keyed by the bare campaign id, so the id must be
+	// proven to belong to the caller's Tenant before any of it runs.
+	GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
+	// The four writes are TENANT-SCOPED (#473): they match (id, tenant_id), so a
 	// foreign-tenant id is invisible and yields ErrNotFound — a cross-tenant archive
 	// or destructive delete can never land. The handlers thread auth.TenantID(ctx).
 	ArchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
@@ -71,7 +76,8 @@ type CampaignBlobSweeper interface {
 // deleted out from under it. It consults the SAME live closure
 // resolveActiveCampaign uses, so there is one source of session truth (ADR-0039).
 // It returns nil when no session is live, the source is unwired (keyless tests),
-// or a DIFFERENT campaign is live. Note the inherent TOCTOU: the live closure is
+// or a DIFFERENT campaign is live. Because it scans every Tenant's sessions by
+// bare campaign id, callers must run [campaignArchive.requireOwned] first. Note the inherent TOCTOU: the live closure is
 // in-process manager state and a session could end (or start) in the millisecond
 // after this check — accepted for the single-operator web tier, where the window
 // is negligible and the DB cascade is still safe either way.
@@ -82,6 +88,27 @@ func (s *campaignArchive) liveGuard(id uuid.UUID, verb string) error {
 	if s.active.isCampaignLive(id) {
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("campaign backs the live Voice Session and cannot be "+verb+" while it runs"))
+	}
+	return nil
+}
+
+// requireOwned proves id names a campaign in the caller's Tenant before a
+// handler does anything keyed by the bare id. The scoped store writes already
+// refuse a foreign id, but they run LAST: without this check a caller could
+// probe another Tenant's campaign id through the steps that precede them —
+// liveGuard answered FailedPrecondition ("backs the live Voice Session") for a
+// foreign campaign that is live and NotFound for one that is not, an
+// existence-and-liveness oracle, and DeleteCampaign listed a foreign
+// campaign's blob keys before the delete refused. A foreign or unknown id is
+// CodeNotFound either way; existence is never leaked. op names the RPC in the
+// log line.
+func (s *campaignArchive) requireOwned(ctx context.Context, tenantID, id uuid.UUID, op string) error {
+	if _, err := s.store.GetCampaignInTenant(ctx, tenantID, id); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
+		}
+		slog.Default().Error(op+": tenant-scoped campaign lookup failed", "campaign_id", id, "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return nil
 }
@@ -102,6 +129,9 @@ func (s *campaignArchive) ArchiveCampaign(
 	tenantID, ok := auth.TenantID(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
+	if err := s.requireOwned(ctx, tenantID, id, "ArchiveCampaign"); err != nil {
+		return nil, err
 	}
 	if err := s.liveGuard(id, "archived"); err != nil {
 		return nil, err
@@ -162,6 +192,9 @@ func (s *campaignArchive) DeleteCampaign(
 	tenantID, ok := auth.TenantID(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
+	if err := s.requireOwned(ctx, tenantID, id, "DeleteCampaign"); err != nil {
+		return nil, err
 	}
 	if err := s.liveGuard(id, "deleted"); err != nil {
 		return nil, err

@@ -1,12 +1,11 @@
 package highlight
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -28,13 +27,15 @@ type ClipStore interface {
 // (tenant-only, e.g. a voice-standalone build with no web resolver).
 type CampaignResolver func(ctx context.Context) (uuid.UUID, bool, error)
 
-// ClipServer serves a Highlight's audio clip over plain HTTP (#308/#309): GET
-// /api/v1/highlights/{id}/clip, a TenantRequired row in the guarded mount
-// table (#408/#446 — session AND tenant) beside the SSE relay (ADR-0015 —
-// a byte stream, not a Connect unary). It loads the row
-// tenant-scoped, fetches the clip through the blob seam (ADR-0048), and streams
-// it with http.ServeContent so the browser <audio> scrubber's Range requests
-// resolve to partial content.
+// ClipServer serves a Highlight's byte assets over plain HTTP: the audio clip
+// (#308/#309), the AI-generated image (#311) and the generated sound (#312), at
+// GET /api/v1/highlights/{id}/{clip,image,sound}. Each is a TenantRequired row
+// in the guarded mount table (#408/#446 — session AND tenant) beside the SSE
+// relay (ADR-0015 — a byte stream, not a Connect unary). It loads the row
+// tenant-scoped and hands the bytes to [blob.Serve] (ADR-0048), which streams
+// them with Range support (the browser <audio> scrubber), answers conditional
+// requests without fetching the blob, and stamps the nosniff/CSP hardening
+// every byte mount shares.
 type ClipServer struct {
 	store   ClipStore
 	blobs   blob.Store
@@ -51,17 +52,55 @@ func NewClipServer(store ClipStore, blobs blob.Store, resolve CampaignResolver, 
 	return &ClipServer{store: store, blobs: blobs, resolve: resolve, log: log}
 }
 
-// ServeClip streams one Highlight's clip. CONTRACT (#408): the mount must be
-// "session AND tenant", not just session — its table row declares
-// TenantRequired (#446), so the guard authenticates the operator AND resolves
-// and injects the tenant server-side. A session-only gate injects just the
-// user, so TenantID misses and this handler 401s every request (the
-// production bug #408 fixed). This
-// handler re-reads that injected tenant to scope the row load, so a foreign-tenant
-// id (or an unparsable one) is 404 — existence is never leaked. A missing blob is also 404
-// (the row and clip should agree, but a purge race must not 500). http.ServeContent
-// handles Range (scrub) and conditional requests off the row's created_at.
+// highlightAsset picks one byte asset off a Highlight row: its blob key (""
+// when the asset does not exist yet), the content type the row declares, and
+// the timestamp that versions it.
+type highlightAsset func(h storage.Highlight) (key, contentType string, modTime time.Time)
+
+// ServeClip streams one Highlight's clip. A clip is written once and never
+// replaced, so the row's created_at versions it.
 func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
+	c.serve(w, req, "clip", func(h storage.Highlight) (string, string, time.Time) {
+		return h.ClipKey, h.ClipContentType, h.CreatedAt
+	})
+}
+
+// ServeImage streams one Highlight's AI-generated image (#311). A Highlight
+// with no image yet (image_key == "") is 404 — the enrichment has not run, is
+// not configured, or failed, and there is nothing to serve.
+func (c *ClipServer) ServeImage(w http.ResponseWriter, req *http.Request) {
+	c.serve(w, req, "image", func(h storage.Highlight) (string, string, time.Time) {
+		return h.ImageKey, h.ImageContentType, h.CreatedAt
+	})
+}
+
+// ServeSound streams one Highlight's generated sound asset (#312). A Highlight
+// with no landed sound (sound_key == "") is 404 — none requested, still
+// generating, unconfigured, or failed. The sound is versioned by
+// sound_requested_at, not created_at: every re-run of the Add-sound action
+// overwrites the SAME blob key, so the request time is what tells a browser its
+// cached copy is stale.
+func (c *ClipServer) ServeSound(w http.ResponseWriter, req *http.Request) {
+	c.serve(w, req, "sound", func(h storage.Highlight) (string, string, time.Time) {
+		modTime := h.CreatedAt
+		if h.SoundRequestedAt != nil {
+			modTime = *h.SoundRequestedAt
+		}
+		return h.SoundKey, h.SoundContentType, modTime
+	})
+}
+
+// serve is the one request path behind the three asset routes; kind names the
+// asset in logs. CONTRACT (#408): the mount must be "session AND tenant", not
+// just session — its table row declares TenantRequired (#446), so the guard
+// authenticates the operator AND resolves and injects the tenant server-side.
+// A session-only gate injects just the user, so TenantID misses and this
+// handler 401s every request (the production bug #408 fixed). The injected
+// tenant scopes the row load, so a foreign-tenant id (or an unparsable one) is
+// 404 — existence is never leaked — and so is a Highlight outside the resolved
+// Active Campaign, an asset that does not exist yet, and a missing blob (the
+// row and its bytes should agree, but a purge race must not 500).
+func (c *ClipServer) serve(w http.ResponseWriter, req *http.Request, kind string, pick highlightAsset) {
 	tenantID, ok := auth.TenantID(req.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
@@ -79,18 +118,18 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err != nil {
-		c.log.Error("highlight clip: load row", "err", err, "highlight", id)
+		c.log.Error("highlight "+kind+": load row", "err", err, "highlight", id)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Active-Campaign scoping (#308): a clip whose highlight belongs to another
+	// Active-Campaign scoping (#308): an asset whose highlight belongs to another
 	// campaign than the resolved Active Campaign is 404 — existence never leaked, the
 	// same posture the Highlight RPCs adopt. A nil resolver leaves scoping tenant-only.
 	if c.resolve != nil {
 		campaignID, ok, rerr := c.resolve(req.Context())
 		if rerr != nil {
-			c.log.Error("highlight clip: resolve active campaign", "err", rerr, "highlight", id)
+			c.log.Error("highlight "+kind+": resolve active campaign", "err", rerr, "highlight", id)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -100,183 +139,17 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	rc, _, err := c.blobs.Get(req.Context(), h.ClipKey)
-	if errors.Is(err, blob.ErrNotFound) {
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		c.log.Error("highlight clip: fetch blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		c.log.Error("highlight clip: read blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", h.ClipContentType)
-	// ServeContent honors Range + If-Modified-Since; the name only informs a
-	// fallback content-type sniff, which our explicit header pre-empts.
-	http.ServeContent(w, req, "clip.wav", h.CreatedAt, bytes.NewReader(data))
-}
-
-// ServeImage streams one Highlight's AI-generated image (#311), mirroring
-// ServeClip: GET /api/v1/highlights/{id}/image, a TenantRequired guarded
-// mount (session AND tenant, per #408 — see ServeClip). It
-// applies the same tenant + Active-Campaign 404 posture (existence never leaked)
-// and serves through http.ServeContent (Range/conditional). A Highlight with no
-// image yet (image_key == "") is 404 — the enrichment has not run, is not
-// configured, or failed, and there is nothing to serve. A missing blob is also
-// 404 (a purge race must not 500).
-func (c *ClipServer) ServeImage(w http.ResponseWriter, req *http.Request) {
-	tenantID, ok := auth.TenantID(req.Context())
-	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-	id, err := uuid.Parse(req.PathValue("id"))
-	if err != nil {
+	// No asset yet: nothing to serve. 404 keeps the posture uniform with a
+	// foreign id — and blob.Get("") would be ErrInvalidKey, a bogus 500.
+	key, contentType, modTime := pick(h)
+	if key == "" {
 		http.NotFound(w, req)
 		return
 	}
 
-	h, err := c.store.GetHighlight(req.Context(), tenantID, id)
-	if errors.Is(err, storage.ErrNotFound) {
-		http.NotFound(w, req)
-		return
+	if err := blob.Serve(w, req, c.blobs, key, blob.ServeOptions{ContentType: contentType, ModTime: modTime}); err != nil {
+		c.log.Error("highlight "+kind+": serve blob", "err", err, "highlight", id)
 	}
-	if err != nil {
-		c.log.Error("highlight image: load row", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Active-Campaign scoping (#308 posture): an image whose highlight belongs to a
-	// campaign other than the resolved Active Campaign is 404. A nil resolver leaves
-	// scoping tenant-only.
-	if c.resolve != nil {
-		campaignID, ok, rerr := c.resolve(req.Context())
-		if rerr != nil {
-			c.log.Error("highlight image: resolve active campaign", "err", rerr, "highlight", id)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if !ok || h.CampaignID != campaignID {
-			http.NotFound(w, req)
-			return
-		}
-	}
-
-	// No image yet: nothing to serve. 404 keeps the posture uniform with a foreign id.
-	if h.ImageKey == "" {
-		http.NotFound(w, req)
-		return
-	}
-
-	rc, _, err := c.blobs.Get(req.Context(), h.ImageKey)
-	if errors.Is(err, blob.ErrNotFound) {
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		c.log.Error("highlight image: fetch blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		c.log.Error("highlight image: read blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", h.ImageContentType)
-	http.ServeContent(w, req, "image", h.CreatedAt, bytes.NewReader(data))
-}
-
-// ServeSound streams one Highlight's generated sound asset (#312), mirroring
-// ServeClip/ServeImage: GET /api/v1/highlights/{id}/sound, a TenantRequired
-// guarded mount (session AND tenant, per #408). Same tenant + Active-Campaign
-// 404 posture (existence never leaked); http.ServeContent gives the browser
-// <audio> scrubber Range/conditional handling. A Highlight with no landed
-// sound (sound_key == "") is 404 — none requested, still generating,
-// unconfigured, or failed. A missing blob is also 404 (a purge race must not
-// 500). Conditional requests key off sound_requested_at (the asset changes on
-// every re-run of the Add-sound action, unlike the created_at-keyed clip).
-func (c *ClipServer) ServeSound(w http.ResponseWriter, req *http.Request) {
-	tenantID, ok := auth.TenantID(req.Context())
-	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-	id, err := uuid.Parse(req.PathValue("id"))
-	if err != nil {
-		http.NotFound(w, req)
-		return
-	}
-
-	h, err := c.store.GetHighlight(req.Context(), tenantID, id)
-	if errors.Is(err, storage.ErrNotFound) {
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		c.log.Error("highlight sound: load row", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if c.resolve != nil {
-		campaignID, ok, rerr := c.resolve(req.Context())
-		if rerr != nil {
-			c.log.Error("highlight sound: resolve active campaign", "err", rerr, "highlight", id)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if !ok || h.CampaignID != campaignID {
-			http.NotFound(w, req)
-			return
-		}
-	}
-
-	// No sound landed: nothing to serve. 404 keeps the posture uniform.
-	if h.SoundKey == "" {
-		http.NotFound(w, req)
-		return
-	}
-
-	rc, _, err := c.blobs.Get(req.Context(), h.SoundKey)
-	if errors.Is(err, blob.ErrNotFound) {
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		c.log.Error("highlight sound: fetch blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		c.log.Error("highlight sound: read blob", "err", err, "highlight", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	modtime := h.CreatedAt
-	if h.SoundRequestedAt != nil {
-		modtime = *h.SoundRequestedAt
-	}
-	w.Header().Set("Content-Type", h.SoundContentType)
-	http.ServeContent(w, req, "sound", modtime, bytes.NewReader(data))
 }
 
 // Compile-time pins: *storage.Store satisfies every narrow store seam this

@@ -36,6 +36,7 @@ GX_DISCORD_BOT_TOKEN=selftest-not-a-real-token
 GX_OPERATOR_IDS=111111111111111111
 GX_ADMISSION_MODE=allowlist
 GX_OLLAMA_URL=
+GX_TRUSTED_CLIENT_IP_HEADER=
 GX_GROQ_API_KEY=
 GX_ELEVENLABS_API_KEY=
 GX_GEMINI_API_KEY=
@@ -99,6 +100,21 @@ if command -v helm >/dev/null 2>&1; then
     || fail "the chart does not render with the open-admission values"
   grep -q 'byok-free' "$workdir/render-open.yaml" || fail "open-admission render lacks the signup plan slug"
   pass "open-admission values (plans catalog + signup slug) render against the local chart"
+
+  # Cloudflare-Tunnel variant: the trusted client-IP header must reach the web
+  # container's env, and must be ABSENT when the operator named none (an
+  # unconfigured pod trusts no client-IP header).
+  grep -q 'GLYPHOXA_TRUSTED_CLIENT_IP_HEADER' "$workdir/render.yaml" \
+    && fail "the default render sets GLYPHOXA_TRUSTED_CLIENT_IP_HEADER although none was named"
+  dcf="$workdir/cloudflare"; mkdir -p "$dcf"
+  run_dry "$dcf" GX_TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP >/dev/null 2>&1 \
+    || fail "dry-run with GX_TRUSTED_CLIENT_IP_HEADER failed"
+  helm template gx-selftest "$CHART" --values "$dcf/values.yaml" \
+    --set-string image.tag=v9.9.9-selftest >"$workdir/render-cf.yaml" \
+    || fail "the chart does not render with a trusted client-IP header"
+  grep -A1 'name: GLYPHOXA_TRUSTED_CLIENT_IP_HEADER' "$workdir/render-cf.yaml" | grep -q 'value: "\?CF-Connecting-IP"\?' \
+    || fail "the web container env lacks GLYPHOXA_TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP"
+  pass "a named trusted client-IP header reaches the web container env (and is absent by default)"
 else
   echo "install-test: SKIP — helm not found; render cases not run" >&2
 fi
@@ -162,7 +178,9 @@ run_dry "$d5" GX_ACME_EMAIL=not-an-email >/dev/null 2>&1 \
   && fail "implausible GX_ACME_EMAIL was accepted"
 run_dry "$d5" GX_BACKUP_DIR=/var/lib/x GX_BACKUP_SCHEDULE='not a schedule' >/dev/null 2>&1 \
   && fail "non-cron GX_BACKUP_SCHEDULE was accepted"
-pass "invalid admission mode / operator ids / backup dir / email / schedule are refused"
+run_dry "$d5" GX_TRUSTED_CLIENT_IP_HEADER='X-Real-IP: evil' >/dev/null 2>&1 \
+  && fail "a GX_TRUSTED_CLIENT_IP_HEADER that is not a header name was accepted"
+pass "invalid admission mode / operator ids / backup dir / email / schedule / client-IP header are refused"
 
 # --- 8. an explicitly EMPTY env var clears a recorded choice on re-run ------
 # d3's state records a backup dir; base_env passes GX_BACKUP_DIR= (set but

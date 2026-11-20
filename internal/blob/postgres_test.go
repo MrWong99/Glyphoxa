@@ -137,6 +137,12 @@ func TestPutGetRoundTrip(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer rc.Close()
+	// The bytea backend already holds the payload in memory, so its body must
+	// be seekable: blob.Serve then streams it (Range included) with no second
+	// copy (R3).
+	if _, ok := rc.(io.ReadSeeker); !ok {
+		t.Errorf("Postgres.Get body is %T, want an io.ReadSeeker", rc)
+	}
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)

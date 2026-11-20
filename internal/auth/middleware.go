@@ -13,8 +13,10 @@ import (
 // composing a single check around a handler in tests and one-off tools.
 
 // WriteDenial maps a policy [Denial] onto the HTTP transport — 401 for a
-// missing/invalid session (or an unresolvable required tenant), 403 for a
-// CSRF failure — with the same message text the Connect adapter returns.
+// missing/invalid session (or an operator with no bound tenant on a
+// tenant-required mount), 403 for a CSRF failure, 503 when the session or
+// tenant could not be checked at all — with the same message text the Connect
+// adapter returns.
 // Call it only with a real denial, never [DenyNone].
 func WriteDenial(w http.ResponseWriter, d Denial) {
 	status := http.StatusUnauthorized
@@ -49,7 +51,8 @@ func RequireSession(a Authenticator, next http.Handler) http.Handler {
 // upstream [RequireSession] injected ([CurrentUser]), resolves the bound
 // tenant SERVER-SIDE via [TenantResolver] (ADR-0039 — never from a client
 // header), and injects it ([WithTenant]) so the handler's [TenantID] read
-// hits. A missing operator or an unresolved tenant rejects 401 — the byte
+// hits. A missing operator or an operator with no tenant rejects 401 (a
+// failed lookup is 503, #661) — the byte
 // handlers ALWAYS need a tenant, so this fails fast with the same code the
 // handler would return anyway (the deliberate contrast with the Connect
 // stack's [TenantOptional], where tenant-agnostic procedures proceed).

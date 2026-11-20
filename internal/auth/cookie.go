@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -52,19 +54,73 @@ func cookieValue(h http.Header, name string) string {
 	return c.Value
 }
 
-// headerSecure reports whether the request reached the reverse proxy over TLS,
-// per the X-Forwarded-Proto header. The self-host topology terminates TLS at the
-// proxy (ADR-0039), so the Go process sees cleartext but must still set Secure
-// cookies when the public edge is https.
-func headerSecure(h http.Header) bool {
-	return strings.EqualFold(h.Get("X-Forwarded-Proto"), "https")
+// SecureCookies reports whether the session, CSRF and OAuth-state cookies must
+// carry the Secure attribute (ADR-0016), derived ONCE from the deployment's
+// public URL — the configured Discord OAuth redirect URL — rather than from
+// each request. The Go process sits behind a TLS-terminating reverse proxy
+// (ADR-0039) and only ever sees cleartext, so the per-request alternative is
+// the X-Forwarded-Proto header, which any client can set or omit and which a
+// proxy that does not overwrite it passes straight through (#662): a missing
+// header silently downgraded the session cookie to non-Secure. The redirect
+// URL is operator configuration and is by construction the scheme browsers
+// reach the instance on (Discord redirects them to it). An https URL yields
+// Secure cookies; http (local dev, http://localhost) and an unset or
+// unparsable value (GLYPHOXA_DEV_MODE, which needs no OAuth) yield non-Secure
+// ones the browser will still store over cleartext.
+func SecureCookies(oauthRedirectURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(oauthRedirectURL))
+	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
-// requestSecure reports whether to mark cookies Secure: the request is TLS
-// directly, or was forwarded as https. Local cleartext dev (http://localhost)
-// is correctly non-Secure so the browser still stores the login cookie.
-func requestSecure(r *http.Request) bool {
-	return r.TLS != nil || headerSecure(r.Header)
+// EdgeConfig is what the auth tier must be TOLD about the reverse proxy in
+// front of it (ADR-0039), because the alternative is believing request headers
+// a client can forge. It is a required constructor argument of [NewOAuth] and
+// [NewAuthServer] — not a setter — so the composition root cannot forget to
+// decide it and silently issue a non-Secure session cookie on an https
+// deployment.
+type EdgeConfig struct {
+	// SecureCookies marks the session, CSRF and OAuth-state cookies Secure.
+	// Derive it with [SecureCookies] from the configured OAuth redirect URL.
+	SecureCookies bool
+	// ClientIPHeader names the ONE request header the deployment's proxy sets
+	// to the real client address, overwriting anything the client sent (e.g.
+	// "CF-Connecting-IP" when the instance is reachable only through
+	// Cloudflare). Empty trusts no such header; see [EdgeConfig.clientIP].
+	ClientIPHeader string
+}
+
+// clientIP extracts the best-effort client IP for the session audit row. The
+// value is only ever stored (sessions.ip) — nothing authorizes on it — but it
+// should not be something the client simply typed (#662).
+//
+// TRUST ASSUMPTION: the web tier is reached only through the deployment's
+// reverse proxy (ADR-0039), and which header that proxy vouches for is
+// OPERATOR CONFIGURATION (GLYPHOXA_TRUSTED_CLIENT_IP_HEADER), never guessed:
+//
+//   - The configured [EdgeConfig.ClientIPHeader], when set and present. Only
+//     name a header your proxy overwrites on every request — behind anything
+//     else a client can supply it and choose its own audit address.
+//   - Otherwise the LAST X-Forwarded-For hop: proxies APPEND the peer they
+//     saw, so the rightmost entry is the one the nearest proxy wrote. The
+//     first entry — which this used to return — is whatever the client put
+//     in the header.
+//   - Otherwise the socket peer.
+func (e EdgeConfig) clientIP(r *http.Request) string {
+	if e.ClientIPHeader != "" {
+		if ip := strings.TrimSpace(r.Header.Get(e.ClientIPHeader)); ip != "" {
+			return ip
+		}
+	}
+	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
+		hops := strings.Split(xff[len(xff)-1], ",")
+		if last := strings.TrimSpace(hops[len(hops)-1]); last != "" {
+			return last
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // sessionCookie builds the HttpOnly session cookie (ADR-0016: HttpOnly, Secure,

@@ -36,6 +36,22 @@ type Mount struct {
 	Handler http.Handler
 }
 
+const (
+	// DefaultBodyReadTimeout is how long ANY request's body may take to arrive
+	// (#662). It covers every route on the listener — the mounts, the SPA root
+	// and the /api/ 404 fence alike — and it is what an unauthenticated caller
+	// gets: half a minute, generous for the small JSON/protobuf messages that
+	// are all a sessionless request can legitimately send. The two upload
+	// routes replace it with a longer deadline, but only AFTER their session
+	// check has passed (auth.UploadBodyReadTimeout).
+	DefaultBodyReadTimeout = 30 * time.Second
+	// idleTimeout closes a keep-alive connection that has sat with no request
+	// for this long. Without it (and with no ReadTimeout to fall back on) an
+	// idle connection is kept open forever. It applies only BETWEEN requests,
+	// so the SSE tail and the streaming chat exchange are unaffected.
+	idleTimeout = 2 * time.Minute
+)
+
 // APIMount adapts a generated Connect handler pair — (mountPath, handler) as
 // returned by a service's Handler() method — into a [Mount] under the public
 // /api prefix. The browser dials Connect at baseUrl "/api"
@@ -63,6 +79,11 @@ type Config struct {
 	// serves the SPA shell with client-side-routing fallback. Nil leaves "/"
 	// unmounted (the API-only server tests).
 	Root http.Handler
+
+	// BodyReadTimeout overrides [DefaultBodyReadTimeout], the deadline armed on
+	// every request that carries a body. Zero means the default; tests shorten
+	// it.
+	BodyReadTimeout time.Duration
 }
 
 // Server is the web-tier HTTP listener. Build it with [NewServer] and run it
@@ -113,6 +134,11 @@ func NewServer(cfg Config) *Server {
 		mux.Handle("/", cfg.Root)
 	}
 
+	bodyTimeout := cfg.BodyReadTimeout
+	if bodyTimeout <= 0 {
+		bodyTimeout = DefaultBodyReadTimeout
+	}
+
 	// Serve HTTP/1.1 and cleartext HTTP/2 (h2c) on the one port via the Go 1.24+
 	// Protocols field, replacing the deprecated x/net/http2/h2c wrapper. Connect
 	// clients use HTTP/1.1; gRPC clients use prior-knowledge h2c.
@@ -123,14 +149,68 @@ func NewServer(cfg Config) *Server {
 	return &Server{
 		srv: &http.Server{
 			Addr:              cfg.Addr,
-			Handler:           mux,
+			Handler:           noSniff(bodyReadDeadline(bodyTimeout, mux)),
 			ReadHeaderTimeout: 5 * time.Second,
-			Protocols:         protocols,
+			// No WriteTimeout on purpose: it is a whole-response wall clock,
+			// and the SSE transcript tail and the streaming chat exchange
+			// legitimately run for hours. No ReadTimeout either: slow request
+			// BODIES are bounded per request instead (bodyReadDeadline), since
+			// one process-wide value cannot fit both a stranger's 1 MiB RPC
+			// and a signed-in 192 MiB upload. Idle connections are bounded by
+			// IdleTimeout.
+			IdleTimeout: idleTimeout,
+			Protocols:   protocols,
 		},
 		done: make(chan struct{}),
 		addr: cfg.Addr,
 		log:  log,
 	}
+}
+
+// noSniff stamps X-Content-Type-Options: nosniff on every response the
+// listener serves (#662) — the Connect JSON, the SSE stream, the OAuth
+// redirects and error pages as much as the SPA and the blob mounts, which also
+// set it themselves. Every handler here declares its content type; a browser
+// must never second-guess one into something executable.
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// bodyReadDeadline bounds how long a request body may take to arrive (#662):
+// with only ReadHeaderTimeout set, a client could send its headers promptly and
+// then trickle the body one byte at a time, pinning a connection and a
+// goroutine indefinitely. It wraps the WHOLE mux, not individual mounts: a
+// route nobody thought to wrap (the SPA root, the /api/ 404 fence) accepts a
+// POST with a declared body just as readily as an API mount does, and net/http
+// drains an unread body after the handler returns.
+//
+// It is a deadline armed per request through [http.ResponseController] rather
+// than http.Server.ReadTimeout because the upload routes need a much longer
+// one, and they need it only for callers who have authenticated: this default
+// is armed first, and the auth layer extends it after the session check
+// passes (auth.UploadBodyReadTimeout). One process-wide ReadTimeout cannot
+// express "30 seconds for strangers, 30 minutes for a signed-in upload".
+//
+// The deadline covers the body and nothing after it. net/http clears the
+// connection read deadline itself once the body has been read to EOF (HTTP/1),
+// and on HTTP/2 an expired stream deadline only fails further body reads — so
+// a handler that has consumed its body may take as long as it likes to answer
+// (an LLM-backed call, the streaming chat exchange) and its context is not
+// cancelled. A bodyless request — every GET, the SSE transcript tail included
+// — is never given a deadline at all.
+func bodyReadDeadline(d time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+			// Best effort: a ResponseWriter that cannot set deadlines (a test
+			// recorder, an exotic wrapper) serves unbounded rather than failing
+			// the request.
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start binds the listener synchronously (so [Server.Addr] resolves an
