@@ -297,7 +297,7 @@ func TestPipeline_ArrivalGapMidUtteranceDoesNotEndpoint(t *testing.T) {
 	// gap (the packets were delayed, not part of a speaker stop).
 	pts := func(i int) time.Duration { return time.Duration(i) * 20 * time.Millisecond }
 	for i := range frames[:gapAt] {
-		inbound <- gxvoice.Frame{PTS: pts(i), Sequence: uint32(i)}
+		inbound <- gxvoice.Frame{PTS: pts(i)}
 	}
 	// The jitter gap: no packets ARRIVE for ≥ the hangover, but no Discord
 	// silence frames were seen — the speaker did not stop. The clock must not
@@ -308,7 +308,7 @@ func TestPipeline_ArrivalGapMidUtteranceDoesNotEndpoint(t *testing.T) {
 	// Speech resumes: stream time contiguous with the pre-gap frames.
 	for i := range frames[gapAt:] {
 		j := gapAt + i
-		inbound <- gxvoice.Frame{PTS: pts(j), Sequence: uint32(j)}
+		inbound <- gxvoice.Frame{PTS: pts(j)}
 	}
 	// The genuine stop: Discord's explicit silence frames, then the packet gap
 	// the clock endpoints through (the #91 shape).

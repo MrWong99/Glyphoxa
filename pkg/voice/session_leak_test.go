@@ -157,7 +157,7 @@ func TestSessionCloseReapsDisgoAudioSender(t *testing.T) {
 	conn := &reapConn{inner: newReapDisgoConn()}
 	sess, err := newSession(context.Background(), testGuild, testChannel, conn, sessionConfig{
 		logger:        discardLogger(),
-		metrics:       discardMetrics{},
+		metrics:       DiscardMetrics{},
 		inboundBuffer: 8,
 	})
 	if err != nil {

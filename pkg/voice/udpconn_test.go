@@ -148,9 +148,9 @@ func sealRTP(t *testing.T, seq uint16, ts, ssrc uint32, payload []byte) []byte {
 }
 
 // keepaliveMetrics counts the two keepalive recorder calls; the rest of the
-// MetricsRecorder surface is inherited no-ops from discardMetrics.
+// MetricsRecorder surface is inherited no-ops from DiscardMetrics.
 type keepaliveMetrics struct {
-	discardMetrics
+	DiscardMetrics
 	mu         sync.Mutex
 	sent, errs int
 }
@@ -182,7 +182,7 @@ func noopDave() godave.Session {
 func newTestUDPConn(t *testing.T, rec MetricsRecorder, ticks chan time.Time, conns ...*fakePacketConn) *keepaliveUDPConn {
 	t.Helper()
 	if rec == nil {
-		rec = discardMetrics{}
+		rec = DiscardMetrics{}
 	}
 	u := newKeepaliveUDPConn(noopDave(), func(uint32) snowflake.ID { return 0 }, discardLogger(), rec)
 	var dials int
@@ -371,6 +371,105 @@ func TestKeepaliveUDPConnRefusesOpenAfterTerminate(t *testing.T) {
 	// revive the transport with a socket and keepalive loop nothing will stop.
 	if _, _, err := u.Open(context.Background(), "198.51.100.1", 443, 42); err == nil {
 		t.Fatal("Open succeeded on a terminated transport")
+	}
+}
+
+// startBlockedOpen runs Open on a socket whose discovery reply has not arrived
+// yet and returns once Open is parked in that read — the lost-reply re-Open
+// that used to hold connMu for the whole 5 s discovery timeout.
+func startBlockedOpen(t *testing.T, u *keepaliveUDPConn, fc *fakePacketConn) <-chan error {
+	t.Helper()
+	errc := make(chan error, 1)
+	go func() {
+		_, _, err := u.Open(context.Background(), "198.51.100.1", 443, 42)
+		errc <- err
+	}()
+	if !eventually(func() bool { return fc.readers.Load() == 1 }) {
+		t.Fatal("Open never reached the discovery read")
+	}
+	return errc
+}
+
+// returnsPromptly fails the test unless fn returns within a second.
+func returnsPromptly(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("%s blocked behind an Open waiting on IP discovery", what)
+	}
+}
+
+// TestKeepaliveUDPConnTerminateDuringDiscovery pins the re-check: a re-Open
+// stuck on a lost discovery reply must not hold up Write or terminate (and
+// through terminate a Session.Close holding playMu), and when the reply finally
+// lands it must see the terminate, close its socket and refuse — never revive
+// the transport with a socket and keepalive loop nothing will stop.
+func TestKeepaliveUDPConnTerminateDuringDiscovery(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	ticks := make(chan time.Time)
+	fc1, fc2 := newFakePacketConn(), newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc1, fc2)
+	open(t, u, fc1, 42)
+
+	errc := startBlockedOpen(t, u, fc2)
+	returnsPromptly(t, "Write", func() { _, _ = u.Write([]byte{0x01}) })
+	returnsPromptly(t, "terminate", u.terminate)
+
+	fc2.reads <- discoveryResponse(42, "203.0.113.7", 50000)
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("Open succeeded after the transport was terminated mid-discovery")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Open did not return after its discovery reply")
+	}
+	select {
+	case <-fc2.closed:
+	default:
+		t.Fatal("the refused Open left its new socket open")
+	}
+	if _, err := u.Write([]byte{0x01}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write after terminate = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestKeepaliveUDPConnCloseDuringDiscovery: a pause landing while a re-Open is
+// discovering behaves as if it ran right after that Open — the transport ends
+// up paused with no socket or keepalive loop, and a later Open resumes it.
+func TestKeepaliveUDPConnCloseDuringDiscovery(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	ticks := make(chan time.Time)
+	fc1, fc2, fc3 := newFakePacketConn(), newFakePacketConn(), newFakePacketConn()
+	u := newTestUDPConn(t, nil, ticks, fc1, fc2, fc3)
+	open(t, u, fc1, 42)
+
+	errc := startBlockedOpen(t, u, fc2)
+	returnsPromptly(t, "Close", func() { _ = u.Close() })
+
+	fc2.reads <- discoveryResponse(42, "203.0.113.7", 50000)
+	if err := <-errc; err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	select {
+	case <-fc2.closed:
+	default:
+		t.Fatal("the Close that landed mid-discovery left the new socket open")
+	}
+	if u.LocalAddr() != nil {
+		t.Fatal("transport has a live socket after a Close that landed mid-Open")
+	}
+
+	open(t, u, fc3, 42)
+	defer u.terminate()
+	if u.LocalAddr() == nil {
+		t.Fatal("a later Open did not resume the paused transport")
 	}
 }
 

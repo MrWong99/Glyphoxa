@@ -5,14 +5,19 @@ run:
   # Lint the PRODUCTION build (the image's tags), not the stub build: the real
   # Opus codec, DAVE wiring and their tests only compile under these tags, so an
   # untagged run never sees them. The `opus` tag needs pkg-config + libopus-dev
-  # (CI's lint job installs them). The integration/live/bench tag sets are not
-  # linted yet: enabling them surfaced 3 errcheck findings in test files plus 2
-  # bench-only `unused` helpers (2026-11-20) that their package owners should
-  # clear first.
+  # (CI's lint job installs them). The integration, live and bench tags are
+  # linted too, so their test files are held to the same bar; they only add
+  # files to the type-check (never run anything), so no Docker or API key is
+  # needed. All tags are on in ONE pass, so a helper used only under `live` is
+  # seen as used under `bench` too — keep such helpers in the file that carries
+  # the narrowest tag set (see voicebench's benchPersona).
   build-tags:
     - opus
     - dave
     - nolibopusfile
+    - integration
+    - live
+    - bench
 
 formatters:
   enable:

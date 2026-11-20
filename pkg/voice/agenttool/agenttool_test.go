@@ -1583,6 +1583,44 @@ func TestEngine_DiceHardening_ArmedTurnAppendsInstruction(t *testing.T) {
 	})
 }
 
+// TestEngine_DiceHardening_FollowsCampaignLanguage: a German campaign's armed
+// turn gets the instruction in German, not an English sentence spliced into a
+// German system prompt; an unknown language falls back to English, like the
+// keyword gate. Two turns of one session carry the identical text (the prompt
+// prefix stays cacheable).
+func TestEngine_DiceHardening_FollowsCampaignLanguage(t *testing.T) {
+	const deSubstr = "Erfinde, rate oder spiele niemals ein Würfelergebnis vor."
+	armedSystem := func(t *testing.T, lang, utterance string) []string {
+		t.Helper()
+		roll := step{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"}
+		prov := &scriptedProvider{steps: []step{roll, {text: "Gut.", stop: "end_turn"}, roll, {text: "Gut.", stop: "end_turn"}}}
+		eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0, agenttool.WithLanguage(lang))
+		var systems []string
+		for range 2 {
+			before := len(prov.requests())
+			if _, err := eng.Generate(context.Background(), []llm.Message{
+				{Role: llm.RoleSystem, Text: "Du bist Bart."},
+				{Role: llm.RoleUser, Text: utterance},
+			}); err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			systems = append(systems, prov.requests()[before].Messages[0].Text)
+		}
+		return systems
+	}
+
+	de := armedSystem(t, "de-DE", "Würfel einen W20 für mich.")
+	if !strings.Contains(de[0], deSubstr) || strings.Contains(de[0], hardeningSubstr) {
+		t.Errorf("German armed system prompt = %q, want the German instruction only", de[0])
+	}
+	if de[0] != de[1] {
+		t.Errorf("hardened system prompt changed between turns:\n%q\n%q", de[0], de[1])
+	}
+	if fr := armedSystem(t, "fr", "Roll a d20 for me."); !strings.Contains(fr[0], hardeningSubstr) {
+		t.Errorf("unknown-language armed system prompt = %q, want the English fallback", fr[0])
+	}
+}
+
 // TestEngine_InventedRoll_RegeneratesWithForcedDice is the headline AC: dice armed,
 // the model narrates a roll result WITHOUT calling the tool → the reply is discarded
 // and regenerated with the dice tool FORCED; the delivered reply reflects the

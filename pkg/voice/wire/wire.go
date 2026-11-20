@@ -1,19 +1,18 @@
-// Package wire assembles the end-to-end live-NPC voice loop from the pieces the
-// MVP built in isolation: the Discord audio Session (pkg/voice), the
-// orchestrator reactive pipeline (VAD → STT → Address Detection → Reply → TTS),
-// and the production Agent loop (pkg/voice/agent driven by the LLM provider and,
-// optionally, the tool-use loop via pkg/voice/agenttool).
+// Package wire assembles the end-to-end live-NPC voice loop from the Discord
+// audio Session (pkg/voice), the orchestrator reactive pipeline (VAD → STT →
+// Address Detection → Reply → TTS), and the production Agent loop
+// (pkg/voice/agent driven by the LLM provider and, optionally, the tool-use
+// loop via pkg/voice/agenttool).
 //
-// It is the integration seam for task #4. The one piece the MVP does not yet
-// have is the audio codec: Discord voice is Opus at 48 kHz, while the
-// orchestrator works in PCM [audio.Frame]s at the VAD/STT sample rate and the
-// TTS provider emits PCM [tts.AudioChunk]s — so a live NPC needs Opus↔PCM
-// transcoding, resampling, and 20 ms reframing on both directions (the playback
-// aligner pkg/voice/tts documents as not-yet-built). That work is isolated
-// behind the [Codec] interface; this package wires everything up to that
-// boundary and fails cleanly with [ErrCodecUnavailable] when no real Codec is
-// supplied, so the construction and control flow are complete and testable
-// before the codec lands.
+// Inbound, a [Pipeline] reads the Session's Opus frames, decodes them to PCM
+// [audio.Frame]s and feeds the orchestrator. Outbound, a [TeeSynthesizer] copies
+// every synthesized sentence to a [PlaybackPump], which encodes it to Opus and
+// plays the sentences in order on the Session. Discord voice is Opus at 48 kHz
+// while the orchestrator and TTS work in PCM at their own rates, so both
+// directions cross the [Codec] boundary. The real Codec lives in
+// pkg/voice/wire/codec under the `opus` build tag; a build without it gets
+// [UnavailableCodec], which reports [ErrCodecUnavailable] so the loop still
+// constructs and fails visibly instead of silently muting the NPC.
 package wire
 
 import (
@@ -29,15 +28,14 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
-// ErrCodecUnavailable is returned by the stub [Codec] (and surfaced by
-// [RunSession]) when the Opus↔PCM transcoding the live loop needs has not been
-// built into this binary. It lets the whole pipeline be constructed and its
-// control flow exercised while the codec is a separate, pending piece of work.
+// ErrCodecUnavailable is returned by the stub [Codec] (and surfaced by the
+// [PlaybackPump] when a sentence cannot be played) when the Opus↔PCM
+// transcoding the live loop needs is not built into this binary (no `opus`
+// build tag).
 var ErrCodecUnavailable = errors.New("wire: audio codec unavailable (Opus↔PCM transcoding not built into this binary)")
 
-// Codec bridges Discord's Opus audio and the orchestrator's PCM. It is the one
-// boundary between the validated reasoning pipeline and the unbuilt transcoding
-// layer; see the package doc.
+// Codec bridges Discord's Opus audio and the orchestrator's PCM; the
+// implementation is pkg/voice/wire/codec (see the package doc).
 //
 // DecodeInbound turns one inbound Discord [gxvoice.Frame] (Opus, ~20 ms, 48 kHz)
 // into zero or more orchestrator [audio.Frame]s (PCM, resampled to the VAD/STT
@@ -56,7 +54,7 @@ type Codec interface {
 
 // unavailableCodec is the default [Codec]: every operation reports
 // [ErrCodecUnavailable]. It keeps the pipeline buildable and the inbound loop
-// runnable (frames decode to nothing) until a real codec is wired in.
+// runnable (frames decode to nothing) in a build without the `opus` tag.
 type unavailableCodec struct{}
 
 // DecodeInbound implements [Codec]; always reports the codec is unavailable.
@@ -69,9 +67,10 @@ func (unavailableCodec) PlaybackSource(<-chan tts.AudioChunk) (gxvoice.Source, e
 	return nil, ErrCodecUnavailable
 }
 
-// UnavailableCodec returns the stub [Codec] used until the Opus transcoding
-// layer is built. Wiring it makes the live loop construct and run, but no audio
-// is decoded or played — every codec call yields [ErrCodecUnavailable].
+// UnavailableCodec returns the stub [Codec] for a build without the `opus` tag
+// (and the default when [NewPipeline] gets nil). Wiring it makes the live loop
+// construct and run, but no audio is decoded or played — every codec call
+// yields [ErrCodecUnavailable].
 func UnavailableCodec() Codec { return unavailableCodec{} }
 
 // Pipeline is the assembled reactive voice pipeline for one Agent: the
@@ -251,7 +250,7 @@ func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger,
 		log = slog.New(slog.NewTextHandler(nopWriter{}, nil))
 	}
 	if metrics == nil {
-		metrics = discardMetrics{}
+		metrics = gxvoice.DiscardMetrics{}
 	}
 	p := &Pipeline{conv: conv, codec: codec, log: log, guild: guild, metrics: metrics}
 	for _, o := range opts {
@@ -429,20 +428,3 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
-
-// discardMetrics is the wire-local no-op [gxvoice.MetricsRecorder] used when
-// [NewPipeline] is handed a nil recorder, so the inbound loop never nil-checks.
-// Only the inbound counters the Pipeline emits are implemented; the rest satisfy
-// the interface as no-ops.
-type discardMetrics struct{}
-
-func (discardMetrics) InboundFramesDropped(string, int) {}
-func (discardMetrics) InboundUndecodableFrame(string)   {}
-func (discardMetrics) SessionOpened(string)             {}
-func (discardMetrics) SessionClosed(string)             {}
-func (discardMetrics) PlaybackStarted(string)           {}
-func (discardMetrics) PlaybackFinished(string, bool)    {}
-func (discardMetrics) BargeCancelled(string)            {}
-func (discardMetrics) UDPKeepaliveSent()                {}
-func (discardMetrics) UDPKeepaliveSendError()           {}
-func (discardMetrics) MediaStallRebuild(string)         {}

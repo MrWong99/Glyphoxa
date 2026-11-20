@@ -7,7 +7,7 @@ import "log/slog"
 // hot path (frame handling, playback, the session lifecycle). It is
 // deliberately tiny: callers wire a Prometheus adapter, and the wrapper stays
 // dependency-free. All methods must be safe for concurrent use; the no-op
-// default ([discardMetrics]) is used when unset.
+// default ([DiscardMetrics]) is used when unset.
 //
 // Cardinality note (ADR-0032 §2.1): every method takes guild so a self-host
 // build can opt into a per-guild cut, but the production Prometheus adapter
@@ -61,19 +61,19 @@ type MetricsRecorder interface {
 	MediaStallRebuild(guild string)
 }
 
-// discardMetrics is the no-op MetricsRecorder used when none is configured.
-type discardMetrics struct{}
+// DiscardMetrics is the no-op MetricsRecorder used when none is configured.
+type DiscardMetrics struct{}
 
-func (discardMetrics) InboundFramesDropped(string, int) {}
-func (discardMetrics) InboundUndecodableFrame(string)   {}
-func (discardMetrics) SessionOpened(string)             {}
-func (discardMetrics) SessionClosed(string)             {}
-func (discardMetrics) PlaybackStarted(string)           {}
-func (discardMetrics) PlaybackFinished(string, bool)    {}
-func (discardMetrics) BargeCancelled(string)            {}
-func (discardMetrics) UDPKeepaliveSent()                {}
-func (discardMetrics) UDPKeepaliveSendError()           {}
-func (discardMetrics) MediaStallRebuild(string)         {}
+func (DiscardMetrics) InboundFramesDropped(string, int) {}
+func (DiscardMetrics) InboundUndecodableFrame(string)   {}
+func (DiscardMetrics) SessionOpened(string)             {}
+func (DiscardMetrics) SessionClosed(string)             {}
+func (DiscardMetrics) PlaybackStarted(string)           {}
+func (DiscardMetrics) PlaybackFinished(string, bool)    {}
+func (DiscardMetrics) BargeCancelled(string)            {}
+func (DiscardMetrics) UDPKeepaliveSent()                {}
+func (DiscardMetrics) UDPKeepaliveSendError()           {}
+func (DiscardMetrics) MediaStallRebuild(string)         {}
 
 // discardLogger returns a logger that drops everything, used when no logger is
 // configured so call sites never nil-check.

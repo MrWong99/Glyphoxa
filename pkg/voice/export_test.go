@@ -27,6 +27,18 @@ func newTestManager(m *mock.Manager, opts ...ManagerOption) *Manager {
 
 // Test-only exports of the internal pieces the white-box tests drive directly.
 
+// session returns the Session registered for guild and whether one is — what
+// the Manager tests assert Open/Close bookkeeping against.
+func (m *Manager) session(guild snowflake.ID) (*Session, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[guild]
+	return sess, ok
+}
+
+// isClosed reports whether Close has begun tearing the Session down.
+func (s *Session) isClosed() bool { return s.closed.Load() }
+
 func newTestSwitchingProvider() *switchingProvider { return &switchingProvider{} }
 
 func newTestPlaySlot(pb *Playback, src Source, ctx context.Context) *playSlot {

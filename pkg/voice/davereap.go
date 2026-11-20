@@ -16,27 +16,32 @@ type frameHolder interface {
 }
 
 // reapableDaveSession wraps the real DAVE session so disgo's audio sender and
-// receiver goroutines can always terminate (#586, the post-session 2-core spin).
+// receiver goroutines can always terminate (#586).
 //
 // disgo gates BOTH per-session audio goroutines on DAVE().Ready():
 //
-//	audio_receiver.go: if !s.conn.DAVE().Ready() { return }  // before ReadPacket
-//	audio_sender.go:   if !s.conn.DAVE().Ready() { return }  // before ProvideOpusFrame
+//	audio_receiver.go: if !s.conn.DAVE().Ready() { sleep 20ms; return }  // before ReadPacket
+//	audio_sender.go:   if !s.conn.DAVE().Ready() { return }               // before ProvideOpusFrame
 //
 // and every teardown path we have relies on code BEHIND that gate: the receiver
 // exits when ReadPacket returns net.ErrClosed off the closed UDP conn, and the
 // sender exits when the switchingProvider's post-Close silence poke (#579/#581)
 // makes it write to the dead transport. While Ready() is false neither call is
-// ever reached, so neither goroutine can ever observe the teardown — and the
-// receiver's loop is a for/select with a default branch and no blocking call,
-// i.e. a pure busy-wait burning a full core per session.
+// ever reached, so neither goroutine can ever observe the teardown: both keep
+// waking every 20 ms (the receiver's not-ready sleep, the sender's frame
+// pacing) for the life of the process. Before disgo v0.20.0 the receiver had
+// no sleep there and this was a busy-wait burning a full core per session
+// (#586's 2-core spin); v0.20.0 turned it into a leak, but a leak of two
+// goroutines per ended session is still unbounded on a long-lived Voice
+// Instance, so the wrapper stays.
 //
 // dave-go's Ready() is false during the whole MLS handshake window and stays
 // false FOREVER on a protocol-version-0 channel (its docs point senders at
 // ShouldHoldFrames for that distinction), so a Voice Session that ends before
 // its first E2EE epoch activates — a short session, or any session on a
-// non-E2EE channel — strands a spinning receiver that survives session end
-// until the process dies.
+// non-E2EE channel — strands both goroutines past session end. On a v0
+// channel it is worse than a leak while the session is live: disgo never reads
+// or sends a frame, so the NPC is deaf and mute.
 //
 // The wrapper restores the godave.Session contract disgo's gate is written
 // against ("sessions that never establish E2EE always return true") and adds
@@ -47,14 +52,13 @@ type frameHolder interface {
 //     transport write) and reap themselves;
 //   - while open, a channel that will never have E2EE (ShouldHoldFrames false
 //     with Ready false ⇒ protocol version 0) also reports true, so audio flows
-//     in transport-only passthrough instead of busy-waiting on an epoch that
-//     will never come.
+//     in transport-only passthrough instead of waiting on an epoch that will
+//     never come.
 //
 // A transient handshake window (protocol version ≥ 1, epoch pending) still
-// reports false — frames must be held there — so the receiver still spins for
-// the duration of a live handshake. That residual busy-wait is disgo's loop
-// shape and is bounded by the handshake; the unbounded, session-outliving spin
-// is what this wrapper removes.
+// reports false — frames must be held there — so both goroutines idle at the
+// gate for the duration of a live handshake. That wait is bounded by the
+// handshake; the unbounded, session-outliving one is what this wrapper removes.
 type reapableDaveSession struct {
 	godave.Session
 	closed atomic.Bool

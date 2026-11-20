@@ -6,11 +6,28 @@ import (
 	"strings"
 )
 
-// diceHardeningInstruction is appended to the system prompt on dice-armed turns
-// (#399, Option B): cheap prompt hardening that tells the model to call the dice
-// Tool and never narrate an invented result. Not airtight on its own — the
-// post-hoc [claimsRollResult] guard is the enforcement backstop.
-const diceHardeningInstruction = "When asked to roll dice, call the dice tool and report its actual result. Never invent, guess, or roleplay a die result."
+// diceHardeningInstructions hold the instruction appended to the system prompt
+// on dice-armed turns (#399, Option B), keyed by gate language: cheap prompt
+// hardening that tells the model to call the dice Tool and never narrate an
+// invented result. Not airtight on its own — the post-hoc [claimsRollResult]
+// guard is the enforcement backstop. It is written in the Campaign Language so
+// a German campaign's system prompt does not switch to English mid-prompt
+// (the language the model then tends to answer in); the text is fixed per
+// session, so an armed turn's prompt prefix stays cacheable. "dice" is the
+// Tool's name and stays untranslated.
+var diceHardeningInstructions = map[string]string{
+	"en": "When asked to roll dice, call the dice tool and report its actual result. Never invent, guess, or roleplay a die result.",
+	"de": "Wenn du gebeten wirst zu würfeln, rufe das Tool dice auf und nenne sein tatsächliches Ergebnis. Erfinde, rate oder spiele niemals ein Würfelergebnis vor.",
+}
+
+// diceHardeningInstruction returns the hardening instruction for a gate
+// language ([gateLanguage]), falling back to English like the keyword gate.
+func diceHardeningInstruction(lang string) string {
+	if s, ok := diceHardeningInstructions[lang]; ok {
+		return s
+	}
+	return diceHardeningInstructions["en"]
+}
 
 // enNumberWord / deNumberWord are the spelled-out number vocabularies the #438
 // spelled-claim patterns capture: 1–20 plus the tens up to 100, in the two

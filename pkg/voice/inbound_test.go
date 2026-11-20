@@ -33,14 +33,14 @@ func pkt(seq uint16, ts uint32, ssrc uint32, opus []byte) *voice.Packet {
 }
 
 func TestInboundDispatcher(t *testing.T) {
-	t.Run("frame carries userID, sequence, silence flag", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 4, discardMetrics{})
+	t.Run("frame carries userID, payload, silence flag", func(t *testing.T) {
+		d := newTestInboundDispatcher("g", 4, DiscardMetrics{})
 		uid := snowflake.ID(42)
 		_ = d.ReceiveOpusFrame(uid, pkt(7, 0, 1, []byte{0xDE, 0xAD}))
 		_ = d.ReceiveOpusFrame(uid, pkt(8, 960, 1, voice.SilenceAudioFrame))
 
 		got := <-d.inbound()
-		if got.UserID != uid || got.Sequence != 7 || got.Silence {
+		if got.UserID != uid || string(got.Opus) != "\xDE\xAD" || got.Silence {
 			t.Fatalf("voiced frame wrong: %+v", got)
 		}
 		silence := <-d.inbound()
@@ -50,7 +50,7 @@ func TestInboundDispatcher(t *testing.T) {
 	})
 
 	t.Run("Opus payload is cloned, not aliased", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 4, discardMetrics{})
+		d := newTestInboundDispatcher("g", 4, DiscardMetrics{})
 		buf := []byte{0x01, 0x02}
 		_ = d.ReceiveOpusFrame(1, pkt(1, 0, 1, buf))
 		buf[0] = 0xFF // disgo reuses its receive buffer; our frame must be unaffected
@@ -61,7 +61,7 @@ func TestInboundDispatcher(t *testing.T) {
 	})
 
 	t.Run("PTS is per-speaker relative", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 8, discardMetrics{})
+		d := newTestInboundDispatcher("g", 8, DiscardMetrics{})
 		// First packet from a speaker is the zero point regardless of its
 		// (random) RTP base; the next, 48000 ticks later, is exactly 1s.
 		_ = d.ReceiveOpusFrame(1, pkt(1, 1_000_000, 1, []byte{0x01}))
@@ -81,7 +81,7 @@ func TestInboundDispatcher(t *testing.T) {
 		// User and Address Detection's last-speaker step needs it (CONTEXT.md).
 		// disgo hands ReceiveOpusFrame the SSRC-resolved snowflake; assert each
 		// distinct speaker's frame carries exactly that non-zero ID.
-		d := newTestInboundDispatcher("g", 8, discardMetrics{})
+		d := newTestInboundDispatcher("g", 8, DiscardMetrics{})
 		alice, bob := snowflake.ID(111), snowflake.ID(222)
 		_ = d.ReceiveOpusFrame(alice, pkt(1, 0, 10, []byte{0x01}))
 		_ = d.ReceiveOpusFrame(bob, pkt(1, 0, 20, []byte{0x02}))
@@ -100,7 +100,7 @@ func TestInboundDispatcher(t *testing.T) {
 	})
 
 	t.Run("unknown SSRC yields zero UserID", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 4, discardMetrics{})
+		d := newTestInboundDispatcher("g", 4, DiscardMetrics{})
 		_ = d.ReceiveOpusFrame(0, pkt(1, 0, 999, []byte{0x01})) // disgo passes 0 when SSRC unknown
 		got := <-d.inbound()
 		if got.UserID != 0 {
@@ -115,9 +115,9 @@ func TestInboundDispatcher(t *testing.T) {
 		for seq := uint16(1); seq <= 4; seq++ {
 			_ = d.ReceiveOpusFrame(1, pkt(seq, uint32(seq), 1, []byte{byte(seq)}))
 		}
-		var got []uint32
+		var got []byte
 		for range 2 {
-			got = append(got, (<-d.inbound()).Sequence)
+			got = append(got, (<-d.inbound()).Opus[0])
 		}
 		if got[0] != 3 || got[1] != 4 {
 			t.Fatalf("drop-oldest kept %v want [3 4]", got)
@@ -128,7 +128,7 @@ func TestInboundDispatcher(t *testing.T) {
 	})
 
 	t.Run("Close closes inbound channel and is idempotent", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 4, discardMetrics{})
+		d := newTestInboundDispatcher("g", 4, DiscardMetrics{})
 		d.Close()
 		d.Close() // must not panic
 		if _, ok := <-d.inbound(); ok {
@@ -137,7 +137,7 @@ func TestInboundDispatcher(t *testing.T) {
 	})
 
 	t.Run("receive after Close is a safe no-op", func(t *testing.T) {
-		d := newTestInboundDispatcher("g", 4, discardMetrics{})
+		d := newTestInboundDispatcher("g", 4, DiscardMetrics{})
 		d.Close()
 		if err := d.ReceiveOpusFrame(1, pkt(1, 0, 1, []byte{0x01})); err != nil {
 			t.Fatalf("post-close receive err: %v", err)
@@ -150,7 +150,7 @@ func TestInboundDispatcher(t *testing.T) {
 // guards. Run with -race; it must neither panic nor deadlock.
 func TestInboundDispatcherCloseRace(t *testing.T) {
 	for range 50 {
-		d := newTestInboundDispatcher("g", 8, discardMetrics{})
+		d := newTestInboundDispatcher("g", 8, DiscardMetrics{})
 
 		// Drain consumer so sends mostly succeed.
 		drained := make(chan struct{})

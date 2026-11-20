@@ -5,7 +5,7 @@ import (
 )
 
 // Accumulator collects per-turn stage spans across replays and reduces them to a
-// [Report]. The driver calls [Accumulator.AddTurn] once per replayed turn, then
+// [Report]. The driver calls [Accumulator.AddTurns] once per replayed clip, then
 // Build to produce the JSON artifact. Splitting collection from reduction keeps
 // the driving loop (clip → Conversation → tap) independent of the percentile
 // math.
@@ -46,12 +46,6 @@ func (a *Accumulator) AddTurns(tap *recorderTap, turns int) {
 	for stage, samples := range tap.drain() {
 		a.byStage[stage] = append(a.byStage[stage], samples...)
 	}
-}
-
-// AddTurn folds a single turn's tap-captured spans (the rig-test convenience for
-// a one-utterance clip). It is [Accumulator.AddTurns] with turns=1.
-func (a *Accumulator) AddTurn(tap *recorderTap) {
-	a.AddTurns(tap, 1)
 }
 
 // Build reduces every collected stage to its distribution and returns the

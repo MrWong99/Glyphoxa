@@ -526,7 +526,9 @@ func TestSimilarNodes(t *testing.T) {
 	// 1 (farther); C left unembedded (must be excluded).
 	a, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "A"})
 	b, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "B"})
-	st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "C"})
+	if _, err := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "C"}); err != nil {
+		t.Fatalf("create C: %v", err)
+	}
 	if err := st.SetNodeEmbedding(ctx, a.ID, unitVec(0), "m", a.UpdatedAt); err != nil {
 		t.Fatalf("embed A: %v", err)
 	}
@@ -541,7 +543,9 @@ func TestSimilarNodes(t *testing.T) {
 		t.Fatalf("insert other campaign: %v", err)
 	}
 	on, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: other, Type: storage.KGNodeNote, Name: "Other-A"})
-	st.SetNodeEmbedding(ctx, on.ID, unitVec(0), "m", on.UpdatedAt)
+	if err := st.SetNodeEmbedding(ctx, on.ID, unitVec(0), "m", on.UpdatedAt); err != nil {
+		t.Fatalf("embed Other-A: %v", err)
+	}
 
 	got, err := st.SimilarNodes(ctx, campaignID, unitVec(0), 5)
 	if err != nil {

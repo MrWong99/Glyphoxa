@@ -18,7 +18,6 @@
 package groq
 
 import (
-	"net/http"
 	"os"
 	"strings"
 
@@ -85,9 +84,6 @@ func WithBaseURL(u string) Option { return openaicompat.WithBaseURL(u) }
 
 // WithModel sets the default model used when [llm.Request.Model] is empty.
 func WithModel(m string) Option { return openaicompat.WithModel(m) }
-
-// WithHTTPClient supplies a custom http.Client (see [openaicompat.WithHTTPClient]).
-func WithHTTPClient(h *http.Client) Option { return openaicompat.WithHTTPClient(h) }
 
 // New constructs a Groq [Client]. If apiKey is empty it falls back to the
 // GROQ_API_KEY environment variable; if that is also empty, the returned client

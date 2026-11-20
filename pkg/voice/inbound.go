@@ -14,11 +14,16 @@ import (
 const rtpClockHz = 48000
 
 // Frame is one inbound Opus packet tagged with its speaker, the unit a Session
-// hands STT. disgo resolves the RTP SSRC to a Discord User ID for us; an
-// unrecognised SSRC (audio arriving before the speaking event) yields a zero
-// UserID, which we pass through rather than buffer (latency budget).
+// hands STT. disgo resolves the RTP SSRC to a Discord User ID for us. Audio on
+// an SSRC not yet mapped (it arrived before the speaking event) never reaches
+// here as speech under DAVE: the transport decrypts it as User 0, which has no
+// MLS sender, so [keepaliveUDPConn.ReadPacket] fails and the packet is dropped.
+// Only what DAVE lets through in plaintext — the Opus silence frame, or any
+// frame once the call is downgraded to transport-only — arrives with a zero
+// UserID, and it is passed through rather than buffered (latency budget).
 type Frame struct {
-	// UserID is the speaking Discord User, or zero if the SSRC is not yet known.
+	// UserID is the speaking Discord User, or zero if the SSRC is not yet known
+	// (see the type doc for when that can happen).
 	UserID snowflake.ID
 	// Opus is the raw Opus payload for one ~20ms window.
 	Opus []byte
@@ -26,8 +31,6 @@ type Frame struct {
 	// this UserID, derived from the RTP timestamp. It is per-speaker, not
 	// session-global, and resets if a speaker's SSRC changes.
 	PTS time.Duration
-	// Sequence is the RTP packet sequence number (widened from disgo's uint16).
-	Sequence uint32
 	// Silence is true when the packet is Discord's Opus silence frame.
 	Silence bool
 }
@@ -74,11 +77,10 @@ func (d *inboundDispatcher) ReceiveOpusFrame(userID snowflake.ID, packet *voice.
 		return nil
 	}
 	frame := Frame{
-		UserID:   userID,
-		Opus:     bytes.Clone(packet.Opus), // disgo reuses its receive buffer
-		PTS:      d.pts(userID, packet.Timestamp),
-		Sequence: uint32(packet.Sequence),
-		Silence:  bytes.Equal(packet.Opus, voice.SilenceAudioFrame),
+		UserID:  userID,
+		Opus:    bytes.Clone(packet.Opus), // disgo reuses its receive buffer
+		PTS:     d.pts(userID, packet.Timestamp),
+		Silence: bytes.Equal(packet.Opus, voice.SilenceAudioFrame),
 	}
 
 	d.mu.RLock()

@@ -114,7 +114,7 @@ func TestSessionMediaLiveness(t *testing.T) {
 	}
 
 	gw := &fakeVoiceGateway{ssrc: 42}
-	ku := newKeepaliveUDPConn(noopDave(), nil, discardLogger(), discardMetrics{})
+	ku := newKeepaliveUDPConn(noopDave(), nil, discardLogger(), DiscardMetrics{})
 	ku.packets.Store(5)
 	ku.echoes.Store(4)
 	ku.keepalives.Store(9)

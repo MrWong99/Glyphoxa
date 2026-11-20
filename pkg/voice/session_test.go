@@ -30,14 +30,14 @@ func openSession(t *testing.T) (*Session, *mock.Conn) {
 
 func TestSessionStateTransitions(t *testing.T) {
 	sess, _ := openSession(t)
-	if sess.State() != Ready {
-		t.Fatalf("state got %v want Ready", sess.State())
+	if sess.isClosed() {
+		t.Fatal("fresh session reports closed")
 	}
 	if err := sess.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if sess.State() != Closed {
-		t.Fatalf("state got %v want Closed", sess.State())
+	if !sess.isClosed() {
+		t.Fatal("session not closed after Close")
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSessionPlayStreamsFrames(t *testing.T) {
 	sess, conn := openSession(t)
 	defer sess.Close()
 
-	pb, err := sess.Play(context.Background(), OpusReader(bytesReader(framed([]byte{0x01}, []byte{0x02}))))
+	pb, err := sess.Play(context.Background(), &countingSource{n: 2})
 	if err != nil {
 		t.Fatalf("Play: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSessionPlayInterruptsCurrent(t *testing.T) {
 	}
 	_, _ = conn.PullFrame() // let it take the floor
 
-	second, err := sess.Play(context.Background(), OpusReader(bytesReader(framed([]byte{0xAA}))))
+	second, err := sess.Play(context.Background(), &countingSource{n: 1})
 	if err != nil {
 		t.Fatalf("second Play: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestSessionPlayMetricsCountedOnce(t *testing.T) {
 	first, _ := sess.Play(context.Background(), endlessSource{})
 	second, _ := sess.Play(context.Background(), endlessSource{}) // interrupts first
 	<-first.Done()
-	third, _ := sess.Play(context.Background(), OpusReader(bytesReader(framed([]byte{0x01})))) // interrupts second
+	third, _ := sess.Play(context.Background(), &countingSource{n: 1}) // interrupts second
 	<-second.Done()
 	pullAll(t, conn) // drain third to clean EOF
 	<-third.Done()

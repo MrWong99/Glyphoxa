@@ -40,12 +40,8 @@ type managerConfig struct {
 	defaults sessionConfig
 }
 
-// SessionOption overrides a per-[Session] setting in [Manager.Open], falling
-// back to the Manager's defaults.
-type SessionOption func(*sessionConfig)
-
-// sessionConfig is the resolved per-Session settings, seeded from Manager
-// defaults and overridden by Open's options.
+// sessionConfig is the per-Session settings every [Manager.Open] applies,
+// taken from the Manager's options.
 type sessionConfig struct {
 	logger        *slog.Logger
 	metrics       MetricsRecorder
@@ -107,35 +103,6 @@ func WithInboundBuffer(n int) ManagerOption {
 	}
 }
 
-// SessionWithLogger overrides the logger for a single Session.
-func SessionWithLogger(logger *slog.Logger) SessionOption {
-	return func(c *sessionConfig) {
-		if logger != nil {
-			c.logger = logger
-		}
-	}
-}
-
-// SessionWithSelfDeaf overrides self-deafen for a single Session.
-func SessionWithSelfDeaf(deaf bool) SessionOption {
-	return func(c *sessionConfig) { c.selfDeaf = deaf }
-}
-
-// SessionWithSelfMute overrides self-mute for a single Session.
-func SessionWithSelfMute(mute bool) SessionOption {
-	return func(c *sessionConfig) { c.selfMute = mute }
-}
-
-// SessionWithInboundBuffer overrides the inbound buffer for a single Session.
-// Values <= 0 are ignored.
-func SessionWithInboundBuffer(n int) SessionOption {
-	return func(c *sessionConfig) {
-		if n > 0 {
-			c.inboundBuffer = n
-		}
-	}
-}
-
 // NewManager creates a Manager over client's voice manager. DAVE is wired by the
 // caller at client construction (see [DaveOption]); NewManager only borrows the
 // already-built voice manager.
@@ -151,7 +118,7 @@ func newManager(vm voiceManager, opts ...ManagerOption) *Manager {
 		dave:   true, // ADR-0006: DAVE is the production default
 		defaults: sessionConfig{
 			logger:        discardLogger(),
-			metrics:       discardMetrics{},
+			metrics:       DiscardMetrics{},
 			inboundBuffer: defaultInboundBuffer,
 		},
 	}
@@ -187,12 +154,7 @@ func (m *Manager) guildMu(guild snowflake.ID) *sync.Mutex {
 // Open joins guild's voice channel and returns its Session. If a Session for
 // guild already exists it is closed and replaced — one Session per Guild. Open
 // blocks until the connection is ready or ctx is cancelled.
-func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID, opts ...SessionOption) (*Session, error) {
-	cfg := m.defaults
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID) (*Session, error) {
 	// Serialize the whole open sequence per guild (see Manager.opening). m.mu
 	// itself must not be held across Close/CreateConn/newSession — Close blocks
 	// on a playback Stop, and newSession blocks on the voice gateway.
@@ -216,7 +178,7 @@ func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID, opts ..
 	}
 
 	conn := m.vm.CreateConn(guild)
-	sess, err := newSession(ctx, guild, channel, conn, cfg)
+	sess, err := newSession(ctx, guild, channel, conn, m.defaults)
 	if err != nil {
 		// Open may already have sent the voice-state JOIN (and opened the voice
 		// gateway/UDP) before it failed or the ctx fired: Close sends the LEAVE
@@ -235,14 +197,6 @@ func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID, opts ..
 	m.sessions[guild] = sess
 	m.mu.Unlock()
 	return sess, nil
-}
-
-// Get returns the Session for guild and whether one is open.
-func (m *Manager) Get(guild snowflake.ID) (*Session, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	sess, ok := m.sessions[guild]
-	return sess, ok
 }
 
 // Close closes every open Session and forgets them. It is safe to call once at

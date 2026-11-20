@@ -1,15 +1,30 @@
 package voice_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/snowflake/v2"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice"
 )
+
+// frames is a minimal [voice.Source] over pre-encoded 20 ms Opus frames.
+type frames [][]byte
+
+func (f *frames) NextFrame(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(*f) == 0 {
+		return nil, io.EOF
+	}
+	next := (*f)[0]
+	*f = (*f)[1:]
+	return next, nil
+}
 
 // Example shows the full public surface: wire DAVE at client construction, open
 // a per-Guild Session, play an Opus stream, and consume inbound speaker frames.
@@ -36,7 +51,7 @@ func Example() {
 		return
 	}
 
-	pb, err := sess.Play(ctx, voice.OpusReader(bytes.NewReader(nil)))
+	pb, err := sess.Play(ctx, &frames{{0xF8, 0xFF, 0xFE}})
 	if err != nil {
 		return
 	}
@@ -45,26 +60,4 @@ func Example() {
 	for frame := range sess.Inbound() {
 		fmt.Printf("%s spoke %d Opus bytes\n", frame.UserID, len(frame.Opus))
 	}
-}
-
-// ExampleOpusReader demonstrates the length-prefixed Opus framing a Source
-// consumes; this one actually runs.
-func ExampleOpusReader() {
-	// Two frames: a 1-byte and a 2-byte payload, each prefixed with a
-	// big-endian uint16 length.
-	stream := []byte{
-		0x00, 0x01, 0xAA, // len 1, payload AA
-		0x00, 0x02, 0xBB, 0xCC, // len 2, payload BB CC
-	}
-	src := voice.OpusReader(bytes.NewReader(stream))
-	for {
-		frame, err := src.NextFrame(context.Background())
-		if err != nil {
-			break
-		}
-		fmt.Printf("%X\n", frame)
-	}
-	// Output:
-	// AA
-	// BBCC
 }

@@ -111,7 +111,9 @@ func TestRunWebBindsWhileThePresenceSeedHangs(t *testing.T) {
 		t.Fatalf("signal: %v", err)
 	}
 	select {
-	case <-done:
+	case err := <-done:
+		// Shutting down promptly is what this test pins, not how runWeb reports it.
+		t.Logf("runWeb returned after SIGTERM: %v", err)
 	case <-time.After(60 * time.Second):
 		t.Fatal("runWeb did not shut down after SIGTERM")
 	}

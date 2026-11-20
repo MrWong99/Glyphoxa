@@ -49,7 +49,7 @@ const (
 // keepaliveUDPConn is this package's implementation of disgo's [voice.UDPConn].
 // It reimplements the pinned disgo udpConnImpl (see go.mod's disgo pin comment;
 // re-diff voice/udp_conn.go on every deliberate bump) because the stock one has
-// two faults this platform cannot live with:
+// three faults this platform cannot live with:
 //
 //  1. It never writes ANYTHING to the UDP socket outside IP discovery and
 //     actual speech frames. A Bot that is not speaking is outbound-silent, and
@@ -94,7 +94,8 @@ const (
 //
 // Concurrency contract (same as disgo's): one writer (disgo's audio sender
 // goroutine calls Write), one reader (disgo's audio receiver goroutine calls
-// ReadPacket), Open/Close serialized by connMu. The keepalive goroutine only
+// ReadPacket), lifecycle transitions serialized by connMu (Open dials and runs
+// IP discovery outside it, then installs under it). The keepalive goroutine only
 // writes raw datagrams on its captured net.Conn — kernel-level concurrent
 // writes on a connected UDP socket are safe and it shares no RTP state with
 // Write. The receive/decrypt buffers are reused across calls: a returned
@@ -123,6 +124,9 @@ type keepaliveUDPConn struct {
 	// cannot revive it — a revived Open would dial a socket and start a
 	// keepalive goroutine that nothing ever stops. Guarded by connMu.
 	terminated bool
+	// pauses counts closeSocketLocked calls, so an Open that dialed without
+	// connMu can tell a Close landed meanwhile. Guarded by connMu.
+	pauses uint64
 	// changed is closed and replaced on every lifecycle transition (Open, Close,
 	// terminate); a ReadPacket waiting out a pause selects on it. Guarded by
 	// connMu.
@@ -254,12 +258,49 @@ func (u *keepaliveUDPConn) notifyLocked() {
 // Close when its conn recovers with a fresh voice session, or straight over a
 // live socket — and each call retires whatever socket and keepalive loop are
 // still there. Only a terminated transport refuses.
+//
+// The dial and the IP discovery (a write plus a read of up to 5 s each) run on
+// a local socket WITHOUT connMu, so a re-Open whose discovery reply is lost
+// never blocks Write, Close or terminate — and through terminate the
+// [Session.Close] that holds playMu — for its whole timeout. connMu is taken
+// only to install the result, and the lifecycle is re-checked then: a
+// terminate that landed meanwhile wins (the new socket is closed, Open
+// refused), and a pause (Close) that landed meanwhile is honoured as if it had
+// run right after this Open (the session's ssrc is taken, the socket is not).
 func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc uint32) (string, int, error) {
 	u.connMu.Lock()
-	defer u.connMu.Unlock()
-
 	if u.terminated {
-		return "", 0, fmt.Errorf("voice: transport already closed; refusing to reopen")
+		u.connMu.Unlock()
+		return "", 0, errTransportTerminated
+	}
+	pausesAtStart := u.pauses
+	u.connMu.Unlock()
+
+	conn, ourAddress, ourPort, err := u.discover(ctx, ip, port, ssrc)
+	if err != nil {
+		return "", 0, err
+	}
+
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
+	if u.terminated {
+		_ = conn.Close()
+		return "", 0, errTransportTerminated
+	}
+
+	u.ssrc = ssrc
+	u.daveSession.AssignSsrcToCodec(ssrc, godave.CodecOpus)
+	// A (re-)Open always belongs to a NEW voice session (a resume never sends
+	// Ready), whose transport key arrives in the SetSecretKey that follows.
+	// Until then there is nothing valid to seal or open packets with.
+	u.encrypter = nil
+
+	if u.pauses != pausesAtStart {
+		// Close ran while we were discovering: it already stopped the old
+		// keepalive loop and socket and woke the reader; serialized after this
+		// Open it would also have closed the new socket, so do just that.
+		_ = conn.Close()
+		return ourAddress, ourPort, nil
 	}
 
 	u.stopKeepaliveLocked()
@@ -273,65 +314,6 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 		time.AfterFunc(retiredSocketLinger, func() { _ = old.Close() })
 	}
 
-	host := net.JoinHostPort(ip, strconv.Itoa(port))
-	u.logger.Debug("opening voice UDP connection", slog.String("host", host))
-	conn, err := u.dial(ctx, "udp", host)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to open UDPConn connection: %w", err)
-	}
-
-	// IP discovery: https://discord.com/developers/docs/topics/voice-connections#ip-discovery
-	sb := make([]byte, 74)
-	binary.BigEndian.PutUint16(sb[:2], 1)      // 1 = send
-	binary.BigEndian.PutUint16(sb[2:4], 70)    // 70 = length
-	binary.BigEndian.PutUint32(sb[4:74], ssrc) // ssrc
-
-	if err = conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("failed to set write deadline on UDPConn connection: %w", err)
-	}
-	if _, err = conn.Write(sb); err != nil {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("failed to write ssrc to UDPConn connection: %w", err)
-	}
-	_ = conn.SetWriteDeadline(time.Time{})
-
-	rb := make([]byte, 74)
-	if err = conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("failed to set read deadline on UDPConn connection: %w", err)
-	}
-	if _, err = conn.Read(rb); err != nil {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("failed to read ip discovery from UDPConn connection: %w", err)
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-
-	if binary.BigEndian.Uint16(rb[0:2]) != 2 {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("invalid ip discovery response")
-	}
-	if size := binary.BigEndian.Uint16(rb[2:4]); size != 70 {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("invalid ip discovery response size")
-	}
-
-	returnedSSRC := binary.BigEndian.Uint32(rb[4:8])   // ssrc
-	ourAddress := string(bytes.Trim(rb[8:72], "\x00")) // our ip (null-padded)
-	ourPort := int(binary.BigEndian.Uint16(rb[72:74])) // our port
-
-	if returnedSSRC != ssrc {
-		_ = conn.Close()
-		return "", 0, fmt.Errorf("invalid ssrc in ip discovery response")
-	}
-
-	u.ssrc = ssrc
-	u.daveSession.AssignSsrcToCodec(ssrc, godave.CodecOpus)
-	// A (re-)Open always belongs to a NEW voice session (a resume never sends
-	// Ready), whose transport key arrives in the SetSecretKey that follows.
-	// Until then there is nothing valid to seal or open packets with.
-	u.encrypter = nil
-
 	u.conn = conn
 	u.packets.Store(0)
 	u.echoes.Store(0)
@@ -340,6 +322,73 @@ func (u *keepaliveUDPConn) Open(ctx context.Context, ip string, port int, ssrc u
 	go u.keepaliveLoop(conn, stop)
 	u.notifyLocked()
 
+	return ourAddress, ourPort, nil
+}
+
+// errTransportTerminated is Open's refusal once the conn guard has terminated
+// the transport.
+var errTransportTerminated = errors.New("voice: transport already closed; refusing to reopen")
+
+// discover dials the voice server and performs Discord's IP discovery on the
+// new socket, returning it with the external address the server reports. It
+// touches no transport state, so Open runs it without connMu. On error the
+// socket is closed.
+func (u *keepaliveUDPConn) discover(ctx context.Context, ip string, port int, ssrc uint32) (net.Conn, string, int, error) {
+	host := net.JoinHostPort(ip, strconv.Itoa(port))
+	u.logger.Debug("opening voice UDP connection", slog.String("host", host))
+	conn, err := u.dial(ctx, "udp", host)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("failed to open UDPConn connection: %w", err)
+	}
+	ourAddress, ourPort, err := ipDiscovery(conn, ssrc)
+	if err != nil {
+		_ = conn.Close()
+		return nil, "", 0, err
+	}
+	return conn, ourAddress, ourPort, nil
+}
+
+// ipDiscovery runs Discord's IP-discovery exchange on conn.
+func ipDiscovery(conn net.Conn, ssrc uint32) (string, int, error) {
+	var err error
+
+	// IP discovery: https://discord.com/developers/docs/topics/voice-connections#ip-discovery
+	sb := make([]byte, 74)
+	binary.BigEndian.PutUint16(sb[:2], 1)      // 1 = send
+	binary.BigEndian.PutUint16(sb[2:4], 70)    // 70 = length
+	binary.BigEndian.PutUint32(sb[4:74], ssrc) // ssrc
+
+	if err = conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return "", 0, fmt.Errorf("failed to set write deadline on UDPConn connection: %w", err)
+	}
+	if _, err = conn.Write(sb); err != nil {
+		return "", 0, fmt.Errorf("failed to write ssrc to UDPConn connection: %w", err)
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+
+	rb := make([]byte, 74)
+	if err = conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return "", 0, fmt.Errorf("failed to set read deadline on UDPConn connection: %w", err)
+	}
+	if _, err = conn.Read(rb); err != nil {
+		return "", 0, fmt.Errorf("failed to read ip discovery from UDPConn connection: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	if binary.BigEndian.Uint16(rb[0:2]) != 2 {
+		return "", 0, fmt.Errorf("invalid ip discovery response")
+	}
+	if size := binary.BigEndian.Uint16(rb[2:4]); size != 70 {
+		return "", 0, fmt.Errorf("invalid ip discovery response size")
+	}
+
+	returnedSSRC := binary.BigEndian.Uint32(rb[4:8])   // ssrc
+	ourAddress := string(bytes.Trim(rb[8:72], "\x00")) // our ip (null-padded)
+	ourPort := int(binary.BigEndian.Uint16(rb[72:74])) // our port
+
+	if returnedSSRC != ssrc {
+		return "", 0, fmt.Errorf("invalid ssrc in ip discovery response")
+	}
 	return ourAddress, ourPort, nil
 }
 
@@ -659,8 +708,10 @@ func (u *keepaliveUDPConn) Close() error {
 // closed, Open is refused from here on, and the blocked ReadPacket and the
 // next Write return net.ErrClosed — the contract disgo's audio goroutines and
 // [Session.Close]'s reap sequence depend on (#579, #586). Idempotent. A
-// straggler Open that is mid-dial holds connMu, so terminate runs after it and
-// closes the socket it just opened; one that arrives later is refused.
+// straggler Open that is mid-dial does not hold connMu, so terminate never
+// waits on its discovery timeout; the Open re-checks terminated before
+// installing its socket, closes it and is refused, as is one that arrives
+// later.
 func (u *keepaliveUDPConn) terminate() {
 	u.connMu.Lock()
 	defer u.connMu.Unlock()
@@ -675,6 +726,7 @@ func (u *keepaliveUDPConn) terminate() {
 // socket, drops the session key, and wakes a waiting reader. Caller holds
 // connMu.
 func (u *keepaliveUDPConn) closeSocketLocked() error {
+	u.pauses++
 	u.stopKeepaliveLocked()
 	conn := u.conn
 	u.conn = nil
