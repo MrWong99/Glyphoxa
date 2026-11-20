@@ -23,8 +23,9 @@ import (
 // so the undelivered tail of a barged / errored turn never reaches the transcript
 // and a zero-delivered turn logs nothing. A closed chunk is
 // written with embedding NULL — the async embedding pipeline fills it later — and
-// the NULL-embedding backlog gauge is refreshed from the store's COUNT after each
-// write. This CHUNK grain (retrieval/Hot Context) is distinct from the per-line
+// the NULL-embedding backlog gauge is refreshed from the store's COUNT, at most
+// once per gaugeRefreshInterval while chunks are written and once more when a
+// session flushes. This CHUNK grain (retrieval/Hot Context) is distinct from the per-line
 // transcript_line grain (ADR-0040): the two are independent records of the same
 // speech.
 //
@@ -44,6 +45,11 @@ const (
 	// chunkWriteTimeout bounds one Insert+Count so a stalled DB can't wedge the
 	// single writer goroutine indefinitely.
 	chunkWriteTimeout = 5 * time.Second
+	// defaultGaugeRefreshInterval throttles the backlog COUNT the writer runs for
+	// the gauge: the count is deployment-wide, so running it after EVERY insert
+	// charged each chunk of each live session one extra query for a number a
+	// scrape reads every 15-30s at best.
+	defaultGaugeRefreshInterval = 15 * time.Second
 
 	// defaultWindow / defaultMaxUtterances are the chunk-close thresholds (ADR-0011):
 	// close at five utterances or sixty seconds, whichever first.
@@ -59,8 +65,9 @@ type ChunkStore interface {
 	CountUnembeddedChunks(ctx context.Context) (int, error)
 }
 
-// BacklogGauge receives the current NULL-embedding backlog after each write
-// (Set-from-COUNT, never Inc/Dec — ADR-0032). *observe.PrometheusRecorder
+// BacklogGauge receives the current NULL-embedding backlog, throttled to one
+// refresh per gauge interval plus one at session flush (Set-from-COUNT, never
+// Inc/Dec — ADR-0032). *observe.PrometheusRecorder
 // satisfies it; nil disables the gauge update.
 type BacklogGauge interface {
 	SetEmbeddingBacklog(n int)
@@ -71,6 +78,9 @@ type BacklogGauge interface {
 type ChunkerConfig struct {
 	Window        time.Duration
 	MaxUtterances int
+	// GaugeRefreshInterval is the minimum spacing between two backlog-gauge
+	// COUNTs triggered by chunk writes. Zero takes the 15s default.
+	GaugeRefreshInterval time.Duration
 }
 
 // chunkTurn is the per-turn coalescing state: the routed target (name + agent id
@@ -130,6 +140,11 @@ type Chunker struct {
 	window time.Duration
 	maxUtt int
 
+	// gaugeEvery / lastGauge throttle the backlog COUNT. Both are touched only on
+	// the single writer goroutine (writeChunk and the FlushSession barrier fn).
+	gaugeEvery time.Duration
+	lastGauge  time.Time
+
 	resolver SpeakerResolver // resolves SpeakerID → name for the line prefix (#281); nil = generic label
 
 	// proj is the shared projection scaffold (#447/#487): it attributes every
@@ -166,13 +181,18 @@ func NewChunker(bus *voiceevent.Bus, sessions Sessions, store ChunkStore, gauge 
 	if maxUtt <= 0 {
 		maxUtt = defaultMaxUtterances
 	}
+	gaugeEvery := cfg.GaugeRefreshInterval
+	if gaugeEvery <= 0 {
+		gaugeEvery = defaultGaugeRefreshInterval
+	}
 	c := &Chunker{
-		store:  store,
-		gauge:  gauge,
-		log:    log,
-		window: window,
-		maxUtt: maxUtt,
-		open:   map[string]*openChunk{},
+		store:      store,
+		gauge:      gauge,
+		log:        log,
+		window:     window,
+		maxUtt:     maxUtt,
+		gaugeEvery: gaugeEvery,
+		open:       map[string]*openChunk{},
 	}
 	if store != nil {
 		c.queue = busproject.NewQueue(chunkQueue, c.writeChunk)
@@ -535,9 +555,9 @@ func (c *Chunker) closeChunk(sid string, oc *openChunk) {
 }
 
 // writeChunk is the Chunker's flush sink — the write half of the single writer
-// goroutine: one serial, bounded Insert+Count per closed chunk, refreshing the
-// backlog gauge (Set-from-COUNT, ADR-0032). An insert/count failure is logged
-// but does not stop the loop — durability is best-effort.
+// goroutine: one serial, bounded Insert per closed chunk, then a throttled
+// refresh of the backlog gauge (Set-from-COUNT, ADR-0032). An insert/count
+// failure is logged but does not stop the loop — durability is best-effort.
 func (c *Chunker) writeChunk(chunk *storage.TranscriptChunk) {
 	ctx, cancel := context.WithTimeout(context.Background(), chunkWriteTimeout)
 	defer cancel()
@@ -545,20 +565,33 @@ func (c *Chunker) writeChunk(chunk *storage.TranscriptChunk) {
 		c.log.Warn("transcript: insert chunk", "err", err)
 		return
 	}
+	if time.Since(c.lastGauge) < c.gaugeEvery {
+		return
+	}
+	c.refreshGauge(ctx)
+}
+
+// refreshGauge Sets the backlog gauge from the store's COUNT. It runs on the
+// writer goroutine only: after a chunk write once gaugeEvery has elapsed, and
+// unconditionally behind FlushSession's barrier so the gauge is exact when a
+// session ends (the throttle would otherwise leave the last writes uncounted).
+func (c *Chunker) refreshGauge(ctx context.Context) {
+	if c.gauge == nil {
+		return
+	}
+	c.lastGauge = time.Now()
 	n, err := c.store.CountUnembeddedChunks(ctx)
 	if err != nil {
 		c.log.Warn("transcript: count unembedded chunks", "err", err)
 		return
 	}
-	if c.gauge != nil {
-		c.gauge.SetEmbeddingBacklog(n)
-	}
+	c.gauge.SetEmbeddingBacklog(n)
 }
 
 // FlushSession closes the session's open chunk (even a lone utterance — the ONLY
 // place ADR-0011 flushes one), tears down its projection state (proj.Close), and
 // drains the writer queue via a flush barrier, returning once every enqueued
-// insert has landed (#104). The Manager calls it at every loop exit for exactly
+// insert has landed (#104) and the backlog gauge has been refreshed. The Manager calls it at every loop exit for exactly
 // the session that ended (#487). It satisfies session.ChunkFinalizer. Persistence
 // disabled (no store) still closes + tears down; a session with no open chunk
 // closes nothing.
@@ -575,7 +608,11 @@ func (c *Chunker) FlushSession(ctx context.Context, sessionID uuid.UUID) error {
 	// entry is deleted so a straggler event can't revive it.
 	c.proj.Close(sid)
 
-	return c.queue.Flush(ctx, nil)
+	return c.queue.Flush(ctx, func() {
+		countCtx, cancel := context.WithTimeout(context.Background(), chunkWriteTimeout)
+		defer cancel()
+		c.refreshGauge(countCtx)
+	})
 }
 
 // Compile-time pins: *storage.Store satisfies every narrow store seam this

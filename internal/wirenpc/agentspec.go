@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -230,9 +231,9 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 	// the model fix would miss the operator's own NPCs. Fetched ONCE per session
 	// start (consistent with the credential/grant hydration); no row → "" so the
 	// adapter default applies.
-	tenantLLMModel := ""
+	tenantLLMModel, tenantLLMProvider := "", ""
 	if cfg, err := st.GetProviderConfigByComponent(ctx, campaign.TenantID, storage.ComponentLLM); err == nil {
-		tenantLLMModel = cfg.Model
+		tenantLLMModel, tenantLLMProvider = cfg.Model, cfg.Provider
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: tenant LLM config: %w", err)
 	}
@@ -253,7 +254,8 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 		}
 		// Resolve the model this NPC's engine runs (#227): the Agent's bound LLM
 		// provider_config model when it has one, else the tenant-level fallback.
-		// Empty stays empty so the openaicompat adapter fills groq.DefaultModel.
+		// A model still empty here is filled with the session provider's default
+		// after the loop ([defaultEmptyModels]).
 		spec.model = resolveNPCModel(loaded.LLMConfig, tenantLLMModel)
 		// Hydrate this NPC's Tool Grants from its DB rows (#113): tool
 		// availability is data-driven, not compiled in. An NPC with no rows gets
@@ -292,6 +294,10 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 	default:
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: get butler: %w", err)
 	}
+
+	// Any spec still without a model (Butler included) gets the SESSION provider's
+	// default, named: see [defaultEmptyModels].
+	defaultEmptyModels(specs, sessionLLMProviderID(primary.LLMConfig, tenantLLMProvider))
 
 	return specs, primary, campaign, nil
 }
@@ -332,14 +338,40 @@ func butlerSpec(ctx context.Context, st *storage.Store, butler storage.Agent, te
 
 // resolveNPCModel picks the model id for one NPC's engine (#227): the Agent's own
 // bound LLM provider_config model wins when present and non-empty, otherwise the
-// tenant-level LLM model fallback. Both empty yields "", which the openaicompat
-// adapter reads as "use the provider default" — the defaulting lives at the
-// adapter, never duplicated here.
+// tenant-level LLM model fallback. Both empty yields "", which the roster load
+// then resolves to the session provider's default ([defaultEmptyModels]).
 func resolveNPCModel(bound *storage.ProviderConfig, tenantModel string) string {
 	if bound != nil && bound.Model != "" {
 		return bound.Model
 	}
 	return tenantModel
+}
+
+// sessionLLMProviderID names the provider whose adapter serves the whole Roster:
+// the primary Agent's bound LLM config, else the Tenant's 'llm' row, else ""
+// (the env default, Groq). It mirrors [effectiveComponentConfig], which
+// [resolveSessionKeys] uses to pick the key and Config.llmProviderID, so the
+// default model filled in below belongs to the adapter that will be called.
+func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider string) string {
+	if primaryBound != nil {
+		return primaryBound.Provider
+	}
+	return tenantProvider
+}
+
+// defaultEmptyModels resolves every model-less spec to providerID's default
+// model ([llmbuild.DefaultModel]). The spec's model is both what the engine
+// requests and what the spend meter prices, and the meter has no row for
+// (provider, ""): an empty model was charged at the conservative fallback, about
+// 30x the real Groq rate, so a platform-key trial tenant (no provider_config at
+// all) tripped its allowance after a few cents of real spend. Naming the default
+// here keeps the requested and the metered model identical.
+func defaultEmptyModels(specs []npcSpec, providerID string) {
+	for i := range specs {
+		if specs[i].model == "" {
+			specs[i].model = llmbuild.DefaultModel(providerID)
+		}
+	}
 }
 
 // grantsFromRows hydrates an Agent's persisted Tool Grant rows into the in-memory

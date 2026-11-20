@@ -36,10 +36,12 @@ const (
 	fillTimeout = 5 * time.Second
 )
 
-// CharacterLookup is the speaker → Character resolution the resolver needs (#276).
-// *storage.Store satisfies it via GetCharacterByDiscordUser.
+// CharacterLookup is the storage read surface the resolver needs: the speaker →
+// Character resolution (#276) and the Campaign's owning Tenant, which scopes the
+// GM verdict. *storage.Store satisfies it.
 type CharacterLookup interface {
 	GetCharacterByDiscordUser(ctx context.Context, campaignID uuid.UUID, discordUserID string) (storage.Character, error)
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 }
 
 // MemberNamer resolves a Discord snowflake to its guild display name — the
@@ -52,21 +54,27 @@ type MemberNamer interface {
 	MemberDisplayName(ctx context.Context, campaignID uuid.UUID, discordUserID string) (string, error)
 }
 
-// GMChecker reports whether a Discord snowflake is a GM. It must never block —
-// Lookup calls it inside the relay/chunker's synchronous bus callbacks
-// (ADR-0040). *auth.GMIdentity satisfies it: the tenant-operator binding union
-// the env allowlist (ADR-0055, amending ADR-0050's allowlist-membership
-// clause), served from a cached snapshot.
+// GMChecker reports whether a Discord snowflake is a GM OF ONE TENANT. It must
+// never block — Lookup calls it inside the relay/chunker's synchronous bus
+// callbacks (ADR-0040). *auth.GMIdentity satisfies it: THIS Tenant's operator
+// binding union the env allowlist (ADR-0055, amending ADR-0050's
+// allowlist-membership clause), served from a cached snapshot.
+//
+// The verdict is per Tenant on purpose. The deployment-wide "operator of SOME
+// tenant" check labelled any Tenant's operator as GM in every other Tenant's
+// transcript they merely joined as a player.
 type GMChecker interface {
-	IsGM(discordUserID string) bool
+	IsGMInTenant(tenantID uuid.UUID, discordUserID string) bool
 }
 
 // Resolution is the resolved identity for a Speaker Lane snowflake. Name is the
 // Character name when mapped, else the guild display name, else "" (unresolved or
 // a failed fetch — the caller keeps its generic label). GM is the GMChecker's
-// verdict, computed on every Lookup against its own snapshot (never cached
-// here), so a binding change takes effect on the checker's freshness terms
-// without a name-cache flush.
+// verdict for the Campaign's owning Tenant, computed on every Lookup against its
+// own snapshot (never cached here), so a binding change takes effect on the
+// checker's freshness terms without a name-cache flush. The Tenant is announced
+// at session start ([Resolver.SetCampaignTenant]); for a Campaign nobody
+// announced, GM is false until a Warm has looked it up.
 type Resolution struct {
 	Name string
 	GM   bool
@@ -97,9 +105,16 @@ type Resolver struct {
 
 	mu       sync.Mutex
 	cache    map[key]entry
-	inflight map[key]struct{}     // keys with a fill in progress (dedup)
-	gen      map[uuid.UUID]uint64 // per-campaign generation; bumped on InvalidateCampaign
-	wg       sync.WaitGroup       // tracks in-flight fills (test synchronization)
+	inflight map[key]struct{}        // keys with a fill in progress (dedup)
+	gen      map[uuid.UUID]uint64    // per-campaign generation; bumped on InvalidateCampaign
+	tenant   map[uuid.UUID]uuid.UUID // campaign → owning Tenant; set at session start or by Warm, immutable once known
+	// tenantRetry is, per Campaign whose Tenant lookup failed, the earliest time
+	// the next lookup may run (the negative cache); tenantBusy marks a lookup in
+	// flight. Together they keep a failing campaign read to one attempt per
+	// ttlNegative instead of one per speech start.
+	tenantRetry map[uuid.UUID]time.Time
+	tenantBusy  map[uuid.UUID]struct{}
+	wg          sync.WaitGroup // tracks in-flight fills (test synchronization)
 }
 
 // NewResolver builds a Resolver. members may be nil (web-only mode: no guild
@@ -118,13 +133,40 @@ func NewResolver(chars CharacterLookup, members MemberNamer, gm GMChecker, log *
 		cache:    map[key]entry{},
 		inflight: map[key]struct{}{},
 		gen:      map[uuid.UUID]uint64{},
+		tenant:   map[uuid.UUID]uuid.UUID{},
+
+		tenantRetry: map[uuid.UUID]time.Time{},
+		tenantBusy:  map[uuid.UUID]struct{}{},
 	}
+}
+
+// SetCampaignTenant records which Tenant owns a Campaign, the scope of the GM
+// verdict. The session Manager calls it at Voice Session start, where both ids
+// are in hand, so the GM flag is right from the session's FIRST line: without it
+// the Tenant is learned by the first Warm's store read, and a line persisted
+// before that read returned would be recorded as a player's (the who/GM snapshot
+// is taken once, at persist time). A Campaign never changes Tenant, so the entry
+// is never invalidated. Safe for concurrent use; a nil Tenant is ignored.
+func (r *Resolver) SetCampaignTenant(campaignID, tenantID uuid.UUID) {
+	if tenantID == uuid.Nil {
+		return
+	}
+	r.mu.Lock()
+	r.tenant[campaignID] = tenantID
+	delete(r.tenantRetry, campaignID)
+	r.mu.Unlock()
 }
 
 // Warm asynchronously fills the cache for a speaker so a later Lookup hits. It
 // never blocks: a fresh cache entry or an in-flight fill for the same key is a
 // no-op (dedup), otherwise it dispatches one background fill. An empty speakerID
 // (unattributed lane) is ignored.
+//
+// The Campaign's Tenant is normally known already ([Resolver.SetCampaignTenant]).
+// When it is not, Warm also fetches it, as its OWN deduplicated, negatively
+// cached lookup: a campaign read that keeps failing costs one store query per
+// ttlNegative, and never drags the name fill (a Character query plus a Discord
+// REST call) along with it on every speech start.
 func (r *Resolver) Warm(campaignID uuid.UUID, speakerID string) {
 	if speakerID == "" {
 		return
@@ -132,6 +174,14 @@ func (r *Resolver) Warm(campaignID uuid.UUID, speakerID string) {
 	k := key{campaign: campaignID, speaker: speakerID}
 
 	r.mu.Lock()
+	if _, known := r.tenant[campaignID]; !known {
+		_, busy := r.tenantBusy[campaignID]
+		if !busy && !r.now().Before(r.tenantRetry[campaignID]) {
+			r.tenantBusy[campaignID] = struct{}{}
+			r.wg.Add(1)
+			go r.fillTenant(campaignID)
+		}
+	}
 	if e, ok := r.cache[k]; ok && r.now().Before(e.expires) {
 		r.mu.Unlock()
 		return // still fresh
@@ -169,6 +219,31 @@ func (r *Resolver) fill(k key, gen uint64) {
 	r.cache[k] = entry{name: name, expires: r.now().Add(ttl)}
 }
 
+// fillTenant is the fallback Tenant lookup for a Campaign no session start
+// announced: one store read off the bus. Success records the Tenant for good; a
+// failure schedules the next attempt ttlNegative out, leaving the GM label off
+// (never wrongly on) meanwhile.
+func (r *Resolver) fillTenant(campaignID uuid.UUID) {
+	defer r.wg.Done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), fillTimeout)
+	defer cancel()
+	c, err := r.chars.GetCampaign(ctx, campaignID)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.tenantBusy, campaignID)
+	if err != nil {
+		r.tenantRetry[campaignID] = r.now().Add(ttlNegative)
+		r.log.Warn("speaker: campaign lookup failed; GM label off until it resolves", "err", err, "campaign", campaignID)
+		return
+	}
+	if _, known := r.tenant[campaignID]; !known {
+		r.tenant[campaignID] = c.TenantID
+	}
+	delete(r.tenantRetry, campaignID)
+}
+
 // resolve performs the actual lookup with no lock held: Character name (positive)
 // → guild display name (positive) → "" (negative). An unknown Character-lookup
 // error (not a genuine miss) short-caches negative and does NOT fall through to
@@ -202,19 +277,23 @@ func (r *Resolver) resolve(k key) (string, time.Duration) {
 }
 
 // Lookup returns the cached Resolution for a speaker. It NEVER blocks or does I/O:
-// GM is the non-blocking GMChecker's verdict, and Name is served only from a fresh
-// cache entry (a cold or expired entry yields Name ""). The caller keeps its
-// generic label when Name is "".
+// GM is the non-blocking GMChecker's verdict for the Campaign's owning Tenant
+// (false while that Tenant is unknown), and Name is served only
+// from a fresh cache entry (a cold or expired entry yields Name ""). The caller
+// keeps its generic label when Name is "".
 func (r *Resolver) Lookup(campaignID uuid.UUID, speakerID string) Resolution {
 	if speakerID == "" {
 		return Resolution{}
 	}
-	res := Resolution{GM: r.gm != nil && r.gm.IsGM(speakerID)}
+	var res Resolution
 	r.mu.Lock()
+	tenantID, tenantKnown := r.tenant[campaignID]
 	if e, ok := r.cache[key{campaign: campaignID, speaker: speakerID}]; ok && r.now().Before(e.expires) {
 		res.Name = e.name
 	}
 	r.mu.Unlock()
+	// The checker is called outside r.mu (it takes its own lock).
+	res.GM = tenantKnown && r.gm != nil && r.gm.IsGMInTenant(tenantID, speakerID)
 	return res
 }
 

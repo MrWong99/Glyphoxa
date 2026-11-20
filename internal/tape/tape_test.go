@@ -1,6 +1,8 @@
 package tape
 
 import (
+	"log/slog"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +11,14 @@ import (
 // base is a fixed wall-clock origin so tests can reason about At windows without
 // touching the real clock.
 var base = time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+// fixedTape is a tape whose retention clock is frozen at base, so the frames
+// these tests stamp at base+offset are always inside the window: they exercise
+// capture, consent and the ring, not time-based retention (which has its own
+// tests below).
+func fixedTape(window time.Duration, consented []string, log *slog.Logger) *Tape {
+	return newTape(window, consented, log, func() time.Time { return base }, time.Hour)
+}
 
 // waitDrained blocks until the owner goroutine has processed every append enqueued
 // so far, by round-tripping a Snapshot (serviced on the same owner after the
@@ -19,7 +29,7 @@ func drainedSnapshot(t *testing.T, tp *Tape, from, to time.Time) Snapshot {
 }
 
 func TestAppendSnapshotRoundTrip(t *testing.T) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	defer tp.Close()
 
 	tp.AppendInbound("alice", []byte{0x01}, base)
@@ -42,7 +52,7 @@ func TestAppendSnapshotRoundTrip(t *testing.T) {
 }
 
 func TestCloseDiscards(t *testing.T) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	tp.AppendInbound("alice", []byte{0x01}, base)
 	// Ensure the frame is processed before Close.
 	drainedSnapshot(t, tp, base.Add(-time.Second), base.Add(time.Second))
@@ -63,7 +73,7 @@ func TestRingBounded(t *testing.T) {
 	// A 1-second window holds 50 frames (20ms each). Append 7000-scaled: use a
 	// small window so the test is fast but the drop-oldest bound is exact.
 	window := time.Second // 50 frames
-	tp := New(window, []string{"alice"}, nil)
+	tp := fixedTape(window, []string{"alice"}, nil)
 	defer tp.Close()
 
 	total := 1050
@@ -89,7 +99,7 @@ func TestRingBounded(t *testing.T) {
 }
 
 func TestUnconsentedNeverAppears(t *testing.T) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	defer tp.Close()
 
 	tp.AppendInbound("bob", []byte{0x01}, base) // bob never consented
@@ -107,7 +117,7 @@ func TestUnconsentedNeverAppears(t *testing.T) {
 }
 
 func TestSetConsentGrantThenCapture(t *testing.T) {
-	tp := New(Window, nil, nil)
+	tp := fixedTape(Window, nil, nil)
 	defer tp.Close()
 
 	tp.AppendInbound("carol", []byte{0x01}, base) // not yet consented -> dropped
@@ -124,7 +134,7 @@ func TestSetConsentGrantThenCapture(t *testing.T) {
 }
 
 func TestSetConsentRevokeClearsLane(t *testing.T) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	defer tp.Close()
 
 	tp.AppendInbound("alice", []byte{0x01}, base)
@@ -146,7 +156,7 @@ func TestSetConsentRevokeClearsLane(t *testing.T) {
 
 func TestAppendAgentAlwaysOn(t *testing.T) {
 	// No consented speakers at all: agent audio is still captured (ADR-0051).
-	tp := New(Window, nil, nil)
+	tp := fixedTape(Window, nil, nil)
 	defer tp.Close()
 
 	tp.AppendAgent([]byte{0x01}, base)
@@ -165,7 +175,7 @@ func TestAppendAgentAlwaysOn(t *testing.T) {
 // while keeping the survivors and agent audio (#306, ADR-0051): the reseed the
 // live wiring drives from the durable rows.
 func TestReconcileConsentIsAuthoritative(t *testing.T) {
-	tp := New(Window, []string{"alice", "bob"}, nil)
+	tp := fixedTape(Window, []string{"alice", "bob"}, nil)
 	defer tp.Close()
 
 	tp.AppendInbound("alice", []byte{0x01}, base)
@@ -207,7 +217,7 @@ func TestReconcileConsentIsAuthoritative(t *testing.T) {
 // but whose Speaker lost consent before it is applied never enters the ring — even
 // bypassing the enqueue-time gate (white-box: call the owner path directly).
 func TestAppendRingDropsStragglerAfterRevoke(t *testing.T) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	defer tp.Close()
 
 	// Simulate the race: consent revoked (set no longer has alice), but a straggler
@@ -228,7 +238,7 @@ func TestAppendRingDropsStragglerAfterRevoke(t *testing.T) {
 }
 
 func TestSnapshotConsistentUnderConcurrentAppends(t *testing.T) {
-	tp := New(Window, []string{"alice", "bob"}, nil)
+	tp := fixedTape(Window, []string{"alice", "bob"}, nil)
 	defer tp.Close()
 
 	var wg sync.WaitGroup
@@ -264,7 +274,7 @@ func TestSnapshotConsistentUnderConcurrentAppends(t *testing.T) {
 }
 
 func BenchmarkAppendInbound(b *testing.B) {
-	tp := New(Window, []string{"alice"}, nil)
+	tp := fixedTape(Window, []string{"alice"}, nil)
 	defer tp.Close()
 	// The owner goroutine drains the mailbox; steady-state append is enqueue (or,
 	// under backlog, the drop-oldest path) — both must be allocation-free.
@@ -273,5 +283,100 @@ func BenchmarkAppendInbound(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tp.AppendInbound("alice", opus, base)
+	}
+}
+
+// fakeClock is a settable retention clock.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// TestSnapshotNeverReturnsAudioOlderThanTheWindow (A3, ADR-0051): a Speaker who
+// said ten seconds an hour ago and has been silent since (Discord sends no frames
+// in silence, so nothing ever overwrote the ring) has NO audio on tape now,
+// however wide a range the Snapshot asks for. The ring was bounded by frame
+// count only, so that audio used to be returned.
+func TestSnapshotNeverReturnsAudioOlderThanTheWindow(t *testing.T) {
+	tp := New(Window, []string{"u1"}, nil)
+	defer tp.Close()
+	t0 := time.Now().Add(-time.Hour)
+	for i := 0; i < 500; i++ { // 10s of frames, an hour ago
+		tp.AppendInbound("u1", []byte{1}, t0.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	recent := time.Now().Add(-time.Second)
+	tp.AppendInbound("u1", []byte{2}, recent)
+
+	s := tp.Snapshot(t0.Add(-time.Minute), time.Now().Add(time.Minute))
+	if len(s.Lanes) != 1 || len(s.Lanes[0].Frames) != 1 || !s.Lanes[0].Frames[0].At.Equal(recent) {
+		n := 0
+		for _, l := range s.Lanes {
+			n += len(l.Frames)
+		}
+		t.Fatalf("snapshot holds %d frames, want exactly the 1 inside the %s window", n, Window)
+	}
+}
+
+// TestSweepDropsExpiredAudioWithoutAnyTraffic (A3): retention does not wait for
+// someone to ask. With no append and no Snapshot, the periodic sweep alone drops
+// audio once it is older than the window.
+func TestSweepDropsExpiredAudioWithoutAnyTraffic(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	tp := newTape(Window, []string{"u1"}, nil, clock.now, 2*time.Millisecond)
+	defer tp.Close()
+	for i := 0; i < 50; i++ {
+		tp.AppendInbound("u1", []byte{1}, clock.now())
+	}
+	if got := tp.heldFrames(); got != 50 {
+		t.Fatalf("held frames = %d, want 50 while inside the window", got)
+	}
+
+	clock.advance(Window + time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for tp.heldFrames() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("sweep left %d frames older than the window on tape", tp.heldFrames())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestSilentLanesExpireAndFreeTheirSlot (A3): a lane with no audio inside the
+// window is forgotten, so Speakers who left (or whose id changed) do not pin the
+// maxLanes cap for the rest of the session and lock a new Speaker out.
+func TestSilentLanesExpireAndFreeTheirSlot(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	ids := make([]string, 0, maxLanes+1)
+	for i := 0; i <= maxLanes; i++ {
+		ids = append(ids, "u"+strconv.Itoa(i))
+	}
+	// An hour-long sweep period: expiry here must come from the cap check itself.
+	tp := newTape(Window, ids, nil, clock.now, time.Hour)
+	defer tp.Close()
+
+	for _, id := range ids[:maxLanes] { // fill every lane slot
+		tp.AppendInbound(id, []byte{1}, clock.now())
+	}
+	clock.advance(Window + time.Second) // ...and let them all fall silent
+
+	newcomer := ids[maxLanes]
+	at := clock.now()
+	tp.AppendInbound(newcomer, []byte{9}, at)
+
+	s := tp.Snapshot(at.Add(-time.Second), at.Add(time.Second))
+	if len(s.Lanes) != 1 || s.Lanes[0].LaneID != newcomer {
+		t.Fatalf("lanes = %+v, want only the newcomer %q (expired lanes must free their slot)", s.Lanes, newcomer)
 	}
 }

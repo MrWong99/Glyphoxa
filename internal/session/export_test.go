@@ -40,6 +40,13 @@ func (m *Manager) SetEndTimeoutForTest(d time.Duration) {
 	m.endTimeout = d
 }
 
+// SetUsageFlushIntervalForTest shrinks the in-session Usage Ledger flush
+// interval (#660) from the production 60s so the periodic flush is observable in
+// milliseconds. Test-only; called before any session starts.
+func (m *Manager) SetUsageFlushIntervalForTest(d time.Duration) {
+	m.usageFlushEvery = d
+}
+
 // BaseFactsForTest returns the FactsRecaller threaded onto the base voice config,
 // so a test can assert Deps.Facts wired it (#126, #448). Test-only.
 func (m *Manager) BaseFactsForTest() agent.FactsRecaller {

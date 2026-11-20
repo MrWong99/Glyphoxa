@@ -195,11 +195,25 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 				"highlight", p.HighlightID)
 			return nil
 		}
+		if errors.Is(err, imagegen.ErrNoImage) {
+			// PERMANENT too: the provider answered, with no image (a safety refusal,
+			// or prose). The excerpt will be refused again, so a retry only re-bills
+			// it. Returning the error instead dead-lettered the job after its
+			// retries, and the boot sweep treats a 'dead' job as absent, so EVERY
+			// boot re-enqueued it and paid for another full round of refusals,
+			// forever. 'done' is the honest state: there is nothing to come back for.
+			release()
+			log.Warn("highlight enrich: provider returned no image (refused or text only), leaving highlight without media",
+				"highlight", p.HighlightID, "tenant", p.TenantID)
+			return nil
+		}
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
 			//
-			// EVERY provider failure takes this exit, including a rejected key (401/403)
+			// EVERY failure to REACH or be SERVED by the provider takes this exit
+			// (an image-less success does not: see ErrNoImage above), including a
+			// rejected key (401/403)
 			// that cannot possibly succeed on retry. That looks wrong and is not: what
 			// the exit really chooses is the RECOVERY path, not the retry. A handler
 			// returning nil completes the job 'done', and

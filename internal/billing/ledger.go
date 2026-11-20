@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -20,13 +22,14 @@ type FlushFunc func(ctx context.Context, rows []storage.UsageRow) error
 // Ledger is the durable-usage counterpart of the in-memory spend meter
 // (ADR-0054): an [observe.UsageSink] that buckets a session's metered usage by
 // (day, component, provider, model) with a priced estimate, for the session
-// Manager to flush into the usage_ledger table at session end. Like the meter
+// Manager to flush into the usage_ledger table every minute while the session
+// runs and at session end (#660). Like the meter
 // it rides [observe.TeeUsage] beside the production recorder — zero new
 // pipeline plumbing — and it never gates anything: attribution only.
 //
-// Buffering is in-memory until Flush: a crash loses the unflushed remainder of
-// the session, which the ADR accepts for an estimates-only ledger (the
-// Prometheus counters still moved).
+// Buffering is in-memory until Flush: a crash loses the usage metered since the
+// last flush (at most one flush interval), which the ADR accepts for an
+// estimates-only ledger (the Prometheus counters still moved).
 type Ledger struct {
 	tenantID uuid.UUID
 	now      func() time.Time
@@ -129,6 +132,14 @@ func (l *Ledger) accumulate(component storage.Component, provider observe.Provid
 // and cleared BEFORE calling flush (usage arriving during a flush lands in the
 // next batch); on error the snapshot is merged back so a later Flush retries —
 // rows commute, so re-merging never mis-counts.
+//
+// One failure is NOT retried: [storage.ErrCommitOutcomeUnknown]. The write is an
+// additive upsert, so if the COMMIT was in flight when the deadline fired the
+// rows may already be in the table, and merging them back would add them a
+// second time on the next (periodic) flush. An over-count spends a Tenant's
+// plan allowance on usage that never happened, which is worse than the
+// under-count of dropping the batch, so the batch is DROPPED and the returned
+// error carries its amounts for the caller's log.
 func (l *Ledger) Flush(ctx context.Context, flush FlushFunc) error {
 	l.mu.Lock()
 	if len(l.rows) == 0 {
@@ -144,6 +155,19 @@ func (l *Ledger) Flush(ctx context.Context, flush FlushFunc) error {
 		rows = append(rows, *r)
 	}
 	if err := flush(ctx, rows); err != nil {
+		if errors.Is(err, storage.ErrCommitOutcomeUnknown) {
+			var d storage.UsageRow
+			for _, r := range rows {
+				d.LLMInputTokens += r.LLMInputTokens
+				d.LLMOutputTokens += r.LLMOutputTokens
+				d.TTSCharacters += r.TTSCharacters
+				d.STTAudioSeconds += r.STTAudioSeconds
+				d.EstimatedUSD += r.EstimatedUSD
+			}
+			return fmt.Errorf("billing: usage batch DROPPED, not retried, because it may already be committed "+
+				"(tenant %s, %d rows, llm tokens %d in / %d out, tts chars %d, stt %.1fs, estimated $%.4f): %w",
+				l.tenantID, len(rows), d.LLMInputTokens, d.LLMOutputTokens, d.TTSCharacters, d.STTAudioSeconds, d.EstimatedUSD, err)
+		}
 		// Merge the failed snapshot back under the CURRENT buffer (which may have
 		// gained rows meanwhile): quantities and estimates are additive.
 		l.mu.Lock()

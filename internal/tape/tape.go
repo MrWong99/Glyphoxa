@@ -32,13 +32,20 @@ import (
 // is never subject to the consent gate that guards inbound Speaker lanes.
 const AgentLaneID = "agent"
 
-// Window is the rollover tape's retention window (ADR-0051): the ring covers the
-// most recent 120 seconds of each lane and drops older audio.
+// Window is the rollover tape's retention window (ADR-0051): a lane holds the
+// most recent 120 seconds of its audio BY THE CLOCK and nothing older.
 const Window = 120 * time.Second
 
 // frameInterval is one Opus packet's duration (~20 ms); the per-lane ring holds
-// window/frameInterval frames.
+// window/frameInterval frames, the most a lane can produce inside the window.
 const frameInterval = 20 * time.Millisecond
+
+// sweepInterval is how often the owner prunes every lane against the clock. The
+// ring's capacity bounds a lane by FRAME COUNT only, and Discord sends no frames
+// while a Speaker is silent, so without a clock a Speaker who said one sentence
+// an hour ago still had it on tape. The sweep bounds how long audio can outlive
+// the window when nothing else (an append to that lane, a Snapshot) prunes it.
+const sweepInterval = 5 * time.Second
 
 // maxLanes caps the number of distinct lanes the tape will allocate rings for, a
 // defensive bound against an unbounded set of Speaker ids (a returning user with a
@@ -78,7 +85,13 @@ type Snapshot struct {
 // discard it with [Tape.Close] at session end.
 type Tape struct {
 	capFrames int
+	window    time.Duration
 	log       *slog.Logger
+
+	// now and sweepEvery are the retention clock and the sweep period; time.Now
+	// and sweepInterval outside tests.
+	now        func() time.Time
+	sweepEvery time.Duration
 
 	// consent is the copy-on-write set of consented Speaker ids
 	// (map[string]struct{}), swapped atomically by SetConsent and loaded by
@@ -117,10 +130,13 @@ type laneFrame struct {
 }
 
 // ctrlMsg is one control request to the owner: a snapshot (snap != nil), a lane
-// clear on consent revoke (revoke), or an authoritative consent reconcile
-// (reconcile). Exactly one applies.
+// clear on consent revoke (revoke), an authoritative consent reconcile
+// (reconcile), or a held-frame count (held != nil). Exactly one applies.
 type ctrlMsg struct {
-	snap       *snapReq
+	snap *snapReq
+	// held, when non-nil, receives the number of frames currently retained across
+	// all lanes, WITHOUT pruning first (it observes what the sweep has done).
+	held       chan int
 	revoke     bool
 	revokeLane string
 	// reconcile, with allowed set, drops every non-agent lane whose id is not in
@@ -139,6 +155,11 @@ type snapReq struct {
 // given Speaker ids (agent audio is always captured regardless). A nil logger
 // discards logs. It starts the owner goroutine; call [Tape.Close] to stop it.
 func New(window time.Duration, consented []string, log *slog.Logger) *Tape {
+	return newTape(window, consented, log, time.Now, sweepInterval)
+}
+
+// newTape is [New] with the retention clock and sweep period injectable.
+func newTape(window time.Duration, consented []string, log *slog.Logger, now func() time.Time, sweepEvery time.Duration) *Tape {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
@@ -147,12 +168,15 @@ func New(window time.Duration, consented []string, log *slog.Logger) *Tape {
 		capFrames = 1
 	}
 	t := &Tape{
-		capFrames: capFrames,
-		log:       log,
-		appends:   make(chan laneFrame, mailboxCap),
-		ctrl:      make(chan ctrlMsg),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
+		capFrames:  capFrames,
+		window:     window,
+		log:        log,
+		now:        now,
+		sweepEvery: sweepEvery,
+		appends:    make(chan laneFrame, mailboxCap),
+		ctrl:       make(chan ctrlMsg),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	set := make(map[string]struct{}, len(consented))
 	for _, id := range consented {
@@ -267,8 +291,10 @@ func (t *Tape) ReconcileConsent(consented []string) {
 }
 
 // Snapshot returns a consistent copy of every lane's frames over [from, to],
-// serviced by the owner goroutine so it never races an append. After Close it
-// returns an empty snapshot for the range.
+// serviced by the owner goroutine so it never races an append. Audio older than
+// the retention window is pruned first, so a Snapshot never returns it however
+// wide the requested range. After Close it returns an empty snapshot for the
+// range.
 func (t *Tape) Snapshot(from, to time.Time) Snapshot {
 	req := &snapReq{from: from, to: to, resp: make(chan Snapshot, 1)}
 	select {
@@ -281,6 +307,24 @@ func (t *Tape) Snapshot(from, to time.Time) Snapshot {
 		return s
 	case <-t.done:
 		return Snapshot{From: from, To: to}
+	}
+}
+
+// heldFrames reports how many frames the tape currently retains across all
+// lanes, as the owner sees them and without pruning. Test observability for the
+// retention sweep; 0 after Close.
+func (t *Tape) heldFrames() int {
+	resp := make(chan int, 1)
+	select {
+	case t.ctrl <- ctrlMsg{held: resp}:
+	case <-t.done:
+		return 0
+	}
+	select {
+	case n := <-resp:
+		return n
+	case <-t.done:
+		return 0
 	}
 }
 
@@ -301,10 +345,15 @@ func (t *Tape) Close() {
 // mailbox, so a Snapshot always observes the appends enqueued before it (the
 // ordering the caller expects) and never blocks appends: the snapshot reply rides
 // a buffered response channel, so the owner returns to draining at once.
+//
+// Retention is by the clock (ADR-0051): every sweepEvery the owner drops, from
+// every lane, the frames older than the window and forgets lanes left empty.
 func (t *Tape) run() {
 	defer close(t.done)
 	rings := make(map[string]*ring)
 	t.warnedLanes = make(map[string]struct{})
+	sweep := time.NewTicker(t.sweepEvery)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-t.stop:
@@ -316,10 +365,19 @@ func (t *Tape) run() {
 			return
 		case lf := <-t.appends:
 			t.appendRing(rings, lf.lane, lf.frame)
+		case <-sweep.C:
+			t.prune(rings)
 		case c := <-t.ctrl:
 			t.drainAppends(rings)
 			switch {
+			case c.held != nil:
+				n := 0
+				for _, r := range rings {
+					n += r.n
+				}
+				c.held <- n
 			case c.snap != nil:
+				t.prune(rings)
 				c.snap.resp <- buildSnapshot(rings, c.snap.from, c.snap.to)
 			case c.revoke:
 				delete(rings, c.revokeLane)
@@ -351,8 +409,24 @@ func (t *Tape) drainAppends(rings map[string]*ring) {
 	}
 }
 
+// prune enforces the retention window against the clock: it drops every frame
+// older than now-window from every lane and forgets a lane left empty, which
+// releases its ring and its maxLanes slot (a Speaker who left, or whose SSRC
+// changed, no longer pins either for the rest of the session). Owner-only.
+func (t *Tape) prune(rings map[string]*ring) {
+	cutoff := t.now().Add(-t.window)
+	for lane, r := range rings {
+		r.dropBefore(cutoff)
+		if r.n == 0 {
+			delete(rings, lane)
+			delete(t.warnedLanes, lane)
+		}
+	}
+}
+
 // appendRing routes one frame into its lane's ring, allocating the ring lazily and
-// refusing new lanes past maxLanes.
+// refusing new lanes past maxLanes (after expiring silent lanes, so only lanes
+// with audio inside the window count toward the cap).
 //
 // It re-checks consent for non-agent lanes against the current set before storing
 // (ADR-0051): AppendInbound already gates at enqueue, but a revoke can land between
@@ -369,6 +443,9 @@ func (t *Tape) appendRing(rings map[string]*ring, lane string, f Frame) {
 	}
 	r := rings[lane]
 	if r == nil {
+		if len(rings) >= maxLanes {
+			t.prune(rings)
+		}
 		if len(rings) >= maxLanes {
 			if _, warned := t.warnedLanes[lane]; !warned {
 				t.warnedLanes[lane] = struct{}{}
@@ -399,7 +476,9 @@ func buildSnapshot(rings map[string]*ring, from, to time.Time) Snapshot {
 
 // ring is a fixed-capacity circular buffer of frames owned solely by the owner
 // goroutine. Its backing slice is preallocated so steady-state append never
-// allocates; once full, append overwrites the oldest frame (drop-oldest).
+// allocates; once full, append overwrites the oldest frame (drop-oldest). The
+// capacity bounds memory; the retention WINDOW is enforced separately, by the
+// clock ([Tape.prune]).
 type ring struct {
 	buf   []Frame
 	start int // index of the oldest frame
@@ -418,6 +497,17 @@ func (r *ring) append(f Frame) {
 	}
 	r.buf[r.start] = f
 	r.start = (r.start + 1) % len(r.buf)
+}
+
+// dropBefore discards the frames at the old end of the ring stamped before
+// cutoff, zeroing each slot so its Opus payload is released to the collector.
+// Frames are appended in arrival order, so the oldest are at start.
+func (r *ring) dropBefore(cutoff time.Time) {
+	for r.n > 0 && r.buf[r.start].At.Before(cutoff) {
+		r.buf[r.start] = Frame{}
+		r.start = (r.start + 1) % len(r.buf)
+		r.n--
+	}
 }
 
 // inRange returns a copy of the held frames whose At is within [from, to],

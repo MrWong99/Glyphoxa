@@ -418,7 +418,10 @@ func scanKGNodeFact(row pgx.Row) (KGNode, error) {
 // SimilarNodes returns the k Knowledge Graph Nodes in campaignID nearest the
 // query vector by cosine distance (<=>), nearest first — the ADR-0011 similarity
 // hint the GM review surface shows beside a Knowledge Proposal (#300, ADR-0052).
-// NULL-embedding rows are excluded (the partial HNSW index). Unlike the
+// NULL-embedding rows are excluded. The search is EXACT over the Campaign's own
+// Nodes, never an HNSW index scan, for the reason [Store.searchChunks] spells
+// out: the index is global, so a filtered approximate scan returns nothing once
+// other Campaigns' Nodes crowd the query's neighbourhood. Unlike the
 // prompt-facing searches this INCLUDES gm_private Nodes: it is GM-facing review
 // only, and it is deliberately NOT part of [PromptKGView] — prompt assembly
 // cannot reach it (#450). k <= 0 is a caller bug and errors. The query vector reuses encodeVector + a server-side ::vector cast,
@@ -428,11 +431,16 @@ func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []
 		return nil, fmt.Errorf("storage: similar nodes: k must be > 0, got %d", k)
 	}
 	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumnsAspects(false)+`
-		   FROM kg_node
-		  WHERE campaign_id = $1 AND embedding IS NOT NULL
-		  ORDER BY embedding <=> $2::vector
-		  LIMIT $3`, campaignID, encodeVector(query), k)
+		`WITH scoped AS MATERIALIZED (
+		     SELECT id AS hit_id, embedding <=> $2::vector AS distance
+		       FROM kg_node
+		      WHERE campaign_id = $1 AND embedding IS NOT NULL
+		 ), nearest AS (
+		     SELECT hit_id, distance FROM scoped ORDER BY distance, hit_id LIMIT $3
+		 )
+		 SELECT `+kgNodeColumnsAspects(false)+`
+		   FROM nearest JOIN kg_node ON kg_node.id = nearest.hit_id
+		  ORDER BY nearest.distance, nearest.hit_id`, campaignID, encodeVector(query), k)
 	if err != nil {
 		return nil, fmt.Errorf("storage: similar kg nodes for campaign %s: %w", campaignID, err)
 	}

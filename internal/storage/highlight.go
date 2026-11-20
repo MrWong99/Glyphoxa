@@ -18,7 +18,7 @@ import (
 //
 // Read/promote/delete are tenant-scoped (single-operator today, ADR-0039, but the
 // WHERE tenant_id guard is the seam the multi-tenant future keys off). The two
-// sweep helpers — DeleteSessionCandidates (the 7-day purge job) and
+// sweep helpers — TakeSessionCandidates (the 7-day purge job) and
 // ListCampaignHighlightClipKeys (the campaign hard-delete blob sweep) — scope by
 // session/campaign instead: their callers carry no tenant, only the owning id.
 
@@ -250,27 +250,49 @@ func (s *Store) SetHighlightImage(ctx context.Context, id uuid.UUID, imageKey, c
 	return nil
 }
 
-// ListSessionCandidateClipKeys returns the clip_key of every remaining CANDIDATE
-// highlight for a Voice Session — the blob keys the 7-day purge job drops through
-// the seam BEFORE it deletes the rows (blob-first, ADR-0048). Promoted rows are
-// excluded (they are kept). Session-scoped (the purge payload carries no tenant).
-func (s *Store) ListSessionCandidateClipKeys(ctx context.Context, voiceSessionID uuid.UUID) ([]string, error) {
-	return s.scanClipKeys(ctx,
-		`SELECT clip_key FROM highlight WHERE voice_session_id = $1 AND status = 'candidate'`,
-		voiceSessionID)
-}
-
-// DeleteSessionCandidates removes every remaining CANDIDATE highlight row for a
-// Voice Session (the 7-day purge, #308/ADR-0051), returning how many rows were
-// deleted. Promoted rows are untouched. Idempotent: a second run deletes nothing.
-// The caller drops the blobs first via ListSessionCandidateClipKeys.
-func (s *Store) DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (int, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM highlight WHERE voice_session_id = $1 AND status = 'candidate'`, voiceSessionID)
+// TakeSessionCandidates is the row half of the 7-day candidate purge for one
+// Voice Session (#308, ADR-0051): ONE statement deletes every remaining CANDIDATE
+// highlight row of the session and returns the blob keys those rows owned (the
+// clip, plus an image or sound key should a row carry one), for the caller to
+// drop through the seam (ADR-0048) AFTER this has committed. Promoted rows are
+// untouched. Idempotent: a second run deletes nothing and returns no keys.
+//
+// Rows first is the order that fails safe. Blobs live behind their own seam, so
+// their deletes can never share this statement's transaction; whichever side
+// goes second can be lost to a crash or an error. Losing the blob deletes leaves
+// orphan blobs, which the boot reconciliation sweep reclaims
+// (highlight.SweepEnrichmentReconciliation: every Highlight-owned clip, image or
+// sound blob whose row is gone). The old blob-first order could lose the ROW
+// delete instead and leave rows pointing at clips that no longer exist, and it
+// raced a GM's promote: a candidate promoted between the key listing and the row
+// delete kept its row and lost its clip. A single DELETE is atomic against that
+// promote: it either sees the row promoted and leaves it (blob untouched) or
+// removes it first, and the promote reports ErrNotFound.
+func (s *Store) TakeSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (blobKeys []string, rows int, err error) {
+	res, err := s.db.Query(ctx,
+		`DELETE FROM highlight
+		  WHERE voice_session_id = $1 AND status = 'candidate'
+		RETURNING clip_key, image_key, sound_key`, voiceSessionID)
 	if err != nil {
-		return 0, fmt.Errorf("storage: delete session candidates: %w", err)
+		return nil, 0, fmt.Errorf("storage: take session candidates: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	defer res.Close()
+	for res.Next() {
+		var keys [3]string
+		if err := res.Scan(&keys[0], &keys[1], &keys[2]); err != nil {
+			return nil, 0, fmt.Errorf("storage: scan taken candidate: %w", err)
+		}
+		rows++
+		for _, k := range keys {
+			if k != "" {
+				blobKeys = append(blobKeys, k)
+			}
+		}
+	}
+	if err := res.Err(); err != nil {
+		return nil, 0, fmt.Errorf("storage: take session candidates: %w", err)
+	}
+	return blobKeys, rows, nil
 }
 
 // SessionPurgeCandidate is an ended Voice Session the boot backstop must schedule a

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -269,6 +271,54 @@ func TestExchange_ToolCallRoundFiresEventAndGrantGate(t *testing.T) {
 	}
 	if len(ev.tools) != 1 || ev.tools[0] != "search_transcripts" {
 		t.Errorf("tool events = %v", ev.tools)
+	}
+}
+
+// meteringRecapper stands in for the recap engine behind the recap Tool: like the
+// real one it charges its LLM usage to the metering the ctx carries.
+type meteringRecapper struct{ sawMetering bool }
+
+func (m *meteringRecapper) RecapLastSessions(ctx context.Context, _ int) (string, error) {
+	if mt, ok := recap.MeteringFrom(ctx); ok && mt.Rec != nil {
+		m.sawMetering = true
+		mt.Rec.LLMTokens(observe.ProviderGroq, "openai/gpt-oss-120b", 7000, 900)
+	}
+	return "Last session: the party met Bart.", nil
+}
+
+// TestExchange_RecapToolSpendLandsInTheExchangeLedger (A1): the recap Tool's own
+// LLM calls are part of the exchange's spend, so they must reach the Usage Ledger
+// the exchange flushes. Before, the shared recap engine metered on the process
+// recorder only and the tokens never reached the tenant's ledger.
+func TestExchange_RecapToolSpendLandsInTheExchangeLedger(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.grants = []storage.ToolGrant{{AgentID: st.butler.ID, ToolName: "recap", Surface: storage.GrantSurfaceChat}}
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{
+		{
+			{Type: llm.EventToolCall, ToolCall: llm.ToolCall{ID: "c1", Name: "recap", Input: []byte(`{"sessions":1}`)}},
+			{Type: llm.EventDone, StopReason: "tool_use"},
+		},
+		textDone("Last time, the party met Bart."),
+	}}
+	recapper := &meteringRecapper{}
+	eng := NewEngine(st, nil, &fakeSearcher{}, &fakeWriter{}, recapper, nil, nil,
+		WithProviderFactory(func(string, string) (llm.Provider, error) { return provider, nil }))
+
+	var ev collectEvents
+	if _, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID,
+		"What happened last time?", &ev); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if !recapper.sawMetering {
+		t.Fatal("recap Tool ran without the exchange's metering on its ctx")
+	}
+	var in int64
+	for _, r := range st.usage {
+		in += r.LLMInputTokens
+	}
+	if in < 7000 {
+		t.Errorf("ledger LLM input tokens = %d, want >= 7000 (the recap Tool's tokens included)", in)
 	}
 }
 

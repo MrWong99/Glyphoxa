@@ -1138,9 +1138,9 @@ func TestCancelledLoopEndsCleanNilReason(t *testing.T) {
 }
 
 // fakeChunkFinalizer is a stand-in ChunkFinalizer (#104): it records the id it was
-// flushed for, the store's ended-count AT flush time (to prove the flush ran
-// BEFORE EndVoiceSession), and can inject an error to prove a flush failure does
-// not fail Stop.
+// flushed for, the store's ended-count AT flush time (to prove where the flush
+// sits relative to the terminal write), and can inject an error to prove a flush
+// failure does not fail Stop.
 type fakeChunkFinalizer struct {
 	mu           sync.Mutex
 	store        *fakeStore
@@ -1167,9 +1167,12 @@ func (f *fakeChunkFinalizer) seen() (uuid.UUID, int, int) {
 	return f.id, f.called, f.endedAtFlush
 }
 
-// TestStopFlushesChunkBeforeEnd is #104: on Stop / loop exit the Manager flushes
-// the active session's open Transcript Chunk BEFORE ending the row.
-func TestStopFlushesChunkBeforeEnd(t *testing.T) {
+// TestStopFlushesChunkBeforeReturning is #104: on Stop / loop exit the Manager
+// flushes the active session's open Transcript Chunk, and Stop does not return
+// until it has. The flush is a best-effort finalizer, so it runs AFTER the
+// terminal row is durable (S10): a process killed mid-flush loses a trailing
+// chunk, never the session's terminal state.
+func TestStopFlushesChunkBeforeReturning(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
 	flusher := &fakeChunkFinalizer{store: store}
@@ -1192,10 +1195,10 @@ func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 
 	id, called, endedAtFlush := flusher.seen()
 	if called != 1 || id != vs.ID {
-		t.Errorf("chunk flush seen id=%s called=%d, want id=%s called=1", id, called, vs.ID)
+		t.Errorf("chunk flush seen id=%s called=%d by the time Stop returned, want id=%s called=1", id, called, vs.ID)
 	}
-	if endedAtFlush != 0 {
-		t.Errorf("EndVoiceSession ran (ended=%d) before the chunk flush; want flush first", endedAtFlush)
+	if endedAtFlush != 1 {
+		t.Errorf("terminal rows written when the chunk flush ran = %d, want 1 (terminal write first)", endedAtFlush)
 	}
 }
 

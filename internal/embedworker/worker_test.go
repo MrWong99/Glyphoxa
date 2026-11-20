@@ -425,6 +425,112 @@ func TestGaugeDecreasesToZero(t *testing.T) {
 	}
 }
 
+// TestRunDrainsBacklogWithoutSleepingBetweenFullBatches: a backlog several
+// batches deep is drained in one go. With an hour-long Interval the worker would
+// otherwise embed exactly one batch and sleep.
+func TestRunDrainsBacklogWithoutSleepingBetweenFullBatches(t *testing.T) {
+	var pending []storage.TranscriptChunk
+	for i := 0; i < 10; i++ {
+		pending = append(pending, chunk("c"))
+	}
+	var pendingNodes []storage.KGNode
+	for i := 0; i < 7; i++ {
+		pendingNodes = append(pendingNodes, node("n", "b"))
+	}
+	store := &fakeStore{pending: pending, pendingNodes: pendingNodes}
+	provider := &timingProvider{}
+	const pause = 30 * time.Millisecond
+	w := New(store, provider, "m", nil, discardLog(), Config{BatchSize: 3, Interval: time.Hour, DrainPause: pause})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for store.pendingCount() > 0 || store.pendingNodeCount() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("backlog not drained within one Run cycle: %d chunks, %d nodes left (one batch per Interval)",
+				store.pendingCount(), store.pendingNodeCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	// The drain is paced: between two passes the provider is left idle for
+	// DrainPause, the window a live recall query needs on the shared Ollama.
+	// Each pass makes its chunk call and then its node call back to back, so the
+	// gap that crosses a pass boundary is the one before every chunk call.
+	gaps := provider.gapsBeforeChunkCalls()
+	if len(gaps) < 2 {
+		t.Fatalf("observed %d pass boundaries, want at least 2", len(gaps))
+	}
+	for i, g := range gaps {
+		if g < pause {
+			t.Errorf("pass boundary %d: provider idle for %s, want at least the %s drain pause", i, g, pause)
+		}
+	}
+}
+
+// timingProvider is a deterministic embedder that records when each call
+// started and ended, so a test can measure how long the provider was left idle.
+type timingProvider struct {
+	mu    sync.Mutex
+	calls []providerCall
+}
+
+type providerCall struct {
+	start, end time.Time
+	chunk      bool
+}
+
+func (p *timingProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	start := time.Now()
+	vecs, err := embeddingstest.Deterministic{}.Embed(ctx, texts)
+	p.mu.Lock()
+	// chunk("c") texts are "c"; node texts start with the node name "n".
+	p.calls = append(p.calls, providerCall{start: start, end: time.Now(), chunk: len(texts) > 0 && texts[0] == "c"})
+	p.mu.Unlock()
+	return vecs, err
+}
+
+func (p *timingProvider) gapsBeforeChunkCalls() []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var gaps []time.Duration
+	for i := 1; i < len(p.calls); i++ {
+		if p.calls[i].chunk {
+			gaps = append(gaps, p.calls[i].start.Sub(p.calls[i-1].end))
+		}
+	}
+	return gaps
+}
+
+// TestPassReportsMoreOnlyAfterCleanFullBatch pins the drain signal: a full batch
+// written cleanly asks for an immediate next pass; a short batch, an empty
+// backlog and a failed batch all fall back to the Interval sleep, so a broken
+// provider is never retried in a hot loop.
+func TestPassReportsMoreOnlyAfterCleanFullBatch(t *testing.T) {
+	full := &fakeStore{pending: []storage.TranscriptChunk{chunk("a"), chunk("b"), chunk("c")}}
+	w := New(full, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{BatchSize: 2})
+	if !w.pass(context.Background()) {
+		t.Error("full clean batch: more = false, want true")
+	}
+	if w.pass(context.Background()) {
+		t.Error("short batch (1 of 2): more = true, want false")
+	}
+	if w.pass(context.Background()) {
+		t.Error("empty backlog: more = true, want false")
+	}
+
+	failing := &fakeStore{pending: []storage.TranscriptChunk{chunk("a"), chunk("b")}}
+	wf := New(failing, &flakyProvider{inner: embeddingstest.Deterministic{}}, "m", nil, discardLog(), Config{BatchSize: 2})
+	if wf.pass(context.Background()) {
+		t.Error("failed full batch: more = true, want false (retry at Interval, not in a hot loop)")
+	}
+}
+
 // blockingProvider blocks inside Embed until the context is cancelled, so a test
 // can cancel mid-call and assert the loop unwinds.
 type blockingProvider struct {

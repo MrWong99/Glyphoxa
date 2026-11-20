@@ -3,6 +3,7 @@ package highlight
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -622,6 +623,32 @@ func TestEnrichImageHandler_GeneratorError_ReturnsErr_RowUntouched(t *testing.T)
 	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
 	if got.ImageKey != "" {
 		t.Fatalf("row must be untouched on generator failure")
+	}
+}
+
+// TestEnrichImageHandler_NoImage_IsTerminal (A7): a provider that answers with
+// no image (a safety refusal, prose) will refuse the same excerpt again. The
+// handler completes the job instead of failing it: a failed job is retried, then
+// dead-lettered, and a dead job is re-enqueued by every boot's sweep, so each
+// boot paid for another round of refusals.
+func TestEnrichImageHandler_NoImage_IsTerminal(t *testing.T) {
+	tenantID := uuid.New()
+	store := newFakeEnrichStore()
+	h := seedRow(store, tenantID)
+	blobs := newFakeBlobs()
+	gen := &fakeGen{err: fmt.Errorf("generate: %w", imagegen.ErrNoImage)}
+
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	payload, _ := MarshalEnrichImage(h.ID, tenantID)
+	if err := handler(context.Background(), payload); err != nil {
+		t.Fatalf("handler err = %v, want nil (terminal: the job completes, no retry, no boot re-enqueue)", err)
+	}
+	if len(blobs.data) != 0 {
+		t.Fatal("no blob should be stored when the provider returned no image")
+	}
+	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
+	if got.ImageKey != "" {
+		t.Fatal("the highlight must stay imageless")
 	}
 }
 

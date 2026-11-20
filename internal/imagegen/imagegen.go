@@ -33,6 +33,12 @@ import (
 // (log + leave the Highlight intact) rather than a retryable error.
 var ErrImageTooLarge = errors.New("imagegen: generated image exceeds the blob size cap")
 
+// ErrNoImage is returned when the provider answered successfully but the
+// response carried no image: a safety refusal, or a model that replied in prose.
+// The same prompt gets the same answer, so it is a PERMANENT failure for that
+// prompt, like [ErrImageTooLarge]: a retry only re-bills the request.
+var ErrNoImage = errors.New("imagegen: response carried no inline image data")
+
 // ErrNotConfigured is what a generator factory returns when the tenant has no
 // image provider key: no BYOK row AND no GEMINI_API_KEY.
 //
@@ -310,7 +316,7 @@ func (g *Gemini) Generate(ctx context.Context, prompt string) (Result, error) {
 			}, nil
 		}
 	}
-	return Result{}, fmt.Errorf("imagegen: response carried no inline image data")
+	return Result{}, ErrNoImage
 }
 
 // truncate bounds an error's echoed response body so a huge error page cannot

@@ -80,8 +80,9 @@ type purgePayload struct {
 // PurgeStore is the storage surface the purge handler needs; *storage.Store
 // satisfies it and tests fake it.
 type PurgeStore interface {
-	ListSessionCandidateClipKeys(ctx context.Context, voiceSessionID uuid.UUID) ([]string, error)
-	DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (int, error)
+	// TakeSessionCandidates deletes the session's candidate rows in one statement
+	// and returns the blob keys they owned plus the row count.
+	TakeSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (blobKeys []string, rows int, err error)
 }
 
 // PurgeScheduleStore is the storage surface the boot-time purge backstop needs:
@@ -133,12 +134,23 @@ func SweepMissingCandidatePurges(ctx context.Context, store PurgeScheduleStore, 
 }
 
 // PurgeHandler builds the background-job handler for JobKindPurgeCandidates. It
-// is at-least-once and idempotent (ADR-0049): it drops each remaining candidate's
-// blob FIRST (through the seam, ADR-0048) and only then deletes the rows, so a
-// crash between the two leaves a re-runnable job (the surviving rows still list
-// their keys). Promoted highlights are untouched — the storage sweep filters to
-// status='candidate'. A re-run after a clean purge lists nothing and deletes
-// nothing. The returned func matches the jobs runner's HandlerFunc.
+// is at-least-once and idempotent (ADR-0049). It removes the remaining candidate
+// ROWS first, in one atomic statement that returns the blob keys they owned, and
+// only then drops those blobs through the seam (ADR-0048).
+//
+// Rows first is deliberate (see storage.TakeSessionCandidates): rows and blobs
+// cannot share a transaction, and of the two ways the second step can be lost,
+// an orphan BLOB is the recoverable one. A blob that fails to delete here, or
+// that a crash strands between the two steps, has no row any more, and the boot
+// reconciliation sweep ([SweepEnrichmentReconciliation] half (b)) deletes every
+// Highlight-owned clip, image and sound blob without a row. So a blob error is
+// logged and the purge carries on: failing the job would retry against rows that
+// are already gone and find nothing to do. The reverse order left rows pointing
+// at deleted clips, and let a GM's promote keep a Highlight whose clip the purge
+// had just dropped.
+//
+// Promoted highlights are untouched (the delete filters to status='candidate').
+// The returned func matches the jobs runner's HandlerFunc.
 func PurgeHandler(store PurgeStore, blobs blob.Store, log *slog.Logger) func(context.Context, json.RawMessage) error {
 	if log == nil {
 		log = slog.Default()
@@ -149,27 +161,32 @@ func PurgeHandler(store PurgeStore, blobs blob.Store, log *slog.Logger) func(con
 			return fmt.Errorf("highlight purge: decode payload: %w", err)
 		}
 
-		keys, err := store.ListSessionCandidateClipKeys(ctx, p.VoiceSessionID)
-		if err != nil {
-			return fmt.Errorf("highlight purge: list candidate clip keys: %w", err)
-		}
-		// Blob first (ADR-0048): drop each clip through the seam before removing the
-		// rows, so a mid-sweep crash never orphans a blob whose row is already gone.
-		for _, k := range keys {
-			if err := blobs.Delete(ctx, k); err != nil {
-				return fmt.Errorf("highlight purge: delete clip %q: %w", k, err)
-			}
-		}
-		n, err := store.DeleteSessionCandidates(ctx, p.VoiceSessionID)
+		keys, n, err := store.TakeSessionCandidates(ctx, p.VoiceSessionID)
 		if err != nil {
 			return fmt.Errorf("highlight purge: delete candidate rows: %w", err)
 		}
+		// The rows are gone for good; the blob drops must not be cut short by the
+		// job's own cancellation (shutdown), or every remaining clip waits for the
+		// next boot's sweep.
+		dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeBlobDropTimeout)
+		defer cancel()
+		stranded := 0
+		for _, k := range keys {
+			if err := blobs.Delete(dropCtx, k); err != nil {
+				stranded++
+				log.Error("highlight purge: delete blob failed; its row is gone, the boot orphan sweep will reclaim it",
+					"err", err, "key", k, "voice_session", p.VoiceSessionID)
+			}
+		}
 		if n > 0 {
-			log.Info("purged candidate highlights", "voice_session", p.VoiceSessionID, "count", n)
+			log.Info("purged candidate highlights", "voice_session", p.VoiceSessionID, "count", n, "blobs_left_for_sweep", stranded)
 		}
 		return nil
 	}
 }
+
+// purgeBlobDropTimeout bounds the blob drops that follow a purge's row delete.
+const purgeBlobDropTimeout = 30 * time.Second
 
 // Compile-time pins: *storage.Store satisfies every narrow store seam this
 // package declares, so a drift in a store method fails THIS package's build

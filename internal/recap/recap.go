@@ -31,7 +31,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -202,18 +201,33 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)
 	}
-	// The default path (providerID "") sends request model "" (adapter fills the
-	// Groq default), but the spend sink must price on a real model, else (groq, "")
-	// misses the price map and warn-spams / inflates the estimate (#272 review).
+	// A config without a model sends request model "" (the adapter fills its own
+	// default, which keeps the recorded cassettes stable), but the spend sink must
+	// price on that real model id: (provider, "") misses the price map and
+	// warn-spams / prices at the conservative fallback (#272 review). The default
+	// comes from the one shared helper, for every provider, not just the env path.
 	priceModel := model
-	if providerID == "" {
-		priceModel = groq.DefaultModel
+	if priceModel == "" {
+		priceModel = llmbuild.DefaultModel(providerID)
 	}
 
 	// Metering (gate #271 posture): spend.PriceOnly tees a caps-free meter
-	// alongside the production recorder — usage is recorded and priced, but the
-	// engine never reads a cap or calls AllowTurn (ADR-0046 is live-session-only).
-	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
+	// alongside the recorder so the attribution line below has an estimate. The
+	// recorder is the CALLER's when the ctx carries one ([WithMetering]: a recap
+	// run from a live session's Tool or a planning chat exchange is that caller's
+	// spend, and must reach its meter, hard cap and Usage Ledger), else the
+	// engine's own process recorder (an off-session recap, which has no cap:
+	// ADR-0046 is live-session-only).
+	base := e.metrics
+	if m, ok := MeteringFrom(ctx); ok {
+		if m.Gate != nil && !m.Gate.AllowTurn() {
+			return Result{}, ErrSpendCapReached
+		}
+		if m.Rec != nil {
+			base = m.Rec
+		}
+	}
+	rec, estimatedUSD := spend.PriceOnly(base, e.log)
 	caller := &llmcall.Caller{
 		Ctx:        ctx,
 		Provider:   provider,

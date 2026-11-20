@@ -3,6 +3,7 @@ package knowledge_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -161,5 +162,20 @@ func TestNewRecapNilDepsPanics(t *testing.T) {
 			}()
 			fn()
 		})
+	}
+}
+
+// TestRecapAdapterSpendCapIsAFriendlyResult: a recap refused by the session's
+// spend cap comes back as speakable text, not a tool error.
+func TestRecapAdapterSpendCapIsAFriendlyResult(t *testing.T) {
+	store := &fakeRecapStore{sessions: []storage.VoiceSession{endedSession(3)}}
+	a := knowledge.NewRecap(&fakeRecapEngine{err: recap.ErrSpendCapReached}, store)
+
+	got, err := a.RecapLastSessions(liveCtx(uuid.New()), 1)
+	if err != nil {
+		t.Fatalf("RecapLastSessions err = %v, want a friendly result", err)
+	}
+	if !strings.Contains(got, "spend cap") {
+		t.Errorf("result = %q, want text naming the spend cap", got)
 	}
 }

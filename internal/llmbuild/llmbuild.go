@@ -5,8 +5,9 @@
 // and the Recap engine (internal/recap) both use: the BYOK credential resolution
 // ([ResolveKey], moved verbatim from wirenpc under the hybrid policy ADR-0039) and
 // the provider dispatch ([New], groq/anthropic/gemini keyed off
-// provider_config.provider, groq the default per ADR-0036). [FromConfig] bundles
-// the two for callers that hold a *storage.ProviderConfig.
+// provider_config.provider, groq the default per ADR-0036). A caller resolving on
+// behalf of a Tenant goes through [ResolveKeyGated], never the ungated
+// [ResolveKey], or a BYOK Tenant silently spends the deployment's env keys.
 package llmbuild
 
 import (
@@ -69,29 +70,21 @@ func New(providerID, apiKey string) (llm.Provider, error) {
 	}
 }
 
-// FromConfig resolves a Provider Config into a live [llm.Provider] plus the model
-// id the caller should request. It is [ResolveKey] (ComponentLLM) followed by
-// [New] keyed off cfg.Provider; the returned model is cfg.Model (empty lets the
-// adapter pick its default per [llm.Request.Model]). A nil cfg resolves to Groq
-// with an empty env-fallback key and an empty model (the deployment default).
-//
-// FromConfig is UNGATED by the platform-key entitlement (ADR-0054 seam (a)):
-// it is for self-host/deployment-level contexts only. A caller resolving on
-// behalf of a tenant must use [ResolveKeyGated] instead, or a BYOK tenant
-// silently spends the deployment's env keys.
-func FromConfig(cipher *crypto.Cipher, cfg *storage.ProviderConfig) (p llm.Provider, model string, err error) {
-	key, err := ResolveKey(cipher, cfg, storage.ComponentLLM)
-	if err != nil {
-		return nil, "", err
+// DefaultModel names the model providerID's adapter requests when a Provider
+// Config carries no explicit model, mirroring [New]'s provider set ("" and any
+// unrecognised id resolve to Groq, the deployment LLM per ADR-0036). Callers
+// resolve an empty model through it BEFORE building a request, so the model that
+// is requested and the model the spend meter prices are one and the same: an
+// empty model id misses the price map and is charged at the conservative
+// fallback (~30x the real Groq rate), which exhausted a platform-key trial
+// allowance after a few cents of real spend.
+func DefaultModel(providerID string) string {
+	switch providerID {
+	case anthropic.ProviderID:
+		return anthropic.DefaultModel
+	case gemini.ProviderID:
+		return gemini.DefaultModel
+	default: // "" and groq
+		return groq.DefaultModel
 	}
-	providerID := ""
-	if cfg != nil {
-		providerID = cfg.Provider
-		model = cfg.Model
-	}
-	p, err = New(providerID, key)
-	if err != nil {
-		return nil, "", err
-	}
-	return p, model, nil
 }

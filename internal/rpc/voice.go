@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -18,8 +19,10 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
@@ -39,6 +42,17 @@ import (
 
 // defaultPreviewText is spoken when PreviewVoice is called with empty text.
 const defaultPreviewText = "Hello! I'm your voice for this campaign. Roll for initiative."
+
+// maxPreviewRunes caps the text one PreviewVoice call may synthesize. A preview
+// is a sentence or two to judge a voice by; without a cap the RPC was a way to
+// run arbitrary-length TTS on the platform's key, 48 MiB of request body at a
+// time.
+const maxPreviewRunes = 300
+
+// previewUsageFlushTimeout bounds the Usage Ledger write that follows a preview.
+// It runs detached from the request (the characters are billed even if the
+// caller has gone), so it needs its own deadline.
+const previewUsageFlushTimeout = 5 * time.Second
 
 // previewTimeout bounds a single preview synthesis so a black-holed TTS endpoint
 // cannot hold the handler open; the request context's own deadline still wins
@@ -66,6 +80,9 @@ const healthProbeTimeout = healthCheckTimeout + 3*time.Second
 type voiceStore interface {
 	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
+	// AddUsage persists Usage Ledger rows (ADR-0054): a voice preview is paid TTS
+	// and is attributed to the Tenant like any other metered call.
+	AddUsage(ctx context.Context, rows []storage.UsageRow) error
 }
 
 // VoiceServer implements managementv1connect.VoiceServiceHandler. The live
@@ -105,13 +122,15 @@ type VoiceServer struct {
 	// prod); tests shrink it to pin the hung-dependency path.
 	probeTimeout time.Duration
 
-	// sessionActive reports whether a live voice session is running (#150):
+	// sessionActive reports whether THIS Tenant has a live voice session (#150):
 	// the Discord health check then short-circuits to healthy without touching
 	// Discord — the session on the same token IS the health signal, and a probe
-	// would race its reconnects for the per-token IDENTIFY budget. nil (not
-	// wired, e.g. web-only mode has no in-process loop to consult) means the
-	// probe always runs.
-	sessionActive func() bool
+	// would race its reconnects for the per-token IDENTIFY budget. It is per
+	// Tenant because the token is: another Tenant's live session proves nothing
+	// about this Tenant's Bot token, and answering "healthy" off it hid a broken
+	// token for as long as anyone else on the deployment was playing. nil (not
+	// wired) means the probe always runs.
+	sessionActive func(ctx context.Context, tenantID uuid.UUID) bool
 
 	// healthMu guards healthCache: one TTL-cached GetProviderHealth result per
 	// tenant (#150). Probes are singleflighted per entry: one leader probes,
@@ -175,19 +194,22 @@ type activeSessionSource interface {
 	IsCampaignLive(campaignID uuid.UUID) bool
 }
 
-// voiceLiveSource reports whether ANY voice session is running in this process —
-// the tenant-agnostic health signal the Discord probe needs (#150). *session.Manager
-// satisfies it via AnyLive.
+// voiceLiveSource reports a Tenant's live Voice Session. *session.Manager
+// (in-process) and *session.IntentControl (claim plane) both satisfy it via
+// Active.
 type voiceLiveSource interface {
-	AnyLive() bool
+	Active(ctx context.Context, tenantID uuid.UUID) (storage.VoiceSession, bool, error)
 }
 
 // SetSessions wires the live session source the Discord health check consults
-// (#150): a process-wide "is any voice session running" signal (tenant-agnostic,
-// correct at any cap, #488). Called once at boot, after the session manager exists
-// and before the server serves, so no lock is needed.
+// (#150): "does THIS Tenant have a voice session running". A read error counts
+// as not live, so the real probe runs. Called once at boot, after the session
+// manager exists and before the server serves, so no lock is needed.
 func (s *VoiceServer) SetSessions(src voiceLiveSource) {
-	s.sessionActive = src.AnyLive
+	s.sessionActive = func(ctx context.Context, tenantID uuid.UUID) bool {
+		_, live, err := src.Active(ctx, tenantID)
+		return err == nil && live
+	}
 }
 
 // SetKeyEntitlement wires the platform-key entitlement every provider-key
@@ -297,7 +319,10 @@ func (s *VoiceServer) ListVoices(
 }
 
 // PreviewVoice synthesizes a short sample for one voice and returns it as a WAV
-// blob the browser can play directly (wraps the existing Synthesize).
+// blob the browser can play directly (wraps the existing Synthesize). The text is
+// capped at maxPreviewRunes, and the characters submitted are written to the
+// Tenant's Usage Ledger: a preview is paid TTS, on the platform's key for a
+// trial Tenant.
 func (s *VoiceServer) PreviewVoice(
 	ctx context.Context,
 	req *connect.Request[managementv1.PreviewVoiceRequest],
@@ -313,6 +338,11 @@ func (s *VoiceServer) PreviewVoice(
 	text := req.Msg.GetText()
 	if text == "" {
 		text = defaultPreviewText
+	}
+	chars := utf8.RuneCountInString(text)
+	if chars > maxPreviewRunes {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("preview text is too long: %d characters, at most %d", chars, maxPreviewRunes))
 	}
 
 	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentTTS)
@@ -331,6 +361,9 @@ func (s *VoiceServer) PreviewVoice(
 		s.log.Warn("PreviewVoice: synthesis failed to start", "err", err)
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("voice preview is unavailable"))
 	}
+	// The request was accepted by the provider, which bills the characters
+	// SUBMITTED whether or not the stream completes: meter now, on every path out.
+	defer s.meterPreview(ctx, tenantID, chars)
 
 	var (
 		pcm        []byte
@@ -589,14 +622,28 @@ func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *manage
 	return healthy("elevenlabs")
 }
 
+// meterPreview writes one preview's submitted characters to the Tenant's Usage
+// Ledger (ADR-0054), priced like session TTS. Best-effort and detached from the
+// request context: a failed write logs and never fails a preview that already
+// played, and a caller who hung up still used the characters.
+func (s *VoiceServer) meterPreview(ctx context.Context, tenantID uuid.UUID, chars int) {
+	ledger := billing.NewLedger(tenantID, nil)
+	ledger.TTSCharacters(observe.ProviderElevenLabs, chars)
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewUsageFlushTimeout)
+	defer cancel()
+	if err := ledger.Flush(flushCtx, s.store.AddUsage); err != nil {
+		s.log.Warn("PreviewVoice: usage ledger flush failed; usage estimate lost", "tenant_id", tenantID, "err", err)
+	}
+}
+
 // healthDiscord proves the Bot token via REST (GET /users/@me, no gateway
-// IDENTIFY — #150) and reports the resolved bot tag. While a voice session is
-// active the check short-circuits to healthy without touching Discord — the
+// IDENTIFY — #150) and reports the resolved bot tag. While THIS Tenant's voice
+// session is active the check short-circuits to healthy without touching Discord — the
 // live session runs on the same token, so it IS the health signal — carrying
 // lastBotTag (the tag of the last successful probe) so the screen's
 // "Connected as X#NNNN" row survives the session.
 func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID, lastBotTag string) *managementv1.ProviderHealth {
-	if s.sessionActive != nil && s.sessionActive() {
+	if s.sessionActive != nil && s.sessionActive(ctx, tenantID) {
 		h := healthy("discord")
 		h.BotTag = lastBotTag
 		h.Detail = "live voice session active"

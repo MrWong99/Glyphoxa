@@ -131,39 +131,6 @@ func TestNewDispatch(t *testing.T) {
 	}
 }
 
-// TestFromConfig proves the config carry: model comes from cfg.Model, a nil cfg
-// resolves to the Groq default with an empty (env-fallback) key and empty model.
-func TestFromConfig(t *testing.T) {
-	cipher := newUnitCipher(t)
-
-	t.Run("nil cfg -> groq default, empty model", func(t *testing.T) {
-		p, model, err := FromConfig(cipher, nil)
-		if err != nil {
-			t.Fatalf("FromConfig(nil): %v", err)
-		}
-		if p == nil {
-			t.Fatal("FromConfig(nil) provider = nil")
-		}
-		if model != "" {
-			t.Errorf("FromConfig(nil) model = %q, want \"\"", model)
-		}
-	})
-
-	t.Run("real cfg carries model", func(t *testing.T) {
-		cfg := sealedConfig(t, cipher, anthropic.ProviderID, "claude-x", "sk-anthropic-key-9999")
-		p, model, err := FromConfig(cipher, cfg)
-		if err != nil {
-			t.Fatalf("FromConfig(cfg): %v", err)
-		}
-		if p == nil {
-			t.Fatal("FromConfig(cfg) provider = nil")
-		}
-		if model != "claude-x" {
-			t.Errorf("FromConfig(cfg) model = %q, want %q", model, "claude-x")
-		}
-	})
-}
-
 // refuseAll is a scripted PlatformKeyEntitlement: refuse every tenant (an
 // open-mode BYOK tenant with no platform subscription), optionally with an
 // evaluation error.
@@ -247,5 +214,23 @@ func TestEnvFallbackAllowed(t *testing.T) {
 	ok, err := EnvFallbackAllowed{}.PlatformKeyAllowed(context.Background(), uuid.New())
 	if !ok || err != nil {
 		t.Errorf("EnvFallbackAllowed = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+// TestDefaultModel_MirrorsNewsProviderSet pins that every provider id [New]
+// dispatches resolves to that adapter's own default model, and that the empty
+// id (the env default) is Groq. A caller that fills an empty model through this
+// requests and prices one and the same real model id.
+func TestDefaultModel_MirrorsNewsProviderSet(t *testing.T) {
+	t.Parallel()
+	for id, want := range map[string]string{
+		"":                   groq.DefaultModel,
+		groq.ProviderID:      groq.DefaultModel,
+		anthropic.ProviderID: anthropic.DefaultModel,
+		gemini.ProviderID:    gemini.DefaultModel,
+	} {
+		if got := DefaultModel(id); got != want {
+			t.Errorf("DefaultModel(%q) = %q, want %q", id, got, want)
+		}
 	}
 }

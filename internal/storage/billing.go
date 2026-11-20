@@ -335,6 +335,12 @@ func (s *Store) TenantMonthUsageUSD(ctx context.Context, tenantID uuid.UUID, fro
 // inserted. Idempotence is NOT promised — the flush path must not double-send —
 // but ordering is irrelevant and rows commute, so concurrent sessions of one
 // tenant simply accumulate.
+//
+// Because the write is additive, the caller must know whether a failed call
+// landed. Any error means "not written" EXCEPT one wrapping
+// [ErrCommitOutcomeUnknown] (the COMMIT was in flight when the context expired
+// or the connection dropped): the rows may be in the table, and sending them
+// again would count them twice.
 func (s *Store) AddUsage(ctx context.Context, usageRows []UsageRow) error {
 	if len(usageRows) == 0 {
 		return nil

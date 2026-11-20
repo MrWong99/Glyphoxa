@@ -226,20 +226,12 @@ func TestHighlight_SessionCandidateSweep(t *testing.T) {
 	candID, candKey := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
 	promID, _ := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightPromoted)
 
-	keys, err := st.ListSessionCandidateClipKeys(ctx, vs.ID)
+	keys, n, err := st.TakeSessionCandidates(ctx, vs.ID)
 	if err != nil {
-		t.Fatalf("list candidate keys: %v", err)
+		t.Fatalf("take candidates: %v", err)
 	}
-	if len(keys) != 1 || keys[0] != candKey {
-		t.Fatalf("candidate keys mismatch: %v", keys)
-	}
-
-	n, err := st.DeleteSessionCandidates(ctx, vs.ID)
-	if err != nil {
-		t.Fatalf("delete candidates: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("deleted %d candidates, want 1", n)
+	if n != 1 || len(keys) != 1 || keys[0] != candKey {
+		t.Fatalf("took %d rows with keys %v; want 1 row and [%s]", n, keys, candKey)
 	}
 	// Candidate gone, promoted untouched.
 	if _, err := st.GetHighlight(ctx, tenantID, candID); !errors.Is(err, storage.ErrNotFound) {
@@ -249,8 +241,45 @@ func TestHighlight_SessionCandidateSweep(t *testing.T) {
 		t.Fatalf("promoted should survive: %v", err)
 	}
 	// Idempotent.
-	if n, err := st.DeleteSessionCandidates(ctx, vs.ID); err != nil || n != 0 {
-		t.Fatalf("second sweep: want 0/nil, got %d/%v", n, err)
+	if keys, n, err := st.TakeSessionCandidates(ctx, vs.ID); err != nil || n != 0 || len(keys) != 0 {
+		t.Fatalf("second sweep: want nothing, got %d rows, keys %v, err %v", n, keys, err)
+	}
+}
+
+// TestHighlight_PurgeNeverReturnsTheClipOfAPromotedHighlight (A12): the purge
+// hands back blob keys ONLY for rows it actually removed. A candidate the GM
+// promoted first keeps its row and its clip key stays out of the purge's list,
+// so the purge cannot drop the audio of a kept Highlight; a promote that loses
+// the race finds the row gone instead of keeping a Highlight with a dead clip.
+func TestHighlight_PurgeNeverReturnsTheClipOfAPromotedHighlight(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, _ := st.CreateVoiceSession(ctx, campaignID)
+	keptID, keptKey := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
+	goneID, goneKey := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
+
+	// The GM keeps one just before the purge runs.
+	if _, err := st.PromoteHighlight(ctx, tenantID, keptID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	keys, n, err := st.TakeSessionCandidates(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("take candidates: %v", err)
+	}
+	if n != 1 || len(keys) != 1 || keys[0] != goneKey {
+		t.Fatalf("took %d rows with keys %v; want only the unpromoted candidate's [%s]", n, keys, goneKey)
+	}
+	for _, k := range keys {
+		if k == keptKey {
+			t.Fatal("the purge returned the clip key of a promoted highlight")
+		}
+	}
+	// ...and the one that lost the race is gone, row and all.
+	if _, err := st.PromoteHighlight(ctx, tenantID, goneID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("promote after the purge = %v, want ErrNotFound", err)
 	}
 }
 

@@ -42,6 +42,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/llmcall"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -49,9 +50,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -254,7 +252,7 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	// model id — the (groq, "") price-map miss the recap engine also guards
 	// against (#272 review).
 	if model == "" {
-		model = defaultModelFor(providerID)
+		model = llmbuild.DefaultModel(providerID)
 	}
 
 	history, err := e.store.ListPlanningMessages(ctx, campaign.ID, threadID)
@@ -305,6 +303,10 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	// bounded by the exchange timeout.
 	runCtx := knowledge.WithCampaign(ctx, campaign.ID)
 	runCtx = tool.WithCaller(runCtx, butler.ID.String())
+	// The recap Tool's own LLM calls are this exchange's spend: hand the shared
+	// recap engine this exchange's recorder so they reach its Usage Ledger and
+	// estimate instead of only the process recorder.
+	runCtx = recap.WithMetering(runCtx, recap.Metering{Rec: rec})
 	runCtx, cancel := context.WithTimeout(runCtx, exchangeTimeout)
 	defer cancel()
 
@@ -374,19 +376,6 @@ func (e *Engine) resolveChatLLMConfig(ctx context.Context, tenantID uuid.UUID, b
 		}
 	}
 	return nil, storage.ComponentChatLLM, nil // env default (Groq, ADR-0036)
-}
-
-// defaultModelFor names the provider's default model so metering never prices
-// on an empty model id. Mirrors llmbuild.New's provider set.
-func defaultModelFor(providerID string) string {
-	switch providerID {
-	case anthropic.ProviderID:
-		return anthropic.DefaultModel
-	case gemini.ProviderID:
-		return gemini.DefaultModel
-	default: // "" and groq
-		return groq.DefaultModel
-	}
 }
 
 // autoTitle derives an unnamed thread's title from its first user message.

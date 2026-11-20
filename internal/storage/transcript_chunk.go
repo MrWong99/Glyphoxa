@@ -197,7 +197,7 @@ func scanChunkMatch(row pgx.Row) (ChunkMatch, error) {
 // Chunks in campaignID nearest the query vector by cosine distance whose
 // participated set CONTAINS agentID — "what this NPC could personally know". A
 // multi-agent chunk is returned for every one of its participants (containment,
-// not equality). NULL-embedding rows are excluded (partial HNSW index).
+// not equality). NULL-embedding rows are excluded.
 func (s *Store) SearchChunksByAgent(ctx context.Context, campaignID, agentID uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
 	return s.searchChunks(ctx, campaignID, &agentID, query, k)
 }
@@ -205,18 +205,30 @@ func (s *Store) SearchChunksByAgent(ctx context.Context, campaignID, agentID uui
 // SearchChunksByCampaign is world-context retrieval (ADR-0011): the k Transcript
 // Chunks in campaignID nearest the query vector by cosine distance, participants
 // ignored — topical Campaign context the NPC "may not personally know".
-// NULL-embedding rows are excluded (partial HNSW index).
+// NULL-embedding rows are excluded.
 func (s *Store) SearchChunksByCampaign(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
 	return s.searchChunks(ctx, campaignID, nil, query, k)
 }
 
-// searchChunks runs the shared ANN query for both retrieval modes: cosine
-// distance (<=>) against the query vector, ascending (nearest first), matching
-// the partial HNSW vector_cosine_ops index. It is always scoped to one Campaign
-// and to non-null embeddings; a non-nil agentID adds the participated-set
-// containment filter (NPC-knowledge mode). k <= 0 is a caller bug and errors
-// rather than silently defaulting. The query vector reuses encodeVector + a
-// server-side ::vector cast, so storage carries no pgvector-go dependency.
+// searchChunks runs the shared nearest-neighbour query for both retrieval modes:
+// cosine distance (<=>) against the query vector, ascending (nearest first). It
+// is always scoped to one Campaign and to non-null embeddings; a non-nil agentID
+// adds the participated-set containment filter (NPC-knowledge mode). k <= 0 is a
+// caller bug and errors rather than silently defaulting. The query vector reuses
+// encodeVector + a server-side ::vector cast, so storage carries no pgvector-go
+// dependency.
+//
+// The search is EXACT over the Campaign's own rows, deliberately not an HNSW
+// index scan (ADR-0011 amendment 2026-11-20; migration 00057 dropped the global
+// HNSW indexes). A global vector index spans every Campaign of every Tenant; an
+// approximate scan over one collects the GLOBAL nearest
+// hnsw.ef_search (40) candidates and applies the campaign filter afterwards, so
+// as soon as other Campaigns' rows crowd the query's neighbourhood the filter
+// discards every candidate and the search returns nothing. The MATERIALIZED CTE
+// is the planner fence that rules that plan out: the Campaign's rows are fetched
+// through transcript_chunk_campaign_idx, their distances computed, and the top k
+// taken by a heap sort. Only (id, distance) is materialized; the k winners are
+// joined back for their columns.
 func (s *Store) searchChunks(ctx context.Context, campaignID uuid.UUID, agentID *uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
 	if k <= 0 {
 		return nil, fmt.Errorf("storage: search chunks: k must be > 0, got %d", k)
@@ -232,11 +244,16 @@ func (s *Store) searchChunks(ctx context.Context, campaignID uuid.UUID, agentID 
 		agentFilter = " AND participated_agent_ids @> ARRAY[$3]::uuid[]"
 	}
 	args = append(args, k)
-	sql := `SELECT ` + transcriptChunkColumns + `, embedding <=> $2::vector AS distance
-		   FROM transcript_chunk
-		  WHERE campaign_id = $1 AND embedding IS NOT NULL` + agentFilter + `
-		  ORDER BY distance
-		  LIMIT $` + strconv.Itoa(len(args))
+	sql := `WITH scoped AS MATERIALIZED (
+		     SELECT id AS hit_id, embedding <=> $2::vector AS distance
+		       FROM transcript_chunk
+		      WHERE campaign_id = $1 AND embedding IS NOT NULL` + agentFilter + `
+		 ), nearest AS (
+		     SELECT hit_id, distance FROM scoped ORDER BY distance, hit_id LIMIT $` + strconv.Itoa(len(args)) + `
+		 )
+		 SELECT ` + transcriptChunkColumns + `, nearest.distance
+		   FROM nearest JOIN transcript_chunk ON transcript_chunk.id = nearest.hit_id
+		  ORDER BY nearest.distance, nearest.hit_id`
 
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
