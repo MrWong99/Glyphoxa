@@ -207,3 +207,29 @@ func TestFuzzyIndex_TruncationAlias_ExactOnlyNoFuzzyTiers(t *testing.T) {
 		t.Fatal("a derived alias must score below a genuine exact name (1.0)")
 	}
 }
+
+// TestFuzzyIndex_EditNetShortNameAllowsOneEdit pins the 2026-11-20 edit-net
+// floor: without phonetic agreement a short name tolerates ONE edit, and only a
+// name of LongNameRunes or more may spend two. With phonetic agreement the
+// second edit is still there ("Bahrd", "Meera").
+func TestFuzzyIndex_EditNetShortNameAllowsOneEdit(t *testing.T) {
+	idx := newFuzzyIndex(NameMatchConfig{}, nil, [][]string{{"Bart"}, {"Grimjaw"}}, nil)
+	if got := idx.scoreAll([]string{"bert"})[0]; got == 0 {
+		t.Error(`"bert" (1 edit from a 4-rune name) did not match through the edit net`)
+	}
+	for _, twoEdits := range []string{"start", "warte", "bord"} {
+		if got := idx.scoreAll([]string{twoEdits})[0]; got != 0 {
+			t.Errorf("%q (2 edits from a 4-rune name) scored %v, want 0", twoEdits, got)
+		}
+	}
+	if got := idx.scoreAll([]string{"grimjov"})[1]; got == 0 {
+		t.Error(`"grimjov" (2 edits from a 7-rune name) did not match through the edit net`)
+	}
+
+	de := newFuzzyIndex(NameMatchConfig{}, KoelnerPhonetik, [][]string{{"Bart"}, {"Mira"}}, nil)
+	for near, agent := range map[string]int{"bahrd": 0, "meera": 1} {
+		if got := de.scoreAll([]string{near})[agent]; got != 0.9 {
+			t.Errorf("%q scored %v for agent %d, want the phonetic score 0.9", near, got, agent)
+		}
+	}
+}

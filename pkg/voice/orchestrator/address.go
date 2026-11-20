@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -18,11 +19,10 @@ import (
 //
 // The algorithm and the routing targets it scores against live entirely behind
 // this seam: the orchestrator holds no matching logic of its own. The voice/address
-// package ships two adapters — address.WholeWordMatcher (the dependency-free
-// whole-word default) and address.Matcher (the scoring fuzzy/phonetic engine,
-// ADR-0024) — and the algorithm choice (regex / LLM judge / two-stage / v1
-// cherry-pick) is open per Q13.4 in DESIGN.md. Construction-time validation of
-// the targets is the matcher's responsibility, not the detector's.
+// package ships the production adapter — address.Matcher, the deterministic
+// scoring engine (ADR-0024) — and the algorithm choice (regex / LLM judge /
+// two-stage / v1 cherry-pick) is open per Q13.4 in DESIGN.md. Construction-time
+// validation of the targets is the matcher's responsibility, not the detector's.
 type TargetMatcher interface {
 	TargetMatch(text string) []voiceevent.AddressRouted
 }
@@ -59,6 +59,21 @@ type SpeakerAwareMatcher interface {
 type InterruptibleMatcher interface {
 	TargetMatcher
 	ClearContinuation(agentID string)
+}
+
+// ReplyAwareMatcher is the optional reply-aware extension of [TargetMatcher]
+// (ADR-0024 amendment, 2026-11-20): a matcher that implements it is told when an
+// Agent it routed to is audibly answering, and counts its continuation window
+// from there instead of from the moment the Agent was addressed. Without it a
+// long answer consumed the window and the speaker's follow-up went unanswered.
+// The scoring [address.Matcher] satisfies it via ExtendContinuation.
+//
+// As with [InterruptibleMatcher] the detector only carries the fact across
+// ("this Agent's reply produced audio just now"); what that means for routing
+// stays behind the matcher seam.
+type ReplyAwareMatcher interface {
+	TargetMatcher
+	ExtendContinuation(agentID string)
 }
 
 // AddressDetector is a [Reactor] that subscribes to [voiceevent.STTFinal]
@@ -108,7 +123,7 @@ type DetectorOption func(*AddressDetector)
 // [SpeakerAwareMatcher] / address.Matcher.TargetMatchFrom) so an excluded Butler
 // never consumes a MaxTargets slot nor becomes lastAddressed. This detector-level
 // drop is retained as a redundant safety net for any [TargetMatcher] that is NOT
-// SpeakerID-aware (e.g. the whole-word matcher, cassette fakes).
+// SpeakerID-aware (e.g. cassette fakes).
 func WithButlerGMGate(isGM func(speakerID string) bool) DetectorOption {
 	return func(d *AddressDetector) { d.isGM = isGM }
 }
@@ -119,7 +134,7 @@ func WithButlerGMGate(isGM func(speakerID string) bool) DetectorOption {
 //
 // The matcher owns the Voice Session's routing targets and their validation;
 // construct it with the Tenant's Butler and the active Character NPCs (see
-// address.NewWholeWordMatcher or address.NewMatcher) before handing it here.
+// address.NewMatcher) before handing it here.
 // Pass [WithButlerGMGate] to enforce the Butler GM-only address gate; with no
 // options the detector routes every matcher decision unconditionally.
 func NewAddressDetector(matcher TargetMatcher, opts ...DetectorOption) *AddressDetector {
@@ -167,6 +182,29 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		})
 	}
 
+	// Reply feedback (ADR-0024 amendment, 2026-11-20): while a routed Agent is
+	// audibly answering, its continuation window is counted from the reply, not
+	// from the address. The reply events carry a TurnID, not an Agent, so the
+	// detector remembers which Agents it routed each recent turn to.
+	//
+	// The signal is [voiceevent.FirstAudio] — one per sentence as it reaches the
+	// playback pump, which the reply path dispatches serially with playback — so
+	// the anchor trails the end of the reply by at most its last sentence. A
+	// terminal "turn completed" event would be the exact signal; when one exists
+	// it should feed ExtendContinuation here as well.
+	var (
+		unsubAudio func()
+		turns      *routedTurns
+	)
+	if rm, replyAware := d.matcher.(ReplyAwareMatcher); replyAware {
+		turns = newRoutedTurns()
+		unsubAudio = voiceevent.On(bus, func(audio voiceevent.FirstAudio) {
+			for _, agentID := range turns.agents(audio.TurnID) {
+				rm.ExtendContinuation(agentID)
+			}
+		})
+	}
+
 	unsubFinal := voiceevent.On(bus, func(final voiceevent.STTFinal) {
 		// An empty or whitespace-only final routes NOWHERE (#434). The STT stage
 		// publishes empties by pinned contract — "downstream consumers, not this
@@ -178,9 +216,10 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		// LLM+TTS money. The empty final stays observable on the bus for
 		// metrics/diagnostics (and the Transcript keeps its own semantics); only
 		// address routing drops it. Logged so live sessions show how often noise
-		// crosses VAD onset yet transcribes to nothing.
+		// crosses VAD onset yet transcribes to nothing — at Debug: a busy table
+		// produces one of these every few seconds.
 		if strings.TrimSpace(final.Text) == "" {
-			slog.Default().Info("orchestrator: empty STT final, routing nowhere",
+			slog.Default().Debug("orchestrator: empty STT final, routing nowhere",
 				slog.String("speaker", final.SpeakerID),
 				slog.String("turn", final.TurnID),
 			)
@@ -201,6 +240,7 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			routes = d.matcher.TargetMatch(final.Text)
 		}
 		var survivors []voiceevent.AddressRouted
+		butlerDenied := false
 		for _, routed := range routes {
 			// Butler GM-only address gate (ADR-0024): drop a Butler route whose
 			// SpeakerID is not a GM (empty fails closed). Fail closed means
@@ -208,6 +248,7 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			// a fallback. Character routes are never gated.
 			if d.isGM != nil && routed.Target.AgentRole == voiceevent.AgentRoleButler &&
 				(final.SpeakerID == "" || !d.isGM(final.SpeakerID)) {
+				butlerDenied = true
 				continue
 			}
 			// Carry the turn correlation id (A3) and the Speaker Lane attribution
@@ -217,8 +258,28 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			routed.SpeakerID = final.SpeakerID
 			survivors = append(survivors, routed)
 		}
+		if turns != nil && final.TurnID != "" && len(survivors) > 0 {
+			ids := make([]string, len(survivors))
+			for i, s := range survivors {
+				ids[i] = s.Target.AgentID
+			}
+			turns.record(final.TurnID, ids)
+		}
 		switch len(survivors) {
 		case 0:
+			// The operator's answer to "why did nobody respond": the utterance was
+			// heard and addressed no Agent. Text stays out of the log (it is in
+			// the Transcript); the size tells a stray word from a sentence.
+			reason := "no agent addressed"
+			if butlerDenied {
+				reason = "Butler excluded: speaker is not the GM"
+			}
+			slog.Default().Debug("orchestrator: utterance routed nowhere",
+				slog.String("reason", reason),
+				slog.String("speaker", final.SpeakerID),
+				slog.String("turn", final.TurnID),
+				slog.Int("words", len(strings.Fields(final.Text))),
+			)
 			return
 		case 1:
 			// Single-target: byte-identical to the pre-ensemble path.
@@ -245,5 +306,53 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		if unsubBarge != nil {
 			unsubBarge()
 		}
+		if unsubAudio != nil {
+			unsubAudio()
+		}
 	}
+}
+
+// routedTurnsCap bounds how many recent turns a detector remembers for reply
+// feedback. Only a turn that is still producing audio matters, and at most a
+// handful overlap (the one playing, the one superseding it), so a small ring is
+// plenty and keeps a long Voice Session from growing the map.
+const routedTurnsCap = 16
+
+// routedTurns remembers which Agents each recent TurnID was routed to, so a
+// reply event that carries only its TurnID can be attributed. It is guarded by
+// its own mutex: finals and reply-audio events arrive on different goroutines.
+type routedTurns struct {
+	mu     sync.Mutex
+	byTurn map[string][]string
+	order  []string // insertion order, oldest first, for eviction
+}
+
+func newRoutedTurns() *routedTurns {
+	return &routedTurns{byTurn: make(map[string][]string, routedTurnsCap)}
+}
+
+// record stores the Agents turnID was routed to, evicting the oldest turn past
+// the cap.
+func (r *routedTurns) record(turnID string, agentIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, known := r.byTurn[turnID]; !known {
+		if len(r.order) >= routedTurnsCap {
+			delete(r.byTurn, r.order[0])
+			r.order = r.order[1:]
+		}
+		r.order = append(r.order, turnID)
+	}
+	r.byTurn[turnID] = agentIDs
+}
+
+// agents returns the Agents turnID was routed to, or nil for an unknown turn
+// (a direct-speech or reaction turn the detector never routed).
+func (r *routedTurns) agents(turnID string) []string {
+	if turnID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.byTurn[turnID]
 }

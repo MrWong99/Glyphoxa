@@ -46,7 +46,7 @@ type Roster struct {
 	butlerGate func(speakerID string) bool
 
 	// heuristics is the Matcher's scoring stack (ADR-0024), set from rosterDeps at
-	// construction. Nil takes address.DefaultHeuristics.
+	// construction. Nil takes the address package's default stack.
 	heuristics []address.Heuristic
 
 	// replierFor builds the [agent.Replier] for one NPC. Production binds it to a
@@ -86,7 +86,7 @@ type rosterDeps struct {
 	// Config.ButlerGMGate (#299/#256). Nil = the Butler answers any speaker.
 	butlerGate func(speakerID string) bool
 	// heuristics is the Matcher's scoring stack (ADR-0024). Nil takes
-	// [address.DefaultHeuristics]; the live wiring passes the defaults bound by
+	// [address.DefaultHeuristicsWithin] at the default window; the live wiring passes the defaults bound by
 	// the deployment's continuation window ([continuationWindow]), and tests that
 	// are about the ambient POOL rather than the shipped weights pass a stack of
 	// their own. Before this seam existed nothing about address scoring could be
@@ -151,8 +151,9 @@ func matcherLanguage(lang string) string {
 // and the STT-truncation aliases derived from its name + aliases (#197). This is
 // the ONE derivation site, so every path that builds an address.Agent — the
 // hardcoded NPC and the DB load (via npcSpecFromAgent) — gets the derived aliases
-// identically. A lone Character NPC is not AddressOnly, so it catches unaddressed
-// speech via the single-NPC fallback (CONTEXT.md "Address-Only").
+// identically. A Character NPC is not AddressOnly, so once a speaker has opened
+// it by name that speaker's unnamed follow-ups continue into it (CONTEXT.md
+// "Address-Only"); a lone NPC is opened by name like any other (ADR-0024).
 func matcherAgent(spec npcSpec) address.Agent {
 	role := spec.role
 	if role == "" {
@@ -196,8 +197,8 @@ func (r *Roster) AddNPC(spec npcSpec) {
 }
 
 // RemoveNPC drops the NPC with agentID from the scene: it leaves the Matcher (so
-// nothing routes to it, and its last-addressed/interruption state is pruned so a
-// later unnamed continuation cannot resurrect it) and the Cast (so even a stray
+// nothing routes to it, and its last-addressed state is pruned so a later
+// unnamed continuation cannot resurrect it) and the Cast (so even a stray
 // route says nothing). Removing an unknown agentID is a no-op. Removing every
 // NPC leaves the Matcher routing to nobody — the voice loop simply stays quiet.
 func (r *Roster) RemoveNPC(agentID string) {
