@@ -118,7 +118,7 @@ func newManager(vm voiceManager, opts ...ManagerOption) *Manager {
 		dave:   true, // ADR-0006: DAVE is the production default
 		defaults: sessionConfig{
 			logger:        discardLogger(),
-			metrics:       discardMetrics{},
+			metrics:       DiscardMetrics{},
 			inboundBuffer: defaultInboundBuffer,
 		},
 	}

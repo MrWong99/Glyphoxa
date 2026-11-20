@@ -148,9 +148,9 @@ func sealRTP(t *testing.T, seq uint16, ts, ssrc uint32, payload []byte) []byte {
 }
 
 // keepaliveMetrics counts the two keepalive recorder calls; the rest of the
-// MetricsRecorder surface is inherited no-ops from discardMetrics.
+// MetricsRecorder surface is inherited no-ops from DiscardMetrics.
 type keepaliveMetrics struct {
-	discardMetrics
+	DiscardMetrics
 	mu         sync.Mutex
 	sent, errs int
 }
@@ -182,7 +182,7 @@ func noopDave() godave.Session {
 func newTestUDPConn(t *testing.T, rec MetricsRecorder, ticks chan time.Time, conns ...*fakePacketConn) *keepaliveUDPConn {
 	t.Helper()
 	if rec == nil {
-		rec = discardMetrics{}
+		rec = DiscardMetrics{}
 	}
 	u := newKeepaliveUDPConn(noopDave(), func(uint32) snowflake.ID { return 0 }, discardLogger(), rec)
 	var dials int

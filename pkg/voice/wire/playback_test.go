@@ -13,8 +13,14 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
+// playSentence is playSentenceBus with no bus, tap or first-frame stamp: the
+// bare block-until-Done core the PlaySentence tests below pin.
+func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk) error {
+	return playSentenceBus(ctx, p, codec, chunks, nil, nil, nil)
+}
+
 // fakePlayback is a programmable playback: the test closes done with a chosen
-// error to drive PlaySentence's block-until-Done path.
+// error to drive playSentenceBus's block-until-Done path.
 type fakePlayback struct {
 	done chan struct{}
 	err  error

@@ -51,7 +51,7 @@ func transportUDPConnCreate(logger *slog.Logger, rec MetricsRecorder) voice.UDPC
 		logger = discardLogger()
 	}
 	if rec == nil {
-		rec = discardMetrics{}
+		rec = DiscardMetrics{}
 	}
 	return func(daveSession godave.Session, ssrcLookup voice.SsrcLookupFunc, _ ...voice.UDPConnConfigOpt) voice.UDPConn {
 		return newKeepaliveUDPConn(daveSession, ssrcLookup, logger, rec)

@@ -99,7 +99,7 @@ func TestGuardedConnRecoversInPlaceAndTearsDownOnce(t *testing.T) {
 
 	// Wire audio the way newSession does.
 	provider := &switchingProvider{}
-	dispatcher := newInboundDispatcher("1", 16, discardMetrics{})
+	dispatcher := newInboundDispatcher("1", 16, DiscardMetrics{})
 	provider.onClose = dispatcher.Close
 	open(t, ku, fc1, 42)
 	if err := ku.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {
@@ -219,7 +219,7 @@ func TestGuardedConnDiscardedByDisgoEndsTheSession(t *testing.T) {
 	conn, ku := guardedTestConn(t, &rec, &removed, ticks, fc)
 
 	provider := &switchingProvider{}
-	dispatcher := newInboundDispatcher("1", 16, discardMetrics{})
+	dispatcher := newInboundDispatcher("1", 16, DiscardMetrics{})
 	provider.onClose = dispatcher.Close
 	open(t, ku, fc, 42)
 	if err := ku.SetSecretKey(voice.EncryptionModeAEADAES256GCMRTPSize, testSecretKey); err != nil {

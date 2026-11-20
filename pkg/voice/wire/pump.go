@@ -24,7 +24,7 @@ import (
 // be spoken one after another, because [gxvoice.Session.Play] auto-interrupts
 // the current playback (playing sentence N+1 concurrently would cut off N's
 // tail). So HandleSentence only enqueues; a single worker goroutine plays each
-// sentence to completion (via [PlaySentence], which blocks on the playback's
+// sentence to completion (via playSentenceBus, which blocks on the playback's
 // Done) before taking the next. That preserves both order and full tails.
 //
 // Consequence of strict serialization with the lockstep tee: while sentence N
@@ -162,9 +162,9 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voicee
 		// return (and so the Replier does not Dispatch the next sentence, which is
 		// what triggers the next HandleSentence) until the tee's forward goroutine
 		// has drained that sentence's channel — which only happens once the worker
-		// has dequeued the job and PlaySentence is consuming it. So the queue is
+		// has dequeued the job and playSentenceBus is consuming it. So the queue is
 		// empty at every enqueue; the buffer only decouples the enqueue from the
-		// worker's in-flight PlaySentence so HandleSentence returns at once.
+		// worker's in-flight playSentenceBus so HandleSentence returns at once.
 		//
 		// The #375 look-ahead lane preserves this invariant: a held Reaction s1 sits
 		// in the LANE, never the queue, so it adds no queue depth. ReleaseLookahead
@@ -186,7 +186,7 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voicee
 // HandleSentence implements [PlaybackSink]: it enqueues the sentence for the
 // worker and returns immediately, never blocking the synthesis goroutine. The
 // worker drains chunks; a sentence whose ctx is already cancelled is played as a
-// no-op ([PlaySentence] returns promptly on a cancelled context). After [Close]
+// no-op (playSentenceBus returns promptly on a cancelled context). After [Close]
 // it drains chunks so the tee's lockstep forward goroutine never blocks.
 func (p *PlaybackPump) HandleSentence(ctx context.Context, chunks <-chan tts.AudioChunk) {
 	// Priority-check stop first: after Close the queue is empty, so a plain
