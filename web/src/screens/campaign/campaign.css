@@ -508,6 +508,17 @@
   gap: var(--spacing-xs);
 }
 
+/* The raw-JSON scope editor sits behind a closed disclosure (power-user only). */
+.gx-editor__tool-advanced > summary {
+  padding-left: var(--spacing-md);
+  color: var(--text-muted);
+  font-size: var(--body-xs);
+  cursor: pointer;
+}
+.gx-editor__tool-advanced[open] > summary {
+  margin-bottom: var(--spacing-xs);
+}
+
 .gx-editor__tool-scope {
   display: flex;
   align-items: flex-end;

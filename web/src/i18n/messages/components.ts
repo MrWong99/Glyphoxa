@@ -105,7 +105,7 @@ export const en = {
   "components.discordUserIdDigitsOnly": "A Discord user ID is digits only.",
   "components.fromVoice": "From voice",
   "components.voiceChannelMembers": "Voice channel members",
-  "components.bindsTo": "Binds to {name}.",
+  "components.bindsTo": "Links to {name}.",
   "components.bindHint": "Pick a voice-channel member, or paste a Discord user ID.",
 
   // — SidebarUser / LegalFooter —

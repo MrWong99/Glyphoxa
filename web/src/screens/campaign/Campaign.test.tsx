@@ -460,28 +460,28 @@ describe("Campaign", () => {
     // Bart (npc-1) is dice-ungranted; the toggle renders unchecked.
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
-    const dice = await screen.findByLabelText("dice");
+    const dice = await screen.findByLabelText("Dice rolls");
     expect(dice).not.toBeChecked();
 
     // The Butler (butler-1) is dice-granted; its toggle renders checked. The
     // editor remounted on selection, so the advanced card is closed again.
     fireEvent.click(screen.getByText("Glyphoxa"));
     openAdvanced();
-    expect(await screen.findByLabelText("dice")).toBeChecked();
+    expect(await screen.findByLabelText("Dice rolls")).toBeChecked();
   });
 
   it("toggles a grant on and it persists across a reload (#117 AC2)", async () => {
     const { grants } = renderScreen();
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
-    const dice = await screen.findByLabelText("dice");
+    const dice = await screen.findByLabelText("Dice rolls");
     expect(dice).not.toBeChecked();
 
     fireEvent.click(dice);
 
     // The mutation persisted to the store and the invalidated query re-read it as
     // granted — the toggle sticks after the reload the invalidation triggers.
-    await waitFor(() => expect(screen.getByLabelText("dice")).toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeChecked());
     expect(grants["npc-1"].granted).toBe(true);
   });
 
@@ -518,16 +518,16 @@ describe("Campaign", () => {
     );
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
-    const dice = await screen.findByLabelText("dice");
+    const dice = await screen.findByLabelText("Dice rolls");
     fireEvent.click(dice);
 
     // In flight: the toggle is disabled, so a second click can't double-submit.
-    await waitFor(() => expect(screen.getByLabelText("dice")).toBeDisabled());
-    fireEvent.click(screen.getByLabelText("dice"));
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeDisabled());
+    fireEvent.click(screen.getByLabelText("Dice rolls"));
     expect(updateCalls).toBe(1);
 
     resolveUpdate();
-    await waitFor(() => expect(screen.getByLabelText("dice")).toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeChecked());
   });
 
   it("renders a scope editor only for a Tool that supports one, and round-trips its config (#117 AC3)", async () => {
@@ -570,10 +570,16 @@ describe("Campaign", () => {
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
 
-    // dice supports no scope → no scope field; remember_knowledge does → one shows.
-    await screen.findByLabelText("dice");
-    expect(screen.queryByLabelText("dice scope")).not.toBeInTheDocument();
-    const scope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    // dice supports no scope → no scope field; remember_knowledge does → one
+    // shows, under friendly labels (never the wire names) and tucked behind
+    // the closed "Advanced" disclosure.
+    await screen.findByLabelText("Dice rolls");
+    expect(screen.queryByText("dice")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/dice rolls scope/i)).not.toBeInTheDocument();
+    const advanced = screen.getByText(/advanced: scope \(json\)/i).closest("details") as HTMLDetailsElement;
+    expect(advanced.open).toBe(false);
+    fireEvent.click(screen.getByText(/advanced: scope \(json\)/i));
+    const scope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
     expect(scope.value).toBe('{"scope":"self"}');
 
     // Edit the scope and save it: the new config round-trips through UpdateToolGrant.
@@ -614,7 +620,7 @@ describe("Campaign", () => {
     );
     fireEvent.click(await screen.findByText("New NPC"));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Jule Brandt" } });
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Role shown under the name"), { target: { value: "" } });
     fireEvent.change(screen.getByLabelText("Draft with AI"), { target: { value: "a stern harbourmaster" } });
     fireEvent.click(screen.getByRole("button", { name: /generate draft/i }));
 
@@ -639,12 +645,12 @@ describe("Campaign", () => {
     );
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
-    const scope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    const scope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
     expect(scope.value).toBe('{"scope":"self"}');
 
     // Edit the scope but do NOT click Save scope, then flip the grant Switch off.
     fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
-    fireEvent.click(screen.getByLabelText("remember_knowledge"));
+    fireEvent.click(screen.getByLabelText("Remember facts"));
 
     // The toggle mutation fired for the revoke and carried NO config — the unsaved
     // draft was never sent, so a stray edit can't silently persist on a toggle.
@@ -662,20 +668,20 @@ describe("Campaign", () => {
     );
     fireEvent.click(await screen.findByText("Bart"));
     openAdvanced();
-    const sw = await screen.findByLabelText("remember_knowledge");
+    const sw = await screen.findByLabelText("Remember facts");
     expect(sw).toBeChecked();
 
     // Revoke (deletes the row), then re-grant.
     fireEvent.click(sw);
-    await waitFor(() => expect(screen.getByLabelText("remember_knowledge")).not.toBeChecked());
-    fireEvent.click(screen.getByLabelText("remember_knowledge"));
-    await waitFor(() => expect(screen.getByLabelText("remember_knowledge")).toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText("Remember facts")).not.toBeChecked());
+    fireEvent.click(screen.getByLabelText("Remember facts"));
+    await waitFor(() => expect(screen.getByLabelText("Remember facts")).toBeChecked());
 
     // The re-grant is a FRESH grant with no scope — the deleted config is gone, not
     // resurrected from local state — and the reappeared editor shows the server
     // value (empty), not the stale pre-revoke draft.
     expect(state().config).toBe("");
-    const rescope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    const rescope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
     expect(rescope.value).toBe("");
     const onCall = calls[calls.length - 1];
     expect(onCall.granted).toBe(true);
