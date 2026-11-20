@@ -1716,6 +1716,10 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// health call probes with the new key instead of serving a stale Degraded
 	// badge for up to the cache TTL (#150).
 	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
+	// The same entitlement again: the Configuration read reports an unsaved
+	// slot the Platform Keys serve as "Included" (W9), never contradicting what
+	// the call-time resolution would do.
+	providerSrv.SetKeyEntitlement(keyEnt)
 	// Saving Discord settings also reconciles the standing presence so the new
 	// token / Guild registers the slash-command surface without a restart (#102).
 	if presenceRefresh != nil {

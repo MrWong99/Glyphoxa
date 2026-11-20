@@ -35,3 +35,9 @@ func (d *DeploymentSharer) SetVoiceListSeamForTest(
 func (s *ProviderServer) SetGuildProofForTest(fn func(ctx context.Context, token, guildID, userID string) error) {
 	s.checkGuildAdmin = fn
 }
+
+// SetEnvLookupForTest overrides the deployment env read behind
+// provided_by_platform (W9) so a test pins which Platform Keys exist.
+func (s *ProviderServer) SetEnvLookupForTest(fn func(string) string) {
+	s.lookupEnv = fn
+}

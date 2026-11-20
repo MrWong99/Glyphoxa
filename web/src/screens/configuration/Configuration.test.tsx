@@ -42,7 +42,7 @@ const CAMPAIGN = {
 };
 
 // cred builds a ProviderCredential the List RPC returns. saved => masked + last4.
-function cred(component: string, provider: string, last4?: string, model = "") {
+function cred(component: string, provider: string, last4?: string, model = "", platform = false) {
   return create(ProviderCredentialSchema, {
     component,
     provider,
@@ -50,6 +50,8 @@ function cred(component: string, provider: string, last4?: string, model = "") {
     showMasked: Boolean(last4),
     last4: last4 ?? "",
     model,
+    // Mirrors the server: a saved own key is never "provided by the platform".
+    providedByPlatform: platform && !last4,
   });
 }
 
@@ -67,6 +69,9 @@ const GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 function mockBackend(
   opts: {
     saved?: Partial<Record<"groq" | "elevenlabs" | "discord" | "gemini", string>>;
+    // platform marks the slots the deployment provides for this tenant (W9:
+    // trial/central-token tenants) — the server's provided_by_platform.
+    platform?: Partial<Record<"groq" | "elevenlabs" | "discord" | "gemini", boolean>>;
     health?: ProviderHealth[];
     // discordSaves captures every SaveDiscordSettings request so tests can pin
     // the wire shape (#142: a token-only save must omit the ID fields).
@@ -145,10 +150,10 @@ function mockBackend(
       listProviderConfigs: () =>
         create(ListProviderConfigsResponseSchema, {
           credentials: [
-            cred("discord", "discord", state.discord),
-            cred("llm", "groq", state.groq, state.groqModel),
-            cred("tts", "elevenlabs", state.elevenlabs),
-            cred("image", "gemini", state.gemini),
+            cred("discord", "discord", state.discord, "", opts.platform?.discord),
+            cred("llm", "groq", state.groq, state.groqModel, opts.platform?.groq),
+            cred("tts", "elevenlabs", state.elevenlabs, "", opts.platform?.elevenlabs),
+            cred("image", "gemini", state.gemini, "", opts.platform?.gemini),
           ],
           guildId: state.guildId,
           discordApplicationId: opts.discordApplicationId ?? "",
@@ -283,6 +288,36 @@ describe("Configuration", () => {
     expect(within(botRow).getByText(/^optional$/i)).toBeInTheDocument();
     expect(within(botRow).getByText(/only needed if you run your own discord bot/i)).toBeInTheDocument();
     expect(screen.queryByText(/working/i)).not.toBeInTheDocument();
+  });
+
+  it("shows Included, not Key needed, for slots the platform provides (W9)", async () => {
+    renderScreen(
+      mockBackend({ platform: { groq: true, elevenlabs: true, gemini: true, discord: true } }),
+    );
+    expect(await screen.findAllByText(/^included$/i)).toHaveLength(4);
+    expect(screen.queryByText(/key needed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^optional$/i)).not.toBeInTheDocument();
+    // The own-key override stays offered: the paste field + Save are still there.
+    const groqRow = screen.getByLabelText("Groq key").closest(".gx-provider-row") as HTMLElement;
+    expect(within(groqRow).getByText(/^included$/i)).toBeInTheDocument();
+    expect(within(groqRow).getByRole("button", { name: /^save$/i })).toBeInTheDocument();
+  });
+
+  it("downgrades an Included slot when its live probe fails (W9)", async () => {
+    renderScreen(
+      mockBackend({
+        platform: { groq: true },
+        health: [
+          create(ProviderHealthSchema, {
+            provider: "groq",
+            status: HealthStatus.DEGRADED,
+          }),
+        ],
+      }),
+    );
+    const groqRow = (await screen.findByLabelText("Groq key")).closest(".gx-provider-row") as HTMLElement;
+    expect(await within(groqRow).findByText(/having trouble/i)).toBeInTheDocument();
+    expect(within(groqRow).queryByText(/^included$/i)).not.toBeInTheDocument();
   });
 
   it("gives the planning-chat model row its own overline", async () => {

@@ -2007,6 +2007,14 @@ message ProviderCredential {
   string model = 6;
   // updated_at is when the credential was last saved (unset when never saved).
   google.protobuf.Timestamp updated_at = 7;
+  // provided_by_platform is true when this Tenant has NOT saved its own key but
+  // the slot still works because the deployment provides it: the Tenant is
+  // entitled to the Platform Keys (ADR-0054/0055 — the same gate every
+  // key resolution consults) and the deployment actually has that provider's
+  // env key (or, for "discord", the central Bot token, ADR-0057). The screen
+  // renders "Included" instead of "Key needed"; saving an own key still
+  // overrides it (a saved BYOK key always wins). Always false once ever_saved.
+  bool provided_by_platform = 8;
 }
 
 // ListProviderConfigsRequest is the (empty) request; the tenant is resolved

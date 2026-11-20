@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -19,8 +20,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/discordguild"
 	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // inviteCodePattern bounds an accepted Discord invite code: 2–64 chars of
@@ -66,6 +71,10 @@ type byokSlot struct {
 	slot       string
 	provider   string
 	components []storage.Component
+	// envKey is the deployment env var the provider adapter falls back to when
+	// the Tenant saved no key (ADR-0039 hybrid policy) — the Platform Key whose
+	// presence makes the slot "provided by the platform" (W9).
+	envKey string
 }
 
 // byokSlots is the MVP provider matrix (ADR-0039): Groq (LLM) + ElevenLabs
@@ -73,17 +82,17 @@ type byokSlot struct {
 // Bot (CONTEXT.md), stored in deployment_config, not a per-Component
 // provider_config.
 var byokSlots = []byokSlot{
-	{provider: "groq", components: []storage.Component{storage.ComponentLLM}},
-	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}},
+	{provider: "groq", components: []storage.Component{storage.ComponentLLM}, envKey: groq.APIKeyEnv},
+	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}, envKey: elevenlabs.APIKeyEnv},
 	// Gemini backs the image Component (#311, ADR-0004 amendment): a distinct
 	// BYOK slot + health check, even though Gemini already appears in the LLM
 	// matrix — the image key is managed on its own Configuration row.
-	{provider: "gemini", components: []storage.Component{storage.ComponentImage}},
+	{provider: "gemini", components: []storage.Component{storage.ComponentImage}, envKey: gemini.APIKeyEnv},
 	// The Butler planning chat's LLM (#592, ADR-0062): a distinct slot + row
 	// (component chat_llm) so chat can run a quality-over-latency model while
 	// the voice loop keeps its ADR-0036 selection — the gemini-image precedent
 	// of the same provider on its own Configuration row.
-	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}},
+	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}, envKey: groq.APIKeyEnv},
 }
 
 // wireID is the id a save names this slot by: slot when set, else provider.
@@ -154,6 +163,16 @@ type ProviderServer struct {
 	// calls — the guild-admin proof (#504) and invite resolution — and never
 	// persisted or returned (ADR-0004 posture).
 	envBotToken string
+
+	// keyEnt is the platform-key entitlement (ADR-0054 seam (a), ADR-0055) the
+	// call-time key resolution consults before riding the env fallback; the
+	// Configuration read consults the SAME gate (via llmbuild.ResolveKeyGated)
+	// to report a slot as provided by the platform (W9). nil grants everything —
+	// the allowlist/self-host posture, as on VoiceServer.
+	keyEnt llmbuild.PlatformKeyEntitlement
+	// lookupEnv reads a deployment env var (os.Getenv in prod); a seam so tests
+	// pin the "platform key present" half of provided_by_platform.
+	lookupEnv func(string) string
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -165,7 +184,7 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &ProviderServer{store: store, cipher: cipher, log: log}
+	s := &ProviderServer{store: store, cipher: cipher, log: log, lookupEnv: os.Getenv}
 	s.resolveInvite = func(ctx context.Context, token, code string) (discordinvite.Resolved, error) {
 		return discordinvite.Resolve(ctx, token, code, log)
 	}
@@ -182,6 +201,15 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 // boot, before the server serves, so no lock is needed.
 func (s *ProviderServer) SetEnvBotToken(token string) {
 	s.envBotToken = token
+}
+
+// SetKeyEntitlement wires the platform-key entitlement ListProviderConfigs
+// consults to report a slot as provided by the platform (W9) — the same
+// instance VoiceServer.SetKeyEntitlement and every engine get, so the badge and
+// the call-time resolution can never disagree. Called once at boot, before the
+// server serves; nil (the default) grants everything.
+func (s *ProviderServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
+	s.keyEnt = ent
 }
 
 // SetHealthInvalidator wires the health-cache buster called after a successful
@@ -267,9 +295,16 @@ func (s *ProviderServer) ListProviderConfigs(
 	}
 	// ErrNotFound → zero DeploymentConfig (all empty): the unsaved, key-needed state.
 
-	creds := []*managementv1.ProviderCredential{discordCredential(dep)}
+	discord := discordCredential(dep)
+	// The central Bot token (ADR-0057) serves a Tenant that saved none; it is
+	// deployment infrastructure, outside the platform-key entitlement.
+	discord.ProvidedByPlatform = !discord.GetEverSaved() && s.envBotToken != ""
+	creds := []*managementv1.ProviderCredential{discord}
+	platform := s.platformKeyGate(ctx, tenantID)
 	for _, slot := range byokSlots {
-		creds = append(creds, providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]]))
+		cred := providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]])
+		cred.ProvidedByPlatform = !cred.GetEverSaved() && s.lookupEnv(slot.envKey) != "" && platform(slot.components[0])
+		creds = append(creds, cred)
 	}
 
 	// Per-tenant Discord integration health (#489): the standing client's state
@@ -287,6 +322,33 @@ func (s *ProviderServer) ListProviderConfigs(
 		IntegrationState:     integrationState,
 		IntegrationDetail:    integrationDetail,
 	}), nil
+}
+
+// platformKeyGate returns a per-call memo of "would this Tenant's call-time key
+// resolution be allowed onto the env fallback" (W9). It asks
+// llmbuild.ResolveKeyGated with no saved config — exactly the question every
+// engine's resolution asks for an unsaved slot — so the badge derives from the
+// one entitlement rule instead of re-implementing it. The entitlement is
+// per-Tenant, not per-Component, so the gate is consulted at most once. A read
+// error fails closed (logged, slot not reported as provided): the screen then
+// shows "Key needed", the conservative answer.
+func (s *ProviderServer) platformKeyGate(ctx context.Context, tenantID uuid.UUID) func(storage.Component) bool {
+	var (
+		asked, allowed bool
+	)
+	return func(component storage.Component) bool {
+		if !asked {
+			asked = true
+			_, err := llmbuild.ResolveKeyGated(ctx, s.keyEnt, tenantID, nil, nil, component)
+			switch {
+			case err == nil:
+				allowed = true
+			case !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
+				s.log.Warn("ListProviderConfigs: platform-key entitlement read failed", "tenant_id", tenantID, "err", err)
+			}
+		}
+		return allowed
+	}
 }
 
 // SaveProviderConfig seals a BYOK provider key and upserts every Component the

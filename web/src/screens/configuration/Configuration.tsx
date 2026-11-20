@@ -512,17 +512,31 @@ function SpendCapsCard() {
 // "Working" or downgrades to "Having trouble" once GetProviderHealth reports
 // the test-call (#70) — the page never waits on the live call, and never
 // claims "Working" before a probe said so.
+//
+// An unsaved slot the deployment provides for this tenant (W9 — a trial
+// tenant on the Platform Keys, a central-Bot table) reads "Included": the
+// probe runs on the platform's key there too, so a failed probe still
+// downgrades it to "Having trouble".
 function HealthBadge({
   saved,
   health,
   optional = false,
+  platform = false,
 }: {
   saved: boolean;
   health?: ProviderHealth;
   optional?: boolean;
+  platform?: boolean;
 }) {
   const { t } = useI18n();
-  if (!saved) {
+  if (!saved && platform && health?.status !== HealthStatus.DEGRADED) {
+    return (
+      <Badge variant="info" dot size="sm">
+        {t("config.badgeIncluded")}
+      </Badge>
+    );
+  }
+  if (!saved && !platform) {
     return optional ? (
       <Badge variant="neutral" dot size="sm">
         {t("config.badgeOptional")}
@@ -786,7 +800,14 @@ function SecretRow({
           )}
         </div>
 
-        {!hideHealth && <HealthBadge saved={saved} health={health} optional={optional} />}
+        {!hideHealth && (
+          <HealthBadge
+            saved={saved}
+            health={health}
+            optional={optional}
+            platform={Boolean(credential?.providedByPlatform)}
+          />
+        )}
       </div>
     </Card>
   );

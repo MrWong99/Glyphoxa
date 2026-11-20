@@ -46,6 +46,9 @@ export const en = {
   // answering; "Working" only once the probe succeeded.
   "config.badgeKeyNeeded": "Key needed",
   "config.badgeOptional": "Optional",
+  // An unsaved slot the deployment provides for this tenant (trial Platform
+  // Keys, the central Bot) — pasting an own key still overrides it.
+  "config.badgeIncluded": "Included",
   "config.badgeSaved": "Saved",
   "config.badgeWorking": "Working",
   "config.badgeDegraded": "Having trouble",
@@ -142,6 +145,7 @@ export const de: Record<keyof typeof en, string> = {
 
   "config.badgeKeyNeeded": "Schlüssel fehlt",
   "config.badgeOptional": "Optional",
+  "config.badgeIncluded": "Inklusive",
   "config.badgeSaved": "Gespeichert",
   "config.badgeWorking": "Funktioniert",
   "config.badgeDegraded": "Hat Probleme",
