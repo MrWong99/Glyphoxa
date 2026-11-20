@@ -75,13 +75,8 @@ func (d *DirectSpeech) SetFloor(floor *Floor) { d.floor = floor }
 // Conversation.Register from [Barge.Gate].
 func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
 
-// SetEnsemble installs the Ensemble Turn speaker on the replier for the ensemble
-// coordinator tests (external test package, #301). Production wiring sets
-// r.ensemble inside Conversation.Register from [Barge.Ensemble].
-func (r *Replier) SetEnsemble(s EnsembleSpeaker) { r.ensemble = s }
-
-// SetLookahead installs the pump look-ahead seam on the replier for the Cross-talk
-// Reaction pre-render tests (external test package, #375). Production wiring sets
+// SetLookahead installs the pump look-ahead seam on the replier for the
+// pre-synthesis pipeline tests (external test package, #626). Production wiring sets
 // r.lookahead inside Conversation.Register from [Barge.Lookahead].
 func (r *Replier) SetLookahead(p LookaheadPump) { r.lookahead = p }
 

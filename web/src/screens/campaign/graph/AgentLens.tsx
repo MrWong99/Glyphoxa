@@ -18,7 +18,7 @@ import { errorMessage } from "@/lib/connectError";
 // turning a silent quality cliff into something the GM can see and fix.
 
 /** What the lens tells the graph to draw differently. */
-export type Lens = {
+type Lens = {
   agentName: string;
   /** Nodes whose facts really will be injected. */
   includedIDs: ReadonlySet<string>;
@@ -36,7 +36,7 @@ export type Lens = {
   ghostIDs: ReadonlySet<string>;
 };
 
-export type LensState = {
+type LensState = {
   lens: Lens | null;
   /** Rendered facts, byte-identical to what the turn injects. */
   facts: string[];

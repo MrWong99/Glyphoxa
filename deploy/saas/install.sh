@@ -62,7 +62,7 @@ Options:
 Every prompt reads its GX_* env var first (GX_HOST, GX_ACME_EMAIL,
 GX_DISCORD_CLIENT_ID, GX_DISCORD_CLIENT_SECRET, GX_DISCORD_BOT_TOKEN,
 GX_OPERATOR_IDS, GX_ADMISSION_MODE, GX_SIGNUP_PLAN_SLUG, GX_OLLAMA_URL,
-GX_GROQ_API_KEY, GX_ELEVENLABS_API_KEY, GX_GEMINI_API_KEY, GX_TLS,
+GX_TRUSTED_CLIENT_IP_HEADER, GX_GROQ_API_KEY, GX_ELEVENLABS_API_KEY, GX_GEMINI_API_KEY, GX_TLS,
 GX_BACKUP_DIR, GX_BACKUP_SCHEDULE, GX_BACKUP_RETENTION_DAYS, GX_PG_DISK);
 a run without a TTY takes ONLY the env vars and fails naming any missing
 required one, so unattended installs are reproducible.
@@ -239,6 +239,11 @@ else
 
   ask GX_OLLAMA_URL "Ollama URL for embeddings (serving nomic-embed-text; empty disables semantic memory L2 with a WARN loop — docs/configuration.md)" ""
 
+  ask GX_TRUSTED_CLIENT_IP_HEADER "Trusted client-IP header for the login audit record: 'CF-Connecting-IP' if this instance is reachable ONLY through Cloudflare (e.g. a Cloudflare Tunnel); empty otherwise — docs/configuration.md" ""
+  case "$GX_TRUSTED_CLIENT_IP_HEADER" in
+    *[!A-Za-z0-9-]*) die "GX_TRUSTED_CLIENT_IP_HEADER must be an HTTP header name (letters, digits, hyphens), got '$GX_TRUSTED_CLIENT_IP_HEADER'" ;;
+  esac
+
   note "Platform provider keys (ADR-0054): leave empty for a pure-BYOK deployment;"
   note "fill to sell 'usage included' tiers on YOUR keys (saas-operations.md §2)."
   ask_secret_optional GX_GROQ_API_KEY "Groq API key (optional, hidden; Enter to skip)"
@@ -345,6 +350,17 @@ plans:
         monthly_price_usd: 0"
   fi
 
+  # The one request header the edge proxy vouches for as the client address
+  # (GLYPHOXA_TRUSTED_CLIENT_IP_HEADER). Only emitted when the operator named
+  # one: unset, the pod trusts no client-IP header at all.
+  WEB_EXTRA_ENV_BLOCK=""
+  if [ -n "${GX_TRUSTED_CLIENT_IP_HEADER-}" ]; then
+    WEB_EXTRA_ENV_BLOCK="
+  extraEnv:
+    - name: GLYPHOXA_TRUSTED_CLIENT_IP_HEADER
+      value: \"$(yesc "$GX_TRUSTED_CLIENT_IP_HEADER")\""
+  fi
+
   CERTMANAGER_ENABLED=false
   [ "$GX_TLS" = "letsencrypt" ] && CERTMANAGER_ENABLED=true
 
@@ -388,7 +404,7 @@ web:
     clientSecret: "$(yesc "$GX_DISCORD_CLIENT_SECRET")"
     # redirectUrl stays empty: it is DERIVED from ingress.host so it can
     # never drift (docs/deploy/k3s-proxmox.md §5).
-  operatorIds: "$(yesc "$GX_OPERATOR_IDS")"${ADMISSION_BLOCK}
+  operatorIds: "$(yesc "$GX_OPERATOR_IDS")"${ADMISSION_BLOCK}${WEB_EXTRA_ENV_BLOCK}
   resources:                 # 'all' mode runs the voice loop in-process
     requests:
       cpu: 500m

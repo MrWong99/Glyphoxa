@@ -104,7 +104,7 @@ func newAuthClientWith(t *testing.T, authn auth.Authenticator, del auth.SessionD
 	stack := auth.NewStack(authn, tr,
 		managementv1connect.AuthServiceGetCurrentUserProcedure,
 		managementv1connect.AuthServiceGetAdmissionModeProcedure)
-	server := auth.NewAuthServer(del, namer, ren, mode, slog.Default())
+	server := auth.NewAuthServer(del, namer, ren, mode, auth.EdgeConfig{}, slog.Default())
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)
@@ -442,20 +442,37 @@ func TestGetCurrentUser_TenantBranches(t *testing.T) {
 	})
 }
 
-// TestLogout_SecureBehindProxy pins that the cleared cookies carry Secure when
-// the request was forwarded as https, and not on cleartext (local dev).
-func TestLogout_SecureBehindProxy(t *testing.T) {
+// TestLogout_SecureFromConfigNotRequest pins that the cleared cookies carry
+// Secure exactly when the deployment was configured https (#662) — a cookie is
+// only cleared by a Set-Cookie whose attributes the browser accepts — and that
+// a client-supplied X-Forwarded-Proto no longer decides it either way.
+func TestLogout_SecureFromConfigNotRequest(t *testing.T) {
 	t.Parallel()
-	for _, proxied := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct", true: "proxied"}[proxied], func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		secure    bool
+		forwarded string
+	}{
+		{"https deployment, no proxy header", true, ""},
+		{"cleartext dev, client claims https", false, "https"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			op := operator()
-			client, _ := newAuthClient(t, fakeAuthN{users: map[string]storage.User{validToken: op}}, &fakeDeleter{})
+			stack := auth.NewStack(fakeAuthN{users: map[string]storage.User{validToken: op}}, fakeTenant{id: uuid.New()})
+			server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist,
+				auth.EdgeConfig{SecureCookies: tc.secure}, slog.Default())
+			mux := http.NewServeMux()
+			mux.Handle(server.Handler(stack.HandlerOptions()...))
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			client := managementv1connect.NewAuthServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
 			req := connect.NewRequest(&managementv1.LogoutRequest{})
 			req.Header().Set("Cookie", auth.SessionCookieName+"="+validToken+"; "+auth.CSRFCookieName+"="+csrfValue)
 			req.Header().Set("X-CSRF-Token", csrfValue)
-			if proxied {
-				req.Header().Set("X-Forwarded-Proto", "https")
+			if tc.forwarded != "" {
+				req.Header().Set("X-Forwarded-Proto", tc.forwarded)
 			}
 			resp, err := client.Logout(context.Background(), req)
 			if err != nil {
@@ -466,8 +483,8 @@ func TestLogout_SecureBehindProxy(t *testing.T) {
 				t.Fatal("no Set-Cookie on logout")
 			}
 			for _, sc := range set {
-				if got := strings.Contains(sc, "; Secure"); got != proxied {
-					t.Errorf("Set-Cookie %q Secure=%v, want %v", sc, got, proxied)
+				if got := strings.Contains(sc, "; Secure"); got != tc.secure {
+					t.Errorf("Set-Cookie %q Secure=%v, want %v", sc, got, tc.secure)
 				}
 			}
 		})

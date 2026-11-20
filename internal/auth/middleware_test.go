@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -121,7 +122,7 @@ func TestRequireTenant_ChainInjectsTenant(t *testing.T) {
 }
 
 // TestRequireTenant_ResolveFailure401 documents the byte-endpoint posture: when the
-// operator has no resolvable tenant, RequireTenant rejects 401 (the handlers
+// operator has no bound tenant (storage.ErrNotFound), RequireTenant rejects 401 (the handlers
 // require a tenant, so proceeding tenantless only 401s deeper — this fails fast
 // with the same code). Unlike the Connect NewTenantInterceptor, which proceeds
 // tenantless and lets each handler fail on its own terms.
@@ -144,6 +145,31 @@ func TestRequireTenant_ResolveFailure401(t *testing.T) {
 	}
 	if called {
 		t.Fatal("inner handler ran despite an unresolved tenant")
+	}
+}
+
+// TestRequireTenant_LookupFailure503 is the #661 half of the posture above: a
+// tenant lookup that FAILED is not "no tenant". It answers 503, never the 401
+// that makes the SPA sign the operator out over a transient database error.
+func TestRequireTenant_LookupFailure503(t *testing.T) {
+	op := storage.User{ID: uuid.New(), Name: "op", Role: "operator"}
+	authN := fakeAuthN{users: map[string]storage.User{validToken: op}}
+	tr := fakeTenant{err: errors.New("connection reset by peer")}
+
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	chain := auth.RequireSession(authN, auth.RequireTenant(tr, inner))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/x/clip", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: validToken})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("lookup failure: code=%d, want 503", rec.Code)
+	}
+	if called {
+		t.Fatal("inner handler ran despite a failed tenant lookup")
 	}
 }
 

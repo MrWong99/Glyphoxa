@@ -20,8 +20,8 @@ func TestPlaybackLookahead_Roundtrip(t *testing.T) {
 
 // TestLookaheadKeyFrom pins the lane key (#626): the pump's look-ahead lane is
 // keyed per SENTENCE for an intra-turn pipeline, so a ctx may carry an explicit
-// key; without one the key is the turn id, which is what every ensemble caller
-// (one held sentence per turn, #375) relies on.
+// key; without one the key is the turn id (a caller holding one sentence per
+// turn).
 func TestLookaheadKeyFrom(t *testing.T) {
 	if got := LookaheadKeyFrom(context.Background()); got != "" {
 		t.Fatalf("bare ctx: got key %q, want empty", got)

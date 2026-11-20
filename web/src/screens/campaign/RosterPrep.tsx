@@ -7,6 +7,7 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
 import {
   UNPLACED_TITLE,
   rosterPrep,
@@ -71,7 +72,7 @@ export function RosterPrep({
   if (graphQuery.isError || readyQuery.isError) {
     return (
       <p className="gx-campaign__error" role="alert">
-        {t("campaign.prepLoadError", { message: (graphQuery.error ?? readyQuery.error)?.message ?? "" })}
+        {t("campaign.prepLoadError", { message: errorMessage(graphQuery.error ?? readyQuery.error) })}
       </p>
     );
   }

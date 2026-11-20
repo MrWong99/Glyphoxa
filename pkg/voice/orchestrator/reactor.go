@@ -818,10 +818,7 @@ type Reply struct {
 	// to — invokes it EXACTLY ONCE iff this Reply is delivered: the ADR-0012
 	// commit point, synth returned nil AND the post-drain ctx is still live. A
 	// start-error or a mid-drain cut leaves it uninvoked, so an undelivered
-	// sentence is never committed. Nil is a no-op. (The Ensemble producers —
-	// [EnsembleSpeaker.Speak] / [CrossTalker.SpeakReaction] — commit via their
-	// own return-value drain and pass hook-less Replies, so they simply never
-	// set it.)
+	// sentence is never committed. Nil is a no-op.
 	OnDelivered func()
 
 	// OnResolved, when non-nil, fires EXACTLY ONCE when this Reply's outcome is
@@ -852,9 +849,7 @@ type Reply struct {
 //
 // In v1.0 the production ReplyFunc is the Agent loop (Hot Context assembly +
 // Persona injection + LLM dispatch, ADR-0019 slice 1); tests supply a closure
-// returning a canned line. Per ADR-0025 a multi-Agent address can yield an
-// Ensemble Turn — the slice return type leaves room for that to grow behind the
-// same seam.
+// returning a canned line.
 type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 
 // StreamReplyFunc is the streaming counterpart to [ReplyFunc] (B1): instead of
@@ -909,22 +904,12 @@ type Replier struct {
 	// [NewReplier].
 	gate TurnGate
 
-	// ensemble, when non-nil, is the Ensemble Turn speaker ([Barge.Ensemble], #301,
-	// ADR-0025): on a [voiceevent.EnsembleRouted] the replier fans the candidates
-	// out into parallel [EnsembleSpeaker.Draft]s, races them, and lets the first
-	// complete non-empty draft (the Lead) take the floor and speak. Nil degrades an
-	// EnsembleRouted to the top-scored single route ([Replier.handleRouted]). Set
-	// only via the orchestrator wiring; not part of [NewReplier]. It requires the
-	// barge-in floor (it lives on [Barge], so it cannot exist without one) — the whole
-	// ensemble is ONE floor-holding unit.
-	ensemble EnsembleSpeaker
-
 	// lookahead, when non-nil, is the pump pre-render seam ([Barge.Lookahead],
-	// #375, ADR-0025): the Cross-talk Reaction's first sentence is synthesized during
-	// the Lead's playback and HELD in this pump's look-ahead lane, released at the
-	// Lead's end for a near-zero onset gap (or discarded on a barge). Nil is the
-	// feature-off default — the Reaction pre-renders TEXT only (the #302 legacy
-	// path). Set only via the orchestrator wiring; not part of [NewReplier].
+	// #626): a routed turn's NEXT sentence is synthesized during its predecessor's
+	// playback and HELD in this pump's look-ahead lane, released when the
+	// predecessor resolves (or discarded on a barge). Nil is the feature-off
+	// default — every sentence is synthesized only after the previous one was
+	// delivered. Set only via the orchestrator wiring; not part of [NewReplier].
 	lookahead LookaheadPump
 }
 
@@ -955,14 +940,11 @@ func NewStreamReplier(ttsStage *TTS, reply StreamReplyFunc, onError ErrorFunc) *
 	return &Replier{tts: ttsStage, replyStream: reply, onError: onError}
 }
 
-// Bind subscribes the replier to [voiceevent.AddressRouted] AND
-// [voiceevent.EnsembleRouted] on bus and returns a function that removes both
-// subscriptions. It implements [Reactor]; bus must be non-nil. Each [Reply] the
-// [ReplyFunc] returns is dispatched in order under ctx; a dispatch failure is
-// reported through the ErrorFunc (callbacks cannot return errors) and does not stop
-// the remaining replies. An EnsembleRouted runs the speculative fan-out + Lead race
-// ([Replier.handleEnsemble], #301) when an [EnsembleSpeaker] is wired, else degrades
-// to the top-scored single route.
+// Bind subscribes the replier to [voiceevent.AddressRouted] on bus and returns a
+// function that removes the subscription. It implements [Reactor]; bus must be
+// non-nil. Each [Reply] the [ReplyFunc] returns is dispatched in order under ctx;
+// a dispatch failure is reported through the ErrorFunc (callbacks cannot return
+// errors) and does not stop the remaining replies.
 func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func()) {
 	if bus == nil {
 		panic("orchestrator.Replier.Bind: bus must not be nil")
@@ -972,21 +954,12 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 	if r.floor != nil {
 		r.floor.bindSupersedeTerminal(bus)
 	}
-	unsubRouted := voiceevent.On(bus, func(e voiceevent.AddressRouted) {
+	return voiceevent.On(bus, func(e voiceevent.AddressRouted) {
 		r.handleRouted(ctx, bus, e)
 	})
-	unsubEnsemble := voiceevent.On(bus, func(e voiceevent.EnsembleRouted) {
-		r.handleEnsemble(ctx, bus, e)
-	})
-	return func() {
-		unsubEnsemble()
-		unsubRouted()
-	}
 }
 
-// handleRouted runs one single-target routing decision: the pre-#301 reply-reactor
-// body, unchanged. It is a method (not an inline closure) so [Replier.handleEnsemble]
-// can degrade a one-survivor / no-ensemble-speaker EnsembleRouted onto it.
+// handleRouted runs one routing decision: the reply-reactor body.
 func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voiceevent.AddressRouted) {
 	{
 		// Carry the turn correlation id (A3) into the dispatch context so the TTS

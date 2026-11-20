@@ -13,6 +13,7 @@ import {
 import {
   CampaignService,
   ProviderService,
+  SessionService,
   VoiceService,
   HealthStatus,
   type ProviderCredential,
@@ -145,8 +146,21 @@ export function Configuration() {
   const campaign = data?.campaign;
 
   const queryClient = useQueryClient();
+  // A credential or Discord save changes more than the list: the live health
+  // probe, the model and voice catalogs (fetched WITH the key) and the linked
+  // guild's voice channels / members all answer differently afterwards. Only
+  // the list used to be dropped, so the badge kept its pre-save verdict and
+  // the Cast and Session screens kept an empty catalog until a reload.
   const invalidateList = () =>
-    invalidateMethodQueries(queryClient, ProviderService.method.listProviderConfigs);
+    invalidateMethodQueries(
+      queryClient,
+      ProviderService.method.listProviderConfigs,
+      VoiceService.method.getProviderHealth,
+      VoiceService.method.listModels,
+      VoiceService.method.listVoices,
+      SessionService.method.listSessionVoiceChannels,
+      CampaignService.method.listDiscordVoiceMembers,
+    );
 
   const config = useQuery(ProviderService.method.listProviderConfigs, {});
   const creds = config.data?.credentials ?? [];

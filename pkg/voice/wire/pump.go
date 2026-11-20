@@ -34,9 +34,9 @@ import (
 // the right tradeoff for that queue; the look-ahead lane below is how a
 // coordinator buys the gap back without weakening it.
 //
-// The ONE exception is the keyed look-ahead lane (#375, #626, ADR-0025): a sentence
-// marked [voiceevent.WithPlaybackLookahead] — a queued Cross-talk Reaction's FIRST
-// sentence, or the NEXT sentence of a pipelined turn (#626) — is HELD in the lane.
+// The ONE exception is the keyed look-ahead lane (#626): a sentence marked
+// [voiceevent.WithPlaybackLookahead] — the NEXT sentence of a pipelined turn —
+// is HELD in the lane.
 // It is synthesized eagerly (its first chunk pre-paid at the tee, so its TTFB is
 // spent DURING the previous sentence's playback) but never drained nor played
 // until the coordinator calls [PlaybackPump.ReleaseLookahead]. The hold is pure
@@ -64,15 +64,14 @@ type PlaybackPump struct {
 	life       context.Context
 	cancelLife context.CancelFunc
 
-	// laneMu guards the keyed look-ahead lane (#375, #626). laneJob is the single
-	// held job (depth 1, ADR-0025) and laneKey its owning LANE KEY — the turn id for
-	// a Cross-talk Reaction (one held sentence per turn) or a per-sentence key for
-	// the intra-turn pre-synthesis pipeline (#626); released latches
+	// laneMu guards the keyed look-ahead lane (#626). laneJob is the single
+	// held job (depth 1) and laneKey its owning LANE KEY — a per-sentence key for
+	// the intra-turn pre-synthesis pipeline; released latches
 	// a ReleaseLookahead that arrived BEFORE the sentence was primed (release-before-
 	// prime race), so the imminent prime bypasses the lane straight to the queue. The
-	// lane is turn-keyed — NOT a bare "held/not-held" flag — so a stale defer discard
-	// or a superseded reaction from an older turn can never drain the CURRENT turn's
-	// held job (cross-turn supersede race). The worker never touches these fields.
+	// lane is keyed — NOT a bare "held/not-held" flag — so a stale defer discard
+	// from an older turn can never drain the CURRENT turn's held job (cross-turn
+	// supersede race). The worker never touches these fields.
 	laneMu   sync.Mutex
 	laneJob  *playJob
 	laneKey  string
@@ -166,11 +165,10 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voicee
 		// empty at every enqueue; the buffer only decouples the enqueue from the
 		// worker's in-flight playSentenceBus so HandleSentence returns at once.
 		//
-		// The #375 look-ahead lane preserves this invariant: a held Reaction s1 sits
-		// in the LANE, never the queue, so it adds no queue depth. ReleaseLookahead
-		// only enqueues s1 after the Lead's last job has been dequeued (the release
-		// fires after the Lead's Speak returned), and the Reaction's s2+ dispatch only
-		// after s1's own hand-off drains — so the queue is still empty at every enqueue.
+		// The look-ahead lane (#626) preserves this invariant: a held sentence sits
+		// in the LANE, never the queue, so it adds no queue depth. The pipelined
+		// turn releases sentence k only after sentence k-1 has resolved (its job
+		// dequeued and drained) — so the queue is still empty at every enqueue.
 		queue: make(chan playJob, 1),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
@@ -230,7 +228,7 @@ func (p *PlaybackPump) enqueue(job playJob) {
 // prime installs a look-ahead sentence in the lane under its lane key (#375, #626).
 // If a matching Release already latched (release-before-prime), the sentence
 // bypasses the lane straight to the queue. If the lane already holds an OLDER job (a
-// superseded reaction, stale by construction), that job is drained before the new
+// superseded turn's, stale by construction), that job is drained before the new
 // one is held — the lane key makes the supersede unambiguous.
 func (p *PlaybackPump) prime(job playJob, id string) {
 	// A sentence whose ctx already cancelled (a barge that landed before the tee
@@ -267,8 +265,8 @@ func (p *PlaybackPump) prime(job playJob, id string) {
 // queue so it plays after the in-flight sentence (order preserved). If the sentence
 // has not been primed yet, it latches so the imminent prime enqueues directly
 // (release-before-prime). It is non-blocking and never waits for a prime. A key
-// that owns no held job and no pending prime is a no-op. The key is the turn id for
-// a Cross-talk Reaction (#375) and a per-sentence key for a pipelined turn (#626).
+// that owns no held job and no pending prime is a no-op. The key is the
+// per-sentence key of a pipelined turn (#626).
 func (p *PlaybackPump) ReleaseLookahead(turnID string) {
 	p.laneMu.Lock()
 	if p.laneJob != nil && p.laneKey == turnID {
@@ -277,7 +275,7 @@ func (p *PlaybackPump) ReleaseLookahead(turnID string) {
 		p.laneKey = ""
 		p.laneMu.Unlock()
 		// Counted here, on the coordinator goroutine, NOT in the worker: the worker
-		// must never touch the lane (ADR-0025, #375). A released job is the lane
+		// must never touch the lane (#375). A released job is the lane
 		// doing its job — its pre-paid TTS startup hid an inter-sentence gap.
 		p.lookahead(observe.LookaheadReleased)
 		p.enqueue(job)

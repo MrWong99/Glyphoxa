@@ -596,7 +596,7 @@ function NewMapButton({
   const locations = nodes.filter((n) => n.nodeType === NodeType.LOCATION);
 
   return (
-    <div className="gx-maps__new" role="dialog" aria-label={t("campaign.addMap")}>
+    <div className="gx-maps__new" role="group" aria-label={t("campaign.addMap")}>
       <div className="gx-maps__modes" role="group" aria-label={t("campaign.imageSourceAria")}>
         <button
           type="button"

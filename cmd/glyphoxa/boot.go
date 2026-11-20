@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -691,6 +692,35 @@ const devSessionTTL = 24 * time.Hour
 // a proxy would hand every proxied visitor the operator console.
 var proxyHeaders = []string{"X-Forwarded-For", "X-Forwarded-Proto", "Forwarded"}
 
+// loopbackHost reports whether an HTTP Host header (or the host of an Origin)
+// names this machine's loopback interface: localhost, any *.localhost name
+// (which browsers resolve to loopback without DNS), or a loopback IP literal.
+// The port, if any, is ignored.
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackOrigin reports whether an Origin header value names a page served
+// from this machine's loopback interface — the dev instance itself, or the
+// Vite dev server proxying to it (http://localhost:5173). The opaque origin
+// "null" (a sandboxed frame, a file:// page) and anything unparsable are not.
+func loopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return loopbackHost(u.Host)
+}
+
 // seedDevSession synthesizes the dev operator and issues a real session for it
 // (ADR-0041 GLYPHOXA_DEV_MODE). It upserts the fixed synthetic operator
 // ([storage.DevOperatorDiscordID]), binds/creates its tenant, and mints a
@@ -773,6 +803,23 @@ func (d *devSessions) tokens(ctx context.Context) (session, csrf string, err err
 // existing gate unchanged — nothing is special-cased downstream. Requests
 // carrying proxy evidence ([proxyHeaders]) are refused with 403: they crossed a
 // reverse proxy, which the loopback bind alone cannot rule out on the same host.
+//
+// Two more refusals close the BROWSER as a way in. Because this middleware
+// overwrites the cookies and supplies the CSRF header itself, the two defences
+// the real gate relies on against a hostile web page — SameSite cookies and
+// the double-submit token — do nothing here: any page the developer visits can
+// make their browser send requests to 127.0.0.1, and every one arrives
+// authenticated.
+//
+//   - The Host header must name loopback ([loopbackHost]). A DNS-rebinding page
+//     (evil.example re-resolved to 127.0.0.1) is same-origin with the dev
+//     instance as far as the browser is concerned and could read every
+//     response — but its requests still say `Host: evil.example`.
+//   - An Origin header, when present, must be a loopback origin
+//     ([loopbackOrigin]). Browsers attach Origin to every cross-origin
+//     state-changing request, so a cross-site form POST (e.g. to the campaign
+//     import) is refused even though it needs no response.
+//
 // INSECURE for anything but local dev; it is only ever wired behind the loopback
 // bind [forceLoopback] forces.
 func devAuthMiddleware(d *devSessions, log *slog.Logger, next http.Handler) http.Handler {
@@ -786,6 +833,21 @@ func devAuthMiddleware(d *devSessions, log *slog.Logger, next http.Handler) http
 					"through a reverse proxy or port-forward", http.StatusForbidden)
 				return
 			}
+		}
+		if !loopbackHost(r.Host) {
+			log.Error("GLYPHOXA_DEV_MODE refused a request for a non-loopback Host — possible DNS rebinding (ADR-0041)",
+				"host", r.Host, "remote", r.RemoteAddr)
+			http.Error(w, "GLYPHOXA_DEV_MODE only answers requests addressed to localhost / 127.0.0.1 (ADR-0041)",
+				http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && !loopbackOrigin(origin) {
+			log.Error("GLYPHOXA_DEV_MODE refused a cross-origin request (ADR-0041)",
+				"origin", origin, "remote", r.RemoteAddr)
+			http.Error(w, "GLYPHOXA_DEV_MODE refuses cross-origin requests (ADR-0041): "+
+				"dev mode auto-authenticates every caller, so only pages served from localhost may call it",
+				http.StatusForbidden)
+			return
 		}
 		session, csrf, err := d.tokens(r.Context())
 		if err != nil {
@@ -825,6 +887,42 @@ func enableDevMode(ctx context.Context, store auth.OAuthStore, authn auth.Authen
 		return devAuthMiddleware(d, log, h)
 	}
 	return loopbackAddr, wrap, nil
+}
+
+// expiredSessionPurger is the housekeeping write [purgeExpiredSessions] needs.
+// *storage.Store satisfies it.
+type expiredSessionPurger interface {
+	PurgeExpiredSessions(ctx context.Context) (int64, error)
+}
+
+// sessionPurgeInterval is how often the web tier sweeps expired session rows.
+// Sessions live 30 days and are purged a day after they expire, so a daily
+// pass keeps the table at "live sessions plus one day".
+const sessionPurgeInterval = 24 * time.Hour
+
+// purgeExpiredSessions deletes expired session rows now and then once per
+// interval until ctx is cancelled (#643). Nothing else ever removes an expired
+// session, and each row carries the IP address and user agent captured at
+// login. It runs in every web/all boot — both Admission Modes and dev mode —
+// and from every replica: the delete is idempotent. A failure is logged and
+// retried on the next tick; it never fails the boot, because an unpurged
+// expired row is inert (AuthenticateSession already refuses it).
+func purgeExpiredSessions(ctx context.Context, store expiredSessionPurger, interval time.Duration, log *slog.Logger) {
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		switch purged, err := store.PurgeExpiredSessions(ctx); {
+		case err != nil && ctx.Err() == nil:
+			log.Warn("purge of expired sessions failed; retrying on the next pass", "err", err)
+		case err == nil && purged > 0:
+			log.Info("purged expired sessions", "count", purged)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // mixedModeGuardStore is the read surface the -mode all mixed-deployment guard

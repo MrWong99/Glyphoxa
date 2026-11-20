@@ -45,7 +45,7 @@ type CampaignFields = { name: string; system: string; language: string };
 // created (and is already in the list) but selecting it failed — a distinction
 // the form must surface, since a blanket "couldn't create" would be a lie and a
 // blind retry would mint a duplicate (#267 review).
-export type CreateCampaignError = { phase: "create" | "activate"; error: Error };
+type CreateCampaignError = { phase: "create" | "activate"; error: Error };
 
 // useCreateCampaign runs the create-then-activate flow: CreateCampaign mints the
 // campaign (auto-Butler, ADR-0009), then SetActiveCampaign selects it so its

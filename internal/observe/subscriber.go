@@ -71,8 +71,7 @@ type turnState struct {
 	// a zero-chunk or start-errored synthesis (TTSInvoked is published per dispatch
 	// attempt, FirstAudio only on a chunk) that will never get a FirstAudio — so the
 	// correct match for any FirstAudio is always the latest invoke, and FIFO-front
-	// would mispair it against the stale unmatched one. (Revisit if Ensemble Turns
-	// make dispatch concurrent — tts.go anticipates that.)
+	// would mispair it against the stale unmatched one.
 	pendingTTS time.Time
 
 	lastSeen time.Time
@@ -130,7 +129,6 @@ func (s *StageSubscriber) Subscribe(bus *voiceevent.Bus) (unsubscribe func()) {
 	unsubs := []func(){
 		voiceevent.On(bus, s.onSTTFinal),
 		voiceevent.On(bus, s.onAddressRouted),
-		voiceevent.On(bus, s.onEnsembleRouted),
 		voiceevent.On(bus, s.onTTSInvoked),
 		voiceevent.On(bus, s.onFirstAudio),
 		voiceevent.On(bus, s.onFirstOpus),
@@ -178,37 +176,6 @@ func (s *StageSubscriber) onAddressRouted(e voiceevent.AddressRouted) {
 
 	// address_detect = route decision − transcript. Only when we have the
 	// STTFinal anchor (sttFinalAt set); otherwise we can't compute the span.
-	if !t.sttFinalAt.IsZero() {
-		s.rec.AddressDetect(e.At.Sub(t.sttFinalAt))
-	}
-}
-
-// onEnsembleRouted stage-marks an Ensemble Turn's routing decision exactly like
-// onAddressRouted (#301): the ensemble opens ONE turn under its TurnID, so the
-// role (Targets[0], the top-scored/eventual coalesce anchor) and the address_detect
-// span are recorded the same way a single-target route is. The elected Lead speaks
-// under this same TurnID, so its FirstOpus/latency pair against this mark.
-func (s *StageSubscriber) onEnsembleRouted(e voiceevent.EnsembleRouted) {
-	if e.TurnID == "" || len(e.Targets) == 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t := s.turns[e.TurnID]
-	if t == nil {
-		t = &turnState{}
-		s.turns[e.TurnID] = t
-	}
-	// TODO(#301): the role label uses Targets[0].AgentRole (the top-scored coalesce
-	// anchor), which may not match the eventually-elected Lead's AgentRole. It is a
-	// metrics label only (ADR-0032 §2.1 — never a per-turn identity), and an
-	// ensemble's candidates share the character role in practice, so the approximation
-	// is harmless; revisit if a mixed-role ensemble (Butler + Character) ever ships.
-	t.role = normalizeRole(e.Targets[0].AgentRole)
-	t.roleKnown = true
-	t.routedAt = e.At
-	t.lastSeen = s.now()
-
 	if !t.sttFinalAt.IsZero() {
 		s.rec.AddressDetect(e.At.Sub(t.sttFinalAt))
 	}
@@ -320,9 +287,8 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 // phantom abandoned turn for audio that actually played (the #391 class). The
 // guard is NARROW to those cut reasons on purpose: every OTHER
 // spine-less terminal is a legit sole signal that must still be counted by
-// fabricating the turn — a text-modality Cross-talk Reaction sub-turn's
-// TurnEnded{text_delivered} (#389) and the /say pre-dispatch refusals
-// (directspeech.go) never open a turn yet their outcome is real.
+// fabricating the turn — the /say pre-dispatch refusals (directspeech.go) never
+// open a turn yet their outcome is real.
 func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	// A natural completion carries no outcome of its own: success is keyed on
 	// first audio (recorded whenever it lands — on pipelined sentences it can

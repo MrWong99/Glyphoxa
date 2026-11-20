@@ -1,7 +1,9 @@
 import { useEffect, useRef, type RefObject } from "react";
 
-// radixModalOpen reports whether a Radix modal layer (AlertDialog / Dialog) is
-// currently mounted. Those layers render through a Portal onto document.body —
+// modalLayerOpen reports whether a real MODAL layer is currently mounted: a
+// Radix AlertDialog (role=alertdialog), a Radix Dialog (role=dialog carrying
+// Radix's data-state="open") or a hand-rolled modal that declares itself with
+// aria-modal="true" (the command palette). Those layers render through a Portal onto document.body —
 // OUTSIDE any popover's anchor ref — and own their own dismissal (Escape closes
 // the dialog; a mis-click on the overlay does not destroy data). A popover that
 // spawns such a dialog (e.g. the campaign switcher's delete ConfirmDialog) must
@@ -9,8 +11,16 @@ import { useEffect, useRef, type RefObject } from "react";
 // otherwise the first mousedown inside the portalled dialog reads as "outside the
 // anchor", the popover closes, and the dialog unmounts mid-interaction before its
 // action can fire (#269).
-function radixModalOpen(): boolean {
-  return document.querySelector('[role="alertdialog"], [role="dialog"]') !== null;
+//
+// It must NOT match a bare role="dialog": inline, non-modal panels once carried
+// that role (the map form, the graph's review card and relation picker), and
+// while one of them was merely on screen every popover in the app — the
+// campaign switcher, each combobox — ignored outside clicks and Escape.
+const MODAL_LAYER =
+  '[role="alertdialog"], [role="dialog"][aria-modal="true"], [role="dialog"][data-state="open"]';
+
+function modalLayerOpen(): boolean {
+  return document.querySelector(MODAL_LAYER) !== null;
 }
 
 // pointerInPortalledMenu reports whether a mousedown landed inside an open
@@ -19,7 +29,7 @@ function radixModalOpen(): boolean {
 // PANEL that hosts the menu's own trigger. Without this, the panel's dismiss reads
 // the mousedown on a menu item as "outside", closes the panel, and unmounts the
 // portalled menu before mouseup — so the item's click never fires. Same trap
-// radixModalOpen guards for dialogs (#269), generalized to menus: any popover
+// modalLayerOpen guards for dialogs (#269), generalized to menus: any popover
 // defers to an open menu, whichever anchor it belongs to.
 function pointerInPortalledMenu(target: Node): boolean {
   return target instanceof Element && target.closest('[role="menu"]') !== null;
@@ -30,7 +40,7 @@ function pointerInPortalledMenu(target: Node): boolean {
 // calls onClose. Extracted from the Combobox popover (#88 slice 2) when the
 // CampaignSwitcher grew an identical copy (#267), so dismissal fixes (touch /
 // pointer events, stacked popovers, focus handling) land in one place. While a
-// Radix modal layer is open it defers to that layer (see radixModalOpen).
+// modal layer is open it defers to that layer (see modalLayerOpen).
 export function usePopoverDismiss(
   ref: RefObject<HTMLElement | null>,
   open: boolean,
@@ -55,7 +65,7 @@ export function usePopoverDismiss(
     const onDown = (e: MouseEvent) => {
       // A Radix dialog spawned from inside this popover portals outside the anchor;
       // let it own dismissal rather than closing the popover out from under it.
-      if (radixModalOpen()) return;
+      if (modalLayerOpen()) return;
       const target = e.target as Node;
       if (extraRef?.current?.contains(target)) return; // inside the portalled surface
       if (pointerInPortalledMenu(target)) return; // an open menu owns its own dismissal
@@ -63,7 +73,7 @@ export function usePopoverDismiss(
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (radixModalOpen()) return; // the dialog's own Escape handler closes it
+        if (modalLayerOpen()) return; // the dialog's own Escape handler closes it
         onCloseRef.current();
       }
     };

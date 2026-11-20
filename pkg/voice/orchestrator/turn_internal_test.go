@@ -55,8 +55,8 @@ func TestTurnRun_Delivered_FiresHookOnce(t *testing.T) {
 	if len(synth.calls) != 1 || synth.calls[0] != "hello" {
 		t.Fatalf("synth calls = %v, want [hello]", synth.calls)
 	}
-	if run.ttsFailed || !run.attempted {
-		t.Fatalf("state after delivery: ttsFailed=%v attempted=%v, want false/true", run.ttsFailed, run.attempted)
+	if run.ttsFailed {
+		t.Fatal("a clean delivery must not mark the turn ttsFailed")
 	}
 	if got := run.finish(nil); got != "" {
 		t.Fatalf("finish(nil) after clean delivery = %q, want \"\"", got)
@@ -109,8 +109,8 @@ func TestTurnRun_CutBeforeDispatch_NeverSynthesizes(t *testing.T) {
 	if len(synth.calls) != 0 {
 		t.Fatal("a cut turn must never reach the synthesizer")
 	}
-	if fired || run.attempted || run.ttsFailed {
-		t.Fatalf("cut-before state: fired=%v attempted=%v ttsFailed=%v, want all false", fired, run.attempted, run.ttsFailed)
+	if fired || run.ttsFailed {
+		t.Fatalf("cut-before state: fired=%v ttsFailed=%v, want all false", fired, run.ttsFailed)
 	}
 	if got := run.finish(nil); got != "" {
 		t.Fatalf("finish on a cut turn = %q, want \"\" (the cutter publishes its own terminal)", got)
@@ -193,64 +193,6 @@ func TestTurnRun_Finish_ProducerErrorMapping(t *testing.T) {
 			t.Fatalf("finish on a cut turn = %q, want \"\" (the cutter owns the terminal)", got)
 		}
 	})
-}
-
-func TestTurnRun_DispatchHeld_LookaheadFirstSentence(t *testing.T) {
-	synth := &fakeSynth{}
-	run := newTurnRun(context.Background(), synth.dispatch, nil)
-
-	var held string
-	abort := errors.New("lookahead aborted")
-	err := run.dispatchHeld(Reply{Sentence: "first"}, func(s string) { held = s }, abort)
-	if err != nil {
-		t.Fatalf("dispatchHeld = %v, want nil (delivered)", err)
-	}
-	if held != "first" {
-		t.Fatalf("onHeld got %q, want the sentence BEFORE the blocking synth", held)
-	}
-	if len(synth.lookahead) != 1 || !synth.lookahead[0] {
-		t.Fatal("the held first sentence must be synthesized under a playback-lookahead-marked ctx")
-	}
-}
-
-func TestTurnRun_DispatchHeld_StartErrorAbortsWithSentinel(t *testing.T) {
-	// A start-error on the HELD first sentence must return the caller's abort
-	// error (NOT ErrNotDelivered): skip-and-continue would let sentence 2
-	// leapfrog the still-playing Lead (#375).
-	synth := &fakeSynth{err: errors.New("synth down")}
-	ec := &errCollector{}
-	run := newTurnRun(context.Background(), synth.dispatch, ec.fn)
-
-	abort := errors.New("lookahead aborted")
-	err := run.dispatchHeld(Reply{Sentence: "first"}, func(string) {}, abort)
-	if !errors.Is(err, abort) {
-		t.Fatalf("dispatchHeld on start-error = %v, want the abort error", err)
-	}
-	if errors.Is(err, ErrNotDelivered) {
-		t.Fatal("the abort must not be the skip-and-continue sentinel")
-	}
-	if !run.ttsFailed {
-		t.Fatal("a held-first start-error still counts toward the tts_error verdict (#391)")
-	}
-}
-
-func TestTurnRun_DispatchHeld_CutBeforeHoldsNothing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	synth := &fakeSynth{}
-	run := newTurnRun(ctx, synth.dispatch, nil)
-
-	heldCalled := false
-	err := run.dispatchHeld(Reply{Sentence: "first"}, func(string) { heldCalled = true }, errors.New("abort"))
-	if OutcomeOf(err) != SentenceCut {
-		t.Fatalf("dispatchHeld on dead ctx = %v, want a cut", err)
-	}
-	if heldCalled {
-		t.Fatal("a cut turn must not hand the coordinator a held sentence")
-	}
-	if len(synth.calls) != 0 {
-		t.Fatal("a cut turn must never reach the synthesizer")
-	}
 }
 
 func TestOutcomeOf_ThreeClassContract(t *testing.T) {
@@ -338,33 +280,4 @@ func TestTurnRun_OnResolvedFiresOnceOnEveryExit(t *testing.T) {
 			t.Fatalf("dispatch outcome = %v, want SentenceCut", OutcomeOf(err))
 		}
 	})
-}
-
-// TestTurnRun_DispatchHeld_FiresOnResolvedOnPreCut closes the one exit that
-// bypassed the resolution hook: dispatchHeld's own pre-dispatch ctx check returns
-// before run is entered. "Fires exactly once on every exit" must hold there too —
-// a producer that waits on OnResolved (the #626 history-commit barrier) would
-// otherwise wait forever on a turn cut before its held sentence was primed.
-func TestTurnRun_DispatchHeld_FiresOnResolvedOnPreCut(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	synth := &fakeSynth{}
-	run := newTurnRun(ctx, synth.dispatch, nil)
-
-	var got []SentenceOutcome
-	held := 0
-	err := run.dispatchHeld(Reply{
-		Sentence:   "hello",
-		OnResolved: func(o SentenceOutcome) { got = append(got, o) },
-	}, func(string) { held++ }, errors.New("abort"))
-
-	if len(got) != 1 || got[0] != SentenceCut {
-		t.Fatalf("OnResolved = %v, want exactly one SentenceCut", got)
-	}
-	if OutcomeOf(err) != SentenceCut {
-		t.Fatalf("dispatchHeld outcome = %v, want SentenceCut", OutcomeOf(err))
-	}
-	if held != 0 || len(synth.calls) != 0 {
-		t.Fatalf("a pre-cut held dispatch must reach neither the coordinator nor the synthesizer (held=%d calls=%v)", held, synth.calls)
-	}
 }

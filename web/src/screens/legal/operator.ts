@@ -16,9 +16,9 @@
 // lawyer (an accepted beta risk, decided 2026-07-22 — see #518).
 
 /** The marker every unfilled field carries. */
-export const PLACEHOLDER_PREFIX = "[BITTE AUSFÜLLEN";
+const PLACEHOLDER_PREFIX = "[BITTE AUSFÜLLEN";
 
-export type OperatorIdentity = {
+type OperatorIdentity = {
   /** Legal name of the natural or legal person operating this deployment. */
   legalName: string;
   /** Street and number. */

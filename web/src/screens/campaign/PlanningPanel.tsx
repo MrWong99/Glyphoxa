@@ -172,6 +172,13 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
     wasStreaming.current = streaming;
   }, [streaming]);
 
+  // The in-flight exchange's cancel handle. Leaving the panel (another
+  // sub-view, another campaign, another screen) aborts the stream: without it
+  // the request ran on with no reader — a paid LLM reply streamed into a
+  // component that no longer exists.
+  const exchangeAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => exchangeAbort.current?.abort(), []);
+
   const send = async () => {
     const text = draft.trim();
     if (text === "" || streaming || createThread.isPending) return;
@@ -193,9 +200,14 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
     setStream({ threadId, userMessage: text, reply: "", tools: [], errorKey: null });
 
     const client = createClient(ChatService, transport);
+    const abort = new AbortController();
+    exchangeAbort.current = abort;
     let done = false;
     try {
-      for await (const res of client.planningExchange({ campaignId, threadId, message: text })) {
+      for await (const res of client.planningExchange(
+        { campaignId, threadId, message: text },
+        { signal: abort.signal },
+      )) {
         const frame = res.frame;
         if (frame.case === "text") {
           const delta = frame.value.delta;
@@ -218,6 +230,8 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
         setStream((s) => (s ? { ...s, errorKey: "chat.errGeneric" } : s));
       }
     } catch (err) {
+      // Our own cancel (the panel went away) is not a failure to report.
+      if (abort.signal.aborted) return;
       const code = ConnectError.from(err).code;
       const errorKey: MessageKey =
         code === Code.ResourceExhausted

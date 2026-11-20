@@ -44,6 +44,7 @@ type AuthServer struct {
 	tenants  TenantNamer
 	renamer  TenantRenamer
 	mode     AdmissionMode
+	secure   bool // clear cookies with the Secure attribute ([EdgeConfig.SecureCookies])
 	log      *slog.Logger
 }
 
@@ -53,11 +54,13 @@ var _ managementv1connect.AuthServiceHandler = (*AuthServer)(nil)
 // (the GetCurrentUser tenant name, ADR-0055), the tenant renamer (the
 // onboarding step), and the deployment's effective Admission Mode served to the
 // login screen. A zero mode serves allowlist — the fail-safe default posture.
-func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, renamer TenantRenamer, mode AdmissionMode, log *slog.Logger) *AuthServer {
+// edge must be the same [EdgeConfig] the OAuth flow was built with: Logout
+// clears the cookies with the Secure attribute they were issued with.
+func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, renamer TenantRenamer, mode AdmissionMode, edge EdgeConfig, log *slog.Logger) *AuthServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, log: log}
+	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, secure: edge.SecureCookies, log: log}
 }
 
 // GetCurrentUser returns the signed-in operator's identity — display fields,
@@ -113,7 +116,7 @@ func (s *AuthServer) Logout(
 		}
 	}
 	resp := connect.NewResponse(&managementv1.LogoutResponse{})
-	secure := headerSecure(req.Header())
+	secure := s.secure
 	resp.Header().Add("Set-Cookie", clearCookie(SessionCookieName, true, secure).String())
 	resp.Header().Add("Set-Cookie", clearCookie(CSRFCookieName, false, secure).String())
 	return resp, nil

@@ -37,36 +37,6 @@ func TestBargeIn_AttributesCutAgent(t *testing.T) {
 	)
 }
 
-// TestBargeIn_AttributesRetargetedHolder pins that the attribution is read by
-// the yield ITSELF, not captured when the confirm window armed: an Ensemble Lead
-// election ([orchestrator.Floor.SetHolderAgent]) may retarget the holder under an
-// unchanged TurnID mid-window, and naming the pre-election Agent would revoke the
-// continuation of an Agent nobody interrupted.
-func TestBargeIn_AttributesRetargetedHolder(t *testing.T) {
-	h := voicetest.New(t)
-	floor := orchestrator.NewFloor()
-	parent := voiceevent.WithTurnID(context.Background(), "T1")
-	turnCtx, release, _ := floor.Take(parent, "npc-anchor")
-	defer release()
-
-	t.Cleanup(orchestrator.NewBargeIn(floor, 20*time.Millisecond).Bind(t.Context(), h.Bus))
-	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
-	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "player-1"}) // arms against npc-anchor
-
-	floor.SetHolderAgent("T1", "npc-lead") // the Lead election lands inside the window
-
-	select {
-	case <-turnCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("speech crossing the confirm window must cancel the turn")
-	}
-	// Same race as above: the publish trails the cancel.
-	voicetest.WaitEvent(t, h, 2*time.Second,
-		func(e voiceevent.BargeDetected) bool { return e.AgentID == "npc-lead" },
-		"barge.detected naming the Agent that actually held the floor at cut time",
-	)
-}
-
 // clearSpyMatcher is a [orchestrator.TargetMatcher] that also implements
 // [orchestrator.InterruptibleMatcher], recording which Agents were cleared.
 type clearSpyMatcher struct {

@@ -245,7 +245,7 @@ func assertEvents(t *testing.T, rec *fakePumpRecorder, want ...observe.Lookahead
 }
 
 // TestPlaybackPump_LookaheadReleasedCounted pins the #375 lane's gap-hiding as its
-// own series: moving a held Reaction sentence into the play queue counts a release.
+// own series: moving a held sentence into the play queue counts a release.
 func TestPlaybackPump_LookaheadReleasedCounted(t *testing.T) {
 	rec := &fakePumpRecorder{}
 	p := newFakePlayer()

@@ -41,7 +41,7 @@ export type Readiness = {
   lastSpokeAt?: Date;
 };
 
-export type RosterEntry = {
+type RosterEntry = {
   agent: Agent;
   /** The Agent's linked Node, when it has one. */
   node: GraphNode | null;
@@ -57,7 +57,7 @@ export type RosterEntry = {
   readiness?: Readiness;
 };
 
-export type RosterGroup = {
+type RosterGroup = {
   /** The faction or location name, or "" for the explicit unplaced group. */
   key: string;
   title: string;

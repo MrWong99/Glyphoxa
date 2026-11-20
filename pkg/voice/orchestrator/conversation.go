@@ -91,14 +91,9 @@ func (r ReplyStrategy) enabled() bool { return r.Whole != nil || r.Stream != nil
 //     soft cap is crossed, #130) and shared with [WithDirectSpeech] (a /say
 //     opens a turn too). [WithClipReplay] deliberately bypasses it — a replay
 //     spends no provider money.
-//   - Ensemble runs a multi-Agent route as a speculative fan-out + Lead race
-//     (ADR-0025, #301). An ensemble is ONE floor-holding unit, so the speaker
-//     exists only inside this group: ensemble-without-barge is unrepresentable.
-//     nil degrades an EnsembleRouted to the top-scored single route.
-//   - Lookahead is the pump's held pre-render lane: the Cross-talk Reaction's
-//     first sentence during the Lead's playback (#375), and — since #626 —
-//     every routed turn's NEXT sentence during its predecessor's, which is what
-//     collapses the inter-sentence gap to pacing overhead. It needs no Ensemble.
+//   - Lookahead is the pump's held pre-render lane (#626): every routed turn's
+//     NEXT sentence is synthesized during its predecessor's playback, which is
+//     what collapses the inter-sentence gap to pacing overhead.
 //
 // A barge group requires a reply strategy ([ReplyStrategy]): the floor and
 // everything above wire through the replier, so without one none of it can
@@ -125,24 +120,17 @@ type Barge struct {
 	// Gate is the live spend turn gate (#130, ADR-0046); nil = feature off (no
 	// caps configured — every new turn is allowed).
 	Gate TurnGate
-	// Ensemble is the Ensemble Turn speaker (#301); nil = feature off (an
-	// EnsembleRouted degrades to the top-scored single route). The production
-	// speaker is agent.Cast.
-	Ensemble EnsembleSpeaker
-	// Lookahead is the pump look-ahead seam (#375, #626); nil = feature off (no
-	// pre-synthesis: every inter-sentence gap is one cold TTS TTFB, and the
-	// Reaction pre-renders TEXT only — the #302 legacy path). With it, every
-	// routed turn pipelines its next sentence into the lane and a queued
-	// Cross-talk Reaction pre-renders its first. The production pump is
-	// [wire.PlaybackPump].
+	// Lookahead is the pump look-ahead seam (#626); nil = feature off (no
+	// pre-synthesis: every inter-sentence gap is one cold TTS TTFB). With it,
+	// every routed turn pipelines its next sentence into the lane. The
+	// production pump is [wire.PlaybackPump].
 	Lookahead LookaheadPump
 }
 
-// LookaheadPump is the pump pre-render seam the reply coordinators drive (#375,
-// #626, ADR-0025): a sentence is synthesized and HELD in the pump's look-ahead
-// lane while the previous one plays — a queued Reaction's first sentence during
-// the Lead's playback, or a routed turn's next sentence during its predecessor's
-// — keyed per held sentence, then either released to play for a near-zero gap, or
+// LookaheadPump is the pump pre-render seam the reply coordinator drives (#626):
+// a sentence is synthesized and HELD in the pump's look-ahead lane while the
+// previous one plays — a routed turn's next sentence during its predecessor's —
+// keyed per held sentence, then either released to play for a near-zero gap, or
 // discarded on a barge/yield (its pre-rendered-but-unplayed audio dropped, ADR-0012/
 // 0027). Both methods are non-blocking latch operations — they never wait for the
 // sentence to be primed — and a keyed discard for an unknown turn is a harmless
@@ -176,7 +164,7 @@ func WithReply(s ReplyStrategy) Option {
 // grouped on b: replies run on their own goroutine under a cancelable per-turn
 // floor, and a [BargeIn] reactor yields that floor when a participant speaks
 // while the Agent is talking — cancelling the turn's TTS and playback. See
-// [Barge] for the windows, the mute/gate/ensemble/lookahead wiring, and the
+// [Barge] for the windows, the mute/gate/lookahead wiring, and the
 // group's validation rules. It requires a reply strategy ([WithReply]); without
 // a replier there is no turn to interrupt.
 func WithBargeIn(b Barge) Option {
@@ -261,10 +249,10 @@ func WithErrorHandler(fn ErrorFunc) Option {
 //
 // It is the single validation point for the option interaction rules (#453):
 // an invalid combination — both reply modes, a reply strategy or direct speech
-// without a TTS stage, a barge group without a reply strategy, a look-ahead
-// pump without an ensemble speaker — fails here with a descriptive error,
-// never as a [Conversation.Register]-time panic. (Combinations the groups make
-// unrepresentable, like ensemble-without-barge, cannot reach it at all.)
+// without a TTS stage, a barge group without a reply strategy — fails here with
+// a descriptive error, never as a [Conversation.Register]-time panic.
+// (Combinations the groups make unrepresentable, like a mute view without a
+// floor, cannot reach it at all.)
 func NewConversation(bus *voiceevent.Bus, vad *VAD, stt *STT, ttsStage *TTS, opts ...Option) (*Conversation, error) {
 	if bus == nil {
 		panic("orchestrator.NewConversation: bus must not be nil")
@@ -300,9 +288,6 @@ func (c *Conversation) validate() error {
 		if !c.reply.enabled() {
 			return errors.New("orchestrator: WithBargeIn requires a reply strategy (WithReply); without a replier there is no turn to interrupt")
 		}
-		// Since #626 the look-ahead lane is NOT the Cross-talk Reaction's alone: every
-		// routed turn pre-synthesizes its next sentence into it, so a pump without an
-		// ensemble speaker is the ordinary production wiring rather than a dead option.
 	}
 	return nil
 }
@@ -331,14 +316,13 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		}
 		if c.barge != nil {
 			// The barge group ([Barge]) wires as one unit: the live mute view (#211,
-			// route gating), the turn gate (#130, spend soft cap), the Ensemble Turn
-			// speaker (#301) and its look-ahead pump (#375) all land on the replier,
+			// route gating), the turn gate (#130, spend soft cap) and the look-ahead
+			// pump (#626) all land on the replier,
 			// and the floor is built from the group's windows. Bind BargeIn before
 			// the replier so a speech_start is evaluated for a yield ahead of any new
 			// turn it might otherwise route.
 			replier.mutes = c.barge.Mutes
 			replier.gate = c.barge.Gate
-			replier.ensemble = c.barge.Ensemble
 			replier.lookahead = c.barge.Lookahead
 			if c.barge.Coalesce > 0 {
 				c.floor = NewFloorWithCoalesce(c.barge.Coalesce)

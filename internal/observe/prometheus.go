@@ -496,7 +496,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Buckets: gapBuckets,
 	})
 	r.playbackLookahead = counterVec("playback_lookahead_total",
-		"Look-ahead lane events (#375, ADR-0025): a held Reaction sentence released into the play queue, a release latched before its prime, or a held-but-unplayed sentence discarded.",
+		"Look-ahead lane events (#626): a held pre-synthesized sentence released into the play queue, a release latched before its prime, or a held-but-unplayed sentence discarded.",
 		"event")
 	reg.MustRegister(r.intersentenceGap, r.playbackLookahead)
 
@@ -789,7 +789,7 @@ func (r *PrometheusRecorder) IntersentenceGap(d time.Duration) {
 	r.intersentenceGap.Observe(d.Seconds())
 }
 
-// PlaybackLookahead counts one look-ahead lane event (#375, ADR-0025), so the
+// PlaybackLookahead counts one look-ahead lane event (#626), so the
 // lane's gap-hiding is readable next to the gap histogram it suppresses.
 func (r *PrometheusRecorder) PlaybackLookahead(ev LookaheadEvent) {
 	r.playbackLookahead.WithLabelValues(string(ev)).Inc()

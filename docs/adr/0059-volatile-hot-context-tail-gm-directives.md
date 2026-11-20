@@ -109,6 +109,8 @@ The Party Marker (#540, ADR-0060) adds a **third** volatile-tail block: one shor
 - **Absent by default.** No marker, no live session, a `gm_private` Map, or a marker sitting on a hidden Pin all yield the empty string and the block is dropped — leaving the prompt byte-identical to the pre-marker path, the same guarantee every other tail block keeps.
 - **Slot order** is facts → location → memory → cross-talk → directive. Location sits with the world content it belongs to; the directive keeps the last, strongest recency slot.
 
+**Note (2026-11-20):** the Cross-talk instruction slot and the speculative Ensemble consults (`Replier.Draft`/`React`, which peeked at a directive without consuming it) were removed with the unshipped Ensemble Turn implementation (ADR-0025). The tail is now facts → location → memory → directive, and every consult belongs to a committed turn; `DirectiveRecaller.Directive` keeps its `consume` parameter, with no caller passing `false`.
+
 Every *other* spatial question goes through the read-only `locate_entity` / `whats_nearby` Tools (#539), not the prompt. The block budget is shared, and anything added to it silently evicts world knowledge.
 
 ## Amendment: the history window is trimmed in blocks; the spoken-output rule joins the stable prefix (2026-11-20)

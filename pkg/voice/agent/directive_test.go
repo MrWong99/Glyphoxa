@@ -110,51 +110,6 @@ func TestDirective_StreamTurnConsumes(t *testing.T) {
 	}
 }
 
-// TestDirective_DraftAndReactPeek pins the speculative Ensemble paths (ADR-0059):
-// Draft and React include the directive in their prompts so a directed Agent's
-// candidate honors the steering — but they PEEK (consume=false), so a losing
-// candidate or a declined reaction never burns a turn of the budget.
-func TestDirective_DraftAndReactPeek(t *testing.T) {
-	prov := &fakeProvider{reply: "Hmm."}
-	dir := &fakeDirective{text: "Bart lies about the key."}
-	r := agent.NewReplier(agent.Config{
-		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
-		Provider:    prov,
-		Synthesizer: stubSynth{},
-		Directive:   dir,
-	})
-
-	if _, err := r.Draft(t.Context(), "", "Where is the key?"); err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if tail := volatileTail(t, prov.lastRequest(t).Messages); !strings.Contains(tail, "Bart lies about the key.") {
-		t.Errorf("Draft volatile tail missing the directive: %q", tail)
-	}
-
-	if _, err := r.React(t.Context(), "", "Bart, Mira?", "Mira", "I saw the key."); err != nil {
-		t.Fatalf("React: %v", err)
-	}
-	tail := volatileTail(t, prov.lastRequest(t).Messages)
-	if !strings.Contains(tail, "Bart lies about the key.") {
-		t.Errorf("React volatile tail missing the directive: %q", tail)
-	}
-	// The directive keeps the LAST slot of the tail — after the cross-talk
-	// instruction — so the GM steering carries the strongest recency signal.
-	if iCross, iDir := strings.Index(tail, "Another character has just spoken"),
-		strings.Index(tail, "## Private direction from your GM"); iCross < 0 || iDir <= iCross {
-		t.Errorf("tail order wrong (want cross-talk < directive): cross=%d directive=%d\n%q", iCross, iDir, tail)
-	}
-
-	for i, c := range dir.consumes {
-		if c {
-			t.Errorf("consult %d consumed on a speculative path, want peek-only (consume=false): %v", i, dir.consumes)
-		}
-	}
-	if len(dir.consumes) != 2 {
-		t.Errorf("consult count = %d, want 2 (Draft + React)", len(dir.consumes))
-	}
-}
-
 // TestVolatileTail_StablePrefixAcrossTurns is the ADR-0059 flagship: with facts,
 // memory, AND a directive changing EVERY turn, the stable system prompt and the
 // already-committed history stay byte-identical across turns — the provider's

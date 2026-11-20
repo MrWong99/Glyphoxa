@@ -55,7 +55,11 @@ type Store interface {
 	// existing key is an upsert. size<0 or size>MaxSize, or an invalid key, is
 	// an error before any read.
 	Put(ctx context.Context, key, contentType string, r io.Reader, size int64) error
-	// Get returns the blob's bytes and Meta, or ErrNotFound.
+	// Get returns the blob's bytes and Meta, or ErrNotFound. A backend that
+	// already holds the payload in memory SHOULD return a body that is also an
+	// io.ReadSeeker (see [Reader]): [Serve] then streams it — Range requests
+	// included — without buffering a second copy. A non-seekable body is still
+	// correct; Serve buffers it once.
 	Get(ctx context.Context, key string) (io.ReadCloser, Meta, error)
 	// Delete removes the blob at key. Deleting an absent key returns nil
 	// (idempotent).

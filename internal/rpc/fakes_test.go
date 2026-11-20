@@ -211,6 +211,26 @@ type fakeArchiveStore struct {
 	deleteCampaignErr error
 	deleteJobKind     string
 	deleteJobPayload  []byte
+
+	// notOwned marks campaign ids the ownership check must refuse (a foreign
+	// Tenant's campaign); ownershipChecks records every id checked, in order.
+	notOwned        map[uuid.UUID]bool
+	ownershipChecks []uuid.UUID
+}
+
+// GetCampaignInTenant is the archive module's ownership check. An id seeded in
+// the embedded store's campaignsByID keeps that store's real tenant scoping; an
+// unseeded id is treated as the caller's own campaign unless listed in
+// notOwned — so the lifecycle tests need not seed a row they never read.
+func (f *fakeArchiveStore) GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error) {
+	f.ownershipChecks = append(f.ownershipChecks, id)
+	if f.notOwned[id] {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	if _, seeded := f.campaignsByID[id]; seeded {
+		return f.fakeManagementStore.GetCampaignInTenant(ctx, tenantID, id)
+	}
+	return storage.Campaign{ID: id, TenantID: tenantID}, nil
 }
 
 func newFakeArchiveStore() *fakeArchiveStore {

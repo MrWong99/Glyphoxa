@@ -179,7 +179,7 @@ describe("KnowledgeGraph", () => {
     fireEvent.mouseDown(node("Bart (NPC)"));
     fireEvent.mouseUp(node("Smugglers (Faction)"));
 
-    const picker = await screen.findByRole("dialog", { name: "Create connection" });
+    const picker = await screen.findByRole("group", { name: "Create connection" });
     expect(picker).toHaveTextContent("Bart");
     expect(picker).toHaveTextContent("Smugglers");
 
@@ -196,7 +196,7 @@ describe("KnowledgeGraph", () => {
     renderGraph();
     fireEvent.mouseDown(node("Bart (NPC)"));
     fireEvent.mouseUp(node("Bart (NPC)"));
-    expect(screen.queryByRole("dialog", { name: "Create connection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Create connection" })).not.toBeInTheDocument();
   });
 
   it("shows an empty state when every type is filtered out", () => {

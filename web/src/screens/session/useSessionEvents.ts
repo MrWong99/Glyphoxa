@@ -48,7 +48,7 @@ export interface Transcript {
 const EMPTY: Transcript = { lines: [], status: "idle", typing: { active: false, label: "" } };
 
 // transcriptKey is the cache key for one session's live transcript.
-export function transcriptKey(id: string) {
+function transcriptKey(id: string) {
   return ["sessionTranscript", id] as const;
 }
 
@@ -68,7 +68,18 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 // snapshot fetch failed with nothing cached, so the screen — a picked past session
 // AND the current/live one — can surface an error instead of masquerading as the
 // empty "start a session" / "Listening…" state (#270).
-export type SessionTranscript = Transcript & { snapshotFailed: boolean };
+type SessionTranscript = Transcript & { snapshotFailed: boolean };
+
+// Patch is one stream frame's edit to the cached Transcript.
+type Patch = (prev: Transcript | undefined) => Transcript;
+
+// The live tail's re-creation backoff once the browser has given up on the
+// EventSource: 1s, 2s, 4s … capped at 30s, reset by a successful open.
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+// EventSource.CLOSED, spelled out: the constant is read off the instance's
+// readyState, and test doubles do not all carry the static.
+const SOURCE_CLOSED = 2;
 
 export function useSessionEvents(
   sessionId: string | undefined,
@@ -84,6 +95,9 @@ export function useSessionEvents(
   // reopen-after-browse resync (#270) keys off it. A ref so it survives re-renders
   // and effect re-runs without itself triggering one.
   const streamedBefore = useRef<Set<string>>(new Set());
+  // One recording per snapshot read currently in flight (see the queryFn): the
+  // stream handlers append every cache patch they apply to each of them.
+  const inflight = useRef<Set<Patch[]>>(new Set());
   // Fetch the snapshot for ANY session that exists — live OR ended. A reload of
   // an ended session replays its persisted history from the DB-backed snapshot
   // (#74); the live stream below only opens while the session is active.
@@ -92,7 +106,7 @@ export function useSessionEvents(
   // Snapshot seed: the initial state the live stream then tails (live), or the
   // persisted history (ended). staleTime is Infinity because the EventSource —
   // not refetching — keeps a live session current, and an ended one is immutable.
-  const { data, isSuccess, isError } = useQuery<Transcript>({
+  const { data, isError } = useQuery<Transcript>({
     queryKey: transcriptKey(sessionId ?? ""),
     enabled: haveSession,
     staleTime: Infinity,
@@ -106,16 +120,28 @@ export function useSessionEvents(
     // error. A reopen resync or manual re-pick re-fetches either way.
     retry: viewingPast ? false : 2,
     queryFn: async () => {
-      const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
-      if (!res.ok) throw new Error(`session snapshot failed: ${res.status}`);
-      // Normalize lines defensively: a zero-line snapshot must never surface as
-      // null or the screen's .length reads crash (#248) — the server contract is
-      // "lines":[], but the screen should survive an older/other server too.
-      const t = (await res.json()) as Transcript;
-      return { ...t, lines: t.lines ?? [] };
+      // Every stream frame applied while this read is in flight is recorded
+      // and replayed over the result: the snapshot was captured server-side
+      // BEFORE those frames, and react-query replaces the cache entry with
+      // whatever this returns — so without the replay a resync silently drops
+      // the newest lines (and rolls a coalescing reply back to a shorter text).
+      const during: Patch[] = [];
+      inflight.current.add(during);
+      try {
+        const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
+        if (!res.ok) throw new Error(`session snapshot failed: ${res.status}`);
+        // Normalize lines defensively: a zero-line snapshot must never surface as
+        // null or the screen's .length reads crash (#248) — the server contract is
+        // "lines":[], but the screen should survive an older/other server too.
+        const t = (await res.json()) as Transcript;
+        return during.reduce<Transcript>((acc, patch) => patch(acc), { ...t, lines: t.lines ?? [] });
+      } finally {
+        inflight.current.delete(during);
+      }
     },
   });
 
+  const hasSnapshot = data !== undefined;
   useEffect(() => {
     // The live tail is only meaningful while the session is active; an ended
     // session has no stream, just the persisted snapshot above.
@@ -124,7 +150,10 @@ export function useSessionEvents(
     // only once the snapshot has landed makes that ordering impossible; the
     // first-connect ring replay (idempotent upsert) re-covers the small window
     // between the snapshot capture and the stream opening.
-    if (!active || !sessionId || !isSuccess) return;
+    // The gate is "a snapshot has landed", not the query's success status: a
+    // FAILED resync refetch flips the status to error while the lines stay
+    // cached, and tearing the tail down on that would freeze a live transcript.
+    if (!active || !sessionId || !hasSnapshot) return;
     const key = transcriptKey(sessionId);
 
     // Reopen-after-browse resync (#270): browsing a past session closes this
@@ -138,51 +167,88 @@ export function useSessionEvents(
     }
     streamedBefore.current.add(sessionId);
 
-    const es = new EventSource(`/api/v1/sessions/${sessionId}/events`);
+    // Every transcript frame goes through apply: it patches the cache AND is
+    // recorded for any snapshot read in flight, which replays it over its
+    // (older) result instead of overwriting it.
+    const apply = (patch: Patch) => {
+      queryClient.setQueryData<Transcript>(key, patch);
+      for (const recording of inflight.current) recording.push(patch);
+    };
 
+    let es: EventSource | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = RECONNECT_BASE_MS;
+    let disposed = false;
     // Re-sync the authoritative snapshot on a RECONNECT (any "open" after the
     // first, FIX 3): the Last-Event-ID ring replay covers bounded lag, this
     // covers an unbounded gap. upsert-by-id makes the refetch + replay overlap
-    // idempotent.
+    // idempotent. The flag spans re-created sources too — a replacement
+    // EventSource starts with no Last-Event-ID at all.
     let everConnected = false;
-    es.addEventListener("open", () => {
-      if (everConnected) void queryClient.invalidateQueries({ queryKey: key });
-      everConnected = true;
-    });
 
-    es.addEventListener("line", (e) => {
-      const line = JSON.parse((e as MessageEvent).data) as TranscriptLine;
-      queryClient.setQueryData<Transcript>(key, (prev) => upsertLine(prev, line));
-    });
-    es.addEventListener("status", (e) => {
-      const s = JSON.parse((e as MessageEvent).data) as { status: "live" | "idle"; typing: TypingState };
-      queryClient.setQueryData<Transcript>(key, (prev) => ({ ...(prev ?? EMPTY), status: s.status, typing: s.typing }));
-    });
-    es.addEventListener("mute", (e) => {
-      const m = JSON.parse((e as MessageEvent).data) as { agent_id: string; muted: boolean };
-      patchOne(m.agent_id, m.muted);
-    });
-    es.addEventListener("spendcap", (e) => {
-      // The session's estimated spend crossed a cap (#130): flip the spend-cap
-      // state on the shared getSession cache so the Session screen shows the
-      // spend-cap-reached badge immediately; the interval refetch fills in the
-      // estimated spend the frame does not carry.
-      const s = JSON.parse((e as MessageEvent).data) as { level: string };
-      patchSpendCap(s.level);
-    });
-    es.addEventListener("connection", (e) => {
-      // The gateway connection state moved (#123): reflect connecting → connected
-      // live, or failed with its readable reason — no page reload.
-      const c = JSON.parse((e as MessageEvent).data) as { state: ConnectionState; detail?: string };
-      queryClient.setQueryData<Transcript>(key, (prev) => ({
-        ...(prev ?? EMPTY),
-        connection: c.state,
-        connectionDetail: c.detail ?? "",
-      }));
-    });
+    const connect = () => {
+      const source = new EventSource(`/api/v1/sessions/${sessionId}/events`);
+      es = source;
 
-    return () => es.close();
-  }, [active, sessionId, isSuccess, queryClient, patchOne, patchSpendCap]);
+      source.addEventListener("open", () => {
+        retryDelay = RECONNECT_BASE_MS;
+        if (everConnected) void queryClient.invalidateQueries({ queryKey: key });
+        everConnected = true;
+      });
+
+      // A dropped connection is the browser's to retry (readyState goes back to
+      // CONNECTING and it reconnects by itself). But a reconnect the server
+      // answers with anything other than a 200 event stream — a 502/503 while
+      // the web tier restarts, a 401 after the cookie lapsed — makes the browser
+      // give up for good: readyState CLOSED, no further events, and the
+      // transcript would sit frozen on a session that is still live. Re-create
+      // the source ourselves, backing off so a down server is not hammered.
+      source.addEventListener("error", () => {
+        if (disposed || source.readyState !== SOURCE_CLOSED) return;
+        source.close();
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, RECONNECT_MAX_MS);
+      });
+
+      source.addEventListener("line", (e) => {
+        const line = JSON.parse((e as MessageEvent).data) as TranscriptLine;
+        apply((prev) => upsertLine(prev, line));
+      });
+      source.addEventListener("status", (e) => {
+        const s = JSON.parse((e as MessageEvent).data) as { status: "live" | "idle"; typing: TypingState };
+        apply((prev) => ({ ...(prev ?? EMPTY), status: s.status, typing: s.typing }));
+      });
+      source.addEventListener("mute", (e) => {
+        const m = JSON.parse((e as MessageEvent).data) as { agent_id: string; muted: boolean };
+        patchOne(m.agent_id, m.muted);
+      });
+      source.addEventListener("spendcap", (e) => {
+        // The session's estimated spend crossed a cap (#130): flip the spend-cap
+        // state on the shared getSession cache so the Session screen shows the
+        // spend-cap-reached badge immediately; the interval refetch fills in the
+        // estimated spend the frame does not carry.
+        const s = JSON.parse((e as MessageEvent).data) as { level: string };
+        patchSpendCap(s.level);
+      });
+      source.addEventListener("connection", (e) => {
+        // The gateway connection state moved (#123): reflect connecting → connected
+        // live, or failed with its readable reason — no page reload.
+        const c = JSON.parse((e as MessageEvent).data) as { state: ConnectionState; detail?: string };
+        apply((prev) => ({
+          ...(prev ?? EMPTY),
+          connection: c.state,
+          connectionDetail: c.detail ?? "",
+        }));
+      });
+    };
+    connect();
+
+    return () => {
+      disposed = true;
+      clearTimeout(retryTimer);
+      es?.close();
+    };
+  }, [active, sessionId, hasSnapshot, queryClient, patchOne, patchSpendCap]);
 
   // snapshotFailed only counts for a session that exists — a null id is the
   // never-run state, not a failure — and only when the snapshot NEVER landed (no

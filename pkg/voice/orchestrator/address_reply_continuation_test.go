@@ -79,7 +79,7 @@ func TestAddressDetector_NoReplyAudioLeavesWindowAtTheAddress(t *testing.T) {
 	h, clk := replyRig(t)
 
 	h.Bus.Publish(voiceevent.STTFinal{Text: "Bart, erzähl mir die ganze Geschichte.", TurnID: "T-1", SpeakerID: "alice"})
-	// Audio of a turn the detector never routed (direct speech, a reaction) is
+	// Audio of a turn the detector never routed (direct speech, a replay) is
 	// not Bart answering Alice.
 	clk.advance(20 * time.Second)
 	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T-other"})
@@ -110,4 +110,116 @@ func TestAddressDetector_ContinuationIsSpeakerScoped(t *testing.T) {
 		},
 		"address.routed → Bart for the opener's own follow-up",
 	)
+}
+
+// TestAddressDetector_CompletedTurnAnchorsContinuationAtReplyEnd pins the exact
+// anchor: the follow-up window is measured from the END of the reply
+// (TurnEnded{completed}), not from the start of its last sentence. A long last
+// sentence used to eat into the window — here it plays for 20 s, and a follow-up
+// 25 s after the room went quiet is 45 s after the last FirstAudio.
+func TestAddressDetector_CompletedTurnAnchorsContinuationAtReplyEnd(t *testing.T) {
+	h, clk := replyRig(t)
+
+	h.Bus.Publish(voiceevent.STTFinal{Text: "Bart, erzähl mir die ganze Geschichte.", TurnID: "T-1", SpeakerID: "alice"})
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
+
+	clk.advance(2 * time.Second)
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T-1"}) // the one long sentence starts
+	clk.advance(20 * time.Second)
+	h.Bus.Publish(voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndCompleted})
+
+	clk.advance(25 * time.Second)
+	h.Bus.Publish(voiceevent.STTFinal{Text: "Und was geschah dann?", TurnID: "T-2", SpeakerID: "alice"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool {
+			return e.TurnID == "T-2" && e.Target.AgentID == bartTarget.AgentID
+		},
+		"address.routed → Bart for a follow-up 25 s after his reply ended",
+	)
+}
+
+// TestAddressDetector_OnlyCompletedRoutedTurnsMoveTheAnchor is the control for
+// the terminal signal: a turn that ended any other way (it failed, was muted,
+// or delivered as text) and the completion of a turn the detector never routed
+// (a /say, a Highlight replay) leave the anchor where it was, so the window
+// still expires from the last reply audio.
+func TestAddressDetector_OnlyCompletedRoutedTurnsMoveTheAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ended voiceevent.TurnEnded
+	}{
+		{"provider error", voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndProviderError}},
+		{"tts error", voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndTTSError}},
+		{"mute", voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndMute}},
+		{"text delivered", voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndTextDelivered}},
+		{"unrouted turn completed", voiceevent.TurnEnded{TurnID: "T-say", Reason: voiceevent.TurnEndCompleted}},
+		{"no turn id", voiceevent.TurnEnded{Reason: voiceevent.TurnEndCompleted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, clk := replyRig(t)
+
+			h.Bus.Publish(voiceevent.STTFinal{Text: "Bart, erzähl mir die ganze Geschichte.", TurnID: "T-1", SpeakerID: "alice"})
+			clk.advance(2 * time.Second)
+			h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T-1"})
+			clk.advance(20 * time.Second)
+			h.Bus.Publish(tc.ended)
+
+			clk.advance(25 * time.Second) // 45 s after the last reply audio
+			h.Bus.Publish(voiceevent.STTFinal{Text: "Und was geschah dann?", TurnID: "T-2", SpeakerID: "alice"})
+
+			voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1) // only the named one
+		})
+	}
+}
+
+// TestAddressDetector_UnbindStopsReplyFeedback pins the wiring and its teardown:
+// the audio and the completion of a routed turn each reach the matcher once, for
+// the Agent that turn was routed to, and neither does after the detector is
+// unbound.
+func TestAddressDetector_UnbindStopsReplyFeedback(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &extendSpyMatcher{route: voiceevent.AddressRouted{Target: bartTarget}}
+	unbind := orchestrator.NewAddressDetector(spy).Bind(t.Context(), h.Bus)
+
+	h.Bus.Publish(voiceevent.STTFinal{Text: "Bart?", TurnID: "T-1"})
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T-1"})
+	h.Bus.Publish(voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndCompleted})
+	if got := spy.extended(); len(got) != 2 || got[0] != bartTarget.AgentID || got[1] != bartTarget.AgentID {
+		t.Fatalf("ExtendContinuation calls = %v, want one for the audio and one for the completion, both for Bart", got)
+	}
+
+	unbind()
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T-1"})
+	h.Bus.Publish(voiceevent.TurnEnded{TurnID: "T-1", Reason: voiceevent.TurnEndCompleted})
+	if got := spy.extended(); len(got) != 2 {
+		t.Fatalf("ExtendContinuation calls after unbind = %v, want still 2", got)
+	}
+}
+
+// extendSpyMatcher is a [orchestrator.ReplyAwareMatcher] that routes every
+// utterance to one target and records the ExtendContinuation calls it receives.
+type extendSpyMatcher struct {
+	route voiceevent.AddressRouted
+
+	mu  sync.Mutex
+	ids []string
+}
+
+func (m *extendSpyMatcher) TargetMatch(text string) []voiceevent.AddressRouted {
+	r := m.route
+	r.Text = text
+	return []voiceevent.AddressRouted{r}
+}
+
+func (m *extendSpyMatcher) ExtendContinuation(agentID string) {
+	m.mu.Lock()
+	m.ids = append(m.ids, agentID)
+	m.mu.Unlock()
+}
+
+func (m *extendSpyMatcher) extended() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.ids...)
 }

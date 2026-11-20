@@ -80,11 +80,10 @@ export function NodeRelations({ node }: { node: PbNode }) {
   // so no DeleteEdge fires on a single click (#209).
   const [confirmEdge, setConfirmEdge] = useState<PbEdge | null>(null);
 
-  // The linked agent is held locally so the select reflects a fresh choice: the
-  // `node` prop is a snapshot of the editor's `editing` state that setNodeAgent
-  // does not update, so a controlled value={node.agentId} would keep showing the
-  // stale link. Seeded from the prop (NodeRelations remounts per edited node) and
-  // refreshed from the SetNodeAgentResponse on success.
+  // The linked agent is held locally so the select reflects a fresh choice at
+  // once, without waiting for the list refetch to hand down a new `node`.
+  // Seeded from the prop (NodeRelations remounts per edited node) and refreshed
+  // from the SetNodeAgentResponse on success.
   const [linkedAgentId, setLinkedAgentId] = useState(node.agentId);
 
   const createEdge = useMutation(CampaignService.method.createEdge, {
@@ -101,13 +100,17 @@ export function NodeRelations({ node }: { node: PbNode }) {
   // The relation's texture (#546). It shares the edge invalidation because the
   // graph colours relations by disposition and shows the note on hover.
   //
-  // savedEdgeID is what closes the inline editor: it must close on the SAVE
+  // savedEdge is what closes the inline editor: it must close on the SAVE
   // LANDING, not on the click. Closing on click hid every rejection — an
   // over-long note came back InvalidArgument and the GM saw a tidy closed row.
-  const [savedEdgeID, setSavedEdgeID] = useState<string | null>(null);
+  //
+  // It is a per-save TOKEN (id + sequence), not just the id: keyed on the id
+  // alone, the row's `saved` flag stayed true after the first save, so a second
+  // edit of the same relation saved fine and then never closed.
+  const [savedEdge, setSavedEdge] = useState<{ id: string; seq: number } | null>(null);
   const updateDetails = useMutation(CampaignService.method.updateEdgeDetails, {
     onSuccess: (_res, vars) => {
-      setSavedEdgeID(vars.id ?? null);
+      setSavedEdge((prev) => ({ id: vars.id ?? "", seq: (prev?.seq ?? 0) + 1 }));
       void invalidateEdges();
     },
   });
@@ -152,7 +155,12 @@ export function NodeRelations({ node }: { node: PbNode }) {
         <Button
           variant="ghost"
           iconStart={<Plus size={13} />}
-          onClick={() => setAdding((a) => !a)}
+          onClick={() => {
+            // A failed add belongs to the form that made it: reopening the
+            // form must not greet the GM with the previous attempt's error.
+            createEdge.reset();
+            setAdding((a) => !a);
+          }}
         >
           {t("knowledge.addConnection")}
         </Button>
@@ -199,7 +207,15 @@ export function NodeRelations({ node }: { node: PbNode }) {
           <OutgoingRow
             key={e.id}
             edge={e}
-            onDelete={() => setConfirmEdge(e)}
+            onDelete={() => {
+              // Asking about another relation retires the last delete's error.
+              deleteEdge.reset();
+              setConfirmEdge(e);
+            }}
+            onToggle={() => {
+              // Reopening a row's editor starts clean, not on its last failure.
+              if (updateDetails.variables?.id === e.id) updateDetails.reset();
+            }}
             onSaveDetails={(note, disposition) =>
               updateDetails.mutate({ id: e.id, note, disposition })
             }
@@ -209,7 +225,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
                 ? t("common.couldntSave", { message: errorMessage(updateDetails.error) })
                 : null
             }
-            saved={savedEdgeID === e.id}
+            savedSeq={savedEdge?.id === e.id ? savedEdge.seq : 0}
           />
         ))}
         {outgoing.length === 0 && (
@@ -264,17 +280,20 @@ export function NodeRelations({ node }: { node: PbNode }) {
 function OutgoingRow({
   edge,
   onDelete,
+  onToggle,
   onSaveDetails,
   saving,
   saveError,
-  saved,
+  savedSeq,
 }: {
   edge: PbEdge;
   onDelete: () => void;
+  onToggle: () => void;
   onSaveDetails: (note: string, disposition: number) => void;
   saving: boolean;
   saveError: string | null;
-  saved: boolean;
+  /** Steps on every save of THIS relation that lands; 0 = none yet. */
+  savedSeq: number;
 }) {
   const { t } = useI18n();
   const meta = typeMeta(edge.toNodeType);
@@ -283,8 +302,8 @@ function OutgoingRow({
   const [note, setNote] = useState(edge.note);
   const [disposition, setDisposition] = useState(String(edge.disposition));
   useEffect(() => {
-    if (saved) setOpen(false);
-  }, [saved]);
+    if (savedSeq > 0) setOpen(false);
+  }, [savedSeq]);
   return (
     <div className="gx-kg-edge">
       <ArrowRight size={13} className="gx-kg-edge__dir" aria-hidden />
@@ -301,7 +320,10 @@ function OutgoingRow({
         className="gx-kg-iconbtn"
         aria-label={t("knowledge.editConnectionAria", { relation: label, target: edge.toNodeName })}
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          onToggle();
+          setOpen((v) => !v);
+        }}
       >
         <Pencil size={13} />
       </button>

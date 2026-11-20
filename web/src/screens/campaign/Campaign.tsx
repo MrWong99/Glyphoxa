@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { useI18n, type MessageKey, type TFunc } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
 import { errorMessage, isNotFound } from "@/lib/connectError";
@@ -58,20 +59,55 @@ function isButler(a: Agent): boolean {
 // longer a deep-link param — it lives in the path, ADR-0063.)
 export type CampaignDeepLink = { node?: string };
 
-export function Campaign({
-  view = "cast",
-  onViewChange,
-  deepLink,
-  onDeepLinkHandled,
-  onOpenTranscriptLine,
-}: {
+type CampaignProps = {
   view?: CampaignView;
   onViewChange?: (view: CampaignView) => void;
   deepLink?: CampaignDeepLink;
   onDeepLinkHandled?: () => void;
   /** Route-owned jump to one Transcript Line on the Session screen (#545). */
   onOpenTranscriptLine?: (sessionID: string, lineID: string) => void;
-} = {}) {
+};
+
+// CodeNotFound is the settled zero-campaign answer, not a transient.
+const rosterRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
+
+// useCampaignEpoch counts Active Campaign CHANGES: it stays 0 while the first
+// campaign id arrives (undefined → id is a load, not a switch) and steps each
+// time a different id replaces a known one. It is the remount key for
+// everything that holds per-campaign UI state.
+function useCampaignEpoch(campaignID: string | undefined): number {
+  const [seen, setSeen] = useState<{ id?: string; epoch: number }>({ epoch: 0 });
+  if (campaignID && campaignID !== seen.id) {
+    // Adjusting state during render (not in an effect) so the stale subtree
+    // never paints against the new campaign.
+    setSeen({ id: campaignID, epoch: seen.id ? seen.epoch + 1 : seen.epoch });
+  }
+  return seen.epoch;
+}
+
+// Campaign is the screen's entry point: it only resolves WHICH campaign is
+// active and keys the real screen on it. The Active Campaign is ambient server
+// state (ADR-0039) — no request carries the campaign id — so a switch made in
+// the topbar changes what every write below lands in without unmounting
+// anything. Left mounted, an open entry editor, an unapplied AI draft, an open
+// map or a selected planning thread from the PREVIOUS campaign would survive
+// the switch, and "Add entries" would write that draft into the new campaign.
+// Remounting on the campaign id drops all of it at once.
+export function Campaign(props: CampaignProps = {}) {
+  // Same retry rule as the screen's own observer of this query: whichever
+  // observer mounts first decides how the fetch retries, and this one does.
+  const { data } = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
+  const epoch = useCampaignEpoch(data?.campaign?.id);
+  return <CampaignScreen key={epoch} {...props} />;
+}
+
+function CampaignScreen({
+  view = "cast",
+  onViewChange,
+  deepLink,
+  onDeepLinkHandled,
+  onOpenTranscriptLine,
+}: CampaignProps) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   // CodeNotFound is the settled zero-campaign answer, not a transient: don't
@@ -79,7 +115,7 @@ export function Campaign({
   const { data, status, error } = useQuery(
     CampaignService.method.getCampaignRoster,
     {},
-    { retry: (count, err) => !isNotFound(err) && count < 3 },
+    { retry: rosterRetry },
   );
   const roster = useMemo(() => data?.roster ?? [], [data]);
 
@@ -99,7 +135,8 @@ export function Campaign({
   // (Character ↔ Discord User bindings, #279), Suggestions, Planning — arrives
   // from the route path and changes via the sidebar sub-navigation (ADR-0063);
   // cross-view jumps inside the screen go through onViewChange (a param-only
-  // navigation, so this component stays mounted and its state survives).
+  // navigation, so this component stays mounted and its state survives). An
+  // Active Campaign switch is the one thing that DOES remount it — see Campaign.
   const setView = (next: CampaignView) => onViewChange?.(next);
   // Within Cast: the editor (default), or the prep readiness view (#544). The
   // editor stays the default because adding and shaping NPCs is the common act;
@@ -150,17 +187,20 @@ export function Campaign({
     onError: (err) => toast.error(t("campaign.couldntDeleteNpc", { message: errorMessage(err) })),
   });
 
-  // Unsaved editor text is guarded: the editor remounts per selection
-  // (key={id}), so a roster click used to silently throw away typing. The
-  // editor reports its dirtiness; a dirty switch asks first.
-  const editorDirty = useRef(false);
-  const [pendingSelect, setPendingSelect] = useState<string | null>(null);
+  // Unsaved editor text is guarded on EVERY path that unmounts or re-seeds the
+  // agent editor (W10): picking another roster member (it remounts per
+  // selection, key={id}), switching to the prep view, and adding an NPC (whose
+  // success selects the new one). The editor reports its dirtiness; a dirty
+  // move asks first. Leaving via the sidebar is held by the route layer off
+  // the same flag (useDirtyGuard → lib/navigationGuard).
+  const edits = useDirtyGuard({
+    title: t("campaign.discardEditsTitle"),
+    description: t("campaign.discardEditsDesc", { name: selected?.name ?? "" }),
+    confirmLabel: t("campaign.discardEditsConfirm"),
+  });
   const selectAgent = (id: string) => {
-    if (editorDirty.current && id !== selected?.id) {
-      setPendingSelect(id);
-      return;
-    }
-    setSelectedId(id);
+    if (id === selected?.id) return;
+    edits.guard(() => setSelectedId(id));
   };
 
   const campaign = data?.campaign;
@@ -237,7 +277,7 @@ export function Campaign({
         // The ChatService RPCs are campaign-scoped (ADR-0062), so the panel
         // waits for the roster read to hand it the campaign id.
         campaign ? (
-          <PlanningPanel campaignId={campaign.id} />
+          <PlanningPanel key={campaign.id} campaignId={campaign.id} />
         ) : status === "error" ? (
           <p className="gx-campaign__error" role="alert">
             {t("campaign.loadError", { message: errorMessage(error) })}
@@ -266,7 +306,7 @@ export function Campaign({
             type="button"
             className="gx-kg-chip"
             aria-pressed={castMode === "prep"}
-            onClick={() => setCastMode("prep")}
+            onClick={() => edits.guard(() => setCastMode("prep"))}
           >
             {t("campaign.castPrep")}
           </button>
@@ -331,7 +371,10 @@ export function Campaign({
             onClick={() =>
               // The placeholder NAME is persisted, so it is created in the GM's
               // display language — the roster shows what they will rename anyway.
-              createAgent.mutate({ name: t("campaign.newNpcName"), title: "", persona: "", voice: "", addressOnly: false })
+              // Guarded: success selects the new NPC, replacing the open editor.
+              edits.guard(() =>
+                createAgent.mutate({ name: t("campaign.newNpcName"), title: "", persona: "", voice: "", addressOnly: false }),
+              )
             }
           >
             <Plus size={15} /> {t("campaign.addNpc")}
@@ -354,31 +397,14 @@ export function Campaign({
               isButler(selected) ? undefined : () => deleteAgent.mutate({ id: selected.id })
             }
             deleting={deleteAgent.isPending}
-            onDirtyChange={(d) => {
-              editorDirty.current = d;
-            }}
-          />
-        )}
-        {pendingSelect !== null && (
-          <ConfirmDialog
-            open
-            onOpenChange={(open) => {
-              if (!open) setPendingSelect(null);
-            }}
-            title={t("campaign.discardEditsTitle")}
-            description={t("campaign.discardEditsDesc", { name: selected?.name ?? "" })}
-            confirmLabel={t("campaign.discardEditsConfirm")}
-            onConfirm={() => {
-              editorDirty.current = false;
-              setSelectedId(pendingSelect);
-              setPendingSelect(null);
-            }}
+            onDirtyChange={edits.markDirty}
           />
         )}
         </div>
         )}
         </>
       )}
+      {edits.dialog}
     </div>
   );
 }
