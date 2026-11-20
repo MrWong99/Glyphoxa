@@ -349,7 +349,7 @@ func TestStartAlreadyActive(t *testing.T) {
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("already-active reply = %+v, want one ephemeral error", resp.followups)
 	}
-	if !strings.Contains(strings.ToLower(resp.followups[0].content), "already active") {
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "already running") {
 		t.Errorf("already-active reply = %q, want a clear 'already active' message", resp.followups[0].content)
 	}
 }

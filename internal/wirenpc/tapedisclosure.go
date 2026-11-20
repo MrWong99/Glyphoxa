@@ -77,7 +77,7 @@ func ParseTapeConsentCustomID(customID string) (campaignID uuid.UUID, granted, o
 const tapeDisclosureContent = "**Session Highlights are enabled.** With your consent, this session's audio is " +
 	"kept in a short (~2 minute) rolling buffer so memorable moments can be clipped for the GM's review. " +
 	"Only players who press **Consent** have their audio kept — press it to opt in, or **Revoke** to opt out at any time. " +
-	"No audio clip leaves this server without an explicit GM action."
+	"No clip is shared anywhere unless the GM chooses to share it."
 
 // The tape disclosure is no longer posted on its own: since #519 it rides the
 // single session-start disclosure message (sessiondisclosure.go), which carries

@@ -222,7 +222,8 @@ func TestMuteCommand_SessionOnAnotherWorker(t *testing.T) {
 }
 
 // TestMuteCommand_RelayFailureSurfaces covers sequence (14): a relay failure
-// posts the REAL error text — never a silent no-op — and an unconfirmed relay
+// is answered as a failure (its real cause logged, never a raw Go error in the
+// GM's chat) — never a silent no-op — and an unconfirmed relay
 // (ErrControlPending) posts the honest not-confirmed wording, no phantom success.
 func TestMuteCommand_RelayFailureSurfaces(t *testing.T) {
 	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
@@ -233,8 +234,11 @@ func TestMuteCommand_RelayFailureSurfaces(t *testing.T) {
 	if err := MuteCommand(&fakeMuter{}, lister, pool).Handle(context.Background(), muteIC(resp, bart.ID.String())); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "tts exploded") {
-		t.Fatalf("failure followup = %+v, want the real error text", resp.followups)
+	if len(resp.followups) != 1 || resp.followups[0].content != controlFailedReply {
+		t.Fatalf("failure followup = %+v, want the failure reply", resp.followups)
+	}
+	if strings.Contains(resp.followups[0].content, "tts exploded") {
+		t.Fatalf("failure followup %q leaks the raw error", resp.followups[0].content)
 	}
 
 	pool = &fakePool{live: true, muteErr: session.ErrControlPending}
