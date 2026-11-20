@@ -33,7 +33,11 @@
   align-items: start;
 }
 
-@media (max-width: 720px) {
+/* Stack below 1100px: with the 248px sidebar and page gutters, the 1fr list
+   track next to the fixed 380px editor shrank to ~180px between 881 and
+   1100px (the sidebar only turns off-canvas at 880px) — titles wrapped per
+   word. One column reads better there and on every narrower viewport. */
+@media (max-width: 1100px) {
   .gx-kg-layout {
     grid-template-columns: 1fr;
   }

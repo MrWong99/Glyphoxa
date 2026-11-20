@@ -52,10 +52,10 @@
   padding: var(--spacing-md);
 }
 
+/* One field (Server ID) since the voice channel moved to the Session screen:
+ * a single capped column instead of a half-empty two-up grid. */
 .gx-discord__ids {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--spacing-md);
+  max-width: 28rem;
 }
 
 .gx-discord__save {
