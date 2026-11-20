@@ -362,6 +362,29 @@ func TestUpdateAgent_NotFound(t *testing.T) {
 	}
 }
 
+// TestUpdateAgent_PreservesProviderConfigPins pins R12: the web editor never
+// sends the per-Agent provider-config pins, so an edit must carry the stored
+// ones through instead of nulling them.
+func TestUpdateAgent_PreservesProviderConfigPins(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	id := uuid.New()
+	voicePin := uuid.NullUUID{UUID: uuid.New(), Valid: true}
+	llmPin := uuid.NullUUID{UUID: uuid.New(), Valid: true}
+	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old",
+		VoiceProviderConfigID: voicePin, LLMProviderConfigID: llmPin}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "New"})); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	got := store.agents[id]
+	if got.VoiceProviderConfigID != voicePin || got.LLMProviderConfigID != llmPin {
+		t.Errorf("pins after edit = voice %v llm %v, want %v / %v", got.VoiceProviderConfigID, got.LLMProviderConfigID, voicePin, llmPin)
+	}
+}
+
 func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 	t.Parallel()
 	store := newFakeAgentStore()

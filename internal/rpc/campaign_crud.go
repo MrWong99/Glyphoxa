@@ -182,14 +182,19 @@ func (s *agentRoster) UpdateAgent(
 
 	m := req.Msg
 	updated, err := s.store.UpdateAgent(ctx, storage.AgentUpdate{
-		ID:          id,
-		CampaignID:  c.ID,
-		Name:        name,
-		Title:       m.GetTitle(),
-		Persona:     m.GetPersona(),
-		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
-		AddressOnly: m.GetAddressOnly(),
-		Aliases:     m.GetAliases(),
+		ID:         id,
+		CampaignID: c.ID,
+		Name:       name,
+		Title:      m.GetTitle(),
+		Persona:    m.GetPersona(),
+		Voice:      applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
+		// The request carries no provider-config pins (the editor never sees
+		// them) and the store UPDATE writes both columns unconditionally, so
+		// carry the stored ones through — an edit used to null them (R12).
+		VoiceProviderConfigID: existing.VoiceProviderConfigID,
+		LLMProviderConfigID:   existing.LLMProviderConfigID,
+		AddressOnly:           m.GetAddressOnly(),
+		Aliases:               m.GetAliases(),
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
