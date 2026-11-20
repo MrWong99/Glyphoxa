@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -118,6 +119,11 @@ func Version(ctx context.Context, db *sql.DB) (int64, error) {
 // EnsureCurrent verifies the DB schema is at the latest known version. web and
 // voice Modes call this at startup and fail fast if the schema is behind
 // (ADR-0031) — they never auto-migrate.
+//
+// A schema AHEAD of this binary is allowed (it is the normal state of an old pod
+// during a rolling upgrade, and of a rollback) but logged at WARN: the binary is
+// running against tables a newer release has changed, and "everything started
+// fine" is otherwise all an operator sees before the first query fails.
 func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 	p, err := NewMigrationProvider(db)
 	if err != nil {
@@ -127,10 +133,25 @@ func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("storage: read versions: %w", err)
 	}
+	ahead, err := schemaVersionVerdict(current, target)
+	if err != nil {
+		return err
+	}
+	if ahead {
+		slog.WarnContext(ctx, "storage: database schema is NEWER than this binary; it was migrated by a later release. Queries may fail on changed tables: upgrade this binary, or finish the rollback by migrating down",
+			"db_version", current, "binary_version", target)
+	}
+	return nil
+}
+
+// schemaVersionVerdict is EnsureCurrent's decision: a DB behind the binary's
+// embedded migrations is an error (run `migrate up`); a DB ahead of them is
+// served, with ahead=true so the caller can warn.
+func schemaVersionVerdict(current, target int64) (ahead bool, err error) {
 	if current < target {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"storage: schema out of date (db at version %d, want %d); run `glyphoxa migrate up`",
 			current, target)
 	}
-	return nil
+	return current > target, nil
 }
