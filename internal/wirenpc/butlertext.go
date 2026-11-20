@@ -21,10 +21,17 @@ import (
 func newVoiceChannelPoster(client *bot.Client, channel snowflake.ID) func(ctx context.Context, text string) error {
 	return func(ctx context.Context, text string) error {
 		for _, part := range discordmsg.Split(text, discordmsg.Limit) {
-			if _, err := client.Rest.CreateMessage(channel, discord.MessageCreate{Content: part}, rest.WithCtx(ctx)); err != nil {
+			if _, err := client.Rest.CreateMessage(channel, butlerTextMessage(part), rest.WithCtx(ctx)); err != nil {
 				return fmt.Errorf("wirenpc: post Butler text to channel %s: %w", channel, err)
 			}
 		}
 		return nil
 	}
+}
+
+// butlerTextMessage is one part of a Butler text answer. The text is LLM output
+// (and may quote the transcript), so it carries [NoMentions]: an "@everyone" the
+// model repeats must not ping the server.
+func butlerTextMessage(part string) discord.MessageCreate {
+	return discord.MessageCreate{Content: part, AllowedMentions: NoMentions()}
 }

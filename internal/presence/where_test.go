@@ -216,7 +216,7 @@ func TestWhere_NoSessionIsRefused(t *testing.T) {
 	if len(f.setCalls) != 0 {
 		t.Fatalf("wrote a marker with no session: %+v", f.setCalls)
 	}
-	if !strings.Contains(lastReply(resp), "No Voice Session") {
+	if lastReply(resp) != noSessionReply {
 		t.Errorf("unexpected reply: %q", lastReply(resp))
 	}
 }

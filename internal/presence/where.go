@@ -125,7 +125,7 @@ func WhereCommand(mgr WhereControl, store WhereStore) Command {
 		Handle: func(ctx context.Context, ic *Interaction) error {
 			vs, active, err := mgr.Active(ctx, ic.TenantID())
 			if err != nil || !active {
-				return ic.ReplyEphemeral("No Voice Session is active.")
+				return ic.ReplyEphemeral(noSessionReply)
 			}
 			mapName := strings.TrimSpace(mustString(ic, "map"))
 			at := strings.TrimSpace(mustString(ic, "at"))
@@ -184,7 +184,7 @@ func WhereCommand(mgr WhereControl, store WhereStore) Command {
 // live-session commands give.
 func whereWriteReply(ic *Interaction, err error) error {
 	if errors.Is(err, storage.ErrNotFound) {
-		return ic.ReplyEphemeral("No Voice Session is active.")
+		return ic.ReplyEphemeral(noSessionReply)
 	}
 	return fmt.Errorf("presence: set party marker: %w", err)
 }

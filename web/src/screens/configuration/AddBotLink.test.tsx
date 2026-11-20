@@ -5,13 +5,21 @@ import { AddBotLink, botAuthorizeUrl } from "./AddBotLink";
 
 // The bot-authorization URL is a fixed contract (#110): Discord's authorize
 // endpoint, scope=bot + applications.commands (so /glyphoxa slash commands
-// appear in a fresh guild), and permissions 3146752 = View Channel (0x400) +
-// Connect (0x100000) + Speak (0x200000) — the set a voice-join needs.
-const PINNED = "https://discord.com/oauth2/authorize?client_id=123&scope=bot%20applications.commands&permissions=3146752";
+// appear in a fresh server), and permissions 3181568 = View Channel (0x400) +
+// Send Messages (0x800) + Attach Files (0x8000) + Connect (0x100000) + Speak
+// (0x200000): the voice join, the session-start transcription/consent notice and
+// Butler text (Send Messages), and shared highlight clips (Attach Files).
+const PINNED = "https://discord.com/oauth2/authorize?client_id=123&scope=bot%20applications.commands&permissions=3181568";
 
 describe("botAuthorizeUrl", () => {
   it("composes the pinned authorize URL from the application id", () => {
     expect(botAuthorizeUrl("123")).toBe(PINNED);
+  });
+
+  it("grants exactly View Channel, Send Messages, Attach Files, Connect and Speak", () => {
+    const perms = BigInt(new URL(botAuthorizeUrl("123")).searchParams.get("permissions") ?? "0");
+    const bits = (1n << 10n) | (1n << 11n) | (1n << 15n) | (1n << 20n) | (1n << 21n);
+    expect(perms).toBe(bits);
   });
 
   it("url-encodes the application id", () => {

@@ -20,3 +20,7 @@ Implementing E7 (#101/#105/#110) required deciding the wire contract for invite 
 ## Relationship to other ADRs
 
 ADR-0016 (the operator-login application backs the bot-authorization URL), ADR-0033 (live Discord behind seams, keyless default suite), ADR-0004/0039 (token sealed at rest, decrypted server-side only), ADR-0014 (management RPC surface).
+
+## Amendment: invite permissions include Send Messages and Attach Files (2026-11-20)
+
+The `3146752` constant predates the Bot writing to text channels. Since then it posts the session-start transcription/consent notice (#519, the only consent surface players see) and Butler text answers into the voice channel's chat, and shares highlight clips as file attachments. In a server whose channels do not grant @everyone those permissions the posts fail with 403 Missing Permissions. The constant is now **`3181568`** = View Channel (`0x400`) + Send Messages (`0x800`) + Attach Files (`0x8000`) + Connect (`0x100000`) + Speak (`0x200000`). Embed Links is deliberately left out: the Bot sends no embeds. Servers that added the Bot under the old link keep the old grant until an admin re-authorizes or adjusts the role, so the disclosure post now logs the remedy on a permission failure.

@@ -100,7 +100,7 @@ var (
 func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler ButlerVoicer) Command {
 	return Command{
 		Path:        "glyphoxa recap",
-		Description: "Recap a Voice Session of the Active Campaign.",
+		Description: "Recap a voice session of the active campaign.",
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
 				Name:         "session",
@@ -178,7 +178,7 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 
 	c, err := resolveActiveCampaign(ctx, store, voice, ic.TenantID(), ic.UserID())
 	if errors.Is(err, ErrNoActiveCampaign) {
-		return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
+		return ic.ReplyEphemeral(noActiveCampaignReply)
 	}
 	if err != nil {
 		return fmt.Errorf("presence: resolve active campaign for recap: %w", err)
@@ -229,7 +229,7 @@ func pickRecapSession(ctx context.Context, ic *Interaction, store RecapStore, ca
 		}
 		vs, err := store.GetVoiceSession(ctx, id)
 		if errors.Is(err, storage.ErrNotFound) || (err == nil && vs.CampaignID != campaignID) {
-			return uuid.UUID{}, false, ic.ReplyEphemeral("That session isn't part of your Active Campaign.")
+			return uuid.UUID{}, false, ic.ReplyEphemeral("That session isn't part of your active campaign.")
 		}
 		if err != nil {
 			return uuid.UUID{}, false, fmt.Errorf("presence: load voice session %s for recap: %w", id, err)
@@ -246,7 +246,7 @@ func pickRecapSession(ctx context.Context, ic *Interaction, store RecapStore, ca
 			return vs.ID, true, nil
 		}
 	}
-	return uuid.UUID{}, false, ic.ReplyEphemeral("No recappable session found among the recent sessions of this campaign.")
+	return uuid.UUID{}, false, ic.ReplyEphemeral("No finished session with a transcript yet.")
 }
 
 // isRecappable reports whether a Voice Session can seed a default/autocomplete recap:
@@ -333,8 +333,8 @@ func normalizeDelivery(ic *Interaction) string {
 // recapSessionChoices builds the /glyphoxa recap `session` autocomplete: the Active
 // Campaign's RECAPPABLE Voice Sessions only — ended, with a recorded transcript
 // (running/failed/empty rows are excluded; an explicit id may still target any of
-// them). Each choice is LABELLED "2006-01-02 15:04 · N lines" and CARRIES the session
-// UUID as its value. Capped at Discord's 25-choice limit. When the GM has typed,
+// them). Each choice is LABELLED "2006-01-02 15:04 UTC · N lines" and CARRIES the
+// session UUID as its value. Capped at Discord's 25-choice limit. When the GM has typed,
 // choices whose label contains the typed text (case-insensitive) are kept.
 func recapSessionChoices(sessions []storage.VoiceSession, typed string) []discord.AutocompleteChoice {
 	needle := strings.ToLower(strings.TrimSpace(typed))
@@ -355,6 +355,8 @@ func recapSessionChoices(sessions []storage.VoiceSession, typed string) []discor
 	return choices
 }
 
-// sessionLabelTimeFormat is the UTC day+minute stamp shown in the recap session
-// picker; UTC keeps it deterministic (the bot has no per-user timezone).
-const sessionLabelTimeFormat = "2006-01-02 15:04"
+// sessionLabelTimeFormat is the day+minute stamp shown in the recap session
+// picker. Autocomplete choices are plain text (no timestamp markup), and the bot
+// knows no one's timezone, so the stamp is UTC and says so rather than pass for
+// local time.
+const sessionLabelTimeFormat = "2006-01-02 15:04 UTC"
