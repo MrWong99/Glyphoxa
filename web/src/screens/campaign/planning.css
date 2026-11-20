@@ -4,7 +4,7 @@
 
 .gx-planning {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) 1fr;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
   gap: var(--spacing-lg);
   align-items: start;
 }

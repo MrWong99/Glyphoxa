@@ -28,7 +28,7 @@
 /* Knowledge view: list left, sticky editor card right (mirrors the roster grid). */
 .gx-kg-layout {
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: var(--spacing-lg);
   align-items: start;
 }
@@ -336,7 +336,7 @@
 /* Two-column: roster list + editor pane. Collapses to one column when narrow. */
 .gx-roster-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 320px) 1fr;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
   gap: var(--spacing-lg);
   align-items: start;
 }
