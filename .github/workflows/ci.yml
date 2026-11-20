@@ -286,10 +286,10 @@ jobs:
       # (ADR-0021), gated behind `//go:build opus`, so the default PR gate
       # never compiles them. Run them HERE — separate from build+vet for
       # concern clarity (#374). `-race` because codec/PlaybackSource pulls
-      # cross-goroutine. Targeted at the two packages that own opus-gated
-      # tests (mixdown decode, wire codec).
+      # cross-goroutine. Targeted at the packages that own opus-gated
+      # tests (mixdown decode, wire codec, the voiceprobe clip round trip).
       - name: Test (opus tags)
-        run: go test -race -tags "opus nolibopusfile" ./internal/mixdown/... ./pkg/voice/wire/...
+        run: go test -race -tags "opus nolibopusfile" ./internal/mixdown/... ./pkg/voice/wire/... ./pkg/voice/voiceprobe/...
 
       # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
       # cassettes for the network providers — keyless (no secrets, ADR-0021).

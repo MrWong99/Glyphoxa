@@ -132,6 +132,62 @@ To exercise one interaction in isolation, drop to the `Reactor` layer and
 compose with `orchestrator.Bind(ctx, bus, reactors…)`; for an ad-hoc typed
 subscription use `voiceevent.On[E](bus, fn)` directly.
 
+## Test against real Discord (the live probe)
+
+Everything above stops at the orchestrator. The stretch beyond it — Discord's
+voice gateway, DAVE/MLS, the UDP transport, playback as a Player actually hears
+it — is covered by [`pkg/voice/voiceprobe`](../../pkg/voice/voiceprobe/): a
+second Discord bot that joins the voice channel as a synthetic Player, speaks a
+clip, and records what the Bot says back.
+
+```go
+p, err := voiceprobe.Join(ctx, voiceprobe.Config{
+    Token: probeToken, Guild: guild, Channel: channel,
+    ReplyFrom: botUserID, // only the Bot counts as a reply, not a human in the channel
+})
+defer p.Close()
+
+reply, err := p.Say(ctx, clip) // speaks, then waits for the reply to finish
+if !reply.Heard { t.Fatal("no reply") }
+// reply.Latency — end of clip to first reply audio
+// reply.PCM     — the reply, 48 kHz mono; feed it to an STT to assert content
+```
+
+It is a **live tier**: never on a PR gate, because it needs things CI does not
+have.
+
+- **A probe bot.** A separate Discord application from the Bot under test,
+  invited to the guild with Connect + Speak. Its token goes in
+  `GLYPHOXA_PROBE_BOT_TOKEN`.
+- **A running Voice Session** in the channel. Start it first: alone in a
+  channel the probe cannot speak, because Discord completes the DAVE group only
+  once a second member is present and the sender waits for it.
+- **A clip that addresses someone.** The Bot answers when an NPC or the Butler
+  is called by name, so `hello-test` ("Glyphoxa, …") only works where the Butler
+  is listening. Any 16-bit PCM WAV is accepted.
+- **The build tags** `opus dave nolibopusfile` (libopus encoder, real DAVE).
+
+Run the packaged live test against a session you started:
+
+```bash
+GLYPHOXA_PROBE_BOT_TOKEN=… GX_PROBE_GUILD=… GX_PROBE_CHANNEL=… \
+GX_PROBE_REPLY_FROM=<Bot user ID> GX_PROBE_CLIP=path/to/addressed.wav \
+go test -tags "opus dave nolibopusfile live" -run TestLive -v ./pkg/voice/voiceprobe/
+```
+
+Or use the command, which suits scripts and soak runs — it exits 2 when an
+expectation is not met and always writes `summary.json` plus the recordings:
+
+```bash
+CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o bin/voiceprobe ./cmd/voiceprobe
+bin/voiceprobe -guild G -channel C -reply-from BOT \
+    -require-reply -max-latency 4s -out /tmp/probe clip1.wav clip2.wav
+```
+
+What runs on every PR instead: the probe's reply detection and recording
+timeline (untagged tests, synthetic frames) and, in the `audio` job, a real
+clip through encode → decode.
+
 ## Adding fixtures
 
 ### A new cassette — `tests/voice-cassettes/`
