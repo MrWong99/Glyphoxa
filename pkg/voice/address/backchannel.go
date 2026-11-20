@@ -22,8 +22,8 @@ import "strings"
 // Scope: the gate suppresses AMBIENT routing only. An utterance carrying a name
 // is an explicit address and never reaches it, so "Bart!" and "ja, Bart" still
 // route (see [Matcher.match]). Transcription is untouched — the utterance stays
-// on the bus, in the Transcript, and in the recency word buffer, exactly like
-// the empty-final guard's contract.
+// on the bus and in the Transcript, exactly like the empty-final guard's
+// contract.
 var backchannelWords = map[string]map[string]struct{}{
 	"en": wordSet(
 		"mhm", "mm", "mmhm", "hm", "hmm", "uh", "uhhuh", "huh", "um", "erm",
