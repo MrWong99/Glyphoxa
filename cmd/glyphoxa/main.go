@@ -1367,7 +1367,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		}
 	}
 	// Per-tenant Discord integration health for the Configuration read (#489):
-	// "ok"/"waiting"/"failed" + detail for the request Tenant's standing client.
+	// "ok"/"waiting"/"reconnecting"/"failed" + detail for the request Tenant's standing client.
 	// nil in web-only mode (no presence).
 	var integrationStatus func(tenantID uuid.UUID) (string, string)
 	if clients != nil {

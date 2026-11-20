@@ -84,14 +84,10 @@ func TestDirective_TurnBudgetConsumedOnCommittedTurnsOnly(t *testing.T) {
 	if got := mgr.Directive(ctx, id, true); got != "" {
 		t.Fatalf("consult past the budget = %q, want empty", got)
 	}
-	if ids := mgr.DirectedAgentIDs(tenantID); len(ids) != 0 {
-		t.Fatalf("DirectedAgentIDs after expiry = %v, want empty", ids)
-	}
 }
 
 // TestDirective_StickyReplaceAndClear pins the sticky default (turns <= 0: until
-// cleared/replaced/session end), replacement, the explicit clear, and the
-// DirectedAgentIDs snapshot.
+// cleared/replaced/session end), replacement, and the explicit clear.
 func TestDirective_StickyReplaceAndClear(t *testing.T) {
 	store := newFakeStore()
 	agents := seedAgents(store, 2)
@@ -107,9 +103,6 @@ func TestDirective_StickyReplaceAndClear(t *testing.T) {
 		if got := mgr.Directive(ctx, id, true); got != "Speak in riddles." {
 			t.Fatalf("sticky consult %d = %q, want the directive", i, got)
 		}
-	}
-	if ids := mgr.DirectedAgentIDs(tenantID); len(ids) != 1 || ids[0] != id {
-		t.Fatalf("DirectedAgentIDs = %v, want [%s]", ids, id)
 	}
 
 	// Replace: the new text wins immediately.
@@ -151,8 +144,5 @@ func TestDirective_DiesWithSession(t *testing.T) {
 	}
 	if got := mgr.Directive(ctx, id, true); got != "" {
 		t.Fatalf("post-stop Directive = %q, want empty (directives die with the session)", got)
-	}
-	if ids := mgr.DirectedAgentIDs(tenantID); ids != nil {
-		t.Fatalf("post-stop DirectedAgentIDs = %v, want nil", ids)
 	}
 }

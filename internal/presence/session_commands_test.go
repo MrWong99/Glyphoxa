@@ -481,6 +481,37 @@ func TestEndStopPending(t *testing.T) {
 	}
 }
 
+// TestSessionOps_TimeoutReadsAsTakingLonger (S7): the slash budget used to equal
+// the claim plane's 30s stop budget, so the command's own ctx usually expired
+// first and the GM got the generic failure instead of the "taking longer"
+// reply. The budget now outlasts the plane's, and a deadline that still wins
+// is answered the same friendly way.
+func TestSessionOps_TimeoutReadsAsTakingLonger(t *testing.T) {
+	plane := session.NewIntentControl(nil, nil, session.IntentControlConfig{})
+	if sessionOpTimeout <= plane.StopBudget() || sessionOpTimeout <= plane.StartBudget() {
+		t.Fatalf("sessionOpTimeout %s must outlast the claim plane's start/stop budgets (%s/%s)",
+			sessionOpTimeout, plane.StartBudget(), plane.StopBudget())
+	}
+
+	end := &fakeVoice{stopErr: context.DeadlineExceeded}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(EndCommand(end))
+	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "taking longer") {
+		t.Errorf("end on a deadline = %+v, want the 'taking longer' reply", resp.followups)
+	}
+
+	c := campaign("Lost Mine")
+	store := &fakeSessionStore{forUser: &c}
+	start := &fakeVoice{startErr: context.DeadlineExceeded}
+	reg = testRegistry(testGuild, operatorID)
+	reg.Register(StartCommand(store, start))
+	resp = dispatchAs(reg, "glyphoxa start", operatorID, nil)
+	if len(resp.followups) != 1 || !strings.Contains(resp.followups[0].content, "taking longer") {
+		t.Errorf("start on a deadline = %+v, want the 'taking longer' reply", resp.followups)
+	}
+}
+
 // TestEndForeignTenantSessionRefused pins the cross-tenant guard (#490): the
 // Manager is single-active, so a GM in Tenant A must NOT stop a live session that
 // belongs to Tenant B — end refuses and never calls Stop.

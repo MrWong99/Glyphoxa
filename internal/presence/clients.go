@@ -203,8 +203,8 @@ type Clients struct {
 	openTimeout  time.Duration
 	closeTimeout time.Duration
 	mu           sync.Mutex
-	entries  map[string]*clientEntry
-	tenants  map[uuid.UUID]*tenantState
+	entries      map[string]*clientEntry
+	tenants      map[uuid.UUID]*tenantState
 	// rebuilds paces gateway opens per Bot token (rebuild.go): every open sends
 	// an IDENTIFY, and Discord resets a token that sends 1000 in 24 hours.
 	// Guarded by mu.

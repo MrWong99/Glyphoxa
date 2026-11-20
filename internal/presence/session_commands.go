@@ -19,8 +19,17 @@ import (
 // no longer carries Discord's 3s deadline; the manager Start/Stop — which can
 // wait on the voice loop unwinding and the ended_at write — runs under this
 // explicit budget instead of an open-ended one. It sits comfortably inside
-// Discord's minutes-long follow-up window.
-const sessionOpTimeout = 30 * time.Second
+// Discord's minutes-long follow-up window, and outlasts the claim plane's own
+// 20s/30s start/stop budgets (S7): at 30s it tied the stop budget, so this ctx
+// usually expired first and the plane's ErrStopPending — the "taking longer"
+// reply — never reached the GM.
+const sessionOpTimeout = 45 * time.Second
+
+// Replies for a start/end the voice worker has not confirmed in time.
+const (
+	startSlowReply = "Starting the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment."
+	stopSlowReply  = "Ending the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment."
+)
 
 // discordChoiceLimit is Discord's hard cap on autocomplete choices per response.
 const discordChoiceLimit = 25
@@ -188,8 +197,12 @@ func EndCommand(voice VoiceControl) Command {
 				}
 				if errors.Is(err, session.ErrStopPending) {
 					// Split/worker mode (#491): the stop was requested but the worker has
-					// not confirmed it within the budget. Retryable, not a failure.
-					return ic.ReplyEphemeral("Ending the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment.")
+					// not confirmed it within the budget. Retryable, not a failure. Our
+					// own deadline winning means the same thing.
+					return ic.ReplyEphemeral(stopSlowReply)
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					return ic.ReplyEphemeral(stopSlowReply)
 				}
 				return fmt.Errorf("presence: stop voice session: %w", err)
 			}
@@ -259,10 +272,10 @@ func startErrorMessage(err error) (string, bool) {
 		return "Voice sessions aren't available on this Glyphoxa installation.", true
 	case errors.Is(err, session.ErrManagerClosed):
 		return "Glyphoxa is restarting. Try again in a moment.", true
-	case errors.Is(err, session.ErrIntentPending):
+	case errors.Is(err, session.ErrIntentPending), errors.Is(err, context.DeadlineExceeded):
 		// Split/worker mode (#491): the intent is queued but no worker claimed it
-		// within the budget. Retryable, not a failure.
-		return "Starting the voice session is taking longer than expected. Check the Session screen in the web app, or try again in a moment.", true
+		// within the budget (or our own deadline won). Retryable, not a failure.
+		return startSlowReply, true
 	case errors.Is(err, session.ErrIntentCancelled):
 		// Split/worker mode (#491): the start was cancelled before any worker claimed
 		// it — a distinct outcome from a still-queued pending.

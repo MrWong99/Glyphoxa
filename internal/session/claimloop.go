@@ -33,6 +33,10 @@ type IntentStore interface {
 	MarkVoiceSessionIntentLive(ctx context.Context, id uuid.UUID, instanceID string, voiceSessionID uuid.UUID) (storage.VoiceSessionIntent, error)
 	HeartbeatVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string) (bool, error)
 	FinishVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string, status storage.VoiceSessionIntentStatus, lastError string) (storage.VoiceSessionIntent, error)
+	// ReleaseVoiceSessionIntent hands a claimed, never-live intent back to
+	// 'pending' (S13): a claim interrupted by this worker's shutdown is not a
+	// failed start, and another worker should pick it up.
+	ReleaseVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string) error
 	ReapDeadVoiceSessionIntents(ctx context.Context, expiry time.Duration) (int64, error)
 	// ReconcileWorkerOrphanedVoiceSessions closes 'running' voice_sessions rows a
 	// crashed worker left behind (#491): run every tick (#483 L2 — idempotent and
@@ -223,6 +227,13 @@ func (l *ClaimLoop) tick(ctx context.Context) {
 // started (ADR-0006 — no running a session the plane believes dead).
 func (l *ClaimLoop) startClaimed(ctx context.Context, intent storage.VoiceSessionIntent) {
 	vs, err := l.mgr.Start(ctx, intent.TenantID, intent.CampaignID, intent.VoiceChannelID)
+	if err != nil && (ctx.Err() != nil || errors.Is(err, ErrManagerClosed)) {
+		// Shutdown landed between the claim and the start (S13): the start never
+		// had a chance, so the intent goes back to 'pending' for another worker
+		// instead of telling the GM it failed.
+		l.release(intent, err)
+		return
+	}
 	if err != nil {
 		// ErrSessionLimit should not occur (tick gates on HasCapacity), but finishing
 		// 'failed' rather than leaving the row 'claimed' guarantees no strand either
@@ -269,6 +280,24 @@ func (l *ClaimLoop) startClaimed(ctx context.Context, intent storage.VoiceSessio
 
 	l.wg.Add(1)
 	go l.runSession(ctx, live)
+}
+
+// release hands a claimed intent whose start was cut short by shutdown back to
+// 'pending', on a detached ctx (the run ctx is already cancelled). When the
+// release cannot apply — the GM asked to stop meanwhile, or the row moved on —
+// the intent is finished 'failed' with the cause as before, so it is never
+// stranded 'claimed'.
+func (l *ClaimLoop) release(intent storage.VoiceSessionIntent, cause error) {
+	ctx, cancel := context.WithTimeout(l.detached(), dbOpTimeout(l.cfg.Poll))
+	err := l.store.ReleaseVoiceSessionIntent(ctx, intent.ID, l.instanceID)
+	cancel()
+	if err == nil {
+		l.log.Info("claim loop: shutting down before the claimed session started; released it for another worker",
+			"intent", intent.ID, "cause", cause)
+		return
+	}
+	l.log.Warn("claim loop: release interrupted claim; finishing failed", "intent", intent.ID, "err", err, "cause", cause)
+	l.finish(intent.ID, storage.VoiceIntentFailed, EncodeStartFailure(cause))
 }
 
 // runSession owns a live intent's heartbeat lifecycle (#491): each Heartbeat tick
