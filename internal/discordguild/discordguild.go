@@ -7,10 +7,8 @@
 // means: guild owner, or any held role (the @everyone role included) carrying
 // ADMINISTRATOR (0x8) or MANAGE_GUILD (0x20).
 //
-// Like internal/discordinvite and internal/discordtag, the calls are plain
-// net/http GETs, deliberately NOT disgo's rest.NewClient: that client's rate
-// limiter starts a cleanup goroutine its Close never stops, leaking one
-// goroutine + ticker per call (ADR-0047).
+// The calls go through internal/discordrest (plain net/http GETs, never
+// disgo's leaking rest client, ADR-0047).
 //
 // These are LIVE network calls. The RPC layer hides CheckAdmin behind a seam so
 // unit tests fake the checker and never touch the network; offline tests drive
@@ -19,21 +17,15 @@ package discordguild
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
-	"time"
+
+	"github.com/MrWong99/Glyphoxa/internal/discordrest"
 )
-
-// liveAPIBaseURL is Discord's REST API root, matching internal/discordinvite.
-const liveAPIBaseURL = "https://discord.com/api/v10"
-
-// userAgent is the DiscordBot form Discord requires of bot REST callers.
-const userAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)"
 
 // Discord permission bits that count as "administers the guild": either grants
 // full guild-settings control, which is the bar for binding the guild to a
@@ -42,10 +34,6 @@ const (
 	permAdministrator uint64 = 0x8
 	permManageGuild   uint64 = 0x20
 )
-
-// guildClient is shared across calls (http.Client is safe for concurrent use);
-// its Timeout is a belt on top of the caller's ctx deadline (ADR-0047).
-var guildClient = &http.Client{Timeout: 15 * time.Second}
 
 // ErrBotNotInGuild means the Bot itself cannot read the guild: the guild read
 // (or the member read) came back 403 or 404 — Discord is inconsistent about
@@ -77,9 +65,7 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 	if log == nil {
 		log = slog.Default()
 	}
-	if baseURL == "" {
-		baseURL = liveAPIBaseURL
-	}
+	baseURL = discordrest.BaseURL(baseURL)
 
 	// GET /guilds/{id} → owner_id + the guild's role table. The Bot must be a
 	// member to read this; 403/404 both mean it is not (Discord is inconsistent).
@@ -90,7 +76,7 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 			Permissions string `json:"permissions"` // decimal STRING per Discord API
 		} `json:"roles"`
 	}
-	status, err := getJSON(ctx, token, baseURL+"/guilds/"+url.PathEscape(guildID), &guild)
+	status, err := discordrest.GetJSON(ctx, token, baseURL+"/guilds/"+url.PathEscape(guildID), &guild)
 	if err != nil {
 		return fmt.Errorf("discordguild: GET /guilds: %w", err)
 	}
@@ -111,7 +97,7 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 	var member struct {
 		Roles []string `json:"roles"`
 	}
-	status, err = getJSON(ctx, token,
+	status, err = discordrest.GetJSON(ctx, token,
 		baseURL+"/guilds/"+url.PathEscape(guildID)+"/members/"+url.PathEscape(userID), &member)
 	if err != nil {
 		return fmt.Errorf("discordguild: GET /guilds/members: %w", err)
@@ -147,29 +133,4 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 		}
 	}
 	return ErrNoPermission
-}
-
-// getJSON issues an authenticated Bot GET and, on 200, decodes the body into
-// out. It returns the HTTP status (so the caller maps 403/404 to sentinels) and
-// an error only for transport or decode failures.
-func getJSON(ctx context.Context, token, rawURL string, out any) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bot "+token)
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := guildClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, nil
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return resp.StatusCode, fmt.Errorf("decode: %w", err)
-	}
-	return resp.StatusCode, nil
 }

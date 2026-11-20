@@ -594,6 +594,8 @@ type countingHealthSeams struct {
 }
 
 func (c *countingHealthSeams) wire(srv *VoiceServer) {
+	// The deployment has every env key, so an unsaved slot is still probed.
+	srv.lookupEnv = func(string) string { return "platform-env-key" }
 	srv.newLister = func(string) tts.VoiceLister {
 		c.lister.Add(1)
 		return &fakeLister{}
@@ -891,6 +893,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 	// The #504 guild-admin proof is out of scope here: stub it to pass, give the
 	// check-token ladder an env token, and put a saver identity in the context.
 	providerSrv.checkGuildAdmin = func(context.Context, string, string, string) error { return nil }
+	providerSrv.voiceChannelInGuild = func(context.Context, string, string, string) (bool, error) { return true, nil }
 	providerSrv.SetEnvBotToken("env-bot-token")
 
 	ctx := auth.WithUser(tenantCtx(), storage.User{ID: uuid.New(), DiscordUserID: "555000000000000000"})

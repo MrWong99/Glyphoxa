@@ -167,14 +167,8 @@ func (s *SessionServer) Handler(opts ...connect.HandlerOption) (string, http.Han
 	return managementv1connect.NewSessionServiceHandler(s, opts...)
 }
 
-// tenant resolves the operator's tenant from the auth interceptor's context.
-func (s *SessionServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *SessionServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // GetSession returns the running session when one is live, otherwise the most
 // recent ended session for the active campaign (the screen's last-session
@@ -244,8 +238,17 @@ func (s *SessionServer) StartSession(
 	// non-id string (a channel NAME, a pasted URL) fails fast here instead of
 	// riding into the voice loop's Discord join.
 	voiceChannelID := req.Msg.GetVoiceChannelId()
-	if voiceChannelID != "" && !snowflakePattern.MatchString(voiceChannelID) {
+	if voiceChannelID != "" && !isSnowflake(voiceChannelID) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_channel_id must be a Discord channel id"))
+	}
+	// The picker is the SPA's convenience, not the tenancy boundary (R9): with
+	// a shared central Bot token (ADR-0057) any snowflake would be joinable, so
+	// an explicit pick must be one of THIS Tenant's linked guild's voice
+	// channels — the PostClip posture. Unwired (web-standalone tests) skips.
+	if voiceChannelID != "" {
+		if err := s.checkVoiceChannelLinked(ctx, voiceChannelID); err != nil {
+			return nil, err
+		}
 	}
 
 	campaign, err := s.startCampaign(ctx)

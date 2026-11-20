@@ -46,9 +46,20 @@ export const en = {
   // answering; "Working" only once the probe succeeded.
   "config.badgeKeyNeeded": "Key needed",
   "config.badgeOptional": "Optional",
+  // An unsaved slot the deployment provides for this tenant (trial Platform
+  // Keys, the central Bot) — pasting an own key still overrides it.
+  "config.badgeIncluded": "Included",
   "config.badgeSaved": "Saved",
   "config.badgeWorking": "Working",
   "config.badgeDegraded": "Having trouble",
+
+  // Why a probe failed — one sentence per stable ProviderHealth.code.
+  "config.healthMissingKey": "No key yet — paste one to use this service.",
+  "config.healthKeyRejected": "The key was rejected — check it or paste a new one.",
+  "config.healthQuotaExhausted": "Out of quota or rate-limited — check your plan, or try again later.",
+  "config.healthUnreachable": "Couldn't reach the service — try again shortly.",
+  "config.healthNoPlatformKeys": "Your plan doesn't include our keys — paste your own key.",
+  "config.healthCheckFailed": "The check failed — try again shortly.",
 
   // Standing Discord integration badge (#489).
   "config.discordIntegrationFailed": "Discord connection failed",
@@ -142,9 +153,18 @@ export const de: Record<keyof typeof en, string> = {
 
   "config.badgeKeyNeeded": "Schlüssel fehlt",
   "config.badgeOptional": "Optional",
+  "config.badgeIncluded": "Inklusive",
   "config.badgeSaved": "Gespeichert",
   "config.badgeWorking": "Funktioniert",
   "config.badgeDegraded": "Hat Probleme",
+
+  "config.healthMissingKey": "Noch kein Schlüssel — füge einen ein, um diesen Dienst zu nutzen.",
+  "config.healthKeyRejected": "Der Schlüssel wurde abgelehnt — prüfe ihn oder füge einen neuen ein.",
+  "config.healthQuotaExhausted":
+    "Kontingent aufgebraucht oder Ratenlimit erreicht — prüfe deinen Tarif oder versuche es später erneut.",
+  "config.healthUnreachable": "Der Dienst ist nicht erreichbar — versuche es gleich noch einmal.",
+  "config.healthNoPlatformKeys": "Dein Tarif enthält unsere Schlüssel nicht — füge deinen eigenen ein.",
+  "config.healthCheckFailed": "Die Prüfung ist fehlgeschlagen — versuche es gleich noch einmal.",
 
   "config.discordIntegrationFailed": "Discord-Verbindung fehlgeschlagen",
   "config.discordIntegrationReconnecting": "Verbindet neu mit Discord",

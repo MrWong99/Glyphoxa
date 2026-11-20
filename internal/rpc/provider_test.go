@@ -200,6 +200,8 @@ const testSaverDiscordID = "555000000000000000"
 func clientForServer(t *testing.T, server *rpc.ProviderServer) (managementv1connect.ProviderServiceClient, uuid.UUID) {
 	t.Helper()
 	server.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
+	// Likewise the R9 channel-in-guild check: every channel belongs.
+	server.SetVoiceChannelCheckForTest(func(context.Context, string, string, string) (bool, error) { return true, nil })
 	return mountProviderServer(t, server, true)
 }
 
@@ -208,6 +210,8 @@ func clientForServer(t *testing.T, server *rpc.ProviderServer) (managementv1conn
 func clientForServerNoUser(t *testing.T, server *rpc.ProviderServer) (managementv1connect.ProviderServiceClient, uuid.UUID) {
 	t.Helper()
 	server.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
+	// Likewise the R9 channel-in-guild check: every channel belongs.
+	server.SetVoiceChannelCheckForTest(func(context.Context, string, string, string) (bool, error) { return true, nil })
 	return mountProviderServer(t, server, false)
 }
 
@@ -582,6 +586,67 @@ func TestProviderDiscordSettings_GuildOwnedByOtherTenant(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "another tenant") {
 		t.Errorf("save owned guild err = %v, want a message naming the other-tenant binding", err)
+	}
+	// A refused guild leaves NOTHING changed — the riding token included: it
+	// used to be written before the guild and survived the refusal.
+	if store.dep != nil && store.dep.DiscordBotTokenLast4 != "" {
+		t.Errorf("refused guild save replaced the bot token (last4 %q)", store.dep.DiscordBotTokenLast4)
+	}
+}
+
+// TestProviderDiscordSettings_ChannelMustBeInGuild pins R9 on the durable
+// Default Voice Channel: a channel that is not one of the guild's voice
+// channels is a GM-readable InvalidArgument and nothing is written — for the
+// guild+channel link and for the channel-only save (checked against the
+// already-linked guild).
+func TestProviderDiscordSettings_ChannelMustBeInGuild(t *testing.T) {
+	t.Parallel()
+	type call struct{ guild, channel string }
+	var calls []call
+	check := func(_ context.Context, _, guildID, channelID string) (bool, error) {
+		calls = append(calls, call{guildID, channelID})
+		return channelID == "472093774421", nil
+	}
+
+	store := newFakeProviderStore()
+	srv := rpc.NewProviderServer(store, testCipher(t), nil)
+	srv.SetEnvBotToken("central-token")
+	client, _ := clientForServer(t, srv)
+	srv.SetVoiceChannelCheckForTest(check)
+
+	_, err := client.SaveDiscordSettings(context.Background(), connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("999999999999"),
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "not in your linked Discord server") {
+		t.Fatalf("foreign channel with guild = %v, want GM-readable CodeInvalidArgument", err)
+	}
+	if store.channelsCalls != 0 || store.dep != nil {
+		t.Fatalf("a refused channel wrote (calls %d, dep %+v)", store.channelsCalls, store.dep)
+	}
+
+	// Link the guild, then a channel-only save is checked against it.
+	store.dep = &storage.DeploymentConfig{GuildID: "472093001100"}
+	_, err = client.SaveDiscordSettings(context.Background(), connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		VoiceChannelId: strPtr("999999999999"),
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("foreign channel-only save = %v, want CodeInvalidArgument", err)
+	}
+	if store.dep.VoiceChannelID != "" {
+		t.Fatalf("refused channel persisted: %q", store.dep.VoiceChannelID)
+	}
+	if _, err := client.SaveDiscordSettings(context.Background(), connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		VoiceChannelId: strPtr("472093774421"),
+	})); err != nil {
+		t.Fatalf("linked channel-only save: %v", err)
+	}
+	if store.dep.VoiceChannelID != "472093774421" {
+		t.Fatalf("linked channel not saved: %q", store.dep.VoiceChannelID)
+	}
+	for _, c := range calls {
+		if c.guild != "472093001100" {
+			t.Errorf("channel %s checked against guild %q, want the linked one", c.channel, c.guild)
+		}
 	}
 }
 

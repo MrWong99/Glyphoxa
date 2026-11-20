@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -143,6 +144,70 @@ func TestStartSessionPassesVoiceChannel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStartSessionChannelMustBeInLinkedGuild pins R9: with the channel lister
+// wired, an explicit voice_channel_id that is not one of the linked guild's
+// voice channels is a GM-readable InvalidArgument and Start never runs — the
+// PostClip posture, since the central Bot token can reach any guild. A
+// listed channel and the guild-default ("") both pass through.
+func TestStartSessionChannelMustBeInLinkedGuild(t *testing.T) {
+	t.Parallel()
+	lister := &fakeChannelLister{channels: []discordshare.Channel{{ID: "111", Name: "Tavern"}}}
+	start := func(t *testing.T, l *fakeChannelLister, channel string) (*fakeSessionManager, error) {
+		t.Helper()
+		mgr := &fakeSessionManager{}
+		inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+			return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+				return next(auth.WithTenant(ctx, uuid.New()), req)
+			}
+		})
+		srv := rpc.NewSessionServer(mgr, activeStore(), nil, nil)
+		srv.SetVoiceChannels(l, &fakeDeploymentReader{dep: storage.DeploymentConfig{GuildID: "g1"}})
+		mux := http.NewServeMux()
+		mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
+		hsrv := httptest.NewServer(mux)
+		t.Cleanup(hsrv.Close)
+		client := managementv1connect.NewSessionServiceClient(http.DefaultClient, hsrv.URL, connect.WithProtoJSON())
+		_, err := client.StartSession(context.Background(),
+			connect.NewRequest(&managementv1.StartSessionRequest{VoiceChannelId: channel}))
+		return mgr, err
+	}
+
+	t.Run("foreign channel refused", func(t *testing.T) {
+		t.Parallel()
+		mgr, err := start(t, lister, "999999999")
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("foreign channel = %v, want CodeInvalidArgument", err)
+		}
+		if !strings.Contains(err.Error(), "not in your linked Discord server") {
+			t.Errorf("message %q is not GM-readable", err)
+		}
+		if mgr.startCalls != 0 {
+			t.Fatalf("manager Start ran %d times, want 0", mgr.startCalls)
+		}
+	})
+	t.Run("linked channel accepted", func(t *testing.T) {
+		t.Parallel()
+		mgr, err := start(t, lister, "111")
+		if err != nil || mgr.startVoiceChan != "111" {
+			t.Fatalf("linked channel: err %v, manager got %q", err, mgr.startVoiceChan)
+		}
+	})
+	t.Run("guild default skips the lister", func(t *testing.T) {
+		t.Parallel()
+		mgr, err := start(t, &fakeChannelLister{err: errors.New("must not be called")}, "")
+		if err != nil || mgr.startCalls != 1 {
+			t.Fatalf("default channel: err %v, starts %d", err, mgr.startCalls)
+		}
+	})
+	t.Run("no token is a precondition", func(t *testing.T) {
+		t.Parallel()
+		_, err := start(t, &fakeChannelLister{err: rpc.ErrNoDiscordToken}, "111")
+		if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+			t.Fatalf("no token = %v, want CodeFailedPrecondition", err)
+		}
+	})
 }
 
 // TestStartSessionRejectsNonSnowflakeChannel: a voice_channel_id that is not

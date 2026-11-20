@@ -35,3 +35,18 @@ func (d *DeploymentSharer) SetVoiceListSeamForTest(
 func (s *ProviderServer) SetGuildProofForTest(fn func(ctx context.Context, token, guildID, userID string) error) {
 	s.checkGuildAdmin = fn
 }
+
+// SetEnvLookupForTest overrides the deployment env read behind
+// provided_by_platform (W9) so a test pins which Platform Keys exist.
+func (s *ProviderServer) SetEnvLookupForTest(fn func(string) string) {
+	s.lookupEnv = fn
+}
+
+// SetVoiceChannelCheckForTest overrides the R9 Default-Voice-Channel-in-guild
+// seam so SaveDiscordSettings never dials Discord in unit tests.
+func (s *ProviderServer) SetVoiceChannelCheckForTest(fn func(ctx context.Context, token, guildID, channelID string) (bool, error)) {
+	s.voiceChannelInGuild = fn
+}
+
+// GMText exposes the GM-facing sentinel-text rewrite.
+var GMText = gmText

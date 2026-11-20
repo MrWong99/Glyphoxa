@@ -3,13 +3,11 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -107,7 +105,7 @@ func (s *campaignArchive) requireOwned(ctx context.Context, tenantID, id uuid.UU
 		if errors.Is(err, storage.ErrNotFound) {
 			return connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error(op+": tenant-scoped campaign lookup failed", "campaign_id", id, "err", err)
+		s.active.logger().Error(op+": tenant-scoped campaign lookup failed", "campaign_id", id, "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return nil
@@ -126,9 +124,9 @@ func (s *campaignArchive) ArchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.requireOwned(ctx, tenantID, id, "ArchiveCampaign"); err != nil {
 		return nil, err
@@ -142,8 +140,7 @@ func (s *campaignArchive) ArchiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("ArchiveCampaign: store archive failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ArchiveCampaign: store archive failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.ArchiveCampaignResponse{Campaign: toProtoCampaign(c)}), nil
 }
@@ -159,9 +156,9 @@ func (s *campaignArchive) UnarchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	c, err := s.store.UnarchiveCampaign(ctx, tenantID, id)
@@ -169,8 +166,7 @@ func (s *campaignArchive) UnarchiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("UnarchiveCampaign: store unarchive failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UnarchiveCampaign: store unarchive failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.UnarchiveCampaignResponse{Campaign: toProtoCampaign(c)}), nil
 }
@@ -189,9 +185,9 @@ func (s *campaignArchive) DeleteCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.requireOwned(ctx, tenantID, id, "DeleteCampaign"); err != nil {
 		return nil, err
@@ -207,20 +203,17 @@ func (s *campaignArchive) DeleteCampaign(
 	if s.campaignBlobs != nil {
 		keys, err := s.campaignBlobs.CampaignClipKeys(ctx, id)
 		if err != nil {
-			slog.Default().Error("DeleteCampaign: list highlight clip keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list highlight clip keys failed", err, "campaign_id", id)
 		}
 		blobKeys = keys
 		mapKeys, err := s.campaignBlobs.CampaignMapImageKeys(ctx, id)
 		if err != nil {
-			slog.Default().Error("DeleteCampaign: list map image keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list map image keys failed", err, "campaign_id", id)
 		}
 		blobKeys = append(blobKeys, mapKeys...)
 		portraitKeys, err := s.campaignBlobs.CampaignPortraitKeys(ctx, id)
 		if err != nil {
-			slog.Default().Error("DeleteCampaign: list portrait keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list portrait keys failed", err, "campaign_id", id)
 		}
 		blobKeys = append(blobKeys, portraitKeys...)
 	}
@@ -240,8 +233,7 @@ func (s *campaignArchive) DeleteCampaign(
 	if len(blobKeys) > 0 {
 		payload, merr := highlight.MarshalCampaignSweep(blobKeys)
 		if merr != nil {
-			slog.Default().Error("DeleteCampaign: marshal clip sweep payload failed", "campaign_id", id, "err", merr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: marshal clip sweep payload failed", merr, "campaign_id", id)
 		}
 		deleteErr = s.store.DeleteCampaignWithJob(ctx, tenantID, id, highlight.JobKindSweepCampaignClips, payload)
 	} else {
@@ -254,8 +246,7 @@ func (s *campaignArchive) DeleteCampaign(
 		case errors.Is(deleteErr, storage.ErrNotArchived):
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("campaign must be archived before deletion"))
 		default:
-			slog.Default().Error("DeleteCampaign: store delete failed", "campaign_id", id, "err", deleteErr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: store delete failed", deleteErr, "campaign_id", id)
 		}
 	}
 
@@ -264,7 +255,7 @@ func (s *campaignArchive) DeleteCampaign(
 	// blob for the durable sweep job (idempotent Delete), never failing the RPC.
 	for _, k := range blobKeys {
 		if err := s.campaignBlobs.DeleteBlob(ctx, k); err != nil {
-			slog.Default().Warn("DeleteCampaign: blob sweep deferred to job", "campaign_id", id, "key", k, "err", err)
+			s.active.logger().Warn("DeleteCampaign: blob sweep deferred to job", "campaign_id", id, "key", k, "err", err)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteCampaignResponse{}), nil

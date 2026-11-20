@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -74,8 +73,7 @@ func (s *characterRoster) ListCharacters(
 
 	chars, err := s.store.ListCharacters(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("ListCharacters: store list failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ListCharacters: store list failed", err, "campaign_id", c.ID)
 	}
 
 	out := mapSlice(chars, toProtoCharacter)
@@ -113,8 +111,7 @@ func (s *characterRoster) CreateCharacter(
 		if errors.Is(err, storage.ErrConflict) {
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		}
-		slog.Default().Error("CreateCharacter: store create failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateCharacter: store create failed", err)
 	}
 	// A new speaker→Character mapping: drop the campaign's cached resolutions so the
 	// live relay attributes this Discord User's next line to the new Character (#281).
@@ -171,8 +168,7 @@ func (s *characterRoster) UpdateCharacter(
 		case errors.Is(err, storage.ErrConflict):
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		default:
-			slog.Default().Error("UpdateCharacter: store update failed", "character_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "UpdateCharacter: store update failed", err, "character_id", id)
 		}
 	}
 	// A rebind or rename changes how this Discord User resolves: drop the campaign's
@@ -210,8 +206,7 @@ func (s *characterRoster) DeleteCharacter(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("character not found"))
 	default:
-		slog.Default().Error("DeleteCharacter: store delete failed", "character_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "DeleteCharacter: store delete failed", err, "character_id", id)
 	}
 }
 
@@ -227,21 +222,6 @@ func validateCharacterFields(trimmedName, discordUserID string) (string, error) 
 		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("discord_user_id must be a discord snowflake (digits only)"))
 	}
 	return discordUserID, nil
-}
-
-// isSnowflake reports whether s is a non-empty run of decimal digits — the shape
-// of a Discord snowflake id. It rejects empty, signed, or non-numeric input
-// before it ever reaches storage.
-func isSnowflake(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // toProtoCharacter maps a storage.Character onto its wire representation. The
