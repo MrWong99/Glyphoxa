@@ -39,3 +39,45 @@ func TestAnswerAsText(t *testing.T) {
 		})
 	}
 }
+
+// TestAnswerAsText_PhrasesMatchWholeWords pins O10: a modality phrase must match
+// as words, not as a raw substring — "im Chateau" contains "im chat" and used to
+// force a spoken answer into the channel chat.
+func TestAnswerAsText_PhrasesMatchWholeWords(t *testing.T) {
+	short := "Sure."
+	for _, utterance := range []string{
+		"Was gibt es im Chateau zu sehen?",
+		"Bart, is the task textures thing done?",
+		"Wer wohnt im Chatelet?",
+		"Did you repost italics again?",
+	} {
+		if AnswerAsText(utterance, short, false) {
+			t.Errorf("AnswerAsText(%q) = text, want voice (no whole-word text phrase)", utterance)
+		}
+	}
+	long := strings.Repeat("x", textLengthThreshold+1)
+	for _, utterance := range []string{
+		"Is the door allowed to be opened?", // "aloud" is not in "allowed", but pin the neighbours
+		"Sag essen ist fertig.",             // contains "sag es" only as a substring
+		"He would say item three.",          // contains "say it" only as a substring
+	} {
+		if !AnswerAsText(utterance, long, false) {
+			t.Errorf("AnswerAsText(%q, long) = voice, want text (no whole-word voice phrase)", utterance)
+		}
+	}
+	// The real requests still win, with any punctuation around them.
+	for _, utterance := range []string{
+		"Schreib das im Chat!", "Post it, please.", "Antworte bitte als Text.",
+		// German compounds of the same request (F9).
+		"Schick mir das als Textnachricht.", "Schreib es bitte im Chatfenster.", "Poste das in den Chat.",
+	} {
+		if !AnswerAsText(utterance, short, false) {
+			t.Errorf("AnswerAsText(%q) = voice, want text", utterance)
+		}
+	}
+	for _, utterance := range []string{"Sag es!", "Read it aloud, please.", "Tell us in voice."} {
+		if AnswerAsText(utterance, long, false) {
+			t.Errorf("AnswerAsText(%q, long) = text, want voice", utterance)
+		}
+	}
+}

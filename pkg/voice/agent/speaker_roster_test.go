@@ -121,7 +121,7 @@ func TestSystemPrompt_RosterWithoutSpeakerName_Absent(t *testing.T) {
 	r.Reply()(t.Context(), routed("bart", "Hello, innkeeper."))
 
 	sys := prov.lastRequest(t).Messages[0].Text
-	want := "You are Bart, the innkeeper.\n\n" + sentinelMarkup
+	want := "You are Bart, the innkeeper.\n\n" + agent.SpokenOutputRuleWithMarkup + "\n\n" + sentinelMarkup
 	if sys != want {
 		t.Errorf("roster-without-resolver prompt not byte-identical:\n got %q\nwant %q", sys, want)
 	}

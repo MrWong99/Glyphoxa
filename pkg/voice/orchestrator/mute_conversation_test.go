@@ -37,7 +37,7 @@ func (e *pausingEngine) GenerateStream(ctx context.Context, _ []llm.Message, onT
 			return full.String(), err
 		}
 		full.WriteString(d)
-		if i == 0 {
+		if i == 1 { // after the SECOND delta: the test cuts the turn while sentence two is on air
 			e.closeFirst.Do(func() { close(e.firstDone) })
 			select {
 			case <-e.release:
@@ -50,19 +50,36 @@ func (e *pausingEngine) GenerateStream(ctx context.Context, _ []llm.Message, onT
 }
 
 // recSynth records every dispatched sentence so a test can assert which sentences
-// actually reached the pump (the delivered set, ADR-0012). It returns an
-// immediately-closed channel — no audio.
+// reached the pump. The FIRST sentence returns an immediately-closed channel (no
+// audio: delivered at once). Every later one stays "on air" until its ctx is
+// cancelled, and the second announces itself on playing — so a test can cut the
+// turn mid-sentence at a point where the first sentence is provably delivered
+// (the Agent dispatches sentence N+1 only after sentence N resolved). Generation
+// no longer runs in lockstep with playback, so "the engine pushed its first
+// delta" says nothing about delivery.
 type recSynth struct {
-	mu    sync.Mutex
-	spoke []string
+	mu      sync.Mutex
+	spoke   []string
+	playing chan struct{} // closed when the second sentence starts playing
 }
 
-func (s *recSynth) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+func (s *recSynth) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
 	s.mu.Lock()
 	s.spoke = append(s.spoke, req.Sentence)
+	n := len(s.spoke)
 	s.mu.Unlock()
 	ch := make(chan tts.AudioChunk)
-	close(ch)
+	if n == 1 {
+		close(ch)
+		return ch, nil
+	}
+	if n == 2 && s.playing != nil {
+		close(s.playing)
+	}
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
 	return ch, nil
 }
 
@@ -83,7 +100,7 @@ func (s *recSynth) spoken() []string {
 // identical.
 func TestMute_ConversationCutsSpeakingTurnLikeBarge(t *testing.T) {
 	h := voicetest.New(t)
-	synth := &recSynth{}
+	synth := &recSynth{playing: make(chan struct{})}
 	ttsStage := orchestrator.NewTTS(h.Bus, synth)
 
 	eng := &pausingEngine{
@@ -111,11 +128,12 @@ func TestMute_ConversationCutsSpeakingTurnLikeBarge(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
 
-	// Wait until the first sentence has been dispatched (the Agent is speaking).
+	// Wait until the first sentence is delivered and the second is on air (the
+	// Agent is speaking mid-reply).
 	select {
-	case <-eng.firstDone:
+	case <-synth.playing:
 	case <-time.After(2 * time.Second):
-		t.Fatal("the Agent never dispatched its first sentence")
+		t.Fatal("the Agent never got to its second sentence")
 	}
 	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Te2e"}) // audible on the wire
 
@@ -133,7 +151,7 @@ func TestMute_ConversationCutsSpeakingTurnLikeBarge(t *testing.T) {
 	)
 	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
 
-	// Only the delivered sentence reached the pump — the never-dispatched tail was dropped.
+	// Only the delivered sentence is committed — the cut one and the never-dispatched tail are dropped.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		hist := replier.HistorySnapshot()
@@ -145,8 +163,8 @@ func TestMute_ConversationCutsSpeakingTurnLikeBarge(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := synth.spoken(); len(got) != 1 || strings.TrimSpace(got[0]) != "First." {
-		t.Fatalf("delivered sentences = %q, want exactly [\"First.\"] (mid-sentence cut drops the tail)", got)
+	if got := synth.spoken(); len(got) != 2 || strings.TrimSpace(got[0]) != "First." || strings.TrimSpace(got[1]) != "Second." {
+		t.Fatalf("sentences that reached the pump = %q, want [\"First.\" \"Second.\"] (the cut drops the tail)", got)
 	}
 	hist := replier.HistorySnapshot()
 	assistant := hist[len(hist)-1]
