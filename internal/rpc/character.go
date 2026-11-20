@@ -73,8 +73,7 @@ func (s *characterRoster) ListCharacters(
 
 	chars, err := s.store.ListCharacters(ctx, c.ID)
 	if err != nil {
-		s.active.logger().Error("ListCharacters: store list failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ListCharacters: store list failed", err, "campaign_id", c.ID)
 	}
 
 	out := mapSlice(chars, toProtoCharacter)
@@ -112,8 +111,7 @@ func (s *characterRoster) CreateCharacter(
 		if errors.Is(err, storage.ErrConflict) {
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		}
-		s.active.logger().Error("CreateCharacter: store create failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateCharacter: store create failed", err)
 	}
 	// A new speaker→Character mapping: drop the campaign's cached resolutions so the
 	// live relay attributes this Discord User's next line to the new Character (#281).
@@ -170,8 +168,7 @@ func (s *characterRoster) UpdateCharacter(
 		case errors.Is(err, storage.ErrConflict):
 			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("a character for that discord user already exists in this campaign"))
 		default:
-			s.active.logger().Error("UpdateCharacter: store update failed", "character_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "UpdateCharacter: store update failed", err, "character_id", id)
 		}
 	}
 	// A rebind or rename changes how this Discord User resolves: drop the campaign's
@@ -209,8 +206,7 @@ func (s *characterRoster) DeleteCharacter(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("character not found"))
 	default:
-		s.active.logger().Error("DeleteCharacter: store delete failed", "character_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "DeleteCharacter: store delete failed", err, "character_id", id)
 	}
 }
 

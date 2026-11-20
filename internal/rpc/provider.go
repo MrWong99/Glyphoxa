@@ -281,8 +281,7 @@ func (s *ProviderServer) ListProviderConfigs(
 
 	configs, err := s.store.ListProviderConfigs(ctx, tenantID)
 	if err != nil {
-		s.log.Error("ListProviderConfigs: list provider_config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListProviderConfigs: list provider_config failed", err)
 	}
 	// Index by Component: each slot is represented by its FIRST component's row
 	// (ElevenLabs' stt/tts rows share one key, so either represents the slot),
@@ -297,8 +296,7 @@ func (s *ProviderServer) ListProviderConfigs(
 
 	dep, err := s.store.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("ListProviderConfigs: get deployment_config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListProviderConfigs: get deployment_config failed", err)
 	}
 	// ErrNotFound → zero DeploymentConfig (all empty): the unsaved, key-needed state.
 
@@ -395,8 +393,7 @@ func (s *ProviderServer) SaveProviderConfig(
 
 	sealed, last4, err := s.seal(secret)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: seal failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: seal failed", err)
 	}
 
 	model := req.Msg.GetModel()
@@ -413,8 +410,7 @@ func (s *ProviderServer) SaveProviderConfig(
 	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: upsert failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: upsert failed", err)
 	}
 
 	// The key changed: the cached health verdict (possibly Degraded from the
@@ -451,8 +447,7 @@ func (s *ProviderServer) saveModelOnly(
 			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
 		}
 		if err != nil {
-			s.log.Error("SaveProviderConfig: read provider_config for model-only save failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveProviderConfig: read provider_config for model-only save failed", err)
 		}
 		existing = append(existing, cfg)
 	}
@@ -476,8 +471,7 @@ func (s *ProviderServer) saveModelOnly(
 	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: model-only upsert failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: model-only upsert failed", err)
 	}
 
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
@@ -568,8 +562,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 	if hasChannel && !hasGuild {
 		dep, derr := s.store.GetDeploymentConfig(ctx, tenantID)
 		if derr != nil && !errors.Is(derr, storage.ErrNotFound) {
-			s.log.Error("SaveDiscordSettings: load deployment config failed", "err", derr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: load deployment config failed", derr)
 		}
 		if dep.GuildID == "" {
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
@@ -592,8 +585,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 		// Seal before any write so a seal failure mutates nothing.
 		sealed, last4, err = s.seal(req.Msg.GetBotToken())
 		if err != nil {
-			s.log.Error("SaveDiscordSettings: seal failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: seal failed", err)
 		}
 	}
 
@@ -635,16 +627,14 @@ func (s *ProviderServer) SaveDiscordSettings(
 				errors.New("this Discord server is already linked by another tenant; it must unlink there first"))
 		}
 		if err != nil {
-			s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: save channels failed", err)
 		}
 	}
 
 	if req.Msg.BotToken != nil {
 		dep, err = s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4)
 		if err != nil {
-			s.log.Error("SaveDiscordSettings: save token failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: save token failed", err)
 		}
 	}
 
@@ -702,8 +692,7 @@ func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID
 		return connect.NewError(connect.CodePermissionDenied,
 			errors.New("you need the Manage Server permission in that Discord server to link it"))
 	default:
-		s.log.Error("SaveDiscordSettings: guild-admin proof failed", "err", err)
-		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return internalErr(s.log, "SaveDiscordSettings: guild-admin proof failed", err)
 	}
 }
 
@@ -746,8 +735,7 @@ func (s *ProviderServer) checkVoiceChannelInGuild(ctx context.Context, tenantID 
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("the Bot is not a member of that server"))
 	case err != nil:
-		s.log.Error("SaveDiscordSettings: list guild voice channels failed", "err", err)
-		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return internalErr(s.log, "SaveDiscordSettings: list guild voice channels failed", err)
 	}
 	if !linked {
 		return connect.NewError(connect.CodeInvalidArgument, errVoiceChannelNotLinked)
@@ -786,8 +774,7 @@ func (s *ProviderServer) ReleaseDiscordGuild(
 			errors.New("that Discord server is not the one currently linked; reload and try again"))
 	}
 	if err != nil {
-		s.log.Error("ReleaseDiscordGuild: store release failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ReleaseDiscordGuild: store release failed", err)
 	}
 
 	// The binding changed: bust the cached health verdict and reconcile the
@@ -897,8 +884,7 @@ func (s *ProviderServer) GetSpendCaps(
 	}
 	caps, err := s.store.GetTenantSpendCaps(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("GetSpendCaps: store read failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "GetSpendCaps: store read failed", err)
 	}
 	return connect.NewResponse(&managementv1.GetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
 }
@@ -935,8 +921,7 @@ func (s *ProviderServer) SetSpendCaps(
 	}
 
 	if err := s.store.SetTenantSpendCaps(ctx, tenantID, caps); err != nil {
-		s.log.Error("SetSpendCaps: store write failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SetSpendCaps: store write failed", err)
 	}
 	return connect.NewResponse(&managementv1.SetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
 }
@@ -974,8 +959,7 @@ func (s *ProviderServer) resolveBotToken(ctx context.Context, tenantID uuid.UUID
 		return "", nil
 	}
 	if err != nil {
-		s.log.Error("resolveBotToken: store read failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveBotToken: store read failed", err)
 	}
 	return s.openKey(dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext)
 }
@@ -1000,8 +984,7 @@ func (s *ProviderServer) openKey(last4 string, ciphertext []byte) (string, error
 	}
 	plaintext, err := s.cipher.Open(ciphertext)
 	if err != nil {
-		s.log.Error("openKey: decrypt failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "openKey: decrypt failed", err)
 	}
 	return string(plaintext), nil
 }

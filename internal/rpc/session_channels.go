@@ -85,8 +85,7 @@ func (s *SessionServer) ListSessionVoiceChannels(
 
 	dep, err := s.deployments.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("ListSessionVoiceChannels: load deployment config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListSessionVoiceChannels: load deployment config failed", err)
 	}
 	if dep.GuildID == "" {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))

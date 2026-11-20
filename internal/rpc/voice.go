@@ -736,8 +736,7 @@ func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUI
 	case errors.Is(err, storage.ErrNotFound):
 		// No row: an env-fallback candidate (nil cfg).
 	case err != nil:
-		s.log.Error("resolveComponentKey: store read failed", "component", component, "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveComponentKey: store read failed", err, "component", component)
 	case !isSaved(cfg.CredentialsLast4):
 		// A row without a saved key ("" or the "env" placeholder) is the same
 		// env-fallback candidate as no row. Normalize to nil: llmbuild treats
@@ -758,8 +757,7 @@ func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUI
 	default:
 		// Decrypt or entitlement-read failure (the latter fails CLOSED): log
 		// the detail, return the generic wire error.
-		s.log.Error("resolveComponentKey: resolve failed", "component", component, "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveComponentKey: resolve failed", err, "component", component)
 	}
 }
 
@@ -771,8 +769,7 @@ func (s *VoiceServer) resolveDiscordToken(ctx context.Context, tenantID uuid.UUI
 		return "", nil
 	}
 	if err != nil {
-		s.log.Error("resolveDiscordToken: store read failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveDiscordToken: store read failed", err)
 	}
 	return s.openKey(dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext)
 }
@@ -788,8 +785,7 @@ func (s *VoiceServer) openKey(last4 string, ciphertext []byte) (string, error) {
 	}
 	plaintext, err := s.cipher.Open(ciphertext)
 	if err != nil {
-		s.log.Error("openKey: decrypt failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "openKey: decrypt failed", err)
 	}
 	return string(plaintext), nil
 }

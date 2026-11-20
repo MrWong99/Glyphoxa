@@ -53,8 +53,7 @@ func (s *kgOrganize) GetCampaignTags(
 	}
 	pairs, err := s.store.CampaignTags(ctx, c.ID)
 	if err != nil {
-		s.active.logger().Error("GetCampaignTags: store read failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "GetCampaignTags: store read failed", err, "campaign_id", c.ID)
 	}
 	out := &managementv1.GetCampaignTagsResponse{Entries: make([]*managementv1.TaggedEntry, 0, len(pairs))}
 	for _, p := range pairs {
@@ -88,13 +87,11 @@ func (s *kgOrganize) SetNodeTags(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("entry not found"))
 		}
-		s.active.logger().Error("SetNodeTags: store write failed", "node_id", nodeID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "SetNodeTags: store write failed", err, "node_id", nodeID)
 	}
 	saved, err := s.store.NodeTags(ctx, c.ID, nodeID)
 	if err != nil {
-		s.active.logger().Error("SetNodeTags: read back failed", "node_id", nodeID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "SetNodeTags: read back failed", err, "node_id", nodeID)
 	}
 	return connect.NewResponse(&managementv1.SetNodeTagsResponse{Tags: saved}), nil
 }
@@ -118,8 +115,7 @@ func (s *kgOrganize) RenameTag(
 		if errors.Is(err, storage.ErrInvalidTag) {
 			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
-		s.active.logger().Error("RenameTag: store write failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "RenameTag: store write failed", err, "campaign_id", c.ID)
 	}
 	return connect.NewResponse(&managementv1.RenameTagResponse{}), nil
 }
@@ -135,8 +131,7 @@ func (s *kgOrganize) ListBoards(
 	}
 	boards, err := s.store.ListBoards(ctx, c.ID)
 	if err != nil {
-		s.active.logger().Error("ListBoards: store read failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ListBoards: store read failed", err, "campaign_id", c.ID)
 	}
 	out := &managementv1.ListBoardsResponse{Boards: make([]*managementv1.Board, 0, len(boards))}
 	for _, b := range boards {
@@ -163,8 +158,7 @@ func (s *kgOrganize) CreateBoard(
 		if errors.Is(err, storage.ErrInvalidTag) {
 			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
-		s.active.logger().Error("CreateBoard: store write failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateBoard: store write failed", err, "campaign_id", c.ID)
 	}
 	return connect.NewResponse(&managementv1.CreateBoardResponse{Board: toProtoBoard(b)}), nil
 }
@@ -207,14 +201,12 @@ func (s *kgOrganize) UpdateBoard(
 		if errors.Is(err, storage.ErrInvalidTag) {
 			return nil, connect.NewError(connect.CodeInvalidArgument, gmError(err))
 		}
-		s.active.logger().Error("UpdateBoard: save failed", "board_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UpdateBoard: save failed", err, "board_id", id)
 	}
 
 	boards, err := s.store.ListBoards(ctx, c.ID)
 	if err != nil {
-		s.active.logger().Error("UpdateBoard: read back failed", "board_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UpdateBoard: read back failed", err, "board_id", id)
 	}
 	for _, b := range boards {
 		if b.ID == id {
@@ -244,8 +236,7 @@ func (s *kgOrganize) DeleteBoard(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("board not found"))
 	default:
-		s.active.logger().Error("DeleteBoard: store delete failed", "board_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "DeleteBoard: store delete failed", err, "board_id", id)
 	}
 }
 

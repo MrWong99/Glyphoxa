@@ -140,8 +140,7 @@ func (s *campaignArchive) ArchiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		s.active.logger().Error("ArchiveCampaign: store archive failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ArchiveCampaign: store archive failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.ArchiveCampaignResponse{Campaign: toProtoCampaign(c)}), nil
 }
@@ -167,8 +166,7 @@ func (s *campaignArchive) UnarchiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		s.active.logger().Error("UnarchiveCampaign: store unarchive failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UnarchiveCampaign: store unarchive failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.UnarchiveCampaignResponse{Campaign: toProtoCampaign(c)}), nil
 }
@@ -205,20 +203,17 @@ func (s *campaignArchive) DeleteCampaign(
 	if s.campaignBlobs != nil {
 		keys, err := s.campaignBlobs.CampaignClipKeys(ctx, id)
 		if err != nil {
-			s.active.logger().Error("DeleteCampaign: list highlight clip keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list highlight clip keys failed", err, "campaign_id", id)
 		}
 		blobKeys = keys
 		mapKeys, err := s.campaignBlobs.CampaignMapImageKeys(ctx, id)
 		if err != nil {
-			s.active.logger().Error("DeleteCampaign: list map image keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list map image keys failed", err, "campaign_id", id)
 		}
 		blobKeys = append(blobKeys, mapKeys...)
 		portraitKeys, err := s.campaignBlobs.CampaignPortraitKeys(ctx, id)
 		if err != nil {
-			s.active.logger().Error("DeleteCampaign: list portrait keys failed", "campaign_id", id, "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: list portrait keys failed", err, "campaign_id", id)
 		}
 		blobKeys = append(blobKeys, portraitKeys...)
 	}
@@ -238,8 +233,7 @@ func (s *campaignArchive) DeleteCampaign(
 	if len(blobKeys) > 0 {
 		payload, merr := highlight.MarshalCampaignSweep(blobKeys)
 		if merr != nil {
-			s.active.logger().Error("DeleteCampaign: marshal clip sweep payload failed", "campaign_id", id, "err", merr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: marshal clip sweep payload failed", merr, "campaign_id", id)
 		}
 		deleteErr = s.store.DeleteCampaignWithJob(ctx, tenantID, id, highlight.JobKindSweepCampaignClips, payload)
 	} else {
@@ -252,8 +246,7 @@ func (s *campaignArchive) DeleteCampaign(
 		case errors.Is(deleteErr, storage.ErrNotArchived):
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("campaign must be archived before deletion"))
 		default:
-			s.active.logger().Error("DeleteCampaign: store delete failed", "campaign_id", id, "err", deleteErr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.active.logger(), "DeleteCampaign: store delete failed", deleteErr, "campaign_id", id)
 		}
 	}
 
