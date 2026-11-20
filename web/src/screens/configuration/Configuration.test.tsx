@@ -24,6 +24,7 @@ import {
   GetSpendCapsResponseSchema,
   SetSpendCapsResponseSchema,
   SpendCapsSchema,
+  ListSupportedLanguagesResponseSchema,
   type ProviderHealth,
   type SaveDiscordSettingsRequest,
   type SetSpendCapsRequest,
@@ -1015,10 +1016,54 @@ describe("Configuration first-run (#267)", () => {
 
     // The create CTA — pre-filled with the seed defaults — stands in for the card.
     expect(await screen.findByText(/create your first campaign/i)).toBeInTheDocument();
-    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("dnd5e");
-    expect((screen.getByLabelText("Spoken language") as HTMLInputElement).value).toBe("en");
+    expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
+    // Spoken language is the same SELECT Campaign settings uses, defaulting to
+    // the display language.
+    expect(screen.getByRole("combobox", { name: /spoken language/i })).toHaveTextContent("English (en)");
     // …and the old error card is gone.
     expect(screen.queryByText(/couldn.t load the active campaign/i)).not.toBeInTheDocument();
+  });
+
+  it("defaults the new campaign's spoken language to the German display language and sends it", async () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      const created: Array<{ system: string; language: string }> = [];
+      const transport = createRouterTransport(({ service }) => {
+        service(VoiceService, {
+          getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+          listModels: () => create(ListModelsResponseSchema, { models: [] }),
+        });
+        service(ProviderService, {
+          listProviderConfigs: () =>
+            create(ListProviderConfigsResponseSchema, {
+              credentials: [],
+              guildId: "",
+              voiceChannelId: "",
+              discordApplicationId: "",
+            }),
+          getSpendCaps: () => create(GetSpendCapsResponseSchema, { caps: create(SpendCapsSchema, {}) }),
+        });
+        service(CampaignService, {
+          getActiveCampaign: () => {
+            throw new ConnectError("no campaign", Code.NotFound);
+          },
+          listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
+          createCampaign: (req) => {
+            created.push({ system: req.system, language: req.language });
+            throw new ConnectError("stop here", Code.Internal);
+          },
+        });
+      });
+      renderScreen(transport);
+      await waitFor(() =>
+        expect(screen.getByRole("combobox", { name: /gesprochene sprache/i })).toHaveTextContent("Deutsch (de)"),
+      );
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Fluch" } });
+      fireEvent.click(screen.getByRole("button", { name: /^kampagne erstellen$/i }));
+      await waitFor(() => expect(created).toEqual([{ system: "D&D 5e", language: "de" }]));
+    } finally {
+      localStorage.clear();
+    }
   });
 
   it("creates the first campaign from the CTA and swaps in the live header", async () => {
