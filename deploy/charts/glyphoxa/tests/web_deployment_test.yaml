@@ -2,7 +2,7 @@ suite: web-mode Deployment
 # The web Deployment runs the single image in `web` (or `all`) Mode: the operator
 # console (SPA) + the Connect API behind a Discord-OAuth gate (#118, ADR-0039). It
 # consumes GLYPHOXA_DATABASE_URL, GLYPHOXA_SECRET (it decrypts BYOK provider
-# credentials — unlike voice), the Discord bot token, the three provider keys, and
+# credentials), the Discord bot token, the three provider keys, and
 # the three Discord OAuth credentials + the operator allowlist from the app Secret.
 # It exposes a public `http` port (the Connect API) AND an internal `metrics` port,
 # and serves /healthz, /readyz, /metrics on the metrics port only — never the
@@ -109,7 +109,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+          value: ghcr.io/mrwong99/glyphoxa:v0.16.0
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -587,3 +587,68 @@ tests:
           content:
             name: GLYPHOXA_VOICE_MAX_CONNECT_CYCLES
             value: "50"
+
+  - it: renders a 120s termination grace period by default
+    # SIGTERM drains in-process sessions in `all` Mode (finalizers, ledger
+    # flush, terminal row); the kubelet's 30s default SIGKILLs mid-drain.
+    # Rendered unconditionally, in web Mode too.
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 120
+
+  - it: honours an overridden termination grace period
+    set:
+      web:
+        terminationGracePeriodSeconds: 300
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 300
+
+  - it: mounts a writable emptyDir at /tmp under the read-only rootfs
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tmp
+            emptyDir: {}
+
+  - it: appends extraEnv, extraVolumes and extraVolumeMounts
+    set:
+      web:
+        extraEnv:
+          - name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
+            value: "2500"
+        extraVolumes:
+          - name: flight
+            emptyDir:
+              sizeLimit: 256Mi
+        extraVolumeMounts:
+          - name: flight
+            mountPath: /flight
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
+            value: "2500"
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: flight
+            mountPath: /flight
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: flight
+            emptyDir:
+              sizeLimit: 256Mi

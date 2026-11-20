@@ -1,5 +1,6 @@
-# Binaries and build artifacts
+# Binaries and build artifacts (the image compiles its own binary)
 bin/
+/glyphoxa
 dist/
 *.exe
 *.dll
@@ -47,6 +48,12 @@ tests/
 
 # Agent worktrees and local Claude state never belong in the image context.
 .claude/
+
+# The SPA is context-fed as the BUILT bundle in internal/spa/dist; the web/
+# sources and their (often 500 MB+) node_modules are never compiled into the
+# image. Core dumps from crashed workers likewise.
+web/node_modules/
+core.[0-9]*
 
 # The Dockerfile itself and the smoke-test harness aren't build inputs.
 Dockerfile

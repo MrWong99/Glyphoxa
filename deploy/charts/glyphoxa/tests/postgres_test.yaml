@@ -99,3 +99,25 @@ tests:
       - equal:
           path: metadata.annotations["helm.sh/hook-weight"]
           value: "-10"
+
+  - it: requests a FAST shutdown before the kubelet's SMART SIGTERM
+    # Postgres waits on connected clients under SIGTERM; the old app pods are
+    # still connected when an upgrade recreates this hook StatefulSet, so without
+    # the preStop the stop ran into SIGKILL and crash recovery on every upgrade.
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].lifecycle.preStop.exec.command[2]
+          pattern: kill -INT 1
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 60
+
+  - it: reserves resources for the database by default
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests
+          value:
+            cpu: 100m
+            memory: 256Mi
