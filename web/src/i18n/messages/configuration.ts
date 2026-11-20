@@ -25,6 +25,7 @@ export const en = {
   "config.kindVoiceSpeech": "Voice & speech",
   "config.kindImages": "Images",
   "config.kindBot": "Bot",
+  "config.kindPlanningChat": "Planning chat model",
   "config.pasteApiKey": "Paste your {name} API key",
 
   // SecretRow controls + aria. {name} is the slot's display name ("Groq",
@@ -41,18 +42,25 @@ export const en = {
   "config.saveModel": "Save model",
 
   // Health badges (#70) — short and friendly, never internal status words.
+  // "Saved" is the honest state between saving a key and the live probe
+  // answering; "Working" only once the probe succeeded.
   "config.badgeKeyNeeded": "Key needed",
+  "config.badgeOptional": "Optional",
+  "config.badgeSaved": "Saved",
   "config.badgeWorking": "Working",
   "config.badgeDegraded": "Having trouble",
 
   // Standing Discord integration badge (#489).
   "config.discordIntegrationFailed": "Discord connection failed",
+  "config.discordIntegrationReconnecting": "Reconnecting to Discord",
   "config.botConnected": "Bot connected",
 
   // Discord connection card.
   "config.discordTitle": "Discord connection",
   "config.botTokenName": "Bot token",
   "config.pasteBotToken": "Paste the Discord bot token",
+  "config.botTokenHint":
+    "Only needed if you run your own Discord bot. Otherwise leave it empty and add Glyphoxa to your server with the button further down.",
   "config.serverIdLabel": "Server ID",
   "config.serverIdPlaceholder": "e.g. 472093001100",
   "config.serverIdHint":
@@ -72,7 +80,7 @@ export const en = {
   "config.linkPasteHint": "Paste a channel or invite link to fill in the Server ID.",
   "config.linkUnreadable": "Couldn't read that link — paste a Discord channel or invite link.",
   "config.resolvingInvite": "Checking the invite…",
-  "config.serverIdFilledFrom": "Server ID filled in from {guild}.",
+  "config.serverIdFilledFrom": "Server ID filled in from {guild} — click “Save Discord settings” to keep it.",
   "config.inviteInvalid": "That invite looks invalid or expired.",
   "config.inviteFailed": "Couldn't check that invite. Please try again.",
   // Appended ONLY to the not-a-member precondition (ADR-0047); "foot of this
@@ -119,6 +127,7 @@ export const de: Record<keyof typeof en, string> = {
   "config.kindVoiceSpeech": "Stimme & Sprache",
   "config.kindImages": "Bilder",
   "config.kindBot": "Bot",
+  "config.kindPlanningChat": "Modell für den Planungs-Chat",
   "config.pasteApiKey": "Füge deinen {name}-API-Schlüssel ein",
 
   "config.secretKeyAria": "{name}-Schlüssel",
@@ -132,15 +141,20 @@ export const de: Record<keyof typeof en, string> = {
   "config.saveModel": "Modell speichern",
 
   "config.badgeKeyNeeded": "Schlüssel fehlt",
+  "config.badgeOptional": "Optional",
+  "config.badgeSaved": "Gespeichert",
   "config.badgeWorking": "Funktioniert",
   "config.badgeDegraded": "Hat Probleme",
 
   "config.discordIntegrationFailed": "Discord-Verbindung fehlgeschlagen",
+  "config.discordIntegrationReconnecting": "Verbindet neu mit Discord",
   "config.botConnected": "Bot verbunden",
 
   "config.discordTitle": "Discord-Verbindung",
   "config.botTokenName": "Bot-Token",
   "config.pasteBotToken": "Füge den Discord-Bot-Token ein",
+  "config.botTokenHint":
+    "Nur nötig, wenn du einen eigenen Discord-Bot betreibst. Sonst lass das Feld leer und füge Glyphoxa über den Button weiter unten zu deinem Server hinzu.",
   "config.serverIdLabel": "Server-ID",
   "config.serverIdPlaceholder": "z. B. 472093001100",
   "config.serverIdHint":
@@ -159,7 +173,8 @@ export const de: Record<keyof typeof en, string> = {
   "config.linkUnreadable":
     "Dieser Link wurde nicht erkannt — füge einen Discord-Kanal- oder Einladungslink ein.",
   "config.resolvingInvite": "Einladung wird geprüft…",
-  "config.serverIdFilledFrom": "Server-ID von {guild} übernommen.",
+  "config.serverIdFilledFrom":
+    "Server-ID von {guild} eingetragen — klicke auf „Discord-Einstellungen speichern“, um sie zu übernehmen.",
   "config.inviteInvalid": "Diese Einladung scheint ungültig oder abgelaufen zu sein.",
   "config.inviteFailed": "Die Einladung konnte nicht geprüft werden. Bitte versuch es noch einmal.",
   "config.addBotHint":

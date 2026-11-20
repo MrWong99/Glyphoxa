@@ -294,8 +294,8 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// text chat as ONE message. Guarded by disclosed so it lands once per Voice
 	// Session, not once per reconnect cycle. Best-effort: a failed post must not
 	// tear the session down — capture stays consent-gated (only prior consenters
-	// are taped) and the operator can re-post — so it is logged and the loop
-	// continues.
+	// are taped) — so it is logged with the remedy, the loop continues, and the
+	// next reconnect cycle tries the post again.
 	discloseSession(cycleCtx, client, channel, cfg, disclosed, log)
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
@@ -354,6 +354,28 @@ const defaultJoinTimeout = 30 * time.Second
 // errJoinTimeout names the join that Discord never answered, so the reconnect
 // loop and the operator see a reason rather than a bare deadline error.
 var errJoinTimeout = errors.New("wirenpc: no voice server answer within the join timeout")
+
+// ReasonVoiceJoinTimeout is the [FatalError] reason for a voice join Discord
+// never answered [maxJoinTimeouts] cycles in a row before the session ever
+// joined. One unanswered join can be a blip; three in a row on a session that
+// never got in is a channel the Bot cannot join (no Connect permission, not a
+// voice channel, outside the server), and retrying it forever only leaves the
+// session idling without a Bot until the idle close. Once a session has joined,
+// join timeouts are a Discord outage and stay transient (runWithReconnect).
+const ReasonVoiceJoinTimeout = "voice_join_timeout"
+
+// maxJoinTimeouts is how many consecutive join timeouts end the session.
+const maxJoinTimeouts = 3
+
+// joinTimeoutFatal wraps the last join timeout as the terminal failure, in words
+// the GM reads on the Session screen.
+func joinTimeoutFatal(err error) *FatalError {
+	return &FatalError{
+		Reason: ReasonVoiceJoinTimeout,
+		Err: fmt.Errorf("the Bot could not join the voice channel (%d attempts); check that it can see the channel "+
+			"and has the Connect and Speak permissions there: %w", maxJoinTimeouts, err),
+	}
+}
 
 // joinVoiceChannel runs open under a join deadline. A deadline that fires while
 // the OUTER ctx is still live is reported as errJoinTimeout; a cancelled outer

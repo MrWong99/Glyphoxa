@@ -64,7 +64,7 @@ type SearchStore interface {
 func SearchCommand(store SearchStore, voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa search",
-		Description: "Search the Active Campaign's transcript.",
+		Description: "Search the active campaign's transcript.",
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
 				Name:        "query",
@@ -79,7 +79,7 @@ func SearchCommand(store SearchStore, voice VoiceControl) Command {
 			if query == "" {
 				// A blank/whitespace query has nothing to search — a clear ephemeral
 				// hint, no Defer and no DB round trip.
-				return ic.ReplyEphemeral("Give me something to search for, e.g. `/glyphoxa search dragon`.")
+				return ic.ReplyEphemeral("Give me something to search for, e.g. `/glyphoxa search query:dragon`.")
 			}
 
 			// Defer (ephemeral): the DB search may run past the 3s window, and the
@@ -96,7 +96,7 @@ func SearchCommand(store SearchStore, voice VoiceControl) Command {
 			// invoking Tenant (#490).
 			c, err := resolveActiveCampaign(dbCtx, store, voice, ic.TenantID(), ic.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
-				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
+				return ic.ReplyEphemeral(noActiveCampaignReply)
 			}
 			if err != nil {
 				return fmt.Errorf("presence: resolve active campaign for search: %w", err)
@@ -115,9 +115,11 @@ func SearchCommand(store SearchStore, voice VoiceControl) Command {
 }
 
 // formatTranscriptMatches renders the top matches as an ephemeral reply: a header
-// plus each hit quoted with its speaker (and pill tag, e.g. "Bart (NPC)") and a
-// UTC HH:MM:SS timestamp (ADR-0011 amendment: quotes lines with speaker +
-// timestamp). UTC keeps it deterministic — the bot has no per-user timezone. Every
+// plus each hit quoted with its speaker (and pill tag, e.g. "Bart (NPC)") and
+// when it was said (ADR-0011 amendment: quotes lines with speaker + timestamp),
+// as Discord timestamp markup so each reader's client shows date and time in
+// their own timezone — hits span sessions, so a bare time of day is ambiguous,
+// and the bot knows no one's timezone. Every
 // quoted line is truncated (a coalesced Agent reply can be long) and the whole
 // reply is kept under Discord's 2000-char cap: a line that would push it over is
 // dropped rather than risking a 400 that hides ALL the matches from the GM.
@@ -129,13 +131,19 @@ func formatTranscriptMatches(query string, lines []storage.TranscriptLine) strin
 		if l.Tag != "" {
 			who = fmt.Sprintf("%s (%s)", l.Who, l.Tag)
 		}
-		line := fmt.Sprintf("\n**%s** · %s — %q", who, l.TS.UTC().Format("15:04:05"), truncateRunes(l.Text, maxQuoteChars))
+		line := fmt.Sprintf("\n**%s** · %s — %q", who, discordTimestamp(l.TS), truncateRunes(l.Text, maxQuoteChars))
 		if b.Len()+len(line) > discordMessageLimit {
 			break
 		}
 		b.WriteString(line)
 	}
 	return b.String()
+}
+
+// discordTimestamp renders t as Discord timestamp markup (short date/time):
+// each client shows it in the reader's own timezone and locale.
+func discordTimestamp(t time.Time) string {
+	return fmt.Sprintf("<t:%d:f>", t.Unix())
 }
 
 // truncateRunes clips s to at most max runes (never bytes — German campaigns), so

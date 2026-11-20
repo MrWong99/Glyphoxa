@@ -1,9 +1,7 @@
 package presence
 
 import (
-	"context"
 	"log/slog"
-	"time"
 
 	"github.com/disgoorg/disgo/events"
 
@@ -38,7 +36,7 @@ func NewConsentButtons(store wirenpc.TapeConsentStore, pub wirenpc.TapeConsentPu
 // consent change and, for a tape-consent button, replies ephemerally. A non-tape
 // button is ignored (another component handler owns it), never answered here.
 func (c *ConsentButtons) HandleComponent(e *events.ComponentInteractionCreate) {
-	reply, ok := wirenpc.ApplyTapeConsent(context.Background(), c.store, c.pub, time.Now, c.log, e.Data.CustomID(), e.User().ID.String())
+	reply, ok := wirenpc.ApplyTapeConsentPress(c.store, c.pub, c.log, e.Data.CustomID(), e.User().ID.String())
 	if !ok {
 		return // not a tape-consent button — leave it for whoever owns it
 	}

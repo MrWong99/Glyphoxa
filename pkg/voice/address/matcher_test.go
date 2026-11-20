@@ -13,16 +13,14 @@ import (
 
 // Fixed Agents reused across the matcher tests. The Butler is AddressOnly (the
 // CONTEXT.md default), so only an explicit name reaches it; Bart and the Goblin
-// are Character NPCs reachable by the ambient heuristics too. Bart carries
-// tavern Expertise for the expert-on-recent-word cases.
+// are Character NPCs reachable by the ambient heuristics too.
 var (
 	butler = address.Agent{
 		Target:      voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Glyphoxa"},
 		AddressOnly: true,
 	}
 	bart = address.Agent{
-		Target:    voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"},
-		Expertise: []string{"tavern", "ale"},
+		Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"},
 	}
 	goblin = address.Agent{
 		Target: voiceevent.AddressTarget{AgentID: "npc-goblin", AgentRole: "character", Name: "Goblin"},
@@ -144,94 +142,35 @@ func TestMatcher_ButlerInterjectionDoesNotClobberContinuation(t *testing.T) {
 	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
 }
 
-// TestMatcher_SoleActiveNPCFallback covers the lone-NPC fallback in its
-// post-amendment role (ADR-0024, 2026-07-27): it CORROBORATES rather than
-// decides. A bare unnamed utterance no longer routes to the only Character NPC
-// — that weight alone made it answer everything anyone said — but combined with
-// a second weak signal (its Expertise on a mentioned word) it reaches the
-// threshold and addresses.
-func TestMatcher_SoleActiveNPCFallback(t *testing.T) {
+// TestMatcher_LoneNPCIsNotAddressedUnnamed pins the shipped stack (ADR-0024,
+// amendments 2026-07-27 and 2026-11-20): the only Character NPC of a campaign is
+// opened by name like any other. An unnamed utterance reaches nobody — at
+// decisive weight the lone-NPC fallback made that NPC answer everything anyone
+// said, and since nothing can corroborate it any more it is not in the default
+// stack at all.
+func TestMatcher_LoneNPCIsNotAddressedUnnamed(t *testing.T) {
 	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
 	assertIDs(t, m.TargetMatch("so what happens next?"))
-	assertIDs(t, m.TargetMatch("pour me an ale would you"), "npc-bart")
+	assertIDs(t, m.TargetMatch("pour me an ale would you"))
 }
 
-// soleDecisiveStack is the shipped stack with the lone-NPC fallback restored to
-// its pre-amendment DECISIVE weight. The mute tests are about the ambient POOL —
-// which Agents may be scored at all — not about the shipped weights, so they pin
-// their behaviour against a stack where the fallback alone still addresses.
-// Without it the 2026-07-27 ADR-0024 amendment (SoleActiveNPC demoted to a
-// corroborating 0.5) would quietly turn them into weight assertions and stop
-// covering the mute semantics they exist for.
+// soleDecisiveStack is the shipped stack plus the opt-in lone-NPC fallback at a
+// DECISIVE weight. The mute tests are about the ambient POOL — which Agents may
+// be scored at all — not about the shipped weights, so they observe it through
+// a stack where an unnamed utterance still addresses the one eligible NPC.
 func soleDecisiveStack() []address.Heuristic {
-	stack := address.DefaultHeuristics()
-	for i, h := range stack {
-		if _, ok := h.(address.SoleActiveNPC); ok {
-			stack[i] = address.SoleActiveNPC{Weight: 1.0}
-		}
-	}
-	return stack
-}
-
-// TestDefaultHeuristics_AllSignalsWired pins #442: every heuristic in the
-// default stack must have a production signal source. RecentlyInterrupted's
-// signal (Matcher.NoteInterruption, fed from the barge path) is deferred to
-// v1.5+ (ADR-0027), so the heuristic must NOT ship in the defaults — an inert
-// weight in the stack misleads anyone tuning routing.
-func TestDefaultHeuristics_AllSignalsWired(t *testing.T) {
-	for _, h := range address.DefaultHeuristics() {
-		if _, ok := h.(address.RecentlyInterrupted); ok {
-			t.Fatalf("DefaultHeuristics contains RecentlyInterrupted: its NoteInterruption signal is unwired until v1.5 (ADR-0027, #442)")
-		}
-	}
-}
-
-// interruptedStack is the explicit opt-in stack for the RecentlyInterrupted
-// tests (#442): the default stack plus the heuristic, constructed the way the
-// deferred v1.5 barge wiring would.
-func interruptedStack() []address.Heuristic {
-	return append(address.DefaultHeuristics(),
-		address.RecentlyInterrupted{Weight: 1.0, Within: 15 * time.Second})
-}
-
-// TestMatcher_RecentlyInterruptedRecovery covers the interruption heuristic
-// under explicit opt-in (#442 — it is no longer a default): after a participant
-// barges in on the Goblin, the next unnamed utterance lands back on the Goblin
-// — not on Bart — even with two NPCs active and no prior addressee.
-func TestMatcher_RecentlyInterruptedRecovery(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(1000, 0)}
-	m := address.NewMatcher(address.Config{Language: "en", Clock: clk.now, Heuristics: interruptedStack()}, butler, bart, goblin)
-
-	m.NoteInterruption("npc-goblin")
-	clk.advance(3 * time.Second)
-	assertIDs(t, m.TargetMatch("no wait, let me finish"), "npc-goblin")
-
-	// Past the 15s window the interruption no longer pulls focus. A
-	// fresh matcher isolates this from the continuation the match above would
-	// otherwise leave behind (the Goblin became the last addressee).
-	stale := &fakeClock{t: time.Unix(1000, 0)}
-	m2 := address.NewMatcher(address.Config{Language: "en", Clock: stale.now, Heuristics: interruptedStack()}, butler, bart, goblin)
-	m2.NoteInterruption("npc-goblin")
-	stale.advance(30 * time.Second)
-	assertIDs(t, m2.TargetMatch("anyway, moving on"))
-}
-
-// TestMatcher_ExpertiseAloneIsInsufficient pins the weak-hint design: mentioning
-// a word an NPC is expert on is not enough to address it by itself (0.5 < 1.0),
-// so topic drift does not hijack routing.
-func TestMatcher_ExpertiseAloneIsInsufficient(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
-	assertIDs(t, m.TargetMatch("the tavern was burned down years ago"))
+	return append(address.DefaultHeuristicsWithin(address.DefaultContinuationWindow),
+		address.SoleActiveNPC{Weight: 1.0})
 }
 
 // TestMatcher_CustomHeuristicStack proves the stack is pluggable: a matcher
-// configured with only an (up-weighted) expert-on-word heuristic addresses the
-// expert NPC on a topic mention alone.
+// configured with only the lone-NPC fallback addresses the one Character NPC on
+// an unnamed utterance, and ignores its name.
 func TestMatcher_CustomHeuristicStack(t *testing.T) {
 	m := address.NewMatcher(address.Config{
 		Language:   "en",
-		Heuristics: []address.Heuristic{address.ExpertOnRecentWord{Weight: 1.0}},
-	}, butler, bart, goblin)
+		Heuristics: []address.Heuristic{address.SoleActiveNPC{Weight: 1.0}},
+	}, butler, bart)
 	assertIDs(t, m.TargetMatch("pour me an ale would you"), "npc-bart")
 }
 
@@ -674,22 +613,23 @@ func TestMatcher_TextEchoedVerbatim(t *testing.T) {
 }
 
 // TestMatcher_CustomThreshold proves the address threshold is configurable: at
-// a threshold above any single ambient weight, the lone-NPC fallback alone no
-// longer addresses, but combining it with an interruption (1.0 + 1.0) does.
-// Uses the opt-in interruption stack (#442) for the second, additive signal.
+// a threshold above any single weight neither a name nor the lone-NPC fallback
+// addresses alone, but a continuation the fallback corroborates (1.0 + 1.0) does.
 func TestMatcher_CustomThreshold(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(0, 0)}
 	m := address.NewMatcher(address.Config{
 		Language:         "en",
 		AddressThreshold: 1.5,
-		Clock:            clk.now,
-		Heuristics:       interruptedStack(),
+		Heuristics:       soleDecisiveStack(),
 	}, butler, bart)
+	assertIDs(t, m.TargetMatch("what now?"))             // sole-NPC 1.0 < 1.5 → nobody
+	assertIDs(t, m.TargetMatch("Bart, pour me a drink")) // name 1.0 < 1.5 → nobody
 
-	assertIDs(t, m.TargetMatch("what now?")) // sole-NPC 1.0 < 1.5 → nobody
-
-	m.NoteInterruption("npc-bart")                        // +1.0
-	assertIDs(t, m.TargetMatch("go on then"), "npc-bart") // 2.0 ≥ 1.5
+	low := address.NewMatcher(address.Config{
+		Language:         "en",
+		AddressThreshold: 0.5,
+		Heuristics:       []address.Heuristic{address.SoleActiveNPC{Weight: 0.5}},
+	}, butler, bart)
+	assertIDs(t, low.TargetMatch("what now?"), "npc-bart") // 0.5 ≥ 0.5
 }
 
 // TestMatcher_UnregisteredLanguageUsesEditNet proves a language with no
@@ -698,7 +638,56 @@ func TestMatcher_CustomThreshold(t *testing.T) {
 func TestMatcher_UnregisteredLanguageUsesEditNet(t *testing.T) {
 	m := address.NewMatcher(address.Config{Language: "xx"}, butler, bart, goblin)
 	// "goblan" is one edit from "goblin": no phonetic encoder, but within the net.
-	assertIDs(t, m.TargetMatch("the goblan lunges at you"), "npc-goblin")
+	assertIDs(t, m.TargetMatch("Goblan, what do you want?"), "npc-goblin")
+}
+
+// TestMatcher_FuzzyNameNeedsAddressEvidence pins the 2026-11-20 ADR-0024
+// amendment: a NON-EXACT name hit addresses only with vocative evidence. Each
+// row is a fresh matcher so no continuation leaks between them.
+func TestMatcher_FuzzyNameNeedsAddressEvidence(t *testing.T) {
+	cases := []struct {
+		name, lang, utter string
+		want              []string
+	}{
+		// Vocative-bracketed mishearing: head, tail, and after a discourse opener.
+		{"head vocative", "en", "bard, what is the special tonight?", []string{"npc-bart"}},
+		{"tail vocative", "de", "Was gibt es heute, Barth?", []string{"npc-bart"}},
+		{"after opener", "de", "Also, Barth, was gibt es heute?", []string{"npc-bart"}},
+		// The same mishearing inside a clause is a word, not an address.
+		{"mid-clause", "en", "the bard plays a song", nil},
+		{"clause-initial without marker", "en", "bard what is the special tonight", nil},
+		{"comma-followed only", "de", "Frag Barth, ob er kommt.", nil},
+		// A bare call is bracketed by the utterance boundaries.
+		{"bare call", "en", "Bard?", []string{"npc-bart"}},
+		{"bare everyday word", "en", "Great!", nil},
+		// An everyday word in perfect vocative shape is still that word.
+		{"everyday word, vocative shape", "en", "Great, let's go.", nil},
+		{"everyday word, tail", "de", "Ich brauche mehr, bitte.", nil},
+		// An EXACT name needs none of this: any position, bare, unpunctuated.
+		{"exact mid-clause", "en", "ask Bart about the special", []string{"npc-bart"}},
+		{"exact bare", "de", "Bart!", []string{"npc-bart"}},
+		{"exact unpunctuated", "de", "bart was hast du im angebot", []string{"npc-bart"}},
+		// A derived truncation alias is non-exact too (#197 stays, "Art und Weise" goes).
+		{"truncation alias, vocative", "de", "Art, wie läuft das Geschäft?", []string{"npc-bart"}},
+		{"truncation alias, plain noun", "de", "Art und Weise sind mir egal.", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bartT := bart
+			bartT.TruncationAliases = address.DeriveTruncationAliases("Bart")
+			m := address.NewMatcher(address.Config{Language: tc.lang}, butler, bartT, greta, goblin)
+			assertIDs(t, m.TargetMatchFrom("player-1", tc.utter), tc.want...)
+		})
+	}
+}
+
+// TestMatcher_ExactEverydayNameStillAddresses pins the other side of the
+// everyday-word rule: it filters MISHEARD names only. An NPC whose real name is
+// an everyday word is addressed by it like any other.
+func TestMatcher_ExactEverydayNameStillAddresses(t *testing.T) {
+	wolf := address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-wolf", AgentRole: "character", Name: "Wolf"}}
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, wolf, goblin)
+	assertIDs(t, m.TargetMatch("Wolf, what do you smell?"), "npc-wolf")
 }
 
 func TestNewMatcher_Panics(t *testing.T) {
@@ -880,7 +869,7 @@ func TestMatcher_ConcurrentMuteAndTargetMatch(t *testing.T) {
 }
 
 // TestMatcher_ConcurrentUse exercises the matcher's locking: many goroutines
-// route, feed interruptions, and churn the roster at once. Run under
+// route, extend the continuation claim, and churn the roster at once. Run under
 // `go test -race` it pins that the shared conversational state stays guarded and
 // that a scoring pass sees a consistent index across a concurrent rebuild.
 func TestMatcher_ConcurrentUse(t *testing.T) {
@@ -889,12 +878,12 @@ func TestMatcher_ConcurrentUse(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		// Each iteration churns a uniquely-named NPC so concurrent Adds never
 		// collide on a duplicate AgentID (which is a panic), letting roster
-		// mutation race freely against routing and interruptions.
+		// mutation race freely against routing and claim extension.
 		id := fmt.Sprintf("npc-extra-%d", i)
 		extra := address.Agent{Target: voiceevent.AddressTarget{AgentID: id, AgentRole: "character", Name: "Extra" + strconv.Itoa(i)}}
 		wg.Add(4)
 		go func() { defer wg.Done(); m.TargetMatch("Bart and the Goblin talk") }()
-		go func() { defer wg.Done(); m.NoteInterruption("npc-bart") }()
+		go func() { defer wg.Done(); m.ExtendContinuation("npc-bart") }()
 		go func() { defer wg.Done(); m.Add(extra) }()
 		go func() { defer wg.Done(); m.Remove(id) }()
 	}

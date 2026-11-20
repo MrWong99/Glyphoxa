@@ -77,22 +77,6 @@ func TestMatcher_ClearContinuationOnlyDropsThatAgent(t *testing.T) {
 	assertIDs(t, m.TargetMatch("and then what?"), "npc-goblin")
 }
 
-// TestMatcher_SoleActiveNPCNeedsCorroboration pins the ADR-0024 stage-3
-// amendment: the lone-NPC fallback is a CORROBORATING signal (0.5), not a
-// decisive one. With one Character NPC on the roster an unnamed cold-open no
-// longer routes — otherwise that NPC answers 100% of everything anyone says,
-// including players talking to each other.
-func TestMatcher_SoleActiveNPCNeedsCorroboration(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
-
-	assertIDs(t, m.TargetMatch("so what happens next?"))
-
-	// Named once, the conversation is open: the lone-NPC weight now corroborates
-	// the continuation instead of standing in for it.
-	assertIDs(t, m.TargetMatch("Bart, pour me a drink."), "npc-bart")
-	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
-}
-
 // TestMatcher_BackchannelDoesNotRoute covers the ADR-0024 substance gate: an
 // utterance made ENTIRELY of backchannel vocalization ("mhm", "äh", "aha") is
 // acknowledgement, not address. It must not open an LLM+TTS turn on the ambient
@@ -240,4 +224,101 @@ func TestMatcher_PunctuationOnlyDoesNotRoute(t *testing.T) {
 
 	clk.advance(40 * time.Second) // well past the window since the routed turn
 	assertIDs(t, m.TargetMatch("und was war da unten?"))
+}
+
+// TestMatcher_ContinuationIsSpeakerScoped pins the 2026-11-20 scope (ledger O3a):
+// the speaker who addressed an NPC continues without a name; another known
+// speaker's unnamed utterance routes nowhere AND does not keep the claim alive.
+// Before, a second player's side talk inside the window was answered by the NPC
+// and re-stamped the anchor, so the claim rolled on table chatter indefinitely.
+func TestMatcher_ContinuationIsSpeakerScoped(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	m := address.NewMatcher(address.Config{Language: "de", Clock: clk.now}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatchFrom("alice", "Bart, was weißt du über den Drachen?"), "npc-bart")
+
+	clk.advance(10 * time.Second)
+	assertIDs(t, m.TargetMatchFrom("bob", "Hat jemand noch Chips für mich?"))
+	// Alice is still in her exchange.
+	assertIDs(t, m.TargetMatchFrom("alice", "Und wo lebt er?"), "npc-bart")
+
+	// Bob's and Carol's chatter must not re-arm Alice's claim: 25 s + 10 s after
+	// her last line it has expired, however much the others talked in between.
+	clk.advance(25 * time.Second)
+	assertIDs(t, m.TargetMatchFrom("carol", "Ich hol mir kurz was zu trinken."))
+	assertIDs(t, m.TargetMatchFrom("bob", "hm"))
+	clk.advance(10 * time.Second)
+	assertIDs(t, m.TargetMatchFrom("alice", "Und dann?"))
+}
+
+// TestMatcher_ContinuationOwnerMovesWithANewNamedAddress: the claim follows
+// whoever NAMES the Agent last — Bob naming Bart takes the exchange over.
+func TestMatcher_ContinuationOwnerMovesWithANewNamedAddress(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, butler, bart, goblin)
+	assertIDs(t, m.TargetMatchFrom("alice", "Bart, was gibt es heute?"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("bob", "Bart, und für mich?"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("bob", "Was kostet das?"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("alice", "Was kostet das?"))
+}
+
+// TestMatcher_ContinuationUnscopedWithoutSpeakerIDs pins the fallback: with no
+// speaker attribution on either side the claim stays table-wide, exactly the
+// pre-amendment behaviour.
+func TestMatcher_ContinuationUnscopedWithoutSpeakerIDs(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, butler, bart, goblin)
+	assertIDs(t, m.TargetMatch("Bart, was gibt es heute?"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("bob", "Und was kostet das?"), "npc-bart")
+
+	m2 := address.NewMatcher(address.Config{Language: "de"}, butler, bart, goblin)
+	assertIDs(t, m2.TargetMatchFrom("alice", "Bart, was gibt es heute?"), "npc-bart")
+	assertIDs(t, m2.TargetMatchFrom("", "Und was kostet das?"), "npc-bart")
+}
+
+// TestMatcher_ExtendContinuationAnchorsToTheReply pins ledger O3b, observed
+// live: the window used to count from the moment the NPC was addressed, so a
+// 24 s answer left the player almost none of it and the follow-up was ignored.
+// The reply path now moves the anchor while the NPC is answering.
+func TestMatcher_ExtendContinuationAnchorsToTheReply(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(5000, 0)}
+	m := address.NewMatcher(address.Config{Language: "de", Clock: clk.now}, butler, bart, goblin)
+	assertIDs(t, m.TargetMatchFrom("alice", "Bart, erzähl mir die ganze Geschichte."), "npc-bart")
+
+	// 2 s to first audio, then a sentence starts every ~6 s for 24 s.
+	clk.advance(2 * time.Second)
+	for i := 0; i < 5; i++ {
+		m.ExtendContinuation("npc-bart")
+		clk.advance(6 * time.Second)
+	}
+	// 32 s after the address, 6 s after the last sentence began.
+	clk.advance(5 * time.Second)
+	assertIDs(t, m.TargetMatchFrom("alice", "Und was geschah dann?"), "npc-bart")
+
+	// The window still closes — measured from the reply, not from never.
+	clk.advance(31 * time.Second)
+	assertIDs(t, m.TargetMatchFrom("alice", "Und danach?"))
+}
+
+// TestMatcher_ExtendContinuationOnlyExtendsALiveHolder: reply activity of an
+// Agent that does not hold the claim — never addressed, superseded by a later
+// address, or cut off by a Barge-in — must not create or revive one.
+func TestMatcher_ExtendContinuationOnlyExtendsALiveHolder(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	m := address.NewMatcher(address.Config{Language: "de", Clock: clk.now}, butler, bart, goblin)
+
+	m.ExtendContinuation("npc-bart") // never addressed
+	m.ExtendContinuation("")         // unattributed
+	assertIDs(t, m.TargetMatchFrom("alice", "Und was geschah dann?"))
+
+	// Superseded: Alice moved on to the Goblin; Bart's late audio is not a claim.
+	assertIDs(t, m.TargetMatchFrom("alice", "Bart, erzähl."), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("alice", "Goblin, und du?"), "npc-goblin")
+	clk.advance(40 * time.Second)
+	m.ExtendContinuation("npc-bart")
+	assertIDs(t, m.TargetMatchFrom("alice", "Und dann?"))
+
+	// Barged: the cut turn's trailing audio must not undo ClearContinuation.
+	assertIDs(t, m.TargetMatchFrom("alice", "Bart, erzähl."), "npc-bart")
+	m.ClearContinuation("npc-bart")
+	m.ExtendContinuation("npc-bart")
+	assertIDs(t, m.TargetMatchFrom("alice", "Und dann?"))
 }

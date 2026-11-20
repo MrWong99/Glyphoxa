@@ -46,6 +46,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec/dsp"
 )
 
+// Available reports that this build links the real Opus transcoder (`-tags
+// opus`). It is false in the default stub build, where every operation fails
+// with [wire.ErrCodecUnavailable]; the binary checks it at boot to warn that a
+// stub build cannot carry a voice session.
+const Available = true
+
 const (
 	// vadSampleRate is the PCM rate the orchestrator's VAD/STT run at; the
 	// decoder emits inbound Opus directly at this rate. Mirrors internal/wirenpc.

@@ -25,7 +25,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
-import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
+import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 import { errorMessage, isNotFound } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type MessageKey } from "@/i18n";
@@ -74,6 +74,8 @@ type ByokSlot = {
    * follow-up; until then no badge beats a wrong one.
    */
   hideHealth?: boolean;
+  /** Not needed to run a session: an unsaved key reads "Optional", not "Key needed". */
+  optional?: boolean;
 };
 const BYOK_SLOTS: readonly ByokSlot[] = [
   {
@@ -100,6 +102,7 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
     label: "Gemini",
     kind: "config.kindImages",
     icon: <ImagePlus size={19} />,
+    optional: true,
   },
   // The chat-scoped model slot (ADR-0062): a second selection on the same Groq
   // key surface, chosen for quality over latency, so upgrading the planning
@@ -111,7 +114,8 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
     label: "Groq",
     nameKey: "chat.configSlotName",
     descriptionKey: "chat.configSlotDesc",
-    kind: "config.kindAiModel",
+    // Its own overline: two "AI model" rows side by side read as a duplicate.
+    kind: "config.kindPlanningChat",
     icon: <MessageCircle size={19} />,
     models: true,
     hideHealth: true,
@@ -263,6 +267,7 @@ export function Configuration() {
             // badge at all (see ByokSlot.hideHealth), so it gets none passed.
             health={slot.hideHealth ? undefined : healthFor(health, slot.provider)}
             hideHealth={slot.hideHealth}
+            optional={slot.optional}
             // Groq-backed rows list the live model catalog with free-text entry
             // (#227); the chosen model rides along when the key is saved, or
             // alone via the model-only save once a key exists.
@@ -282,6 +287,10 @@ export function Configuration() {
             icon={<MessagesSquare size={19} />}
             kind={t("config.kindBot")}
             name={t("config.botTokenName")}
+            // Central-Bot tables never need a token (ADR-0057); only a BYOK
+            // Bot does — say so before a first-time GM goes hunting for one.
+            description={t("config.botTokenHint")}
+            optional
             placeholder={t("config.pasteBotToken")}
             credential={credentialFor(creds, "discord")}
             health={healthFor(health, "discord")}
@@ -390,24 +399,6 @@ export function Configuration() {
   );
 }
 
-// FirstCampaignCTA replaces the active-campaign card on a fresh, unseeded install
-// (GetActiveCampaign → CodeNotFound). It runs the shared create-then-activate flow
-// (#267): creating here mints the campaign (auto-Butler, ADR-0009) and selects it,
-// and the sweep re-resolves GetActiveCampaign so this card swaps itself for the
-// live header — no reload, no `glyphoxa seed`.
-function FirstCampaignCTA() {
-  const { t } = useI18n();
-  const create = useCreateCampaign();
-  return (
-    <div className="gx-first-campaign">
-      <span className="gx-overline">{t("config.activeCampaign")}</span>
-      <h2 className="gx-first-campaign__title">{t("config.firstCampaignTitle")}</h2>
-      <p className="gx-first-campaign__lede">{t("config.firstCampaignLede")}</p>
-      <CreateCampaignForm onSubmit={create.submit} pending={create.pending} error={create.error} autoFocusName />
-    </div>
-  );
-}
-
 // SpendCapsCard is the minimal soft/hard per-session spend-cap editor (#130,
 // ADR-0046): two USD inputs, blank = that cap unset. A soft cap refuses new Agent
 // turns once estimated spend crosses it (in-flight replies finish); a hard cap ends
@@ -501,14 +492,28 @@ function SpendCapsCard() {
   );
 }
 
-// HealthBadge renders the status dot. An unsaved slot is "Key needed" (presence).
-// A saved slot shows "Working" instantly (presence) and downgrades to "Having
-// trouble" only once GetProviderHealth reports a failed test-call (#70) — the
-// page never waits on the live call.
-function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealth }) {
+// HealthBadge renders the status dot. An unsaved slot is "Key needed"
+// (presence), or a neutral "Optional" when the slot isn't required to run a
+// session. A saved slot shows "Saved" instantly (presence) and upgrades to
+// "Working" or downgrades to "Having trouble" once GetProviderHealth reports
+// the test-call (#70) — the page never waits on the live call, and never
+// claims "Working" before a probe said so.
+function HealthBadge({
+  saved,
+  health,
+  optional = false,
+}: {
+  saved: boolean;
+  health?: ProviderHealth;
+  optional?: boolean;
+}) {
   const { t } = useI18n();
   if (!saved) {
-    return (
+    return optional ? (
+      <Badge variant="neutral" dot size="sm">
+        {t("config.badgeOptional")}
+      </Badge>
+    ) : (
       <Badge variant="warning" dot size="sm">
         {t("config.badgeKeyNeeded")}
       </Badge>
@@ -527,6 +532,13 @@ function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealt
       </span>
     );
   }
+  if (health?.status !== HealthStatus.HEALTHY) {
+    return (
+      <Badge variant="neutral" dot size="sm">
+        {t("config.badgeSaved")}
+      </Badge>
+    );
+  }
   return (
     <Badge variant="success" dot size="sm">
       {t("config.badgeWorking")}
@@ -536,12 +548,22 @@ function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealt
 
 // IntegrationBadge renders THIS tenant's standing Discord client health (#489):
 // the per-tenant registry reports "ok" (client up), "waiting" (no Bot token yet),
-// or "failed" (the token was rejected terminally — revoked/invalid) with a
-// human detail. Empty state (web-only mode, no standing presence) renders nothing.
+// "reconnecting" (a token is set but the client is down and being re-opened,
+// #642) or "failed" (the token was rejected terminally — revoked/invalid), the
+// last two with a human detail. Empty state (web-only mode, no standing
+// presence) and any state this build does not know render nothing — only an
+// explicit "ok" may claim the Bot is connected.
 function IntegrationBadge({ state, detail }: { state: string; detail: string }) {
   const { t } = useI18n();
-  if (state === "" || state === "waiting") {
-    return null;
+  if (state === "reconnecting") {
+    return (
+      <span className="gx-health">
+        <Badge variant="warning" dot size="sm">
+          {t("config.discordIntegrationReconnecting")}
+        </Badge>
+        {detail && <span className="gx-health__detail">{detail}</span>}
+      </span>
+    );
   }
   if (state === "failed") {
     return (
@@ -552,6 +574,9 @@ function IntegrationBadge({ state, detail }: { state: string; detail: string }) 
         {detail && <span className="gx-health__detail">{detail}</span>}
       </span>
     );
+  }
+  if (state !== "ok") {
+    return null;
   }
   return (
     <Badge variant="success" dot size="sm">
@@ -575,6 +600,7 @@ function SecretRow({
   health,
   models,
   hideHealth = false,
+  optional = false,
   onSave,
 }: {
   icon: ReactNode;
@@ -592,6 +618,8 @@ function SecretRow({
    * row's chat_llm key. A dedicated chat_llm probe is a follow-up.
    */
   hideHealth?: boolean;
+  /** An unsaved key reads "Optional" rather than "Key needed". */
+  optional?: boolean;
   onSave: (secret: string, model?: string) => Promise<unknown>;
 }) {
   const { t } = useI18n();
@@ -744,7 +772,7 @@ function SecretRow({
           )}
         </div>
 
-        {!hideHealth && <HealthBadge saved={saved} health={health} />}
+        {!hideHealth && <HealthBadge saved={saved} health={health} optional={optional} />}
       </div>
     </Card>
   );

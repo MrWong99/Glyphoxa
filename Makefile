@@ -1,22 +1,46 @@
 # Glyphoxa Makefile
-# Requires: Go 1.27+. The default (untagged) build is pure Go: CGO stays off
-# so it is statically linked and trivially cross-compilable. The exception is
-# the `opus` build tag — the outbound Opus encoder links system libopus via
-# CGO (ADR-0034 amendment 2026-07-19) and must be paired with
-# `nolibopusfile`, so audible builds need pkg-config + libopus-dev and
-# CGO_ENABLED=1 (see CONTRIBUTING.md; the Dockerfile links it statically).
-# No target below uses the opus tag, but the test targets override the export
-# per-recipe anyway: `go test -race` requires cgo (issue #580), so they need a
-# host C toolchain (gcc) — while still linking no native libraries. `build`
-# keeps the pure-Go export and its static-link property.
+# Requires: Go 1.27+ and the generated protobuf stubs (gen/ is gitignored —
+# `make proto` produces it, ADR-0039).
+#
+# Two builds:
+#   make build       — the default UNTAGGED build: pure Go, CGO off, statically
+#                      linked and cross-compilable. It links the STUB Opus codec
+#                      and the STUB DAVE wiring, so it serves the web console,
+#                      migrations and the CLI subcommands but CANNOT carry a voice
+#                      session (it logs a WARN at boot in voice/all Mode).
+#   make build-live  — the voice-capable build with the production tags
+#                      `opus dave nolibopusfile`, the same tags the container
+#                      image uses. The outbound Opus encoder links system libopus
+#                      via CGO (ADR-0034 amendment 2026-07-19), so it needs a C
+#                      toolchain (gcc), pkg-config and libopus headers
+#                      (libopus-dev / opus-devel / `brew install opus pkg-config`).
+#                      The binary links libopus dynamically; the Dockerfile is the
+#                      fully static variant.
+# The test targets override the CGO export per-recipe: `go test -race` requires
+# cgo (issue #580), so they need gcc too — while still linking no native libs.
 
 export CGO_ENABLED := 0
 
-.PHONY: build test lint vet fmt check clean refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
+# The version stamped into the binary (`glyphoxa version`, the boot log).
+# Release images stamp the tag via the Dockerfile's VERSION build-arg.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION)
+LIVE_TAGS := opus dave nolibopusfile
 
-# Build voice engine
-build:
-	go build -o bin/glyphoxa ./cmd/glyphoxa
+.PHONY: build build-live gen-check test test-v test-cover lint vet fmt check clean refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
+
+# Pure-Go stub build: web console, migrations and CLI only — NO voice (see the
+# header). Use build-live for a binary that can join a voice channel.
+build: gen-check
+	go build -ldflags "$(LDFLAGS)" -o bin/glyphoxa ./cmd/glyphoxa
+
+# Voice-capable build with the production tags (needs gcc + pkg-config + libopus).
+build-live: gen-check
+	CGO_ENABLED=1 go build -tags "$(LIVE_TAGS)" -ldflags "$(LDFLAGS)" -o bin/glyphoxa ./cmd/glyphoxa
+
+# gen/ is gitignored; fail with the fix instead of a wall of missing-package errors.
+gen-check:
+	@test -d gen || { echo "gen/ is missing: run 'make proto' (buf generate) first" >&2; exit 1; }
 
 # Run all tests with race detector. CGO_ENABLED=1 overrides the global pure-Go
 # export: -race requires cgo (issue #580). Mirrors CI's test job, which runs
@@ -39,15 +63,18 @@ test-cover:
 lint:
 	$(shell go env GOPATH)/bin/golangci-lint run ./...
 
-# Install golangci-lint v2 into GOPATH/bin.
+# Install golangci-lint v2 into GOPATH/bin, at the version CI's lint job pins
+# (.github/workflows/ci.yml) so local and CI lint agree. Build it with the
+# project's Go toolchain: a binary built by an older Go cannot lint 1.27 code.
+GOLANGCI_LINT_VERSION ?= v2.15.0
 install-lint:
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 # Go vet
 vet:
 	go vet ./...
 
-# Format check
+# Format the tree in place (gofmt -w; lists the files it rewrote).
 fmt:
 	gofmt -l -w .
 
@@ -96,8 +123,9 @@ clean:
 
 # --- Container image (ADR-0034) --------------------------------------------
 # One multi-stage image for the single binary; `mode`/config are runtime args.
-# Fully pure Go since #468 (the ONNX/silero CGO binding is gone): the runtime
-# stage is FROM scratch carrying the static binary + CA certs.
+# The image builds the live tags with libopus linked STATICALLY (CGO on, see the
+# Dockerfile), so the runtime stage is FROM scratch carrying the static binary +
+# CA certs. VERSION is stamped through the Dockerfile's VERSION build-arg.
 DOCKER_IMAGE ?= glyphoxa:smoke
 
 # Depends on `proto`: gen/ is gitignored and NOT generated inside the image
@@ -109,11 +137,13 @@ DOCKER_IMAGE ?= glyphoxa:smoke
 # `make spa` first to build the real console into internal/spa/dist and ship it
 # (CI feeds this via the `web` job's `spa-dist` artifact instead).
 docker-build: proto
-	docker build -t $(DOCKER_IMAGE) .
+	docker build --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
 
 # Build the real Vite + React console into internal/spa/dist (vite.config.ts
 # build.outDir) so a following `make docker-build` embeds the console rather than
-# the placeholder fallback (#114). Requires Node; the pure-Go build path does not.
+# the placeholder fallback (#114). Requires Node; the Go builds do not. It
+# overwrites the tracked placeholder internal/spa/dist/index.html — run
+# `git checkout -- internal/spa/dist/` before committing.
 spa:
 	cd web && npm ci && npm run build
 

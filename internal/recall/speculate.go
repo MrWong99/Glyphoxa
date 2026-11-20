@@ -11,7 +11,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
-// specCache holds the recaller's single speculated utterance (latest only): the
+// specCache holds one campaign's speculated utterance (latest only): the
 // normalized query text, the embedded vector, and the world-context chunks
 // prefetched with that vector. A Recall whose normalized final matches norm reuses
 // vec (skipping the inline embed) and, when worldOK, the prefetched world chunks —
@@ -28,6 +28,9 @@ type specCache struct {
 	world      []storage.ChunkMatch
 	worldOK    bool
 	valid      bool
+	// at is when the entry was stored; an entry older than [cacheTTL] is not
+	// served (the same words said again minutes later get a fresh retrieval).
+	at time.Time
 }
 
 // onPartial is the bus callback for [voiceevent.STTPartial]. The bus delivers
@@ -47,6 +50,74 @@ func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	case r.signal <- struct{}{}:
 	default: // a wake is already pending; the speculator will read the latest text
 	}
+}
+
+// flight is one embed-and-prefetch of a FINAL utterance, started the moment the
+// final is published. Its point is not a head start — Address Detection is a
+// synchronous text match, so the turn's [Recaller.Recall] follows within
+// microseconds — but that the embed runs under the recaller's own context: a
+// turn that gives up at its budget no longer cancels the request, which for a
+// cold local model aborted the load every time. Recall joins the flight rather
+// than embedding the same text a second time behind it; done is closed when the
+// result is in the cache, or will never be.
+type flight struct {
+	norm string
+	done chan struct{}
+	// result is the flight's own outcome, valid once done is closed (result.valid
+	// false = the embed failed). Recall reads it from here, not from the cache: a
+	// later final of the same campaign may have replaced the cache slot meanwhile.
+	result specCache
+}
+
+// onFinal is the bus callback for [voiceevent.STTFinal]. Finals do not go through
+// the serial speculator: each gets its own goroutine (bounded by finalSlots), so
+// one table's chatter cannot queue ahead of another turn's recall. Like onPartial
+// it must not block.
+func (r *Recaller) onFinal(f voiceevent.STTFinal) {
+	norm := normalize(f.Text)
+	if norm == "" {
+		return
+	}
+	sid, err := uuid.Parse(f.SessionID)
+	if err != nil {
+		return // nothing to scope a prefetch to; Recall embeds inline
+	}
+	vs, ok := r.sessions.Resolve(sid)
+	if !ok {
+		return
+	}
+	campaignID := vs.CampaignID
+	if _, hit := r.cacheLookup(norm, campaignID); hit {
+		return // the partials already speculated this exact text
+	}
+	select {
+	case r.finalSlots <- struct{}{}:
+	default:
+		return // saturated: Recall embeds inline, as it did before finals speculated
+	}
+	fl := &flight{norm: norm, done: make(chan struct{})}
+	r.cacheMu.Lock()
+	r.flights[campaignID] = fl
+	r.cacheMu.Unlock()
+
+	r.finals.Add(1)
+	go func() {
+		defer r.finals.Done()
+		defer func() { <-r.finalSlots }()
+		defer close(fl.done)
+		fl.result = r.embedAndCache(f.Text, norm, campaignID)
+	}()
+}
+
+// flightFor returns the campaign's in-flight final speculation when it is for
+// exactly this query.
+func (r *Recaller) flightFor(norm string, campaignID uuid.UUID) *flight {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if fl := r.flights[campaignID]; fl != nil && fl.norm == norm {
+		return fl
+	}
+	return nil
 }
 
 // takePending drains the latest-wins mailbox (text + originating session id).
@@ -146,13 +217,21 @@ func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 	r.lastEmbedNorm = norm
 	r.lastEmbedAt = now
 
+	r.embedAndCache(text, norm, campaignID)
+	return 0
+}
+
+// embedAndCache embeds text and prefetches its world-context chunks off the turn
+// path, replacing the campaign's cache slot on success. It returns the stored
+// entry (valid false when the embed failed).
+func (r *Recaller) embedAndCache(text, norm string, campaignID uuid.UUID) specCache {
 	ctx, cancel := context.WithTimeout(r.ctx, speculateTimeout)
 	defer cancel()
 
 	vecs, err := r.embedder.Embed(ctx, []string{text})
 	if err != nil || len(vecs) != 1 {
-		r.log.Warn("memory speculation: embed failed; will retry on the next partial", "err", err)
-		return 0
+		r.log.Warn("memory speculation: embed failed; will retry on the next utterance", "err", err)
+		return specCache{}
 	}
 	// Prefetch world context with the vector. A failure still caches the vector
 	// (worldOK false) so a later hit skips the (expensive) embed and fetches world
@@ -163,26 +242,34 @@ func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 		r.log.Warn("memory speculation: world prefetch failed; caching vector only", "err", err)
 		world = nil
 	}
-	r.storeCache(norm, campaignID, vecs[0], world, worldOK)
-	return 0
+	return r.storeCache(norm, campaignID, vecs[0], world, worldOK)
 }
 
-// storeCache replaces the single speculated entry (latest utterance only),
-// tagged with the campaign it was prefetched for (#487).
-func (r *Recaller) storeCache(norm string, campaignID uuid.UUID, vec []float32, world []storage.ChunkMatch, worldOK bool) {
+// storeCache replaces the campaign's speculated entry (latest utterance only).
+// One slot per campaign (#487): concurrent sessions neither serve nor evict each
+// other's prefetch. The map is bounded by the campaigns live in this process;
+// entries past their TTL are dropped here so an ended session's slot goes too.
+func (r *Recaller) storeCache(norm string, campaignID uuid.UUID, vec []float32, world []storage.ChunkMatch, worldOK bool) specCache {
+	now := time.Now()
 	r.cacheMu.Lock()
-	r.cache = specCache{norm: norm, campaignID: campaignID, vec: vec, world: world, worldOK: worldOK, valid: true}
-	r.cacheMu.Unlock()
+	defer r.cacheMu.Unlock()
+	for id, c := range r.cache {
+		if now.Sub(c.at) > cacheTTL {
+			delete(r.cache, id)
+		}
+	}
+	c := specCache{norm: norm, campaignID: campaignID, vec: vec, world: world, worldOK: worldOK, valid: true, at: now}
+	r.cache[campaignID] = c
+	return c
 }
 
-// cacheLookup returns the cached entry when norm AND campaignID match the
-// speculated query, and whether it was a hit — the campaign match keeps a
-// concurrent session's prefetch from serving this turn (#487).
+// cacheLookup returns the campaign's cached entry when it is fresh and norm
+// matches the speculated query, and whether it was a hit.
 func (r *Recaller) cacheLookup(norm string, campaignID uuid.UUID) (specCache, bool) {
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
-	if r.cache.valid && r.cache.norm == norm && r.cache.campaignID == campaignID {
-		return r.cache, true
+	if c := r.cache[campaignID]; c.valid && c.norm == norm && time.Since(c.at) <= cacheTTL {
+		return c, true
 	}
 	return specCache{}, false
 }

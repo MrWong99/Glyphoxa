@@ -123,10 +123,11 @@ describe("sessionRefetchInterval (#144)", () => {
 });
 
 describe("Session", () => {
-  it("renders idle with a zeroed timer and a Start button", async () => {
+  it("renders idle with no timer and a Start button", async () => {
     renderScreen();
     expect(await screen.findByText("Idle")).toBeInTheDocument();
-    expect(screen.getByTestId("elapsed")).toHaveTextContent("00:00:00");
+    // Idle hides the clock — a frozen 00:00:00 reads as a stuck timer.
+    expect(screen.queryByTestId("elapsed")).toBeNull();
     expect(screen.getByRole("button", { name: /start session/i })).toBeInTheDocument();
     // The campaign name renders in the header (subtle); it loads on its own query.
     expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
@@ -143,12 +144,13 @@ describe("Session", () => {
     fireEvent.click(startBtn);
     expect(await screen.findByText("Live")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /stop session/i })).toBeInTheDocument();
+    expect(screen.getByTestId("elapsed")).toBeInTheDocument();
 
-    // Live → Idle: Stop resets to Idle, the timer zeroes, and the last-session
+    // Live → Idle: Stop resets to Idle, the timer disappears, and the last-session
     // summary appears with the transcribed line count.
     fireEvent.click(screen.getByRole("button", { name: /stop session/i }));
     expect(await screen.findByText("Idle")).toBeInTheDocument();
-    expect(screen.getByTestId("elapsed")).toHaveTextContent("00:00:00");
+    expect(screen.queryByTestId("elapsed")).toBeNull();
     await waitFor(() =>
       expect(screen.getByText(/12 lines transcribed/i)).toBeInTheDocument(),
     );
@@ -271,6 +273,39 @@ describe("Session reload of an ended session (#74)", () => {
     // disabled there so transcribed asterisks can never reformat spoken words.
     expect(screen.getByText("I said **loudly** hello")).toBeInTheDocument();
     expect(document.querySelector('[data-line-id="u:1"] .gx-line__text strong')).toBeNull();
+  });
+
+  it("renders expressive-TTS audio tags on Agent lines as a stage direction, spaced from the words", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          lines: [
+            { id: "a:t1", who: "Flo", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "[cheerfully]Hier ist dein Wurf" },
+            { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "[laughs] stays literal" },
+          ],
+          status: "idle",
+          typing: { active: false, label: "" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={endedTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    await screen.findByText("Idle");
+    const npcText = await waitFor(() => {
+      const el = document.querySelector('[data-line-id="a:t1"] .gx-line__text');
+      if (!el) throw new Error("line not rendered yet");
+      return el as HTMLElement;
+    });
+    expect(npcText.querySelector('[data-testid="audio-tag"]')?.textContent).toBe("cheerfully");
+    // The spoken words follow the direction after a space — no raw bracket text.
+    expect(npcText.textContent).toBe("cheerfully Hier ist dein Wurf");
+    // Human STT lines stay verbatim.
+    expect(screen.getByText("[laughs] stays literal")).toBeInTheDocument();
   });
 });
 

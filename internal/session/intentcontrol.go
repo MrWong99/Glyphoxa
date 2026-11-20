@@ -112,6 +112,15 @@ func NewIntentControl(store IntentControlStore, log *slog.Logger, cfg IntentCont
 	return &IntentControl{store: store, log: log, cfg: cfg}
 }
 
+// StartBudget is how long Start waits for a worker before ErrIntentPending.
+// Callers that bound Start with their own ctx size it past this, or the
+// friendlier ErrIntentPending can never win the race (S7).
+func (c *IntentControl) StartBudget() time.Duration { return c.cfg.StartBudget }
+
+// StopBudget is how long Stop waits for the worker before ErrStopPending; see
+// StartBudget.
+func (c *IntentControl) StopBudget() time.Duration { return c.cfg.StopBudget }
+
 // Start writes a pending intent for the Tenant's Campaign and polls the claim
 // plane until a worker drives it live (returning the loaded voice_sessions row),
 // it fails/dies (an error carrying the recorded last_error), or the Start budget

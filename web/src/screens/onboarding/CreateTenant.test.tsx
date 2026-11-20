@@ -95,6 +95,11 @@ describe("CreateTenant", () => {
     expect(await screen.findByLabelText(/name your table/i)).toHaveValue("Rin's Table");
   });
 
+  it("explains in one sentence what a table is", async () => {
+    renderScreen(backend());
+    expect(await screen.findByText(/a table is your group's own space in glyphoxa/i)).toBeInTheDocument();
+  });
+
   it("renames the Tenant and navigates into the app on save", async () => {
     const renamed: { name?: string } = {};
     renderScreen(backend({ renamed }));

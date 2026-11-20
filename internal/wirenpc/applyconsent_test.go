@@ -118,3 +118,30 @@ func TestApplyTapeConsent_StorageFailurePublishesNothing(t *testing.T) {
 		t.Fatalf("storage failure not logged; log = %q", logbuf.String())
 	}
 }
+
+// deadlineConsentStore records whether each write carried a deadline.
+type deadlineConsentStore struct {
+	erroringConsentStore
+	deadline time.Time
+	bounded  bool
+}
+
+func (d *deadlineConsentStore) UpsertTapeConsent(ctx context.Context, _ uuid.UUID, _ string) error {
+	d.deadline, d.bounded = ctx.Deadline()
+	return nil
+}
+
+// TestApplyTapeConsentPress_BoundsTheWrite (S12): a button press replies only
+// after the consent write, so the write must finish inside Discord's 3s window.
+func TestApplyTapeConsentPress_BoundsTheWrite(t *testing.T) {
+	store := &deadlineConsentStore{}
+	if _, ok := ApplyTapeConsentPress(store, nil, discardLog(), tapeGrantCustomID(uuid.New()), "player-1"); !ok {
+		t.Fatal("ApplyTapeConsentPress did not recognise a grant button")
+	}
+	if !store.bounded {
+		t.Fatal("consent write ran without a deadline")
+	}
+	if left := time.Until(store.deadline); left > TapeConsentTimeout || TapeConsentTimeout >= 3*time.Second {
+		t.Errorf("deadline %s away (timeout %s), want under Discord's 3s interaction window", left, TapeConsentTimeout)
+	}
+}

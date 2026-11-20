@@ -2,13 +2,15 @@
 
 ## Supported Versions
 
-Glyphoxa is in early alpha development. Security fixes are applied to the latest
-commit on `main` only.
+Glyphoxa is in public beta and has not reached 1.0. Security fixes land on
+`main` and ship in the next `vX.Y.Z` release image
+(`ghcr.io/mrwong99/glyphoxa`); there are no backports to older releases.
+Releases below v0.16.0 have known defects and must not be run.
 
 | Version | Supported |
 |---------|-----------|
-| `main` (HEAD) | ✅ |
-| Older commits | ❌ |
+| Latest release + `main` | ✅ |
+| Older releases | ❌ |
 
 ## Reporting a Vulnerability
 
@@ -17,7 +19,7 @@ commit on `main` only.
 Instead, report vulnerabilities privately:
 
 1. **GitHub Security Advisories** (preferred) — go to
-   [Security → Advisories → New draft advisory](https://github.com/MrWong99/glyphoxa/security/advisories/new)
+   [Security → Advisories → New draft advisory](https://github.com/MrWong99/Glyphoxa/security/advisories/new)
 2. **Email** — send details to the repository owner via their GitHub profile
 
 ### What to Include

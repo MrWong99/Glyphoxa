@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -84,6 +85,14 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		now = time.Now
 	}
 	delay := p.initial
+	// joinTimeouts counts consecutive cycles whose voice join Discord never
+	// answered; any other outcome resets it (S15). everJoined records that this
+	// Run has joined at least once: the timeouts are fatal only before that. A
+	// session that served for hours and then meets three join timeouts (a
+	// Discord voice-region failover takes about that long) is having an outage,
+	// not pointing at a channel the Bot cannot join, and keeps retrying.
+	joinTimeouts := 0
+	everJoined := false
 	for {
 		// connectedAt is written by the callback inside attempt and read after
 		// attempt returns — connectAndServe invokes it synchronously, same
@@ -102,6 +111,20 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		if fe := classifyFatal(err); fe != nil {
 			log.Error("voice connection failed fatally; not retrying", "err", fe, "reason", fe.Reason)
 			return fe
+		}
+		switch {
+		case !connectedAt.IsZero():
+			everJoined = true
+			joinTimeouts = 0
+		case errors.Is(err, errJoinTimeout):
+			joinTimeouts++
+			if !everJoined && joinTimeouts >= maxJoinTimeouts {
+				fe := joinTimeoutFatal(err)
+				log.Error("voice join never answered; ending the session", "err", fe, "reason", fe.Reason, "attempts", joinTimeouts)
+				return fe
+			}
+		default:
+			joinTimeouts = 0 // a cycle that failed some other way breaks the run
 		}
 		if !connectedAt.IsZero() && now().Sub(connectedAt) >= p.healthyAfter {
 			delay = p.initial // served healthily — forgive past failures (issue #44)

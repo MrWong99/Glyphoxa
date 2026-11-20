@@ -52,7 +52,7 @@ func sayIC(resp *fakeResponder, text, as string) *Interaction {
 // GM in Tenant A whose single active session belongs to Tenant B cannot puppet it —
 // the handler refuses ephemerally and publishes no SpeakRequested.
 func TestSayCommand_ForeignTenantSessionRefused(t *testing.T) {
-	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart", Voice: testVoice}
 	// Live session belongs to tenantB; the interaction is tenantA. Active is
 	// Tenant-keyed (#488), so the tenantA query sees no session.
 	mgr := &fakeSayer{active: true, tenantID: tenantB, campaignID: uuid.New()}
@@ -107,7 +107,7 @@ func TestSayCommand_IsFlatGMOnlyWithAutocomplete(t *testing.T) {
 // the local Manager holds no session but the pool does — /say Defers, relays
 // through the claim plane (the LOCAL SayAs is never called), and confirms.
 func TestSayCommand_SessionOnAnotherWorker(t *testing.T) {
-	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart", Voice: testVoice}
 	sayer := &fakeSayer{active: false}
 	pool := &fakePool{live: true, campaignID: uuid.New()}
 	resp := &fakeResponder{}
@@ -172,7 +172,7 @@ func TestSayCommand_UnknownAgentRefused(t *testing.T) {
 func TestSayCommand_ButlerRefusedOnHandle(t *testing.T) {
 	campaign := uuid.New()
 	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}
-	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart", Voice: testVoice}
 
 	for _, as := range []string{"Glyphoxa", butler.ID.String()} {
 		sayer := &fakeSayer{active: true, campaignID: campaign}
@@ -194,7 +194,7 @@ func TestSayCommand_ButlerRefusedOnHandle(t *testing.T) {
 // spoken via SayAs(id, text) and the GM gets an ephemeral ack naming the Agent.
 func TestSayCommand_HappyCallsSayAs(t *testing.T) {
 	campaign := uuid.New()
-	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart", Voice: testVoice}
 	sayer := &fakeSayer{active: true, campaignID: campaign}
 	lister := &fakeLister{agents: []storage.Agent{bart}}
 	resp := &fakeResponder{}
@@ -213,7 +213,7 @@ func TestSayCommand_HappyCallsSayAs(t *testing.T) {
 // resolve and the publish: SayAs returning an error surfaces the same ephemeral
 // no-session refusal (mirrors the mute command), not a generic failure.
 func TestSayCommand_SayAsRaceRefused(t *testing.T) {
-	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart", Voice: testVoice}
 	sayer := &fakeSayer{active: true, sayErr: context.Canceled}
 	lister := &fakeLister{agents: []storage.Agent{bart}}
 	resp := &fakeResponder{}
@@ -231,7 +231,7 @@ func TestSayCommand_SayAsRaceRefused(t *testing.T) {
 func TestSayCommand_AutocompleteOffersVoicedNPCs(t *testing.T) {
 	campaign := uuid.New()
 	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Butler"}
-	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart", Voice: testVoice}
 	sayer := &fakeSayer{active: true, campaignID: campaign}
 	lister := &fakeLister{agents: []storage.Agent{butler, bart}}
 

@@ -116,10 +116,11 @@ func (s *Session) MediaLiveness() (MediaLiveness, bool) {
 // announcement. It is package-level because disgo's event handler is
 // registered per client (shared across every guild conn the client hosts)
 // while the readers are per-Session; the gateway instance — one per voice
-// connection — is the correlation key both sides can reach. Entries are pruned
-// by age on write: a gateway is unreachable once its conn is discarded, and a
-// long-lived shared client would otherwise accumulate one stale entry per
-// session ever hosted.
+// connection — is the correlation key both sides can reach. A gateway is
+// unreachable once its conn is discarded, so [connGuard] forgets its entry
+// then; the age-based prune on write is the backstop for a conn built without
+// the guard, so a long-lived shared client never accumulates one stale entry
+// per session ever hosted.
 var speakingEvents = &speakingLog{entries: map[voice.Gateway]time.Time{}}
 
 // speakingStaleAfter is how long a gateway's entry survives without a new
@@ -143,6 +144,13 @@ func (l *speakingLog) note(gw voice.Gateway, at time.Time) {
 			}
 		}
 	}
+}
+
+// forget drops gw's entry: its conn was discarded.
+func (l *speakingLog) forget(gw voice.Gateway) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, gw)
 }
 
 func (l *speakingLog) last(gw voice.Gateway) time.Time {

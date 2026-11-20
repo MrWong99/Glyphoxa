@@ -168,15 +168,11 @@ func newAmbientRosterFor(specs []npcSpec, repliers []*agent.Replier, synth tts.S
 	return newRosterWith(soleDecisiveStack(), specs, repliers, synth)
 }
 
-// soleDecisiveStack is the shipped stack with SoleActiveNPC back at weight 1.0.
+// soleDecisiveStack is the shipped stack plus the opt-in lone-NPC fallback
+// (address.SoleActiveNPC) at a decisive weight.
 func soleDecisiveStack() []address.Heuristic {
-	stack := address.DefaultHeuristics()
-	for i, h := range stack {
-		if _, ok := h.(address.SoleActiveNPC); ok {
-			stack[i] = address.SoleActiveNPC{Weight: 1.0}
-		}
-	}
-	return stack
+	return append(address.DefaultHeuristicsWithin(address.DefaultContinuationWindow),
+		address.SoleActiveNPC{Weight: 1.0})
 }
 
 func newRosterWith(heuristics []address.Heuristic, specs []npcSpec, repliers []*agent.Replier, synth tts.Synthesizer) *Roster {

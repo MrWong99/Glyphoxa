@@ -119,27 +119,6 @@ func (m *Manager) Directive(_ context.Context, agentID string, consume bool) str
 	return ""
 }
 
-// DirectedAgentIDs is a sorted snapshot of the Agent ids with an active
-// directive in tenantID's session, or nil when that Tenant has no live session
-// — diagnostics/tests parity with MutedAgentIDs.
-func (m *Manager) DirectedAgentIDs(tenantID uuid.UUID) []string {
-	l := m.Live(tenantID)
-	if l == nil {
-		return nil
-	}
-	var ids []string
-	if err := l.revalidate(func() {
-		set := make(map[string]struct{}, len(l.as.directives))
-		for id := range l.as.directives {
-			set[id] = struct{}{}
-		}
-		ids = mutedIDsLocked(set)
-	}); err != nil {
-		return nil
-	}
-	return ids
-}
-
 // compile-time proof the Manager satisfies the storage-free directive seam the
 // voice wiring consumes (mirrors the MuteView proof in wirenpc).
 var _ interface {

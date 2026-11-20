@@ -96,11 +96,17 @@ func TestEmbed_Batch_ReturnsNVectorsInInputOrder(t *testing.T) {
 		sawPath.Store(r.URL.Path)
 		raw, _ := io.ReadAll(r.Body)
 		var req struct {
-			Model string   `json:"model"`
-			Input []string `json:"input"`
+			Model     string   `json:"model"`
+			Input     []string `json:"input"`
+			KeepAlive *int     `json:"keep_alive"`
 		}
 		if err := json.Unmarshal(raw, &req); err != nil {
 			t.Errorf("decode request body: %v", err)
+		}
+		// The model must stay loaded: an unload after five idle minutes costs a
+		// multi-second reload that no live turn can wait for.
+		if req.KeepAlive == nil || *req.KeepAlive >= 0 {
+			t.Errorf("keep_alive = %v, want a negative number (never unload)", req.KeepAlive)
 		}
 		sawModel.Store(req.Model)
 		sawInput.Store(strings.Join(req.Input, "|"))

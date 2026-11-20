@@ -28,3 +28,17 @@ Endpoint→final drops from one full batch POST (~1.5s) to a manual-commit final
 - **ADR-0020** — taxonomy gains `STTPartial`.
 - **ADR-0021** — the websocket adapter needs a deterministic fake/replay harness like the batch cassettes before it gates CI.
 - **ADR-0039** — MVP provider matrix unchanged (still Groq + ElevenLabs).
+
+## Amendment 2026-11-20 — the batch fallback never fit its budget
+
+A live production check (batch STT, the default) found memory recall degrading to no-memory on **every** turn (`glyphoxa_voice_memory_recall_total{outcome="skip"}` = 100%). Two causes, neither visible in tests with a fake embedder:
+
+- **The inline fallback cannot finish in 250ms on the production node.** One spoken sentence takes the CPU-only Ollama instance ~340ms to embed, warm. The "kept as the fallback path" promise above was therefore false wherever streaming STT is off.
+- **A cold model never loads.** Ollama unloads an idle model after five minutes; a recall that gives up at its budget makes Ollama abort the load, so recall calls alone never bring the model back.
+
+Decisions:
+
+- **The final's embed starts when `STTFinal` is published, under the recaller's own context**, not inside `Recall`. The recaller subscribes to `STTFinal` and embeds-and-prefetches unconditionally (no rate limit, no minimum length — a turn is about to ask for exactly this text), each final on its own bounded goroutine so table chatter never queues ahead of an addressed utterance. `Recall` joins that call instead of embedding the same text a second time behind it. This buys no head start — Address Detection is a synchronous text match, so `Recall` follows the final within microseconds — what it buys is that a turn running out of budget no longer cancels the request, so a cold model finishes loading.
+- **The budget is 500ms by default** (`GLYPHOXA_RECALL_BUDGET`). It is a ceiling: a speculation hit over partials still costs a millisecond or two. On batch STT a turn that recalls now **pays the real embed time (~350ms on the production node) before its first LLM call.** We accept that in exchange for NPCs that remember; streaming STT remains the way to get recall at no added latency, and is the reason to turn it on once #639 is fixed. A joined final counts as a `miss` in `glyphoxa_voice_memory_recall_total`, so `hit` keeps meaning "speculated over partials, free".
+- **Speculation state is per campaign** (one cache slot and one in-flight final each, entries expire after two minutes), so concurrent sessions in one process neither serve nor evict each other's prefetch.
+- **The embeddings model is pinned and pre-loaded**: every embed request carries `keep_alive: -1`, and the recaller warms the model at boot, retrying while the embeddings server is still coming up.

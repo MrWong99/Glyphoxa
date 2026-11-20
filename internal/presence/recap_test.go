@@ -197,7 +197,7 @@ func TestRecapNoActiveCampaign(t *testing.T) {
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
 	}
-	if resp.followups[0].content != "No Active Campaign yet — run /glyphoxa use campaign:<name> first." {
+	if resp.followups[0].content != noActiveCampaignReply {
 		t.Errorf("no-campaign reply = %q, want the exact sibling wording", resp.followups[0].content)
 	}
 	if eng.calls != 0 {
@@ -220,8 +220,8 @@ func TestRecapNoRecappableSession(t *testing.T) {
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
 	}
-	if !strings.Contains(strings.ToLower(resp.followups[0].content), "no recappable session") {
-		t.Errorf("no-recappable reply = %q, want a 'no recappable session' message", resp.followups[0].content)
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "no finished session with a transcript") {
+		t.Errorf("no-recappable reply = %q, want a 'no finished session with a transcript' message", resp.followups[0].content)
 	}
 	if eng.calls != 0 {
 		t.Errorf("engine ran %d times with nothing recappable, want 0", eng.calls)
@@ -524,8 +524,8 @@ func TestRecapAutocompleteEndedOnly(t *testing.T) {
 	if ch.Value != ended.ID.String() {
 		t.Errorf("choice value = %q, want the ended session UUID %s", ch.Value, ended.ID)
 	}
-	if ch.Name != "2026-06-26 18:30 · 88 lines" {
-		t.Errorf("choice label = %q, want \"2026-06-26 18:30 · 88 lines\"", ch.Name)
+	if ch.Name != "2026-06-26 18:30 UTC · 88 lines" {
+		t.Errorf("choice label = %q, want \"2026-06-26 18:30 UTC · 88 lines\" (dated, and marked UTC rather than passing for local time)", ch.Name)
 	}
 }
 

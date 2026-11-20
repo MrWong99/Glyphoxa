@@ -45,7 +45,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+          value: ghcr.io/mrwong99/glyphoxa:v0.16.0
       - equal:
           path: spec.template.spec.containers[0].args
           value:
