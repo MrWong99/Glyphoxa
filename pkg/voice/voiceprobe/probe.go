@@ -210,6 +210,10 @@ type Barge struct {
 	// Heard is false when the first clip got no reply to interrupt; nothing
 	// else is set and the second clip was not spoken.
 	Heard bool
+	// Interrupted is false when the reply had already ended by the time the
+	// probe spoke over it: nothing was interrupted and TalkedOver says nothing
+	// about barge-in. Use a first clip that draws a longer reply.
+	Interrupted bool
 	// Latency is the time from the end of the first clip to its reply.
 	Latency time.Duration
 	// TalkedOver is how long the Bot kept talking after the probe started to
@@ -231,6 +235,9 @@ const (
 	joinTimeout = 30 * time.Second
 	playMargin  = 20 * time.Second
 )
+
+// opusFrameDuration is the length of one voice frame.
+const opusFrameDuration = 20 * time.Millisecond
 
 // pauseRebase is how far behind its timestamp a frame must arrive to count as
 // the start of a new utterance after a pause (see [recorder.record]).
@@ -258,7 +265,7 @@ func (p *Probe) Interrupt(ctx context.Context, clip, over Clip, after time.Durat
 		return Barge{}, err
 	}
 	out := Barge{Heard: true, Latency: first.Sub(asked)}
-	out.TalkedOver, out.Reply, err = p.rec.waitBarge(ctx, barged, time.Now(), p.cfg.Quiet, p.cfg.MaxWait)
+	out.Interrupted, out.TalkedOver, out.Reply, err = p.rec.waitBarge(ctx, barged, time.Now(), p.cfg.Quiet, p.cfg.MaxWait)
 	return out, err
 }
 
@@ -450,31 +457,35 @@ func (r *recorder) waitStart(ctx context.Context, since time.Time, maxWait time.
 }
 
 // waitBarge follows an interruption that began at barged and whose clip ended
-// at spoken: it returns how long the interrupted reply ran on past barged, and
-// the reply to the interruption once it has been followed by quiet (or the
-// zero Reply when maxWait passes after spoken without one).
-func (r *recorder) waitBarge(ctx context.Context, barged, spoken time.Time, quiet, maxWait time.Duration) (time.Duration, Reply, error) {
+// at spoken: it reports whether a reply was running at barged at all, how long
+// it ran on past barged, and the reply to the interruption once it has been
+// followed by quiet (or the zero Reply when maxWait passes after spoken without
+// one).
+func (r *recorder) waitBarge(ctx context.Context, barged, spoken time.Time, quiet, maxWait time.Duration) (bool, time.Duration, Reply, error) {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, Reply{}, ctx.Err()
+			return false, 0, Reply{}, ctx.Err()
 		case now := <-tick.C:
 			r.mu.Lock()
-			cut, resumed, last := splitBarge(r.arrivals, barged, now, bargeGap)
+			cut, resumed, last := splitBarge(r.arrivals, barged, spoken, now, bargeGap)
 			r.mu.Unlock()
+			// A reply whose last frame is older than a frame or two at barged had
+			// already ended: there was nothing to interrupt.
+			interrupted := cut.After(barged.Add(-5 * opusFrameDuration))
 			switch {
 			case cut.IsZero(): // the interrupted reply is still running
 			case !resumed.IsZero() && now.Sub(last) >= quiet:
-				return talkedOver(cut, barged), Reply{
+				return interrupted, talkedOver(cut, barged), Reply{
 					Heard:    true,
 					Latency:  resumed.Sub(spoken),
 					Duration: last.Sub(resumed),
 					PCM:      r.mix(resumed, last),
 				}, nil
 			case resumed.IsZero() && now.Sub(spoken) >= maxWait:
-				return talkedOver(cut, barged), Reply{}, nil
+				return interrupted, talkedOver(cut, barged), Reply{}, nil
 			}
 		}
 	}
@@ -482,11 +493,14 @@ func (r *recorder) waitBarge(ctx context.Context, barged, spoken time.Time, quie
 
 func talkedOver(cut, barged time.Time) time.Duration { return max(cut.Sub(barged), 0) }
 
-// splitBarge reads a frame-arrival timeline around an interruption at barged:
-// cut is the last frame of the reply that was running then (zero while it has
-// not yet fallen silent for gap, judged at now), resumed the first frame after
-// that silence (zero if none yet), last the latest frame.
-func splitBarge(arrivals []time.Time, barged, now time.Time, gap time.Duration) (cut, resumed, last time.Time) {
+// splitBarge reads a frame-arrival timeline around an interruption that began at
+// barged and whose clip ended at spoken: cut is the last frame of the reply that
+// was running at barged (zero while it has not yet fallen silent for gap, judged
+// at now), resumed the first frame of the reply to the interruption (zero if none
+// yet), last the latest frame. A pause that ends before spoken is not the end of
+// the interrupted reply — the Bot cannot answer a clip it has not heard out — so
+// it is a pause between two of its sentences, and the reply is still running.
+func splitBarge(arrivals []time.Time, barged, spoken, now time.Time, gap time.Duration) (cut, resumed, last time.Time) {
 	if len(arrivals) == 0 {
 		return barged, time.Time{}, time.Time{}
 	}
@@ -497,7 +511,7 @@ func splitBarge(arrivals []time.Time, barged, now time.Time, gap time.Duration) 
 			prev = at
 			continue
 		}
-		if at.Sub(prev) >= gap {
+		if at.Sub(prev) >= gap && !at.Before(spoken) {
 			return prev, at, last
 		}
 		prev = at
@@ -544,7 +558,9 @@ func (r *recorder) waitReply(ctx context.Context, since time.Time, quiet, maxWai
 // frame of margin either side for the arrival jitter the timeline was built on.
 func (r *recorder) mix(from, to time.Time) []int16 {
 	lo := max(samplesIn(from.Sub(r.start))-opusFrame, 0)
-	hi := samplesIn(to.Sub(r.start)) + 2*opusFrame
+	// The tail margin also covers audio a delivery stall pushed later on the
+	// track than it was heard (see the re-anchoring in record).
+	hi := samplesIn(to.Sub(r.start)) + 2*opusFrame + samplesIn(pauseRebase)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]int16, hi-lo)

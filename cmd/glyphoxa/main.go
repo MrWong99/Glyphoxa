@@ -1179,7 +1179,8 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// reserved Hot Context memory slot; a slow/unavailable path degrades
 		// to no-memory within the turn budget. Bound to the run ctx — AfterFunc drops
 		// the bus subscription and stops the speculator on shutdown. In web-only mode
-		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
+		// the Manager starts no sessions, so the recaller stays dormant (bus idle)
+		// apart from the one warm-up embed.
 		// Set only in this branch so a keyless deployment leaves Memory a true nil
 		// (recall off), never a typed-nil interface.
 		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{

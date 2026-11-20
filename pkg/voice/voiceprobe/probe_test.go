@@ -256,32 +256,43 @@ func TestSplitBarge(t *testing.T) {
 		return out
 	}
 	const gap = 700 * time.Millisecond
+	// The probe starts talking over the Bot at 1000 ms and finishes at 3000 ms.
+	barged, spoken := at(1000), at(3000)
 
 	t.Run("reply stops, a new one follows", func(t *testing.T) {
-		arrivals := append(run(0, 1400), run(4000, 5000)...) // barged at 1000
-		cut, resumed, last := splitBarge(arrivals, at(1000), at(6000), gap)
+		arrivals := append(run(0, 1400), run(4000, 5000)...)
+		cut, resumed, last := splitBarge(arrivals, barged, spoken, at(6000), gap)
 		if !cut.Equal(at(1400)) || !resumed.Equal(at(4000)) || !last.Equal(at(5000)) {
 			t.Errorf("cut=%s resumed=%s last=%s, want 1400/4000/5000 ms",
 				cut.Sub(t0), resumed.Sub(t0), last.Sub(t0))
 		}
 	})
 	t.Run("reply still running", func(t *testing.T) {
-		cut, _, _ := splitBarge(run(0, 2000), at(1000), at(2100), gap)
+		cut, _, _ := splitBarge(run(0, 2000), barged, spoken, at(2100), gap)
 		if !cut.IsZero() {
 			t.Errorf("cut = %s, want none while the Bot keeps talking", cut.Sub(t0))
 		}
 	})
 	t.Run("reply stopped, nothing since", func(t *testing.T) {
-		cut, resumed, _ := splitBarge(run(0, 1200), at(1000), at(3000), gap)
+		cut, resumed, _ := splitBarge(run(0, 1200), barged, spoken, at(3500), gap)
 		if !cut.Equal(at(1200)) || !resumed.IsZero() {
 			t.Errorf("cut=%s resumed-zero=%v, want cut at 1200 ms and no resume", cut.Sub(t0), resumed.IsZero())
 		}
 	})
-	t.Run("bot was already silent when barged", func(t *testing.T) {
-		arrivals := append(run(0, 100), run(3000, 3500)...)
-		cut, resumed, _ := splitBarge(arrivals, at(1000), at(5000), gap)
-		if talkedOver(cut, at(1000)) != 0 || !resumed.Equal(at(3000)) {
-			t.Errorf("talkedOver=%s resumed=%s, want 0 and 3000 ms", talkedOver(cut, at(1000)), resumed.Sub(t0))
+	t.Run("a pause between sentences is not a yield", func(t *testing.T) {
+		// Barge-in broken: the Bot pauses 760 ms mid-reply and carries on, all
+		// while the probe is still speaking. That is one reply, still running.
+		arrivals := append(run(0, 1300), run(2060, 9000)...)
+		cut, _, _ := splitBarge(arrivals, barged, spoken, at(9050), gap)
+		if !cut.IsZero() {
+			t.Errorf("cut = %s, want none: the Bot talked through the interruption", cut.Sub(t0))
+		}
+	})
+	t.Run("reply had ended before the barge", func(t *testing.T) {
+		arrivals := append(run(0, 100), run(3200, 3500)...)
+		cut, resumed, _ := splitBarge(arrivals, barged, spoken, at(5000), gap)
+		if !cut.Before(barged) || !resumed.Equal(at(3200)) {
+			t.Errorf("cut=%s resumed=%s, want a cut before the barge and a resume at 3200 ms", cut.Sub(t0), resumed.Sub(t0))
 		}
 	})
 }

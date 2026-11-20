@@ -642,11 +642,11 @@ func TestMailbox_LatestWins(t *testing.T) {
 	r.onPartial(voiceevent.STTPartial{Text: "two"})
 	r.onPartial(voiceevent.STTPartial{Text: "three"})
 
-	got, _, _, ok := r.takePending()
+	got, _, ok := r.takePending()
 	if !ok || got != "three" {
 		t.Errorf("takePending = (%q, %v), want (three, true) — latest wins", got, ok)
 	}
-	if _, _, _, ok := r.takePending(); ok {
+	if _, _, ok := r.takePending(); ok {
 		t.Error("mailbox not empty after a drain")
 	}
 }

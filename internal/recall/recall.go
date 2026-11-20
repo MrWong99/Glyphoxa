@@ -13,10 +13,10 @@
 //     memory injects at effectively zero added latency (a "hit").
 //   - Inline: no usable speculation (mismatch, no partials, batch STT) falls back to
 //     embedding the utterance and running BOTH ANN modes within a hard budget
-//     (ADR-0042) inside the turn ctx (a "miss"). The embed does not start cold at
-//     Recall: the recaller also subscribes to [voiceevent.STTFinal] and starts it
-//     when the final is published, so it overlaps Address Detection, and Recall
-//     joins that call.
+//     (ADR-0042) inside the turn ctx (a "miss"). The recaller also subscribes to
+//     [voiceevent.STTFinal] and starts the embed under its OWN context when the
+//     final is published; Recall joins that call, so a turn that runs out of
+//     budget no longer cancels the request (which aborted every cold model load).
 //
 // A slow or unavailable embeddings/DB path, or the budget elapsing, degrades to a
 // zero [agent.Memory] ("skip", counted). A barge cancels the turn ctx, which
@@ -105,6 +105,13 @@ const (
 	// warmTimeout bounds [Recaller.Warm]: generous, because pulling a model into
 	// memory on a small CPU-only node is the slow case it exists for.
 	warmTimeout = 2 * time.Minute
+	// warmRetry spaces Warm's attempts while the embeddings server is not up yet.
+	warmRetry = 15 * time.Second
+	// cacheTTL bounds how long a speculated entry is served.
+	cacheTTL = 2 * time.Minute
+	// maxFinalSpeculations bounds concurrent final embeds across all sessions in
+	// the process; past it a final is simply not speculated.
+	maxFinalSpeculations = 4
 )
 
 func (c Config) withDefaults() Config {
@@ -140,19 +147,21 @@ type Recaller struct {
 	specDone    chan struct{} // closed when the speculator goroutine exits
 	speculated  chan struct{} // 1-slot test notify: a speculation pass completed
 
-	mailMu        sync.Mutex
-	pending       string
-	pendingSID    string  // session id of the latest pending partial (#487)
-	pendingFlight *flight // set when the pending text is a final (see onFinal)
-	hasPending    bool
+	mailMu     sync.Mutex
+	pending    string
+	pendingSID string // session id of the latest pending partial (#487)
+	hasPending bool
 
 	// lastEmbed* gate the speculator; touched only by the speculator goroutine.
 	lastEmbedNorm string
 	lastEmbedAt   time.Time
 
 	cacheMu sync.Mutex
-	cache   specCache
-	flight  *flight // the latest final's speculation, joined by Recall
+	cache   map[uuid.UUID]specCache // per campaign
+	flights map[uuid.UUID]*flight   // per campaign: the latest final's speculation, joined by Recall
+
+	finalSlots chan struct{}  // bounds concurrent final speculations
+	finals     sync.WaitGroup // their goroutines, awaited by Close
 }
 
 // New builds a Recaller wired to the embeddings provider, the ANN retriever, the
@@ -194,6 +203,9 @@ func newRecaller(embedder embeddings.Provider, retriever Retriever, sessions Ses
 		signal:     make(chan struct{}, 1),
 		specDone:   make(chan struct{}),
 		speculated: make(chan struct{}, 1),
+		cache:      make(map[uuid.UUID]specCache),
+		flights:    make(map[uuid.UUID]*flight),
+		finalSlots: make(chan struct{}, maxFinalSpeculations),
 	}
 }
 
@@ -208,13 +220,21 @@ func (r *Recaller) start(bus *voiceevent.Bus) {
 
 // Warm loads the embeddings model before the first turn needs it. A cold local
 // model takes seconds to load — far past the recall budget — and the first
-// utterances of a session would otherwise all degrade to no-memory. Blocking and
-// best-effort: run it in a goroutine at boot.
+// utterances of a session would otherwise all degrade to no-memory. It retries
+// until it succeeds, warmTimeout passes or ctx ends, because the embeddings
+// server commonly comes up after this process. Blocking: run it in a goroutine.
 func (r *Recaller) Warm(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, warmTimeout)
 	defer cancel()
-	if _, err := r.embedder.Embed(ctx, []string{"warm-up"}); err != nil {
-		r.log.Warn("memory recall: embeddings warm-up failed; the first turns may run without memory", "err", err)
+	for {
+		_, err := r.embedder.Embed(ctx, []string{"warm-up"})
+		if err == nil {
+			return
+		}
+		if r.sleep(ctx, warmRetry) != nil {
+			r.log.Warn("memory recall: embeddings warm-up failed; the first turns may run without memory", "err", err)
+			return
+		}
 	}
 }
 
@@ -239,6 +259,7 @@ func (r *Recaller) Close() {
 	r.unsubscribe()
 	r.cancel()
 	<-r.specDone
+	r.finals.Wait()
 }
 
 // Recall implements [agent.MemoryRecaller]. It returns the Hot Context memory for
@@ -283,6 +304,10 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	// (#487): a cross-session partial that happened to normalize identically must
 	// not serve another session's prefetched world chunks.
 	cached, hit := r.cacheLookup(norm, campaignID)
+	// joined marks a result that came from the final's own embed: it reuses the
+	// vector like a hit, but the turn waited for it, so it is COUNTED as a miss —
+	// "hit" stays the measure of speculation over partials (zero added latency).
+	joined := false
 	if !hit {
 		// The final's own speculation started when the final was published and is
 		// usually still embedding: join it instead of embedding the same text again
@@ -290,7 +315,8 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 		if fl := r.flightFor(norm, campaignID); fl != nil {
 			select {
 			case <-fl.done:
-				cached, hit = r.cacheLookup(norm, campaignID)
+				cached, hit = fl.result, fl.result.valid
+				joined = hit
 			case <-ctx.Done():
 				return r.degrade(ctx, time.Since(start), fmt.Errorf("embed utterance: %w", ctx.Err()))
 			}
@@ -343,7 +369,7 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	// as possibly-not-witnessed (ADR-0011). Personal wins.
 	world = excludeByID(world, chunkIDSet(personal))
 
-	if hit {
+	if hit && !joined {
 		r.metrics.MemoryRecall(observe.RecallHit, time.Since(start))
 	} else {
 		r.metrics.MemoryRecall(observe.RecallMiss, time.Since(start))

@@ -169,8 +169,14 @@ func run() error {
 				reply = barge.Reply
 				res.Clip, res.ClipSeconds = over.Name, over.Duration().Seconds()
 				res.Interrupted, res.TalkoverSeconds = clip.Name, barge.TalkedOver.Seconds()
-				say("interrupted the reply to %s with %s: the Bot talked on for %.2fs", clip.Name, over.Name, res.TalkoverSeconds)
-				if *maxTalkover > 0 && barge.TalkedOver > *maxTalkover {
+				if !barge.Interrupted {
+					say("the reply to %s had already ended when %s was spoken: nothing was interrupted", clip.Name, over.Name)
+					summary.Failures = append(summary.Failures,
+						fmt.Sprintf("%s: the reply to %s ended before the interruption; use a clip that draws a longer reply or a shorter -barge-after", over.Name, clip.Name))
+				} else {
+					say("interrupted the reply to %s with %s: the Bot talked on for %.2fs", clip.Name, over.Name, res.TalkoverSeconds)
+				}
+				if barge.Interrupted && *maxTalkover > 0 && barge.TalkedOver > *maxTalkover {
 					summary.Failures = append(summary.Failures,
 						fmt.Sprintf("%s: the Bot talked over the interruption for %s, more than %s", over.Name, barge.TalkedOver.Round(time.Millisecond), *maxTalkover))
 				}
