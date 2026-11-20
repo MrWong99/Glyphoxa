@@ -13,6 +13,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
@@ -90,6 +91,36 @@ func TestGeneratePersonaMetersUsage(t *testing.T) {
 	}
 	if got.provider != observe.ProviderGroq || got.model != groq.DefaultModel {
 		t.Errorf("priced (%s,%s), want (groq, %s)", got.provider, got.model, groq.DefaultModel)
+	}
+}
+
+// TestGeneratePersonaPricesSavedConfigWithoutModel: a saved LLM config that
+// names a provider but no model is priced on that provider's default model,
+// never on (provider, "") — which misses the price map and is charged at the
+// conservative fallback rate.
+func TestGeneratePersonaPricesSavedConfigWithoutModel(t *testing.T) {
+	st := newFakeStore()
+	c := seedCampaign(st, "")
+	st.byComponent[c.TenantID] = storage.ProviderConfig{
+		ID: uuid.New(), TenantID: c.TenantID, Component: storage.ComponentLLM,
+		Provider: anthropic.ProviderID, CredentialsLast4: llmbuild.EnvPlaceholderLast4,
+	}
+	rec := &capRec{}
+	var req llm.Request
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+		return &stubProvider{text: "You are someone.", usage: &llm.Usage{InputTokens: 42, OutputTokens: 7}, capture: func(r llm.Request) { req = r }}, nil
+	}))
+	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err != nil {
+		t.Fatalf("GeneratePersona: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("LLMTokens calls = %d, want 1", len(rec.calls))
+	}
+	if got := rec.calls[0]; got.provider != observe.ProviderAnthropic || got.model != anthropic.DefaultModel {
+		t.Errorf("priced (%s,%s), want (anthropic, %s)", got.provider, got.model, anthropic.DefaultModel)
+	}
+	if req.Model != "" {
+		t.Errorf("request model = %q, want empty (the adapter fills its own default)", req.Model)
 	}
 }
 

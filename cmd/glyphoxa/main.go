@@ -1597,7 +1597,6 @@ type sessionControl interface {
 	MutedAgentIDs(tenantID uuid.UUID) []string
 	Spend(tenantID uuid.UUID) spend.Status
 	IsCampaignLive(campaignID uuid.UUID) bool
-	AnyLive() bool
 	ReplayHighlight(ctx context.Context, tenantID uuid.UUID, clipKey string) error
 	// ActiveVoiceChannelID reports the channel the Tenant's LIVE session joined
 	// (per-start selection may differ from the stored Default Voice Channel);

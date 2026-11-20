@@ -124,9 +124,9 @@ func attrValue(m []string) string {
 }
 
 // isSameOrigin reports whether ref addresses the embedded bundle itself, as
-// opposed to an external resource (the Google Fonts preconnect/stylesheet
-// links), an inline data: URI, or a bare fragment. Only same-origin refs are
-// ours to resolve.
+// opposed to an external resource (an absolute or protocol-relative URL), an
+// inline data: URI, or a bare fragment. Only same-origin refs are ours to
+// resolve.
 func isSameOrigin(ref string) bool {
 	switch {
 	case schemeRe.MatchString(ref): // absolute URL, data:, mailto:, tel:, …

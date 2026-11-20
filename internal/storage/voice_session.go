@@ -66,9 +66,9 @@ func (s *Store) ImportVoiceSession(ctx context.Context, v VoiceSession) (uuid.UU
 // CloseVoiceSession closes a running Voice Session with an explicit terminal
 // status and end_reason: it sets ended_at=now(), status, the final line_count, and
 // end_reason (NULL when endReason is nil), returning the updated row. A missing id
-// yields ErrNotFound. It is the single terminal-write seam (#123): [EndVoiceSession]
-// delegates to it for a clean stop ('ended', NULL reason), and the session Manager
-// calls it directly with 'failed' + the readable cause on a fatal gateway rejection.
+// yields ErrNotFound. It is the single terminal-write seam (#123): the session
+// Manager calls it with 'ended' and a nil reason for a clean stop, and with
+// 'failed' + the readable cause on a fatal gateway rejection.
 func (s *Store) CloseVoiceSession(ctx context.Context, id uuid.UUID, status VoiceSessionStatus, lineCount int, endReason *string) (VoiceSession, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE voice_sessions
@@ -84,14 +84,6 @@ func (s *Store) CloseVoiceSession(ctx context.Context, id uuid.UUID, status Voic
 		return VoiceSession{}, fmt.Errorf("storage: close voice session %s: %w", id, err)
 	}
 	return v, nil
-}
-
-// EndVoiceSession closes a running Voice Session cleanly: status='ended' with a
-// NULL end_reason and the final line_count, returning the updated row. A missing
-// id yields ErrNotFound. It is a thin wrapper over [CloseVoiceSession] — the
-// clean-stop path that leaves end_reason NULL (distinct from orphaned/failed).
-func (s *Store) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (VoiceSession, error) {
-	return s.CloseVoiceSession(ctx, id, VoiceSessionEnded, lineCount, nil)
 }
 
 // ReconcileOrphanedVoiceSessions closes every Voice Session row still marked

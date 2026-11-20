@@ -298,14 +298,14 @@ func TestHighlight_ListSessionsNeedingCandidatePurge(t *testing.T) {
 	// Orphan: ended, has a candidate, no purge job → must be listed.
 	orphan, _ := st.CreateVoiceSession(ctx, campaignID)
 	seedHighlight(t, st, tenantID, orphan.ID, campaignID, storage.HighlightCandidate)
-	if _, err := st.EndVoiceSession(ctx, orphan.ID, 0); err != nil {
+	if _, err := st.CloseVoiceSession(ctx, orphan.ID, storage.VoiceSessionEnded, 0, nil); err != nil {
 		t.Fatalf("end orphan: %v", err)
 	}
 
 	// Already scheduled: ended, has a candidate, but a pending purge job exists → NOT listed.
 	scheduled, _ := st.CreateVoiceSession(ctx, campaignID)
 	seedHighlight(t, st, tenantID, scheduled.ID, campaignID, storage.HighlightCandidate)
-	if _, err := st.EndVoiceSession(ctx, scheduled.ID, 0); err != nil {
+	if _, err := st.CloseVoiceSession(ctx, scheduled.ID, storage.VoiceSessionEnded, 0, nil); err != nil {
 		t.Fatalf("end scheduled: %v", err)
 	}
 	payload := []byte(`{"voice_session_id":"` + scheduled.ID.String() + `"}`)
@@ -320,7 +320,7 @@ func TestHighlight_ListSessionsNeedingCandidatePurge(t *testing.T) {
 	// Promoted-only: ended but its only highlight is promoted (kept) → NOT listed.
 	promotedOnly, _ := st.CreateVoiceSession(ctx, campaignID)
 	seedHighlight(t, st, tenantID, promotedOnly.ID, campaignID, storage.HighlightPromoted)
-	if _, err := st.EndVoiceSession(ctx, promotedOnly.ID, 0); err != nil {
+	if _, err := st.CloseVoiceSession(ctx, promotedOnly.ID, storage.VoiceSessionEnded, 0, nil); err != nil {
 		t.Fatalf("end promotedOnly: %v", err)
 	}
 

@@ -266,9 +266,9 @@ func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llm
 		return nil, nil, fmt.Errorf("assist: build llm provider: %w", err)
 	}
 	// A config without a model sends request model "" (the adapter fills its own
-	// default) but prices — and now ledgers — on that real model id, for every
-	// provider and not just the env path: (provider, "") misses the price map and
-	// bills the Tenant's allowance at the conservative fallback (#272 review).
+	// default) but prices on that real model id, for every provider: (provider,
+	// "") misses the price map and is charged at the conservative fallback rate
+	// (#272 review).
 	priceModel := model
 	if priceModel == "" {
 		priceModel = llmbuild.DefaultModel(providerID)

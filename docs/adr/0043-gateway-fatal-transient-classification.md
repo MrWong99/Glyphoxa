@@ -20,3 +20,7 @@ Implementing #123 (E6) required deciding what counts as a *fatal* Discord gatewa
 ## Relationship to other ADRs
 
 ADR-0020 (taxonomy gains `connection.state`), ADR-0014 (frame rides the SSE ring), ADR-0039 (Session screen consumes it), ADR-0031 (no schema migration needed).
+
+## Amendment 2026-11-20
+
+The `EndVoiceSession` delegating wrapper is removed: nothing outside tests called it, so `CloseVoiceSession` (with `ended` and a nil reason for a clean stop) is now the only terminal write.
