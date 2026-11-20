@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"regexp"
 	"slices"
 
 	"connectrpc.com/connect"
@@ -27,11 +26,6 @@ import (
 type VoiceChannelLister interface {
 	ListVoiceChannels(ctx context.Context) ([]discordshare.Channel, error)
 }
-
-// snowflakePattern is the shape of a Discord snowflake id (an unsigned 64-bit
-// decimal). StartSession validates its optional voice_channel_id against it so
-// an accidental non-id string fails fast instead of riding into the voice loop.
-var snowflakePattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
 // SetVoiceChannels wires the Session screen's voice-channel picker seam onto
 // the SessionServer: the guild channel lister plus the deployment-config read

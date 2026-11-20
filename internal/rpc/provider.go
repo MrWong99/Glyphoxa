@@ -530,7 +530,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// save makes the value DURABLE, so a channel name or pasted URL persisting
 	// here would break every later default-channel consumer (session starts, the
 	// Players-panel member read).
-	if hasChannel && !snowflakePattern.MatchString(req.Msg.GetVoiceChannelId()) {
+	if hasChannel && !isSnowflake(req.Msg.GetVoiceChannelId()) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("voice_channel_id must be a Discord channel id"))
 	}
@@ -540,7 +540,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// decoration) must never reach that comparison — and a non-canonical stored
 	// guild_id would also break the interaction router's string-equality lookup
 	// (GetTenantIDByGuildID).
-	if hasGuild && !snowflakePattern.MatchString(req.Msg.GetGuildId()) {
+	if hasGuild && !isSnowflake(req.Msg.GetGuildId()) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("guild_id must be a Discord server id"))
 	}

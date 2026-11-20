@@ -244,7 +244,7 @@ func (s *SessionServer) StartSession(
 	// non-id string (a channel NAME, a pasted URL) fails fast here instead of
 	// riding into the voice loop's Discord join.
 	voiceChannelID := req.Msg.GetVoiceChannelId()
-	if voiceChannelID != "" && !snowflakePattern.MatchString(voiceChannelID) {
+	if voiceChannelID != "" && !isSnowflake(voiceChannelID) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_channel_id must be a Discord channel id"))
 	}
 	// The picker is the SPA's convenience, not the tenancy boundary (R9): with

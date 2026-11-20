@@ -229,21 +229,6 @@ func validateCharacterFields(trimmedName, discordUserID string) (string, error) 
 	return discordUserID, nil
 }
 
-// isSnowflake reports whether s is a non-empty run of decimal digits — the shape
-// of a Discord snowflake id. It rejects empty, signed, or non-numeric input
-// before it ever reaches storage.
-func isSnowflake(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // toProtoCharacter maps a storage.Character onto its wire representation. The
 // nullable linked_user_id becomes "" when dormant (unset until Discord OAuth,
 // ADR-0003).
