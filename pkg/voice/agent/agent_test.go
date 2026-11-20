@@ -768,13 +768,10 @@ func TestReplyStream_NotAddressed_NoDispatch(t *testing.T) {
 // not the untruncated completion.
 //
 // Scope note: the second turn is fired AFTER the first turn's goroutine has fully
-// unwound (the <-done barrier), so this pins the committed CONTENT
-// deterministically. It does NOT exercise the production interleaving where
-// a zero barge confirm window lets turn 2 route while turn 1 is still committing — there,
-// turn-1 unwind (~a few statements after cancel) precedes turn-2 routing
-// (STT→address→bus fan-out) in practice, but ordering is not guaranteed by
-// construction (only r.mu's mutual exclusion is). If a real ordering bug ever
-// surfaces, a turn-sequence guard is the fix; today the mutex is sufficient.
+// unwound (the <-done barrier), so this pins the committed CONTENT. The
+// interleaving where turn 2 records its user line while turn 1 is still
+// committing is pinned by
+// TestReplyStream_SupersededTurnCommit_StaysBehindItsOwnQuestion.
 func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
 	eng := &fakeStreamEngine{
 		deltas:     []string{"Aye. ", "Two rooms. ", "Anything else?"},

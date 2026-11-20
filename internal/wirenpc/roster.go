@@ -360,6 +360,9 @@ func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine,
 				PlayerCharacters: d.playerCharacters,
 				FellowNPCs:       siblingNames(d.npcs, spec.agentID),
 				TextSink:         textSink,
+				// The canned stall for a terminal engine failure, in the Campaign
+				// Language — an NPC in a German campaign must not stall in English.
+				FallbackLine: agent.FallbackLineFor(d.language),
 				OnError: func(err error) {
 					d.log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},

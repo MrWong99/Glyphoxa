@@ -1,6 +1,9 @@
 package agent
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // textLengthThreshold is the answer-length (in runes) above which a Butler reply
 // defaults to text delivery (#297 decision 2): short results (a dice roll, a
@@ -10,7 +13,8 @@ const textLengthThreshold = 400
 
 // textRequestPhrases force text delivery when they appear in the addressed
 // utterance ("post that as text", "in chat"). EN + DE (#297 decision 2: the
-// request can override the size default).
+// request can override the size default). Phrases are matched as whole words
+// (see [containsAny]).
 var textRequestPhrases = []string{"as text", "in chat", "post it", "als text", "im chat"}
 
 // voiceRequestPhrases force spoken delivery when they appear in the addressed
@@ -26,13 +30,13 @@ var voiceRequestPhrases = []string{"in voice", "aloud", "say it", "sag es"}
 //   - Otherwise size decides: an answer longer than [textLengthThreshold] runes
 //     posts as text, a short one is spoken.
 //
-// The utterance is matched case-insensitively. A voiceless Butler always returns
+// The utterance is matched case-insensitively and on whole words. A voiceless Butler always returns
 // text, even against a voice-forcing phrase — it has no Voice to honor it with.
 func AnswerAsText(utterance, answer string, voiceless bool) bool {
 	if voiceless {
 		return true
 	}
-	u := strings.ToLower(utterance)
+	u := words(utterance)
 	if containsAny(u, textRequestPhrases) {
 		return true
 	}
@@ -42,11 +46,32 @@ func AnswerAsText(utterance, answer string, voiceless bool) bool {
 	return len([]rune(answer)) > textLengthThreshold
 }
 
-// containsAny reports whether s contains any of the phrases.
-func containsAny(s string, phrases []string) bool {
+// words lower-cases s and splits it into its words — runs of letters and
+// digits — so a phrase can be matched on word boundaries whatever punctuation
+// or spacing surrounds it.
+func words(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// containsAny reports whether the word sequence utterance contains any of the
+// phrases as a run of WHOLE words. A raw substring test is wrong here: "im
+// Chateau" contains "im chat", and "the task textures" contains "as text".
+func containsAny(utterance []string, phrases []string) bool {
 	for _, p := range phrases {
-		if strings.Contains(s, p) {
-			return true
+		phrase := words(p)
+		for i := 0; i+len(phrase) <= len(utterance); i++ {
+			match := true
+			for j, w := range phrase {
+				if utterance[i+j] != w {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
 		}
 	}
 	return false
