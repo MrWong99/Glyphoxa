@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
@@ -36,7 +36,16 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
   // authoritative list the SERVER last confirmed, so each save builds on the last
   // one rather than on whatever the cache happens to show.
   const [settled, setSettled] = useState<string[] | null>(null);
-  useEffect(() => setSettled(null), [nodeID]);
+  // What the server last CONFIRMED for this entry (null = nothing saved yet on
+  // this visit, so the cache is the truth). setTags paints its payload
+  // optimistically; a rejected save rolls the chips back to this — leaving the
+  // optimistic list up showed a tag the server refused as if it had been saved,
+  // and the next save then resent it.
+  const confirmed = useRef<string[] | null>(null);
+  useEffect(() => {
+    confirmed.current = null;
+    setSettled(null);
+  }, [nodeID]);
 
   const all = useMemo(() => tagsQuery.data?.entries ?? [], [tagsQuery.data]);
   const fromServer = useMemo(
@@ -59,9 +68,11 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
     // The response carries what actually landed (normalized, deduped) — that, not
     // the request, is what the next save must build on.
     onSuccess: (res) => {
+      confirmed.current = res.tags;
       setSettled(res.tags);
       invalidateTags(queryClient);
     },
+    onError: () => setSettled(confirmed.current),
   });
 
   const setTags = (tags: string[]) => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { AdvancedCard } from "@/components/ui/AdvancedCard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { useI18n } from "@/i18n";
 import { playAudioBlob } from "@/lib/audio";
 import { errorMessage } from "@/lib/connectError";
@@ -174,17 +175,20 @@ function CampaignScreen({
     onError: (err) => toast.error(t("campaign.couldntDeleteNpc", { message: errorMessage(err) })),
   });
 
-  // Unsaved editor text is guarded: the editor remounts per selection
-  // (key={id}), so a roster click used to silently throw away typing. The
-  // editor reports its dirtiness; a dirty switch asks first.
-  const editorDirty = useRef(false);
-  const [pendingSelect, setPendingSelect] = useState<string | null>(null);
+  // Unsaved editor text is guarded on EVERY path that unmounts or re-seeds the
+  // agent editor (W10): picking another roster member (it remounts per
+  // selection, key={id}), switching to the prep view, and adding an NPC (whose
+  // success selects the new one). The editor reports its dirtiness; a dirty
+  // move asks first. Leaving via the sidebar is held by the route layer off
+  // the same flag (useDirtyGuard → lib/navigationGuard).
+  const edits = useDirtyGuard({
+    title: t("campaign.discardEditsTitle"),
+    description: t("campaign.discardEditsDesc", { name: selected?.name ?? "" }),
+    confirmLabel: t("campaign.discardEditsConfirm"),
+  });
   const selectAgent = (id: string) => {
-    if (editorDirty.current && id !== selected?.id) {
-      setPendingSelect(id);
-      return;
-    }
-    setSelectedId(id);
+    if (id === selected?.id) return;
+    edits.guard(() => setSelectedId(id));
   };
 
   const campaign = data?.campaign;
@@ -272,7 +276,7 @@ function CampaignScreen({
             type="button"
             className="gx-kg-chip"
             aria-pressed={castMode === "prep"}
-            onClick={() => setCastMode("prep")}
+            onClick={() => edits.guard(() => setCastMode("prep"))}
           >
             {t("campaign.castPrep")}
           </button>
@@ -337,7 +341,10 @@ function CampaignScreen({
             onClick={() =>
               // The placeholder NAME is persisted, so it is created in the GM's
               // display language — the roster shows what they will rename anyway.
-              createAgent.mutate({ name: t("campaign.newNpcName"), title: "", persona: "", voice: "", addressOnly: false })
+              // Guarded: success selects the new NPC, replacing the open editor.
+              edits.guard(() =>
+                createAgent.mutate({ name: t("campaign.newNpcName"), title: "", persona: "", voice: "", addressOnly: false }),
+              )
             }
           >
             <Plus size={15} /> {t("campaign.addNpc")}
@@ -360,31 +367,14 @@ function CampaignScreen({
               isButler(selected) ? undefined : () => deleteAgent.mutate({ id: selected.id })
             }
             deleting={deleteAgent.isPending}
-            onDirtyChange={(d) => {
-              editorDirty.current = d;
-            }}
-          />
-        )}
-        {pendingSelect !== null && (
-          <ConfirmDialog
-            open
-            onOpenChange={(open) => {
-              if (!open) setPendingSelect(null);
-            }}
-            title={t("campaign.discardEditsTitle")}
-            description={t("campaign.discardEditsDesc", { name: selected?.name ?? "" })}
-            confirmLabel={t("campaign.discardEditsConfirm")}
-            onConfirm={() => {
-              editorDirty.current = false;
-              setSelectedId(pendingSelect);
-              setPendingSelect(null);
-            }}
+            onDirtyChange={edits.markDirty}
           />
         )}
         </div>
         )}
         </>
       )}
+      {edits.dialog}
     </div>
   );
 }

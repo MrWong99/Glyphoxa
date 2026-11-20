@@ -11,6 +11,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { PlayerBindForm } from "@/components/PlayerBindForm";
 import type { PlayerBindFields } from "@/components/PlayerBindForm";
 import { invalidateMethodQueries } from "@/lib/queryClient";
@@ -60,6 +61,9 @@ export function PlayersPanel() {
     onSuccess: (res) => {
       void invalidateCharacters();
       setCreating(false);
+      // The new Character's editor must not open wearing the previous one's
+      // "Saved" / "Couldn't save" line (see show below).
+      updateCharacter.reset();
       if (res.character) setEditingId(res.character.id);
     },
   });
@@ -77,13 +81,24 @@ export function PlayersPanel() {
       toast.error(t("campaign.couldntDeletePlayer", { message: errorMessage(err) })),
   });
 
-  const startCreate = () => {
-    setCreating(true);
-    setEditingId(null);
-  };
+  // Unsaved typing in the bind form is guarded (W10): both moves below remount
+  // the form and would silently drop it.
+  const edits = useDirtyGuard();
+  // The create/update mutations are shared by every Character, so their settled
+  // status must not outlive the form it belongs to: without the resets,
+  // selecting Kira after a failed save on Bram showed Bram's error (or his
+  // "Saved") on Kira, and a reopened create form opened on its last failure.
+  const show = (next: { creating: boolean; editingId: string | null }) =>
+    edits.guard(() => {
+      createCharacter.reset();
+      updateCharacter.reset();
+      setCreating(next.creating);
+      setEditingId(next.editingId);
+    });
+  const startCreate = () => show({ creating: true, editingId: null });
   const selectCharacter = (c: Character) => {
-    setEditingId(c.id);
-    setCreating(false);
+    if (c.id === editingId && !creating) return;
+    show({ creating: false, editingId: c.id });
   };
 
   const submitCreate = (fields: PlayerBindFields) => createCharacter.mutate(fields);
@@ -163,7 +178,13 @@ export function PlayersPanel() {
                 : null
             }
             onSubmit={submitCreate}
-            onCancel={() => setCreating(false)}
+            onCancel={() => {
+              // Cancel IS the explicit discard — no second question.
+              edits.markDirty(false);
+              createCharacter.reset();
+              setCreating(false);
+            }}
+            onDirtyChange={edits.markDirty}
           />
         </Card>
       ) : editing ? (
@@ -190,6 +211,7 @@ export function PlayersPanel() {
             }
             onSubmit={submitEdit}
             onDelete={() => setConfirmDelete(editing)}
+            onDirtyChange={edits.markDirty}
           />
           {updateCharacter.isSuccess && !updateCharacter.isPending && (
             <span className="gx-editor__status" aria-live="polite">
@@ -202,6 +224,8 @@ export function PlayersPanel() {
           <p>{t("campaign.playersPrompt")}</p>
         </Card>
       )}
+
+      {edits.dialog}
 
       {confirmDelete && (
         <ConfirmDialog

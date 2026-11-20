@@ -31,6 +31,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { stripMarkdown } from "@/components/ui/Markdown";
 import { NodePortrait, portraitURL } from "./NodePortrait";
 import { NodeRelations } from "./NodeRelations";
@@ -76,7 +77,15 @@ export function KnowledgePanel({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
-  const [editing, setEditing] = useState<Node | null>(null);
+  // The open entry is held by ID and resolved against the live list on every
+  // render. Holding the Node itself froze a snapshot: a portrait upload, a
+  // "Voiced by" link or a proposal approval refetched the list but the editor
+  // kept showing the row as it was when the GM clicked Edit.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editing = useMemo(
+    () => listQuery.data?.nodes.find((n) => n.id === editingId) ?? null,
+    [listQuery.data, editingId],
+  );
   const [mode, setMode] = useState<ViewMode>("list");
   // Tag filter chips (#543): one selection filters the list AND the graph, since
   // "show me act two" is the same question in both views.
@@ -132,7 +141,7 @@ export function KnowledgePanel({
     if (!focusNodeID) return;
     const node = listQuery.data?.nodes.find((n) => n.id === focusNodeID);
     if (!node) return;
-    setEditing(node);
+    setEditingId(node.id);
     setMode("list");
     onFocusHandled?.();
   }, [focusNodeID, listQuery.data, onFocusHandled]);
@@ -185,7 +194,7 @@ export function KnowledgePanel({
   });
   const updateNode = useMutation(CampaignService.method.updateNode, {
     onSuccess: () => {
-      setEditing(null);
+      setEditingId(null);
       invalidate();
     },
   });
@@ -195,6 +204,21 @@ export function KnowledgePanel({
   const deleteNode = useMutation(CampaignService.method.deleteNode, {
     onSuccess: invalidate,
   });
+
+  // Unsaved typing in the editor rail is guarded (W10): opening another entry
+  // remounts the editor (key = entry id) and would silently drop it.
+  const edits = useDirtyGuard();
+  // openEditor is the ONE way the GM moves the editor to another entry (or
+  // back to "new"). It also clears the three mutations' settled status: they
+  // are shared by every entry, so without this entry B's editor opened showing
+  // entry A's "Couldn't save" — or a long-gone failed delete — as its own.
+  const openEditor = (id: string | null) =>
+    edits.guard(() => {
+      createNode.reset();
+      updateNode.reset();
+      deleteNode.reset();
+      setEditingId(id);
+    });
 
   if (status === "pending") {
     return <div className="gx-skeleton" data-testid="kg-loading" />;
@@ -217,7 +241,7 @@ export function KnowledgePanel({
   const removeNode = (n: Node) =>
     deleteNode.mutate(
       { id: n.id },
-      { onSuccess: () => setEditing((e) => (e?.id === n.id ? null : e)) },
+      { onSuccess: () => setEditingId((id) => (id === n.id ? null : id)) },
     );
 
   // The editor's alert line. The active save (create or edit) takes precedence;
@@ -239,8 +263,7 @@ export function KnowledgePanel({
   // Clicking a graph node opens the SAME editor the list opens (#534): the graph
   // is a navigation surface, not a second editing surface.
   const editByID = (id: string) => {
-    const node = listQuery.data?.nodes.find((n) => n.id === id);
-    if (node) setEditing(node);
+    if (listQuery.data?.nodes.some((n) => n.id === id)) openEditor(id);
   };
 
   return (
@@ -345,7 +368,7 @@ export function KnowledgePanel({
                       <KnowledgeCard
                         key={n.id}
                         node={n}
-                        onEdit={() => setEditing(n)}
+                        onEdit={() => openEditor(n.id)}
                         onDelete={() => setConfirmNode(n)}
                         deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
                       />
@@ -370,9 +393,16 @@ export function KnowledgePanel({
         pending={editing ? updateNode.isPending : createNode.isPending}
         error={editorError}
         onOpenLine={onOpenLine}
-        onCancel={() => setEditing(null)}
+        onCancel={() => {
+          // Cancel IS the explicit discard — no second question.
+          edits.markDirty(false);
+          openEditor(null);
+        }}
+        onDirtyChange={edits.markDirty}
         onDelete={editing ? () => setConfirmNode(editing) : undefined}
         onSubmit={(fields, reset) => {
+          // A fresh save supersedes whatever an earlier delete reported.
+          deleteNode.reset();
           if (editing) {
             updateNode.mutate({
               id: editing.id,
@@ -396,6 +426,8 @@ export function KnowledgePanel({
           }
         }}
       />
+
+      {edits.dialog}
 
       {confirmNode && (
         <NodeDeleteConfirm
@@ -1010,6 +1042,7 @@ function EntryEditor({
   onSubmit,
   onDelete,
   onCancel,
+  onDirtyChange,
   onOpenLine,
 }: {
   node: Node | null;
@@ -1018,6 +1051,8 @@ function EntryEditor({
   onSubmit: (fields: EditorFields, reset: () => void) => void;
   onDelete?: () => void;
   onCancel: () => void;
+  /** Reports whether the fields differ from what the editor opened with. */
+  onDirtyChange?: (dirty: boolean) => void;
   /** Jump to one Transcript Line on the Session screen (appearances, #545). */
   onOpenLine?: (sessionID: string, lineID: string) => void;
 }) {
@@ -1039,7 +1074,25 @@ function EntryEditor({
   const typeOptions = TYPE_ORDER.map((v) => ({ value: String(v), label: t(TYPE_META[v].labelKey) }));
   const typeHint = TYPE_ORDER.map((v) => t(TYPE_META[v].labelKey)).join(" · ");
 
+  // Dirtiness is measured against what the editor OPENED with (captured once,
+  // like knownAspectIds): the node prop follows refetches, and a portrait
+  // upload landing mid-edit must not make untouched fields read as edited.
+  // The entry type is deliberately not part of it — picking a type alone on a
+  // blank "new entry" form is not work worth a confirmation.
+  const fingerprint = JSON.stringify([name, body, gmPrivate, toWireAspects(aspects)]);
+  const [opened, setOpened] = useState(fingerprint);
+  const isDirty = fingerprint !== opened;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(
+    () => () => onDirtyChange?.(false), // unmount lifts the guard
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   const reset = () => {
+    setOpened(JSON.stringify(["", "", false, []]));
     setNodeType(NodeType.NOTE);
     setName("");
     setBody("");

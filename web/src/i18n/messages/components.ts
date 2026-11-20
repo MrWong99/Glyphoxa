@@ -120,6 +120,8 @@ export const en = {
   "components.useCustomValue": 'Use "{text}"',
   "components.comboboxOptionsLabel": "Options",
   "components.typeToConfirm": "Type “{text}” to confirm",
+
+  "components.logOutFailed": "Couldn't log out: {message}",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -248,4 +250,6 @@ export const de: Record<keyof typeof en, string> = {
   "components.useCustomValue": "„{text}“ verwenden",
   "components.comboboxOptionsLabel": "Optionen",
   "components.typeToConfirm": "Gib „{text}“ ein, um zu bestätigen",
+
+  "components.logOutFailed": "Abmelden fehlgeschlagen: {message}",
 };

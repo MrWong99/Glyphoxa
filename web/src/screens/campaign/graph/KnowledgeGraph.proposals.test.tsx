@@ -136,7 +136,7 @@ describe("proposals on the graph", () => {
     const { similar } = renderGraph([FACT_PROPOSAL]);
     fireEvent.click(await screen.findByRole("button", { name: /Suggested fact from Bart/ }));
 
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
     // "Bart" appears twice on purpose: once as the AUTHOR and once as the
     // proposal's subject. A Character NPC may only propose on its own linked Node
     // (ADR-0052), so that is the realistic shape — and both lines must be there,
@@ -154,7 +154,7 @@ describe("proposals on the graph", () => {
   it("approving goes through the existing RPC and refreshes both the queue and the graph", async () => {
     const { approve, onGraphChanged } = renderGraph([FACT_PROPOSAL]);
     fireEvent.click(await screen.findByRole("button", { name: /Suggested fact from Bart/ }));
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
 
@@ -168,7 +168,7 @@ describe("proposals on the graph", () => {
   it("rejecting asks first — a dropped suggestion never becomes canon", async () => {
     const { reject } = renderGraph([FACT_PROPOSAL]);
     fireEvent.click(await screen.findByRole("button", { name: /Suggested fact from Bart/ }));
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Dismiss" }));
     expect(reject).not.toHaveBeenCalled();
@@ -182,7 +182,7 @@ describe("proposals on the graph", () => {
     expect(before.length).toBeGreaterThan(0);
 
     fireEvent.click(await screen.findByRole("button", { name: /Suggested new entry/ }));
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
     await waitFor(() => expect(approve).toHaveBeenCalled());
 
@@ -212,7 +212,7 @@ describe("proposals on the graph", () => {
     expect(ghostAt).toBeTruthy();
 
     fireEvent.click(ghost);
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
     await waitFor(() => expect(approve).toHaveBeenCalled());
 
@@ -237,7 +237,7 @@ describe("proposals on the graph", () => {
     const strip = await screen.findByText(/can't be drawn here/);
     expect(strip).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Glyphoxa:.*Smugglers/ }));
-    const dialog = await screen.findByRole("dialog", { name: /Review suggestion/ });
+    const dialog = await screen.findByRole("group", { name: /Review suggestion/ });
     expect(within(dialog).getByText(/can't be added to the wiki yet/)).toBeInTheDocument();
   });
 

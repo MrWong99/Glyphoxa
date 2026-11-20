@@ -20,6 +20,9 @@ export const en = {
   "common.hideAdvanced": "Hide advanced settings",
   "common.language": "Language",
   "common.displayLanguage": "Display language",
+  "common.discardChangesTitle": "Discard unsaved changes?",
+  "common.discardChangesDesc": "You have edits that haven't been saved yet. If you continue, they are lost.",
+  "common.discardChangesConfirm": "Discard changes",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -39,4 +42,7 @@ export const de: Record<keyof typeof en, string> = {
   "common.hideAdvanced": "Erweiterte Einstellungen ausblenden",
   "common.language": "Sprache",
   "common.displayLanguage": "Anzeigesprache",
+  "common.discardChangesTitle": "Ungespeicherte Änderungen verwerfen?",
+  "common.discardChangesDesc": "Du hast Änderungen, die noch nicht gespeichert sind. Wenn du fortfährst, gehen sie verloren.",
+  "common.discardChangesConfirm": "Änderungen verwerfen",
 };

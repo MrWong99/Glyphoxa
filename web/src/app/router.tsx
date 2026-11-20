@@ -1,3 +1,4 @@
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import {
   createRootRoute,
   createRoute,
@@ -13,14 +14,41 @@ import { isCampaignView } from "@/screens/campaign/views";
 import { useI18n } from "@/i18n";
 import { Login } from "@/screens/login/Login";
 import { CreateTenant } from "@/screens/onboarding/CreateTenant";
-import { Configuration } from "@/screens/configuration/Configuration";
-import { Campaign } from "@/screens/campaign/Campaign";
-import { Session } from "@/screens/session/Session";
 import { Placeholder } from "@/screens/Placeholder";
 import { RootEntry } from "@/screens/landing/RootEntry";
-import { Imprint } from "@/screens/legal/Imprint";
-import { Privacy } from "@/screens/legal/Privacy";
-import { Terms } from "@/screens/legal/Terms";
+import { NavigationGuard, RouteError, RouteNotFound, RoutePending } from "@/app/RouteFallbacks";
+
+// Route-level code splitting: the three app screens and the legal documents
+// are separate chunks, fetched when first visited. The entry bundle keeps what
+// every visit needs before it knows where it is going — the router, the public
+// landing/login pages and the shell. Each import() is named once here so the
+// shell can also warm the chunks in the background (preloadScreens).
+const screenChunks = {
+  configuration: () => import("@/screens/configuration/Configuration"),
+  campaign: () => import("@/screens/campaign/Campaign"),
+  session: () => import("@/screens/session/Session"),
+};
+const Configuration = lazy(() => screenChunks.configuration().then((m) => ({ default: m.Configuration })));
+const Campaign = lazy(() => screenChunks.campaign().then((m) => ({ default: m.Campaign })));
+const Session = lazy(() => screenChunks.session().then((m) => ({ default: m.Session })));
+const Imprint = lazy(() => import("@/screens/legal/Imprint").then((m) => ({ default: m.Imprint })));
+const Privacy = lazy(() => import("@/screens/legal/Privacy").then((m) => ({ default: m.Privacy })));
+const Terms = lazy(() => import("@/screens/legal/Terms").then((m) => ({ default: m.Terms })));
+
+// preloadScreens fetches the other app screens' chunks once the shell is up,
+// so the first click on a sidebar item does not wait on the network. A failed
+// warm-up is silent: the real navigation retries and reports through the
+// error boundary.
+function preloadScreens() {
+  for (const load of Object.values(screenChunks)) void load().catch(() => {});
+}
+
+// loaded wraps a lazily loaded screen in its own Suspense boundary, so a chunk
+// in flight shows the pending placeholder INSIDE the shell instead of blanking
+// the sidebar and topbar around it.
+function loaded(screen: ReactNode) {
+  return <Suspense fallback={<RoutePending />}>{screen}</Suspense>;
+}
 
 // Code-based route tree (ADR-0018). The Tenant lives in the path
 // (/t/:tenantSlug/...) so URLs are bookmarkable; for the single-operator MVP
@@ -75,15 +103,18 @@ const onboardingRoute = createRoute({
 // Router infers the typed route registry from the literal `addChildren` tree, so
 // a spread of mapped routes would compile but leave <Link to="/privacy"> a type
 // error (and unnavigable).
-const imprintRoute = createRoute({ getParentRoute: () => rootRoute, path: "/imprint", component: Imprint });
-const impressumRoute = createRoute({ getParentRoute: () => rootRoute, path: "/impressum", component: Imprint });
-const privacyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/privacy", component: Privacy });
-const datenschutzRoute = createRoute({ getParentRoute: () => rootRoute, path: "/datenschutz", component: Privacy });
-const termsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/terms", component: Terms });
+const ImprintPage = () => loaded(<Imprint />);
+const PrivacyPage = () => loaded(<Privacy />);
+const TermsPage = () => loaded(<Terms />);
+const imprintRoute = createRoute({ getParentRoute: () => rootRoute, path: "/imprint", component: ImprintPage });
+const impressumRoute = createRoute({ getParentRoute: () => rootRoute, path: "/impressum", component: ImprintPage });
+const privacyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/privacy", component: PrivacyPage });
+const datenschutzRoute = createRoute({ getParentRoute: () => rootRoute, path: "/datenschutz", component: PrivacyPage });
+const termsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/terms", component: TermsPage });
 const nutzungsbedingungenRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/nutzungsbedingungen",
-  component: Terms,
+  component: TermsPage,
 });
 
 // "/" → the public landing page for a visitor with no session, and a straight
@@ -104,7 +135,20 @@ const tenantRoute = createRoute({
   path: "t/$tenantSlug",
   component: function TenantLayout() {
     const { tenantSlug } = tenantRoute.useParams();
-    return <AuthGate>{(user) => <AppShell tenantSlug={tenantSlug} user={user} />}</AuthGate>;
+    // Warm the other screens' chunks shortly after the shell paints. Skipped
+    // under test, where a stray late import only produces act() noise.
+    useEffect(() => {
+      if (import.meta.env.MODE === "test") return;
+      const timer = setTimeout(preloadScreens, 1500);
+      return () => clearTimeout(timer);
+    }, []);
+    return (
+      <>
+        <AuthGate>{(user) => <AppShell tenantSlug={tenantSlug} user={user} />}</AuthGate>
+        {/* Holds a navigation away while an editor has unsaved edits (W10). */}
+        <NavigationGuard />
+      </>
+    );
   },
 });
 
@@ -185,9 +229,9 @@ const screenRoute = createRoute({
       });
     switch (screen) {
       case "configuration":
-        return <Configuration />;
+        return loaded(<Configuration />);
       case "session":
-        return <Session deepLink={search} onDeepLinkHandled={clearDeepLink} />;
+        return loaded(<Session deepLink={search} onDeepLinkHandled={clearDeepLink} />);
       default:
         return <Placeholder title={t("auth.notFoundTitle")} />;
     }
@@ -226,7 +270,7 @@ const subviewRoute = createRoute({
     const navigate = useNavigate();
     const { t } = useI18n();
     if (screen === "campaign" && isCampaignView(view)) {
-      return (
+      return loaded(
         <Campaign
           view={view}
           onViewChange={(next) =>
@@ -256,7 +300,7 @@ const subviewRoute = createRoute({
               search: { session: sessionID, line: lineID },
             })
           }
-        />
+        />,
       );
     }
     return <Placeholder title={t("auth.notFoundTitle")} />;
@@ -278,9 +322,20 @@ export const routeTree = rootRoute.addChildren([
   tenantRoute.addChildren([tenantIndexRoute, screenRoute, subviewRoute]),
 ]);
 
+// The fallbacks every route inherits (ADR-0018): a thrown render/loader error
+// and an unmatched URL both render in the app's own styling and language
+// instead of the router's bare English defaults. Exported with the tree so
+// tests mount the same configuration production runs.
+export const routerDefaults = {
+  defaultErrorComponent: RouteError,
+  defaultNotFoundComponent: RouteNotFound,
+  defaultPendingComponent: RoutePending,
+} as const;
+
 export const router = createRouter({
   routeTree,
   defaultPreload: "intent",
+  ...routerDefaults,
 });
 
 declare module "@tanstack/react-router" {
