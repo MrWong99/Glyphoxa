@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"log/slog"
 
 	"connectrpc.com/connect"
 
@@ -44,7 +43,7 @@ func (s *characterRoster) ListDiscordVoiceMembers(
 	if err != nil {
 		// Soft degrade: the picker is an optional convenience over free-text entry,
 		// so a bot-offline / REST failure must not fail the call.
-		slog.Default().Warn("ListDiscordVoiceMembers: lister failed; serving empty", "err", err)
+		s.active.logger().Warn("ListDiscordVoiceMembers: lister failed; serving empty", "err", err)
 		return connect.NewResponse(&managementv1.ListDiscordVoiceMembersResponse{}), nil
 	}
 

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -19,8 +21,13 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/discordguild"
 	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
+	"github.com/MrWong99/Glyphoxa/internal/discordshare"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // inviteCodePattern bounds an accepted Discord invite code: 2–64 chars of
@@ -66,6 +73,10 @@ type byokSlot struct {
 	slot       string
 	provider   string
 	components []storage.Component
+	// envKey is the deployment env var the provider adapter falls back to when
+	// the Tenant saved no key (ADR-0039 hybrid policy) — the Platform Key whose
+	// presence makes the slot "provided by the platform" (W9).
+	envKey string
 }
 
 // byokSlots is the MVP provider matrix (ADR-0039): Groq (LLM) + ElevenLabs
@@ -73,17 +84,17 @@ type byokSlot struct {
 // Bot (CONTEXT.md), stored in deployment_config, not a per-Component
 // provider_config.
 var byokSlots = []byokSlot{
-	{provider: "groq", components: []storage.Component{storage.ComponentLLM}},
-	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}},
+	{provider: "groq", components: []storage.Component{storage.ComponentLLM}, envKey: groq.APIKeyEnv},
+	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}, envKey: elevenlabs.APIKeyEnv},
 	// Gemini backs the image Component (#311, ADR-0004 amendment): a distinct
 	// BYOK slot + health check, even though Gemini already appears in the LLM
 	// matrix — the image key is managed on its own Configuration row.
-	{provider: "gemini", components: []storage.Component{storage.ComponentImage}},
+	{provider: "gemini", components: []storage.Component{storage.ComponentImage}, envKey: gemini.APIKeyEnv},
 	// The Butler planning chat's LLM (#592, ADR-0062): a distinct slot + row
 	// (component chat_llm) so chat can run a quality-over-latency model while
 	// the voice loop keeps its ADR-0036 selection — the gemini-image precedent
 	// of the same provider on its own Configuration row.
-	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}},
+	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}, envKey: groq.APIKeyEnv},
 }
 
 // wireID is the id a save names this slot by: slot when set, else provider.
@@ -148,12 +159,28 @@ type ProviderServer struct {
 	// never touches the network (ADR-0033 keyless suite).
 	checkGuildAdmin func(ctx context.Context, token, guildID, userID string) error
 
+	// voiceChannelInGuild reports whether channelID is one of guildID's voice
+	// channels, read with a Bot token, so a Default Voice Channel save can prove
+	// the channel belongs to the guild (R9). A seam like checkGuildAdmin:
+	// defaults to a live discordshare.ListVoiceChannels; unit tests fake it.
+	voiceChannelInGuild func(ctx context.Context, token, guildID, channelID string) (bool, error)
+
 	// envBotToken is the deployment's central DISCORD_BOT_TOKEN (SetEnvBotToken),
 	// the last rung of the check-token ladder (ADR-0058): request plaintext >
 	// stored BYOK token > this. Used ONLY to authenticate read-only Discord REST
 	// calls — the guild-admin proof (#504) and invite resolution — and never
 	// persisted or returned (ADR-0004 posture).
 	envBotToken string
+
+	// keyEnt is the platform-key entitlement (ADR-0054 seam (a), ADR-0055) the
+	// call-time key resolution consults before riding the env fallback; the
+	// Configuration read consults the SAME gate (via llmbuild.ResolveKeyGated)
+	// to report a slot as provided by the platform (W9). nil grants everything —
+	// the allowlist/self-host posture, as on VoiceServer.
+	keyEnt llmbuild.PlatformKeyEntitlement
+	// lookupEnv reads a deployment env var (os.Getenv in prod); a seam so tests
+	// pin the "platform key present" half of provided_by_platform.
+	lookupEnv func(string) string
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -165,12 +192,19 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &ProviderServer{store: store, cipher: cipher, log: log}
+	s := &ProviderServer{store: store, cipher: cipher, log: log, lookupEnv: os.Getenv}
 	s.resolveInvite = func(ctx context.Context, token, code string) (discordinvite.Resolved, error) {
 		return discordinvite.Resolve(ctx, token, code, log)
 	}
 	s.checkGuildAdmin = func(ctx context.Context, token, guildID, userID string) error {
 		return discordguild.CheckAdmin(ctx, token, guildID, userID, log)
+	}
+	s.voiceChannelInGuild = func(ctx context.Context, token, guildID, channelID string) (bool, error) {
+		channels, err := discordshare.ListVoiceChannels(ctx, token, guildID, log)
+		if err != nil {
+			return false, err
+		}
+		return slices.ContainsFunc(channels, func(c discordshare.Channel) bool { return c.ID == channelID }), nil
 	}
 	return s
 }
@@ -182,6 +216,15 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 // boot, before the server serves, so no lock is needed.
 func (s *ProviderServer) SetEnvBotToken(token string) {
 	s.envBotToken = token
+}
+
+// SetKeyEntitlement wires the platform-key entitlement ListProviderConfigs
+// consults to report a slot as provided by the platform (W9) — the same
+// instance VoiceServer.SetKeyEntitlement and every engine get, so the badge and
+// the call-time resolution can never disagree. Called once at boot, before the
+// server serves; nil (the default) grants everything.
+func (s *ProviderServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
+	s.keyEnt = ent
 }
 
 // SetHealthInvalidator wires the health-cache buster called after a successful
@@ -222,16 +265,8 @@ func (s *ProviderServer) Handler(opts ...connect.HandlerOption) (string, http.Ha
 	return managementv1connect.NewProviderServiceHandler(s, opts...)
 }
 
-// tenant resolves the operator's tenant the auth interceptor stack put in the
-// context (ADR-0039 thin pass-through). Behind the stack this is always present;
-// a missing tenant is treated as unauthenticated.
-func (s *ProviderServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *ProviderServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // ListProviderConfigs returns the three write-only credential slots (Discord,
 // Groq, ElevenLabs) plus the non-secret Discord IDs. No secret value is read.
@@ -246,8 +281,7 @@ func (s *ProviderServer) ListProviderConfigs(
 
 	configs, err := s.store.ListProviderConfigs(ctx, tenantID)
 	if err != nil {
-		s.log.Error("ListProviderConfigs: list provider_config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListProviderConfigs: list provider_config failed", err)
 	}
 	// Index by Component: each slot is represented by its FIRST component's row
 	// (ElevenLabs' stt/tts rows share one key, so either represents the slot),
@@ -262,14 +296,20 @@ func (s *ProviderServer) ListProviderConfigs(
 
 	dep, err := s.store.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("ListProviderConfigs: get deployment_config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListProviderConfigs: get deployment_config failed", err)
 	}
 	// ErrNotFound → zero DeploymentConfig (all empty): the unsaved, key-needed state.
 
-	creds := []*managementv1.ProviderCredential{discordCredential(dep)}
+	discord := discordCredential(dep)
+	// The central Bot token (ADR-0057) serves a Tenant that saved none; it is
+	// deployment infrastructure, outside the platform-key entitlement.
+	discord.ProvidedByPlatform = !discord.GetEverSaved() && s.envBotToken != ""
+	creds := []*managementv1.ProviderCredential{discord}
+	platform := s.platformKeyGate(ctx, tenantID)
 	for _, slot := range byokSlots {
-		creds = append(creds, providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]]))
+		cred := providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]])
+		cred.ProvidedByPlatform = !cred.GetEverSaved() && s.lookupEnv(slot.envKey) != "" && platform(slot.components[0])
+		creds = append(creds, cred)
 	}
 
 	// Per-tenant Discord integration health (#489): the standing client's state
@@ -287,6 +327,33 @@ func (s *ProviderServer) ListProviderConfigs(
 		IntegrationState:     integrationState,
 		IntegrationDetail:    integrationDetail,
 	}), nil
+}
+
+// platformKeyGate returns a per-call memo of "would this Tenant's call-time key
+// resolution be allowed onto the env fallback" (W9). It asks
+// llmbuild.ResolveKeyGated with no saved config — exactly the question every
+// engine's resolution asks for an unsaved slot — so the badge derives from the
+// one entitlement rule instead of re-implementing it. The entitlement is
+// per-Tenant, not per-Component, so the gate is consulted at most once. A read
+// error fails closed (logged, slot not reported as provided): the screen then
+// shows "Key needed", the conservative answer.
+func (s *ProviderServer) platformKeyGate(ctx context.Context, tenantID uuid.UUID) func(storage.Component) bool {
+	var (
+		asked, allowed bool
+	)
+	return func(component storage.Component) bool {
+		if !asked {
+			asked = true
+			_, err := llmbuild.ResolveKeyGated(ctx, s.keyEnt, tenantID, nil, nil, component)
+			switch {
+			case err == nil:
+				allowed = true
+			case !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
+				s.log.Warn("ListProviderConfigs: platform-key entitlement read failed", "tenant_id", tenantID, "err", err)
+			}
+		}
+		return allowed
+	}
 }
 
 // SaveProviderConfig seals a BYOK provider key and upserts every Component the
@@ -326,8 +393,7 @@ func (s *ProviderServer) SaveProviderConfig(
 
 	sealed, last4, err := s.seal(secret)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: seal failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: seal failed", err)
 	}
 
 	model := req.Msg.GetModel()
@@ -344,8 +410,7 @@ func (s *ProviderServer) SaveProviderConfig(
 	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: upsert failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: upsert failed", err)
 	}
 
 	// The key changed: the cached health verdict (possibly Degraded from the
@@ -382,8 +447,7 @@ func (s *ProviderServer) saveModelOnly(
 			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
 		}
 		if err != nil {
-			s.log.Error("SaveProviderConfig: read provider_config for model-only save failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveProviderConfig: read provider_config for model-only save failed", err)
 		}
 		existing = append(existing, cfg)
 	}
@@ -407,8 +471,7 @@ func (s *ProviderServer) saveModelOnly(
 	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
 	if err != nil {
-		s.log.Error("SaveProviderConfig: model-only upsert failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SaveProviderConfig: model-only upsert failed", err)
 	}
 
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
@@ -453,7 +516,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// save makes the value DURABLE, so a channel name or pasted URL persisting
 	// here would break every later default-channel consumer (session starts, the
 	// Players-panel member read).
-	if hasChannel && !snowflakePattern.MatchString(req.Msg.GetVoiceChannelId()) {
+	if hasChannel && !isSnowflake(req.Msg.GetVoiceChannelId()) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("voice_channel_id must be a Discord channel id"))
 	}
@@ -463,7 +526,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// decoration) must never reach that comparison — and a non-canonical stored
 	// guild_id would also break the interaction router's string-equality lookup
 	// (GetTenantIDByGuildID).
-	if hasGuild && !snowflakePattern.MatchString(req.Msg.GetGuildId()) {
+	if hasGuild && !isSnowflake(req.Msg.GetGuildId()) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("guild_id must be a Discord server id"))
 	}
@@ -495,36 +558,46 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// (a riding bot_token included) so a rejected request mutates nothing — the
 	// same pre-write posture as the proof above. SaveDefaultVoiceChannel's own
 	// linked-guild fence below stays as the racing-release backstop.
+	channelGuild := req.Msg.GetGuildId()
 	if hasChannel && !hasGuild {
 		dep, derr := s.store.GetDeploymentConfig(ctx, tenantID)
 		if derr != nil && !errors.Is(derr, storage.ErrNotFound) {
-			s.log.Error("SaveDiscordSettings: load deployment config failed", "err", derr)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: load deployment config failed", derr)
 		}
 		if dep.GuildID == "" {
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
 				errors.New("link a Discord server first"))
 		}
+		channelGuild = dep.GuildID
+	}
+	// The Default Voice Channel must be one of that guild's voice channels
+	// (R9): the value is DURABLE and every later session start joins it, so a
+	// foreign snowflake must never persist here. Pre-write, like the proof.
+	if hasChannel {
+		if err := s.checkVoiceChannelInGuild(ctx, tenantID, req.Msg.GetBotToken(), channelGuild, req.Msg.GetVoiceChannelId()); err != nil {
+			return nil, err
+		}
+	}
+
+	var sealed []byte
+	var last4 string
+	if req.Msg.BotToken != nil {
+		// Seal before any write so a seal failure mutates nothing.
+		sealed, last4, err = s.seal(req.Msg.GetBotToken())
+		if err != nil {
+			return nil, internalErr(s.log, "SaveDiscordSettings: seal failed", err)
+		}
 	}
 
 	var dep storage.DeploymentConfig
 
-	// Bot token first (when the client sent one), so the IDs upsert below returns
-	// the row with the freshly-saved token last4.
-	if req.Msg.BotToken != nil {
-		token := req.Msg.GetBotToken()
-		sealed, last4, err := s.seal(token)
-		if err != nil {
-			s.log.Error("SaveDiscordSettings: seal failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-		}
-		dep, err = s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4)
-		if err != nil {
-			s.log.Error("SaveDiscordSettings: save token failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-		}
-	}
-
+	// IDs FIRST, token second: the guild write is the one that can be refused
+	// as a business rule ("already linked by another tenant", ErrGuildTaken),
+	// and a refused guild must leave nothing changed — the riding token
+	// included. The token save then returns the full row, IDs and all. (A
+	// token write failing AFTER a successful guild write is a store fault, not
+	// a refusal; the guild link stands, proven with this very token.)
+	//
 	// IDs only when present on the wire (mirrors the token's presence handling):
 	// a token-only save must never touch the stored IDs (#142).
 	switch {
@@ -554,8 +627,14 @@ func (s *ProviderServer) SaveDiscordSettings(
 				errors.New("this Discord server is already linked by another tenant; it must unlink there first"))
 		}
 		if err != nil {
-			s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
-			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			return nil, internalErr(s.log, "SaveDiscordSettings: save channels failed", err)
+		}
+	}
+
+	if req.Msg.BotToken != nil {
+		dep, err = s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4)
+		if err != nil {
+			return nil, internalErr(s.log, "SaveDiscordSettings: save token failed", err)
 		}
 	}
 
@@ -598,20 +677,9 @@ func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID
 			errors.New("no authenticated Discord user to verify guild permissions for"))
 	}
 
-	token := reqToken
-	if token == "" {
-		stored, err := s.resolveBotToken(ctx, tenantID)
-		if err != nil {
-			return err
-		}
-		token = stored
-	}
-	if token == "" {
-		token = s.envBotToken
-	}
-	if token == "" {
-		return connect.NewError(connect.CodeFailedPrecondition,
-			errors.New("save the Discord bot token first"))
+	token, err := s.checkToken(ctx, tenantID, reqToken)
+	if err != nil {
+		return err
 	}
 
 	switch err := s.checkGuildAdmin(ctx, token, guildID, user.DiscordUserID); {
@@ -624,9 +692,55 @@ func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID
 		return connect.NewError(connect.CodePermissionDenied,
 			errors.New("you need the Manage Server permission in that Discord server to link it"))
 	default:
-		s.log.Error("SaveDiscordSettings: guild-admin proof failed", "err", err)
-		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return internalErr(s.log, "SaveDiscordSettings: guild-admin proof failed", err)
 	}
+}
+
+// checkToken walks the ADR-0058 check-token ladder for a read-only Discord
+// REST call made on a save's behalf: the request's plaintext Bot token when one
+// rode along (pre-seal), else the stored BYOK token, else the central env
+// token. No token on any rung is FailedPrecondition ("save the token first").
+func (s *ProviderServer) checkToken(ctx context.Context, tenantID uuid.UUID, reqToken string) (string, error) {
+	token := reqToken
+	if token == "" {
+		stored, err := s.resolveBotToken(ctx, tenantID)
+		if err != nil {
+			return "", err
+		}
+		token = stored
+	}
+	if token == "" {
+		token = s.envBotToken
+	}
+	if token == "" {
+		return "", connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("save the Discord bot token first"))
+	}
+	return token, nil
+}
+
+// checkVoiceChannelInGuild verifies a Default Voice Channel save names one of
+// guildID's voice channels (R9) — the guild being linked in the same request,
+// or the already-linked one for a channel-only save — listed with the
+// check-token ladder's token. Not in the guild is the GM-readable
+// InvalidArgument StartSession also uses.
+func (s *ProviderServer) checkVoiceChannelInGuild(ctx context.Context, tenantID uuid.UUID, reqToken, guildID, channelID string) error {
+	token, err := s.checkToken(ctx, tenantID, reqToken)
+	if err != nil {
+		return err
+	}
+	linked, err := s.voiceChannelInGuild(ctx, token, guildID, channelID)
+	switch {
+	case errors.Is(err, discordshare.ErrNoAccess):
+		return connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("the Bot is not a member of that server"))
+	case err != nil:
+		return internalErr(s.log, "SaveDiscordSettings: list guild voice channels failed", err)
+	}
+	if !linked {
+		return connect.NewError(connect.CodeInvalidArgument, errVoiceChannelNotLinked)
+	}
+	return nil
 }
 
 // ReleaseDiscordGuild frees this Tenant's bound Guild (#504, ADR-0058) — the
@@ -660,8 +774,7 @@ func (s *ProviderServer) ReleaseDiscordGuild(
 			errors.New("that Discord server is not the one currently linked; reload and try again"))
 	}
 	if err != nil {
-		s.log.Error("ReleaseDiscordGuild: store release failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ReleaseDiscordGuild: store release failed", err)
 	}
 
 	// The binding changed: bust the cached health verdict and reconcile the
@@ -771,8 +884,7 @@ func (s *ProviderServer) GetSpendCaps(
 	}
 	caps, err := s.store.GetTenantSpendCaps(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("GetSpendCaps: store read failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "GetSpendCaps: store read failed", err)
 	}
 	return connect.NewResponse(&managementv1.GetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
 }
@@ -809,8 +921,7 @@ func (s *ProviderServer) SetSpendCaps(
 	}
 
 	if err := s.store.SetTenantSpendCaps(ctx, tenantID, caps); err != nil {
-		s.log.Error("SetSpendCaps: store write failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "SetSpendCaps: store write failed", err)
 	}
 	return connect.NewResponse(&managementv1.SetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
 }
@@ -848,8 +959,7 @@ func (s *ProviderServer) resolveBotToken(ctx context.Context, tenantID uuid.UUID
 		return "", nil
 	}
 	if err != nil {
-		s.log.Error("resolveBotToken: store read failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveBotToken: store read failed", err)
 	}
 	return s.openKey(dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext)
 }
@@ -874,8 +984,7 @@ func (s *ProviderServer) openKey(last4 string, ciphertext []byte) (string, error
 	}
 	plaintext, err := s.cipher.Open(ciphertext)
 	if err != nil {
-		s.log.Error("openKey: decrypt failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "openKey: decrypt failed", err)
 	}
 	return string(plaintext), nil
 }

@@ -77,7 +77,7 @@ func TestHandlerOptions_BoundRequestBodies(t *testing.T) {
 		t.Parallel()
 		// The large cap exists only behind the pre-body session check, so the
 		// upload is made by a signed-in caller.
-		stack := auth.NewStack(fakeAuthN{users: map[string]storage.User{validToken: operator()}}, fakeTenant{id: uuid.New()})
+		stack := auth.NewPolicy(fakeAuthN{users: map[string]storage.User{validToken: operator()}}, fakeTenant{id: uuid.New()}).Stack()
 		_, h := stack.UploadHandler(echoHandler)
 		client := echoClient(t, h)
 		signedIn := func(size int) *connect.Request[managementv1.CreateMapRequest] {
@@ -175,7 +175,7 @@ func TestUploadHandler_RejectsWithoutReadingBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			stack := auth.NewStack(tc.authn, fakeTenant{id: uuid.New()})
+			stack := auth.NewPolicy(tc.authn, fakeTenant{id: uuid.New()}).Stack()
 			handlerRan := false
 			_, h := stack.UploadHandler(func(...connect.HandlerOption) (string, http.Handler) {
 				return echoProc, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { handlerRan = true })
@@ -219,7 +219,7 @@ func TestUploadHandler_ValidSessionAuthenticatesOnce(t *testing.T) {
 	t.Parallel()
 	op := operator()
 	authn := &countingAuthN{inner: fakeAuthN{users: map[string]storage.User{validToken: op}}}
-	stack := auth.NewStack(authn, fakeTenant{id: uuid.New()})
+	stack := auth.NewPolicy(authn, fakeTenant{id: uuid.New()}).Stack()
 	_, h := stack.UploadHandler(echoHandler)
 	client := echoClient(t, h)
 

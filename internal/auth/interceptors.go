@@ -117,7 +117,7 @@ func denialError(d Denial) *connect.Error {
 
 // The three single-check interceptors below expose ONE policy check each —
 // the Connect mirrors of middleware.go's RequireSession / RequireCSRF /
-// RequireTenant. Production handlers never compose them by hand: [NewStack]
+// RequireTenant. Production handlers never compose them by hand: [Policy.Stack]
 // runs the full policy in one interceptor. They remain the exported seam for
 // mounting an isolated check around a service in tests (e.g. proving a
 // mutation is CSRF-gated without standing up the whole stack).
@@ -189,21 +189,12 @@ func NewTenantInterceptor(tr TenantResolver) connect.UnaryInterceptorFunc {
 }
 
 // Stack is the Connect interceptor stack the web tier mounts on every
-// management handler. Build it with [NewStack] and apply it with
+// management handler. Build it with [Policy.Stack] and apply it with
 // [Stack.HandlerOptions]. Every service reuses the same Stack so the gate is
 // identical across services.
 type Stack struct {
 	policy       *Policy
 	interceptors []connect.Interceptor
-}
-
-// NewStack assembles the interceptor stack over a fresh [Policy]. public
-// lists the fully-qualified procedures reachable without a valid session (the
-// SPA's AuthService.GetCurrentUser boot probe). The composition root, which
-// also feeds the plain-mount table, builds the policy once and uses
-// [Policy.Stack] instead.
-func NewStack(a Authenticator, tr TenantResolver, public ...string) *Stack {
-	return NewPolicy(a, tr).Stack(public...)
 }
 
 // Stack assembles the Connect interceptor stack over this policy — the same

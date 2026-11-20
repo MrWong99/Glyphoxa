@@ -78,7 +78,7 @@ func TestDevModeAutoAuthEndToEnd(t *testing.T) {
 	store := bootMigratedStore(t)
 	ctx := context.Background()
 
-	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
+	stack := auth.NewPolicy(store, store).Stack(managementv1connect.AuthServiceGetCurrentUserProcedure)
 	authServer := auth.NewAuthServer(store, store, store, auth.AdmissionAllowlist, auth.EdgeConfig{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(authServer.Handler(stack.HandlerOptions()...))

@@ -71,6 +71,7 @@ func providerClient(t *testing.T, store *storage.Store, cipher *crypto.Cipher, t
 	// Always-pass proof stub: this suite exercises the STORAGE boundary; the
 	// live Discord proof stays behind its seam (ADR-0033).
 	srvImpl.SetGuildProofForTest(func(context.Context, string, string, string) error { return nil })
+	srvImpl.SetVoiceChannelCheckForTest(func(context.Context, string, string, string) (bool, error) { return true, nil })
 	mux := http.NewServeMux()
 	mux.Handle(srvImpl.Handler(connect.WithInterceptors(inject)))
 	srv := httptest.NewServer(mux)

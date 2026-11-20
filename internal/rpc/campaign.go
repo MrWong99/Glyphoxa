@@ -9,6 +9,7 @@ package rpc
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -169,6 +170,13 @@ func (s *CampaignServer) SetBlobs(blobs blob.Store) {
 	s.campaignMaps.blobs = blobs
 	s.nodePortraits.blobs = blobs
 	s.kgNodes.blobs = blobs
+}
+
+// SetLogger injects the CampaignService's logger: every feature module logs
+// through it (they share the one activeCampaignSource). Called once at boot,
+// before the server serves; unset, the modules use slog.Default.
+func (s *CampaignServer) SetLogger(log *slog.Logger) {
+	s.active.log = log
 }
 
 // SetSessions wires the live Voice Session source the Active Campaign resolution

@@ -379,6 +379,10 @@ func (f *fakeAgentStore) UpdateAgent(_ context.Context, u storage.AgentUpdate) (
 	a.Title = u.Title
 	a.Persona = u.Persona
 	a.Voice = u.Voice
+	// The real UPDATE writes both pins unconditionally (storage.UpdateAgent), so
+	// the fake does too — a handler that forgets to carry them erases them.
+	a.VoiceProviderConfigID = u.VoiceProviderConfigID
+	a.LLMProviderConfigID = u.LLMProviderConfigID
 	a.AddressOnly = u.AddressOnly
 	a.Aliases = u.Aliases
 	f.agents[u.ID] = a

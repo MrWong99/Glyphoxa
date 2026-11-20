@@ -37,7 +37,7 @@ type TenantRenamer interface {
 
 // AuthServer implements the Connect AuthService (ADR-0016 / ADR-0039): it reads
 // the operator the auth interceptor resolved into the context and tears the
-// session down on logout. The interceptor stack ([NewStack]) does the cookie
+// session down on logout. The interceptor stack ([Policy.Stack]) does the cookie
 // validation + CSRF; this handler is the thin policy layer over it.
 type AuthServer struct {
 	sessions SessionDeleter

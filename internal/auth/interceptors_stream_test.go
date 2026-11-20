@@ -48,10 +48,10 @@ func newStreamProbeClient(t *testing.T) (managementv1connect.ChatServiceClient, 
 	t.Helper()
 	probe := &streamProbe{}
 	op := operator()
-	stack := auth.NewStack(
+	stack := auth.NewPolicy(
 		fakeAuthN{users: map[string]storage.User{validToken: op}},
 		fakeTenant{id: uuid.New()},
-	)
+	).Stack()
 	mux := http.NewServeMux()
 	mux.Handle(managementv1connect.NewChatServiceHandler(probe, stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)

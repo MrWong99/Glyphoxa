@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -70,7 +69,7 @@ func (s *toolGrants) ListToolGrants(
 
 	grants, err := s.toolGrantsFor(ctx, agentID)
 	if err != nil {
-		slog.Default().Error("ListToolGrants: read grants failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("ListToolGrants: read grants failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.ListToolGrantsResponse{Grants: grants}), nil
@@ -124,13 +123,13 @@ func (s *toolGrants) UpdateToolGrant(
 			ToolName: registered.Name(),
 			Config:   config,
 		}); err != nil {
-			slog.Default().Error("UpdateToolGrant: upsert failed", "agent_id", agentID, "tool", registered.Name(), "err", err)
+			s.active.logger().Error("UpdateToolGrant: upsert failed", "agent_id", agentID, "tool", registered.Name(), "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	} else {
 		// Revoke is idempotent: a not-present grant is already in the desired state.
 		if err := s.store.DeleteToolGrant(ctx, agentID, registered.Name()); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			slog.Default().Error("UpdateToolGrant: delete failed", "agent_id", agentID, "tool", registered.Name(), "err", err)
+			s.active.logger().Error("UpdateToolGrant: delete failed", "agent_id", agentID, "tool", registered.Name(), "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	}
@@ -138,7 +137,7 @@ func (s *toolGrants) UpdateToolGrant(
 	// Read the state back so the client renders persisted truth (jsonb reformats).
 	grants, err := s.toolGrantsFor(ctx, agentID)
 	if err != nil {
-		slog.Default().Error("UpdateToolGrant: read-back failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("UpdateToolGrant: read-back failed", "agent_id", agentID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	for _, g := range grants {
@@ -147,7 +146,7 @@ func (s *toolGrants) UpdateToolGrant(
 		}
 	}
 	// The Tool is registered, so toolGrantsFor always emits an entry for it.
-	slog.Default().Error("UpdateToolGrant: toggled tool missing from catalog", "tool", registered.Name())
+	s.active.logger().Error("UpdateToolGrant: toggled tool missing from catalog", "tool", registered.Name())
 	return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 }
 
@@ -164,7 +163,7 @@ func (s *toolGrants) requireAgentInCampaign(ctx context.Context, campaignID, age
 		if errors.Is(err, storage.ErrNotFound) {
 			return connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
+		s.active.logger().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if a.CampaignID != campaignID {

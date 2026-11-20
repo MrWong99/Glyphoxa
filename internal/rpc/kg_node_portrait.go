@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -95,18 +94,6 @@ func (s *nodePortraits) GenerateNodePortrait(
 	}), nil
 }
 
-// rasterImageType allowlists the portrait upload content types (#591 review):
-// raster formats only. image/svg+xml (and anything else scriptable) is
-// deliberately absent — the portrait mount serves blobs same-origin with the
-// stored Content-Type, so a scriptable type would be stored XSS.
-func rasterImageType(ct string) bool {
-	switch ct {
-	case "image/png", "image/jpeg", "image/webp", "image/gif":
-		return true
-	}
-	return false
-}
-
 // SetNodePortrait applies portrait bytes — generated or uploaded — to an entry.
 //
 // Blob FIRST, row second (the CreateMap rule): a row referencing missing bytes
@@ -126,7 +113,7 @@ func (s *nodePortraits) SetNodePortrait(
 	if len(m.GetImageBytes()) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("no image was provided"))
 	}
-	if !rasterImageType(m.GetContentType()) {
+	if !blob.IsRasterImageType(m.GetContentType()) {
 		// An allowlist of RASTER types, not an image/* prefix check (#591 review):
 		// image/svg+xml is scriptable — served same-origin it would be stored XSS
 		// the moment the portrait URL is opened as a document.
@@ -147,7 +134,7 @@ func (s *nodePortraits) SetNodePortrait(
 
 	key, err := blob.Key(tenantID, "node", uuid.New(), "portrait")
 	if err != nil {
-		slog.Default().Error("SetNodePortrait: blob key", "err", err)
+		s.active.logger().Error("SetNodePortrait: blob key", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	if err := s.putPortrait(ctx, key, m.GetContentType(), m.GetImageBytes()); err != nil {
@@ -161,12 +148,12 @@ func (s *nodePortraits) SetNodePortrait(
 		// cleanup. Best-effort because the row failure is what the caller must
 		// hear about.
 		if derr := s.blobs.Delete(ctx, key); derr != nil {
-			slog.Default().Warn("SetNodePortrait: could not drop orphaned blob", "key", key, "err", derr)
+			s.active.logger().Warn("SetNodePortrait: could not drop orphaned blob", "key", key, "err", derr)
 		}
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 		}
-		slog.Default().Error("SetNodePortrait: store update failed", "node_id", id, "err", err)
+		s.active.logger().Error("SetNodePortrait: store update failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// The row now points at the new bytes, so the old ones are unreachable. An
@@ -174,7 +161,7 @@ func (s *nodePortraits) SetNodePortrait(
 	// ErrInvalidKey — a warning about leaked bytes that never existed.
 	if oldKey != "" {
 		if derr := s.blobs.Delete(ctx, oldKey); derr != nil {
-			slog.Default().Warn("SetNodePortrait: could not drop superseded blob", "key", oldKey, "err", derr)
+			s.active.logger().Warn("SetNodePortrait: could not drop superseded blob", "key", oldKey, "err", derr)
 		}
 	}
 	return connect.NewResponse(&managementv1.SetNodePortraitResponse{Node: toProtoNode(updated)}), nil
@@ -199,7 +186,7 @@ func (s *nodePortraits) ClearNodePortrait(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
 		}
-		slog.Default().Error("ClearNodePortrait: store update failed", "node_id", id, "err", err)
+		s.active.logger().Error("ClearNodePortrait: store update failed", "node_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	// A failed blob delete leaves reclaimable bytes, not a broken entry — a
@@ -207,7 +194,7 @@ func (s *nodePortraits) ClearNodePortrait(
 	// row. Clearing an entry that had no portrait is an ordinary no-op.
 	if s.blobs != nil && oldKey != "" {
 		if derr := s.blobs.Delete(ctx, oldKey); derr != nil {
-			slog.Default().Warn("ClearNodePortrait: could not drop portrait blob", "key", oldKey, "err", derr)
+			s.active.logger().Warn("ClearNodePortrait: could not drop portrait blob", "key", oldKey, "err", derr)
 		}
 	}
 	return connect.NewResponse(&managementv1.ClearNodePortraitResponse{Node: toProtoNode(updated)}), nil
@@ -229,7 +216,7 @@ func (s *nodePortraits) putPortrait(ctx context.Context, key, contentType string
 		return connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("that image is too large (max %d MiB)", blob.MaxSize>>20))
 	case err != nil:
-		slog.Default().Error("node portrait: blob put failed", "key", key, "err", err)
+		s.active.logger().Error("node portrait: blob put failed", "key", key, "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return nil

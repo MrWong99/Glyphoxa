@@ -80,7 +80,8 @@ func TestCreateCharacter_EmptyNameIsInvalidArgument(t *testing.T) {
 
 func TestCreateCharacter_NonSnowflakeIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	for _, bad := range []string{"", "not-a-number", "123abc", "-5", "12 34", "12.3"} {
+	// 21 digits overflows a uint64 snowflake: the one validator is length-bounded.
+	for _, bad := range []string{"", "not-a-number", "123abc", "-5", "12 34", "12.3", "123456789012345678901"} {
 		store := newFakeCharacterStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
 		client := characterClient(t, store)

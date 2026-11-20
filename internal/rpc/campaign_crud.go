@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -66,14 +65,12 @@ func (s *agentRoster) GetCampaignRoster(
 	if err != nil {
 		// The Butler is auto-created with the campaign (ADR-0009); its absence is
 		// an invariant violation, not a client error. Log raw, return generic.
-		slog.Default().Error("GetCampaignRoster: get butler failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "GetCampaignRoster: get butler failed", err, "campaign_id", c.ID)
 	}
 
 	chars, err := s.store.CharacterAgents(ctx, c.ID)
 	if err != nil {
-		slog.Default().Error("GetCampaignRoster: list character agents failed", "campaign_id", c.ID, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "GetCampaignRoster: list character agents failed", err, "campaign_id", c.ID)
 	}
 
 	roster := make([]*managementv1.Agent, 0, len(chars)+1)
@@ -123,16 +120,14 @@ func (s *agentRoster) CreateAgent(
 		Aliases:     m.GetAliases(),
 	})
 	if err != nil {
-		slog.Default().Error("CreateAgent: store create failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateAgent: store create failed", err)
 	}
 
 	// Read the row back so the response carries the assigned speaker-colour slot
 	// and the canonical persisted shape.
 	created, err := s.store.GetAgent(ctx, id)
 	if err != nil {
-		slog.Default().Error("CreateAgent: read-back failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateAgent: read-back failed", err, "agent_id", id)
 	}
 	return connect.NewResponse(&managementv1.CreateAgentResponse{Agent: toProtoAgent(created)}), nil
 }
@@ -172,8 +167,7 @@ func (s *agentRoster) UpdateAgent(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UpdateAgent: read existing agent failed", err, "agent_id", id)
 	}
 	if existing.CampaignID != c.ID {
 		// The Agent is in another Campaign — invisible to this operator's session.
@@ -182,21 +176,25 @@ func (s *agentRoster) UpdateAgent(
 
 	m := req.Msg
 	updated, err := s.store.UpdateAgent(ctx, storage.AgentUpdate{
-		ID:          id,
-		CampaignID:  c.ID,
-		Name:        name,
-		Title:       m.GetTitle(),
-		Persona:     m.GetPersona(),
-		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
-		AddressOnly: m.GetAddressOnly(),
-		Aliases:     m.GetAliases(),
+		ID:         id,
+		CampaignID: c.ID,
+		Name:       name,
+		Title:      m.GetTitle(),
+		Persona:    m.GetPersona(),
+		Voice:      applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
+		// The request carries no provider-config pins (the editor never sees
+		// them) and the store UPDATE writes both columns unconditionally, so
+		// carry the stored ones through — an edit used to null them (R12).
+		VoiceProviderConfigID: existing.VoiceProviderConfigID,
+		LLMProviderConfigID:   existing.LLMProviderConfigID,
+		AddressOnly:           m.GetAddressOnly(),
+		Aliases:               m.GetAliases(),
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 		}
-		slog.Default().Error("UpdateAgent: store update failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UpdateAgent: store update failed", err, "agent_id", id)
 	}
 
 	// Keep the auto-created NPC Node's name in step while the two names still
@@ -207,7 +205,7 @@ func (s *agentRoster) UpdateAgent(
 	// (logged), the next matching rename catches up.
 	if existing.Role == storage.AgentRoleCharacter {
 		if rerr := s.store.RenameAgentNode(ctx, c.ID, id, existing.Name, updated.Name); rerr != nil {
-			slog.Default().Warn("UpdateAgent: rename linked node failed", "agent_id", id, "err", rerr)
+			s.active.logger().Warn("UpdateAgent: rename linked node failed", "agent_id", id, "err", rerr)
 		}
 	}
 	return connect.NewResponse(&managementv1.UpdateAgentResponse{Agent: toProtoAgent(updated)}), nil
@@ -241,8 +239,7 @@ func (s *agentRoster) DeleteAgent(
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 	default:
-		slog.Default().Error("DeleteAgent: store delete failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "DeleteAgent: store delete failed", err, "agent_id", id)
 	}
 }
 

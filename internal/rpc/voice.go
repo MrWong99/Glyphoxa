@@ -18,7 +18,6 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
@@ -27,6 +26,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
@@ -118,6 +118,14 @@ type VoiceServer struct {
 	// IDENTIFY, #150) and returns the bot tag. Defaults to discordtag.Resolve.
 	botTag func(ctx context.Context, token string) (string, error)
 
+	// envBotToken is the deployment's central DISCORD_BOT_TOKEN (ADR-0057), the
+	// fallback the Discord health probe uses for a Tenant with no saved token —
+	// the same ladder a session start resolves. Wired via SetEnvBotToken.
+	envBotToken string
+	// lookupEnv reads a deployment env var (os.Getenv in prod): the health
+	// probe tells "no key anywhere" apart from a key the provider rejected.
+	lookupEnv func(string) string
+
 	// now is the health cache's clock; tests advance it past the TTL.
 	now func() time.Time
 	// probeTimeout is the whole-probe hard deadline (healthProbeTimeout in
@@ -181,6 +189,7 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		pingImage:    livePingGemini,
 		listModels:   func(ctx context.Context, apiKey string) ([]string, error) { return groq.New(apiKey).ListModels(ctx) },
 		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		lookupEnv:    os.Getenv,
 		now:          time.Now,
 		probeTimeout: healthProbeTimeout,
 		healthCache:  map[uuid.UUID]*healthEntry{},
@@ -236,19 +245,21 @@ func (s *VoiceServer) SetOffSessionMetering(m *billing.OffSession) {
 	}
 }
 
+// SetEnvBotToken wires the deployment's central Bot token (ADR-0057) as the
+// Discord health probe's fallback for a Tenant with no saved token, mirroring
+// ProviderServer.SetEnvBotToken. Called once at boot, before the server serves.
+func (s *VoiceServer) SetEnvBotToken(token string) {
+	s.envBotToken = token
+}
+
 // Handler builds the Connect HTTP handler for VoiceService and returns its mount
 // path + handler, mirroring the other rpc servers.
 func (s *VoiceServer) Handler(opts ...connect.HandlerOption) (string, http.Handler) {
 	return managementv1connect.NewVoiceServiceHandler(s, opts...)
 }
 
-func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) {
-	id, ok := auth.TenantID(ctx)
-	if !ok {
-		return uuid.Nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
-	}
-	return id, nil
-}
+// tenant is [requireTenant] (kept as a method so the handlers read as before).
+func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
 // ListModels returns the live Groq model catalog for the model select (#227):
 // the OpenAI-compatible GET /models fetched with the tenant's decrypted BYOK key
@@ -599,7 +610,7 @@ func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, la
 			}
 			for i, check := range checks {
 				if providers[i] == nil {
-					providers[i] = degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
+					providers[i] = s.degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
 				}
 			}
 			return providers, false
@@ -610,14 +621,14 @@ func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, la
 
 // healthLLM pings Groq with the decrypted LLM key.
 func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
-	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentLLM)
+	key, err := s.healthKey(ctx, tenantID, storage.ComponentLLM, groq.APIKeyEnv)
 	if err != nil {
-		return degraded("groq", err)
+		return s.degraded("groq", err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
 	if err := s.pingLLM(cctx, key); err != nil {
-		return degraded("groq", err)
+		return s.degraded("groq", err)
 	}
 	return healthy("groq")
 }
@@ -625,28 +636,28 @@ func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *manage
 // healthImage pings the Gemini image provider with the decrypted image key (#311),
 // mirroring healthLLM. No configured key (nor GEMINI_API_KEY fallback) → degraded.
 func (s *VoiceServer) healthImage(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
-	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentImage)
+	key, err := s.healthKey(ctx, tenantID, storage.ComponentImage, gemini.APIKeyEnv)
 	if err != nil {
-		return degraded("gemini", err)
+		return s.degraded("gemini", err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
 	if err := s.pingImage(cctx, key); err != nil {
-		return degraded("gemini", err)
+		return s.degraded("gemini", err)
 	}
 	return healthy("gemini")
 }
 
 // healthTTS reuses ListVoices as the ElevenLabs liveness probe (GET /v1/voices).
 func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
-	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentTTS)
+	key, err := s.healthKey(ctx, tenantID, storage.ComponentTTS, elevenlabs.APIKeyEnv)
 	if err != nil {
-		return degraded("elevenlabs", err)
+		return s.degraded("elevenlabs", err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
 	if _, err := s.newLister(key).ListVoices(cctx); err != nil {
-		return degraded("elevenlabs", err)
+		return s.degraded("elevenlabs", err)
 	}
 	return healthy("elevenlabs")
 }
@@ -666,13 +677,21 @@ func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID, las
 	}
 	token, err := s.resolveDiscordToken(ctx, tenantID)
 	if err != nil {
-		return degraded("discord", err)
+		return s.degraded("discord", err)
+	}
+	if token == "" {
+		// No saved token: the central Bot serves this Tenant (ADR-0057) — probe
+		// the token a session start would use, not an empty one.
+		token = s.envBotToken
+	}
+	if token == "" {
+		return s.degraded("discord", errMissingKey)
 	}
 	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
 	tag, err := s.botTag(cctx, token)
 	if err != nil {
-		return degraded("discord", err)
+		return s.degraded("discord", err)
 	}
 	h := healthy("discord")
 	h.BotTag = tag
@@ -683,12 +702,34 @@ func healthy(provider string) *managementv1.ProviderHealth {
 	return &managementv1.ProviderHealth{Provider: provider, Status: managementv1.HealthStatus_HEALTH_STATUS_HEALTHY}
 }
 
-func degraded(provider string, err error) *managementv1.ProviderHealth {
+// degraded builds a Degraded result whose detail is a short GM sentence for
+// err's failure class (healthClass), with the class as a stable code the
+// screen translates. The raw error — vendor text, env var names, ADR
+// references — goes to the server log only.
+func (s *VoiceServer) degraded(provider string, err error) *managementv1.ProviderHealth {
+	code, detail := healthClass(err)
+	s.log.Warn("GetProviderHealth: provider check failed", "provider", provider, "code", code, "err", err)
 	return &managementv1.ProviderHealth{
 		Provider: provider,
 		Status:   managementv1.HealthStatus_HEALTH_STATUS_DEGRADED,
-		Detail:   err.Error(),
+		Detail:   detail,
+		Code:     code,
 	}
+}
+
+// healthKey resolves a health probe's key like every other call
+// (resolveComponentKey) and reports [errMissingKey] when the resolution lands
+// on the env fallback but the deployment has no env key either — so the
+// screen can say "no key" instead of relaying an adapter's "set GROQ_API_KEY".
+func (s *VoiceServer) healthKey(ctx context.Context, tenantID uuid.UUID, component storage.Component, envKey string) (string, error) {
+	key, err := s.resolveComponentKey(ctx, tenantID, component)
+	if err != nil {
+		return "", err
+	}
+	if key == "" && s.lookupEnv(envKey) == "" {
+		return "", errMissingKey
+	}
+	return key, nil
 }
 
 // resolveComponentKey resolves a component's BYOK key under the hybrid policy:
@@ -710,8 +751,7 @@ func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUI
 	case errors.Is(err, storage.ErrNotFound):
 		// No row: an env-fallback candidate (nil cfg).
 	case err != nil:
-		s.log.Error("resolveComponentKey: store read failed", "component", component, "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveComponentKey: store read failed", err, "component", component)
 	case !isSaved(cfg.CredentialsLast4):
 		// A row without a saved key ("" or the "env" placeholder) is the same
 		// env-fallback candidate as no row. Normalize to nil: llmbuild treats
@@ -725,15 +765,14 @@ func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUI
 	case err == nil:
 		return key, nil
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
-		return "", connect.NewError(connect.CodeFailedPrecondition, llmbuild.ErrNoPlatformKeyEntitlement)
+		return "", connect.NewError(connect.CodeFailedPrecondition, gmError(llmbuild.ErrNoPlatformKeyEntitlement))
 	case cfgPtr != nil && s.cipher == nil:
 		return "", connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
 	default:
 		// Decrypt or entitlement-read failure (the latter fails CLOSED): log
 		// the detail, return the generic wire error.
-		s.log.Error("resolveComponentKey: resolve failed", "component", component, "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveComponentKey: resolve failed", err, "component", component)
 	}
 }
 
@@ -745,8 +784,7 @@ func (s *VoiceServer) resolveDiscordToken(ctx context.Context, tenantID uuid.UUI
 		return "", nil
 	}
 	if err != nil {
-		s.log.Error("resolveDiscordToken: store read failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "resolveDiscordToken: store read failed", err)
 	}
 	return s.openKey(dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext)
 }
@@ -762,8 +800,7 @@ func (s *VoiceServer) openKey(last4 string, ciphertext []byte) (string, error) {
 	}
 	plaintext, err := s.cipher.Open(ciphertext)
 	if err != nil {
-		s.log.Error("openKey: decrypt failed", "err", err)
-		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return "", internalErr(s.log, "openKey: decrypt failed", err)
 	}
 	return string(plaintext), nil
 }
@@ -847,7 +884,7 @@ func livePingGroq(ctx context.Context, apiKey string) error {
 		apiKey = os.Getenv(groq.APIKeyEnv)
 	}
 	if apiKey == "" {
-		return fmt.Errorf("groq: missing API key (set %s)", groq.APIKeyEnv)
+		return fmt.Errorf("groq: %w (set %s)", errMissingKey, groq.APIKeyEnv)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, groq.DefaultBaseURL+"/models", nil)
 	if err != nil {
@@ -860,7 +897,7 @@ func livePingGroq(ctx context.Context, apiKey string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("groq ping: HTTP %d", resp.StatusCode)
+		return &providererr.HTTPError{Op: "groq ping", StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	return nil
 }
@@ -878,7 +915,7 @@ func livePingGemini(ctx context.Context, apiKey string) error {
 		apiKey = os.Getenv(gemini.APIKeyEnv)
 	}
 	if apiKey == "" {
-		return fmt.Errorf("gemini: missing API key (set %s)", gemini.APIKeyEnv)
+		return fmt.Errorf("gemini: %w (set %s)", errMissingKey, gemini.APIKeyEnv)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gemini.DefaultBaseURL+"/models", nil)
 	if err != nil {
@@ -891,7 +928,7 @@ func livePingGemini(ctx context.Context, apiKey string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gemini ping: HTTP %d", resp.StatusCode)
+		return &providererr.HTTPError{Op: "gemini ping", StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	return nil
 }

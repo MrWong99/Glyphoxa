@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math"
 	"strings"
 
@@ -30,9 +29,9 @@ func (s *campaignManagement) ListCampaigns(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListCampaignsRequest],
 ) (*connect.Response[managementv1.ListCampaignsResponse], error) {
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	list := s.store.ListCampaignsInTenant
 	if req.Msg.GetIncludeArchived() {
@@ -40,8 +39,7 @@ func (s *campaignManagement) ListCampaigns(
 	}
 	campaigns, err := list(ctx, tenantID)
 	if err != nil {
-		slog.Default().Error("ListCampaigns: store list failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "ListCampaigns: store list failed", err)
 	}
 
 	out := mapSlice(campaigns, toProtoCampaign)
@@ -65,9 +63,9 @@ func (s *campaignManagement) CreateCampaign(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	id, err := s.store.CreateCampaign(ctx, storage.NewCampaign{
@@ -77,8 +75,7 @@ func (s *campaignManagement) CreateCampaign(
 		Language: m.GetLanguage(),
 	})
 	if err != nil {
-		slog.Default().Error("CreateCampaign: store create failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateCampaign: store create failed", err)
 	}
 
 	// Read the row back so the response carries the canonical persisted shape
@@ -86,8 +83,7 @@ func (s *campaignManagement) CreateCampaign(
 	// read-back is tenant-scoped (#473) — the row was just created under this tenant.
 	created, err := s.store.GetCampaignInTenant(ctx, tenantID, id)
 	if err != nil {
-		slog.Default().Error("CreateCampaign: read-back failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "CreateCampaign: read-back failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.CreateCampaignResponse{Campaign: toProtoCampaign(created)}), nil
 }
@@ -132,9 +128,9 @@ func (s *campaignManagement) UpdateCampaign(
 		confirmWindows = &v
 	}
 
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	updated, err := s.store.UpdateCampaign(ctx, storage.CampaignUpdate{
@@ -154,8 +150,7 @@ func (s *campaignManagement) UpdateCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("UpdateCampaign: store update failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "UpdateCampaign: store update failed", err, "campaign_id", id)
 	}
 	return connect.NewResponse(&managementv1.UpdateCampaignResponse{Campaign: toProtoCampaign(updated)}), nil
 }
@@ -182,9 +177,9 @@ func (s *campaignManagement) SetActiveCampaign(
 	if !ok || u.DiscordUserID == "" {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no operator in context"))
 	}
-	tenantID, ok := auth.TenantID(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	tenantID, err := requireTenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Validate the target exists WITHIN THE CALLER'S TENANT before persisting the
@@ -197,8 +192,7 @@ func (s *campaignManagement) SetActiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("SetActiveCampaign: validate campaign failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "SetActiveCampaign: validate campaign failed", err, "campaign_id", id)
 	}
 	// An archived campaign cannot be the Active Campaign (#269): it is excluded from
 	// every resolution surface, so selecting it would resolve to a DIFFERENT campaign
@@ -214,8 +208,7 @@ func (s *campaignManagement) SetActiveCampaign(
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
-		slog.Default().Error("SetActiveCampaign: store write failed", "campaign_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.active.logger(), "SetActiveCampaign: store write failed", err, "campaign_id", id)
 	}
 
 	// Return the resolved Active Campaign via the one shared live-first policy, so

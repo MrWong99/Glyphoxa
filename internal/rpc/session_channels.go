@@ -3,7 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
-	"regexp"
+	"slices"
 
 	"connectrpc.com/connect"
 
@@ -27,11 +27,6 @@ type VoiceChannelLister interface {
 	ListVoiceChannels(ctx context.Context) ([]discordshare.Channel, error)
 }
 
-// snowflakePattern is the shape of a Discord snowflake id (an unsigned 64-bit
-// decimal). StartSession validates its optional voice_channel_id against it so
-// an accidental non-id string fails fast instead of riding into the voice loop.
-var snowflakePattern = regexp.MustCompile(`^[0-9]{1,20}$`)
-
 // SetVoiceChannels wires the Session screen's voice-channel picker seam onto
 // the SessionServer: the guild channel lister plus the deployment-config read
 // that carries the linked guild + Default Voice Channel. Called once at boot;
@@ -40,6 +35,35 @@ var snowflakePattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 func (s *SessionServer) SetVoiceChannels(lister VoiceChannelLister, deps deploymentReader) {
 	s.voiceChannels = lister
 	s.deployments = deps
+}
+
+// errVoiceChannelNotLinked is the GM-readable refusal for a voice channel id
+// that is not one of the linked guild's voice channels (R9). Shared with
+// ProviderServer's Default Voice Channel save so both surfaces say the same.
+var errVoiceChannelNotLinked = errors.New("that voice channel is not in your linked Discord server — pick one from the list")
+
+// checkVoiceChannelLinked verifies channelID is a voice channel of the
+// request Tenant's linked guild (R9), via the same tenant-scoped lister the
+// picker reads. A server without the lister wired skips the check (unit-test
+// posture). Not linked is CodeInvalidArgument with a GM-readable message; a
+// missing token / unlinked guild are the picker's own preconditions.
+func (s *SessionServer) checkVoiceChannelLinked(ctx context.Context, channelID string) error {
+	if s.voiceChannels == nil {
+		return nil
+	}
+	channels, err := s.voiceChannels.ListVoiceChannels(ctx)
+	switch {
+	case errors.Is(err, ErrNoDiscordToken):
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("save a Discord Bot token first"))
+	case errors.Is(err, ErrNoGuildLinked):
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))
+	case err != nil:
+		return s.discordError("StartSession", err)
+	}
+	if !slices.ContainsFunc(channels, func(c discordshare.Channel) bool { return c.ID == channelID }) {
+		return connect.NewError(connect.CodeInvalidArgument, errVoiceChannelNotLinked)
+	}
+	return nil
 }
 
 // ListSessionVoiceChannels lists the linked guild's voice channels for the
@@ -61,8 +85,7 @@ func (s *SessionServer) ListSessionVoiceChannels(
 
 	dep, err := s.deployments.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.log.Error("ListSessionVoiceChannels: load deployment config failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		return nil, internalErr(s.log, "ListSessionVoiceChannels: load deployment config failed", err)
 	}
 	if dep.GuildID == "" {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("link a Discord server first"))

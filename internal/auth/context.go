@@ -1,7 +1,7 @@
 // Package auth is the single-operator authentication tier (ADR-0016 / ADR-0039):
 // the net/http Discord OAuth carve-out (ADR-0015), the opaque cookie session it
 // issues, and ONE transport-agnostic policy (#446, policy.go) that gates both
-// transports — the Connect interceptor stack ([NewStack]) over the management
+// transports — the Connect interceptor stack ([Policy.Stack]) over the management
 // RPCs and the guarded plain-mount table ([MustGuardMounts]) over the byte
 // endpoints. [CurrentUser] / [TenantID] read the resolved principal out of a
 // handler's context.

@@ -8,9 +8,10 @@
 // session's token could delay its reconnect and burn its budget; the REST read
 // costs neither.
 //
-// The call is a plain net/http GET, deliberately NOT disgo's rest.NewClient:
-// that client's rate limiter starts a cleanup goroutine (`for range ticker.C`)
-// its Close never stops, leaking one goroutine + ticker per probe.
+// The call goes through internal/discordrest (a plain net/http GET, never
+// disgo's leaking rest client, ADR-0047). A non-200 is a
+// *discordrest.StatusError so the health badge can tell a rejected token from
+// Discord being down.
 //
 // This is a LIVE network call. The RPC layer hides it behind a seam so unit
 // tests fake the resolver and never touch the network; [Resolve] against the
@@ -20,23 +21,15 @@ package discordtag
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/disgoorg/disgo/discord"
+
+	"github.com/MrWong99/Glyphoxa/internal/discordrest"
 )
-
-// liveAPIBaseURL is Discord's REST API root, matching the version disgo pins.
-const liveAPIBaseURL = "https://discord.com/api/v10"
-
-// selfUserClient is shared across probes (http.Client is safe for concurrent
-// use); its Timeout is a belt on top of the caller's ctx deadline so a resolver
-// invoked without one still cannot hang.
-var selfUserClient = &http.Client{Timeout: 15 * time.Second}
 
 // Resolve reads the bot user via REST `GET /users/@me` with token and returns
 // its tag ("Username#Discriminator", or the bare username under Discord's new
@@ -58,30 +51,14 @@ func resolve(ctx context.Context, token, baseURL string, log *slog.Logger) (stri
 	if log == nil {
 		log = slog.Default()
 	}
-	if baseURL == "" {
-		baseURL = liveAPIBaseURL
-	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/users/@me", nil)
-	if err != nil {
-		return "", fmt.Errorf("discordtag: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bot "+token)
-	// Discord requires bots to identify with the DiscordBot User-Agent form.
-	req.Header.Set("User-Agent", "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)")
-
-	resp, err := selfUserClient.Do(req)
+	var user discord.OAuth2User
+	status, err := discordrest.GetJSON(ctx, token, discordrest.BaseURL(baseURL)+"/users/@me", &user)
 	if err != nil {
 		return "", fmt.Errorf("discordtag: GET /users/@me: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("discordtag: GET /users/@me: HTTP %d", resp.StatusCode)
-	}
-
-	var user discord.OAuth2User
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return "", fmt.Errorf("discordtag: decode self user: %w", err)
+	if status != http.StatusOK {
+		return "", &discordrest.StatusError{Op: "discordtag: GET /users/@me", Status: status}
 	}
 	tag := user.Tag()
 	log.Debug("resolved Discord bot tag via REST", "tag", tag)

@@ -512,17 +512,31 @@ function SpendCapsCard() {
 // "Working" or downgrades to "Having trouble" once GetProviderHealth reports
 // the test-call (#70) — the page never waits on the live call, and never
 // claims "Working" before a probe said so.
+//
+// An unsaved slot the deployment provides for this tenant (W9 — a trial
+// tenant on the Platform Keys, a central-Bot table) reads "Included": the
+// probe runs on the platform's key there too, so a failed probe still
+// downgrades it to "Having trouble".
 function HealthBadge({
   saved,
   health,
   optional = false,
+  platform = false,
 }: {
   saved: boolean;
   health?: ProviderHealth;
   optional?: boolean;
+  platform?: boolean;
 }) {
   const { t } = useI18n();
-  if (!saved) {
+  if (!saved && platform && health?.status !== HealthStatus.DEGRADED) {
+    return (
+      <Badge variant="info" dot size="sm">
+        {t("config.badgeIncluded")}
+      </Badge>
+    );
+  }
+  if (!saved && !platform) {
     return optional ? (
       <Badge variant="neutral" dot size="sm">
         {t("config.badgeOptional")}
@@ -542,7 +556,9 @@ function HealthBadge({
         <Badge variant="danger" dot size="sm">
           {t("config.badgeDegraded")}
         </Badge>
-        {health.detail && <span className="gx-health__detail">{health.detail}</span>}
+        {healthDetail(health, t) && (
+          <span className="gx-health__detail">{healthDetail(health, t)}</span>
+        )}
       </span>
     );
   }
@@ -558,6 +574,23 @@ function HealthBadge({
       {t("config.badgeWorking")}
     </Badge>
   );
+}
+
+// The stable failure classes GetProviderHealth reports (ProviderHealth.code),
+// each with its own translated sentence. An unknown code (a newer server)
+// falls back to the server's English detail.
+const HEALTH_CODE_KEYS: Record<string, MessageKey> = {
+  missing_key: "config.healthMissingKey",
+  key_rejected: "config.healthKeyRejected",
+  quota_exhausted: "config.healthQuotaExhausted",
+  unreachable: "config.healthUnreachable",
+  plan_excludes_platform_keys: "config.healthNoPlatformKeys",
+  check_failed: "config.healthCheckFailed",
+};
+
+function healthDetail(health: ProviderHealth, t: (key: MessageKey) => string): string {
+  const key = HEALTH_CODE_KEYS[health.code];
+  return key ? t(key) : health.detail;
 }
 
 // IntegrationBadge renders THIS tenant's standing Discord client health (#489):
@@ -786,7 +819,14 @@ function SecretRow({
           )}
         </div>
 
-        {!hideHealth && <HealthBadge saved={saved} health={health} optional={optional} />}
+        {!hideHealth && (
+          <HealthBadge
+            saved={saved}
+            health={health}
+            optional={optional}
+            platform={Boolean(credential?.providedByPlatform)}
+          />
+        )}
       </div>
     </Card>
   );
