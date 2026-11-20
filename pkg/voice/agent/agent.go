@@ -1522,10 +1522,11 @@ func speakerRosterBlock(players, npcs []string) string {
 	return b.String()
 }
 
-// trimHistoryLocked bounds the live history (and its turn index) to roughly keep user/assistant messages, trimming
-// in BLOCKS with hysteresis: nothing is dropped until the history has grown past
-// twice keep, and then it is cut back to the most recent keep in one step. The
-// trimmed window is moved forward to begin on a user message.
+// trimHistoryLocked bounds the live history (and its turn index) to roughly
+// keep = [Config.HistoryTurns] user/assistant messages, trimming in BLOCKS with
+// hysteresis: nothing is dropped until the history has grown past twice keep,
+// and then it is cut back to the most recent keep in one step. The trimmed
+// window is moved forward to begin on a user message.
 //
 // Both properties are there for the provider. A window that slides one message
 // per append starts on a different message every turn — from the ninth exchange
