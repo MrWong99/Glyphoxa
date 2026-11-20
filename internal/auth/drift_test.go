@@ -135,7 +135,7 @@ func driftMatrix() []driftCell {
 func connectAdapter(t *testing.T, authn auth.Authenticator, tenants auth.TenantResolver) managementv1connect.AuthServiceClient {
 	t.Helper()
 	stack := auth.NewStack(authn, tenants)
-	server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, nil, auth.AdmissionAllowlist, nil)
+	server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, nil, auth.AdmissionAllowlist, auth.EdgeConfig{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)
@@ -337,8 +337,11 @@ func TestAdapterParity_PrincipalInjection(t *testing.T) {
 // TestAdapterTenantPosture documents the ONE deliberate divergence between
 // the transports, now expressed as declared data instead of hand-synced code:
 // the Connect stack runs TenantOptional (tenant-agnostic procedures proceed
-// on a resolve failure), while the byte mounts declare TenantRequired (their
-// handlers always need a tenant, so an unresolvable one fails fast with 401).
+// when the operator has no bound tenant), while the byte mounts declare
+// TenantRequired (their handlers always need a tenant, so a missing one fails
+// fast with 401). "No bound tenant" is storage.ErrNotFound; a lookup that
+// FAILED is the separate posture TestAdapterParity_TenantResolverFailureIsUnavailable
+// pins (#661).
 func TestAdapterTenantPosture(t *testing.T) {
 	t.Parallel()
 	op := operator()
@@ -434,5 +437,55 @@ func TestAdapterParity_AuthenticatorFailureIsUnavailable(t *testing.T) {
 	writeMount.ServeHTTP(writeRec, httpWrite)
 	if writeRec.Code != http.StatusServiceUnavailable {
 		t.Errorf("POST mount status = %d, want 503", writeRec.Code)
+	}
+}
+
+// TestAdapterParity_TenantResolverFailureIsUnavailable is the #661 regression:
+// a tenant lookup that FAILED (a pool timeout, a dropped connection — anything
+// but storage.ErrNotFound) is CodeUnavailable / 503 on both transports and in
+// BOTH tenant modes. Before the fix resolveTenant folded every error into "no
+// tenant", so a transient database error on a TenantRequired byte mount
+// answered 401 "please sign in" (the SPA signs the operator out on that), and
+// on the Connect stack the call ran tenantless into a misleading handler
+// error.
+func TestAdapterParity_TenantResolverFailureIsUnavailable(t *testing.T) {
+	t.Parallel()
+	op := operator()
+	authn := fakeAuthN{users: map[string]storage.User{validToken: op}}
+	broken := fakeTenant{err: errors.New("pool: acquire timeout")}
+	cookie := auth.SessionCookieName + "=" + validToken
+
+	client, connectSeen := recordingConnectAdapter(t, authn, broken)
+	req := connect.NewRequest(&managementv1.GetCurrentUserRequest{})
+	req.Header().Set("Cookie", cookie)
+	if _, err := client.GetCurrentUser(context.Background(), req); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("TenantOptional (Connect): code = %v, want Unavailable (err=%v)", connect.CodeOf(err), err)
+	}
+	if connectSeen.hasUser {
+		t.Error("TenantOptional (Connect): handler ran despite a failed tenant lookup")
+	}
+
+	for _, mode := range []auth.TenantMode{auth.TenantRequired, auth.TenantOptional} {
+		mount, _, seen := httpAdapter(t, authn, broken, mode)
+		httpReq := httptest.NewRequest(http.MethodGet, "/read", nil)
+		httpReq.Header.Set("Cookie", cookie)
+		rec := httptest.NewRecorder()
+		mount.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("mount (mode %d): status = %d, want 503", mode, rec.Code)
+		}
+		if seen.hasUser {
+			t.Errorf("mount (mode %d): handler ran despite a failed tenant lookup", mode)
+		}
+	}
+
+	// TenantNone never consults the resolver, so its failure is irrelevant.
+	none, _, _ := httpAdapter(t, authn, broken, auth.TenantNone)
+	rec := httptest.NewRecorder()
+	noneReq := httptest.NewRequest(http.MethodGet, "/read", nil)
+	noneReq.Header.Set("Cookie", cookie)
+	none.ServeHTTP(rec, noneReq)
+	if rec.Code != http.StatusOK {
+		t.Errorf("TenantNone: status = %d, want 200", rec.Code)
 	}
 }

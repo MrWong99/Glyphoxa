@@ -28,7 +28,7 @@ import type { Layout } from "./layout";
  * with t(reason.key, reason.params) at render time (spec rule: never bake a
  * translated string into non-component state).
  */
-export type ReasonMsg = { key: MessageKey; params?: MsgParams };
+type ReasonMsg = { key: MessageKey; params?: MsgParams };
 
 /**
  * An endpoint a proposal names, resolved against the campaign.
@@ -38,7 +38,7 @@ export type ReasonMsg = { key: MessageKey; params?: MsgParams };
  * and then proposes an edge into it files two proposals, and the pair only makes
  * sense drawn together.
  */
-export type Anchor =
+type Anchor =
   | { at: "node"; id: string }
   | { at: "ghost"; name: string }
   | { at: "unknown"; name: string; reason: ReasonMsg };
@@ -162,7 +162,7 @@ export function resolveProposals(
 }
 
 /** A proposed Node, placed. `key` is stable across renders (the proposal id). */
-export type GhostNode = {
+type GhostNode = {
   key: string;
   proposalID: string;
   name: string;
@@ -173,7 +173,7 @@ export type GhostNode = {
 };
 
 /** A proposed Edge, placed between two drawn (or ghosted) endpoints. */
-export type GhostEdge = {
+type GhostEdge = {
   key: string;
   proposalID: string;
   relation: EdgeType;
@@ -185,7 +185,7 @@ export type GhostEdge = {
 };
 
 /** A proposed fact, marking the Node it would land on. */
-export type FactMark = {
+type FactMark = {
   key: string;
   proposalID: string;
   nodeID: string;
@@ -195,9 +195,9 @@ export type FactMark = {
 };
 
 /** A proposal that could not be drawn, and why. It is listed, never dropped. */
-export type UnplacedProposal = { proposal: ResolvedProposal; reason: ReasonMsg };
+type UnplacedProposal = { proposal: ResolvedProposal; reason: ReasonMsg };
 
-export type PlacedProposals = {
+type PlacedProposals = {
   ghostNodes: GhostNode[];
   ghostEdges: GhostEdge[];
   factMarks: FactMark[];

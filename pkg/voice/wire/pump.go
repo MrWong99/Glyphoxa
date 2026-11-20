@@ -34,9 +34,9 @@ import (
 // the right tradeoff for that queue; the look-ahead lane below is how a
 // coordinator buys the gap back without weakening it.
 //
-// The ONE exception is the keyed look-ahead lane (#375, #626, ADR-0025): a sentence
-// marked [voiceevent.WithPlaybackLookahead] — a queued Cross-talk Reaction's FIRST
-// sentence, or the NEXT sentence of a pipelined turn (#626) — is HELD in the lane.
+// The ONE exception is the keyed look-ahead lane (#626): a sentence marked
+// [voiceevent.WithPlaybackLookahead] — the NEXT sentence of a pipelined turn —
+// is HELD in the lane.
 // It is synthesized eagerly (its first chunk pre-paid at the tee, so its TTFB is
 // spent DURING the previous sentence's playback) but never drained nor played
 // until the coordinator calls [PlaybackPump.ReleaseLookahead]. The hold is pure
@@ -57,15 +57,21 @@ type PlaybackPump struct {
 	done  chan struct{} // closed by the worker when it has exited
 	once  sync.Once
 
-	// laneMu guards the keyed look-ahead lane (#375, #626). laneJob is the single
-	// held job (depth 1, ADR-0025) and laneKey its owning LANE KEY — the turn id for
-	// a Cross-talk Reaction (one held sentence per turn) or a per-sentence key for
-	// the intra-turn pre-synthesis pipeline (#626); released latches
+	// life is the pump's lifetime ctx, cancelled by Close (#644). Every played
+	// sentence runs under a ctx cancelled by EITHER its own ctx or life, so Close
+	// ends an in-flight sentence whose own ctx never cancels (a sender that is
+	// already gone would otherwise never finish it, wedging the cycle teardown).
+	life       context.Context
+	cancelLife context.CancelFunc
+
+	// laneMu guards the keyed look-ahead lane (#626). laneJob is the single
+	// held job (depth 1) and laneKey its owning LANE KEY — a per-sentence key for
+	// the intra-turn pre-synthesis pipeline; released latches
 	// a ReleaseLookahead that arrived BEFORE the sentence was primed (release-before-
 	// prime race), so the imminent prime bypasses the lane straight to the queue. The
-	// lane is turn-keyed — NOT a bare "held/not-held" flag — so a stale defer discard
-	// or a superseded reaction from an older turn can never drain the CURRENT turn's
-	// held job (cross-turn supersede race). The worker never touches these fields.
+	// lane is keyed — NOT a bare "held/not-held" flag — so a stale defer discard
+	// from an older turn can never drain the CURRENT turn's held job (cross-turn
+	// supersede race). The worker never touches these fields.
 	laneMu   sync.Mutex
 	laneJob  *playJob
 	laneKey  string
@@ -159,15 +165,15 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voicee
 		// empty at every enqueue; the buffer only decouples the enqueue from the
 		// worker's in-flight PlaySentence so HandleSentence returns at once.
 		//
-		// The #375 look-ahead lane preserves this invariant: a held Reaction s1 sits
-		// in the LANE, never the queue, so it adds no queue depth. ReleaseLookahead
-		// only enqueues s1 after the Lead's last job has been dequeued (the release
-		// fires after the Lead's Speak returned), and the Reaction's s2+ dispatch only
-		// after s1's own hand-off drains — so the queue is still empty at every enqueue.
+		// The look-ahead lane (#626) preserves this invariant: a held sentence sits
+		// in the LANE, never the queue, so it adds no queue depth. The pipelined
+		// turn releases sentence k only after sentence k-1 has resolved (its job
+		// dequeued and drained) — so the queue is still empty at every enqueue.
 		queue: make(chan playJob, 1),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
 	}
+	p.life, p.cancelLife = context.WithCancel(context.Background())
 	for _, o := range opts {
 		o(p)
 	}
@@ -222,7 +228,7 @@ func (p *PlaybackPump) enqueue(job playJob) {
 // prime installs a look-ahead sentence in the lane under its lane key (#375, #626).
 // If a matching Release already latched (release-before-prime), the sentence
 // bypasses the lane straight to the queue. If the lane already holds an OLDER job (a
-// superseded reaction, stale by construction), that job is drained before the new
+// superseded turn's, stale by construction), that job is drained before the new
 // one is held — the lane key makes the supersede unambiguous.
 func (p *PlaybackPump) prime(job playJob, id string) {
 	// A sentence whose ctx already cancelled (a barge that landed before the tee
@@ -259,8 +265,8 @@ func (p *PlaybackPump) prime(job playJob, id string) {
 // queue so it plays after the in-flight sentence (order preserved). If the sentence
 // has not been primed yet, it latches so the imminent prime enqueues directly
 // (release-before-prime). It is non-blocking and never waits for a prime. A key
-// that owns no held job and no pending prime is a no-op. The key is the turn id for
-// a Cross-talk Reaction (#375) and a per-sentence key for a pipelined turn (#626).
+// that owns no held job and no pending prime is a no-op. The key is the
+// per-sentence key of a pipelined turn (#626).
 func (p *PlaybackPump) ReleaseLookahead(turnID string) {
 	p.laneMu.Lock()
 	if p.laneJob != nil && p.laneKey == turnID {
@@ -269,7 +275,7 @@ func (p *PlaybackPump) ReleaseLookahead(turnID string) {
 		p.laneKey = ""
 		p.laneMu.Unlock()
 		// Counted here, on the coordinator goroutine, NOT in the worker: the worker
-		// must never touch the lane (ADR-0025, #375). A released job is the lane
+		// must never touch the lane (#375). A released job is the lane
 		// doing its job — its pre-paid TTS startup hid an inter-sentence gap.
 		p.lookahead(observe.LookaheadReleased)
 		p.enqueue(job)
@@ -308,8 +314,9 @@ func (p *PlaybackPump) DiscardLookahead(turnID string) {
 
 // run is the single serial worker: it plays one sentence to completion before
 // taking the next, which is what serializes playback and preserves order. It
-// exits when Close signals stop, finishing any in-flight sentence first and
-// draining any job still queued (its tee forwarder must never be orphaned).
+// exits when Close signals stop — Close's lifetime cancel ends any in-flight
+// sentence first (#644) — draining any job still queued (its tee forwarder must
+// never be orphaned).
 func (p *PlaybackPump) run() {
 	defer close(p.done)
 	for {
@@ -317,8 +324,7 @@ func (p *PlaybackPump) run() {
 		case job := <-p.queue:
 			// Stop wins over a dequeued job: a select with both arms ready picks
 			// randomly, and a sentence enqueued just before Close must be dropped
-			// (drained), not spoken into the teardown — Close's contract is
-			// "finish the IN-FLIGHT sentence", and a queued one hasn't started.
+			// (drained), not spoken into the teardown — a queued one hasn't started.
 			select {
 			case <-p.stop:
 				go drain(job.chunks)
@@ -337,8 +343,14 @@ func (p *PlaybackPump) run() {
 			// written on disgo's sender goroutine and read here after the playback's
 			// Done, hence atomic.
 			var audible atomic.Bool
-			err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap,
+			// The play ctx ends with the sentence's own ctx OR the pump's lifetime
+			// (#644), keeping the sentence ctx's values (TurnID, look-ahead marks).
+			playCtx, cancel := context.WithCancel(job.ctx)
+			stopWatch := context.AfterFunc(p.life, cancel)
+			err := playSentenceBus(playCtx, p.player, p.codec, job.chunks, p.bus, p.outboundTap,
 				p.firstFrameStamp(turn, &audible))
+			stopWatch()
+			cancel()
 			if err != nil && !errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
 				p.logger.Warn("wire: sentence playback failed", "err", err)
 			}
@@ -412,11 +424,16 @@ func (p *PlaybackPump) firstFrameStamp(turn string, audible *atomic.Bool) func(t
 	}
 }
 
-// Close stops the worker (after any in-flight sentence) and blocks until it has
-// exited. It is idempotent and safe to call once at teardown; the pump must not
-// be used afterwards.
+// Close stops the worker and blocks until it has exited. An in-flight sentence
+// is ENDED (its playback stopped, as a barge would), not waited for (#644): its
+// own ctx may never cancel while the sender that would finish it is already
+// gone. It is idempotent and safe to call once at teardown; the pump must not be
+// used afterwards.
 func (p *PlaybackPump) Close() {
-	p.once.Do(func() { close(p.stop) })
+	p.once.Do(func() {
+		close(p.stop)
+		p.cancelLife()
+	})
 	<-p.done
 	// The worker never touches the lane, so a look-ahead sentence primed but never
 	// released/discarded would wedge its tee's lockstep forward goroutine forever.

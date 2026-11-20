@@ -88,7 +88,7 @@ func TestStageSubscriberHeadlineAndStages(t *testing.T) {
 	speechEnd := base
 	bus.Publish(voiceevent.STTFinal{At: base.Add(700 * time.Millisecond), Text: "hi", TurnID: "T1", SpeechEndAt: speechEnd})
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(750 * time.Millisecond), TurnID: "T1", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1200 * time.Millisecond), TurnID: "T1", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1200 * time.Millisecond), TurnID: "T1"})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1500 * time.Millisecond), TurnID: "T1"})
 	// First opus on the wire lands AFTER first-audio-to-pump (codec encode + pacing).
 	bus.Publish(voiceevent.FirstOpus{At: base.Add(1600 * time.Millisecond), TurnID: "T1"})
@@ -193,7 +193,7 @@ func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 	for i := 0; i < 3; i++ {
 		at := base.Add(time.Duration(i+1) * 100 * time.Millisecond)
-		bus.Publish(voiceevent.TTSInvoked{At: at, TurnID: "T", Index: i})
+		bus.Publish(voiceevent.TTSInvoked{At: at, TurnID: "T"})
 		bus.Publish(voiceevent.FirstAudio{At: at.Add(50 * time.Millisecond), TurnID: "T"})
 		bus.Publish(voiceevent.FirstOpus{At: at.Add(80 * time.Millisecond), TurnID: "T"})
 	}
@@ -218,10 +218,10 @@ func TestStageSubscriberTTFBPairsLatestNotStale(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 
 	// Sentence 0: synthesized but zero chunks → TTSInvoked, no FirstAudio.
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(100 * time.Millisecond), TurnID: "T", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(100 * time.Millisecond), TurnID: "T"})
 	// Sentence 1: serial dispatch means its invoke comes AFTER sentence 0's, then
 	// its FirstAudio. Correct ttfb = 1200 − 1000 = 200ms (its own invoke).
-	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1000 * time.Millisecond), TurnID: "T", Index: 1})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1000 * time.Millisecond), TurnID: "T"})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1200 * time.Millisecond), TurnID: "T"})
 
 	if len(rec.ttsTTFB) != 1 {
@@ -262,7 +262,7 @@ func TestStageSubscriberSweepReapsAbandonedTurns(t *testing.T) {
 
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "dead", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "dead", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: clock, TurnID: "dead", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: clock, TurnID: "dead"})
 	// never a FirstAudio.
 
 	if got := sub.Sweep(); got != 0 {
@@ -300,10 +300,10 @@ func TestStageSubscriberFirstAudioOutcome(t *testing.T) {
 
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "live", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "live", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(400 * time.Millisecond), TurnID: "live", Index: 0})
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(400 * time.Millisecond), TurnID: "live"})
 	bus.Publish(voiceevent.FirstAudio{At: clock.Add(600 * time.Millisecond), TurnID: "live"})
 	// A second sentence's first audio must NOT re-count the outcome.
-	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(900 * time.Millisecond), TurnID: "live", Index: 1})
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(900 * time.Millisecond), TurnID: "live"})
 	bus.Publish(voiceevent.FirstAudio{At: clock.Add(1000 * time.Millisecond), TurnID: "live"})
 
 	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnFirstAudio || got[0].reason != ReasonNone {
@@ -384,6 +384,53 @@ func TestStageSubscriberTextDeliveredOutcome(t *testing.T) {
 	}
 }
 
+// TestStageSubscriberCompletedOutcome pins W1: a clean turn now ends with a
+// TurnEnded{completed}, which records no outcome of its own. After first audio
+// the turn already counted first_audio; a voiced turn that produced NO audio
+// (empty completion, zero TTS chunks) stays the abandoned/no_first_audio failure
+// at the TTL reap; a FirstAudio landing just after the completion (pipelined
+// sentences publish it off the sender goroutine) still counts the success.
+func TestStageSubscriberCompletedOutcome(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	// A spoken turn: first audio, then its natural completion.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "spoke", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "spoke", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.FirstAudio{At: clock, TurnID: "spoke"})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "spoke", Reason: voiceevent.TurnEndCompleted})
+
+	// A clean turn of a voiced agent that produced no audio at all.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "quiet", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "quiet", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "quiet", Reason: voiceevent.TurnEndCompleted})
+
+	// FirstAudio arriving just after the completion still counts.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "late", Reason: voiceevent.TurnEndCompleted})
+	bus.Publish(voiceevent.FirstAudio{At: clock, TurnID: "late"})
+
+	// A completed /say (never opened by an STTFinal) records nothing.
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "say-1", Reason: voiceevent.TurnEndCompleted})
+
+	want := []turnOutcomeRec{{TurnFirstAudio, ReasonNone}, {TurnFirstAudio, ReasonNone}}
+	if got := rec.outcomes(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("turn outcomes = %+v, want %+v", got, want)
+	}
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+	want = append(want, turnOutcomeRec{TurnAbandoned, ReasonNoFirstAudio})
+	if got := rec.outcomes(); len(got) != 3 || got[2] != want[2] {
+		t.Fatalf("after reap outcomes = %+v, want the silent turn abandoned/no_first_audio: %+v", got, want)
+	}
+}
+
 // TestStageSubscriberTurnEndedReasons pins the precise-reason mapping: each
 // TurnEnded reason records the right outcome+reason, and a turn-end arriving
 // AFTER first audio is ignored (the turn already counted first_audio).
@@ -400,6 +447,7 @@ func TestStageSubscriberTurnEndedReasons(t *testing.T) {
 		{"provider_error", voiceevent.TurnEndProviderError, TurnAbandoned, ReasonProviderError},
 		{"mute", voiceevent.TurnEndMute, TurnAbandoned, ReasonMute},
 		{"spend_cap", voiceevent.TurnEndSpendCap, TurnAbandoned, ReasonSpendCap},
+		{"cancelled", voiceevent.TurnEndCancelled, TurnAbandoned, ReasonCancelled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -576,29 +624,6 @@ func TestStageSubscriberEndToEndPrometheus(t *testing.T) {
 	}
 }
 
-// TestStageSubscriberEnsembleRoutedStageMark pins #301: an EnsembleRouted stage-marks
-// the turn exactly like an AddressRouted — the role comes from Targets[0] and the
-// address_detect span is recorded, so the Lead's FirstOpus (under the same TurnID)
-// pairs against it.
-func TestStageSubscriberEnsembleRoutedStageMark(t *testing.T) {
-	rec := &recordingStage{}
-	bus := voiceevent.NewBus()
-	NewStageSubscriber(rec).Subscribe(bus)
-
-	bus.Publish(voiceevent.STTFinal{At: base.Add(700 * time.Millisecond), TurnID: "E", SpeechEndAt: base})
-	bus.Publish(voiceevent.EnsembleRouted{At: base.Add(750 * time.Millisecond), TurnID: "E", Targets: []voiceevent.AddressTarget{
-		{AgentRole: "character"}, {AgentRole: "character"},
-	}})
-	bus.Publish(voiceevent.FirstOpus{At: base.Add(1600 * time.Millisecond), TurnID: "E"})
-
-	if len(rec.addressDetect) != 1 || rec.addressDetect[0] != 50*time.Millisecond {
-		t.Fatalf("address_detect = %v, want [50ms] from the EnsembleRouted mark", rec.addressDetect)
-	}
-	if len(rec.responseLat) != 1 || rec.responseLat[0].label != "character" || rec.responseLat[0].d != 1600*time.Millisecond {
-		t.Fatalf("response_latency = %+v, want one [character 1.6s] anchored on the ensemble mark", rec.responseLat)
-	}
-}
-
 // TestStageSubscriberTurnEndedUnknownTurnIgnored pins the #310/#391-class guard: a
 // TurnEnded for a turn the subscriber never OPENED (no STTFinal/AddressRouted/
 // TTSInvoked spine) records NO outcome — otherwise a Highlight voice replay cut by
@@ -620,18 +645,16 @@ func TestStageSubscriberTurnEndedUnknownTurnIgnored(t *testing.T) {
 }
 
 // TestStageSubscriberSpinelessTextDeliveredRecorded pins that the barge-only guard
-// (#310) does NOT drop legit spine-less terminals: a text-modality Cross-talk
-// Reaction sub-turn (#389) publishes ONLY TurnEnded{text_delivered} for its fresh
-// reaction id — no STTFinal/AddressRouted/TTSInvoked opener — yet its success outcome
-// must still be counted (the reaction is the ONLY signal of that sub-turn).
+// (#310) does NOT drop legit spine-less terminals: a turn whose ONLY event is its
+// TurnEnded{text_delivered} — no STTFinal/AddressRouted/TTSInvoked opener — still
+// has its success outcome counted (the terminal is the only signal of that turn).
 func TestStageSubscriberSpinelessTextDeliveredRecorded(t *testing.T) {
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
 	NewStageSubscriber(rec).Subscribe(bus)
 
-	// The real spine-less reaction sequence: a fresh reaction id ends text_delivered
-	// with no prior opener events for that id.
-	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "reaction-1", Reason: voiceevent.TurnEndTextDelivered})
+	// A fresh turn id ends text_delivered with no prior opener events for that id.
+	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "spineless-1", Reason: voiceevent.TurnEndTextDelivered})
 
 	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnTextDelivered {
 		t.Fatalf("spine-less text_delivered outcomes = %+v, want one [text_delivered]", got)

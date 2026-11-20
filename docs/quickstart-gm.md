@@ -408,9 +408,9 @@ the table:
 - **Just talk over the NPC.** Keep speaking for about a quarter-second (the
   **Barge-in Confirm Window** — fixed at 250 ms of continuous voiced speech in this
   build; ADR-0027's per-Agent tunable is not wired) and the NPC cuts off
-  *immediately* — mid-word, no drain, no finishing the sentence. (Barge-in also
-  tears down a whole **Ensemble Turn**; Ensemble Turns are deferred and cannot
-  occur in this build — one utterance addresses at most one Agent.)
+  *immediately* — mid-word, no drain, no finishing the sentence. (One utterance
+  addresses at most one Agent; several NPCs answering one line — an **Ensemble
+  Turn** — is not implemented.)
 - **A backchannel does not cut it off.** A "mhm", a "yeah", a cough — anything
   shorter than the window — is **Soft-overlap**. The NPC keeps going. Your
   backchannel is still transcribed and still becomes context for the next reply.

@@ -3,7 +3,6 @@ package presence
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/google/uuid"
 
@@ -51,17 +50,19 @@ func poolActive(ctx context.Context, pool PoolControl, tenantID uuid.UUID) (stor
 // the confirming text ONLY on the worker's confirmed terminal row (the relay
 // polled it 'done' — ADR-0012: never claim what was not confirmed). An
 // unconfirmed relay (ErrControlPending) posts the honest not-confirmed wording;
-// a session that ended mid-relay posts the plain guard; anything else surfaces
-// the REAL error text — a failure is never a silent no-op.
+// a session that ended mid-relay posts the plain guard; anything else is logged
+// with its real cause and answered as a failure — never a silent no-op, and never
+// a raw Go error in the GM's chat.
 func replyControlOutcome(ic *Interaction, err error, success string) error {
 	switch {
 	case err == nil:
 		return ic.ReplyEphemeral(success)
 	case errors.Is(err, session.ErrControlPending):
-		return ic.ReplyEphemeral("The worker hosting the session has not confirmed the control yet — it may still land; check the session and retry if needed.")
+		return ic.ReplyEphemeral("That's not confirmed yet. It may still take effect; check the Session screen in the web app and try again if needed.")
 	case errors.Is(err, session.ErrNoActiveSession):
-		return ic.ReplyEphemeral("No Voice Session is active.")
+		return ic.ReplyEphemeral(noSessionReply)
 	default:
-		return ic.ReplyEphemeral(fmt.Sprintf("The worker hosting the session could not apply that: %v", err))
+		ic.logger().Error("presence: relayed live control failed", "tenant", ic.TenantID(), "err", err)
+		return ic.ReplyEphemeral(controlFailedReply)
 	}
 }

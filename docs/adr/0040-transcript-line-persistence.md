@@ -98,3 +98,25 @@ undocumented divergence with the Chunker (which already purged undelivered
 sentences) and keeps the Transcript doctrine singular across both grains:
 **the Transcript records delivered speech, at sentence grain** (sentence-grain
 rounding on barge per #401 stays accepted).
+
+**Amendment (2026-11-20, #641 — sentence grain inside a delivered line):** the
+#437 reconcile applied only to whole lines, so a line that delivered at least
+one sentence kept the text of its never-delivered ones (a start-errored or
+pre-first-audio-failed opener, a tail still awaiting audio at a `tts_error` /
+`provider_error` / `completed` end or at session end). The Relay now keeps a
+FIFO of each turn's sentences awaiting `FirstAudio` and strips a sentence's text
+back out of the line when it is known not to have been heard: on its
+`TTSStreamFailed` (now also published for a TTS start-error, always after the
+sentence's `TTSInvoked` and before the next one's), at the turn's own non-cut
+terminal, and in the Finalize sweep; the corrected row is re-UPSERTed. Because
+`FirstAudio` of pipelined sentences 2..N is published by the wire's sender
+goroutine, it can arrive after the turn's terminal; such a late `FirstAudio`
+restores the sentence the terminal stripped. A turn cut by a barge, supersede,
+mute or conversation teardown (`cancelled`) keeps its in-flight text (#401).
+Every turn — routed reply, `/say` or Highlight replay — ends with exactly one
+`TurnEnded`, a clean one with reason `completed`. The invariant is
+unconditional since 2026-11-20: the unshipped Ensemble Turn implementation, the
+one path that ended a clean turn with none and a barged Reaction with two, was
+removed (ADR-0025). Residual: a sentence synthesized to zero
+audio chunks without an error is never signalled and pairs with the next
+sentence's `FirstAudio`.

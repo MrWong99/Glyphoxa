@@ -6,6 +6,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // TestUnembeddedBacklogQueriesAreIndexable pins migration 00057: the backfill
@@ -56,6 +58,52 @@ func TestUnembeddedBacklogQueriesAreIndexable(t *testing.T) {
 		}
 		if tc.noSort && strings.Contains(plan.String(), "Sort") {
 			t.Errorf("%s: plan still sorts, want the index to supply the (created_at, id) order:\n%s", tc.name, plan.String())
+		}
+	}
+}
+
+// TestMigration00057_AppliesAfter00056And00058 is the order production sees:
+// 00056 and 00058 are already applied when 00057 arrives. It must apply cleanly
+// out of order, leaving the backlog indexes in place and the global HNSW indexes
+// gone.
+func TestMigration00057_AppliesAfter00056And00058(t *testing.T) {
+	dsn := startPostgres(t)
+	db := openSQL(t, dsn)
+	ctx := context.Background()
+
+	provider, err := storage.NewMigrationProvider(db)
+	if err != nil {
+		t.Fatalf("NewMigrationProvider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 56); err != nil {
+		t.Fatalf("migrate up to 00056: %v", err)
+	}
+	if _, err := provider.ApplyVersion(ctx, 58, true); err != nil {
+		t.Fatalf("apply 00058 ahead of 00057: %v", err)
+	}
+	if err := storage.EnsureCurrent(ctx, db); err == nil || !strings.Contains(err.Error(), "57") {
+		t.Fatalf("EnsureCurrent = %v, want it to name the unapplied 57", err)
+	}
+	if err := storage.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp with 00057 pending behind 00058: %v", err)
+	}
+	if err := storage.EnsureCurrent(ctx, db); err != nil {
+		t.Fatalf("EnsureCurrent after MigrateUp: %v", err)
+	}
+
+	for index, want := range map[string]bool{
+		"transcript_chunk_unembedded_idx":     true,
+		"kg_node_unembedded_idx":              true,
+		"transcript_chunk_embedding_hnsw_idx": false,
+		"kg_node_embedding_hnsw_idx":          false,
+	} {
+		var exists bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, index).Scan(&exists); err != nil {
+			t.Fatalf("look up index %s: %v", index, err)
+		}
+		if exists != want {
+			t.Errorf("index %s exists = %v, want %v", index, exists, want)
 		}
 	}
 }

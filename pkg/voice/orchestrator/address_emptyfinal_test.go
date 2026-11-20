@@ -15,9 +15,9 @@ import (
 // These tests pin the consuming half of the STT stage's publish-everything
 // contract (#434): an STTFinal whose text is empty or whitespace-only is "the
 // recognizer authoritatively heard nothing" — a noise burst that crossed VAD
-// onset (cough, breath, chair) — and must route NOWHERE. Zero AddressRouted /
-// EnsembleRouted is the whole downstream story: the Replier wakes only on
-// those events, so no route means no turn, no history/Hot-Context append, no
+// onset (cough, breath, chair) — and must route NOWHERE. Zero AddressRouted
+// is the whole downstream story: the Replier wakes only on
+// that event, so no route means no turn, no history/Hot-Context append, no
 // LLM+TTS call, no spend — the Agent never speaks unprompted at a cough. The
 // empty final itself stays on the bus (observability and Transcript semantics
 // are unchanged).
@@ -38,7 +38,6 @@ func TestAddressDetector_EmptyFinal_NoSoleNPCRoute(t *testing.T) {
 	}
 
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
-	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 0)
 }
 
 // TestAddressDetector_EmptyFollowUp_NoLastAddressedRoute is the two-NPC
@@ -65,7 +64,6 @@ func TestAddressDetector_EmptyFollowUp_NoLastAddressedRoute(t *testing.T) {
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "  ", TurnID: "T-2"})
 
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1) // still only the named one
-	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 0)
 }
 
 // logCapture is a slog.Handler recording every record at any level, so a test

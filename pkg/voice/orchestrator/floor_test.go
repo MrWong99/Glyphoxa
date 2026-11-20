@@ -447,43 +447,6 @@ func TestFloor_YieldAgentOnFreeFloorReportsFalse(t *testing.T) {
 	}
 }
 
-// TestFloor_SetHolderAgentRetargetsMuteCut pins the Ensemble Lead election
-// (#301): once the Lead is chosen, the floor is retargeted from the coalesce
-// anchor (Targets[0]) onto the elected Lead, so a per-Agent mute cut
-// ([Floor.YieldAgent], #211) — and the coalesce window — name the agent actually
-// speaking. A stale turnID is a no-op (a late election for a superseded turn must
-// not retarget the current holder).
-func TestFloor_SetHolderAgentRetargetsMuteCut(t *testing.T) {
-	f := orchestrator.NewFloor()
-	parent := voiceevent.WithTurnID(context.Background(), "T-ens")
-	ctx, release, _ := f.Take(parent, "bart") // taken under the coalesce anchor
-	defer release()
-
-	// A mute cut for the elected Lead does nothing until the floor is retargeted.
-	if _, yielded := f.YieldAgent("mira"); yielded {
-		t.Fatal("YieldAgent(mira) must be a no-op before the floor is retargeted onto mira")
-	}
-
-	// Stale turnID: must not retarget the live holder.
-	f.SetHolderAgent("stale", "mira")
-	if _, yielded := f.YieldAgent("mira"); yielded {
-		t.Fatal("a stale-turnID SetHolderAgent must not retarget the current holder")
-	}
-
-	// Elect mira as Lead under the live turnID: now a mute cut for mira cuts it.
-	f.SetHolderAgent("T-ens", "mira")
-	turnID, yielded := f.YieldAgent("mira")
-	if !yielded {
-		t.Fatal("YieldAgent(mira) must cut the turn once the floor is retargeted onto mira")
-	}
-	if turnID != "T-ens" {
-		t.Fatalf("YieldAgent returned turnID %q, want T-ens", turnID)
-	}
-	if ctx.Err() == nil {
-		t.Fatal("the retargeted mute cut must cancel the turn ctx")
-	}
-}
-
 // TestFloor_SpeakingTurn pins the arm-time Gate-1 read of the barge window
 // (#432): a free floor and a held-but-silent (pre-audio) holder both report
 // not-speaking, and only once the holder is marked speaking does its TurnID

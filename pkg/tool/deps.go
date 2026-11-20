@@ -58,10 +58,10 @@ type Recapper interface {
 // part of a Kind stay zero and omitempty keeps them out of the jsonb.
 //
 // Per ADR-0052 a proposal is the ONLY effect of the Tool — nothing touches
-// kg_node/kg_edge until the GM approves in PR-b's review surface. A speculative
-// draft (ADR-0053 ensemble fan-out) that is later discarded may still leave a
-// proposal row; that is ADR-0052-consistent (the NPC heard the fact) and the GM
-// review is the safety net.
+// kg_node/kg_edge until the GM approves in PR-b's review surface. A reply that
+// is later cut (a barge, ADR-0027) may still leave a proposal row; that is
+// ADR-0052-consistent (the NPC heard the fact) and the GM review is the safety
+// net.
 type ProposedWrite struct {
 	V       int    `json:"v"`
 	Kind    string `json:"kind"`

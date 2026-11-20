@@ -38,7 +38,8 @@ type OAuth struct {
 	discord  DiscordOAuth
 	adm      Admission // the admission policy (ADR-0041 allowlist / ADR-0055 open)
 	ttl      time.Duration
-	redirect string // where the callback sends the browser after login
+	redirect string     // where the callback sends the browser after login
+	edge     EdgeConfig // proxy facts: cookie Secure, trusted client-IP header
 	now      func() time.Time
 	log      *slog.Logger
 }
@@ -74,8 +75,10 @@ const onboardingRedirect = "/onboarding/create-tenant"
 // User whose snowflake is absent from the allowlist is denied a session at the
 // callback (ADR-0041); in open mode such a User is admitted via the create-only
 // signup transaction instead (ADR-0055). Allowlisted Users keep the
-// claim-or-create login path in BOTH modes.
-func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Admission, log *slog.Logger) *OAuth {
+// claim-or-create login path in BOTH modes. edge is the deployment's proxy
+// configuration ([EdgeConfig]) — required, so cookie security is always an
+// explicit decision of the caller.
+func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Admission, edge EdgeConfig, log *slog.Logger) *OAuth {
 	if appRedirect == "" {
 		appRedirect = "/"
 	}
@@ -86,6 +89,7 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Ad
 		store:    store,
 		discord:  discord,
 		adm:      adm,
+		edge:     edge,
 		ttl:      defaultSessionTTL,
 		redirect: appRedirect,
 		now:      time.Now,
@@ -118,14 +122,13 @@ func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
 	if aup {
 		cookieValue += aupStateSuffix
 	}
-	secure := requestSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
 		Value:    cookieValue,
 		Path:     "/",
 		Expires:  o.now().Add(stateCookieTTL),
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   o.edge.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, o.discord.AuthCodeURL(state), http.StatusFound)
@@ -230,7 +233,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		UserID:    user.ID,
 		Token:     sessionToken,
 		ExpiresAt: expires,
-		IP:        clientIP(r),
+		IP:        o.edge.clientIP(r),
 		UA:        r.UserAgent(),
 	}); err != nil {
 		o.log.Error("oauth callback: create session", "err", err)
@@ -238,7 +241,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secure := requestSecure(r)
+	secure := o.edge.SecureCookies
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -289,7 +292,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		Session: storage.NewSession{
 			Token:     sessionToken,
 			ExpiresAt: expires,
-			IP:        clientIP(r),
+			IP:        o.edge.clientIP(r),
 			UA:        r.UserAgent(),
 		},
 		AUPAcceptedAt: o.now(),
@@ -305,7 +308,7 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		return
 	}
 
-	secure := requestSecure(r)
+	secure := o.edge.SecureCookies
 	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
@@ -314,14 +317,4 @@ func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser, a
 		dest = onboardingRedirect
 	}
 	http.Redirect(w, r, dest, http.StatusFound)
-}
-
-// clientIP extracts the best-effort client IP for the session audit row,
-// preferring the proxy's X-Forwarded-For first hop.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		return strings.TrimSpace(first)
-	}
-	return r.RemoteAddr
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // This file is the declarative policy table for the plain (non-Connect)
@@ -26,6 +27,14 @@ type GuardedMount struct {
 	Pattern string
 	Tenant  TenantMode
 	Handler http.Handler
+
+	// BodyReadTimeout, when set, is the body read deadline the guard arms once
+	// the request has PASSED the policy gate, replacing the listener's short
+	// default — for the one mount that receives a large upload (the campaign
+	// bundle import, [UploadBodyReadTimeout]). Armed after auth on purpose: an
+	// unauthenticated caller never gets more than the default to hold a
+	// connection open. Zero keeps the default.
+	BodyReadTimeout time.Duration
 }
 
 // guardedMethods are the method verbs a guarded pattern must lead with. The
@@ -91,9 +100,10 @@ func MustGuardMounts(p *Policy, rows []GuardedMount) []GuardedMount {
 		}
 		seen[row.Pattern] = struct{}{}
 		guarded = append(guarded, GuardedMount{
-			Pattern: row.Pattern,
-			Tenant:  row.Tenant,
-			Handler: p.guard(row),
+			Pattern:         row.Pattern,
+			Tenant:          row.Tenant,
+			Handler:         p.guard(row),
+			BodyReadTimeout: row.BodyReadTimeout,
 		})
 	}
 	return guarded
@@ -107,9 +117,13 @@ func (p *Policy) guard(row GuardedMount) http.Handler {
 			Tenant: row.Tenant,
 		})
 		if v.Deny != DenyNone {
+			// Refused before the handler read anything: do not sit draining a
+			// body the caller may never send.
+			abandonBody(w, r)
 			WriteDenial(w, v.Deny)
 			return
 		}
+		extendBodyDeadline(w, row.BodyReadTimeout)
 		row.Handler.ServeHTTP(w, r.WithContext(v.Context(r.Context())))
 	})
 }

@@ -481,28 +481,41 @@ func TestReplier_CrossTargetAddressWithinWindowSupersedes(t *testing.T) {
 	// CUT turn must get EXACTLY ONE terminal with the supersede reason (#443) —
 	// previously it got none and every consumer TTL-reaped its state.
 	var bartEnded, gretaEnded []voiceevent.TurnEnded
-	for _, ev := range h.Events() {
-		e, ok := ev.(voiceevent.TurnEnded)
-		if !ok {
-			continue
-		}
-		switch e.TurnID {
-		case "seg-bart":
-			bartEnded = append(bartEnded, e)
-		case "seg-greta":
-			gretaEnded = append(gretaEnded, e)
+	collect := func() {
+		bartEnded, gretaEnded = nil, nil
+		for _, ev := range h.Events() {
+			e, ok := ev.(voiceevent.TurnEnded)
+			if !ok {
+				continue
+			}
+			switch e.TurnID {
+			case "seg-bart":
+				bartEnded = append(bartEnded, e)
+			case "seg-greta":
+				gretaEnded = append(gretaEnded, e)
+			}
 		}
 	}
+	// Greta's own terminal lands when her goroutine releases the floor; wait for
+	// it, then give a stray second terminal a beat to show up.
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		if collect(); len(gretaEnded) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	collect()
 	if len(bartEnded) != 1 {
 		t.Fatalf("the superseded seg-bart got %d TurnEnded, want exactly one (#443): %+v", len(bartEnded), bartEnded)
 	}
 	if bartEnded[0].Reason != voiceevent.TurnEndSuperseded {
 		t.Fatalf("seg-bart terminal reason = %q, want %q", bartEnded[0].Reason, voiceevent.TurnEndSuperseded)
 	}
-	// The superseding turn proceeded cleanly: no terminal of its own (a clean turn
-	// emits none), and in particular not a coalesced drop.
-	if len(gretaEnded) != 0 {
-		t.Fatalf("the superseding seg-greta must end cleanly with no TurnEnded, got %+v", gretaEnded)
+	// The superseding turn proceeded cleanly: exactly its own completed terminal
+	// (W1), and in particular not a coalesced drop.
+	if len(gretaEnded) != 1 || gretaEnded[0].Reason != voiceevent.TurnEndCompleted {
+		t.Fatalf("the superseding seg-greta must end with exactly one completed, got %+v", gretaEnded)
 	}
 }
 
@@ -730,15 +743,14 @@ func TestReplier_ButlerSpokenTurnRunsOnSharedFloor(t *testing.T) {
 	}
 }
 
-// TestReplier_FloorCleanTurnPublishesNoTurnEnded proves a turn that produces audio
-// cleanly publishes no TurnEnded (the success path is silent; first audio is the
-// terminal signal). It synchronizes on the producer returning, then drains.
-func TestReplier_FloorCleanTurnPublishesNoTurnEnded(t *testing.T) {
+// TestReplier_FloorCleanTurnPublishesCompleted pins W1: a turn that produces
+// audio cleanly ends with EXACTLY ONE TurnEnded{completed}, so consumers (the
+// transcript relay's "<NPC> is speaking…" label, the metrics subscriber) see the
+// end instead of inferring it from silence.
+func TestReplier_FloorCleanTurnPublishesCompleted(t *testing.T) {
 	h := voicetest.New(t)
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{}) // all sentences succeed
-	done := make(chan struct{})
 	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
-		defer close(done)
 		return dispatch(orchestrator.Reply{Sentence: "hello there"})
 	}
 	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
@@ -748,12 +760,70 @@ func TestReplier_FloorCleanTurnPublishesNoTurnEnded(t *testing.T) {
 
 	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tok"})
 
-	<-done // producer finished; the goroutine publishes TurnEnded (if any) before exiting
-	// The publish happens after dispatchAll returns, just after the producer; give
-	// that a beat, then assert nothing arrived.
 	select {
 	case e := <-ended:
-		t.Fatalf("clean turn must publish no TurnEnded, got %+v", e)
+		if e.TurnID != "tok" || e.Reason != voiceevent.TurnEndCompleted {
+			t.Fatalf("TurnEnded = %+v, want {tok completed}", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("clean turn published no terminal event")
+	}
+	select {
+	case e := <-ended:
+		t.Fatalf("clean turn published a second TurnEnded: %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestReplier_SyncCleanTurnPublishesCompleted: the no-floor (synchronous) path
+// ends a clean turn with TurnEnded{completed} too.
+func TestReplier_SyncCleanTurnPublishesCompleted(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		return dispatch(orchestrator.Reply{Sentence: "hello there"})
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tsyncok"})
+
+	n := 0
+	for _, ev := range h.Events() {
+		if e, ok := ev.(voiceevent.TurnEnded); ok && e.TurnID == "tsyncok" {
+			n++
+			if e.Reason != voiceevent.TurnEndCompleted {
+				t.Fatalf("TurnEnded reason = %q, want completed", e.Reason)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("got %d TurnEnded for a clean sync turn, want exactly 1", n)
+	}
+}
+
+// TestReplier_CutTurnPublishesNoCompleted: a turn cut mid-drain by a floor yield
+// publishes NO terminal of its own — the cutter (barge/mute/supersede) owns it —
+// so a cut turn still ends with exactly one TurnEnded.
+func TestReplier_CutTurnPublishesNoCompleted(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	ttsStage := orchestrator.NewTTS(h.Bus, yieldSynth{floor: floor})
+	done := make(chan struct{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		defer close(done)
+		return dispatch(orchestrator.Reply{Sentence: "cut me"})
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	ended := waitTurnEnded(t, h.Bus)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tcut"})
+	<-done
+	select {
+	case e := <-ended:
+		t.Fatalf("a cut turn must not publish its own terminal (the cutter does), got %+v", e)
 	case <-time.After(100 * time.Millisecond):
 	}
 }

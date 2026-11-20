@@ -7,14 +7,14 @@
 //     ResolveGuildInvite, because a non-member Bot cannot read them client-side.
 // Everything here is client-side and issues no network call.
 
-export interface ChannelLink {
+interface ChannelLink {
   guildId: string;
   channelId: string;
 }
 
 // DiscordLink is the union front door: a resolved channel link, or an invite
 // carrying only its code.
-export type DiscordLink =
+type DiscordLink =
   | { kind: "channel"; guildId: string; channelId: string }
   | { kind: "invite"; code: string };
 
@@ -78,7 +78,7 @@ export function parseChannelLink(input: string): ChannelLink | null {
 // returns null. It accepts discord.gg/{code} and discord(app).com/invite/{code}
 // with the same tolerances as parseChannelLink. A bare host with no code segment
 // yields null.
-export function parseInviteCode(input: string): string | null {
+function parseInviteCode(input: string): string | null {
   const url = toURL(input);
   if (!url) return null;
   const host = url.hostname.toLowerCase();

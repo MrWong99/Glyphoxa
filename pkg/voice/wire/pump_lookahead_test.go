@@ -119,12 +119,12 @@ func TestPlaybackPump_LookaheadHeldUntilRelease(t *testing.T) {
 	pump := newPump(p, drainingCodec{}, nil, nil)
 	defer pump.Close()
 
-	// Sentence 1 (the Lead's last): worker picks it up and blocks in Play.
+	// Sentence 1 (the one being spoken): worker picks it up and blocks in Play.
 	c1, ro1 := openChunks()
 	pump.HandleSentence(context.Background(), ro1)
 	pb1 := p.waitPlay(t)
 
-	// Reaction s1 handed to the pump as a look-ahead: HandleSentence returns promptly
+	// The next sentence handed to the pump as a look-ahead: HandleSentence returns promptly
 	// and the sentence must NOT play nor have its chunks drained.
 	cr, ror := openChunks()
 	handled := make(chan struct{})
@@ -138,18 +138,18 @@ func TestPlaybackPump_LookaheadHeldUntilRelease(t *testing.T) {
 	pump.ReleaseLookahead("R")
 	assertNoPlay(t, p, "released look-ahead while sentence 1 still in flight")
 
-	// Finish sentence 1; the released reaction then plays and its codec drains cr.
+	// Finish sentence 1; the released sentence then plays and its codec drains cr.
 	close(c1)
 	pb1.finish(nil)
 	pb2 := p.waitPlay(t)
 	if pb2 == pb1 {
-		t.Fatal("expected a distinct playback for the released reaction")
+		t.Fatal("expected a distinct playback for the released sentence")
 	}
 	if got := p.plays.Load(); got != 2 {
-		t.Fatalf("plays = %d, want 2 (sentence 1 then the released reaction)", got)
+		t.Fatalf("plays = %d, want 2 (sentence 1 then the released sentence)", got)
 	}
 	pb2.finish(nil)
-	join(t, probe, "held reaction producer after release+play")
+	join(t, probe, "held sentence producer after release+play")
 }
 
 // TestPlaybackPump_ReleaseBeforePrimeLatch pins the release-before-prime race

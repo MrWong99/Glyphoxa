@@ -182,7 +182,7 @@ func deliver(replies []orchestrator.Reply) []orchestrator.Reply {
 
 // lastUserMessage returns the text of the LAST user-role message in msgs — the
 // current utterance. Since ADR-0059 the volatile Hot Context tail (facts,
-// memory, GM directive, cross-talk instruction) trails the conversation as a
+// memory, GM directive) trails the conversation as a
 // system-role message, so "the last message" is no longer necessarily the user
 // line.
 func lastUserText(t *testing.T, msgs []llm.Message) string {
@@ -393,7 +393,7 @@ func TestReplyStream_SpeakerName_PrefixesUserLine(t *testing.T) {
 
 // TestReply_NotAddressed_ReturnsNilAndSkipsProvider pins the AgentID gate: a
 // route targeting a different Agent yields no reply and never calls the LLM, so
-// many Agents' loops can share one bus (the Ensemble Turn building block).
+// many Agents' loops can share one bus (the multi-NPC Cast building block).
 func TestReply_NotAddressed_ReturnsNilAndSkipsProvider(t *testing.T) {
 	prov := &fakeProvider{reply: "should not be produced"}
 	r := agent.NewReplier(agent.Config{
@@ -768,13 +768,10 @@ func TestReplyStream_NotAddressed_NoDispatch(t *testing.T) {
 // not the untruncated completion.
 //
 // Scope note: the second turn is fired AFTER the first turn's goroutine has fully
-// unwound (the <-done barrier), so this pins the committed CONTENT
-// deterministically. It does NOT exercise the production interleaving where
-// a zero barge confirm window lets turn 2 route while turn 1 is still committing — there,
-// turn-1 unwind (~a few statements after cancel) precedes turn-2 routing
-// (STT→address→bus fan-out) in practice, but ordering is not guaranteed by
-// construction (only r.mu's mutual exclusion is). If a real ordering bug ever
-// surfaces, a turn-sequence guard is the fix; today the mutex is sufficient.
+// unwound (the <-done barrier), so this pins the committed CONTENT. The
+// interleaving where turn 2 records its user line while turn 1 is still
+// committing is pinned by
+// TestReplyStream_SupersededTurnCommit_StaysBehindItsOwnQuestion.
 func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
 	eng := &fakeStreamEngine{
 		deltas:     []string{"Aye. ", "Two rooms. ", "Anything else?"},

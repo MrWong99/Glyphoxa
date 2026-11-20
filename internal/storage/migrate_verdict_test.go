@@ -2,18 +2,18 @@ package storage
 
 import "testing"
 
-// TestSchemaVersionVerdict pins EnsureCurrent's three outcomes: behind is a
-// startup error, equal is clean, and a DB AHEAD of the binary is served but
-// flagged so the caller warns (D10: it used to be indistinguishable from equal).
-func TestSchemaVersionVerdict(t *testing.T) {
+// TestSchemaAhead pins EnsureCurrent's "database newer than this binary" check
+// (D10): only a database whose highest applied version exceeds every embedded
+// migration counts, so a database at head, or one still catching up, never warns.
+func TestSchemaAhead(t *testing.T) {
 	t.Parallel()
-	if _, err := schemaVersionVerdict(54, 57); err == nil {
-		t.Error("db behind binary: err = nil, want the run-migrate-up error")
+	if schemaAhead(58, 58) {
+		t.Error("db at head: ahead = true, want false")
 	}
-	if ahead, err := schemaVersionVerdict(57, 57); err != nil || ahead {
-		t.Errorf("db at head: ahead=%v err=%v, want false/nil", ahead, err)
+	if schemaAhead(55, 58) {
+		t.Error("db behind the binary: ahead = true, want false (that is the unapplied-migration error, not this warning)")
 	}
-	if ahead, err := schemaVersionVerdict(58, 57); err != nil || !ahead {
-		t.Errorf("db ahead of binary: ahead=%v err=%v, want true/nil (serve, but warn)", ahead, err)
+	if !schemaAhead(59, 58) {
+		t.Error("db migrated by a later release: ahead = false, want true")
 	}
 }

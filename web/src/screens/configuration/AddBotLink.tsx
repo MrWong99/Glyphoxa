@@ -15,11 +15,14 @@ import { useI18n } from "@/i18n";
 
 // botAuthorizeUrl composes Discord's bot-authorization URL for one application.
 // scope=bot pulls the Bot into the Guild; applications.commands registers the
-// /glyphoxa slash commands in a fresh guild; permissions 3146752 = View Channel
-// (0x400) + Connect (0x100000) + Speak (0x200000) — the minimum a voice-join Bot
-// needs.
+// /glyphoxa slash commands in a fresh server; permissions 3181568 = View Channel
+// (0x400) + Send Messages (0x800) + Attach Files (0x8000) + Connect (0x100000) +
+// Speak (0x200000). Connect + Speak are the voice join; Send Messages carries the
+// session-start transcription/consent notice and the Butler's text answers into
+// the voice channel's chat; Attach Files carries shared highlight clips. No Embed
+// Links: the Bot posts no embeds.
 export function botAuthorizeUrl(applicationId: string): string {
-  return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(applicationId)}&scope=bot%20applications.commands&permissions=3146752`;
+  return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(applicationId)}&scope=bot%20applications.commands&permissions=3181568`;
 }
 
 // The always-visible copy (config.addBotCopy) distinguishes this step from

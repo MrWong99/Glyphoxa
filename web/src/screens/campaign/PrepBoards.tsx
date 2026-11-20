@@ -191,16 +191,29 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
                   const meta = metaOf(node?.nodeType ?? 0);
                   return (
                     <li key={id}>
-                      <button
-                        type="button"
-                        className="gx-kg-chip"
-                        style={{ color: meta.color, background: alphaBg(meta.color) }}
-                        onClick={() => onOpenNode?.(id)}
-                      >
-                        {/* While the node list still loads a missing name means
-                            "not resolved yet", never "deleted". */}
-                        {node?.name ?? (nodesQuery.isPending ? "…" : t("campaign.deletedEntry"))}
-                      </button>
+                      {/* A button only where it does something: with no
+                          onOpenNode (the Session screen's reference view) the
+                          entry is plain text, not a control that swallows a
+                          click and a tab stop for nothing. */}
+                      {onOpenNode ? (
+                        <button
+                          type="button"
+                          className="gx-kg-chip"
+                          style={{ color: meta.color, background: alphaBg(meta.color) }}
+                          onClick={() => onOpenNode(id)}
+                        >
+                          {/* While the node list still loads a missing name means
+                              "not resolved yet", never "deleted". */}
+                          {node?.name ?? (nodesQuery.isPending ? "…" : t("campaign.deletedEntry"))}
+                        </button>
+                      ) : (
+                        <span
+                          className="gx-kg-chip"
+                          style={{ color: meta.color, background: alphaBg(meta.color) }}
+                        >
+                          {node?.name ?? (nodesQuery.isPending ? "…" : t("campaign.deletedEntry"))}
+                        </span>
+                      )}
                       <button
                         type="button"
                         className="gx-kg-iconbtn"

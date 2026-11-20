@@ -563,10 +563,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		presence.DirectCommand(mgr, store, intentControl),
 		presence.WhereCommand(mgr, store),
 	)
-	if err := clients.EnsureAll(ctx); err != nil {
-		log.Warn("voice worker: initial presence seed failed; retries on the next Discord settings save", "err", err)
-	}
-	go clients.Run(ctx)
+	// Seed + reconcile the standing clients in the background (#642): Run ensures
+	// every Tenant at once, and an unreachable Discord must not hold up the claim
+	// loop below — a claimed session ensures its Tenant's client on demand.
+	startPresence(ctx, clients)
 
 	// Presence-owner election (#492, ADR-0057 (c)): runs beside the claim loop on the
 	// SAME instanceID, flipping the Registry active only while this Instance owns the
@@ -598,6 +598,15 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 		clients.Close,
 	)
 	return nil
+}
+
+// startPresence seeds and then reconciles the standing Discord clients on
+// their own goroutine and returns at once (#642). The seed opens one gateway
+// per Bot token, and disgo retries an unreachable Discord for as long as it is
+// allowed to: run synchronously it kept the web listener from binding (and a
+// worker's claim loop from starting) for the whole outage.
+func startPresence(ctx context.Context, clients *presence.Clients) {
+	go clients.Run(ctx)
 }
 
 // voiceDeps is the buildVoiceDeps set (#491): the session Manager's
@@ -955,6 +964,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	if err := sweepAllowlistSessions(ctx, store, dev, admission, allow, log); err != nil {
 		return err
 	}
+	// Expired-session housekeeping (#643): one pass now, then daily, in every
+	// posture — allowlist, open and dev mode alike. Rides the process signal
+	// ctx, so SIGTERM stops it.
+	go purgeExpiredSessions(ctx, store, sessionPurgeInterval, log)
 
 	// Signup default plan (ADR-0055): resolved once here, preflighted FATALLY in
 	// `open` mode — a bad slug must fail the boot, not every signup after OAuth.
@@ -1341,15 +1354,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		)
 		// Seed the per-tenant registry at boot (AC: the commands appear with no Voice
 		// Session), one standing client per distinct Bot token (#489, ADR-0039
-		// presence-before-request). Non-fatal per Tenant: a bad or absent token
-		// leaves that Tenant in the wait-state and the RPC refresher retries on its
-		// next save, without blocking the others. Then a background poll reconciles
-		// out-of-band changes (a raw DB write / a missed refresher) on the interval.
-		if err := clients.EnsureAll(ctx); err != nil {
-			log.Warn("presence: initial seed failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
-		go clients.Run(ctx)
+		// presence-before-request), then reconcile out-of-band changes (a raw DB
+		// write / a missed refresher) on the interval. Non-fatal per Tenant: a bad
+		// or absent token leaves that Tenant in the wait-state without blocking the
+		// others. On its own goroutine (#642): the seed opens Discord gateways, and
+		// an unreachable Discord must not keep the web listener below from binding.
+		startPresence(ctx, clients)
 	}
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
@@ -1364,10 +1374,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var presenceRefresh func(tenantID uuid.UUID)
 	if clients != nil {
 		presenceRefresh = func(tenantID uuid.UUID) {
-			// Bound the ensure: EnsureTenant holds the registry's ensureMu across
-			// gateway + REST I/O, so a Tenant whose Discord endpoint hangs would
-			// otherwise pin the lock and stall EVERY other Tenant's save + Voice
-			// Session start behind it (finding 4). 60s is well past a healthy open.
+			// Bound the ensure: EnsureTenant holds the registry's ensure gate across
+			// gateway + REST I/O, and this save's ensure waits behind any other one
+			// in flight. 60s is well past a healthy open.
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			if err := clients.EnsureTenant(ctx, tenantID); err != nil {
@@ -1377,7 +1386,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		}
 	}
 	// Per-tenant Discord integration health for the Configuration read (#489):
-	// "ok"/"waiting"/"failed" + detail for the request Tenant's standing client.
+	// "ok"/"waiting"/"reconnecting"/"failed" + detail for the request Tenant's standing client.
 	// nil in web-only mode (no presence).
 	var integrationStatus func(tenantID uuid.UUID) (string, string)
 	if clients != nil {
@@ -1548,8 +1557,13 @@ var plainMountPolicy = map[string]auth.TenantMode{
 	"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
 	// TenantNone: ServeImport resolves the tenant off the session itself
 	// (#291); the POST method already makes the guard demand the CSRF pair.
-	"POST /api/v1/campaigns/import": auth.TenantNone,
+	importMountPattern: auth.TenantNone,
 }
+
+// importMountPattern is the campaign bundle import route — named because two
+// tables key on it: its auth posture above and its post-auth upload body
+// deadline in managementMounts.
+const importMountPattern = "POST /api/v1/campaigns/import"
 
 // relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
@@ -1584,11 +1598,23 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// these routes — so the old silent warn-and-continue is gone, replaced by the
 	// fatal preflight in runWeb.
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
+	oauthRedirectURL := os.Getenv("DISCORD_OAUTH_REDIRECT_URL")
 	discord := auth.NewDiscordClient(auth.DiscordConfig{
 		ClientID:     clientID,
 		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("DISCORD_OAUTH_REDIRECT_URL"),
+		RedirectURL:  oauthRedirectURL,
 	})
+	// What the auth tier is TOLD about the proxy in front of it (#662), instead
+	// of believing forgeable request headers. Cookie Secure is decided once,
+	// from the scheme of the public URL the operator configured, not per
+	// request from X-Forwarded-Proto. The client-IP header the session audit
+	// row trusts is likewise configuration: unset trusts none (last
+	// X-Forwarded-For hop, then the socket peer); a Cloudflare-only deployment
+	// sets GLYPHOXA_TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP.
+	edge := auth.EdgeConfig{
+		SecureCookies:  auth.SecureCookies(oauthRedirectURL),
+		ClientIPHeader: strings.TrimSpace(os.Getenv("GLYPHOXA_TRUSTED_CLIENT_IP_HEADER")),
+	}
 	// The OAuth callback's admission policy (ADR-0041 / ADR-0055). In allowlist
 	// mode the GLYPHOXA_OPERATOR_IDS allowlist is the single authorization gate:
 	// a Discord User whose snowflake is absent is denied a session before any
@@ -1601,8 +1627,8 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		Allowlist:      allowlist,
 		SignupPlanSlug: signupPlanSlug,
 		Signup:         store,
-	}, log)
-	authServer := auth.NewAuthServer(store, store, store, admission, log)
+	}, edge, log)
+	authServer := auth.NewAuthServer(store, store, store, admission, edge, log)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
@@ -1662,8 +1688,15 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// SAME factory closure as Highlight enrichment and mapgen (ADR-0039 — one
 	// place for the hybrid key policy).
 	campaignSrv.SetPortraitGenerator(portraitgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log))
-	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
-	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
+	// CampaignService is the ONE Connect service that takes image uploads
+	// (CreateMap / ReplaceMapImage / SetNodePortrait), so it alone carries the
+	// 48 MiB read cap; every other service keeps the 1 MiB default. connect-go
+	// buffers a request before any interceptor runs, so stack.UploadHandler
+	// returns the handler already behind a header-only session check: a caller
+	// without a valid session is refused before a body byte is read. The cap
+	// cannot be obtained without that check.
+	campaignPath, campaignHandler := stack.UploadHandler(campaignSrv.Handler)
+	authPath, authHandler := stack.Handler(authServer.Handler)
 	// VoiceService (#70) serves the live provider data the Configuration +
 	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq
 	// model allowlist, and the async provider-health signal — all via the
@@ -1704,8 +1737,8 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// administer a guild before binding it. Empty when unset (BYOK-only web
 	// deployments): the proof then requires a saved/request token.
 	providerSrv.SetEnvBotToken(os.Getenv("DISCORD_BOT_TOKEN"))
-	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
-	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
+	providerPath, providerHandler := stack.Handler(providerSrv.Handler)
+	voicePath, voiceHandler := stack.Handler(voiceSrv.Handler)
 	// The recap engine regenerates Butler-flavoured Session recaps on demand
 	// (#272/#274, gate #271: never persisted). It spends provider money per call
 	// and meters usage, so SessionService.GenerateRecap is CSRF-guarded like a
@@ -1747,7 +1780,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		searchEngine.SetEmbedder(embedProvider, observe.ProviderOllama, embedModel)
 	}
 	sessionSrv.SetSearch(searchEngine)
-	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
+	sessionPath, sessionHandler := stack.Handler(sessionSrv.Handler)
 
 	// Butler planning chat (#592, ADR-0062): the ChatService — thread CRUD plus
 	// the streaming exchange, the first server-streaming RPC on the stack (whose
@@ -1766,7 +1799,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, metrics, log, chatOpts...)
 	chatSrv := rpc.NewChatServer(store, log)
 	chatSrv.SetEngine(chatEngine)
-	chatPath, chatHandler := chatSrv.Handler(stack.HandlerOptions()...)
+	chatPath, chatHandler := stack.Handler(chatSrv.Handler)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
 	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated
@@ -1828,7 +1861,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Campaign bundle import (#291): multipart upload, operator-gated; the
 		// POST method makes the guard demand the CSRF double-submit (ADR-0016)
 		// the SPA satisfies with the script-readable glyphoxa_csrf cookie.
-		"POST /api/v1/campaigns/import": http.HandlerFunc(bundleHandler.ServeImport),
+		importMountPattern: http.HandlerFunc(bundleHandler.ServeImport),
 	}
 	if len(plainHandlers) != len(plainMountPolicy) {
 		panic(fmt.Sprintf("plain mounts and plainMountPolicy disagree: %d handlers, %d policy rows — every plain mount must declare its posture (#446)",
@@ -1838,11 +1871,19 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	for _, pattern := range slices.Sorted(maps.Keys(plainHandlers)) {
 		// A handler missing from plainMountPolicy yields the zero TenantMode,
 		// which MustGuardMounts rejects loudly.
-		rows = append(rows, auth.GuardedMount{
+		row := auth.GuardedMount{
 			Pattern: pattern,
 			Tenant:  plainMountPolicy[pattern],
 			Handler: plainHandlers[pattern],
-		})
+		}
+		// The bundle import is the one plain mount that receives a large body
+		// (up to 192 MiB): the guard extends its body deadline once the
+		// session + CSRF gate has passed. Every other mount — and every
+		// unauthenticated caller of this one — keeps the listener default.
+		if pattern == importMountPattern {
+			row.BodyReadTimeout = auth.UploadBodyReadTimeout
+		}
+		rows = append(rows, row)
 	}
 	guarded := auth.MustGuardMounts(policy, rows)
 

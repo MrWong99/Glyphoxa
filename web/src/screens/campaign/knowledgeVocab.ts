@@ -25,7 +25,7 @@ import type { MessageKey, TFunc } from "@/i18n";
 // module holding a translated string in module-level state. The wire values
 // (snake_case relation names, NodeType/EdgeType enums) are untouched.
 
-export type TypeMeta = { labelKey: MessageKey; color: string; Icon: LucideIcon };
+type TypeMeta = { labelKey: MessageKey; color: string; Icon: LucideIcon };
 
 /** Per-type label key, design colour and icon (approved #129 design). */
 export const TYPE_META: Record<number, TypeMeta> = {
@@ -78,7 +78,7 @@ export const EDGE_TYPES: { value: EdgeType; wire: string; labelKey: MessageKey }
 ];
 
 /** Relation → display-label KEY. Render with t(EDGE_LABEL.get(...)!). */
-export const EDGE_LABEL = new Map<EdgeType, MessageKey>(
+const EDGE_LABEL = new Map<EdgeType, MessageKey>(
   EDGE_TYPES.map((e) => [e.value, e.labelKey]),
 );
 /** Relation → wire name, for data-* attributes and CSS hooks only. */
@@ -104,7 +104,7 @@ export function edgeOptions(t: TFunc): { value: string; label: string }[] {
  * show it — the relations editor authors it, and the proposal review card has to
  * render what an Agent PROPOSED before the GM approves it.
  */
-export const DISPOSITION_OPTIONS: { value: string; labelKey: MessageKey }[] = [
+const DISPOSITION_OPTIONS: { value: string; labelKey: MessageKey }[] = [
   { value: "-2", labelKey: "knowledge.dispositionHostile" },
   { value: "-1", labelKey: "knowledge.dispositionWary" },
   { value: "0", labelKey: "knowledge.dispositionNeutral" },

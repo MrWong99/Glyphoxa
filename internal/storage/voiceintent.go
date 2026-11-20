@@ -195,6 +195,27 @@ func (s *Store) FinishVoiceSessionIntent(ctx context.Context, id uuid.UUID, inst
 	return v, nil
 }
 
+// ReleaseVoiceSessionIntent hands a 'claimed' intent that never went live back
+// to 'pending', clearing its claim, so another Voice Instance claims it: the
+// claiming worker is shutting down before the session started, which is not a
+// failed start. Fenced by instance_id like every claim-side write, and refused
+// once stop_requested is set (the GM no longer wants it started). ErrNotFound
+// when no such claimed row is held by instanceID.
+func (s *Store) ReleaseVoiceSessionIntent(ctx context.Context, id uuid.UUID, instanceID string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE voice_session_intents
+		    SET status = 'pending', instance_id = '', claimed_at = NULL, heartbeat_at = NULL
+		  WHERE id = $1 AND instance_id = $2 AND status = 'claimed' AND NOT stop_requested`,
+		id, instanceID)
+	if err != nil {
+		return fmt.Errorf("storage: release voice session intent %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ReapDeadVoiceSessionIntents marks 'dead' every claimed/live intent whose
 // heartbeat is older than expiry — the owning Voice Instance is presumed crashed
 // (ADR-0006/0057 (e): no takeover, so a stale claim is a death, not a hand-off).

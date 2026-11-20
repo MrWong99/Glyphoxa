@@ -57,7 +57,7 @@ type Floor struct {
 	// TurnID after a [Floor.Take] superseded a live holder (#443) — the Take is
 	// the only seam that knows the cause, so it publishes the cut turn's
 	// terminal. Installed by [Floor.bindSupersedeTerminal] from the floor-sharing
-	// reactors' Bind. The barge/mute paths ([Floor.Yield] and friends) clear the
+	// reactors' Bind. The barge/mute paths ([Floor.YieldTurn], [Floor.YieldAgent]) clear the
 	// holder before any new Take, and a released (completed) turn cleared its
 	// cancel, so this fires ONLY for a genuine mid-flight supersession — never a
 	// second terminal for a turn that already got one from its cutter.
@@ -128,8 +128,19 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 // coalesced is false.
 //
 // The turn's TurnID is recovered from parent ([voiceevent.TurnIDFrom]) and held
-// so [Floor.Yield] can attribute a barge to the turn it cancelled.
+// so [Floor.YieldTurn] can attribute a barge to the turn it cancelled.
 func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Context, release func(), coalesced bool) {
+	ctx, rel, coalesced := f.take(parent, agentID)
+	return ctx, func() { rel() }, coalesced
+}
+
+// take is [Floor.Take] with a release that reports whether this turn still held
+// the floor at release time — i.e. no Yield (barge/mute) and no superseding Take
+// cut it. The check and the clear happen in ONE critical section, so a turn's
+// natural-completion terminal can be published exactly when no cutter will
+// publish one: once released, a later Yield finds the floor free and reports
+// nothing (W1 — every turn ends with exactly one TurnEnded).
+func (f *Floor) take(parent context.Context, agentID string) (ctx context.Context, release func() (held bool), coalesced bool) {
 	ctx, cancel := context.WithCancel(parent)
 
 	f.mu.Lock()
@@ -143,7 +154,7 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 		f.lastTake = f.clock()
 		f.mu.Unlock()
 		cancel()
-		return ctx, func() {}, true // no-op release: this turn never held the floor
+		return ctx, func() bool { return false }, true // no-op release: this turn never held the floor
 	}
 	var superseded string
 	var notify func(string)
@@ -172,40 +183,21 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 		notify(superseded)
 	}
 
-	release = func() {
+	release = func() (held bool) {
 		f.mu.Lock()
 		// Only clear if this turn still holds the floor: a later Take (or a
 		// Yield) may already have moved on, and a stale release must not wipe a
-		// newer turn's cancel.
-		if f.gen == gen {
+		// newer turn's cancel. A Yield nils f.cancel without bumping gen, so both
+		// halves are needed to say "nobody cut this turn".
+		if f.gen == gen && f.cancel != nil {
 			f.cancel = nil
+			held = true
 		}
 		f.mu.Unlock()
 		cancel()
+		return held
 	}
 	return ctx, release, false
-}
-
-// Yield cancels the turn currently holding the floor and reports whether one was
-// held, along with that turn's TurnID. It is the barge-in action: yielded=true
-// means an Agent was actually speaking and has now been cut (and turnID is the
-// turn that was cut, so the caller can attribute the barge); yielded=false means
-// the floor was free, so nothing was interrupted (turnID is empty and no
-// BargeDetected/TurnEnded should be emitted).
-func (f *Floor) Yield() (turnID string, yielded bool) {
-	f.mu.Lock()
-	c := f.cancel
-	turnID = f.holderTurn
-	f.cancel = nil
-	f.holderTurn = ""
-	f.holderAgent = ""
-	f.speaking = false
-	f.mu.Unlock()
-	if c == nil {
-		return "", false
-	}
-	c()
-	return turnID, true
 }
 
 // YieldTurn cancels the turn holding the floor ONLY when turnID is that turn
@@ -219,13 +211,10 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 // speech was aimed at a turn that no longer exists, and cancelling the new
 // turn would be exactly the pre-audio self-cancel Gate 1 exists to prevent
 // (`no_audio` turns must not be cancellable). An empty floor is likewise a
-// no-op. Mechanically identical to [Floor.Yield] once the guard passes.
+// no-op. Once the guard passes it clears the holder and cancels its ctx.
 // It reports the AgentID of the holder it cut, read in the same critical section
-// as the yield itself so the attribution can never be stale — [Floor.SetHolderAgent]
-// may retarget the holder mid-turn (the Ensemble Lead election) under an unchanged
-// turnID, so reading the agent beforehand would name whoever held the floor then,
-// not whoever was actually cut. It is "" on a no-op yield and on a holder taken
-// with no target.
+// as the yield itself so the attribution can never be stale. It is "" on a no-op
+// yield and on a holder taken with no target.
 func (f *Floor) YieldTurn(turnID string) (agentID string, yielded bool) {
 	f.mu.Lock()
 	if f.cancel == nil || f.holderTurn != turnID || !f.speaking {
@@ -268,7 +257,7 @@ func (f *Floor) SpeakingTurn() (turnID string, speaking bool) {
 // Unlike the barge gate ([Floor.Speaking]) this deliberately ignores f.speaking:
 // a mute is a deliberate GM action that kills a held-but-silent pre-audio turn
 // too (the LLM "thinking" phase), so a just-muted Agent never starts speaking
-// after the fact (AC2). Mechanically identical to [Floor.Yield] once the holder
+// after the fact (AC2). Mechanically identical to [Floor.YieldTurn] once the holder
 // matches — the same forward-boundary hard cut (ADR-0027) — differing only in the
 // holder-match guard.
 func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
@@ -286,33 +275,6 @@ func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
 	f.mu.Unlock()
 	c()
 	return turnID, true
-}
-
-// SetHolderAgent retargets the floor's coalesce anchor and mute-cut key
-// ([Floor.holderAgent]) onto agentID, but only while turnID still holds the floor
-// (holderTurn == turnID AND a turn is held). It is the Ensemble Lead election
-// (#301, ADR-0025): the floor is Taken under the coalesce anchor Targets[0], and
-// once the speculative race elects a Lead the floor must name THAT agent so a
-// per-Agent mute cut ([Floor.YieldAgent], #211) and the coalesce window both key on
-// whoever is actually speaking. A stale turnID — a late election for a turn already
-// superseded/yielded — is a no-op, so it can never retarget a newer holder.
-func (f *Floor) SetHolderAgent(turnID, agentID string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.cancel != nil && f.holderTurn == turnID {
-		f.holderAgent = agentID
-	}
-}
-
-// Active reports whether a turn currently holds the floor (a turn is in flight,
-// from its [Floor.Take] until release/Yield — which spans the pre-audio LLM phase
-// as well as playback). It is a point-in-time read; callers must tolerate the
-// floor being taken or yielded immediately afterward. For the "is the Agent
-// AUDIBLY speaking" question the barge gate asks, use [Floor.Speaking].
-func (f *Floor) Active() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.cancel != nil
 }
 
 // MarkSpeaking records that the turn identified by turnID has produced its first
@@ -335,7 +297,7 @@ func (f *Floor) MarkSpeaking(turnID string) {
 // This is the barge gate (ADR-0027): a human speech_start is a barge only while
 // the Agent is actually speaking, not during the held-but-silent pre-audio LLM
 // phase (where the speech is the addressing user's own continued/over-split
-// utterance, not an interruption). Point-in-time, like [Floor.Active].
+// utterance, not an interruption). A point-in-time read.
 func (f *Floor) Speaking() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

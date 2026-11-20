@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,11 +25,19 @@ type fakeClipStore struct {
 	imageCT    string
 	soundKey   string // empty = no sound landed yet (#312)
 	soundCT    string
+	// createdAt / soundRequestedAt version the row's assets for the cache
+	// validators; a zero createdAt falls back to time.Now().
+	createdAt        time.Time
+	soundRequestedAt *time.Time
 }
 
 func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) (storage.Highlight, error) {
 	if tenantID != f.tenantID || id != f.id {
 		return storage.Highlight{}, storage.ErrNotFound
+	}
+	createdAt := f.createdAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
 	}
 	return storage.Highlight{
 		ID:               f.id,
@@ -41,7 +50,8 @@ func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) 
 		ImageContentType: f.imageCT,
 		SoundKey:         f.soundKey,
 		SoundContentType: f.soundCT,
-		CreatedAt:        time.Now(),
+		SoundRequestedAt: f.soundRequestedAt,
+		CreatedAt:        createdAt,
 	}, nil
 }
 
@@ -348,5 +358,164 @@ func TestClip_MissingBlob404(t *testing.T) {
 	srv.ServeClip(rr, clipRequest(t, tenantID, id.String(), ""))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("missing blob: want 404, got %d", rr.Code)
+	}
+}
+
+// --- shared byte-serve posture (R3) ---
+
+// countingBlobs counts Gets over the fake blob store, so a test can prove a
+// conditional request never touched the bytes.
+type countingBlobs struct {
+	*fakeBlobs
+	gets int
+}
+
+func (c *countingBlobs) Get(ctx context.Context, key string) (io.ReadCloser, blob.Meta, error) {
+	c.gets++
+	return c.fakeBlobs.Get(ctx, key)
+}
+
+// assetFixture is a Highlight carrying all three byte assets with stable
+// version timestamps, behind a Get-counting blob store.
+func assetFixture(t *testing.T) (srv *ClipServer, store *fakeClipStore, blobs *countingBlobs, tenantID, id uuid.UUID) {
+	t.Helper()
+	tenantID, id = uuid.New(), uuid.New()
+	campaignID := uuid.New()
+	clipKey, _ := blob.Key(tenantID, "highlight", id, "clip.wav")
+	imageKey, _ := blob.Key(tenantID, "highlight", id, "image")
+	soundKey, _ := blob.Key(tenantID, "highlight", id, "sound")
+	blobs = &countingBlobs{fakeBlobs: newFakeBlobs()}
+	blobs.data[clipKey] = make([]byte, 200)
+	blobs.data[imageKey] = make([]byte, 300)
+	blobs.data[soundKey] = make([]byte, 400)
+	requested := time.Date(2026, 11, 20, 12, 5, 0, 0, time.UTC)
+	store = &fakeClipStore{
+		tenantID: tenantID, id: id, campaignID: campaignID,
+		clipKey: clipKey, imageKey: imageKey, imageCT: "image/png", soundKey: soundKey, soundCT: "audio/mpeg",
+		createdAt:        time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC),
+		soundRequestedAt: &requested,
+	}
+	resolve := func(context.Context) (uuid.UUID, bool, error) { return campaignID, true, nil }
+	return NewClipServer(store, blobs, resolve, testLog()), store, blobs, tenantID, id
+}
+
+// assetRoutes is the three Highlight byte routes, table-driven: the route's
+// handler, its expected content type and its body size in assetFixture.
+func assetRoutes(srv *ClipServer) map[string]struct {
+	serve http.HandlerFunc
+	ct    string
+	size  int
+} {
+	return map[string]struct {
+		serve http.HandlerFunc
+		ct    string
+		size  int
+	}{
+		"clip":  {srv.ServeClip, "audio/wav", 200},
+		"image": {srv.ServeImage, "image/png", 300},
+		"sound": {srv.ServeSound, "audio/mpeg", 400},
+	}
+}
+
+func assetRequest(tenantID uuid.UUID, id uuid.UUID, kind string, header http.Header) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/"+id.String()+"/"+kind, nil)
+	req.SetPathValue("id", id.String())
+	for k, vs := range header {
+		req.Header[k] = vs
+	}
+	return req.WithContext(auth.WithTenant(req.Context(), tenantID))
+}
+
+// TestHighlightAssets_HardenedLikeTheOtherByteMounts is the #662/R3
+// regression for the three Highlight routes: they serve model- and
+// user-derived bytes same-origin and used to send neither nosniff nor a CSP,
+// while the Map image and Node portrait mounts did. All byte mounts now share
+// one posture (blob.Serve), cache headers included.
+func TestHighlightAssets_HardenedLikeTheOtherByteMounts(t *testing.T) {
+	srv, _, _, tenantID, id := assetFixture(t)
+	for kind, route := range assetRoutes(srv) {
+		rr := httptest.NewRecorder()
+		route.serve(rr, assetRequest(tenantID, id, kind, nil))
+		if rr.Code != http.StatusOK || rr.Body.Len() != route.size {
+			t.Fatalf("%s: status=%d bytes=%d, want 200 with %d bytes", kind, rr.Code, rr.Body.Len(), route.size)
+		}
+		for name, want := range map[string]string{
+			"Content-Type":            route.ct,
+			"X-Content-Type-Options":  "nosniff",
+			"Content-Security-Policy": blob.ServeCSP,
+			"Cache-Control":           "private, no-cache",
+		} {
+			if got := rr.Header().Get(name); got != want {
+				t.Errorf("%s: %s = %q, want %q", kind, name, got, want)
+			}
+		}
+		if rr.Header().Get("ETag") == "" {
+			t.Errorf("%s: no ETag", kind)
+		}
+	}
+}
+
+// TestHighlightAssets_RevalidationSkipsTheBlob: a browser replaying the ETag it
+// was given gets a 304 and the blob store is never read (R3) — previously each
+// revalidation of a clip loaded the whole WAV out of Postgres twice over.
+func TestHighlightAssets_RevalidationSkipsTheBlob(t *testing.T) {
+	srv, _, blobs, tenantID, id := assetFixture(t)
+	for kind, route := range assetRoutes(srv) {
+		first := httptest.NewRecorder()
+		route.serve(first, assetRequest(tenantID, id, kind, nil))
+		etag := first.Header().Get("ETag")
+		blobs.gets = 0
+
+		rr := httptest.NewRecorder()
+		route.serve(rr, assetRequest(tenantID, id, kind, http.Header{"If-None-Match": {etag}}))
+		if rr.Code != http.StatusNotModified {
+			t.Errorf("%s: revalidation status = %d, want 304", kind, rr.Code)
+		}
+		if blobs.gets != 0 {
+			t.Errorf("%s: the blob was fetched %d times to answer a 304", kind, blobs.gets)
+		}
+	}
+}
+
+// TestSound_ReRequestInvalidatesTheCachedCopy pins why the sound is versioned
+// by sound_requested_at: re-running Add-sound overwrites the SAME blob key, so
+// only the request time can tell a browser its cached sound is stale. The clip
+// (written once) keeps its validator across the same change.
+func TestSound_ReRequestInvalidatesTheCachedCopy(t *testing.T) {
+	srv, store, _, tenantID, id := assetFixture(t)
+	etagOf := func(kind string, serve http.HandlerFunc) string {
+		rr := httptest.NewRecorder()
+		serve(rr, assetRequest(tenantID, id, kind, nil))
+		return rr.Header().Get("ETag")
+	}
+	soundBefore, clipBefore := etagOf("sound", srv.ServeSound), etagOf("clip", srv.ServeClip)
+
+	rerun := store.soundRequestedAt.Add(time.Hour)
+	store.soundRequestedAt = &rerun
+
+	rr := httptest.NewRecorder()
+	srv.ServeSound(rr, assetRequest(tenantID, id, "sound", http.Header{"If-None-Match": {soundBefore}}))
+	if rr.Code != http.StatusOK {
+		t.Errorf("sound after a re-request: status = %d, want 200 (the bytes at this key changed)", rr.Code)
+	}
+	if got := etagOf("clip", srv.ServeClip); got != clipBefore {
+		t.Errorf("clip ETag changed from %q to %q on a sound re-request", clipBefore, got)
+	}
+}
+
+// TestSound_NoSoundYet404: a Highlight whose sound has not landed is 404, and
+// the blob seam is never asked for the empty key (that would be ErrInvalidKey
+// and a bogus 500).
+func TestSound_NoSoundYet404(t *testing.T) {
+	srv, store, blobs, tenantID, id := assetFixture(t)
+	store.soundKey = ""
+	blobs.gets = 0
+	rr := httptest.NewRecorder()
+	srv.ServeSound(rr, assetRequest(tenantID, id, "sound", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("no sound yet: status = %d, want 404", rr.Code)
+	}
+	if blobs.gets != 0 {
+		t.Errorf("blob store queried %d times for an absent sound", blobs.gets)
 	}
 }

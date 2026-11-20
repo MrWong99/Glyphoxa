@@ -83,11 +83,10 @@ func llmProviderLabel(providerID string) observe.Provider {
 	return observe.Provider(providerID)
 }
 
-// The playback pump is the production [orchestrator.LookaheadPump] (#375): the same
-// serialized playback path holds and releases the Cross-talk Reaction's pre-rendered
-// first sentence. The pump is wired as [orchestrator.Barge.Lookahead] together with
-// the Ensemble speaker when multi-target routing lands (ADR-0025 deferred); this
-// assertion pins the conformance until then.
+// The playback pump is the production [orchestrator.LookaheadPump] (#626): the same
+// serialized playback path holds and releases a routed turn's pre-synthesized next
+// sentence. It is wired as [orchestrator.Barge.Lookahead] in [bargeGroup]; this
+// assertion pins the conformance at compile time.
 var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
 
 // conversationDeps carries everything [buildConversation] assembles the
@@ -189,7 +188,7 @@ type conversationDeps struct {
 	clipReplayLoad orchestrator.ClipLoader
 	clipReplaySink orchestrator.ClipSink
 
-	// lookahead is this cycle's playback pump as the look-ahead lane (#375, #626):
+	// lookahead is this cycle's playback pump as the look-ahead lane (#626):
 	// with it, every routed turn pre-synthesizes its NEXT sentence into the lane
 	// while the current one plays, so the inter-sentence gap collapses from a cold
 	// TTS TTFB to pacing overhead. nil is the feature-off default (bench / voice
@@ -201,10 +200,8 @@ type conversationDeps struct {
 // floor for one live cycle (#453): the confirm/coalesce windows, the mute view,
 // the spend gate, and the pump look-ahead lane.
 //
-// No Ensemble speaker yet: the live matcher is single-target (Config.MaxTargets
-// unset ⇒ 1, ADR-0025 deferred), so an EnsembleRouted never fires. Since #626 the
-// look-ahead lane no longer waits on it — the intra-turn pre-synthesis pipeline
-// consumes the same lane on ordinary routed turns.
+// The live matcher is single-target (Config.MaxTargets unset ⇒ 1, ADR-0038):
+// one utterance opens one turn. Ensemble Turns (ADR-0025) are not implemented.
 func bargeGroup(d conversationDeps) orchestrator.Barge {
 	return orchestrator.Barge{
 		Confirm:  bargeConfirmWindow,
@@ -218,8 +215,7 @@ func bargeGroup(d conversationDeps) orchestrator.Barge {
 		// turn once the session's estimated spend crosses the soft cap. A nil gate
 		// is the feature-off default (no caps configured).
 		Gate: d.gate,
-		// Pre-synthesis pipelining (#626) — and, when an Ensemble speaker lands, the
-		// Cross-talk Reaction pre-render (#375) — over the session's playback pump.
+		// Pre-synthesis pipelining (#626) over the session's playback pump.
 		Lookahead: d.lookahead,
 	}
 }

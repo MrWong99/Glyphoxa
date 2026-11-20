@@ -103,7 +103,7 @@ export type Pin = { x: number; y: number };
  * what makes the ghost turn solid exactly where it stood rather than merely near
  * it. A seed only applies to a Node with no pin.
  */
-export type LayoutOpts = {
+type LayoutOpts = {
   pins?: ReadonlyMap<string, Pin>;
   seeds?: ReadonlyMap<string, Pin>;
 };

@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -99,8 +101,10 @@ func TestProjection_LinesAndOrder(t *testing.T) {
 		At: at(2), Text: "Hello Bart", TurnID: "t1",
 		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", Index: 0, TurnID: "t1"})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "What'll it be?", Index: 1, TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "What'll it be?", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"})
 	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
 
 	v := r.View(id)
@@ -455,9 +459,71 @@ func TestRelay_TwoSessionsNoCrossTalk(t *testing.T) {
 	}
 }
 
-// TestTyping_ClearsAfterCleanTurn is the headline regression (FIX 1): a CLEAN
-// turn emits NO TurnEnded, so typing must NOT stay stuck on "<NPC> is speaking…"
-// — a following human utterance returns it to listening.
+// TestTyping_CleanNPCReplyClearsWithoutHumanAudio is W1's regression, driven
+// through the REAL orchestrator Replier: after a clean NPC
+// reply, with NO further human audio, the typing label must return to listening.
+// It used to stay "<NPC> is speaking…" until somebody next made a sound, because a
+// clean turn published no terminal event.
+func TestTyping_CleanNPCReplyClearsWithoutHumanAudio(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	ttsStage := orchestrator.NewTTS(bus, oneChunkSynth{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		if err := dispatch(orchestrator.Reply{Sentence: "Aye."}); err != nil {
+			return err
+		}
+		return dispatch(orchestrator.Reply{Sentence: "What'll it be?"})
+	}
+	// No barge-in floor here (that wiring is package-internal); the floor path's
+	// terminal is pinned in the orchestrator's own tests.
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	ended := make(chan voiceevent.TurnEnded, 4)
+	t.Cleanup(voiceevent.On(bus, func(e voiceevent.TurnEnded) { ended <- e }))
+	t.Cleanup(replier.Bind(t.Context(), bus))
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Bart, a drink?", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1", Text: "Bart, a drink?",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	select {
+	case e := <-ended:
+		if e.Reason != voiceevent.TurnEndCompleted {
+			t.Fatalf("terminal reason = %q, want completed", e.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the clean NPC turn never published a terminal event")
+	}
+
+	v := r.View(id)
+	if !v.Typing.Active || v.Typing.Label != listenLabel {
+		t.Fatalf("typing after a clean NPC reply = %+v, want %q with no further human audio", v.Typing, listenLabel)
+	}
+	// The reply really did show as speaking first, then cleared.
+	sawSpeaking := false
+	for _, f := range r.Frames(id, 0) {
+		if f.Event == "status" && strings.Contains(string(f.Data), "Bart is speaking") {
+			sawSpeaking = true
+		}
+	}
+	if !sawSpeaking {
+		t.Fatal("the reply never showed \"Bart is speaking…\" — the test proves nothing")
+	}
+}
+
+// oneChunkSynth synthesizes every sentence as one audio chunk.
+type oneChunkSynth struct{}
+
+func (oneChunkSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	ch := make(chan tts.AudioChunk, 1)
+	ch <- tts.AudioChunk{}
+	close(ch)
+	return ch, nil
+}
+
+func (oneChunkSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTyping_ClearsAfterCleanTurn (FIX 1): even before the turn's terminal event
+// arrives, a following human utterance returns typing to listening.
 func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
 	bus, r, _, id := liveRelay(t)
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hi", TurnID: "t1"})
@@ -466,7 +532,7 @@ func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Aye.", TurnID: "t1"})
-	// No TurnEnded — a clean (successful) turn reports nothing.
+	// The turn is still in flight (no TurnEnded yet).
 	if v := r.View(id); v.Typing.Label != "Bart is speaking…" {
 		t.Fatalf("mid-reply typing=%+v", v.Typing)
 	}
@@ -508,6 +574,7 @@ func TestLateTTSInvoked_DoesNotClobber(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
 	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit.", TurnID: "t1"})
 	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
 	before := r.View(id)
@@ -697,97 +764,5 @@ func TestView_ZeroLinesMarshalsEmptyArray(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"lines":[]`) {
 		t.Errorf("zero-line live View marshals %s, want \"lines\":[]", b)
-	}
-}
-
-// TestProjection_LookaheadReaction_HappyAttributesReactor pins #375 F1 at the relay
-// tier: the ordered stream a coordinator emits on the happy path — EnsembleReaction
-// (naming the reactor) BEFORE the reaction's first TTSInvoked — projects the reaction
-// as its OWN line a:<rID> attributed to the reactor's name (never the "NPC" fallback),
-// and persists exactly that one reaction row.
-func TestProjection_LookaheadReaction_HappyAttributesReactor(t *testing.T) {
-	bus := voiceevent.NewBus()
-	fs := &fakeSessions{id: uuid.New(), active: true}
-	store := newFakeLineStore()
-	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
-
-	// The Lead turn.
-	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})
-	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "Te"})
-	// The reaction: EnsembleReaction (attribution) STRICTLY precedes the first TTSInvoked
-	// (F1: PublishInvoked fires only after the announce, at release).
-	bus.Publish(voiceevent.EnsembleReaction{At: at(3), TurnID: "rID", LeadTurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"}})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", TurnID: "rID"})
-	// Both turns delivered audio, so both rows survive the #437 reconcile.
-	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "rID"})
-
-	// The reaction is its own line, attributed to Goblin (never "NPC").
-	v := r.View(fs.id.String())
-	var reaction *Line
-	for i := range v.Lines {
-		if v.Lines[i].ID == "a:rID" {
-			reaction = &v.Lines[i]
-		}
-	}
-	if reaction == nil {
-		t.Fatalf("no a:rID reaction line projected; lines=%+v", v.Lines)
-	}
-	if reaction.Who != "Goblin" {
-		t.Fatalf("reaction line Who = %q, want Goblin (never the NPC fallback)", reaction.Who)
-	}
-	if reaction.Text != "I disagree." {
-		t.Fatalf("reaction line text = %q, want %q", reaction.Text, "I disagree.")
-	}
-
-	// Persistence: the reaction row exists, attributed to Goblin.
-	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
-		t.Fatalf("Finalize: %v", err)
-	}
-	rows, _ := store.ListTranscriptLines(context.Background(), fs.id)
-	var got *storage.TranscriptLine
-	for i := range rows {
-		if rows[i].LineID == "a:rID" {
-			got = &rows[i]
-		}
-	}
-	if got == nil {
-		t.Fatalf("reaction row a:rID not persisted; rows=%+v", rows)
-	}
-	if got.Who != "Goblin" {
-		t.Fatalf("persisted reaction Who = %q, want Goblin", got.Who)
-	}
-}
-
-// TestProjection_LookaheadReaction_BargeBeforeReleaseNoLine pins #375 F1's headline
-// win: when a barge lands BEFORE release, the coordinator emits NEITHER EnsembleReaction
-// NOR any TTSInvoked{rID} — so the relay creates NO a:<rID> line and persists ZERO rows
-// for it. (Before F1, a pre-render TTSInvoked{rID} created a misattributed "NPC" line.)
-func TestProjection_LookaheadReaction_BargeBeforeReleaseNoLine(t *testing.T) {
-	bus := voiceevent.NewBus()
-	fs := &fakeSessions{id: uuid.New(), active: true}
-	store := newFakeLineStore()
-	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
-
-	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
-	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})
-	// Barge before the reaction was released: the whole unit ends. NO EnsembleReaction,
-	// NO TTSInvoked for the reaction id are ever published (F1).
-	bus.Publish(voiceevent.TurnEnded{At: at(3), TurnID: "Te", Reason: voiceevent.TurnEndBarge})
-
-	v := r.View(fs.id.String())
-	for _, l := range v.Lines {
-		if l.ID == "a:rID" {
-			t.Fatalf("a reaction line a:rID was projected despite a barge before release: %+v", l)
-		}
-	}
-	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
-		t.Fatalf("Finalize: %v", err)
-	}
-	rows, _ := store.ListTranscriptLines(context.Background(), fs.id)
-	for _, row := range rows {
-		if row.LineID == "a:rID" {
-			t.Fatalf("a reaction row a:rID was persisted despite a barge before release: %+v", row)
-		}
 	}
 }

@@ -1,7 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 import { beforeEach } from "vitest";
 
+import { loadCatalog } from "./src/i18n";
 import { MockEventSource } from "./src/test/mockEventSource";
+
+// The German catalog is its own lazily fetched chunk in the app (src/i18n).
+// Tests that render in German expect the strings on the FIRST render, the way
+// main.tsx guarantees them in production by loading the catalog before it
+// mounts — so load it once up front here too.
+await loadCatalog("de");
 
 // jsdom does not implement HTMLMediaElement.play(); the Preview-voice helper
 // (src/lib/audio.ts) fires it fire-and-forget. Stub it so the noise stays out of

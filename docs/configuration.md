@@ -185,7 +185,12 @@ insecure-mode warning. A container port-mapping cannot reach the loopback bind,
 which blunts production misuse — but any **same-host** process still can (a
 reverse proxy pointed at `127.0.0.1`, a `kubectl port-forward`), so dev mode
 additionally **rejects (403) any request carrying proxy headers**
-(`X-Forwarded-For` / `X-Forwarded-Proto` / `Forwarded`). **Never set
+(`X-Forwarded-For` / `X-Forwarded-Proto` / `Forwarded`). Because your own
+browser can also reach the loopback bind on behalf of any page you have open,
+dev mode likewise rejects a request whose `Host` is not `localhost` /
+`127.0.0.1` / `[::1]` (DNS rebinding) or whose `Origin` is not a loopback
+origin (cross-site requests) — so open the instance as `http://localhost:8080`
+or `http://127.0.0.1:8080`, not through a custom hostname. **Never set
 `GLYPHOXA_DEV_MODE` in production.**
 
 Point dev mode at a **throwaway database**: the dev Operator claims the seeded
@@ -358,7 +363,7 @@ meet, degrading recall to no-memory on timeout.
 | `DISCORD_BOT_TOKEN` | `voice` (fatal); web/all fallback | Discord gateway/voice bot token. |
 | `DISCORD_OAUTH_CLIENT_ID` | `web`/`all` | OAuth app client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | `web`/`all` | OAuth app client secret. |
-| `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. |
+| `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. Its scheme also decides the session cookies' `Secure` attribute: `https://…` ⇒ `Secure` cookies, `http://…` ⇒ plain (local dev). |
 | `GLYPHOXA_OPERATOR_IDS` | `web`/`all` (`allowlist` mode) | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). In `allowlist` Admission Mode the sole login gate: empty, separators-only, or non-numeric entries ⇒ fatal. In `open` mode it is the platform-admin list and may be empty. Also a deployment-wide GM override for Slash Commands and the Butler voice gate. |
 | `GLYPHOXA_ADMISSION_MODE` | optional | Who may complete the Discord login ([ADR-0055](adr/0055-self-signup-admission-modes.md)): `allowlist` (only `GLYPHOXA_OPERATOR_IDS`) or `open` (any Discord User; each signup founds its own Tenant). Unset ⇒ the posture recorded in the database, `allowlist` on a fresh one. Any other value ⇒ fatal. Flipping `open` → `allowlist` and restarting evicts every signup. |
 | `GLYPHOXA_SIGNUP_PLAN_SLUG` | `open` mode | The Plan every open-mode signup is bound to. In `open` mode the boot fails unless it names a synced, non-archived Plan (`glyphoxa billing plans-sync`, [deploy/saas-operations.md](deploy/saas-operations.md)). Ignored in `allowlist` mode. |
@@ -366,6 +371,7 @@ meet, degrading recall to no-memory on timeout.
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
 | `GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD` | optional | Per-application 24h Discord gateway IDENTIFY count above which a structured warning fires (token-reset early-warning, #486). Positive integer; blank/non-numeric/≤0 ⇒ default `500` (below Discord's 1000/token/24h limit). See [deploy/saas-operations.md §7](deploy/saas-operations.md). |
+| `GLYPHOXA_TRUSTED_CLIENT_IP_HEADER` | optional (`web`/`all`) | The one request header your reverse proxy sets to the real client address, **overwriting anything the client sent** — used only for the IP stored on the login session's audit record. Set `CF-Connecting-IP` when the instance is reachable *only* through Cloudflare (e.g. a Cloudflare Tunnel); `deploy/saas/install.sh` asks for it (`GX_TRUSTED_CLIENT_IP_HEADER`) and writes it as `web.extraEnv`. Unset ⇒ no header is trusted: the last `X-Forwarded-For` hop (the one the nearest proxy appended), else the socket peer. Never name a header your proxy merely passes through — a client could then choose its own audit address. |
 | `GLYPHOXA_OLLAMA_URL` | optional | Ollama embeddings endpoint override; default `http://127.0.0.1:11434`. v1.0 embeddings are **Ollama-only** (ADR-0011), so set it wherever the process has no local Ollama — containers and k8s pods (k3d: `http://host.k3d.internal:11434`). The server must serve `nomic-embed-text`. Unreachable ⇒ semantic memory (L2) stalls loudly; nothing else breaks. |
 | `GLYPHOXA_PRIVACY_POLICY_URL` | optional | The deployment's published privacy-policy page. The Bot links it from the transcription disclosure it posts in the voice channel at Voice Session start (#519) — the players at the table are data subjects who may never open the web app. Blank ⇒ the disclosure still posts, without a link. The Helm chart derives it from `ingress.host` + `/privacy` when `privacyPolicyUrl` is unset. |
 | `GLYPHOXA_VOICE_IDLE_CLOSE_WINDOW` | optional | How long a Voice Session may process no audio before the hosting Voice Instance closes it ([ADR-0061](adr/0061-idle-close-voice-session-watchdog.md)). Go duration; default `15m`. The literal `off` disables idle closing — a value that is not a duration is treated as a typo and takes the default, so a resource protection is never switched off by accident. "Audio" is inbound room speech or the Bot being asked to speak (`/say`, voiced recap, Highlight replay); a table that is present but silent for the whole window **is** closed. |

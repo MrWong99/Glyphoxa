@@ -21,7 +21,7 @@ export const SYSTEM_SUGGESTIONS = ["D&D 5e", "Pathfinder 2e", "Call of Cthulhu"]
 // option list stays readable without a hardcoded language table, and follows
 // the operator's display language rather than always naming languages in
 // English.
-export function languageLabel(lang: Lang, code: string): string {
+function languageLabel(lang: Lang, code: string): string {
   try {
     const name = new Intl.DisplayNames([lang], { type: "language" }).of(code);
     return name && name !== code ? `${name} (${code})` : code;

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
+import { toast } from "sonner";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -16,7 +17,12 @@ import { SidebarUser } from "./SidebarUser";
 const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
-beforeEach(() => navigate.mockClear());
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+
+beforeEach(() => {
+  navigate.mockClear();
+  vi.mocked(toast.error).mockClear();
+});
 
 describe("SidebarUser", () => {
   it("renders the real operator identity", () => {
@@ -52,5 +58,30 @@ describe("SidebarUser", () => {
 
     await waitFor(() => expect(loggedOut).toBe(true));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/login" }));
+  });
+
+  it("says so when the logout fails, and stays put (W15)", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(AuthService, {
+        logout: () => {
+          throw new ConnectError("session store unavailable", Code.Unavailable);
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <SidebarUser user={create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" })} />
+      </Providers>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        expect.stringContaining("session store unavailable"),
+      ),
+    );
+    expect(navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /log out/i })).toBeEnabled();
   });
 });

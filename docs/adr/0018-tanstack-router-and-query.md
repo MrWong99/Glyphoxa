@@ -28,3 +28,12 @@ Audited against the tree (`web/src/app/router.tsx`, `AuthGate.tsx`, `web/src/lib
 - **The `X-Tenant-Id` header interceptor** — the server resolves the Tenant from the session's operator binding (`auth.TenantResolver`, `internal/auth/policy.go`); the slug in the URL is not sent as a header.
 
 **Changed.** The boot flow calls the Connect procedure `AuthService.GetCurrentUser` (not `GET /api/v1/auth/me`), and an unauthenticated result redirects to `/login` from `AuthGate`; `/t/$tenantSlug/` redirects to the Configuration screen rather than to a remembered last screen.
+
+## Amendment: how the route-level promises are met (2026-11-20, audit sweep)
+
+This closes the first two "Not implemented" items of the audit amendment above (lazy-loaded routes; `errorComponent`) — that amendment describes the tree just before this change, when there was one 1 MB chunk and the router's unstyled English defaults on a thrown render or an unmatched URL. They are now met as follows, and two cross-cutting behaviours are added at the same layer:
+
+- **Code splitting is per SCREEN, not per route file.** `Configuration`, `Campaign`, `Session` and the three legal pages are `React.lazy` chunks inside their own `Suspense` boundary (so a chunk in flight leaves the shell painted); the shell warms the screen chunks shortly after it mounts. The landing/login pages and the shell stay in the entry bundle. The non-English display catalog is likewise its own chunk, fetched before the first render when it is the active language.
+- **Error and not-found handling is router-level, not per-route**: `defaultErrorComponent`, `defaultNotFoundComponent` and `defaultPendingComponent` (`web/src/app/RouteFallbacks.tsx`), localized. A route may still override; none needs to today.
+- **Expired sessions are handled once, in the `QueryClient`**: any read or write that returns `CodeUnauthenticated` invalidates the `GetCurrentUser` probe, and the `AuthGate` — which observes it — redirects to `/login`. The path being left is parked in `sessionStorage` and restored by the root route after the next sign-in (same-origin `/t/…` paths only; the OAuth round trip itself carries nothing).
+- **Unsaved edits block navigation at the route layer.** Screens stay router-free: an editor reports dirtiness through `useDirtyGuard`, which lists it in `lib/navigationGuard`, and a `useBlocker` mounted in the tenant layout asks before a path change or a tab close discards it.

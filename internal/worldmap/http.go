@@ -7,10 +7,8 @@
 package worldmap
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -108,40 +106,13 @@ func (s *ImageServer) ServeImage(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	rc, meta, err := s.blobs.Get(req.Context(), m.BlobKey)
-	if errors.Is(err, blob.ErrNotFound) {
-		// The row and its bytes should agree, but a reconciliation race must not 500.
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		s.log.Error("map image: fetch blob", "err", err, "map", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		s.log.Error("map image: read blob", "err", err, "map", id)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if meta.ContentType != "" {
-		w.Header().Set("Content-Type", meta.ContentType)
-	}
-	// Defence in depth, the portrait mount's posture (#591): a blob stored under
-	// a scriptable type before the raster allowlist — or through any future
-	// writer, the bundle importer included — must still never execute. nosniff
-	// pins the declared type and the CSP forbids scripts and subresources even
-	// when the response is opened as a top-level document.
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	// A Map image is immutable for a given row version: a re-upload writes a NEW
-	// blob key. updated_at is therefore a sound validator, and lets the browser skip
-	// re-fetching a large scan on every pan.
-	http.ServeContent(w, req, "", m.UpdatedAt, bytes.NewReader(data))
+	// blob key, and updated_at moves with it. blob.Serve turns the pair into the
+	// validators — so the browser's revalidation of a large scan costs no blob
+	// read — and stamps the nosniff/CSP hardening every byte mount shares.
+	if err := blob.Serve(w, req, s.blobs, m.BlobKey, blob.ServeOptions{ModTime: m.UpdatedAt}); err != nil {
+		s.log.Error("map image: serve blob", "err", err, "map", id)
+	}
 }
 
 func (s *ImageServer) resolveCampaign(ctx context.Context) (uuid.UUID, bool, error) {

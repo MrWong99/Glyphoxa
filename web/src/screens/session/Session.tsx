@@ -18,6 +18,7 @@ import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { InlineMarkdown, Markdown } from "@/components/ui/Markdown";
 import { splitAudioTags } from "@/lib/audioTags";
 import { useSessionEvents, formatClock, type LineKind } from "./useSessionEvents";
+import { readLastVoiceChannel, rememberVoiceChannel } from "./lastVoiceChannel";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
 import { HighlightsStrip } from "./HighlightsStrip";
@@ -272,12 +273,18 @@ export function Session({
   // sonner) and invalidate — a Stop that hits "no active session" means the
   // loop already died server-side, and the refetch snaps the badge off Live.
   // The server's message stays verbatim, interpolated into the localized template.
+  // The linked guild's id, resolved further down with the channel picker; a ref
+  // because the Start handler above it only needs the value at call time.
+  const guildIdRef = useRef("");
   const onError = (key: MessageKey) => (err: Error) => {
     toast.error(t(key, { message: errorMessage(err) }));
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {
-    onSuccess: () => {
+    onSuccess: (_res, req) => {
+      // Remember where this session joined, so the next visit pre-selects it.
+      // Only on success: a channel the Bot could not join is not worth keeping.
+      rememberVoiceChannel(guildIdRef.current, req.voiceChannelId ?? "");
       void invalidate();
       void invalidateSessions();
     },
@@ -288,9 +295,9 @@ export function Session({
     onError: onError("session.couldntStop"),
   });
 
-  // Voice-channel picker: the session joins the picked channel; the stored
-  // Default Voice Channel pre-selects it (default → first channel → none, the
-  // ShareHighlightDialog precedent). retry:false keeps it cheap — a
+  // Voice-channel picker: the session joins the picked channel; the last-used
+  // channel, else the stored Default Voice Channel, pre-selects it (see the
+  // precedence note below). retry:false keeps it cheap — a
   // precondition (unlinked guild / missing Bot token) fails once and its
   // actionable message renders as an inline hint beside Start (silence here
   // once dead-ended an operator: no picker, no clue why, and Start falling
@@ -317,12 +324,28 @@ export function Session({
         ? t("session.hintSaveBotTokenFirst")
         : channelsError;
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null);
-  // A stored default that is no longer among the guild's channels (deleted in
-  // Discord) must not ride a Start invisibly: fall back to the first listed
-  // channel, which the Select then actually shows.
-  const defaultInList = channels.some((c) => c.id === defaultChannelId);
+  // Selection precedence: what the GM picked on this visit → the channel the
+  // last session was started in (remembered per Discord server in this
+  // browser, lastVoiceChannel.ts) → the Tenant's Default Voice Channel → none.
+  // The guild id keys the memory; it rides the Tenant's provider config read
+  // (shared with Configuration, campaign-invariant). retry:false: without it
+  // the memory is simply skipped.
+  const guildId =
+    useQuery(ProviderService.method.listProviderConfigs, {}, { retry: false }).data?.guildId ?? "";
+  guildIdRef.current = guildId;
+  const lastChannelId = useMemo(() => readLastVoiceChannel(guildId), [guildId]);
+  // A remembered or default id that is no longer among the guild's channels
+  // (deleted in Discord) must not ride a Start invisibly, so each rung only
+  // counts when the list still has it. With nothing known the Select shows its
+  // placeholder and Start waits for a pick — silently joining whichever channel
+  // Discord happens to list first put the Bot in the wrong room.
+  const inList = (id: string | null | undefined) => !!id && channels.some((c) => c.id === id);
   const selectedChannelId =
-    pickedChannelId ?? ((defaultInList ? defaultChannelId : channels[0]?.id) || "");
+    pickedChannelId ??
+    (inList(lastChannelId) ? lastChannelId! : inList(defaultChannelId) ? defaultChannelId : "");
+  // Only a LOADED, non-empty list can demand a pick: an errored or empty list
+  // still starts with no channel and lets the server report its precondition.
+  const channelPickNeeded = channels.length > 0 && selectedChannelId === "";
 
   // "Set as default" persists the current pick as the guild's Default Voice
   // Channel (SaveDiscordSettings with only voice_channel_id on the wire — the
@@ -693,8 +716,9 @@ export function Session({
                 // window would send no channel and fail on deployments with no
                 // stored default, even though a pre-selected channel was moments
                 // away. An errored/empty list re-enables (Start then reports the
-                // server's actionable precondition).
-                disabled={start.isPending || channelsQ.isLoading}
+                // server's actionable precondition). A loaded list with no
+                // selection holds too: the placeholder asks for a pick.
+                disabled={start.isPending || channelsQ.isLoading || channelPickNeeded}
               >
                 {t("session.startSession")}
               </Button>
@@ -995,7 +1019,7 @@ function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: stri
       {searching &&
         (searchQuery.isError ? (
           <p className="gx-session__transcript-empty" role="alert">
-            {t("session.couldntSearch", { message: searchQuery.error?.message ?? "" })}
+            {t("session.couldntSearch", { message: errorMessage(searchQuery.error) })}
           </p>
         ) : lines.length > 0 ? (
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">

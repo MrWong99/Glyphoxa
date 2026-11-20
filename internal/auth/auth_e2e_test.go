@@ -100,7 +100,7 @@ func TestAuthEndToEnd(t *testing.T) {
 	}}
 	// The operator snowflake is on the mandatory allowlist (ADR-0041) so the
 	// callback issues a real session.
-	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("555")}, nil)
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("555")}, auth.EdgeConfig{}, nil)
 
 	// 1. OAuth callback issues a real session — capture the cookies.
 	cbReq := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?code=c&state=st", nil)
@@ -137,7 +137,7 @@ func TestAuthEndToEnd(t *testing.T) {
 
 	// 2. AuthService over the real store + interceptor stack.
 	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
-	server := auth.NewAuthServer(store, store, store, auth.AdmissionAllowlist, nil)
+	server := auth.NewAuthServer(store, store, store, auth.AdmissionAllowlist, auth.EdgeConfig{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)

@@ -41,3 +41,9 @@ Operationally:
 - **`web` / `voice` Modes (scale path):** do **not** auto-migrate. The deploy runs `glyphoxa migrate up` once as a pre-deploy job; the serving instances assume a current schema and fail fast (via goose `status`/version check) if it is behind. This keeps schema changes a deliberate, observable deploy step rather than an emergent race between N booting processes.
 
 **Why:** the whole DB layer is greenfield — v1 shipped no migrations and no real persistence at all (one of its concrete failures, ADR-0007), so there is nothing to port and no reason to inherit a heavier tool. goose gives plain SQL we can review line-by-line, runs from the single binary the modes already share, and locks correctly when configured — at the cost of one mandatory configuration step (the session locker) that this ADR makes non-optional.
+
+## Amendment: out-of-order migrations are applied, and "current" means none pending (2026-11-20)
+
+Migration numbers are chosen by whoever opens the PR, and parallel PRs merge in any order — so a database can already be at 00058 when 00056 first reaches it. Two defaults made that dangerous. goose refused the lower-numbered migration outright ("found missing migrations"), bricking `migrate up`. And `EnsureCurrent` compared only the highest applied version against the highest embedded one, so a `web`/`voice` process (which never auto-migrates) booted as "current" against a schema that was missing a migration.
+
+**Decided:** the provider is built with `goose.WithAllowOutofOrder(true)`, so a not-yet-applied lower-numbered migration is simply applied; and `EnsureCurrent` fails when *any* embedded migration is unapplied, naming them. The cost is a discipline that already held in practice: a migration must not depend on the relative order of migrations from other, concurrently open PRs. `migrate down` still rolls back the highest applied version.

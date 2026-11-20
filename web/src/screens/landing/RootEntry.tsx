@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
+import { consumeReturnTo } from "@/lib/returnTo";
 import { Landing } from "./Landing";
 
 // What the ROOT path serves (#521).
@@ -54,6 +55,13 @@ export function RootEntry() {
 
   useEffect(() => {
     if (signedIn) {
+      // A sign-in that follows a lapsed session goes back to where the
+      // operator was (parked by the AuthGate; same-origin /t/… paths only).
+      const back = consumeReturnTo();
+      if (back) {
+        void navigate({ href: back, replace: true });
+        return;
+      }
       void navigate({
         to: "/t/$tenantSlug/$screen",
         params: { tenantSlug: DEFAULT_TENANT, screen: "configuration" },

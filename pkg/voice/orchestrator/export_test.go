@@ -6,6 +6,32 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
+// Yield cancels whatever turn holds the floor, speaking or not, and reports its
+// TurnID — a test-only unconditional cut standing in for a barge/mute (production
+// cuts through [Floor.YieldTurn] / [Floor.YieldAgent], which guard the holder).
+func (f *Floor) Yield() (turnID string, yielded bool) {
+	f.mu.Lock()
+	c := f.cancel
+	turnID = f.holderTurn
+	f.cancel = nil
+	f.holderTurn = ""
+	f.holderAgent = ""
+	f.speaking = false
+	f.mu.Unlock()
+	if c == nil {
+		return "", false
+	}
+	c()
+	return turnID, true
+}
+
+// Active reports whether a turn currently holds the floor (test-only probe).
+func (f *Floor) Active() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancel != nil
+}
+
 // BindSupersedeTerminal exposes the floor's supersede-terminal wiring (#443) for
 // the floor unit tests (external test package). Production installs it from the
 // floor-sharing reactors' Bind.
@@ -49,13 +75,8 @@ func (d *DirectSpeech) SetFloor(floor *Floor) { d.floor = floor }
 // Conversation.Register from [Barge.Gate].
 func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
 
-// SetEnsemble installs the Ensemble Turn speaker on the replier for the ensemble
-// coordinator tests (external test package, #301). Production wiring sets
-// r.ensemble inside Conversation.Register from [Barge.Ensemble].
-func (r *Replier) SetEnsemble(s EnsembleSpeaker) { r.ensemble = s }
-
-// SetLookahead installs the pump look-ahead seam on the replier for the Cross-talk
-// Reaction pre-render tests (external test package, #375). Production wiring sets
+// SetLookahead installs the pump look-ahead seam on the replier for the
+// pre-synthesis pipeline tests (external test package, #626). Production wiring sets
 // r.lookahead inside Conversation.Register from [Barge.Lookahead].
 func (r *Replier) SetLookahead(p LookaheadPump) { r.lookahead = p }
 

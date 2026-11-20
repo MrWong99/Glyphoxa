@@ -5,8 +5,8 @@ package orchestrator_test
 // ([orchestrator.ReplyStrategy]), everything riding the barge-in floor is one
 // group ([orchestrator.Barge]), and NewConversation is the single validation
 // point. These tests pin one descriptive error per representable rule; the
-// rules the groups make unrepresentable (ensemble-without-barge,
-// mute/gate-without-floor) need no runtime check at all.
+// rules the groups make unrepresentable (mute/gate-without-floor) need no
+// runtime check at all.
 
 import (
 	"context"
@@ -100,8 +100,8 @@ func TestNewConversation_DirectSpeechRequiresTTS(t *testing.T) {
 // TestNewConversation_BargeRequiresReplyStrategy pins that a barge group
 // without a reply strategy is a loud construction error instead of the silent
 // no-op it used to be: the floor and everything the group carries (mutes, gate,
-// ensemble, look-ahead) wire through the replier, so without one none of it can
-// take effect.
+// look-ahead) wire through the replier, so without one none of it can take
+// effect.
 func TestNewConversation_BargeRequiresReplyStrategy(t *testing.T) {
 	h, vadStage, sttStage, ttsStage := validateStages(t)
 	_, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
@@ -110,18 +110,17 @@ func TestNewConversation_BargeRequiresReplyStrategy(t *testing.T) {
 	wantConstructionError(t, err, "WithBargeIn", "reply strategy")
 }
 
-// TestNewConversation_LookaheadWithoutEnsemble pins the #626 relaxation: the
-// look-ahead lane is no longer the Cross-talk Reaction's alone — every routed
-// turn pre-synthesizes its next sentence into it — so a pump wired WITHOUT an
-// ensemble speaker is the ordinary production shape, not a construction error.
-func TestNewConversation_LookaheadWithoutEnsemble(t *testing.T) {
+// TestNewConversation_LookaheadPump pins the production shape (#626): a barge
+// group carrying only a look-ahead pump — every routed turn pre-synthesizes its
+// next sentence into it — constructs without error.
+func TestNewConversation_LookaheadPump(t *testing.T) {
 	h, vadStage, sttStage, ttsStage := validateStages(t)
 	conv, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: nopStream}),
 		orchestrator.WithBargeIn(orchestrator.Barge{Lookahead: fakePump{}}),
 	)
 	if err != nil {
-		t.Fatalf("NewConversation with a look-ahead pump and no ensemble: %v", err)
+		t.Fatalf("NewConversation with a look-ahead pump: %v", err)
 	}
 	if conv == nil {
 		t.Fatal("NewConversation returned no Conversation")

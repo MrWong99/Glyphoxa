@@ -109,4 +109,31 @@ The Party Marker (#540, ADR-0060) adds a **third** volatile-tail block: one shor
 - **Absent by default.** No marker, no live session, a `gm_private` Map, or a marker sitting on a hidden Pin all yield the empty string and the block is dropped — leaving the prompt byte-identical to the pre-marker path, the same guarantee every other tail block keeps.
 - **Slot order** is facts → location → memory → cross-talk → directive. Location sits with the world content it belongs to; the directive keeps the last, strongest recency slot.
 
+**Note (2026-11-20):** the Cross-talk instruction slot and the speculative Ensemble consults (`Replier.Draft`/`React`, which peeked at a directive without consuming it) were removed with the unshipped Ensemble Turn implementation (ADR-0025). The tail is now facts → location → memory → directive, and every consult belongs to a committed turn; `DirectiveRecaller.Directive` keeps its `consume` parameter, with no caller passing `false`.
+
 Every *other* spatial question goes through the read-only `locate_entity` / `whats_nearby` Tools (#539), not the prompt. The block budget is shared, and anything added to it silently evicts world knowledge.
+
+## Amendment: the history window is trimmed in blocks; the spoken-output rule joins the stable prefix (2026-11-20)
+
+Two changes to what the cacheable prefix is made of.
+
+- **Block trim.** Section 1 calls the history "append-only", which was only true
+  until `HistoryTurns` was reached: from then on the window slid by one message
+  per append, so its first message — and with it everything after the system
+  prompt — changed on every turn, and the prefix cache covered the system prompt
+  alone for the rest of the session. The window is now trimmed in blocks with
+  hysteresis (`agent.trimHistory`): it grows to twice `HistoryTurns` and is cut
+  back to the most recent `HistoryTurns` in one step, so the prefix is stable
+  for `HistoryTurns/2` exchanges at a time. The cut is moved forward to a user
+  message, so the window never opens on an assistant reply whose question was
+  dropped (nor, should tool messages ever be kept in history, on a tool result
+  without its call). `HistoryTurns` is therefore the size the window is cut
+  *to*, not a hard cap on it.
+- **Spoken-output rule.** A session-constant paragraph telling the model its
+  words are spoken — no markdown, lists, headings, emojis or code — sits in the
+  stable system prompt between the speaker-attribution section and the
+  audio-markup instruction, for every voiced Agent without a text channel. It is
+  constant per session, so it costs the cache nothing. As with the self-prefix
+  rule, the prompt only makes the mistake rarer; the guarantee is the
+  deterministic markdown scrub in the delivery path (`agent.scrubSpoken`), which
+  leaves bracketed audio tags (ADR-0022) alone.

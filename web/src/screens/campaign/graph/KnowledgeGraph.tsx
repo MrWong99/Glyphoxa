@@ -373,7 +373,9 @@ export function KnowledgeGraph({
       ) : (
         <svg
           className="gx-kg-graph__canvas"
-          role="img"
+          // role="group", not "img": an img's children are presentational, which
+          // hid every node and suggestion button in here from assistive tech.
+          role="group"
           aria-label={t("knowledge.mapAria", { n: laid.nodes.length, m: laid.edges.length })}
           viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
           onMouseDown={(ev) => {
@@ -725,7 +727,7 @@ function ProposalReview({
   return (
     <div
       className="gx-kg-graph__review"
-      role="dialog"
+      role="group"
       aria-label={t("knowledge.reviewSuggestionAria")}
       ref={card}
     >
@@ -786,7 +788,7 @@ function RelationPicker({
   const { t } = useI18n();
   const [edgeType, setEdgeType] = useState<EdgeType>(EDGE_TYPES[0].value);
   return (
-    <div className="gx-kg-graph__picker" role="dialog" aria-label={t("knowledge.createConnection")}>
+    <div className="gx-kg-graph__picker" role="group" aria-label={t("knowledge.createConnection")}>
       <p className="gx-kg-graph__picker-text">
         <strong>{fromName}</strong> → <strong>{toName}</strong>
       </p>

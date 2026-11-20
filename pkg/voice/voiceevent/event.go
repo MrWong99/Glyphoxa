@@ -246,90 +246,6 @@ type AddressRouted struct {
 // EventName implements [Event].
 func (AddressRouted) EventName() string { return "address.routed" }
 
-// EnsembleRouted marks the routing decision for one [STTFinal] utterance that
-// addressed TWO OR MORE Agents at once (ADR-0024 returns a set when
-// address.Config.MaxTargets > 1). It is the atomic Ensemble Turn signal (ADR-0025):
-// the address detector publishes exactly ONE EnsembleRouted for the whole set
-// instead of N independent [AddressRouted], so the turn-taking layer runs the set
-// as ONE floor-holding unit (speculative fan-out + Lead race) rather than N
-// contending turns. A single-target utterance still publishes a plain
-// [AddressRouted] — the byte-identical MaxTargets=1 default, where the ensemble
-// branch is dead code.
-//
-// Targets are the post-GM-gate survivors in the matcher's score-sorted order
-// (Targets[0] is the top-scored), and len(Targets) >= 2 by construction. Text,
-// TurnID, and SpeakerID mirror [AddressRouted]: the utterance text plus the
-// correlation id and Speaker Lane attribution copied from the originating
-// [STTFinal] (A3, ADR-0050) — the coordinator stamps SpeakerID back onto every
-// per-candidate route it reconstructs from this set.
-type EnsembleRouted struct {
-	At        time.Time
-	Text      string
-	TurnID    string
-	SpeakerID string
-	Targets   []AddressTarget
-	// SessionID is the voice_sessions uuid string of the Voice Session this event
-	// originated in (#487, session-scoped attribution). "" means session-local /
-	// pre-stamp — the single-session default before [Forward] stamps it onto the
-	// process bus. Additive per ADR-0020 (wire names unchanged).
-	SessionID string
-}
-
-// EventName implements [Event].
-func (EnsembleRouted) EventName() string { return "address.ensemble" }
-
-// EnsembleLead marks the Agent the speculative race elected as the Ensemble Turn's
-// Lead (ADR-0025, #301): the first candidate to finish a complete, non-empty draft
-// takes the floor and speaks under the ensemble's ORIGINAL TurnID. It is published
-// the moment the Lead is chosen, before its first sentence dispatches, so the
-// transcript relay attributes the turn's line to the winning Agent (exactly as
-// [AddressRouted] does for a single-target turn). The losing candidates' drafts are
-// discarded (ADR-0012 — a loser commits nothing); their Reactions are #302.
-type EnsembleLead struct {
-	At     time.Time
-	TurnID string
-	Target AddressTarget
-	// SessionID is the voice_sessions uuid string of the Voice Session this event
-	// originated in (#487, session-scoped attribution). "" means session-local /
-	// pre-stamp — the single-session default before [Forward] stamps it onto the
-	// process bus. Additive per ADR-0020 (wire names unchanged).
-	SessionID string
-}
-
-// EventName implements [Event].
-func (EnsembleLead) EventName() string { return "ensemble.lead" }
-
-// EnsembleReaction marks the Cross-talk Reaction phase of an Ensemble Turn (ADR-0025,
-// #302): after the Lead delivered at least one sentence, the coordinator fed the
-// Lead's text to one other addressed Agent as Cross-talk, and that Agent produced a
-// non-empty Reaction it is about to speak. It is published ONLY when the reaction is
-// non-empty (a decline publishes nothing), immediately before the reaction's first
-// sentence dispatches, so the transcript relay attributes the reaction's line to the
-// reacting Agent.
-//
-// Unlike the Lead — which speaks under the ensemble's ORIGINAL TurnID — the Reaction
-// is a distinct sub-turn: TurnID is a FRESH [NewTurnID] (so its [TTSInvoked] /
-// [FirstOpus] / TurnEnded correlate as an independent turn and land on their own
-// transcript line), and LeadTurnID links back to the Lead's turn it reacted to. The
-// Reaction is independently barge-able: a human barge during its playback ends it
-// with a TurnEnded carrying THIS TurnID, while the Lead's already-delivered line
-// stays committed. Depth is capped at 1 — a Reaction never triggers a further
-// Reaction (ADR-0025).
-type EnsembleReaction struct {
-	At         time.Time
-	TurnID     string // FRESH NewTurnID for the reaction sub-turn
-	LeadTurnID string // the Lead's (ensemble original) TurnID this reacts to
-	Target     AddressTarget
-	// SessionID is the voice_sessions uuid string of the Voice Session this event
-	// originated in (#487, session-scoped attribution). "" means session-local /
-	// pre-stamp — the single-session default before [Forward] stamps it onto the
-	// process bus. Additive per ADR-0020 (wire names unchanged).
-	SessionID string
-}
-
-// EventName implements [Event].
-func (EnsembleReaction) EventName() string { return "ensemble.reaction" }
-
 // SpeakRequested marks a GM-puppeteered direct-speech request: the `/say <text>
 // as:<agent>` slash command (ADR-0010, #295) asks an Agent to speak Text verbatim,
 // bypassing Address Detection and the LLM Replier entirely (ADR-0024 — /say is the
@@ -364,14 +280,11 @@ func (SpeakRequested) EventName() string { return "speak.requested" }
 // whose Synthesize start-errors (empty VoiceID, auth failure) still emits
 // TTSInvoked, the invoked-but-never-spoke signal (#20). It announces the dispatch
 // attempt, not a success: whether the sentence was actually spoken is signalled by
-// [FirstAudio], not here.
-//
-// Index is 0-based within the current turn and increments per dispatch attempt on
-// the same stage.
+// [FirstAudio], not here. Consumers coalesce a turn's sentences by arrival order
+// within the TurnID.
 type TTSInvoked struct {
 	At       time.Time
 	Sentence string
-	Index    int
 	// TurnID is the correlation id of the turn this sentence belongs to (A3),
 	// threaded from the reply reactor; see [STTFinal.TurnID].
 	TurnID string
@@ -385,12 +298,14 @@ type TTSInvoked struct {
 // EventName implements [Event].
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
-// TTSStreamFailed marks a sentence whose synthesis stream terminated ABNORMALLY
-// mid-delivery (#436): the provider accepted the dispatch (its [TTSInvoked]
-// fired, possibly its FirstAudio too) but the stream died before the last chunk,
-// so the room heard at most a fragment. Published by the orchestrator TTS stage
-// under a live turn ctx only — a barge cutting the stream is the caller's cut,
-// not a failure, and publishes nothing here. Consumers use it to keep the
+// TTSStreamFailed marks a sentence that failed: its synthesis never started (a
+// start-error) or its stream terminated ABNORMALLY mid-delivery (#436) — its
+// [TTSInvoked] fired, possibly its FirstAudio too, but the room heard at most a
+// fragment. It always refers to the turn's most recently announced sentence: it
+// is published after that sentence's TTSInvoked and before the next one's (by
+// the orchestrator TTS stage, or — for a held look-ahead sentence — by the
+// pipelined turn once the sentence is released). Published under a live turn ctx
+// only — a barge cutting the stream is the caller's cut, not a failure. Consumers use it to keep the
 // deliver-then-commit record honest: the Transcript Chunker retracts (or never
 // commits) the failed sentence so the Chunk grain agrees with Agent history,
 // which omits it (ADR-0012's bias — never record text the room did not hear).
@@ -510,20 +425,38 @@ const (
 	// vanished (which the TTL sweep would otherwise miscount as
 	// abandoned/no_first_audio).
 	TurnEndTextDelivered TurnEndReason = "text_delivered"
+	// TurnEndCompleted: the turn ran to its natural end — the producer finished,
+	// every dispatched sentence resolved, and nothing cut it (a routed reply, a
+	// /say, a Highlight replay). Consumers no longer infer the end from silence:
+	// the transcript relay drops its "<NPC> is speaking…" label on it. It says
+	// nothing about audio — a voiced turn that produced none is still a failure to
+	// the metrics subscriber, which keys success on first audio.
+	TurnEndCompleted TurnEndReason = "completed"
+	// TurnEndCancelled: the turn held the floor but its context was cancelled from
+	// ABOVE — the conversation was torn down (a reconnect cycle after a media
+	// stall or gateway loss, a session stop) — rather than by a barge, mute or
+	// supersede. A cut like those (the relay keeps the in-flight sentence text),
+	// but neither a success nor a provider failure.
+	TurnEndCancelled TurnEndReason = "cancelled"
 )
 
-// TurnEnded marks a turn that ended for a known reason — distinct from a turn
-// that simply vanished (reaped by the metrics TTL sweep with no signal). It
-// carries the turn's TurnID and the precise [TurnEndReason] so the metrics
-// subscriber records WHY a turn died (barge vs supersede vs tts/provider error)
-// rather than the coarse "no first audio" catch-all. Text is the dropped
+// TurnEnded marks a turn's end with its precise [TurnEndReason]: the success
+// terminals ([TurnEndCompleted], [TurnEndTextDelivered]) and the failure/cut
+// reasons (barge vs supersede vs tts/provider error …), so the metrics subscriber
+// records WHY a turn ended rather than the coarse "no first audio" catch-all, and
+// the transcript relay knows when an Agent stopped speaking. A turn that vanished
+// with no signal at all is reaped by the metrics TTL sweep. Text is the dropped
 // transcript, set only for [TurnEndSupersedeCoalesced]; empty otherwise.
 //
-// Published by the seam that knows the cause: the [orchestrator.Replier]
-// (supersede-coalesced, tts/provider error) and the [orchestrator.BargeIn]
-// (barge). The subscriber treats first-audio as terminal, so a TurnEnded arriving
-// AFTER first audio (e.g. a barge mid-playback) is a normal interruption and does
-// not re-count the turn.
+// Published by the seam that knows the cause: the [orchestrator.Replier],
+// [orchestrator.DirectSpeech] and [orchestrator.ClipReplay] (completed,
+// cancelled, supersede-coalesced, tts/provider error, mute, spend cap), the
+// [orchestrator.Floor] (superseded), the mute reactor (mute) and the
+// [orchestrator.BargeIn] (barge). Every turn — routed reply, /say or replay —
+// ends with exactly one.
+// The subscriber treats first-audio as terminal, so a TurnEnded arriving AFTER
+// first audio (e.g. a barge mid-playback, or the natural completion) does not
+// re-count the turn.
 type TurnEnded struct {
 	At     time.Time
 	TurnID string

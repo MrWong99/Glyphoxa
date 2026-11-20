@@ -110,11 +110,11 @@ func TestApplicationIDFromToken(t *testing.T) {
 // The pacer must hold what actually goes out far inside Discord's 1000 per 24h.
 func TestIdentifyPacerCapsARunawayLoop(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
-	p := newIdentifyPacer(func() time.Time { return clock })
+	p := NewIdentifyPacer(func() time.Time { return clock })
 
 	var sent int
 	for elapsed := time.Duration(0); elapsed < 24*time.Hour; {
-		wait := p.reserve()
+		wait := p.Reserve()
 		// The loop cannot ask again before its held-back IDENTIFY went out.
 		clock = clock.Add(wait)
 		elapsed += wait
@@ -136,45 +136,67 @@ func TestIdentifyPacerCapsARunawayLoop(t *testing.T) {
 
 func TestIdentifyPacerBurstThenRefill(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
-	p := newIdentifyPacer(func() time.Time { return clock })
+	p := NewIdentifyPacer(func() time.Time { return clock })
 
 	for i := range identifyBurst {
-		if wait := p.reserve(); wait != 0 {
+		if wait := p.Reserve(); wait != 0 {
 			t.Fatalf("IDENTIFY %d of the burst waited %s, want 0", i+1, wait)
 		}
 	}
-	if wait := p.reserve(); wait != identifyRefill {
+	if wait := p.Reserve(); wait != identifyRefill {
 		t.Fatalf("first IDENTIFY past the burst waits %s, want %s", wait, identifyRefill)
 	}
 	// Reservations queue: the next caller waits behind the previous one.
-	if wait := p.reserve(); wait != 2*identifyRefill {
+	if wait := p.Reserve(); wait != 2*identifyRefill {
 		t.Fatalf("second IDENTIFY past the burst waits %s, want %s", wait, 2*identifyRefill)
 	}
 
 	// A quiet stretch refills the bucket, but never past the burst.
 	clock = clock.Add(24 * time.Hour)
 	for i := range identifyBurst {
-		if wait := p.reserve(); wait != 0 {
+		if wait := p.Reserve(); wait != 0 {
 			t.Fatalf("after a quiet day, IDENTIFY %d waited %s, want 0", i+1, wait)
 		}
 	}
-	if wait := p.reserve(); wait == 0 {
+	if wait := p.Reserve(); wait == 0 {
 		t.Fatal("the bucket refilled past its burst")
 	}
 }
 
 func TestIdentifyPacerWaitHonoursContext(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
-	p := newIdentifyPacer(func() time.Time { return clock })
+	p := NewIdentifyPacer(func() time.Time { return clock })
 	for range identifyBurst {
-		if err := p.wait(context.Background()); err != nil {
+		if err := p.Wait(context.Background()); err != nil {
 			t.Fatalf("wait inside the burst: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := p.wait(ctx); !errors.Is(err, context.Canceled) {
+	if err := p.Wait(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait past the burst with a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
+// TestIdentifyPacerRefundsAnAbandonedWait: a caller that gives up before its
+// turn sent nothing, so its reservation goes back. Kept, a bounded open that
+// kept timing out in the pacer was charged 3 minutes per ~1 minute attempt and
+// the hold grew without end (#642 review).
+func TestIdentifyPacerRefundsAnAbandonedWait(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	p := NewIdentifyPacer(func() time.Time { return clock })
+	for range identifyBurst {
+		p.Reserve()
+	}
+	for range 5 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := p.Wait(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("abandoned wait = %v, want context.Canceled", err)
+		}
+	}
+	if wait := p.Reserve(); wait != identifyRefill {
+		t.Fatalf("after five abandoned waits the next IDENTIFY waits %s, want %s (nothing was sent)", wait, identifyRefill)
 	}
 }
 

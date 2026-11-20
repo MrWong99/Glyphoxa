@@ -184,11 +184,11 @@ func TestMatcher_EmptyHeuristicStackNeverAddresses(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Bart!"))
 }
 
-// TestMatcher_MultiTargetEnsemble covers the multi-target half of the contract:
-// one utterance naming two NPCs addresses both (an Ensemble Turn, ADR-0025).
+// TestMatcher_MultiTargetUncapped covers the multi-target half of the contract:
+// one utterance naming two NPCs addresses both when the cap is lifted.
 // MaxTargets: -1 lifts the single-target default cap so the full named set is
-// published — the proof that ensemble routing stays reachable.
-func TestMatcher_MultiTargetEnsemble(t *testing.T) {
+// published.
+func TestMatcher_MultiTargetUncapped(t *testing.T) {
 	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butler, bart, goblin)
 	got := m.TargetMatch("Bart and the Goblin start arguing")
 	assertIDs(t, got, "npc-bart", "npc-goblin")

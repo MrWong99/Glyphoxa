@@ -93,7 +93,7 @@ not a device/memory limit, and the hard parts are already solved.
 
 What is **already** per-session and N-instanceable (verified): the entire audio
 pipeline is built per connect-and-serve cycle — audio manager, codec, playback pump,
-tee synthesizer, per-speaker VAD lanes, barge-in Floor, ensemble/reaction state,
+tee synthesizer, per-speaker VAD lanes, barge-in Floor,
 STT/TTS/LLM clients, tool grants, BYOK keys, spend meter, usage ledger
 (`internal/wirenpc/connect.go`, `pipeline.go`, `run.go`; `internal/session/manager.go`
 `activeSession`). `pkg/voice.Manager` is **already multi-guild** on one bot client

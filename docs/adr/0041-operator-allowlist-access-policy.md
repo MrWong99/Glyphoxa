@@ -11,6 +11,12 @@ The allowlist as shipped gated only **new** logins: `storage.AuthenticateSession
 - **Per-request re-check** (Contains() after AuthenticateSession) — rejected *for now*: the only session-minting paths are the gated callback and the loopback-only dev seed, so it adds wiring (allowlist threaded through the interceptor stack + RequireSession, dev-mode carve-out) without closing a real hole. **It becomes mandatory the day the allowlist is runtime-editable** (config UI) — revisit then.
 - **Upgrade note**: instances that ran pre-gate builds with OAuth configured should also audit `tenant` for stranger-claimed rows — those are data, not sessions; the sweep does not touch them.
 
+## Amendment: dev mode refuses non-loopback Host and cross-origin requests (2026-11-20)
+
+The forced loopback bind keeps other *machines* out of a `GLYPHOXA_DEV_MODE` instance, and the proxy-header refusal keeps same-host proxies out. Neither keeps out the developer's own **browser**, which is on the loopback interface too and will send requests there on behalf of any page it has open. In dev mode that matters more than usual, because the auto-auth middleware overwrites the cookies and supplies the CSRF header itself — so the two defences the real gate has against a hostile page (SameSite cookies, the double-submit token) are inert.
+
+**Decided: dev mode additionally refuses (403)** a request whose `Host` header does not name loopback (`localhost`, `*.localhost`, a loopback IP) — the DNS-rebinding case, where `evil.example` re-resolves to `127.0.0.1` and becomes same-origin with the instance — and a request whose `Origin` header is present and is not a loopback origin — the cross-site form POST. A loopback `Origin` on another port stays allowed, so the Vite dev server proxying `/api` keeps working. Requests with no `Origin` (curl, same-origin navigations) are unaffected.
+
 ## What this decides
 
 - **`GLYPHOXA_OPERATOR_IDS` is the gate.** A comma/whitespace-separated list of Discord User snowflakes, checked at the OAuth callback. A Discord User not on the list is rejected *before* any session issuance or Tenant write and redirected to the login screen with a `not_authorized` signal.

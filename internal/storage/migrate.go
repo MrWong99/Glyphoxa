@@ -43,8 +43,17 @@ func NewMigrationProvider(db *sql.DB) (*goose.Provider, error) {
 		return nil, fmt.Errorf("storage: build migration session locker: %w", err)
 	}
 
+	// WithAllowOutofOrder: migrations are numbered by whoever opens the PR, and
+	// parallel PRs merge in any order, so a database can already be at 00058
+	// when 00056 first reaches it. goose's default refuses that ("found missing
+	// migrations") and would brick `migrate up`; with the option a lower-numbered
+	// migration that is not yet applied is simply applied. Each migration must
+	// therefore be written to hold regardless of its neighbours' order — which
+	// independent PRs' migrations are by construction. The option also makes
+	// HasPending compare the applied SET rather than the highest version, which
+	// [EnsureCurrent] depends on.
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS,
-		goose.WithSessionLocker(locker))
+		goose.WithSessionLocker(locker), goose.WithAllowOutofOrder(true))
 	if err != nil {
 		return nil, fmt.Errorf("storage: build migration provider: %w", err)
 	}
@@ -117,33 +126,51 @@ func Version(ctx context.Context, db *sql.DB) (int64, error) {
 	return v, nil
 }
 
-// EnsureCurrent verifies the DB schema is at the latest known version. web and
-// voice Modes call this at startup and fail fast if the schema is behind
+// EnsureCurrent verifies that EVERY embedded migration has been applied. web
+// and voice Modes call this at startup and fail fast if the schema is behind
 // (ADR-0031) — they never auto-migrate.
 //
-// A schema AHEAD of this binary is allowed (it is the normal state of an old pod
-// during a rolling upgrade, and of a rollback) but logged at WARN: the binary is
-// running against tables a newer release has changed, and "everything started
-// fine" is otherwise all an operator sees before the first query fails.
+// "Behind" is judged on the applied set, not the highest version: comparing
+// maxima alone called a database current when a lower-numbered migration had
+// merged after a higher one and was never applied — the process then booted
+// against a schema missing that migration.
+//
+// A schema AHEAD of this binary (the database carries a version newer than any
+// migration embedded here) is allowed: it is the normal state of an old pod
+// during a rolling upgrade, and of a rollback. It is logged at WARN, once per
+// process: the binary is running against tables a newer release has changed,
+// and "everything started fine" is otherwise all an operator sees before the
+// first query fails.
 func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 	p, err := NewMigrationProvider(db)
 	if err != nil {
 		return err
 	}
-	current, target, err := p.GetVersions(ctx)
+	raw, err := p.Status(ctx)
 	if err != nil {
-		return fmt.Errorf("storage: read versions: %w", err)
+		return fmt.Errorf("storage: read migration status: %w", err)
 	}
-	ahead, err := schemaVersionVerdict(current, target)
-	if err != nil {
-		return err
+	var pending []int64
+	var embeddedMax int64
+	for _, st := range raw {
+		if st.State != goose.StateApplied {
+			pending = append(pending, st.Source.Version)
+		}
+		embeddedMax = max(embeddedMax, st.Source.Version)
 	}
-	if ahead {
+	if len(pending) > 0 {
+		return fmt.Errorf(
+			"storage: schema out of date (%d unapplied migration(s): %v); run `glyphoxa migrate up`",
+			len(pending), pending)
+	}
+	// Every embedded migration is applied. Is the database further along still?
+	// Best-effort: a failed version read only costs the warning.
+	if dbVersion, err := p.GetDBVersion(ctx); err == nil && schemaAhead(dbVersion, embeddedMax) {
 		// Once per process: EnsureCurrent runs at every Voice Session start, and
 		// the condition does not change while the process lives.
 		aheadWarnOnce.Do(func() {
 			slog.WarnContext(ctx, "storage: database schema is NEWER than this binary; it was migrated by a later release. Queries may fail on changed tables: upgrade this binary, or finish the rollback by migrating down",
-				"db_version", current, "binary_version", target)
+				"db_version", dbVersion, "binary_version", embeddedMax)
 		})
 	}
 	return nil
@@ -153,14 +180,8 @@ func EnsureCurrent(ctx context.Context, db *sql.DB) error {
 // line per process.
 var aheadWarnOnce sync.Once
 
-// schemaVersionVerdict is EnsureCurrent's decision: a DB behind the binary's
-// embedded migrations is an error (run `migrate up`); a DB ahead of them is
-// served, with ahead=true so the caller can warn.
-func schemaVersionVerdict(current, target int64) (ahead bool, err error) {
-	if current < target {
-		return false, fmt.Errorf(
-			"storage: schema out of date (db at version %d, want %d); run `glyphoxa migrate up`",
-			current, target)
-	}
-	return current > target, nil
+// schemaAhead reports whether the database's highest applied version is newer
+// than every migration this binary embeds: it was migrated by a later release.
+func schemaAhead(dbVersion, embeddedMax int64) bool {
+	return dbVersion > embeddedMax
 }

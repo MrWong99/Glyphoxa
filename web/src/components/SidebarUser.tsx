@@ -2,12 +2,14 @@ import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { LogOut } from "lucide-react";
+import { toast } from "sonner";
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Avatar } from "./ui/Avatar";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/connectError";
 
 // SidebarUser is the app-shell footer identity (ADR-0016 / ADR-0039): it renders
 // the real signed-in operator (name / role / avatar) the AuthGate resolved,
@@ -24,6 +26,10 @@ export function SidebarUser({ user }: { user: User }) {
       queryClient.clear();
       void navigate({ to: "/login" });
     },
+    // A failed logout must say so (ADR-0017: sonner): the button just
+    // re-enabling reads as "nothing happened" at best and "I'm logged out" at
+    // worst — on a shared machine the session is still live.
+    onError: (err) => toast.error(t("components.logOutFailed", { message: errorMessage(err) })),
   });
 
   return (

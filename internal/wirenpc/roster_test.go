@@ -1025,3 +1025,42 @@ func TestRoster_SingleNPCBehaviorPreserved(t *testing.T) {
 		}
 	}
 }
+
+// failingEngine is an [agent.Engine] whose every completion fails terminally.
+type failingEngine struct{}
+
+func (failingEngine) Generate(context.Context, []llm.Message) (string, error) {
+	return "", errors.New("provider down")
+}
+
+// TestRosterDepsForLive_FallbackLineInCampaignLanguage pins the live wiring of
+// the terminal-error stall: an NPC of a German campaign speaks the German line,
+// not the English default, when its Engine fails before any audio.
+func TestRosterDepsForLive_FallbackLineInCampaignLanguage(t *testing.T) {
+	for _, c := range []struct{ language, want string }{
+		{"de", agent.FallbackLineFor("de")},
+		{"en", agent.DefaultFallbackLine},
+		{"", agent.DefaultFallbackLine},
+	} {
+		deps := rosterDepsForLive(conversationDeps{log: slog.New(slog.DiscardHandler), language: c.language},
+			func(npcSpec) agent.Engine { return failingEngine{} }, &recordingSynth{}, 16)
+		// A voiced spec: the fallback is never spoken for a voiceless Persona.
+		r := deps.replierFor(npcSpec{agentID: "npc-bart", name: "Bart", role: voiceevent.AgentRoleCharacter,
+			voice: tts.Voice{ProviderID: "test", VoiceID: "b", Name: "Bart"}})
+		route := voiceevent.AddressRouted{At: time.Now(), Text: "Bart?",
+			Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter, Name: "Bart"}}
+		var spoken []string
+		if err := r.ReplyStream()(context.Background(), route, func(rep orchestrator.Reply) error {
+			spoken = append(spoken, rep.Sentence)
+			return nil
+		}); err != nil {
+			t.Fatalf("language %q: ReplyStream = %v, want nil (fallback spoken)", c.language, err)
+		}
+		if len(spoken) != 1 || spoken[0] != c.want {
+			t.Errorf("language %q: spoken %q, want [%q]", c.language, spoken, c.want)
+		}
+	}
+	if agent.FallbackLineFor("de") == agent.DefaultFallbackLine {
+		t.Error("the German fallback line is the English default")
+	}
+}
