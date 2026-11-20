@@ -220,6 +220,11 @@ func (p PGStore) InTx(ctx context.Context, fn func(tx ImportStore) error) error 
 	return p.Store.InTx(ctx, func(tx *storage.Store) error { return fn(tx) })
 }
 
+// hasBlobStore tells [Import] whether this adapter can write image bytes at
+// all: a PGStore implements [MapImageWriter] either way, and one with a nil
+// Blobs must take the importer's no-writer path, not fail inside WriteMapImage.
+func (p PGStore) hasBlobStore() bool { return p.Blobs != nil }
+
 // WriteMapImage implements [MapImageWriter].
 func (p PGStore) WriteMapImage(ctx context.Context, key, contentType string, data []byte) error {
 	if p.Blobs == nil {

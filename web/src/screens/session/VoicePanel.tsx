@@ -85,6 +85,15 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
         {anyVoicing ? t("session.muteAll") : t("session.unmuteAll")}
       </button>
 
+      {rosterQuery.isError && (
+        <div className="gx-voice-panel__error" role="alert">
+          <p>{t("session.rosterLoadFailed", { message: errorMessage(rosterQuery.error) })}</p>
+          <button type="button" className="gx-voice-panel__retry" onClick={() => void rosterQuery.refetch()}>
+            {t("session.retry")}
+          </button>
+        </div>
+      )}
+
       <ul className="gx-voice-panel__rows">
         {roster.map((a) => {
           const butler = isButler(a);
@@ -94,14 +103,16 @@ export function VoicePanel({ active, mutedIds }: { active: boolean; mutedIds: st
           // a silently swallowed CodeNotFound), while Character NPCs toggle mute.
           // "address-only" is internal vocabulary — users see plain language.
           // With no live session nobody is producing audio: "Ready", not
-          // "Speaking" — the head counts 0 of N and the rows must agree.
+          // "Voice on" — the head counts 0 of N and the rows must agree. An
+          // unmuted NPC reads "Voice on", never "Speaking": unmuted only means
+          // it MAY speak, not that it is producing audio right now.
           const state = butler
             ? t("session.butlerState")
             : !active
               ? t("session.stateIdle")
               : isMuted
                 ? t("session.stateMuted")
-                : t("session.stateSpeaking");
+                : t("session.stateVoiceOn");
           return (
             <li key={a.id} className="gx-voice-row" data-muted={isMuted || undefined} data-testid="voice-row">
               {butler ? (

@@ -69,6 +69,10 @@ type ClipResult struct {
 	ReplyLatencySeconds float64 `json:"reply_latency_seconds,omitempty"`
 	ReplySeconds        float64 `json:"reply_seconds,omitempty"`
 	ReplyFile           string  `json:"reply_file,omitempty"`
+	// Barge-in mode only: the clip whose reply this clip interrupted, and how
+	// long the Bot kept talking once the interruption began.
+	Interrupted     string  `json:"interrupted,omitempty"`
+	TalkoverSeconds float64 `json:"talkover_seconds,omitempty"`
 }
 
 // SpeakerResult is one recorded speaker.
@@ -92,6 +96,8 @@ func run() error {
 		linger       = flag.Duration("linger", 0, "keep listening this long after the last clip (soak, unprompted speech)")
 		requireReply = flag.Bool("require-reply", false, "exit 2 unless every clip got a reply")
 		maxLatency   = flag.Duration("max-latency", 0, "exit 2 if any reply started later than this after its clip (0 = no limit)")
+		bargeAfter   = flag.Duration("barge-after", 0, "barge-in mode: clips are taken in pairs, the second spoken over the reply to the first once it has run this long (0 = off)")
+		maxTalkover  = flag.Duration("max-talkover", 0, "exit 2 if the Bot kept talking longer than this after being interrupted (0 = no limit)")
 		verbose      = flag.Bool("v", false, "log disgo/voice internals")
 	)
 	flag.Parse()
@@ -121,6 +127,9 @@ func run() error {
 		}
 		clips = append(clips, clip)
 	}
+	if *bargeAfter > 0 && len(clips)%2 != 0 {
+		return errors.New("-barge-after takes clips in pairs: a question, then the interruption")
+	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return err
 	}
@@ -146,14 +155,40 @@ func run() error {
 
 	summary := Summary{Guild: cfg.Guild.String(), Channel: cfg.Channel.String()}
 	var runErr error
-	for i, clip := range clips {
+	for i := 0; i < len(clips); i++ {
+		clip := clips[i]
 		say("speaking %s (%.1fs)", clip.Name, clip.Duration().Seconds())
-		reply, err := p.Say(ctx, clip)
+		var reply voiceprobe.Reply
+		var err error
+		res := ClipResult{Clip: clip.Name, ClipSeconds: clip.Duration().Seconds()}
+		if *bargeAfter > 0 {
+			over := clips[i+1]
+			i++
+			var barge voiceprobe.Barge
+			if barge, err = p.Interrupt(ctx, clip, over, *bargeAfter); err == nil && barge.Heard {
+				reply = barge.Reply
+				res.Clip, res.ClipSeconds = over.Name, over.Duration().Seconds()
+				res.Interrupted, res.TalkoverSeconds = clip.Name, barge.TalkedOver.Seconds()
+				if !barge.Interrupted {
+					say("the reply to %s had already ended when %s was spoken: nothing was interrupted", clip.Name, over.Name)
+					summary.Failures = append(summary.Failures,
+						fmt.Sprintf("%s: the reply to %s ended before the interruption; use a clip that draws a longer reply or a shorter -barge-after", over.Name, clip.Name))
+				} else {
+					say("interrupted the reply to %s with %s: the Bot talked on for %.2fs", clip.Name, over.Name, res.TalkoverSeconds)
+				}
+				if barge.Interrupted && *maxTalkover > 0 && barge.TalkedOver > *maxTalkover {
+					summary.Failures = append(summary.Failures,
+						fmt.Sprintf("%s: the Bot talked over the interruption for %s, more than %s", over.Name, barge.TalkedOver.Round(time.Millisecond), *maxTalkover))
+				}
+			}
+		} else {
+			reply, err = p.Say(ctx, clip)
+		}
 		if err != nil {
 			runErr = err
 			break
 		}
-		res := ClipResult{Clip: clip.Name, ClipSeconds: clip.Duration().Seconds(), Replied: reply.Heard}
+		res.Replied = reply.Heard
 		switch {
 		case !reply.Heard:
 			say("NO reply within %s", *maxWait)

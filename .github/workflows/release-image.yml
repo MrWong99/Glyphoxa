@@ -1,23 +1,26 @@
 name: release-image
 
 # Publishes the single Glyphoxa OCI image (ADR-0034) to GitHub Container
-# Registry on a release tag. The image tags match the goreleaser footer
-# (.goreleaser.yml: `docker pull ghcr.io/mrwong99/glyphoxa:v{{ .Version }}`) and
-# the issue-#31 requirement that the published image carry version + git SHA.
+# Registry on a release tag: ghcr.io/mrwong99/glyphoxa:<tag> plus the short git
+# SHA (the issue-#31 requirement that the published image carry version + git
+# SHA). The image is the only release artifact — there are no binary archives.
 #
-# Triggered by the same `v*` tags goreleaser releases on, so the binary archives
-# (goreleaser) and the container image are cut from one tag. The `zhi-*` tags
-# goreleaser ignores are excluded here too, for parity.
+# Before anything is pushed the job (1) refuses a tag whose commit has no green
+# ci.yml run and (2) builds the image locally and runs scripts/container-smoke.sh
+# against it (the same gate ci.yml's `image` job runs on every PR). Both are
+# pinned by internal/ci's workflow-invariant tests. `zhi-*` tags are excluded.
 on:
   push:
     tags:
       - "v*"
       - "!zhi-*"
 
-# Pushing to ghcr needs `packages: write`; `contents: read` to check out.
+# Pushing to ghcr needs `packages: write`; `contents: read` to check out;
+# `actions: read` to look up the ci.yml run for the tagged commit.
 permissions:
   contents: read
   packages: write
+  actions: read
 
 jobs:
   publish:
@@ -27,6 +30,24 @@ jobs:
     if: github.repository == 'MrWong99/Glyphoxa'
     steps:
       - uses: actions/checkout@v7
+
+      # Refuse to publish a commit CI never passed on. ci.yml runs on every push
+      # to main and every PR, so a tag cut from main has a completed ci.yml run
+      # for its exact SHA; require one with conclusion=success. A tag pushed
+      # before that run finishes fails here — re-run this workflow once CI is
+      # green.
+      - name: Require a green ci.yml run for the tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          green="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
+          if [ "${green:-0}" -lt 1 ]; then
+            echo "::error::no successful ci.yml run for ${SHA}; refusing to publish ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          echo "ci.yml is green for ${SHA}"
 
       # The Dockerfile does `COPY . .` then `go build` — gen/ is gitignored and
       # NOT generated inside the image (no buf/node in the builder), so it must
@@ -80,13 +101,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # docker/metadata-action derives the tag set from the git ref:
-      #   - type=ref,event=tag → the literal tag, e.g. v1.2.3 (matches the
-      #     goreleaser footer's ghcr.io/mrwong99/glyphoxa:v1.2.3).
+      #   - type=ref,event=tag → the literal tag, e.g. v1.2.3.
       #   - type=sha,prefix= → the short git SHA, e.g. a1b2c3d (the "+ git SHA"
       #     half of issue #31's "version + git SHA").
       #   - latest only on a non-prerelease tag.
-      # The repo is lowercased by the action, so MrWong99 → mrwong99 to match the
-      # goreleaser footer's ghcr.io/mrwong99/glyphoxa.
+      # The repo is lowercased by the action, so MrWong99 → mrwong99
+      # (ghcr.io/mrwong99/glyphoxa).
       - name: Compute image tags
         id: meta
         uses: docker/metadata-action@v6
@@ -97,11 +117,30 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
-      - name: Build and push
+      # Build once into the local daemon and smoke it BEFORE anything is pushed:
+      # the CLI runs, the binary is static and voice-capable, the image is
+      # scratch + non-root, and the real console is embedded (#31, #114).
+      - name: Build image (local, for the smoke test)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: glyphoxa:release-smoke
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+
+      - name: Container smoke test
+        run: ./scripts/container-smoke.sh glyphoxa:release-smoke
+
+      # Same inputs as the smoked build, so this is a cache hit that only pushes.
+      - name: Push
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The PR `image` job (ci.yml) primes this gha cache, so the release

@@ -20,6 +20,7 @@ package groq
 import (
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/openaicompat"
 )
@@ -51,7 +52,23 @@ const (
 	// gemini's thinking-token headroom; the #424 live run confirmed the default
 	// model produces complete spoken replies within it.
 	DefaultMaxTokens = 1024
+
+	// ReasoningEffort is sent for Groq's reasoning models (the gpt-oss family).
+	// Left unset they think at the provider default before the first spoken word,
+	// and on 2026-11-20 a production turn leaked that reasoning into the reply
+	// text, which the NPC then read aloud for 23 seconds. A voice reply is one to
+	// four sentences in character: "low" is all the deliberation it needs.
+	ReasoningEffort = "low"
 )
+
+// reasoningEffortFor returns the reasoning_effort to send for model. Groq accepts
+// the field only on reasoning models and rejects the request on the others.
+func reasoningEffortFor(model string) string {
+	if strings.HasPrefix(model, "openai/gpt-oss") {
+		return ReasoningEffort
+	}
+	return ""
+}
 
 // Client is the Groq LLM adapter: the shared [openaicompat.Client] preconfigured
 // by [New]. Construct with [New]; the zero value is not usable. Safe for
@@ -88,6 +105,7 @@ func New(apiKey string, opts ...Option) *Client {
 		openaicompat.WithBaseURL(DefaultBaseURL),
 		openaicompat.WithModel(DefaultModel),
 		openaicompat.WithDefaultMaxTokens(DefaultMaxTokens),
+		openaicompat.WithReasoningEffortFor(reasoningEffortFor),
 		// Groq honours stream_options.include_usage, so ask for the trailing usage
 		// chunk to meter tokens (#127, ADR-0045).
 		openaicompat.WithIncludeUsage(true),

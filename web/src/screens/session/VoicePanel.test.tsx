@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
@@ -36,7 +36,7 @@ const ROSTER = [BUTLER, BART, GRETA];
 // panelTransport serves a live-or-idle session with a mutable muted set plus the
 // campaign roster, so the Voice panel renders and its mutations round-trip in the
 // closure (mirroring the server's authoritative muted-id response).
-function panelTransport(opts: { active: boolean; muted?: string[] }) {
+function panelTransport(opts: { active: boolean; muted?: string[]; rosterFails?: boolean }) {
   let muted = opts.muted ?? [];
   const current = create(VoiceSessionSchema, {
     id: "vs1",
@@ -71,18 +71,23 @@ function panelTransport(opts: { active: boolean; muted?: string[] }) {
         create(GetActiveCampaignResponseSchema, {
           campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
         }),
-      getCampaignRoster: () =>
-        create(GetCampaignRosterResponseSchema, {
+      getCampaignRoster: () => {
+        if (opts.rosterFails) throw new ConnectError("roster boom", Code.Internal);
+        return create(GetCampaignRosterResponseSchema, {
           campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
           roster: ROSTER,
-        }),
+        });
+      },
     });
   });
 }
 
-function renderPanel(opts: { active: boolean; muted?: string[] }) {
+function renderPanel(opts: { active: boolean; muted?: string[]; rosterFails?: boolean }) {
+  const queryClient = makeQueryClient();
+  // A failing read would otherwise sit through react-query's default retries.
+  if (opts.rosterFails) queryClient.setDefaultOptions({ queries: { retry: false } });
   render(
-    <Providers transport={panelTransport(opts)} queryClient={makeQueryClient()}>
+    <Providers transport={panelTransport(opts)} queryClient={queryClient}>
       <Session />
     </Providers>,
   );
@@ -107,7 +112,7 @@ describe("VoicePanel (#211)", () => {
     expect(screen.getByText("Greta")).toBeInTheDocument();
     // The count is over the VOICEABLE Character NPCs only; the Address-Only Butler
     // is never voiced, so it is not in the denominator (2, not 3).
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 2 speaking");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 2 voices on");
   });
 
   it("disables every control when no Voice Session is live", async () => {
@@ -117,7 +122,7 @@ describe("VoicePanel (#211)", () => {
     // Mute-all + every per-Agent toggle disabled; count reads 0 while idle.
     expect(screen.getByRole("button", { name: /unmute all/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /mute bart/i })).toBeDisabled();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 speaking");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voices on");
   });
 
   it("mutes an Agent on click, dimming its row and dropping the count", async () => {
@@ -131,7 +136,7 @@ describe("VoicePanel (#211)", () => {
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
     // The mutation patched the shared cache, so the count reflects the mute.
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 speaking"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voices on"));
     // The toggle now offers to unmute Bart.
     expect(screen.getByRole("button", { name: /unmute bart/i })).toBeInTheDocument();
   });
@@ -141,11 +146,11 @@ describe("VoicePanel (#211)", () => {
     await screen.findByText("Butler");
     const butlerRow = screen.getByText("Butler").closest('[data-testid="voice-row"]') as HTMLElement;
     // The Butler is never voiced, so its row carries neither a Mute nor an Unmute
-    // control (no swallowed CodeNotFound) and reads as answers-when-called, not
-    // "Speaking" (the plain-language rewrite of the internal "address-only").
+    // control (no swallowed CodeNotFound) and says only the GM can call it, not
+    // "Voice on" (the plain-language rewrite of the internal "address-only").
     expect(within(butlerRow).queryByRole("button")).toBeNull();
-    expect(within(butlerRow).getByText(/answers when called/i)).toBeInTheDocument();
-    expect(within(butlerRow).queryByText("Speaking")).toBeNull();
+    expect(within(butlerRow).getByText(/answers only the GM, when called by name/i)).toBeInTheDocument();
+    expect(within(butlerRow).queryByText("Voice on")).toBeNull();
   });
 
   it("flips the mute-all button label between Mute all and Unmute all", async () => {
@@ -158,7 +163,7 @@ describe("VoicePanel (#211)", () => {
 
     // Now everyone is muted → Unmute all.
     expect(await screen.findByRole("button", { name: /unmute all/i })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 speaking"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voices on"));
   });
 
   it("flips a row from an SSE mute frame without a reload (AC5)", async () => {
@@ -179,6 +184,14 @@ describe("VoicePanel (#211)", () => {
 
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 speaking");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voices on");
+  });
+
+  it("shows an error with a retry when the roster fails to load, not an empty panel", async () => {
+    renderPanel({ active: true, rosterFails: true });
+    const alert = (await screen.findByText(/couldn't load the NPC list/i)).closest('[role="alert"]') as HTMLElement;
+    expect(alert).not.toBeNull();
+    expect(within(alert).getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryAllByTestId("voice-row")).toHaveLength(0);
   });
 });

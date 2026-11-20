@@ -184,6 +184,19 @@ bin/voiceprobe -guild G -channel C -reply-from BOT \
     -require-reply -max-latency 4s -out /tmp/probe clip1.wav clip2.wav
 ```
 
+To test **barge-in**, pass clips in pairs with `-barge-after`: the first clip is
+spoken, and once its reply has run that long the second is spoken over it. The
+summary reports how long the Bot kept talking after the interruption began
+(`talkover_seconds`; about half a second on production), and `-max-talkover`
+turns that into an exit-2 expectation. Use a first clip that draws a long answer.
+
+```bash
+bin/voiceprobe -guild G -channel C -reply-from BOT -barge-after 3s -max-talkover 1500ms \
+    -out /tmp/probe tell-a-long-story.wav stop-i-have-a-question.wav
+```
+
+In Go the same thing is `p.Interrupt(ctx, clip, over, after)`.
+
 What runs on every PR instead: the probe's reply detection and recording
 timeline (untagged tests, synthetic frames) and, in the `audio` job, a real
 clip through encode → decode.

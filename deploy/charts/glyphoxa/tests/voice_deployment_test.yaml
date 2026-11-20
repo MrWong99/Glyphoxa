@@ -141,7 +141,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+          value: ghcr.io/mrwong99/glyphoxa:v0.16.0
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -622,3 +622,52 @@ tests:
           content:
             name: GLYPHOXA_VOICE_GOROUTINE_CEILING
             value: "0"
+
+  - it: mounts a writable emptyDir at /tmp under the read-only rootfs
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tmp
+            emptyDir: {}
+
+  - it: appends extraEnv, extraVolumes and extraVolumeMounts
+    set:
+      voice:
+        extraEnv:
+          - name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
+            value: "2500"
+        extraVolumes:
+          - name: certs
+            secret:
+              secretName: extra-certs
+        extraVolumeMounts:
+          - name: certs
+            mountPath: /certs
+            readOnly: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_FLIGHT_TRACE_THRESHOLD_MS
+            value: "2500"
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: certs
+            mountPath: /certs
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: certs
+            secret:
+              secretName: extra-certs

@@ -82,7 +82,7 @@ pass "version comparison is numeric (v1.2.10 > v1.2.3)"
 
 # --- 7. semver prerelease ordering: rc -> GA is an UPGRADE, GA -> rc is not --
 # GNU sort -V alone gets this backwards (v1.3.0 < v1.3.0-rc1); the guard maps
-# '-' to '~' to restore semver order (.goreleaser.yml cuts prerelease tags).
+# '-' to '~' to restore semver order (the repo cuts v1.2.3-rc1-style prerelease tags).
 d="$workdir/rc-to-ga"; make_state "$d" v1.3.0-rc1
 out="$(run_update "$d" --dry-run --version v1.3.0 2>&1)" \
   || fail "the routine rc -> GA update (v1.3.0-rc1 -> v1.3.0) was refused as a downgrade: $out"

@@ -170,16 +170,23 @@ func Join(ctx context.Context, cfg Config) (*Probe, error) {
 	if err != nil {
 		return nil, fmt.Errorf("voiceprobe: build client: %w", err)
 	}
-	if err := client.OpenGateway(ctx); err != nil {
+	// Neither step fails on its own when the token lacks access: a join the bot
+	// may not make simply never gets its voice-server update. Bound both.
+	joinCtx, cancel := context.WithTimeout(ctx, joinTimeout)
+	defer cancel()
+	if err := client.OpenGateway(joinCtx); err != nil {
 		client.Close(context.Background())
 		return nil, fmt.Errorf("voiceprobe: open gateway: %w", err)
 	}
 	mgr := gxvoice.NewManager(client, gxvoice.WithLogger(log), gxvoice.WithDave(true),
 		gxvoice.WithSelfDeaf(false), gxvoice.WithSelfMute(false), gxvoice.WithInboundBuffer(1024))
-	sess, err := mgr.Open(ctx, cfg.Guild, cfg.Channel)
+	sess, err := mgr.Open(joinCtx, cfg.Guild, cfg.Channel)
 	if err != nil {
 		_ = mgr.Close()
 		client.Close(context.Background())
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("voiceprobe: no voice connection after %s: check the channel ID and that the probe bot is in the guild with Connect and Speak there: %w", joinTimeout, err)
+		}
 		return nil, fmt.Errorf("voiceprobe: join voice: %w", err)
 	}
 
@@ -192,30 +199,108 @@ func Join(ctx context.Context, cfg Config) (*Probe, error) {
 // Say speaks the clip and waits for the reply to finish. A missing reply is not
 // an error: it is reported as Reply.Heard == false, for the caller to assert on.
 func (p *Probe) Say(ctx context.Context, clip Clip) (Reply, error) {
+	if err := p.speak(ctx, clip); err != nil {
+		return Reply{}, err
+	}
+	return p.rec.waitReply(ctx, time.Now(), p.cfg.Quiet, p.cfg.MaxWait)
+}
+
+// Barge is what the probe heard when it talked over a reply (a barge-in).
+type Barge struct {
+	// Heard is false when the first clip got no reply to interrupt; nothing
+	// else is set and the second clip was not spoken.
+	Heard bool
+	// Interrupted is false when the reply had already ended by the time the
+	// probe spoke over it: nothing was interrupted and TalkedOver says nothing
+	// about barge-in. Use a first clip that draws a longer reply.
+	Interrupted bool
+	// Latency is the time from the end of the first clip to its reply.
+	Latency time.Duration
+	// TalkedOver is how long the Bot kept talking after the probe started to
+	// speak over it: small when barge-in works, the rest of the reply when the
+	// Bot ignored the interruption.
+	TalkedOver time.Duration
+	// Reply is what came back for the interrupting clip, if anything.
+	Reply Reply
+}
+
+// bargeGap is the silence that separates the interrupted reply from the reply
+// to the interruption. Shorter than any turn (STT + LLM + TTS), longer than a
+// pause between two sentences of one reply.
+const bargeGap = 700 * time.Millisecond
+
+// joinTimeout bounds [Join]; playMargin is how long past its own length a clip
+// may take to go out before [Probe.Say] gives up on it.
+const (
+	joinTimeout = 30 * time.Second
+	playMargin  = 20 * time.Second
+)
+
+// opusFrameDuration is the length of one voice frame.
+const opusFrameDuration = 20 * time.Millisecond
+
+// pauseRebase is how far behind its timestamp a frame must arrive to count as
+// the start of a new utterance after a pause (see [recorder.record]).
+const pauseRebase = 200 * time.Millisecond
+
+// Interrupt speaks clip, lets the reply run for after, then speaks over on top
+// of it and reports how quickly the Bot yielded and what it answered. Use a
+// clip that draws a reply longer than after plus the length of over.
+func (p *Probe) Interrupt(ctx context.Context, clip, over Clip, after time.Duration) (Barge, error) {
+	if err := p.speak(ctx, clip); err != nil {
+		return Barge{}, err
+	}
+	asked := time.Now()
+	first, err := p.rec.waitStart(ctx, asked, p.cfg.MaxWait)
+	if err != nil || first.IsZero() {
+		return Barge{}, err
+	}
+	select {
+	case <-time.After(after):
+	case <-ctx.Done():
+		return Barge{}, ctx.Err()
+	}
+	barged := time.Now()
+	if err := p.speak(ctx, over); err != nil {
+		return Barge{}, err
+	}
+	out := Barge{Heard: true, Latency: first.Sub(asked)}
+	out.Interrupted, out.TalkedOver, out.Reply, err = p.rec.waitBarge(ctx, barged, time.Now(), p.cfg.Quiet, p.cfg.MaxWait)
+	return out, err
+}
+
+// speak plays one clip to its end.
+func (p *Probe) speak(ctx context.Context, clip Clip) error {
 	if len(clip.PCM) == 0 {
-		return Reply{}, fmt.Errorf("voiceprobe: clip %q is empty", clip.Name)
+		return fmt.Errorf("voiceprobe: clip %q is empty", clip.Name)
 	}
 	ch := make(chan tts.AudioChunk, 1)
 	ch <- tts.AudioChunk{PCM: clip.PCM, SampleRate: clip.SampleRate, Channels: clip.Channels}
 	close(ch)
 	src, err := p.codec.PlaybackSource(ch)
 	if err != nil {
-		return Reply{}, fmt.Errorf("voiceprobe: encoder (build with -tags \"opus nolibopusfile\"): %w", err)
+		return fmt.Errorf("voiceprobe: encoder (build with -tags \"opus nolibopusfile\"): %w", err)
 	}
 	pb, err := p.sess.Play(ctx, src)
 	if err != nil {
-		return Reply{}, fmt.Errorf("voiceprobe: play %q: %w", clip.Name, err)
+		return fmt.Errorf("voiceprobe: play %q: %w", clip.Name, err)
 	}
+	stuck := time.NewTimer(clip.Duration() + playMargin)
+	defer stuck.Stop()
 	select {
 	case <-pb.Done():
+	case <-stuck.C:
+		pb.Stop()
+		return fmt.Errorf("voiceprobe: %q (%s) was still not sent after %s: alone in a channel the probe cannot speak (Discord completes the DAVE group only with a second member) — start the Voice Session first",
+			clip.Name, clip.Duration().Round(100*time.Millisecond), clip.Duration()+playMargin)
 	case <-ctx.Done():
 		pb.Stop()
-		return Reply{}, ctx.Err()
+		return ctx.Err()
 	}
 	if err := pb.Err(); err != nil {
-		return Reply{}, fmt.Errorf("voiceprobe: playback %q: %w", clip.Name, err)
+		return fmt.Errorf("voiceprobe: playback %q: %w", clip.Name, err)
 	}
-	return p.rec.waitReply(ctx, time.Now(), p.cfg.Quiet, p.cfg.MaxWait)
+	return nil
 }
 
 // Listen keeps recording for d without speaking (a settle period after joining,
@@ -256,6 +341,9 @@ type recorder struct {
 	armed time.Time
 	first time.Time
 	last  time.Time
+	// arrivals are the counted frames' arrival times since armed: the timeline
+	// [Probe.Interrupt] reads to tell the interrupted reply from the next one.
+	arrivals []time.Time
 }
 
 type track struct {
@@ -300,6 +388,15 @@ func (r *recorder) record(f gxvoice.Frame, now time.Time) {
 		r.tracks[f.UserID] = t
 		rebase = true
 	}
+	// A speaker's PTS only advances while they send: after a pause their next
+	// frame carries the timestamp right behind the last one. Left alone it would
+	// be written directly after the previous utterance — a track with no pauses,
+	// and a reply window ([recorder.mix] reads wall-clock time) full of silence.
+	// So a frame that arrives well after its PTS says it should re-anchors the
+	// stream to the wall clock. Jitter is far below the threshold.
+	if !rebase && samplesIn(now.Sub(r.start))-(t.base+samplesIn(f.PTS)) > samplesIn(pauseRebase) {
+		rebase = true
+	}
 	if rebase {
 		t.base = samplesIn(now.Sub(r.start)) - samplesIn(f.PTS)
 	}
@@ -317,8 +414,11 @@ func (r *recorder) record(f gxvoice.Frame, now time.Time) {
 	copy(t.pcm[at:], t.buf[:n])
 	t.voiced += n
 	if r.counts(f.UserID) {
-		if r.first.IsZero() && !r.armed.IsZero() && now.After(r.armed) {
-			r.first = now
+		if !r.armed.IsZero() && now.After(r.armed) {
+			if r.first.IsZero() {
+				r.first = now
+			}
+			r.arrivals = append(r.arrivals, now)
 		}
 		r.last = now
 	}
@@ -326,11 +426,107 @@ func (r *recorder) record(f gxvoice.Frame, now time.Time) {
 
 func samplesIn(d time.Duration) int { return int(d.Seconds() * SampleRate) }
 
+// arm starts a new reply wait at since. Callers hold r.mu.
+func (r *recorder) arm(since time.Time) {
+	r.armed, r.first, r.arrivals = since, time.Time{}, r.arrivals[:0]
+}
+
+// waitStart blocks until the first counted audio after since and returns when
+// it arrived, or the zero time when maxWait passes with nothing heard. The
+// wait stays armed, so the arrivals keep accumulating for [recorder.waitBarge].
+func (r *recorder) waitStart(ctx context.Context, since time.Time, maxWait time.Duration) (time.Time, error) {
+	r.mu.Lock()
+	r.arm(since)
+	r.mu.Unlock()
+
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return time.Time{}, ctx.Err()
+		case now := <-tick.C:
+			r.mu.Lock()
+			first := r.first
+			r.mu.Unlock()
+			if !first.IsZero() || now.Sub(since) >= maxWait {
+				return first, nil
+			}
+		}
+	}
+}
+
+// waitBarge follows an interruption that began at barged and whose clip ended
+// at spoken: it reports whether a reply was running at barged at all, how long
+// it ran on past barged, and the reply to the interruption once it has been
+// followed by quiet (or the zero Reply when maxWait passes after spoken without
+// one).
+func (r *recorder) waitBarge(ctx context.Context, barged, spoken time.Time, quiet, maxWait time.Duration) (bool, time.Duration, Reply, error) {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false, 0, Reply{}, ctx.Err()
+		case now := <-tick.C:
+			r.mu.Lock()
+			cut, resumed, last := splitBarge(r.arrivals, barged, spoken, now, bargeGap)
+			r.mu.Unlock()
+			// A reply whose last frame is older than a frame or two at barged had
+			// already ended: there was nothing to interrupt.
+			interrupted := cut.After(barged.Add(-5 * opusFrameDuration))
+			switch {
+			case cut.IsZero(): // the interrupted reply is still running
+			case !resumed.IsZero() && now.Sub(last) >= quiet:
+				return interrupted, talkedOver(cut, barged), Reply{
+					Heard:    true,
+					Latency:  resumed.Sub(spoken),
+					Duration: last.Sub(resumed),
+					PCM:      r.mix(resumed, last),
+				}, nil
+			case resumed.IsZero() && now.Sub(spoken) >= maxWait:
+				return interrupted, talkedOver(cut, barged), Reply{}, nil
+			}
+		}
+	}
+}
+
+func talkedOver(cut, barged time.Time) time.Duration { return max(cut.Sub(barged), 0) }
+
+// splitBarge reads a frame-arrival timeline around an interruption that began at
+// barged and whose clip ended at spoken: cut is the last frame of the reply that
+// was running at barged (zero while it has not yet fallen silent for gap, judged
+// at now), resumed the first frame of the reply to the interruption (zero if none
+// yet), last the latest frame. A pause that ends before spoken is not the end of
+// the interrupted reply — the Bot cannot answer a clip it has not heard out — so
+// it is a pause between two of its sentences, and the reply is still running.
+func splitBarge(arrivals []time.Time, barged, spoken, now time.Time, gap time.Duration) (cut, resumed, last time.Time) {
+	if len(arrivals) == 0 {
+		return barged, time.Time{}, time.Time{}
+	}
+	last = arrivals[len(arrivals)-1]
+	prev := barged
+	for _, at := range arrivals {
+		if at.Before(barged) {
+			prev = at
+			continue
+		}
+		if at.Sub(prev) >= gap && !at.Before(spoken) {
+			return prev, at, last
+		}
+		prev = at
+	}
+	if now.Sub(prev) >= gap {
+		return prev, time.Time{}, last
+	}
+	return time.Time{}, time.Time{}, last
+}
+
 // waitReply blocks until audio that began after since has been followed by
 // quiet of silence, or until maxWait passes with nothing heard.
 func (r *recorder) waitReply(ctx context.Context, since time.Time, quiet, maxWait time.Duration) (Reply, error) {
 	r.mu.Lock()
-	r.armed, r.first = since, time.Time{}
+	r.arm(since)
 	r.mu.Unlock()
 
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -362,7 +558,9 @@ func (r *recorder) waitReply(ctx context.Context, since time.Time, quiet, maxWai
 // frame of margin either side for the arrival jitter the timeline was built on.
 func (r *recorder) mix(from, to time.Time) []int16 {
 	lo := max(samplesIn(from.Sub(r.start))-opusFrame, 0)
-	hi := samplesIn(to.Sub(r.start)) + 2*opusFrame
+	// The tail margin also covers audio a delivery stall pushed later on the
+	// track than it was heard (see the re-anchoring in record).
+	hi := samplesIn(to.Sub(r.start)) + 2*opusFrame + samplesIn(pauseRebase)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]int16, hi-lo)

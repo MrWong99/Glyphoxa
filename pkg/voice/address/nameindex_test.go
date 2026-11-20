@@ -132,7 +132,7 @@ func TestMinNameConfidence_IsStricterThanTheLiveDetector(t *testing.T) {
 // defaulted, so a stack without a NameMatch cannot pass the comparison by
 // accident.
 func liveNameThreshold() (float64, bool) {
-	for _, h := range DefaultHeuristics() {
+	for _, h := range DefaultHeuristicsWithin(DefaultContinuationWindow) {
 		if nm, ok := h.(NameMatch); ok {
 			return nm.Threshold, true
 		}

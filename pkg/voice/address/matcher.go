@@ -1,6 +1,7 @@
 package address
 
 import (
+	"log/slog"
 	"sort"
 	"strconv"
 	"sync"
@@ -26,13 +27,10 @@ type Agent struct {
 	// a mid-sentence noun ("was für eine Art …") never routes here. Callers derive
 	// them with [DeriveTruncationAliases]; empty for Agents with none.
 	TruncationAliases []string
-	// Expertise lists words this Agent is considered the expert on, consumed by
-	// the [ExpertOnRecentWord] heuristic.
-	Expertise []string
 	// AddressOnly marks an Agent reachable only by an explicit name match
 	// (CONTEXT.md "Address-Only"): it is excluded from every non-name heuristic,
-	// so continuation, interruption, and single-NPC fallback can never route to
-	// it. The Butler is conventionally AddressOnly; Character NPCs are not.
+	// so continuation and single-NPC fallback can never route to it. The Butler
+	// is conventionally AddressOnly; Character NPCs are not.
 	AddressOnly bool
 
 	index int // position in the matcher's agents slice; set at construction
@@ -60,8 +58,8 @@ type Config struct {
 	Encoders *EncoderRegistry
 	// NameMatch tunes the fuzzy engine (windowing, rune floor, edit bound).
 	NameMatch NameMatchConfig
-	// Heuristics is the scoring stack. Nil uses [DefaultHeuristics]; an
-	// explicitly empty (non-nil, zero-length) slice disables scoring entirely
+	// Heuristics is the scoring stack. Nil uses [DefaultHeuristicsWithin] bound
+	// by ContinuationWindow; an explicitly empty (non-nil, zero-length) slice disables scoring entirely
 	// (nothing is ever addressed), which is occasionally useful in tests.
 	Heuristics []Heuristic
 	// AddressThreshold is the minimum total score an Agent needs to be
@@ -87,9 +85,6 @@ type Config struct {
 	// Nil leaves the Butler addressable by any speaker (the rollout default, and
 	// byte-identical to the pre-gate [Matcher.TargetMatch] path).
 	ButlerGMGate func(speakerID string) bool
-	// RecencyWindow bounds how long mentioned words and interruptions stay
-	// "recent". Default 30s.
-	RecencyWindow time.Duration
 	// ContinuationWindow bounds how long the last-speaker continuation claim
 	// survives (ADR-0024 stage-2 amendment, 2026-07-27): past it an unnamed
 	// utterance no longer routes to whoever was addressed last, and the
@@ -98,65 +93,47 @@ type Config struct {
 	// unbounded continuation, which is the behaviour that made an NPC answer
 	// every unnamed utterance for the rest of the session.
 	//
-	// It is applied by seeding [LastAddressed.Within] in [DefaultHeuristics]; a
-	// caller supplying its own Heuristics owns its own bound and this field is
-	// then ignored.
+	// It is applied by seeding [LastAddressed.Within] in
+	// [DefaultHeuristicsWithin]; a caller supplying its own Heuristics owns its
+	// own bound and this field is then ignored.
 	ContinuationWindow time.Duration
-	// MaxRecentWords caps the rolling mentioned-word buffer. Default 200.
-	MaxRecentWords int
 	// Clock supplies the current time; nil uses time.Now. Tests inject a fake
-	// clock to drive the recency windows deterministically.
+	// clock to drive the continuation window deterministically.
 	Clock func() time.Time
 }
 
 // DefaultContinuationWindow is the shipped bound on the last-speaker
-// continuation claim (ADR-0024 stage-2 amendment, 2026-07-27). It is sized for
-// the gap a real exchange leaves: the Agent's own spoken answer (a handful of
-// sentences of TTS) plus the human's think-and-reply pause still fall inside it,
-// so "und dann?" keeps working, while a conversation the table has genuinely
-// moved on from expires and stops pulling every unnamed utterance.
+// continuation claim (ADR-0024 stage-2 amendment, 2026-07-27). It is measured
+// from the END of the exchange so far — the routing decision, moved forward by
+// the addressed Agent's reply while that is audible
+// ([Matcher.ExtendContinuation], amendment 2026-11-20) — so it only has to
+// cover the human's think-and-reply pause, however long the answer ran. A
+// conversation the table has genuinely moved on from still expires and stops
+// pulling unnamed utterances.
 const DefaultContinuationWindow = 30 * time.Second
 
-// DefaultHeuristics returns the v1.0 scoring stack: explicit name match
-// (dominant), last-addressed continuation, expert-on-recent-word, and the
-// single-NPC fallback. Continuation is bounded by [DefaultContinuationWindow];
-// use [DefaultHeuristicsWithin] to bound it differently.
-func DefaultHeuristics() []Heuristic {
-	return DefaultHeuristicsWithin(DefaultContinuationWindow)
-}
-
-// DefaultHeuristicsWithin returns [DefaultHeuristics] with the continuation
-// claim bounded by continuation (non-positive: unbounded, the pre-amendment
-// behaviour).
+// DefaultHeuristicsWithin returns the shipped scoring stack — explicit name
+// match, then last-speaker continuation bounded by continuation (non-positive:
+// unbounded, the pre-2026-07-27 behaviour).
 //
 // The weights encode ADR-0024's ordered chain as additive scores against the
 // default threshold of 1.0. An explicit name match (weight 1.0) addresses on
 // its own and suppresses every ambient heuristic (see
 // [DecisionContext.AnyNameMatched]), so a named Agent is never joined by a
-// fallback. When no name is heard, continuation is the one decisive ambient
-// signal (weight 1.0) — and only inside its window — while the lone-NPC
-// fallback and expert-on-word are corroborating hints (0.5 each) that reinforce
-// or break ties without addressing anyone on their own. No ambient signal can
-// ever route to an AddressOnly Agent, which stays name-gated regardless.
+// fallback. When no name is heard, continuation is the one ambient signal
+// (weight 1.0) — only inside its window, and only for the speaker who opened
+// the exchange. No ambient signal can ever route to an AddressOnly Agent, which
+// stays name-gated regardless.
 //
-// The 2026-07-27 amendment demoted [SoleActiveNPC] from decisive to
-// corroborating: at weight 1.0 the single Character NPC of an ordinary campaign
-// answered EVERY non-empty utterance anybody made — players talking to each
-// other, thinking aloud, backchannelling — because nothing else was needed to
-// reach the threshold. A lone NPC is now opened by name like any other, after
-// which continuation carries the exchange.
-//
-// [RecentlyInterrupted] is deliberately NOT a default (#442): it REWARDS the
-// interrupted Agent, and live testing showed the opposite is wanted — a human
-// cutting an Agent off means "stop", which the barge path now expresses by
-// clearing the continuation claim ([Matcher.ClearContinuation], ADR-0027
-// amendment) rather than by scoring a bonus.
+// A lone Character NPC is opened by name like any other, after which
+// continuation carries the exchange: [SoleActiveNPC] is opt-in, not a default
+// (see its doc). An interruption is expressed by REVOKING the continuation
+// claim ([Matcher.ClearContinuation], ADR-0027 amendment), not by a scoring
+// bonus: a human cutting an Agent off means "stop" (#442).
 func DefaultHeuristicsWithin(continuation time.Duration) []Heuristic {
 	return []Heuristic{
 		NameMatch{Weight: 1.0, Threshold: 0.6},
 		LastAddressed{Weight: 1.0, Within: continuation},
-		ExpertOnRecentWord{Weight: 0.5},
-		SoleActiveNPC{Weight: 0.5},
 	}
 }
 
@@ -171,8 +148,8 @@ func DefaultHeuristicsWithin(continuation time.Duration) []Heuristic {
 // the heuristic stack, and returns the set whose total reaches the threshold
 // (highest score first). The set may be empty (no target — the utterance is
 // still transcribed), hold one Agent (the usual case), or hold several (an
-// Ensemble Turn, ADR-0025). It then records the decision and the utterance's
-// words so the next turn's continuation and expertise heuristics can see them.
+// Ensemble Turn, ADR-0025). It then records the decision — who was addressed,
+// by whom, and when — so the next turn's continuation heuristic can see it.
 //
 // A Matcher carries mutable conversational state and is safe for concurrent
 // use; the bus delivers events synchronously but possibly from different
@@ -183,8 +160,6 @@ type Matcher struct {
 	heuristics []Heuristic
 	threshold  float64
 	maxTargets int // resolved cap: >0 caps at N, <0 is unlimited (0 never stored)
-	window     time.Duration
-	maxWords   int
 	clock      func() time.Time
 	// butlerGate is Config.ButlerGMGate: the matcher-side Butler eligibility gate
 	// consulted by TargetMatchFrom (#256). Nil means the Butler is addressable by
@@ -204,12 +179,18 @@ type Matcher struct {
 	index         *fuzzyIndex
 	agents        []Agent
 	lastAddressed map[string]bool
-	// lastAddressedAt is when lastAddressed was last REPLACED — the anchor the
+	// lastAddressedAt is the continuation claim's anchor — the instant the
 	// bounded continuation heuristic ([LastAddressed.Within]) measures against.
-	// One instant covers the whole set because match replaces it atomically.
+	// It is set when lastAddressed is replaced and moved forward by the addressed
+	// Agent's reply ([Matcher.ExtendContinuation]) and by the claim owner's
+	// backchannel. One instant covers the whole set because match replaces it
+	// atomically.
 	lastAddressedAt time.Time
-	interruptions   map[string]time.Time
-	recentWords     []timedWord
+	// lastAddressedBy is the SpeakerID whose NAMED address opened the current
+	// claim; only that speaker continues it without a name
+	// ([DecisionContext.AddressedWithin]). Empty when the opener was
+	// unattributed, which leaves the claim table-wide.
+	lastAddressedBy string
 	// muted holds the AgentIDs currently muted (#225). Mute is MATCHER-INTERNAL
 	// state guarded by m.mu — the SAME critical section as index and agents — so
 	// a scoring pass reads a mutually consistent index/roster/mute triple and
@@ -222,11 +203,6 @@ type Matcher struct {
 	// mute gate (which ends the turn pre-audio) instead of re-routing to another
 	// NPC — the exact #225 failure this closes.
 	muted map[string]struct{}
-}
-
-type timedWord struct {
-	word string
-	at   time.Time
 }
 
 // NewMatcher builds a [Matcher] for agents under cfg. It panics if no agents
@@ -253,14 +229,6 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 	threshold := cfg.AddressThreshold
 	if threshold <= 0 {
 		threshold = 1.0
-	}
-	window := cfg.RecencyWindow
-	if window <= 0 {
-		window = 30 * time.Second
-	}
-	maxWords := cfg.MaxRecentWords
-	if maxWords <= 0 {
-		maxWords = 200
 	}
 	clock := cfg.Clock
 	if clock == nil {
@@ -289,14 +257,11 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		heuristics:    heuristics,
 		threshold:     threshold,
 		maxTargets:    maxTargets,
-		window:        window,
-		maxWords:      maxWords,
 		clock:         clock,
 		language:      cfg.Language,
 		butlerGate:    cfg.ButlerGMGate,
 		agents:        agents,
 		lastAddressed: map[string]bool{},
-		interruptions: map[string]time.Time{},
 		muted:         map[string]struct{}{},
 	}
 	m.index = m.buildIndex()
@@ -321,17 +286,33 @@ func (m *Matcher) buildIndex() *fuzzyIndex {
 		names[i] = m.agents[i].matchableNames()
 		truncations[i] = m.agents[i].TruncationAliases
 	}
-	return newFuzzyIndex(m.nameMatch, m.enc, names, truncations)
+	idx := newFuzzyIndex(m.nameMatch, m.enc, names, truncations)
+	idx.common = commonWordsFor(m.language)
+	return idx
 }
 
-// NoteInterruption records that the Agent with agentID was just interrupted
-// (barged in on). The [RecentlyInterrupted] heuristic reads these. It is the
-// seam through which the turn-taking layer feeds Barge-in signals (ADR-0027)
-// to the matcher without the matcher depending on a bus event that does not yet
-// exist; tests call it directly. Unknown agentIDs are recorded harmlessly.
-func (m *Matcher) NoteInterruption(agentID string) {
+// ExtendContinuation moves the continuation claim's anchor to now, provided the
+// Agent with agentID currently holds the claim. It is the seam the reply path
+// feeds (ADR-0024 amendment, 2026-11-20): the window used to be measured from
+// the moment the Agent was ADDRESSED, so a long answer ate it — an Agent that
+// spoke for 24 s left the player six seconds to ask a follow-up, and a longer
+// answer left none (observed live). Calling this while the Agent is audibly
+// answering makes the window count from the end of the reply instead, which is
+// the gap [DefaultContinuationWindow] was always meant to cover.
+//
+// It only ever EXTENDS an existing claim: an Agent that holds none — never
+// addressed, replaced by a later address to somebody else, revoked by a Barge-in
+// ([Matcher.ClearContinuation]), muted, or removed — is left alone, so a late
+// audio event of a cut or superseded turn cannot re-arm anything. Who owns the
+// claim is untouched.
+func (m *Matcher) ExtendContinuation(agentID string) {
+	if agentID == "" {
+		return
+	}
 	m.mu.Lock()
-	m.interruptions[agentID] = m.clock()
+	if m.lastAddressed[agentID] {
+		m.lastAddressedAt = m.clock()
+	}
 	m.mu.Unlock()
 }
 
@@ -343,8 +324,8 @@ func (m *Matcher) NoteInterruption(agentID string) {
 //
 // It is the seam the Barge-in path feeds (ADR-0027 amendment, 2026-07-27):
 // ADR-0027 deferred a barge→matcher signal to v1.5+ on the assumption that the
-// signal would be [RecentlyInterrupted]'s reward. Live testing showed the sign
-// is the other way round. A human who cuts an Agent off is telling it to STOP;
+// signal would REWARD the interrupted Agent. Live testing showed the sign is the
+// other way round. A human who cuts an Agent off is telling it to STOP;
 // leaving the interrupted Agent as the sticky addressee made its cut turn
 // immediately followed by a NEW one, because the interrupting speech is itself a
 // routable final and continuation pulled it straight back to the same Agent —
@@ -398,8 +379,7 @@ func (m *Matcher) Add(agents ...Agent) {
 }
 
 // Remove drops the Agents with agentIDs from the live roster (a Character NPC
-// leaving the scene) and prunes their continuation and interruption state so a
-// later turn never resurrects a departed Agent. Unknown agentIDs are ignored.
+// leaving the scene) and prunes their continuation state so a later turn never resurrects a departed Agent. Unknown agentIDs are ignored.
 // Removing every Agent is allowed: the matcher then routes to nobody. It
 // rebuilds and swaps the fuzzy index under the mutex like [Matcher.Add].
 func (m *Matcher) Remove(agentIDs ...string) {
@@ -423,7 +403,6 @@ func (m *Matcher) Remove(agentIDs ...string) {
 	m.agents = kept
 	for id := range drop {
 		delete(m.lastAddressed, id)
-		delete(m.interruptions, id)
 		delete(m.muted, id) // a re-Added Agent starts unmuted
 	}
 	m.reindexLocked()
@@ -443,8 +422,7 @@ func (m *Matcher) Remove(agentIDs ...string) {
 // TargetMatch reads a consistent index/roster/mute triple (ADR-0024, #145).
 // SetMuted is idempotent and a no-op for an unknown agentID. Muting is a state
 // TRANSITION check first (wireMutes re-fires SetMuted per event): only an actual
-// unmuted→muted flip prunes the Agent's lastAddressed and interruption state,
-// mirroring Remove's prune so a later unnamed continuation cannot resurrect the
+// unmuted→muted flip prunes the Agent's lastAddressed state, mirroring Remove's prune so a later unnamed continuation cannot resurrect the
 // muted Agent (#211 parity). Remove clears the flag, so a re-Added Agent is
 // unmuted.
 func (m *Matcher) SetMuted(agentID string, muted bool) {
@@ -469,11 +447,10 @@ func (m *Matcher) SetMuted(agentID string, muted bool) {
 		delete(m.muted, agentID)
 		return
 	}
-	// Unmuted → muted transition: mute and prune continuation/interruption state
-	// so an unnamed follow-up never continues into the muted Agent (#211 parity).
+	// Unmuted → muted transition: mute and prune continuation state so an unnamed
+	// follow-up never continues into the muted Agent (#211 parity).
 	m.muted[agentID] = struct{}{}
 	delete(m.lastAddressed, agentID)
-	delete(m.interruptions, agentID)
 }
 
 // reindexLocked reassigns each Agent's index to its new slice position and swaps
@@ -490,14 +467,16 @@ func (m *Matcher) reindexLocked() {
 // TargetMatch scores text against every Agent and returns the addressed set,
 // highest total first. It implements the orchestrator's TargetMatcher. It applies
 // no Butler GM-gate: the Butler is addressable by any speaker on this path (the
-// gate rides the SpeakerID-aware [Matcher.TargetMatchFrom] instead).
+// gate rides the SpeakerID-aware [Matcher.TargetMatchFrom] instead), and the
+// utterance is unattributed, so continuation is not speaker-scoped on this path.
 func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
-	return m.match(text, false)
+	return m.match("", text, false)
 }
 
 // TargetMatchFrom is the SpeakerID-aware routing entry (#256): identical to
-// [Matcher.TargetMatch] except it applies the [Config.ButlerGMGate] Butler
-// eligibility drop. When a ButlerGMGate is configured and speakerID fails it (or
+// [Matcher.TargetMatch] except it scopes last-speaker continuation to speakerID
+// ([DecisionContext.AddressedWithin]) and applies the [Config.ButlerGMGate]
+// Butler eligibility drop. When a ButlerGMGate is configured and speakerID fails it (or
 // is empty — fail closed), every Butler-role candidate is excluded from the scored
 // set BEFORE scoring, the MaxTargets cap, and lastAddressed — so a non-GM naming
 // the Butler neither shadows a co-named NPC's slot nor black-holes the next
@@ -507,18 +486,19 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 // SpeakerAwareMatcher seam.
 func (m *Matcher) TargetMatchFrom(speakerID, text string) []voiceevent.AddressRouted {
 	excludeButler := m.butlerGate != nil && (speakerID == "" || !m.butlerGate(speakerID))
-	return m.match(text, excludeButler)
+	return m.match(speakerID, text, excludeButler)
 }
 
 // match is the shared scoring core behind TargetMatch and TargetMatchFrom.
-// excludeButler drops every Butler-role candidate before scoring (the #256
-// pre-cap Butler GM-gate), so an excluded Butler never scores, never consumes a
-// MaxTargets slot, and is never recorded as lastAddressed.
-func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRouted {
+// speakerID ("" when unattributed) scopes the continuation claim. excludeButler
+// drops every Butler-role candidate before scoring (the #256 pre-cap Butler
+// GM-gate), so an excluded Butler never scores, never consumes a MaxTargets
+// slot, and is never recorded as lastAddressed.
+func (m *Matcher) match(speakerID, text string, excludeButler bool) []voiceevent.AddressRouted {
 	now := m.clock()
 	// Offset-preserving tokenization on the utterance path: the token TEXT is
 	// byte-identical to tokenize(text), and the byte offsets/gap markers drive the
-	// Vocative Flag (ADR-0024). words feeds the recency/heuristic state unchanged.
+	// Vocative Flag (ADR-0024).
 	toks, markAfter := offsetTokenize(text)
 	words := make([]string, len(toks))
 	for i := range toks {
@@ -532,10 +512,11 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	// post-Remove roster and hand one agent's name score to the survivor
 	// reindexed into its slot (#145). nameScores stays keyed by m.agents
 	// positions only because index and roster come from one snapshot.
-	nameScores, nameFlagged, namePositions := m.index.score(toks, markAfter)
-
-	m.pruneLocked(now)
-	m.recordWordsLocked(words, now)
+	//
+	// addressEvidence: a non-exact name hit is in nameScores only when it stood in
+	// vocative position and is not an everyday word (ADR-0024 amendment,
+	// 2026-11-20) — the fuzzy tiers alone no longer address anybody.
+	nameScores, nameFlagged, namePositions := m.index.score(toks, markAfter, true)
 
 	// A final with no tokens at all — the marks a recognizer renders for a noise
 	// burst ("...", "?", "—") — is neither an utterance nor a Backchannel (that
@@ -562,8 +543,7 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	// of backchannel filler — "mhm", "ja", "okay", the noises a listener makes
 	// while somebody else has the floor — acknowledges, it does not address. It
 	// routes NOWHERE unless it names an Agent, so it can never open an LLM+TTS
-	// turn off the ambient heuristics. Placed AFTER recordWordsLocked so the
-	// words still feed the recency buffer, and BEFORE scoring so no heuristic can
+	// turn off the ambient heuristics. Placed BEFORE scoring so no heuristic can
 	// see it: this mirrors the detector's empty-final guard, which likewise drops
 	// the ROUTE while leaving transcription and the Transcript untouched. The
 	// continuation state is left alone — an "mhm" does not end the exchange it
@@ -575,6 +555,11 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		// listening. Only the timestamp moves; the addressee set is untouched, and a
 		// matcher that has never addressed anybody stays unanchored.
 		//
+		// ...but only the filler of the speaker who is IN that exchange: another
+		// player's "hm" is not listening to this NPC, and letting it re-stamp kept
+		// one speaker's claim rolling on the whole table's noise (amendment
+		// 2026-11-20).
+		//
 		// ...but only while that exchange is still ALIVE. lastAddressed is never
 		// cleared on expiry (the window is enforced at score time), so an
 		// unconditional refresh let any filler — a cough that transcribes as "hm"
@@ -582,7 +567,7 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		// next unnamed utterance routed to an NPC nobody was talking to: the
 		// "named once, answers everything" defect the 2026-07-27 amendment
 		// removed, back through the most frequent kind of STT final at a table.
-		if len(m.lastAddressed) > 0 && m.continuationAlive(now) {
+		if len(m.lastAddressed) > 0 && sameSpeaker(speakerID, m.lastAddressedBy) && m.continuationAlive(now) {
 			m.lastAddressedAt = now
 		}
 		m.mu.Unlock()
@@ -593,13 +578,12 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		Now:             now,
 		Utterance:       text,
 		Words:           words,
-		window:          m.window,
+		SpeakerID:       speakerID,
 		nameScores:      nameScores,
 		anyNameMatched:  anyNameMatched,
 		lastAddressed:   m.lastAddressed,
 		lastAddressedAt: m.lastAddressedAt,
-		interruptions:   m.interruptions,
-		recentWords:     m.recentWordSetLocked(),
+		lastAddressedBy: m.lastAddressedBy,
 		nonAddressable:  m.nonAddressableCount(),
 	}
 
@@ -608,6 +592,7 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		total float64
 	}
 	var hits []scored
+	butlerDenied := false
 	for _, a := range m.agents {
 		// Butler GM-gate (#256): a Butler-role candidate the speaker may not
 		// address is dropped here — before scoring, the cap, and lastAddressed — so
@@ -615,6 +600,9 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		// last-addressed. This is the matcher-side relocation of the former
 		// detector-level drop (ADR-0024 amendment).
 		if excludeButler && a.Target.AgentRole == voiceevent.AgentRoleButler {
+			if nameScores[a.index] >= nameThreshold {
+				butlerDenied = true // named, but the gate said no: worth a log line
+			}
 			continue
 		}
 		// AddressOnly agents are reachable only by an explicit name match; no
@@ -732,12 +720,28 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	// Stay put on a no-target (or all-muted) turn rather than forgetting who held
 	// the floor — but do NOT restamp then, or a room full of unaddressed chatter
 	// would keep a dead conversation alive forever.
+	//
+	// A NAMED address opens the claim for its speaker; an unnamed hit is that
+	// speaker continuing (the scope in [DecisionContext.AddressedWithin] lets
+	// nobody else through), so it restamps the anchor and leaves the owner as is.
 	if len(addressed) > 0 {
 		m.lastAddressed = addressed
 		m.lastAddressedAt = now
+		if anyNameMatched {
+			m.lastAddressedBy = speakerID
+		}
 	}
 
 	m.mu.Unlock()
+
+	// Operator breadcrumb for "why did the Butler not answer": the Butler was
+	// named, and the GM gate removed it before scoring. Debug, outside the lock.
+	if butlerDenied {
+		slog.Default().Debug("address: Butler excluded: speaker is not the GM",
+			slog.String("speaker", speakerID),
+			slog.Int("routed", len(out)),
+		)
+	}
 	return out
 }
 
@@ -788,43 +792,4 @@ func (m *Matcher) nonAddressableCount() int {
 		n++
 	}
 	return n
-}
-
-// pruneLocked drops words and interruptions older than the recency window so
-// the buffers stay bounded over a long Voice Session. Caller holds m.mu.
-func (m *Matcher) pruneLocked(now time.Time) {
-	cutoff := now.Add(-m.window)
-	keep := m.recentWords[:0]
-	for _, w := range m.recentWords {
-		if !w.at.Before(cutoff) {
-			keep = append(keep, w)
-		}
-	}
-	m.recentWords = keep
-	for id, at := range m.interruptions {
-		if at.Before(cutoff) {
-			delete(m.interruptions, id)
-		}
-	}
-}
-
-// recordWordsLocked appends the current utterance's words to the rolling
-// buffer, trimming the oldest entries past the cap. Caller holds m.mu.
-func (m *Matcher) recordWordsLocked(words []string, now time.Time) {
-	for _, w := range words {
-		m.recentWords = append(m.recentWords, timedWord{word: w, at: now})
-	}
-	if len(m.recentWords) > m.maxWords {
-		m.recentWords = m.recentWords[len(m.recentWords)-m.maxWords:]
-	}
-}
-
-// recentWordSetLocked returns the distinct words currently in the buffer.
-// Caller holds m.mu.
-func (m *Matcher) recentWordSetLocked() map[string]struct{} {
-	set := make(map[string]struct{}, len(m.recentWords))
-	for _, w := range m.recentWords {
-		set[w.word] = struct{}{}
-	}
-	return set
 }
