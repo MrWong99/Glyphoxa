@@ -11,6 +11,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -679,5 +680,28 @@ func TestRecapExplicitEmptyTranscript(t *testing.T) {
 	}
 	if strings.Contains(got, "went wrong") {
 		t.Errorf("empty transcript must not be a generic failure; got %q", resp.followups[0].content)
+	}
+}
+
+// TestRecapAllowanceExhaustedIsAPlainReply (#658): a recap is a paid call, and a
+// Tenant whose monthly plan allowance is spent is refused before the provider is
+// reached. That is a policy refusal the GM must be able to read — one plain
+// ephemeral sentence saying WHY, not the generic "went wrong" failure.
+func TestRecapAllowanceExhaustedIsAPlainReply(t *testing.T) {
+	c := campaign("Lost Mine")
+	live := runningSession(c.ID, time.Now())
+	store := recapStore(c, live)
+	eng := &fakeRecapEngine{err: fmt.Errorf("recap: %w", billing.ErrAllowanceExhausted)}
+	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"session": live.ID.String()})
+
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
+	}
+	got := strings.ToLower(resp.followups[0].content)
+	if !strings.Contains(got, "included usage") || !strings.Contains(got, "next month") {
+		t.Errorf("allowance reply = %q, want a sentence naming the spent allowance and when it resets", resp.followups[0].content)
+	}
+	if strings.Contains(got, "billing:") || strings.Contains(got, "went wrong") {
+		t.Errorf("allowance reply leaks the raw error or the generic failure: %q", resp.followups[0].content)
 	}
 }

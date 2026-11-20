@@ -329,8 +329,7 @@ const chatExchangeSubject = "the planning chat"
 func (s *ChatServer) chatExchangeErr(threadID uuid.UUID, err error) *connect.Error {
 	switch {
 	case errors.Is(err, planchat.ErrAllowanceExhausted):
-		return connect.NewError(connect.CodeResourceExhausted,
-			errors.New("this month's included usage is exhausted; the chat resumes next month or after a plan upgrade"))
+		return allowanceExhaustedErr()
 	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("no LLM provider is available: save an API key in Configuration or choose a plan that includes usage"))

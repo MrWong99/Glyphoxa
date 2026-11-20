@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
@@ -173,7 +174,7 @@ func TestEnrichSoundStingLands(t *testing.T) {
 		Data: []byte("mp3"), ContentType: "audio/mpeg", Model: "eleven_text_to_sound_v2", CharacterCost: 100,
 	}}
 
-	h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), nil)
+	h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 	if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestEnrichSoundMusicDurationBounds(t *testing.T) {
 	blobs := newFakeBlobs()
 	gen := &fakeSoundGen{res: soundgen.Result{Data: []byte("m"), ContentType: "audio/mpeg", Model: "music_v1"}}
 
-	h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), nil)
+	h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 	if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindMusic)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestEnrichSoundSkips(t *testing.T) {
 			store := newFakeSoundEnrichStore()
 			tc.prep(store)
 			gen := &fakeSoundGen{res: soundgen.Result{Data: []byte("x"), ContentType: "audio/mpeg", Model: "m"}}
-			h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(gen, nil), nil)
+			h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 			if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -283,7 +284,7 @@ func TestEnrichSoundNotConfigured(t *testing.T) {
 	store := newFakeSoundEnrichStore()
 	store.rows[id] = soundRow(tenantID, id, storage.SoundKindSting)
 
-	h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(nil, ErrSoundNotConfigured), nil)
+	h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(nil, ErrSoundNotConfigured), billing.NewOffSession(store, nil, nil), nil)
 	if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err != nil {
 		t.Fatalf("handler: %v (a missing key must not retry)", err)
 	}
@@ -305,7 +306,7 @@ func TestEnrichSoundProviderErrorRetries(t *testing.T) {
 	store.rows[id] = soundRow(tenantID, id, storage.SoundKindSting)
 	gen := &fakeSoundGen{err: &providererr.HTTPError{Op: "elevenlabs.GenerateSting", StatusCode: 401, Status: "401 Unauthorized"}}
 
-	h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(gen, nil), nil)
+	h := EnrichSoundHandler(store, newFakeBlobs(), soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 	if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err == nil {
 		t.Fatal("handler returned nil for a provider error, want an error (retry/dead-letter)")
 	}
@@ -332,7 +333,7 @@ func TestEnrichSoundLandMissDisambiguates(t *testing.T) {
 		gen := &fakeSoundGen{res: soundgen.Result{Data: []byte("x"), ContentType: "audio/mpeg", Model: "m"}}
 		// The land misses AND the follow-up read finds no row: delete happened.
 		store.setErr = storage.ErrNotFound
-		h := EnrichSoundHandler(&rowVanishesAfterFirstRead{fakeSoundEnrichStore: store, id: id}, blobs, soundFactoryOf(gen, nil), nil)
+		h := EnrichSoundHandler(&rowVanishesAfterFirstRead{fakeSoundEnrichStore: store, id: id}, blobs, soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 		if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err != nil {
 			t.Fatalf("handler: %v", err)
 		}
@@ -349,7 +350,7 @@ func TestEnrichSoundLandMissDisambiguates(t *testing.T) {
 		gen := &fakeSoundGen{res: soundgen.Result{Data: []byte("x"), ContentType: "audio/mpeg", Model: "m"}}
 		// Force the conditional miss while the row still exists (kind changed).
 		store.setErr = storage.ErrNotFound
-		h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), nil)
+		h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 		if err := h(context.Background(), soundPayload(t, id, tenantID, storage.SoundKindSting)); err != nil {
 			t.Fatalf("handler: %v", err)
 		}
@@ -440,7 +441,7 @@ func TestEnrichSoundCassette(t *testing.T) {
 			store.rows[id] = row
 			blobs := newFakeBlobs()
 
-			h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), nil)
+			h := EnrichSoundHandler(store, blobs, soundFactoryOf(gen, nil), billing.NewOffSession(store, nil, nil), nil)
 			if err := h(context.Background(), soundPayload(t, id, tenantID, kind)); err != nil {
 				t.Fatalf("handler over cassette: %v", err)
 			}

@@ -13,10 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -98,20 +98,31 @@ type EnrichStore interface {
 //
 //   - the Highlight is gone (deleted before the job ran) → nil (done).
 //   - the Highlight already has an image → nil (no double spend on a re-run).
+//   - the Tenant's monthly plan allowance is exhausted (#658) → log + nil. The
+//     job has no one to refuse, so it SKIPS the paid step: the Highlight stays
+//     promoted with its clip and no image, and the job completes 'done' — it is
+//     not retried and the boot sweep does not re-enqueue it, so an exhausted
+//     Tenant cannot make the runner spin on a refusal every backoff and every
+//     boot until the month turns. The cost is that this Highlight never gets
+//     an image later either (ADR-0054 amendment 2026-11-20).
 //   - image generation is not configured for the tenant → log + nil (the
 //     Highlight stays intact without media, AC — never a retry loop on a missing
 //     key).
 //   - a provider failure → the error is returned (retry / dead-letter) whatever
 //     its status, but a rejected key and an exhausted quota are LOGGED apart:
 //     they need different humans doing different things.
-//   - otherwise generate → meter usage (caps-free spend meter teed onto the
-//     production recorder; Gemini bills the image as output tokens, so it prices
-//     through LLMTokens — no image-specific meter, #311) → store the image behind
+//   - otherwise generate → meter usage through the off-session seam (priced,
+//     forwarded to the production recorder and flushed to the Tenant's Usage
+//     Ledger; Gemini bills the image as output tokens, so it prices through
+//     LLMTokens — no image-specific meter, #311) → store the image behind
 //     the blob seam at the deterministic key → record it on the row. A row that
 //     vanished between the read and the write compensates the orphaned blob and
 //     returns nil (done). A provider or blob error returns so the runner retries /
 //     dead-letters — the row is never mutated, so the Highlight is intact (AC).
-func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFactory, rec observe.StageRecorder, log *slog.Logger) func(context.Context, json.RawMessage) error {
+func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFactory, metering *billing.OffSession, rec observe.StageRecorder, log *slog.Logger) func(context.Context, json.RawMessage) error {
+	if metering == nil {
+		panic("highlight: EnrichImageHandler: nil off-session metering")
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -136,6 +147,21 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			// Already enriched (a re-run of an at-least-once job): stop before any
 			// spend so the same Highlight is never billed twice.
 			return nil
+		}
+
+		// The off-session metering seam (#658), before the claim and before any
+		// spend. An exhausted allowance is a clean SKIP, not a failure: see the
+		// handler doc for why this must not retry. Any other error (the allowance
+		// could not be read) is returned, so the job retries rather than spending
+		// ungated.
+		call, err := metering.Begin(ctx, p.TenantID, rec)
+		if errors.Is(err, billing.ErrAllowanceExhausted) {
+			log.Warn("highlight enrich: plan allowance exhausted, leaving highlight without media",
+				"highlight", p.HighlightID, "tenant", p.TenantID)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("highlight enrich: open metered call: %w", err)
 		}
 
 		// Race-proof claim (#406): a conditional state transition so two concurrent
@@ -241,19 +267,23 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			return fmt.Errorf("highlight enrich: generate image: %w", err)
 		}
 
-		// Meter the spend (ADR-0045/0046): spend.PriceOnly tees a caps-free meter
-		// onto the production recorder, pricing the image's tokens AND moving the
-		// glyphoxa_voice_llm_tokens series. The enrichment job is off-session and
-		// never cap-gated (the recap posture). Gemini bills the image as output
-		// tokens → LLMTokens.
-		priced, estimatedUSD := spend.PriceOnly(rec, log)
-		priced.LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
+		// Meter the spend (ADR-0045/0046) on the call's recorder: it prices the
+		// image's tokens, moves the glyphoxa_voice_llm_tokens series AND ledgers
+		// them for the Tenant. The enrichment job is off-session and never
+		// cap-gated (the recap posture). Gemini bills the image as output tokens →
+		// LLMTokens. Flushed NOW, before the blob write: the generation is billed
+		// whether or not the image lands, and a flush failure logs and continues —
+		// failing the job here would re-bill the generation on retry.
+		call.Recorder().LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
+		flushErr := call.Close(ctx)
 		log.Info("highlight enrich: image generated",
 			"highlight", p.HighlightID,
+			"tenant", p.TenantID,
 			"model", model,
 			"input_tokens", res.PromptTokens,
 			"output_tokens", res.OutputTokens,
-			"estimated_usd", estimatedUSD(),
+			"estimated_usd", call.EstimatedUSD(),
+			"flushed", flushErr == nil,
 		)
 
 		key, err := blob.Key(p.TenantID, highlightOwnerKind, p.HighlightID, imageBlobName)

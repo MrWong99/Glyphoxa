@@ -14,6 +14,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
@@ -131,6 +132,9 @@ type SessionServer struct {
 	// wired via SetSoundEnrichment. Nil (unwired) makes SetHighlightSound
 	// report CodeUnimplemented rather than enqueue jobs that can never run.
 	soundFactory highlight.SoundGeneratorFactory
+	// metering backs SetHighlightSound's plan-allowance precheck (#658); wired
+	// via SetOffSessionMetering. Nil skips the precheck (the job gates itself).
+	metering *billing.OffSession
 
 	// sharer / replayer / shareStore back the Highlight Discord-delivery RPCs (#310);
 	// wired via SetSharing after construction. Nil (unwired) makes ShareHighlight /
@@ -524,8 +528,9 @@ func (s *SessionServer) ListSessions(
 // Lines already exist and the snapshot simply grows, so the recap covers the
 // transcript as of the call. recap.ErrNoTranscript (nothing to summarize) and
 // recap.ErrTranscriptTooLong (a retry can never succeed) are both static
-// CodeFailedPrecondition; any other engine error is logged and returned as a
-// static CodeInternal. An over-cap session_ids count is CodeInvalidArgument (a
+// CodeFailedPrecondition; an exhausted plan allowance is the shared
+// CodeResourceExhausted refusal (allowance_error.go); any other engine error is
+// logged and returned as a static CodeInternal. An over-cap session_ids count is CodeInvalidArgument (a
 // spend guardrail). State-changing (spends money): auth + CSRF guard it.
 func (s *SessionServer) GenerateRecap(
 	ctx context.Context,
@@ -576,6 +581,10 @@ func (s *SessionServer) GenerateRecap(
 	}
 
 	res, err := s.recapper.Recap(ctx, sessionIDs)
+	if errors.Is(err, billing.ErrAllowanceExhausted) {
+		// A recap is an off-session paid call (#658): the plan allowance is spent.
+		return nil, allowanceExhaustedErr()
+	}
 	if errors.Is(err, recap.ErrNoTranscript) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no transcript to summarize"))
 	}

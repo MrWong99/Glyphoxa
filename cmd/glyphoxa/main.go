@@ -29,6 +29,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/appearance"
 	"github.com/MrWong99/Glyphoxa/internal/assist"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
@@ -615,7 +616,11 @@ func startPresence(ctx context.Context, clients *presence.Clients) {
 // resolver (Character CRUD invalidation hook), and the relay (SSE mounts +
 // shutdown hook on the web tier).
 type voiceDeps struct {
-	recapEngine     *recap.Engine
+	recapEngine *recap.Engine
+	// offSession is the process's ONE off-session metering seam (#658): built
+	// here because the recap engine needs it, surfaced so the web tier hands
+	// the SAME value to every other off-session paid call.
+	offSession      *billing.OffSession
 	speakerResolver *speaker.Resolver
 	relay           *transcript.Relay
 	deps            session.Deps
@@ -647,7 +652,10 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 	// web tier), and the recap knowledge Tool (Deps.Tools below). It reads
 	// transcripts via the store, decrypts a BYOK LLM key with cipher, meters
 	// usage into the process metrics — but never persists a recap (ADR-0040).
-	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
+	// A recap no caller meters (the slash command, the RPC) is an off-session
+	// paid call: gated on the plan allowance and ledgered through the seam.
+	offSession := newOffSessionMetering(admission, store, log)
+	recapEngine := recap.NewEngine(store, cipher, offSession, metrics, log, recap.WithKeyEntitlement(keyEnt))
 
 	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
 	// Character/GM display name for the relay + chunk prefix, falling back to the
@@ -757,7 +765,7 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 			return discordUserID != "" && gmID.IsGMInTenant(tenantID, discordUserID)
 		}
 	}
-	return voiceDeps{recapEngine: recapEngine, speakerResolver: speakerResolver, relay: relay, deps: deps, idleGuard: idleGuard}
+	return voiceDeps{recapEngine: recapEngine, offSession: offSession, speakerResolver: speakerResolver, relay: relay, deps: deps, idleGuard: idleGuard}
 }
 
 // drainVoiceWorker runs the -mode voice worker to SIGTERM and then tears it down in
@@ -1147,7 +1155,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// and linked Knowledge Graph entries from a GM prompt — strictly on button
 	// press, preview-first. Same posture as the recap engine: BYOK key via
 	// cipher, env fallback gated by keyEnt, usage metered but never cap-gated.
-	assistEngine := assist.NewEngine(store, cipher, metrics, log, assist.WithKeyEntitlement(keyEnt))
+	// Every off-session paid call in this process — assist, generated maps and
+	// portraits, Highlight image/sound enrichment, voice previews, the planning
+	// chat — is gated and ledgered through this ONE seam (#658, ADR-0054
+	// amendment 2026-11-20).
+	offSession := vd.offSession
+	assistEngine := assist.NewEngine(store, cipher, offSession, metrics, log, assist.WithKeyEntitlement(keyEnt))
 
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
@@ -1269,7 +1282,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// env fallback), no row falls back to GEMINI_API_KEY, and neither present is
 	// ErrImageNotConfigured (the handler leaves the Highlight intact without media).
 	imageFactory := newImageFactory(store, cipher, keyEnt)
-	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
+	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, offSession, metrics, log))
 	// Session Highlight sound enrichment (#312, ADR-0004 amendment/0049): the
 	// GM's opt-in "Add sound" action generates an ElevenLabs sting or Music
 	// track that attaches as a separate blob. The factory rides the tenant's
@@ -1277,7 +1290,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Component; anything else is highlight.ErrSoundNotConfigured (the handler
 	// leaves the Highlight intact without media).
 	soundFactory := newSoundFactory(store, cipher, keyEnt)
-	jobRunner.Register(highlight.JobKindEnrichSound, highlight.EnrichSoundHandler(store, blobStore, soundFactory, log))
+	jobRunner.Register(highlight.JobKindEnrichSound, highlight.EnrichSoundHandler(store, blobStore, soundFactory, offSession, log))
 	// The Knowledge Graph appearance index (#545, ADR-0008 amendment): one pass per
 	// ended session, matching its committed Transcript Lines against the campaign's
 	// entry names. A job because the work is per-session and must never touch a
@@ -1425,7 +1438,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt, offSession)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1591,7 +1604,7 @@ type sessionControl interface {
 	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
 }
 
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1680,14 +1693,14 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Generated maps (#541, ADR-0060). The engine shares the image factory with
 	// Highlight enrichment, and borrows the assist engine's metered text call for
 	// pin suggestions rather than resolving a second LLM provider of its own.
-	mapEngine := mapgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log).
+	mapEngine := mapgen.New(newImageFactory(store, cipher, keyEnt), store, offSession, metrics, log).
 		WithTextCaller(assistEngine)
 	campaignSrv.SetMapGenerator(mapEngine)
 	campaignSrv.SetMapPinSuggester(mapEngine)
 	// Generated Node portraits (#590): the third image-seam consumer, sharing the
 	// SAME factory closure as Highlight enrichment and mapgen (ADR-0039 — one
 	// place for the hybrid key policy).
-	campaignSrv.SetPortraitGenerator(portraitgen.New(newImageFactory(store, cipher, keyEnt), store, metrics, log))
+	campaignSrv.SetPortraitGenerator(portraitgen.New(newImageFactory(store, cipher, keyEnt), store, offSession, metrics, log))
 	// CampaignService is the ONE Connect service that takes image uploads
 	// (CreateMap / ReplaceMapImage / SetNodePortrait), so it alone carries the
 	// 48 MiB read cap; every other service keeps the 1 MiB default. connect-go
@@ -1711,6 +1724,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// gap): health pings, model/voice catalogs, and the TTS preview refuse the
 	// env fallback for an unentitled tenant in `open` mode.
 	voiceSrv.SetKeyEntitlement(keyEnt)
+	// PreviewVoice is paid TTS: gate it on the plan allowance and ledger it
+	// through the shared off-session seam (#658).
+	voiceSrv.SetOffSessionMetering(offSession)
 	providerSrv := rpc.NewProviderServer(store, cipher, log)
 	// Saving a credential busts the tenant's cached health verdict so the next
 	// health call probes with the new key instead of serving a stale Degraded
@@ -1752,6 +1768,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Sound enrichment RPC seam (#312): SetHighlightSound prechecks the factory
 	// so an unconfigured tenant gets an actionable error at click time.
 	sessionSrv.SetSoundEnrichment(newSoundFactory(store, cipher, keyEnt))
+	// SetHighlightSound refuses up front what the sound job would only skip
+	// (an exhausted plan allowance, #658).
+	sessionSrv.SetOffSessionMetering(offSession)
 	// Highlight Discord delivery (#310, Epic 8, ADR-0051): the GM shares a promoted
 	// Highlight as a file to a text channel (DeploymentSharer resolves the Bot token +
 	// guild from deployment_config via the cipher, then plain net/http Discord REST —
@@ -1788,15 +1807,11 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// #591 search engine as its tool belt, the knowledge adapters for
 	// proposal-mediated writes and recap (campaign-stamped per exchange — no
 	// Voice Session involved), and the ADR-0055 posture wiring: the platform-key
-	// entitlement plus — in open admission mode — the monthly allowance gate
-	// checked before each exchange.
+	// entitlement plus the shared off-session metering seam, which — in open
+	// admission mode — checks the monthly allowance before each exchange.
 	chatKnowledge := knowledge.New(store, store.PromptKG())
 	chatRecap := knowledge.NewRecap(recapEngine, store)
-	chatOpts := []planchat.Option{planchat.WithKeyEntitlement(keyEnt)}
-	if a := allowanceForMode(admission, store); a != nil {
-		chatOpts = append(chatOpts, planchat.WithAllowance(a))
-	}
-	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, metrics, log, chatOpts...)
+	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, offSession, metrics, log, planchat.WithKeyEntitlement(keyEnt))
 	chatSrv := rpc.NewChatServer(store, log)
 	chatSrv.SetEngine(chatEngine)
 	chatPath, chatHandler := stack.Handler(chatSrv.Handler)

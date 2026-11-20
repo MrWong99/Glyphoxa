@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -59,7 +60,7 @@ func TestRecapSingleCassette(t *testing.T) {
 		cass := voicecassette.LoadLLM(t, "llm-recap-single")
 		return countingProvider{inner: capturingProvider{inner: cass, sys: &sysSeen}, calls: &calls}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)
@@ -122,7 +123,7 @@ func TestRecapWindowedCassette(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return countingProvider{inner: voicecassette.LoadLLM(t, "llm-recap-windowed"), calls: &calls}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)

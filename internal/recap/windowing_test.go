@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -35,7 +36,7 @@ func TestWindowedMapReduce(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial", capture: func(llm.Request) { calls++ }}, nil
 	}
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid})
 	if err != nil {
 		t.Fatalf("Recap: %v", err)
@@ -57,7 +58,7 @@ func TestTooManyWindows(t *testing.T) {
 	// 33 lines each longer than windowChars => each is its own window => 33 > maxWindows(32).
 	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), bigLines(maxWindows+1, windowChars+10))
 
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(okFactory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != ErrTranscriptTooLong {
 		t.Fatalf("err = %v, want ErrTranscriptTooLong", err)
 	}
@@ -71,7 +72,7 @@ func TestStreamError(t *testing.T) {
 	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
 	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
 
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial cut off", errText: "boom"}, nil
 	}))
 	_, err := eng.Recap(context.Background(), []uuid.UUID{sid})
@@ -87,7 +88,7 @@ func TestTruncatedStream(t *testing.T) {
 	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
 	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
 
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial", noDone: true}, nil
 	}))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err == nil {

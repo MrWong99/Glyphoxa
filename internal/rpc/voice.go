@@ -49,11 +49,6 @@ const defaultPreviewText = "Hello! I'm your voice for this campaign. Roll for in
 // time.
 const maxPreviewRunes = 300
 
-// previewUsageFlushTimeout bounds the Usage Ledger write that follows a preview.
-// It runs detached from the request (the characters are billed even if the
-// caller has gone), so it needs its own deadline.
-const previewUsageFlushTimeout = 5 * time.Second
-
 // previewTimeout bounds a single preview synthesis so a black-holed TTS endpoint
 // cannot hold the handler open; the request context's own deadline still wins
 // when shorter.
@@ -81,7 +76,8 @@ type voiceStore interface {
 	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	// AddUsage persists Usage Ledger rows (ADR-0054): a voice preview is paid TTS
-	// and is attributed to the Tenant like any other metered call.
+	// and is attributed to the Tenant like any other metered call. It backs the
+	// default off-session metering seam NewVoiceServer builds.
 	AddUsage(ctx context.Context, rows []storage.UsageRow) error
 }
 
@@ -96,6 +92,12 @@ type VoiceServer struct {
 	// keyEnt gates the env fallback on every provider-key resolution (ADR-0054
 	// seam (a)); nil grants everything. Wired via SetKeyEntitlement.
 	keyEnt llmbuild.PlatformKeyEntitlement
+
+	// metering is the off-session seam PreviewVoice is gated and ledgered
+	// through (#658). NewVoiceServer defaults it to an UNGATED seam over the
+	// store, so a preview is always ledgered; SetOffSessionMetering swaps in the
+	// process-wide one that carries the plan-allowance gate.
+	metering *billing.OffSession
 
 	// newLister builds a TTS voice catalog client for an API key ("" -> the
 	// adapter's env fallback). Defaults to ElevenLabs.
@@ -172,6 +174,7 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		store:        store,
 		cipher:       cipher,
 		log:          log,
+		metering:     billing.NewOffSession(store, nil, log),
 		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
 		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
 		pingLLM:      livePingGroq,
@@ -220,6 +223,17 @@ func (s *VoiceServer) SetSessions(src voiceLiveSource) {
 // outside the entitlement.
 func (s *VoiceServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
 	s.keyEnt = ent
+}
+
+// SetOffSessionMetering wires the process-wide off-session metering seam
+// (#658, ADR-0054 amendment 2026-11-20) PreviewVoice runs through, replacing
+// the ungated default: in `open` Admission Mode it carries the monthly
+// plan-allowance gate. Called once at boot before the server serves, so no
+// lock is needed.
+func (s *VoiceServer) SetOffSessionMetering(m *billing.OffSession) {
+	if m != nil {
+		s.metering = m
+	}
 }
 
 // Handler builds the Connect HTTP handler for VoiceService and returns its mount
@@ -322,7 +336,9 @@ func (s *VoiceServer) ListVoices(
 // blob the browser can play directly (wraps the existing Synthesize). The text is
 // capped at maxPreviewRunes, and the characters submitted are written to the
 // Tenant's Usage Ledger: a preview is paid TTS, on the platform's key for a
-// trial Tenant.
+// trial Tenant. It is an off-session paid call, so it goes through the metering
+// seam: a Tenant whose plan allowance is spent is refused (ResourceExhausted)
+// before the provider is reached.
 func (s *VoiceServer) PreviewVoice(
 	ctx context.Context,
 	req *connect.Request[managementv1.PreviewVoiceRequest],
@@ -345,6 +361,15 @@ func (s *VoiceServer) PreviewVoice(
 			fmt.Errorf("preview text is too long: %d characters, at most %d", chars, maxPreviewRunes))
 	}
 
+	call, err := s.metering.Begin(ctx, tenantID, nil)
+	if err != nil {
+		if errors.Is(err, billing.ErrAllowanceExhausted) {
+			return nil, allowanceExhaustedErr()
+		}
+		s.log.Error("PreviewVoice: allowance check failed", "tenant_id", tenantID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
 	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentTTS)
 	if err != nil {
 		return nil, err
@@ -362,8 +387,12 @@ func (s *VoiceServer) PreviewVoice(
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("voice preview is unavailable"))
 	}
 	// The request was accepted by the provider, which bills the characters
-	// SUBMITTED whether or not the stream completes: meter now, on every path out.
-	defer s.meterPreview(ctx, tenantID, chars)
+	// SUBMITTED whether or not the stream completes: meter now, priced like
+	// session TTS, and flush on every path out. The flush is detached from the
+	// request context (a caller who hung up still used the characters) and a
+	// failed write logs without failing a preview that already played.
+	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, chars)
+	defer call.Close(ctx)
 
 	var (
 		pcm        []byte
@@ -620,20 +649,6 @@ func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *manage
 		return degraded("elevenlabs", err)
 	}
 	return healthy("elevenlabs")
-}
-
-// meterPreview writes one preview's submitted characters to the Tenant's Usage
-// Ledger (ADR-0054), priced like session TTS. Best-effort and detached from the
-// request context: a failed write logs and never fails a preview that already
-// played, and a caller who hung up still used the characters.
-func (s *VoiceServer) meterPreview(ctx context.Context, tenantID uuid.UUID, chars int) {
-	ledger := billing.NewLedger(tenantID, nil)
-	ledger.TTSCharacters(observe.ProviderElevenLabs, chars)
-	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), previewUsageFlushTimeout)
-	defer cancel()
-	if err := ledger.Flush(flushCtx, s.store.AddUsage); err != nil {
-		s.log.Warn("PreviewVoice: usage ledger flush failed; usage estimate lost", "tenant_id", tenantID, "err", err)
-	}
 }
 
 // healthDiscord proves the Bot token via REST (GET /users/@me, no gateway

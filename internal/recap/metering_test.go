@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -29,7 +30,7 @@ func TestMeteringReportedUsage(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", usage: &llm.Usage{InputTokens: 321, OutputTokens: 99}}, nil
 	}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(factory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestMeteringEstimateNeverZero(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "a non-empty recap body"}, nil // no usage
 	}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(factory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestMeteringReportedUsageOnError(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial", usage: &llm.Usage{InputTokens: 7, OutputTokens: 3}, errText: "boom"}, nil
 	}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(factory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err == nil {
 		t.Fatal("Recap err = nil, want the stream error")
 	}
@@ -109,7 +110,7 @@ func TestMeteringDefaultPathPricesGroqModel(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", capture: func(req llm.Request) { reqModel = req.Model }}, nil
 	}
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(factory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestMeteringModellessConfigPricesProviderDefault(t *testing.T) {
 
 	rec := &capRec{}
 	factory := func(_, _ string) (llm.Provider, error) { return &stubProvider{text: "recap"}, nil }
-	eng := NewEngine(st, nil, rec, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil, WithProviderFactory(factory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestAttributionLogOnFailure(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	eng := NewEngine(st, nil, observe.Discard{}, log, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, log, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "partial", usage: &llm.Usage{InputTokens: 4, OutputTokens: 2}, errText: "boom"}, nil
 	}))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err == nil {
@@ -180,7 +181,7 @@ func TestAttributionLog(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	eng := NewEngine(st, nil, observe.Discard{}, log, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, log, WithProviderFactory(func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", usage: &llm.Usage{InputTokens: 10, OutputTokens: 5}}, nil
 	}))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
@@ -211,7 +212,7 @@ func TestNeverReadsCaps(t *testing.T) {
 	tenantID := uuid.New()
 	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
 	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
-	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(okFactory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(okFactory))
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap must succeed without any cap surface: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestRecapChargesTheCallersMeteringFromContext(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", usage: &llm.Usage{InputTokens: 40, OutputTokens: 9}}, nil
 	}
-	eng := NewEngine(st, nil, process, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), process, nil, WithProviderFactory(factory))
 
 	ctx := WithMetering(context.Background(), Metering{Rec: caller})
 	if _, err := eng.Recap(ctx, []uuid.UUID{sid}); err != nil {
@@ -263,7 +264,7 @@ func TestRecapRefusedByCallersSpendGate(t *testing.T) {
 	factory := func(_, _ string) (llm.Provider, error) {
 		return &stubProvider{text: "recap", capture: func(llm.Request) { calls++ }}, nil
 	}
-	eng := NewEngine(st, nil, nil, nil, WithProviderFactory(factory))
+	eng := NewEngine(st, nil, billingtest.Ungated(), nil, nil, WithProviderFactory(factory))
 
 	ctx := WithMetering(context.Background(), Metering{Rec: rec, Gate: refusingGate{}})
 	_, err := eng.Recap(ctx, []uuid.UUID{sid})

@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/idleclose"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
@@ -245,6 +246,28 @@ func allowanceForMode(admission auth.AdmissionMode, reader spend.AllowanceReader
 		return spend.PlanAllowance{Reader: reader}
 	}
 	return nil
+}
+
+// offSessionStore is what the off-session metering seam needs from storage:
+// the Usage Ledger write and the two allowance reads. *storage.Store satisfies
+// it.
+type offSessionStore interface {
+	billing.UsageWriter
+	spend.AllowanceReader
+}
+
+// newOffSessionMetering builds the ONE seam every off-session paid provider
+// call runs through (#658, ADR-0054 amendment 2026-11-20): usage always
+// reaches the Usage Ledger, and in `open` Admission Mode the monthly
+// plan-allowance gate ([allowanceForMode]) refuses a Tenant whose allowance is
+// spent before the provider is reached. In `allowlist` mode there is no gate —
+// the same posture the live session start has.
+func newOffSessionMetering(admission auth.AdmissionMode, store offSessionStore, log *slog.Logger) *billing.OffSession {
+	var gate billing.AllowanceChecker
+	if a := allowanceForMode(admission, store); a != nil {
+		gate = a
+	}
+	return billing.NewOffSession(store, gate, log)
 }
 
 // signupPlanGetter is the plan read [signupPlanPreflight] needs.

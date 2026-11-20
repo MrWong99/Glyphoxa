@@ -8,9 +8,15 @@
 // the Groq env default (ADR-0036) — via the shared [internal/llmbuild] helper.
 // Recaps are REGENERATED per request and never persisted (no schema touch). A short
 // session is one Butler-flavoured call; an over-budget one is map-reduced over
-// windows of whole Lines. Usage is METERED (attributed to the recapped Voice Session
-// ids via metrics + a structured log) but NEVER cap-gated — recap never reads a
-// tenant cap nor calls AllowTurn (ADR-0046 is live-session-only).
+// windows of whole Lines.
+//
+// Metering has two modes. A recap a CALLER already meters (the Butler's recap
+// Tool inside a Voice Session, a planning chat exchange — [WithMetering]) charges
+// that caller's recorder, cap and ledger. Every other recap (the slash command,
+// the GenerateRecap RPC) is an off-session paid call and goes through
+// [billing.OffSession] (#658): refused with [billing.ErrAllowanceExhausted] when
+// the Tenant's plan allowance is spent, ledgered otherwise. An off-session recap
+// is never cap-gated (ADR-0046 caps are live-session-only).
 package recap
 
 import (
@@ -24,10 +30,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/llmcall"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -94,6 +100,7 @@ type ProviderFactory func(providerID, apiKey string) (llm.Provider, error)
 type Engine struct {
 	st          Store
 	cipher      *crypto.Cipher
+	metering    *billing.OffSession
 	metrics     observe.StageRecorder
 	log         *slog.Logger
 	newProvider ProviderFactory
@@ -121,12 +128,18 @@ func WithKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) Option {
 }
 
 // NewEngine builds a recap Engine. cipher decrypts a BYOK LLM key (nil is fine for
-// the env/default path); metrics receives usage (nil -> discard); log receives the
-// attribution line (nil -> discard).
-func NewEngine(st Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
+// the env/default path); metering is the off-session seam a recap no caller
+// meters is gated and ledgered through (nil is a wiring bug and panics here);
+// metrics receives usage (nil -> discard); log receives the attribution line
+// (nil -> discard).
+func NewEngine(st Store, cipher *crypto.Cipher, metering *billing.OffSession, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
+	if metering == nil {
+		panic("recap: NewEngine: nil off-session metering")
+	}
 	e := &Engine{
 		st:          st,
 		cipher:      cipher,
+		metering:    metering,
 		metrics:     metrics,
 		log:         log,
 		newProvider: llmbuild.New,
@@ -211,23 +224,26 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 		priceModel = llmbuild.DefaultModel(providerID)
 	}
 
-	// Metering (gate #271 posture): spend.PriceOnly tees a caps-free meter
-	// alongside the recorder so the attribution line below has an estimate. The
-	// recorder is the CALLER's when the ctx carries one ([WithMetering]: a recap
-	// run from a live session's Tool or a planning chat exchange is that caller's
-	// spend, and must reach its meter, hard cap and Usage Ledger), else the
-	// engine's own process recorder (an off-session recap, which has no cap:
-	// ADR-0046 is live-session-only).
-	base := e.metrics
-	if m, ok := MeteringFrom(ctx); ok {
-		if m.Gate != nil && !m.Gate.AllowTurn() {
-			return Result{}, ErrSpendCapReached
-		}
-		if m.Rec != nil {
-			base = m.Rec
-		}
+	// Metering. The recorder is the CALLER's when the ctx carries one
+	// ([WithMetering]: a recap run from a live session's Tool or a planning chat
+	// exchange is that caller's spend, and must reach its meter, hard cap and
+	// Usage Ledger — which also already checked its own allowance). Otherwise
+	// this is an off-session paid call and opens the one seam for those
+	// ([billing.OffSession]): the plan-allowance gate runs here, before any
+	// provider request, and the usage is ledgered when the recap returns.
+	m, _ := MeteringFrom(ctx)
+	if m.Gate != nil && !m.Gate.AllowTurn() {
+		return Result{}, ErrSpendCapReached
 	}
-	rec, estimatedUSD := spend.PriceOnly(base, e.log)
+	rec := m.Rec
+	var call *billing.Call
+	if rec == nil {
+		call, err = e.metering.Begin(ctx, campaign.TenantID, e.metrics)
+		if err != nil {
+			return Result{}, err
+		}
+		rec = call.Recorder()
+	}
 	caller := &llmcall.Caller{
 		Ctx:        ctx,
 		Provider:   provider,
@@ -242,18 +258,26 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	for i, vs := range sessions {
 		chronIDs[i] = vs.ID
 	}
-	// Attribute whatever was spent to the recapped session id(s) — on success AND on
-	// a midway failure, so metered tokens are never orphaned (#272 review). Fires
-	// once the meter/caller exist; the earlier provider-resolution errors spent
-	// nothing and have no meter to report.
+	// Flush and attribute whatever was spent to the recapped session id(s) — on
+	// success AND on a midway failure, so metered tokens are never orphaned (#272
+	// review). Fires once the meter/caller exist; the earlier provider-resolution
+	// errors spent nothing and have no meter to report. A caller-metered recap
+	// has no estimate of its own: the caller's meter prices it and its own
+	// attribution line reports it.
 	defer func() {
-		e.log.Info("recap: llm usage",
+		attrs := []any{
 			"voice_session_ids", chronIDs,
 			"input_tokens", caller.TotalIn,
 			"output_tokens", caller.TotalOut,
-			"estimated_usd", estimatedUSD(),
 			"ok", err == nil,
-		)
+		}
+		if call != nil {
+			flushErr := call.Close(ctx)
+			attrs = append(attrs, "estimated_usd", call.EstimatedUSD(), "flushed", flushErr == nil)
+		} else {
+			attrs = append(attrs, "metered_by", "caller")
+		}
+		e.log.Info("recap: llm usage", attrs...)
 	}()
 
 	butlerSys := butlerSystemPrompt(butler.Persona, campaign.Language)

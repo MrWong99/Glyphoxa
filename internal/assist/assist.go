@@ -9,10 +9,11 @@
 // The LLM provider is resolved exactly like the recap engine (#271/#272): the
 // Butler's llm_provider_config_id, else the Tenant 'llm' Provider Config, else
 // the Groq env default (ADR-0036) — through [internal/llmbuild], with the env
-// fallback gated by the platform-key entitlement (ADR-0054/0055). Usage is
-// METERED via the shared [internal/llmcall] caller (attributed to the campaign
-// via metrics + a structured log) but NEVER cap-gated — ADR-0046 caps are
-// live-Voice-Session-only.
+// fallback gated by the platform-key entitlement (ADR-0054/0055). Every call
+// goes through the off-session metering seam ([billing.OffSession], #658): an
+// exhausted plan allowance refuses it with [billing.ErrAllowanceExhausted]
+// before the provider is reached, and its usage lands in the Tenant's Usage
+// Ledger. It is NEVER cap-gated — ADR-0046 caps are live-Voice-Session-only.
 package assist
 
 import (
@@ -24,14 +25,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/llmcall"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -112,6 +112,7 @@ type ProviderFactory func(providerID, apiKey string) (llm.Provider, error)
 type Engine struct {
 	st          Store
 	cipher      *crypto.Cipher
+	metering    *billing.OffSession
 	metrics     observe.StageRecorder
 	log         *slog.Logger
 	newProvider ProviderFactory
@@ -137,12 +138,18 @@ func WithKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) Option {
 }
 
 // NewEngine builds an assist Engine. cipher decrypts a BYOK LLM key (nil is
-// fine for the env/default path); metrics receives usage (nil -> discard); log
+// fine for the env/default path); metering is the off-session seam every call
+// is gated and ledgered through (nil is a wiring bug and panics here rather
+// than at the GM's first click); metrics receives usage (nil -> discard); log
 // receives the attribution line (nil -> discard).
-func NewEngine(st Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
+func NewEngine(st Store, cipher *crypto.Cipher, metering *billing.OffSession, metrics observe.StageRecorder, log *slog.Logger, opts ...Option) *Engine {
+	if metering == nil {
+		panic("assist: NewEngine: nil off-session metering")
+	}
 	e := &Engine{
 		st:          st,
 		cipher:      cipher,
+		metering:    metering,
 		metrics:     metrics,
 		log:         log,
 		newProvider: llmbuild.New,
@@ -162,11 +169,11 @@ func NewEngine(st Store, cipher *crypto.Cipher, metrics observe.StageRecorder, l
 // GeneratePersona drafts a Persona (markdown) for a Character NPC from the GM's
 // short prompt. The draft is returned for review in the editor — never saved.
 func (e *Engine) GeneratePersona(ctx context.Context, campaign storage.Campaign, in PersonaInput) (persona string, err error) {
-	caller, estimatedUSD, err := e.newCaller(ctx, campaign)
+	caller, call, err := e.newCaller(ctx, campaign)
 	if err != nil {
 		return "", err
 	}
-	defer e.attribute("persona", campaign.ID, caller, estimatedUSD, &err)
+	defer e.attribute("persona", campaign.ID, caller, call, &err)
 
 	text, err := caller.Call(personaSystemPrompt(campaign), personaUserPrompt(in), personaMaxTokens)
 	if err != nil {
@@ -188,11 +195,11 @@ func (e *Engine) GenerateKnowledge(ctx context.Context, campaign storage.Campaig
 		return Draft{}, fmt.Errorf("assist: list existing nodes: %w", err)
 	}
 
-	caller, estimatedUSD, err := e.newCaller(ctx, campaign)
+	caller, call, err := e.newCaller(ctx, campaign)
 	if err != nil {
 		return Draft{}, err
 	}
-	defer e.attribute("knowledge", campaign.ID, caller, estimatedUSD, &err)
+	defer e.attribute("knowledge", campaign.ID, caller, call, &err)
 
 	text, err := caller.Call(knowledgeSystemPrompt(campaign, existing), prompt, knowledgeMaxTokens)
 	if err != nil {
@@ -221,18 +228,23 @@ func (e *Engine) GenerateKnowledge(ctx context.Context, campaign storage.Campaig
 // `feature` is the attribution label. The caller owns its prompts and its
 // parsing; this owns provider resolution, metering and attribution.
 func (e *Engine) CallText(ctx context.Context, campaign storage.Campaign, feature, system, user string, maxTokens int) (text string, err error) {
-	caller, estimatedUSD, err := e.newCaller(ctx, campaign)
+	caller, call, err := e.newCaller(ctx, campaign)
 	if err != nil {
 		return "", err
 	}
-	defer e.attribute(feature, campaign.ID, caller, estimatedUSD, &err)
+	defer e.attribute(feature, campaign.ID, caller, call, &err)
 	return caller.Call(system, user, maxTokens)
 }
 
-// newCaller resolves the campaign's LLM provider (Butler config → tenant 'llm'
-// config → gated env default) and wires the shared metered caller over the
-// caps-free PriceOnly meter — the recap engine's exact posture.
-func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llmcall.Caller, func() float64, error) {
+// newCaller opens the off-session metered call (the allowance gate runs here,
+// BEFORE anything else), resolves the campaign's LLM provider (Butler config →
+// tenant 'llm' config → gated env default) and wires the shared caller onto the
+// call's recorder — the recap engine's exact posture.
+func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llmcall.Caller, *billing.Call, error) {
+	call, err := e.metering.Begin(ctx, campaign.TenantID, e.metrics)
+	if err != nil {
+		return nil, nil, err
+	}
 	butler, err := e.st.GetButler(ctx, campaign.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assist: load butler for campaign %s: %w", campaign.ID, err)
@@ -253,35 +265,38 @@ func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llm
 	if err != nil {
 		return nil, nil, fmt.Errorf("assist: build llm provider: %w", err)
 	}
-	// The default path sends request model "" (the adapter fills the Groq
-	// default) but prices on a real model so (groq, "") never misses the price
-	// map (#272 review).
+	// A config without a model sends request model "" (the adapter fills its own
+	// default) but prices — and now ledgers — on that real model id, for every
+	// provider and not just the env path: (provider, "") misses the price map and
+	// bills the Tenant's allowance at the conservative fallback (#272 review).
 	priceModel := model
-	if providerID == "" {
-		priceModel = groq.DefaultModel
+	if priceModel == "" {
+		priceModel = llmbuild.DefaultModel(providerID)
 	}
 
-	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
 	return &llmcall.Caller{
 		Ctx:        ctx,
 		Provider:   provider,
 		Model:      model,
 		PriceModel: priceModel,
 		Label:      llmcall.ProviderLabel(providerID),
-		Rec:        rec,
+		Rec:        call.Recorder(),
 		ErrPrefix:  "assist",
-	}, estimatedUSD, nil
+	}, call, nil
 }
 
-// attribute emits the usage attribution line — on success AND on a midway
-// failure, so metered tokens are never orphaned (the #272 review rule).
-func (e *Engine) attribute(feature string, campaignID uuid.UUID, c *llmcall.Caller, estimatedUSD func() float64, err *error) {
+// attribute flushes the call's usage to the Usage Ledger and emits the
+// attribution line — on success AND on a midway failure, so metered tokens are
+// never orphaned (the #272 review rule).
+func (e *Engine) attribute(feature string, campaignID uuid.UUID, c *llmcall.Caller, call *billing.Call, err *error) {
+	flushErr := call.Close(c.Ctx)
 	e.log.Info("assist: llm usage",
 		"feature", feature,
 		"campaign_id", campaignID,
 		"input_tokens", c.TotalIn,
 		"output_tokens", c.TotalOut,
-		"estimated_usd", estimatedUSD(),
+		"estimated_usd", call.EstimatedUSD(),
+		"flushed", flushErr == nil,
 		"ok", *err == nil,
 	)
 }

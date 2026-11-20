@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/mapgen"
@@ -113,6 +114,9 @@ func (s *campaignMaps) GenerateMapImage(
 // names no cause at all rather than guessing "configuration".
 func mapGenerateErr(op, subject string, err error) *connect.Error {
 	switch {
+	case errors.Is(err, billing.ErrAllowanceExhausted):
+		// Checked first: it is refused before the generator is even built.
+		return allowanceExhaustedErr()
 	case errors.Is(err, mapgen.ErrNotConfigured):
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("no image provider key is configured — save a Gemini key in Configuration"))

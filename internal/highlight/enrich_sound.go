@@ -15,7 +15,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
@@ -129,15 +128,15 @@ func clampDuration(d, min, max time.Duration) time.Duration {
 // SoundEnrichStore is the storage surface the sound-generation handler needs;
 // *storage.Store satisfies it and tests fake it. The claim pair mirrors the
 // image enrichment's (#406); SetHighlightSound is the CONDITIONAL land (misses
-// when the row is gone OR the GM changed the choice mid-generation); AddUsage
-// is the per-generation Usage Ledger flush (ADR-0004 amendment: attribution
-// under the SFX/Music model id).
+// when the row is gone OR the GM changed the choice mid-generation). The
+// per-generation Usage Ledger write (ADR-0004 amendment: attribution under the
+// SFX/Music model id) goes through the off-session metering seam, not this
+// store.
 type SoundEnrichStore interface {
 	GetHighlight(ctx context.Context, tenantID, id uuid.UUID) (storage.Highlight, error)
 	SetHighlightSound(ctx context.Context, id uuid.UUID, kind, soundKey, contentType string, sizeBytes int64) error
 	TryClaimHighlightSoundEnrich(ctx context.Context, id uuid.UUID, ttl time.Duration) (bool, error)
 	ReleaseHighlightSoundEnrichClaim(ctx context.Context, id uuid.UUID) error
-	AddUsage(ctx context.Context, rows []storage.UsageRow) error
 }
 
 // EnrichSoundHandler builds the JobKindEnrichSound handler (ADR-0049). It is
@@ -148,6 +147,11 @@ type SoundEnrichStore interface {
 //   - the row's sound_kind no longer matches the payload's (the GM changed or
 //     cleared the choice; the newer RPC enqueued its own job) → nil.
 //   - the requested sound already landed → nil (no double spend on a re-run).
+//   - the Tenant's monthly plan allowance is exhausted (#658) → log + nil: the
+//     paid step is skipped, the Highlight stays intact without sound and the
+//     job completes 'done' (the EnrichImageHandler rationale; SetHighlightSound
+//     already refuses the request up front, so this is the race where the
+//     allowance ran out between the click and the job).
 //   - sound generation is not configured for the tenant → log + nil (the
 //     Highlight stays intact without media — never a retry loop on a missing
 //     key; ADR-0004 amendment's clean no-op).
@@ -163,7 +167,10 @@ type SoundEnrichStore interface {
 //     blob for the newer job to overwrite (deleting it could destroy that
 //     job's already-landed asset). Errors never mutate the row — the
 //     Highlight keeps its clip and stays soundless (AC).
-func EnrichSoundHandler(store SoundEnrichStore, blobs blob.Store, factory SoundGeneratorFactory, log *slog.Logger) func(context.Context, json.RawMessage) error {
+func EnrichSoundHandler(store SoundEnrichStore, blobs blob.Store, factory SoundGeneratorFactory, metering *billing.OffSession, log *slog.Logger) func(context.Context, json.RawMessage) error {
+	if metering == nil {
+		panic("highlight: EnrichSoundHandler: nil off-session metering")
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -189,6 +196,20 @@ func EnrichSoundHandler(store SoundEnrichStore, blobs blob.Store, factory SoundG
 			// Already landed (a re-run of an at-least-once job): stop before any
 			// spend so the same request is never billed twice.
 			return nil
+		}
+
+		// The off-session metering seam (#658), before the claim and before any
+		// spend: an exhausted allowance is a clean skip (handler doc); a gate
+		// that could not be read is returned so the job retries rather than
+		// spending ungated.
+		call, err := metering.Begin(ctx, p.TenantID, nil)
+		if errors.Is(err, billing.ErrAllowanceExhausted) {
+			log.Warn("highlight sound enrich: plan allowance exhausted, leaving highlight without sound",
+				"highlight", p.HighlightID, "tenant", p.TenantID)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("highlight sound enrich: open metered call: %w", err)
 		}
 
 		// Race-proof claim (the #406 pattern): two concurrent jobs for the SAME
@@ -260,21 +281,19 @@ func EnrichSoundHandler(store SoundEnrichStore, blobs blob.Store, factory SoundG
 		// Meter the spend (ADR-0004/0046 amendments): a per-generation Usage
 		// Ledger flush attributes the estimate to the tenant under the SFX/Music
 		// model id — off-session, never cap-gated (the recap posture). A flush
-		// failure logs and continues: attribution only, never a gate, and failing
-		// the job here would re-bill the generation on retry.
-		estimated := spend.EstimateSoundUSD(observe.ProviderElevenLabs, res.Model, req.Duration)
-		ledger := billing.NewLedger(p.TenantID, nil)
-		ledger.SoundGeneration(observe.ProviderElevenLabs, res.Model, req.Duration, res.CharacterCost)
-		if ferr := ledger.Flush(ctx, store.AddUsage); ferr != nil {
-			log.Error("highlight sound enrich: flush usage ledger", "err", ferr, "highlight", p.HighlightID)
-		}
+		// failure logs (inside Close) and continues: failing the job here would
+		// re-bill the generation on retry.
+		call.Sound(observe.ProviderElevenLabs, res.Model, req.Duration, res.CharacterCost)
+		flushErr := call.Close(ctx)
 		log.Info("highlight sound enrich: sound generated",
 			"highlight", p.HighlightID,
+			"tenant", p.TenantID,
 			"kind", p.Kind,
 			"model", res.Model,
 			"requested_duration", req.Duration,
 			"character_cost", res.CharacterCost,
-			"estimated_usd", estimated,
+			"estimated_usd", call.EstimatedUSD(),
+			"flushed", flushErr == nil,
 		)
 
 		key, err := blob.Key(p.TenantID, highlightOwnerKind, p.HighlightID, soundBlobName)
