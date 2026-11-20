@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -56,18 +55,31 @@ func SetImportLimitForTest(n int64) func() {
 // decodeLimit is the effective decode cap; a var so tests can shrink it.
 var decodeLimit = MaxDecodedBytes
 
-// importConcurrency bounds how many imports may inflate at once. The per-request
-// caps (192 MiB compressed, 256 MiB decoded — ADR-0053) keep one backup
-// importable, but gzip inflates whitespace ~1000:1 and Decode holds about twice
-// the decoded size, so a few concurrent 260 KB uploads could still pin the web
-// tier's memory. Imports are rare and operator-driven; serializing them costs
-// nothing.
-const importConcurrency = 2
+// inflateFloor and maxInflateRatio are the gzip-bomb guard on top of the flat
+// decode cap. A gzipped bundle may always decode to inflateFloor bytes; past
+// that, the decoded size may not exceed maxInflateRatio times the compressed
+// bytes actually read so far. An honest bundle stays well under it — base64 map
+// images inflate ~1.3×, indented JSON prose 5–10× — while a run of one repeated
+// byte inflates ~1000×, so a 250 KiB bomb is refused after 32 MiB of inflating
+// instead of after the whole 256 MiB cap.
+const (
+	inflateFloor    int64 = 32 << 20
+	maxInflateRatio int64 = 20
+)
+
+// importConcurrency bounds how many bundle transfers — imports AND exports
+// (ServeExport shares this gate) — may run at once. The per-request caps
+// (192 MiB compressed, 256 MiB decoded, the inflate ratio — ADR-0053) bound one
+// request; this bounds how many hold that much memory together. Both directions
+// build the whole Bundle in memory, and the web pod's memory limit has room for
+// one of those, not two. Bundles are rare and operator-driven; serializing them
+// costs nothing.
+const importConcurrency = 1
 
 var importGate = make(chan struct{}, importConcurrency)
 
-// acquireImportSlot takes an import slot without blocking; ok is false when
-// every slot is busy, and release returns the slot.
+// acquireImportSlot takes a bundle slot (shared by import and export) without
+// blocking; ok is false when every slot is busy, and release returns the slot.
 func acquireImportSlot() (release func(), ok bool) {
 	select {
 	case importGate <- struct{}{}:
@@ -99,7 +111,8 @@ var (
 	// bundle's own content (a dangling ref, a duplicate ref, a bad image) — a
 	// client-caused 400, never a 500 with an alarming Error log.
 	ErrInvalidBundle = errors.New("invalid campaign bundle")
-	// ErrTooLarge means the decompressed bundle exceeded the decode cap.
+	// ErrTooLarge means the decompressed bundle exceeded the decode cap or
+	// inflated past the gzip-bomb ratio guard.
 	ErrTooLarge = errors.New("bundle exceeds maximum decoded size")
 )
 
@@ -117,56 +130,161 @@ func Encode(w io.Writer, b *Bundle) error {
 }
 
 // Decode reads a bundle, transparently accepting either a gzipped or a plain
-// JSON stream. It enforces the decode-size cap, rejects unknown fields, and
-// checks the format version.
+// JSON stream. It enforces the decode-size cap and, for gzip, the inflate-ratio
+// guard; rejects unknown fields; and checks the format version.
+//
+// The document is decoded STREAMING (the gzip-bomb fix): the inflated bytes are
+// never collected into one buffer first, and the version gate is not a second
+// full Unmarshal. Instead the top-level object is walked key by key, so
+// format_version — which [Encode] always writes first — is checked before the
+// campaign section is decoded strictly. A newer bundle therefore still gets the
+// "format is newer" error (ADR-0053 §7), not a cryptic unknown-field one. A
+// hand-written bundle that puts format_version AFTER a section this build
+// cannot parse gets the parse error instead.
 func Decode(r io.Reader) (*Bundle, error) {
-	br := bufio.NewReader(r)
+	compressed := &countingReader{r: r}
+	br := bufio.NewReader(compressed)
 	magic, err := br.Peek(2)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
-	var src io.Reader = br
+	guard := &inflateGuard{r: br}
 	if len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
 		gz, err := gzip.NewReader(br)
 		if err != nil {
 			return nil, err
 		}
 		defer gz.Close()
-		src = gz
+		guard = &inflateGuard{r: gz, compressed: compressed}
 	}
 
-	limited := io.LimitReader(src, decodeLimit+1)
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > decodeLimit {
-		return nil, ErrTooLarge
-	}
-
-	// Lenient version pre-pass: a newer bundle adds fields this build does not
-	// know, so the strict decode below would reject it with a cryptic
-	// unknown-field error. Gate on the version FIRST (ADR-0053 §7: refuse newer
-	// with a clear error) before the strict full decode.
-	var ver struct {
-		FormatVersion int `json:"format_version"`
-	}
-	if err := json.Unmarshal(data, &ver); err != nil {
-		return nil, err
-	}
-	if err := CheckVersion(ver.FormatVersion); err != nil {
-		return nil, fmt.Errorf("bundle has format_version %d; this build supports %d: %w",
-			ver.FormatVersion, FormatVersion, err)
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(guard)
 	dec.DisallowUnknownFields()
-	var b Bundle
-	if err := dec.Decode(&b); err != nil {
+	b, err := decodeBundle(dec)
+	if err != nil {
+		// The guard's refusal reaches the decoder as a read error; return the
+		// guard's own so ErrTooLarge survives however the decoder reported it.
+		if guard.err != nil {
+			return nil, guard.err
+		}
 		return nil, err
+	}
+	return b, nil
+}
+
+// decodeBundle walks a bundle's top-level object, gating on format_version the
+// moment it is read (see [Decode]).
+func decodeBundle(dec *json.Decoder) (*Bundle, error) {
+	if err := expectDelim(dec, '{'); err != nil {
+		return nil, err
+	}
+	var b Bundle
+	versionSeen := false
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := tok.(string)
+		switch key {
+		case "format_version":
+			if err := dec.Decode(&b.FormatVersion); err != nil {
+				return nil, err
+			}
+			if err := checkVersionMsg(b.FormatVersion); err != nil {
+				return nil, err
+			}
+			versionSeen = true
+		case "exported_at":
+			if err := dec.Decode(&b.ExportedAt); err != nil {
+				return nil, err
+			}
+		case "campaign":
+			if err := dec.Decode(&b.Campaign); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("json: unknown field %q", key)
+		}
+	}
+	if err := expectDelim(dec, '}'); err != nil {
+		return nil, err
+	}
+	if !versionSeen {
+		// No format_version reads as version 0: unsupported, with the same
+		// message naming both versions.
+		if err := checkVersionMsg(0); err != nil {
+			return nil, err
+		}
 	}
 	return &b, nil
+}
+
+// expectDelim consumes the next token and fails unless it is want.
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != want {
+		return fmt.Errorf("json: bundle is not a JSON object (got %v)", tok)
+	}
+	return nil
+}
+
+// checkVersionMsg is [CheckVersion] wrapped in the client-facing message that
+// names both versions (ADR-0053 §7).
+func checkVersionMsg(v int) error {
+	if err := CheckVersion(v); err != nil {
+		return fmt.Errorf("bundle has format_version %d; this build supports %d: %w", v, FormatVersion, err)
+	}
+	return nil
+}
+
+// countingReader counts the bytes read through it: the compressed side of the
+// inflate-ratio guard. It counts what the gzip reader's buffer has pulled, at
+// most a buffer ahead of what was inflated — slack that only errs towards
+// accepting.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// inflateGuard counts decoded bytes and fails, stickily, once they pass the
+// decode cap or — for a gzipped stream (compressed != nil) — once they pass
+// both inflateFloor and maxInflateRatio times the compressed bytes read so far.
+// It fails while the bytes ARRIVE, so a bomb costs at most about inflateFloor of
+// inflating, never the whole decode cap.
+type inflateGuard struct {
+	r          io.Reader
+	compressed *countingReader
+	decoded    int64
+	err        error
+}
+
+func (g *inflateGuard) Read(p []byte) (int, error) {
+	if g.err != nil {
+		return 0, g.err
+	}
+	n, err := g.r.Read(p)
+	g.decoded += int64(n)
+	switch {
+	case g.decoded > decodeLimit:
+		g.err = fmt.Errorf("%w (%d MiB)", ErrTooLarge, decodeLimit>>20)
+	case g.compressed != nil && g.decoded > inflateFloor && g.decoded > maxInflateRatio*g.compressed.n:
+		g.err = fmt.Errorf("%w: it inflates more than %d times its compressed size", ErrTooLarge, maxInflateRatio)
+	}
+	if g.err != nil {
+		return 0, g.err
+	}
+	return n, err
 }
 
 // CheckVersion reports whether v is a supported bundle format version.
