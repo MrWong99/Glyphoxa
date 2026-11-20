@@ -45,6 +45,6 @@ func TestCountBargeCancels(t *testing.T) {
 	if len(m.guilds) != 1 {
 		t.Fatalf("counted after unsubscribe: %v", m.guilds)
 	}
-	countBargeCancels(nil, m, "g1")()  // nil bus: no-op
+	countBargeCancels(nil, m, "g1")()   // nil bus: no-op
 	countBargeCancels(bus, nil, "g1")() // nil recorder: no-op
 }
