@@ -20,6 +20,25 @@ type fakeChars struct {
 	err   error                        // when non-nil, returned for every lookup (a DB failure)
 	gate  chan struct{}                // when non-nil, each lookup blocks on it before returning
 	calls int
+
+	// tenantOf maps a campaign to its owning Tenant; a campaign not listed
+	// belongs to defaultTenant. campaignErr fails every GetCampaign.
+	tenantOf    map[uuid.UUID]uuid.UUID
+	campaignErr error
+}
+
+// defaultTenant owns every test campaign that tenantOf does not place elsewhere.
+var defaultTenant = uuid.MustParse("00000000-0000-0000-0000-0000000000aa")
+
+func (f *fakeChars) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	if f.campaignErr != nil {
+		return storage.Campaign{}, f.campaignErr
+	}
+	tenant := defaultTenant
+	if t, ok := f.tenantOf[id]; ok {
+		tenant = t
+	}
+	return storage.Campaign{ID: id, TenantID: tenant}, nil
 }
 
 func (f *fakeChars) GetCharacterByDiscordUser(_ context.Context, campaignID uuid.UUID, discordUserID string) (storage.Character, error) {
@@ -78,7 +97,8 @@ const (
 	guestID  = "333333333333333333"
 )
 
-// fakeGM is a scripted GMChecker: the listed snowflakes are GMs.
+// fakeGM is a scripted GMChecker: the listed snowflakes are GMs of defaultTenant
+// and of no other Tenant.
 type fakeGM map[string]struct{}
 
 func gmSet(ids ...string) fakeGM {
@@ -91,9 +111,9 @@ func gmSet(ids ...string) fakeGM {
 	return s
 }
 
-func (f fakeGM) IsGM(discordUserID string) bool {
+func (f fakeGM) IsGMInTenant(tenantID uuid.UUID, discordUserID string) bool {
 	_, ok := f[discordUserID]
-	return ok
+	return ok && tenantID == defaultTenant
 }
 
 func newTestResolver(t *testing.T, chars CharacterLookup, namer MemberNamer, gmIDs ...string) *Resolver {
@@ -205,6 +225,8 @@ func TestResolverGMFlagIndependentOfName(t *testing.T) {
 	// Unmapped GM: no Character, no guild name — still GM by the checker's verdict.
 	unmappedGM := "999999999999999999"
 	r2 := newTestResolver(t, &fakeChars{byKey: map[string]storage.Character{}}, &fakeNamer{}, unmappedGM)
+	r2.Warm(campaign, unmappedGM)
+	r2.wg.Wait()
 	if got := r2.Lookup(campaign, unmappedGM); !got.GM {
 		t.Fatalf("unmapped GM Lookup = %+v, want GM=true (GMChecker verdict, no name needed)", got)
 	}
@@ -346,5 +368,53 @@ func TestResolverLookupNeverDoesIO(t *testing.T) {
 	_ = r.Lookup(campaign, guestID)
 	if chars.callCount() != 0 || namer.callCount() != 0 {
 		t.Fatalf("Lookup did I/O: chars=%d namer=%d, want 0/0", chars.callCount(), namer.callCount())
+	}
+}
+
+// TestResolverGMLabelIsScopedToTheCampaignsTenant (S2): the GM label follows the
+// Campaign's OWNING Tenant. An operator of Tenant A who joins a Tenant B session
+// as a player is not labelled GM in Tenant B's transcript.
+func TestResolverGMLabelIsScopedToTheCampaignsTenant(t *testing.T) {
+	home, foreign := uuid.New(), uuid.New()
+	otherTenant := uuid.New()
+	chars := &fakeChars{
+		byKey:    map[string]storage.Character{},
+		tenantOf: map[uuid.UUID]uuid.UUID{foreign: otherTenant}, // home → defaultTenant
+	}
+	r := newTestResolver(t, chars, &fakeNamer{}, gmUser) // gmUser operates defaultTenant only
+
+	r.Warm(home, gmUser)
+	r.Warm(foreign, gmUser)
+	r.wg.Wait()
+
+	if got := r.Lookup(home, gmUser); !got.GM {
+		t.Errorf("own tenant's campaign: Lookup = %+v, want GM=true", got)
+	}
+	if got := r.Lookup(foreign, gmUser); got.GM {
+		t.Errorf("another tenant's campaign: Lookup = %+v, want GM=false (operator of a DIFFERENT tenant)", got)
+	}
+}
+
+// TestResolverGMOffUntilTenantKnown: with the Campaign's Tenant unresolved (cold
+// cache, or a failed campaign read) nobody is labelled GM; the next Warm retries.
+func TestResolverGMOffUntilTenantKnown(t *testing.T) {
+	campaign := uuid.New()
+	chars := &fakeChars{byKey: map[string]storage.Character{}, campaignErr: errors.New("db down")}
+	r := newTestResolver(t, chars, &fakeNamer{}, gmUser)
+
+	if got := r.Lookup(campaign, gmUser); got.GM {
+		t.Fatalf("cold Lookup = %+v, want GM=false", got)
+	}
+	r.Warm(campaign, gmUser)
+	r.wg.Wait()
+	if got := r.Lookup(campaign, gmUser); got.GM {
+		t.Fatalf("Lookup after a failed campaign read = %+v, want GM=false", got)
+	}
+
+	chars.campaignErr = nil
+	r.Warm(campaign, gmUser) // tenant still unknown, so this refills despite the cached name
+	r.wg.Wait()
+	if got := r.Lookup(campaign, gmUser); !got.GM {
+		t.Fatalf("Lookup after the campaign read recovered = %+v, want GM=true", got)
 	}
 }

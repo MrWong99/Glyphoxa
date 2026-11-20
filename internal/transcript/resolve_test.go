@@ -234,6 +234,10 @@ type fakeCharLookup struct {
 	byKey map[string]storage.Character
 }
 
+func (f *fakeCharLookup) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{ID: id}, nil
+}
+
 func (f *fakeCharLookup) GetCharacterByDiscordUser(_ context.Context, campaignID uuid.UUID, discordUserID string) (storage.Character, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
