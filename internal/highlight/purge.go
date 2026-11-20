@@ -80,8 +80,10 @@ type purgePayload struct {
 // PurgeStore is the storage surface the purge handler needs; *storage.Store
 // satisfies it and tests fake it.
 type PurgeStore interface {
-	ListSessionCandidateClipKeys(ctx context.Context, voiceSessionID uuid.UUID) ([]string, error)
-	DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (int, error)
+	// PurgeSessionCandidates locks the session's candidate rows, hands their clip
+	// keys to drop, then deletes the rows, all in one transaction (a drop error
+	// rolls back).
+	PurgeSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID, drop func(ctx context.Context, clipKeys []string) error) (int, error)
 }
 
 // PurgeScheduleStore is the storage surface the boot-time purge backstop needs:
@@ -136,9 +138,12 @@ func SweepMissingCandidatePurges(ctx context.Context, store PurgeScheduleStore, 
 // is at-least-once and idempotent (ADR-0049): it drops each remaining candidate's
 // blob FIRST (through the seam, ADR-0048) and only then deletes the rows, so a
 // crash between the two leaves a re-runnable job (the surviving rows still list
-// their keys). Promoted highlights are untouched — the storage sweep filters to
-// status='candidate'. A re-run after a clean purge lists nothing and deletes
-// nothing. The returned func matches the jobs runner's HandlerFunc.
+// their keys). Both steps run inside the store's purge transaction, which holds
+// the candidate rows locked: a GM promoting one of them mid-purge waits and then
+// finds it gone, instead of keeping a Highlight whose clip was just dropped.
+// Promoted highlights are untouched — the purge filters to status='candidate'.
+// A re-run after a clean purge finds nothing and deletes nothing. The returned
+// func matches the jobs runner's HandlerFunc.
 func PurgeHandler(store PurgeStore, blobs blob.Store, log *slog.Logger) func(context.Context, json.RawMessage) error {
 	if log == nil {
 		log = slog.Default()
@@ -149,20 +154,18 @@ func PurgeHandler(store PurgeStore, blobs blob.Store, log *slog.Logger) func(con
 			return fmt.Errorf("highlight purge: decode payload: %w", err)
 		}
 
-		keys, err := store.ListSessionCandidateClipKeys(ctx, p.VoiceSessionID)
-		if err != nil {
-			return fmt.Errorf("highlight purge: list candidate clip keys: %w", err)
-		}
-		// Blob first (ADR-0048): drop each clip through the seam before removing the
-		// rows, so a mid-sweep crash never orphans a blob whose row is already gone.
-		for _, k := range keys {
-			if err := blobs.Delete(ctx, k); err != nil {
-				return fmt.Errorf("highlight purge: delete clip %q: %w", k, err)
+		// Blob first (ADR-0048): drop each clip through the seam before the rows go,
+		// so a mid-sweep crash never leaves a row whose blob is already gone.
+		n, err := store.PurgeSessionCandidates(ctx, p.VoiceSessionID, func(ctx context.Context, keys []string) error {
+			for _, k := range keys {
+				if err := blobs.Delete(ctx, k); err != nil {
+					return fmt.Errorf("delete clip %q: %w", k, err)
+				}
 			}
-		}
-		n, err := store.DeleteSessionCandidates(ctx, p.VoiceSessionID)
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("highlight purge: delete candidate rows: %w", err)
+			return fmt.Errorf("highlight purge: %w", err)
 		}
 		if n > 0 {
 			log.Info("purged candidate highlights", "voice_session", p.VoiceSessionID, "count", n)

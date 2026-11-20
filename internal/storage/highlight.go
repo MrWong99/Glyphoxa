@@ -250,27 +250,48 @@ func (s *Store) SetHighlightImage(ctx context.Context, id uuid.UUID, imageKey, c
 	return nil
 }
 
-// ListSessionCandidateClipKeys returns the clip_key of every remaining CANDIDATE
-// highlight for a Voice Session — the blob keys the 7-day purge job drops through
-// the seam BEFORE it deletes the rows (blob-first, ADR-0048). Promoted rows are
-// excluded (they are kept). Session-scoped (the purge payload carries no tenant).
-func (s *Store) ListSessionCandidateClipKeys(ctx context.Context, voiceSessionID uuid.UUID) ([]string, error) {
-	return s.scanClipKeys(ctx,
-		`SELECT clip_key FROM highlight WHERE voice_session_id = $1 AND status = 'candidate'`,
-		voiceSessionID)
-}
-
-// DeleteSessionCandidates removes every remaining CANDIDATE highlight row for a
-// Voice Session (the 7-day purge, #308/ADR-0051), returning how many rows were
-// deleted. Promoted rows are untouched. Idempotent: a second run deletes nothing.
-// The caller drops the blobs first via ListSessionCandidateClipKeys.
-func (s *Store) DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID) (int, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM highlight WHERE voice_session_id = $1 AND status = 'candidate'`, voiceSessionID)
+// PurgeSessionCandidates is the 7-day candidate purge for one Voice Session
+// (#308, ADR-0051) as ONE transaction: it locks every remaining CANDIDATE
+// highlight row of the session, hands their clip keys to drop (which deletes the
+// blobs through the seam), and then deletes the rows, returning how many. A drop
+// error rolls back, so the rows survive for the job's retry. Promoted rows are
+// untouched. Idempotent: a second run finds nothing.
+//
+// The row locks are the point. Blob-first (ADR-0048) is kept, so a crash never
+// leaves a row whose blob is gone; but without the locks a GM could PROMOTE a
+// candidate between the listing and the row delete: the delete (filtered to
+// status='candidate') then skipped the freshly promoted row, whose clip blob the
+// purge had already dropped, leaving a kept Highlight with no audio. Holding
+// FOR UPDATE makes that promote wait until the purge commits, after which the
+// row is gone and the promote reports ErrNotFound.
+func (s *Store) PurgeSessionCandidates(ctx context.Context, voiceSessionID uuid.UUID, drop func(ctx context.Context, clipKeys []string) error) (int, error) {
+	n := 0
+	err := s.InTx(ctx, func(tx *Store) error {
+		keys, err := tx.scanClipKeys(ctx,
+			`SELECT clip_key FROM highlight
+			  WHERE voice_session_id = $1 AND status = 'candidate'
+			    FOR UPDATE`, voiceSessionID)
+		if err != nil {
+			return err
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+		if err := drop(ctx, keys); err != nil {
+			return err
+		}
+		tag, err := tx.db.Exec(ctx,
+			`DELETE FROM highlight WHERE voice_session_id = $1 AND status = 'candidate'`, voiceSessionID)
+		if err != nil {
+			return fmt.Errorf("storage: delete session candidates: %w", err)
+		}
+		n = int(tag.RowsAffected())
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("storage: delete session candidates: %w", err)
+		return 0, err
 	}
-	return int(tag.RowsAffected()), nil
+	return n, nil
 }
 
 // SessionPurgeCandidate is an ended Voice Session the boot backstop must schedule a

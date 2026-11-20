@@ -27,32 +27,32 @@ type fakePurgeStore struct {
 	deleteErr error
 }
 
-func (f *fakePurgeStore) ListSessionCandidateClipKeys(_ context.Context, _ uuid.UUID) ([]string, error) {
+// PurgeSessionCandidates mirrors the real store's transaction: hand the candidate
+// keys to drop, and delete the rows only if it succeeds.
+func (f *fakePurgeStore) PurgeSessionCandidates(ctx context.Context, _ uuid.UUID, drop func(context.Context, []string) error) (int, error) {
 	if f.listErr != nil {
-		return nil, f.listErr
+		return 0, f.listErr
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.deleted {
-		return nil, nil // already purged: idempotent re-run sees nothing
+		f.mu.Unlock()
+		return 0, nil // already purged: idempotent re-run sees nothing
 	}
-	return append([]string(nil), f.keys...), nil
-}
+	keys := append([]string(nil), f.keys...)
+	f.mu.Unlock()
 
-func (f *fakePurgeStore) DeleteSessionCandidates(_ context.Context, _ uuid.UUID) (int, error) {
+	if err := drop(ctx, keys); err != nil {
+		return 0, err // rolled back: rows stay
+	}
 	if f.deleteErr != nil {
 		return 0, f.deleteErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	*f.events = append(*f.events, "row-delete")
-	if f.deleted {
-		return 0, nil
-	}
 	f.deleted = true
-	n := len(f.keys)
-	f.deleteN = n
-	return n, nil
+	f.deleteN = len(keys)
+	return len(keys), nil
 }
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

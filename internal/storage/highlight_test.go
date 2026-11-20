@@ -226,20 +226,27 @@ func TestHighlight_SessionCandidateSweep(t *testing.T) {
 	candID, candKey := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
 	promID, _ := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightPromoted)
 
-	keys, err := st.ListSessionCandidateClipKeys(ctx, vs.ID)
-	if err != nil {
-		t.Fatalf("list candidate keys: %v", err)
+	// A failing blob drop rolls the purge back: the candidate row survives for the
+	// job's retry (never a row whose blob may or may not be gone).
+	if _, err := st.PurgeSessionCandidates(ctx, vs.ID, func(context.Context, []string) error {
+		return errors.New("blob store down")
+	}); err == nil {
+		t.Fatal("want the drop error to fail the purge")
 	}
-	if len(keys) != 1 || keys[0] != candKey {
-		t.Fatalf("candidate keys mismatch: %v", keys)
+	if _, err := st.GetHighlight(ctx, tenantID, candID); err != nil {
+		t.Fatalf("candidate must survive a failed purge: %v", err)
 	}
 
-	n, err := st.DeleteSessionCandidates(ctx, vs.ID)
+	var dropped []string
+	n, err := st.PurgeSessionCandidates(ctx, vs.ID, func(_ context.Context, keys []string) error {
+		dropped = append(dropped, keys...)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("delete candidates: %v", err)
+		t.Fatalf("purge candidates: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("deleted %d candidates, want 1", n)
+	if n != 1 || len(dropped) != 1 || dropped[0] != candKey {
+		t.Fatalf("purged %d rows, dropped keys %v; want 1 row and [%s]", n, dropped, candKey)
 	}
 	// Candidate gone, promoted untouched.
 	if _, err := st.GetHighlight(ctx, tenantID, candID); !errors.Is(err, storage.ErrNotFound) {
@@ -248,9 +255,59 @@ func TestHighlight_SessionCandidateSweep(t *testing.T) {
 	if _, err := st.GetHighlight(ctx, tenantID, promID); err != nil {
 		t.Fatalf("promoted should survive: %v", err)
 	}
-	// Idempotent.
-	if n, err := st.DeleteSessionCandidates(ctx, vs.ID); err != nil || n != 0 {
+	// Idempotent: nothing left, and drop is not even called.
+	if n, err := st.PurgeSessionCandidates(ctx, vs.ID, func(context.Context, []string) error {
+		t.Error("drop called with no candidates left")
+		return nil
+	}); err != nil || n != 0 {
 		t.Fatalf("second sweep: want 0/nil, got %d/%v", n, err)
+	}
+}
+
+// TestHighlight_PurgeDoesNotStrandAPromotedHighlightWithoutItsClip (A12): a GM
+// promoting a candidate WHILE the purge is dropping its clip must not end up with
+// a kept Highlight whose audio is gone. The purge holds the candidate rows
+// locked, so the promote waits and then finds the row purged (ErrNotFound),
+// rather than slipping in between the blob drop and the row delete.
+func TestHighlight_PurgeDoesNotStrandAPromotedHighlightWithoutItsClip(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, _ := st.CreateVoiceSession(ctx, campaignID)
+	candID, _ := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
+
+	promoteErr := make(chan error, 1)
+	_, err := st.PurgeSessionCandidates(ctx, vs.ID, func(context.Context, []string) error {
+		// The clip blob is being dropped right now: the GM clicks Keep.
+		go func() {
+			_, err := st.PromoteHighlight(ctx, tenantID, candID)
+			promoteErr <- err
+		}()
+		select {
+		case err := <-promoteErr:
+			t.Errorf("promote completed (err=%v) while the purge held the candidate; it must wait", err)
+			promoteErr <- err
+		case <-time.After(300 * time.Millisecond):
+			// Still blocked on the row lock: what we want.
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("purge candidates: %v", err)
+	}
+
+	select {
+	case err := <-promoteErr:
+		if !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("promote after the purge = %v, want ErrNotFound (the candidate is gone, clip and row together)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("promote never returned after the purge committed")
+	}
+	if _, err := st.GetHighlight(ctx, tenantID, candID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("a highlight row survived the purge whose clip was dropped: %v", err)
 	}
 }
 
