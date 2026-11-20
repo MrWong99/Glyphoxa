@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -455,9 +457,71 @@ func TestRelay_TwoSessionsNoCrossTalk(t *testing.T) {
 	}
 }
 
-// TestTyping_ClearsAfterCleanTurn is the headline regression (FIX 1): a CLEAN
-// turn emits NO TurnEnded, so typing must NOT stay stuck on "<NPC> is speaking…"
-// — a following human utterance returns it to listening.
+// TestTyping_CleanNPCReplyClearsWithoutHumanAudio is W1's regression, driven
+// through the REAL orchestrator Replier: after a clean NPC
+// reply, with NO further human audio, the typing label must return to listening.
+// It used to stay "<NPC> is speaking…" until somebody next made a sound, because a
+// clean turn published no terminal event.
+func TestTyping_CleanNPCReplyClearsWithoutHumanAudio(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	ttsStage := orchestrator.NewTTS(bus, oneChunkSynth{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		if err := dispatch(orchestrator.Reply{Sentence: "Aye."}); err != nil {
+			return err
+		}
+		return dispatch(orchestrator.Reply{Sentence: "What'll it be?"})
+	}
+	// No barge-in floor here (that wiring is package-internal); the floor path's
+	// terminal is pinned in the orchestrator's own tests.
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	ended := make(chan voiceevent.TurnEnded, 4)
+	t.Cleanup(voiceevent.On(bus, func(e voiceevent.TurnEnded) { ended <- e }))
+	t.Cleanup(replier.Bind(t.Context(), bus))
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Bart, a drink?", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1", Text: "Bart, a drink?",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	select {
+	case e := <-ended:
+		if e.Reason != voiceevent.TurnEndCompleted {
+			t.Fatalf("terminal reason = %q, want completed", e.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the clean NPC turn never published a terminal event")
+	}
+
+	v := r.View(id)
+	if !v.Typing.Active || v.Typing.Label != listenLabel {
+		t.Fatalf("typing after a clean NPC reply = %+v, want %q with no further human audio", v.Typing, listenLabel)
+	}
+	// The reply really did show as speaking first, then cleared.
+	sawSpeaking := false
+	for _, f := range r.Frames(id, 0) {
+		if f.Event == "status" && strings.Contains(string(f.Data), "Bart is speaking") {
+			sawSpeaking = true
+		}
+	}
+	if !sawSpeaking {
+		t.Fatal("the reply never showed \"Bart is speaking…\" — the test proves nothing")
+	}
+}
+
+// oneChunkSynth synthesizes every sentence as one audio chunk.
+type oneChunkSynth struct{}
+
+func (oneChunkSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	ch := make(chan tts.AudioChunk, 1)
+	ch <- tts.AudioChunk{}
+	close(ch)
+	return ch, nil
+}
+
+func (oneChunkSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTyping_ClearsAfterCleanTurn (FIX 1): even before the turn's terminal event
+// arrives, a following human utterance returns typing to listening.
 func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
 	bus, r, _, id := liveRelay(t)
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hi", TurnID: "t1"})
@@ -466,7 +530,7 @@ func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Aye.", TurnID: "t1"})
-	// No TurnEnded — a clean (successful) turn reports nothing.
+	// The turn is still in flight (no TurnEnded yet).
 	if v := r.View(id); v.Typing.Label != "Bart is speaking…" {
 		t.Fatalf("mid-reply typing=%+v", v.Typing)
 	}

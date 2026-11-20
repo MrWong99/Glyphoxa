@@ -384,6 +384,44 @@ func TestStageSubscriberTextDeliveredOutcome(t *testing.T) {
 	}
 }
 
+// TestStageSubscriberCompletedOutcome pins W1: a clean turn now ends with a
+// TurnEnded{completed}. After first audio it is NOT a second outcome (the turn
+// already counted first_audio); a clean turn that said nothing is the success
+// outcome `completed`, never abandoned — and the TTL reap re-counts neither.
+func TestStageSubscriberCompletedOutcome(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	// A spoken turn: first audio, then its natural completion.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "spoke", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "spoke", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.FirstAudio{At: clock, TurnID: "spoke"})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "spoke", Reason: voiceevent.TurnEndCompleted})
+
+	// A clean turn whose reply was empty: no audio, still not a failure.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "quiet", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "quiet", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "quiet", Reason: voiceevent.TurnEndCompleted})
+
+	// A completed /say (never opened by an STTFinal) is not a voice turn here.
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "say-1", Reason: voiceevent.TurnEndCompleted})
+
+	want := []turnOutcomeRec{{TurnFirstAudio, ReasonNone}, {TurnCompleted, ReasonNone}}
+	if got := rec.outcomes(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("turn outcomes = %+v, want %+v", got, want)
+	}
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+	if got := rec.outcomes(); len(got) != 2 {
+		t.Fatalf("reap re-counted a completed turn: %+v", got)
+	}
+}
+
 // TestStageSubscriberTurnEndedReasons pins the precise-reason mapping: each
 // TurnEnded reason records the right outcome+reason, and a turn-end arriving
 // AFTER first audio is ignored (the turn already counted first_audio).

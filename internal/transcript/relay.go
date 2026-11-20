@@ -432,9 +432,9 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// name is cached by the time STTFinal projects the line (~1.7s later, off the
 		// bus). Warm never blocks. Then clear any stale "<NPC> is speaking…" the
 		// moment speech starts (it fires BEFORE STTFinal), instead of waiting for
-		// the next finalized line. Live-validated — a clean turn emits no
-		// TurnEnded, so without this the last agent line keeps the label through
-		// the following silence. Also correct for a barge (human over the Agent).
+		// the next finalized line. A human talking over (or right after) the Agent
+		// is listening again even before that turn's TurnEnded lands. Also correct
+		// for a barge (human over the Agent).
 		if r.resolver != nil && ev.SpeakerID != "" {
 			r.resolver.Warm(r.proj.Session(sid).CampaignID, ev.SpeakerID)
 		}
@@ -518,9 +518,9 @@ func (r *Relay) fold(e voiceevent.Event) {
 		if t.deliveredN == 0 {
 			st.unconfirmed[t.line.ID] = struct{}{}
 		}
-		// emitLine derives typing from the line's kind (FIX 1), so a clean turn
-		// (which emits NO TurnEnded) still shows "speaking" and a later human line
-		// returns to listening — no standalone setTyping here.
+		// emitLine derives typing from the line's kind (FIX 1), so the reply shows
+		// "speaking" until the turn's TurnEnded (completed included, W1) or a later
+		// human line returns it to listening — no standalone setTyping here.
 		r.emitLine(st, sid, *t.line)
 	case voiceevent.FirstAudio:
 		// The pending sentence reached the room (ADR-0012's delivery signal): the
@@ -568,8 +568,8 @@ func (r *Relay) fold(e voiceevent.Event) {
 		}
 	case voiceevent.TurnEnded:
 		// Mark the turn finalized (keep the entry so a late sentence is dropped,
-		// FIX 2) and fall back to listening — correct for a barge that cut the
-		// Agent off mid-reply.
+		// FIX 2) and fall back to listening — for every reason: a natural
+		// completion (W1) as much as a barge that cut the Agent off mid-reply.
 		t := r.proj.Turn(sid, ev.TurnID)
 		t.ended = true
 		// Reconcile the LINE grain against ADR-0012's delivered-only invariant
@@ -662,9 +662,8 @@ func (r *Relay) liveTyping() Typing {
 // coalescing reply in place), emits a "line" frame, and derives the typing
 // indicator from the line's kind (FIX 1). Deriving it from the LAST emitted line
 // — Agent line => "<who> is speaking…", human line => listening — matches the
-// design rule and is robust to a CLEAN turn, which emits no TurnEnded: without
-// this the label would stick on "speaking" through the following silence and
-// human turns. Caller holds r.mu.
+// design rule; the turn's TurnEnded (every turn gets one, a clean turn
+// `completed`) then returns it to listening. Caller holds r.mu.
 func (r *Relay) emitLine(st *sessionState, sid string, l Line) {
 	replaced := false
 	for i := range st.lines {

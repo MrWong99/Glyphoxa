@@ -1010,11 +1010,11 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		ctx := voiceevent.WithTurnID(ctx, e.TurnID)
 
 		// Default (no floor): dispatch synchronously on the bus goroutine — the
-		// behaviour every non-barge-in caller relies on. Announce a turn that died of
-		// its own error (a real TTS/provider failure) before producing audio so the
-		// metrics subscriber records the precise reason, not the coarse no-first-audio
-		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
-		// barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
+		// behaviour every non-barge-in caller relies on. Announce the turn's terminal —
+		// its own error (a real TTS/provider failure, #20) or completed for a clean
+		// turn — so the metrics subscriber records the precise reason, not the coarse
+		// no-first-audio TTL reap, mirroring the floor branch below. The sync path has
+		// no barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
 		// mute gate (#211, #225) below lives in the floor branch only. Since #225 the
 		// matcher keeps a muted addressee routable by name (silencing is the reactor
 		// gate's job, not the matcher's), so a route CAN name a muted Agent. Prod
@@ -1023,8 +1023,9 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// reached only by configs wiring neither, and relies on that pairing rather
 		// than on the matcher de-routing muted Agents.
 		if r.floor == nil {
-			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
+			reason := r.dispatchAll(ctx, e)
+			if ctx.Err() == nil {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(reason)})
 			}
 			return
 		}
@@ -1056,7 +1057,7 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 		// only folds same-target re-takes (#146): a segment routed to a DIFFERENT
 		// agent inside the window ("Bart, hold the door. Greta, run!") supersedes
 		// instead of vanishing.
-		turnCtx, release, coalesced := r.floor.Take(ctx, e.Target.AgentID)
+		turnCtx, release, coalesced := r.floor.take(ctx, e.Target.AgentID)
 		if coalesced {
 			// The floor's same-utterance grace window folded this late same-target
 			// segment into the turn already speaking (one utterance VAD-split in
@@ -1080,19 +1081,31 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 			return
 		}
 		go func() {
-			defer release()
 			reason := r.dispatchAll(turnCtx, e)
-			// Announce a turn that died of its own error (a real TTS/provider
-			// failure) before producing audio — so the metrics subscriber records
-			// the precise reason, not the coarse no-first-audio catch-all. A turn
-			// cancelled by a barge or a supersede is NOT reported here (ctx.Err() !=
-			// nil): the barge publishes its own TurnEnded, and the subscriber's
-			// first-audio/TTL guards handle the rest. A clean turn reports nothing.
-			if reason != "" && turnCtx.Err() == nil {
-				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
+			// Every turn that took the floor ends with exactly ONE TurnEnded (W1):
+			// its own error reason, or [voiceevent.TurnEndCompleted] for a clean
+			// turn. A turn cut by a barge/mute/supersede is NOT reported here — its
+			// cutter publishes the terminal. "Not cut" is decided atomically with the
+			// release (held): a cut racing the end of dispatchAll either lands before
+			// it (held=false, the cutter reports) or after it (the floor is already
+			// free, so the cutter yields nothing and reports nothing). live excludes a
+			// conversation-shutdown cancel, which publishes no terminal at all.
+			live := turnCtx.Err() == nil
+			if held := release(); held && live {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(reason)})
 			}
 		}()
 	}
+}
+
+// terminalReason maps dispatchAll's failure reason to the turn's terminal
+// reason: the failure itself, or [voiceevent.TurnEndCompleted] when the turn ran
+// clean. Callers only use it for a turn no cutter ended.
+func terminalReason(failed voiceevent.TurnEndReason) voiceevent.TurnEndReason {
+	if failed == "" {
+		return voiceevent.TurnEndCompleted
+	}
+	return failed
 }
 
 // dispatchAll renders one routing decision under ctx, returning the turn-end

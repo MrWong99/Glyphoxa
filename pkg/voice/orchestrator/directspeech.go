@@ -114,7 +114,9 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 		// No floor wired (voice standalone / bench): dispatch synchronously on the bus
 		// goroutine, mirroring the Replier's no-floor branch.
 		if d.floor == nil {
-			d.dispatch(turnCtx, bus, e, voice)
+			if failed := d.dispatch(turnCtx, voice, e.Text); turnCtx.Err() == nil {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(failed)})
+			}
 			return
 		}
 
@@ -128,28 +130,31 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 		// residuals). We honor the fold rather than supersede — publishing a TurnEnded
 		// so the metrics subscriber records the dropped segment — because superseding
 		// would cancel the NPC's live LLM reply mid-sentence, a worse outcome.
-		floorCtx, release, coalesced := d.floor.Take(turnCtx, e.Target.AgentID)
+		floorCtx, release, coalesced := d.floor.take(turnCtx, e.Target.AgentID)
 		if coalesced {
 			release()
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndSupersedeCoalesced, Text: e.Text})
 			return
 		}
 		go func() {
-			defer release()
-			d.dispatch(floorCtx, bus, e, voice)
+			failed := d.dispatch(floorCtx, voice, e.Text)
+			// Exactly one terminal per turn (W1), decided atomically with the release
+			// exactly like the Replier's floor branch: a barge/supersede cutting the
+			// /say publishes its own TurnEnded, so it is not double-counted here.
+			live := floorCtx.Err() == nil
+			if held := release(); held && live {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: terminalReason(failed)})
+			}
 		}()
 	})
 }
 
 // dispatch renders one /say request's whole text as a single dispatch through the
-// turn module (#444). A start error (real synth/provider fault, not a barge
-// cancel) that produced no audio is announced as a tts_error TurnEnded so the
-// metrics subscriber records the precise reason; a barge cutting ctx publishes
-// its own TurnEnded, so it is not double-counted here.
-func (d *DirectSpeech) dispatch(ctx context.Context, bus *voiceevent.Bus, e voiceevent.SpeakRequested, voice tts.Voice) {
+// turn module (#444), returning [voiceevent.TurnEndTTSError] when a start error
+// (real synth/provider fault, not a barge cancel) left the room hearing nothing,
+// or "" for a delivered (or cut) sentence. The caller maps it to the terminal.
+func (d *DirectSpeech) dispatch(ctx context.Context, voice tts.Voice, text string) voiceevent.TurnEndReason {
 	t := newTurnRun(ctx, d.tts.Dispatch, d.onError)
-	_ = t.dispatch(Reply{Sentence: e.Text, Voice: voice})
-	if t.ttsFailed && ctx.Err() == nil {
-		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
-	}
+	_ = t.dispatch(Reply{Sentence: text, Voice: voice})
+	return t.finish(nil)
 }

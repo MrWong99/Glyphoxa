@@ -130,6 +130,17 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 // The turn's TurnID is recovered from parent ([voiceevent.TurnIDFrom]) and held
 // so [Floor.Yield] can attribute a barge to the turn it cancelled.
 func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Context, release func(), coalesced bool) {
+	ctx, rel, coalesced := f.take(parent, agentID)
+	return ctx, func() { rel() }, coalesced
+}
+
+// take is [Floor.Take] with a release that reports whether this turn still held
+// the floor at release time — i.e. no Yield (barge/mute) and no superseding Take
+// cut it. The check and the clear happen in ONE critical section, so a turn's
+// natural-completion terminal can be published exactly when no cutter will
+// publish one: once released, a later Yield finds the floor free and reports
+// nothing (W1 — every turn ends with exactly one TurnEnded).
+func (f *Floor) take(parent context.Context, agentID string) (ctx context.Context, release func() (held bool), coalesced bool) {
 	ctx, cancel := context.WithCancel(parent)
 
 	f.mu.Lock()
@@ -143,7 +154,7 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 		f.lastTake = f.clock()
 		f.mu.Unlock()
 		cancel()
-		return ctx, func() {}, true // no-op release: this turn never held the floor
+		return ctx, func() bool { return false }, true // no-op release: this turn never held the floor
 	}
 	var superseded string
 	var notify func(string)
@@ -172,16 +183,19 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 		notify(superseded)
 	}
 
-	release = func() {
+	release = func() (held bool) {
 		f.mu.Lock()
 		// Only clear if this turn still holds the floor: a later Take (or a
 		// Yield) may already have moved on, and a stale release must not wipe a
-		// newer turn's cancel.
-		if f.gen == gen {
+		// newer turn's cancel. A Yield nils f.cancel without bumping gen, so both
+		// halves are needed to say "nobody cut this turn".
+		if f.gen == gen && f.cancel != nil {
 			f.cancel = nil
+			held = true
 		}
 		f.mu.Unlock()
 		cancel()
+		return held
 	}
 	return ctx, release, false
 }

@@ -302,8 +302,9 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 }
 
 // onTurnEnded records the terminal outcome of a turn that ended for a KNOWN
-// reason (barge / supersede-coalesced / tts or provider error), published by the
-// seam that knows the cause. It records the outcome+reason once (outcomeDone
+// reason (completed / text delivered / barge / supersede-coalesced / tts or
+// provider error …), published by the seam that knows the cause. It records the
+// outcome+reason once (outcomeDone
 // blocks the TTL reap — and a later end signal — from re-counting it) so the
 // counter attributes WHY a turn died instead of the coarse no-first-audio
 // catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
@@ -330,10 +331,16 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
 	if t == nil {
-		if e.Reason == voiceevent.TurnEndBarge || e.Reason == voiceevent.TurnEndSuperseded {
+		switch e.Reason {
+		case voiceevent.TurnEndBarge, voiceevent.TurnEndSuperseded:
 			// An unopened barge or supersede cut = a #310 replay cut (a replay runs
 			// no STT/LLM/TTS, so its id has no spine); recording it would fabricate
 			// a phantom abandoned turn for audio that actually played (#391/#443).
+			return
+		case voiceevent.TurnEndCompleted:
+			// An unopened natural completion is a successful GM /say (no STTFinal
+			// spine): its FirstAudio is likewise not counted here, so neither is its
+			// success terminal.
 			return
 		}
 		t = &turnState{}
@@ -363,6 +370,8 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 		return TurnYielded, ReasonSupersessionGrace, "yielded"
 	case voiceevent.TurnEndTextDelivered:
 		return TurnTextDelivered, ReasonNone, "text_delivered"
+	case voiceevent.TurnEndCompleted:
+		return TurnCompleted, ReasonNone, "completed"
 	case voiceevent.TurnEndBarge:
 		return TurnAbandoned, ReasonBarge, "abandoned"
 	case voiceevent.TurnEndSuperseded:

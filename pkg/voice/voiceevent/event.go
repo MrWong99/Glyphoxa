@@ -510,20 +510,31 @@ const (
 	// vanished (which the TTL sweep would otherwise miscount as
 	// abandoned/no_first_audio).
 	TurnEndTextDelivered TurnEndReason = "text_delivered"
+	// TurnEndCompleted: the turn ran to its natural end — the producer finished,
+	// every dispatched sentence resolved, and nothing cut it. It is the SUCCESS
+	// terminal of an ordinary spoken turn (or /say), so every turn that takes the
+	// floor ends with exactly one TurnEnded and consumers never have to infer
+	// completion from the absence of an event: the transcript relay drops its
+	// "<NPC> is speaking…" label on it, and the metrics subscriber records it as a
+	// success (a turn that already reached first audio is not re-counted).
+	TurnEndCompleted TurnEndReason = "completed"
 )
 
-// TurnEnded marks a turn that ended for a known reason — distinct from a turn
-// that simply vanished (reaped by the metrics TTL sweep with no signal). It
-// carries the turn's TurnID and the precise [TurnEndReason] so the metrics
-// subscriber records WHY a turn died (barge vs supersede vs tts/provider error)
-// rather than the coarse "no first audio" catch-all. Text is the dropped
+// TurnEnded marks a turn's end with its precise [TurnEndReason]: the success
+// terminals ([TurnEndCompleted], [TurnEndTextDelivered]) and the failure/cut
+// reasons (barge vs supersede vs tts/provider error …), so the metrics subscriber
+// records WHY a turn ended rather than the coarse "no first audio" catch-all, and
+// the transcript relay knows when an Agent stopped speaking. A turn that vanished
+// with no signal at all is reaped by the metrics TTL sweep. Text is the dropped
 // transcript, set only for [TurnEndSupersedeCoalesced]; empty otherwise.
 //
-// Published by the seam that knows the cause: the [orchestrator.Replier]
-// (supersede-coalesced, tts/provider error) and the [orchestrator.BargeIn]
-// (barge). The subscriber treats first-audio as terminal, so a TurnEnded arriving
-// AFTER first audio (e.g. a barge mid-playback) is a normal interruption and does
-// not re-count the turn.
+// Published by the seam that knows the cause: the [orchestrator.Replier] and
+// [orchestrator.DirectSpeech] (completed, supersede-coalesced, tts/provider
+// error, mute, spend cap), the [orchestrator.Floor] (superseded) and the
+// [orchestrator.BargeIn] (barge). A turn that took the floor gets exactly one. The
+// subscriber treats first-audio as terminal, so a TurnEnded arriving AFTER first
+// audio (e.g. a barge mid-playback, or the natural completion) does not re-count
+// the turn.
 type TurnEnded struct {
 	At     time.Time
 	TurnID string
