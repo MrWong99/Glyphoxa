@@ -51,8 +51,7 @@ import (
 //
 // The loop answers only routes whose [voiceevent.AddressTarget.AgentID] equals
 // AgentID; a route for any other Agent yields no reply, so several Agents'
-// loops can share one bus and each speak only when addressed (the Ensemble
-// Turn building block, ADR-0025).
+// loops can share one bus and each speak only when addressed (see [Cast]).
 type Persona struct {
 	// AgentID is the stable Agent identifier this loop answers for, matched
 	// against [voiceevent.AddressTarget.AgentID].
@@ -173,9 +172,9 @@ type DirectiveRecaller interface {
 	// Directive returns the active directive text for agentID, or "" when none.
 	// consume reports whether this consult belongs to a COMMITTED turn (the
 	// single-target batch/streaming reply paths): a turn-bounded directive's
-	// remaining-turns budget is decremented only then. The speculative Ensemble
-	// consults ([Replier.Draft] / [Replier.React]) peek with consume=false so a
-	// losing candidate never burns a turn of the budget.
+	// remaining-turns budget is decremented only then. consume=false is a peek
+	// that leaves the budget untouched; no reply path peeks today (the speculative
+	// Ensemble Turn drafts that did were removed, ADR-0025).
 	Directive(ctx context.Context, agentID string, consume bool) string
 }
 
@@ -213,7 +212,7 @@ type Config struct {
 	// user/assistant messages. The window is trimmed in BLOCKS, not one message
 	// per append: it grows to twice HistoryTurns and is then cut back to the most
 	// recent HistoryTurns, moved forward to start on a user message (see
-	// [trimHistory]). A window that slid on every append would change the start
+	// [Replier.trimHistoryLocked]). A window that slid on every append would change the start
 	// of the conversation each turn and defeat the provider's prefix cache
 	// (ADR-0059). Zero means unbounded (keep the whole conversation). This is the
 	// recent-Transcript half of Hot Context (CONTEXT.md "Hot Context") — the loop
@@ -259,7 +258,7 @@ type Config struct {
 	// LAST in the tail so the freshest instruction carries the strongest recency
 	// signal. Consulted under the turn ctx alongside Memory/Facts, OUTSIDE the
 	// history lock; the committed reply paths consume a turn of a turn-bounded
-	// directive's budget, the speculative Draft/React paths only peek. nil
+	// directive's budget. nil
 	// disables the slot — the prompt is byte-identical to the pre-directive path.
 	Directive DirectiveRecaller
 
@@ -349,9 +348,7 @@ type Config struct {
 	// not a barge, and DOES speak), never once a sentence dispatch was ATTEMPTED
 	// (the room may already have heard partial audio — a delivered sentence, or
 	// a #436 mid-stream TTS failure's fragment), and never for a voiceless
-	// Persona (empty VoiceID must not reach TTS). On an Ensemble Turn whose
-	// every candidate Draft failed terminally, the coordinator speaks the
-	// top-scored candidate's line via [Cast.SpeakFallback].
+	// Persona (empty VoiceID must not reach TTS).
 	FallbackLine string
 }
 
@@ -620,7 +617,7 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 	// eagerly. It is committed only when the dispatch site delivers the sentence and
 	// invokes OnDelivered — so a batch turn barged before any audio leaves no phantom
 	// assistant message (zero delivered → not logged). The user message stays
-	// committed eagerly (parity with streamTurn/SpeakDraft). The Agent batch emits ONE
+	// committed eagerly (parity with streamTurn). The Agent batch emits ONE
 	// Reply (the whole reply), so a barge mid-drain commits nothing.
 	return []orchestrator.Reply{{
 		Sentence:    reply,
@@ -629,188 +626,19 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 	}}
 }
 
-// Draft produces the Agent's would-be reply text for one utterance WITHOUT
-// mutating any state — the speculative fan-out half of an Ensemble Turn (ADR-0025,
-// #301). It assembles the SAME Hot Context [Replier.turn] would (system prompt +
-// bounded recent Transcript + the user message), but on a SNAPSHOT copy of the
-// history, so a candidate that LOSES the Lead race commits nothing: no user
-// message appended, no assistant message recorded (ADR-0012's zero-commit rule,
-// made structural). An empty completion returns "", nil (the Agent says nothing);
-// an engine error — including a ctx cancel when the loser's shared draft context is
-// cut after the winner is elected — returns "", err. The winning candidate's
-// [Replier.SpeakDraft] is what actually commits the turn.
-//
-// It honors ctx (bounded by [Config.TurnTimeout] like the LLM turn) and consults
-// Memory/Facts under it, so a barge tearing down the whole ensemble unwinds every
-// in-flight draft.
-func (r *Replier) Draft(ctx context.Context, speakerID, text string) (string, error) {
-	return r.draftWithLine(ctx, r.userLine(speakerID, text), text)
-}
-
-// draftWithLine is [Replier.Draft] with the speaker-attributed user line already
-// resolved — the [Cast]'s Ensemble Turn entry point (#473 review): the Cast
-// resolves the line ONCE per (turn, Agent) at Draft time and reuses the SAME
-// string for the turn's Speak/React/SpeakReaction, so the committed history can
-// never drift from the prompt the draft reasoned over when [Config.SpeakerName]'s
-// live cache warms (or empties) mid-turn. text stays the RAW utterance — memory
-// recall keys on it (ADR-0042), never the attributed line.
-func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (string, error) {
-	ctx, cancel := r.withTurnTimeout(ctx)
-	defer cancel()
-
-	// Snapshot the history and append the user message on the COPY — Draft must not
-	// touch the loop's live history (purity). The candidate reasons over the same
-	// speaker-attributed line SpeakDraft would commit, so prompt and record agree.
-	r.mu.Lock()
-	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
-	r.mu.Unlock()
-	history = append(history, llm.Message{Role: llm.RoleUser, Text: userLine})
-	history = trimHistory(history, r.cfg.HistoryTurns)
-
-	// The recallers run under ctx, never mutating loop state (they never did).
-	// Recall keys on the RAW utterance (ADR-0042), not the attributed line. The
-	// directive consult only PEEKS (consume=false): a draft that loses the Lead
-	// race must not burn a turn of the budget (ADR-0059).
-	in := r.gather(ctx, text, false)
-
-	msgs := make([]llm.Message, 0, len(history)+2)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
-	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(in.facts), locationBlock(in.location), memoryBlock(in.mem), directiveBlock(in.directive))
-
-	reply, err := r.engine.Generate(ctx, msgs)
-	if err != nil {
-		return "", err
-	}
-	return stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply)), nil
-}
-
-// SpeakDraft speaks an already-generated draft (the winning Lead's, from a prior
-// [Replier.Draft]) as this Agent's turn (ADR-0025, #301). It appends the user
-// message (parity with [Replier.streamTurn], which always records the utterance it
-// answered), sentence-splits draft, and dispatches each sentence in order,
-// committing to history ONLY the text actually delivered (ADR-0012). dispatch is
-// the deliver-then-commit signal: a sentence joins the committed text only once
-// dispatch returns nil (fully synthesized under a live turn ctx); a dispatch
-// reporting the turn cancelled (a barge cutting the ensemble mid-draft) stops the
-// drain, and the sentences forwarded before the cut are committed while the rest
-// are dropped. It returns the delivered text; a ctx-cancel is the expected barge
-// path, not a failure, so it returns a nil error there.
-func (r *Replier) SpeakDraft(ctx context.Context, speakerID, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	// The committed user message is the speaker-attributed line (the same one
-	// Draft reasoned over); the modality decision keys on the RAW utterance.
-	return r.speakDraftModality(ctx, r.userLine(speakerID, userText), userText, draft, dispatch)
-}
-
-// ReactsAsText reports whether this Agent would deliver its Cross-talk Reaction
-// (reaction) to utterance as channel TEXT rather than speech — the SAME
-// [AnswerAsText] decision [Replier.SpeakReaction] applies (voiceless Butler, an
-// explicit request, or a #297-d2 long answer). It is the coordinator's pre-render
-// seam (#389, ADR-0025/0027): the Ensemble coordinator classifies the reactor BEFORE
-// entering the look-ahead pre-render, so a text reactor is routed through the
-// post-gate tail — its irreversible TextSink post never happens mid-Lead-playback (an
-// audio Reaction is held in the pump lane and discardable; a text post is not). It
-// keys on the RAW utterance, matching the modality decision SpeakReaction makes. A
-// nil TextSink (every non-Butler) is never text.
-func (r *Replier) ReactsAsText(utterance, reaction string) bool {
-	if r.cfg.TextSink == nil {
-		return false
-	}
-	voiceless := r.cfg.Persona.Voice.VoiceID == ""
-	return AnswerAsText(utterance, reaction, voiceless)
-}
-
-// speakDraftModality is the shared body of [Replier.SpeakDraft] and
-// [Replier.SpeakReaction]. commitText is what a delivered turn appends as the user
-// message (the composite Cross-talk line for a Reaction, the raw utterance for a
-// Lead); modalityUtterance is what [AnswerAsText] keys on — always the RAW utterance,
-// so a Reaction's quoted Lead line never contaminates the keyword match (#389 finding
-// 3). draft is the answer text.
-func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUtterance, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	// Text-modality gate (#389, ADR-0009 2026-07-10 amendment): a Butler with a
-	// TextSink routes its winning draft by the SAME [AnswerAsText] decision the routed
-	// streaming path uses ([Replier.textModalityTurn]). A text-modality draft — a
-	// voiceless Butler (empty VoiceID), an explicit "as text" request, or a long result
-	// (#297 d2) — is posted WHOLE to the channel chat with ZERO TTS dispatch, committed
-	// user+assistant (ADR-0012 text-delivered commits), and reported with the
-	// [orchestrator.ErrTextDelivered] sentinel so the ensemble coordinator publishes
-	// TurnEnded(text_delivered), keeping metrics/relay consistent with the routed path.
-	// Because this precedes every dispatch, a voiceless Butler can NEVER reach TTS with
-	// an empty VoiceID on the ensemble Draft/Speak path OR the Cross-talk Reaction path
-	// ([Replier.SpeakReaction] delegates here) — the structural-unreachability guarantee.
-	// A failed post delivered nothing, so it commits nothing and surfaces the post error
-	// (never the sentinel), mirroring [Replier.textModalityTurn].
-	if r.cfg.TextSink != nil && strings.TrimSpace(draft) != "" {
-		voiceless := r.cfg.Persona.Voice.VoiceID == ""
-		if AnswerAsText(modalityUtterance, draft, voiceless) {
-			if err := r.cfg.TextSink(ctx, draft); err != nil {
-				return "", err
-			}
-			r.commitSpoken(r.appendUser(commitText), draft)
-			return draft, orchestrator.ErrTextDelivered
-		}
-	}
-
-	// Deliver-then-commit via the shared emitter (ADR-0012, #444). Lazy
-	// user-append (#375, F3): the user message is appended on the FIRST delivered
-	// sentence, not eagerly at the top, so a turn that delivers ZERO sentences
-	// (every sentence start-errors, or a barge cut it before the first) logs
-	// NOTHING — ADR-0012: "If zero sentences were delivered the utterance is not
-	// logged at all."
-	var split sentenceSplitter
-	var turn uint64 // set by the lazy user-append; read only past d.wait()
-	d := &deliveredText{
-		dispatch:         dispatch,
-		voice:            r.cfg.Persona.Voice,
-		selfName:         r.cfg.Persona.Name,
-		onFirstDelivered: func() { turn = r.appendUser(commitText) },
-		pipelined:        orchestrator.PipelinedDispatch(ctx),
-	}
-
-	var dispErr error
-	for _, sentence := range split.Push(draft) {
-		if e := d.emit(sentence); e != nil {
-			dispErr = e
-			break
-		}
-	}
-	// Flush the trailing unterminated sentence — unless the turn was cut, in which
-	// case its tail was never spoken and must not be dispatched.
-	if dispErr == nil && ctx.Err() == nil {
-		if tail := split.Flush(); tail != "" {
-			if e := d.emit(tail); e != nil {
-				dispErr = e
-			}
-		}
-	}
-
-	d.wait()
-	r.commitSpoken(turn, d.text())
-
-	// A cancel is the expected barge path (the whole ensemble was torn down), not a
-	// turn failure; surface only a genuine dispatch error under a live ctx.
-	if ctx.Err() != nil {
-		return d.text(), nil
-	}
-	return d.text(), dispErr
-}
-
 // deliveredText accumulates one turn's delivered sentences under the
 // deliver-then-commit contract (ADR-0012, #444): emit dispatches a sentence and
 // appends it to the spoken text ONLY when the orchestrator's turn module
 // reports it delivered. A start-error ([orchestrator.SentenceNotDelivered])
 // skips the sentence's commit but keeps the turn going — the resulting history
 // gap is INTENDED (exactly what the room heard); a cut
-// ([orchestrator.SentenceCut], a barge/mute cancel) stops the drain.
-// onFirstDelivered, when non-nil, runs once before the first committed sentence
-// — the lazy user-message append (#375 F3), so a zero-delivered turn logs
-// NOTHING. It is the ONE producer-side emit path (the per-site closures it
-// replaced each re-implemented this classification).
+// ([orchestrator.SentenceCut], a barge/mute cancel) stops the drain. It is the
+// ONE producer-side emit path (the per-site closures it replaced each
+// re-implemented this classification).
 type deliveredText struct {
-	dispatch         func(orchestrator.Reply) error
-	voice            tts.Voice
-	onFirstDelivered func()
-	spoken           strings.Builder
+	dispatch func(orchestrator.Reply) error
+	voice    tts.Voice
+	spoken   strings.Builder
 
 	// pipelined mirrors [orchestrator.PipelinedDispatch] for this turn (#626).
 	// Under a pipelined dispatch the callback returns as soon as the PREVIOUS
@@ -820,7 +648,7 @@ type deliveredText struct {
 	// barrier every reader of [deliveredText.text] must cross first. Unpipelined,
 	// emit commits on the return exactly as before, hook-free.
 	pipelined bool
-	// mu guards spoken/onFirstDelivered, which the pipelined commit hook writes
+	// mu guards spoken, which the pipelined commit hook writes
 	// from a goroutine other than the producer's. wg counts sentences dispatched
 	// but not yet resolved.
 	mu sync.Mutex
@@ -889,16 +717,11 @@ func (d *deliveredText) emit(sentence string) error {
 	return nil
 }
 
-// commit appends one DELIVERED sentence to the turn's spoken text, running the
-// lazy first-delivery hook before the first of them. Pipelined, it runs on the
-// dispatch goroutine — hence the lock.
+// commit appends one DELIVERED sentence to the turn's spoken text. Pipelined, it
+// runs on the dispatch goroutine — hence the lock.
 func (d *deliveredText) commit(sentence string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.onFirstDelivered != nil {
-		d.onFirstDelivered()
-		d.onFirstDelivered = nil
-	}
 	if d.spoken.Len() > 0 {
 		d.spoken.WriteByte(' ')
 	}
@@ -918,115 +741,6 @@ func (d *deliveredText) text() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.spoken.String()
-}
-
-// crossTalkSilence is the sentinel a Cross-talk Reaction emits to DECLINE speaking
-// (ADR-0025, #302): the Reaction prompt permits an explicit "stay silent" output to
-// avoid hollow "yeah, what he said" filler. A reply equal to it (or empty) means the
-// Agent reacts with nothing — no event, no dispatch, no commit (ADR-0012).
-const crossTalkSilence = "[SILENCE]"
-
-// crossTalkInstruction is the prompt addendum for a Cross-talk Reaction turn
-// (ADR-0025): it frames the just-heard Lead line as cross-talk this Agent may react
-// to, and permits the [crossTalkSilence] decline. It rides the volatile Hot Context
-// tail ONLY on the React path (ADR-0059 — never the stable system prompt, whose
-// cached prefix it would fork), so a normal turn's prompt is unchanged.
-const crossTalkInstruction = "Another character has just spoken in the conversation, quoted below. " +
-	"React briefly in your own voice — a short agreement, a pointed disagreement, or an aside — " +
-	"but only if you have something worth adding. If you would just echo them or have nothing to add, " +
-	"reply with exactly " + crossTalkSilence + " and nothing else."
-
-// crossTalkUserText composes the user message for a Cross-talk Reaction (ADR-0025,
-// #302): the original utterance, then the Lead's delivered line attributed to it. It
-// is the SINGLE composition site — [Replier.React] feeds it to the LLM as the turn's
-// user message AND [Replier.SpeakReaction] commits the SAME text to history, so the
-// reacting Agent's recorded turn and the prompt it reasoned over never drift.
-func crossTalkUserText(userText, leadName, leadText string) string {
-	return userText + "\n\n" + leadName + ` says: "` + leadText + `"`
-}
-
-// React produces this Agent's would-be Cross-talk Reaction to the Lead's delivered
-// line WITHOUT mutating any state — the speculative half of the Reaction phase of an
-// Ensemble Turn (ADR-0025, #302). Like [Replier.Draft] it reads Hot Context on a
-// history SNAPSHOT (so a reaction that is never spoken commits nothing, ADR-0012),
-// but its user message is the composite [crossTalkUserText] and its volatile
-// Hot Context tail carries the [crossTalkInstruction] permitting the decline
-// sentinel. An empty
-// completion OR the [crossTalkSilence] sentinel returns "", nil — the Agent declines
-// to react. It honors ctx (bounded by [Config.TurnTimeout]) so a barge tearing the
-// whole ensemble down unwinds an in-flight reaction generation.
-func (r *Replier) React(ctx context.Context, speakerID, userText, leadName, leadText string) (string, error) {
-	return r.reactWithLine(ctx, r.userLine(speakerID, userText), userText, leadName, leadText)
-}
-
-// reactWithLine is [Replier.React] with the speaker-attributed user line already
-// resolved — the [Cast]'s entry point (#473 review, see [Replier.draftWithLine]):
-// the composite the reactor reasons over is built from the line pinned at Draft
-// time, so SpeakReaction can commit the identical composite even when the
-// SpeakerName cache changes mid-turn. userText stays the RAW utterance for
-// memory recall (ADR-0042).
-func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadName, leadText string) (string, error) {
-	ctx, cancel := r.withTurnTimeout(ctx)
-	defer cancel()
-
-	// Snapshot + append the composite user message on the COPY (purity, as Draft).
-	// The composite's utterance half carries the speaker attribution (the Lead's
-	// half is already name-attributed by construction).
-	r.mu.Lock()
-	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
-	r.mu.Unlock()
-	history = append(history, llm.Message{Role: llm.RoleUser, Text: crossTalkUserText(userLine, leadName, leadText)})
-	history = trimHistory(history, r.cfg.HistoryTurns)
-
-	// Recall keys on the raw utterance (the memory the Agent brings to the moment),
-	// not the composite — the cross-talk line is context, not a new topic. The
-	// directive consult only PEEKS (a reaction that stays silent must not burn a
-	// turn of the budget, ADR-0059).
-	in := r.gather(ctx, userText, false)
-
-	// The crossTalkInstruction rides the volatile tail, NOT the stable system
-	// prompt (ADR-0059): appended there it would fork the cached prefix right
-	// after the Persona, invalidating the whole history for the provider's
-	// prefix cache. In the tail it sits with the other per-turn content —
-	// before the directive, which keeps the strongest recency slot.
-	msgs := make([]llm.Message, 0, len(history)+2)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
-	msgs = append(msgs, history...)
-	msgs = appendVolatileTail(msgs, factsBlock(in.facts), locationBlock(in.location), memoryBlock(in.mem), crossTalkInstruction, directiveBlock(in.directive))
-
-	reply, err := r.engine.Generate(ctx, msgs)
-	if err != nil {
-		return "", err
-	}
-	reply = stripSelfPrefix(r.cfg.Persona.Name, strings.TrimSpace(reply))
-	if isSilenceSentinel(reply) {
-		return "", nil // the Reactor declined (ADR-0025 zero-delivered)
-	}
-	return reply, nil
-}
-
-// isSilenceSentinel reports whether reply is a Cross-talk decline: empty, or nothing
-// but the [crossTalkSilence] token (#302 hardening). Live models emit case/punctuation
-// variants — "[silence]", "[SILENCE].", `"[silence]."` — so the match is
-// case-insensitive over the reply stripped of surrounding whitespace, quotes, and
-// trailing punctuation. A reply that merely MENTIONS the token amid other words is a
-// real reply, not a decline (a contains-ONLY check, not a substring check).
-func isSilenceSentinel(reply string) bool {
-	trimmed := strings.Trim(strings.TrimSpace(reply), " \t\n\"'.,!?")
-	return trimmed == "" || strings.EqualFold(trimmed, crossTalkSilence)
-}
-
-// SpeakReaction speaks an already-generated Cross-talk Reaction (from a prior
-// [Replier.React]) as this Agent's own sub-turn (ADR-0025, #302). It commits the SAME
-// composite user text React reasoned over ([crossTalkUserText]) so the committed user
-// message and the prompt never drift, and delivers the reaction under
-// deliver-then-commit (ADR-0012). The text-modality decision (#389), however, keys on
-// the RAW utterance — NOT the composite — so the Lead's quoted line can never flip a
-// voiced reactor to text via a keyword match ("Post it on the tavern board.", finding
-// 3). It returns the delivered text; a ctx-cancel (a barge cutting the reaction
-// mid-playback) commits only the sentences spoken before the cut.
-func (r *Replier) SpeakReaction(ctx context.Context, speakerID, userText, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	return r.speakDraftModality(ctx, crossTalkUserText(r.userLine(speakerID, userText), leadName, leadText), userText, reaction, dispatch)
 }
 
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
@@ -1372,9 +1086,8 @@ func (r *Replier) HistorySnapshot() []llm.Message {
 // appendUser appends the utterance as a user message under the history lock,
 // trims to [Config.HistoryTurns], and returns the id of the turn it opens — the
 // anchor [Replier.commitSpoken] places that turn's assistant reply behind. It is
-// the single user-append site shared by the streaming/batch turns' eager append,
-// [Replier.SpeakDraft]'s deliver-then-commit lazy append, and its text-modality
-// branch (#389).
+// the single user-append site shared by the streaming and batch turns' eager
+// append and the text-modality turn.
 func (r *Replier) appendUser(text string) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1809,21 +1522,11 @@ func speakerRosterBlock(players, npcs []string) string {
 	return b.String()
 }
 
-// trimHistoryLocked applies [trimHistory] to the live history and its turn
-// index. Caller holds r.mu.
-func (r *Replier) trimHistoryLocked() {
-	cut := trimCut(r.history, r.cfg.HistoryTurns)
-	if cut == 0 {
-		return
-	}
-	r.history = append([]llm.Message(nil), r.history[cut:]...)
-	r.turnOf = append([]uint64(nil), r.turnOf[cut:]...)
-}
-
-// trimHistory bounds history to roughly keep user/assistant messages, trimming
-// in BLOCKS with hysteresis: nothing is dropped until the history has grown past
-// twice keep, and then it is cut back to the most recent keep in one step. The
-// trimmed window is moved forward to begin on a user message.
+// trimHistoryLocked bounds the live history (and its turn index) to roughly
+// keep = [Config.HistoryTurns] user/assistant messages, trimming in BLOCKS with
+// hysteresis: nothing is dropped until the history has grown past twice keep,
+// and then it is cut back to the most recent keep in one step. The trimmed
+// window is moved forward to begin on a user message.
 //
 // Both properties are there for the provider. A window that slides one message
 // per append starts on a different message every turn — from the ninth exchange
@@ -1835,18 +1538,18 @@ func (r *Replier) trimHistoryLocked() {
 // to accept: starting on a user message is the one cut that can never split a
 // reply from its question or a tool result from its call.
 //
-// It re-slices onto a fresh backing array when it trims (so the dropped turns
-// can be GC'd), and returns history unchanged (same backing) when it does not. A
-// zero or negative keep means unbounded.
-func trimHistory(history []llm.Message, keep int) []llm.Message {
-	cut := trimCut(history, keep)
+// It re-slices onto fresh backing arrays when it trims (so the dropped turns
+// can be GC'd). A zero or negative keep means unbounded. Caller holds r.mu.
+func (r *Replier) trimHistoryLocked() {
+	cut := trimCut(r.history, r.cfg.HistoryTurns)
 	if cut == 0 {
-		return history
+		return
 	}
-	return append([]llm.Message(nil), history[cut:]...)
+	r.history = append([]llm.Message(nil), r.history[cut:]...)
+	r.turnOf = append([]uint64(nil), r.turnOf[cut:]...)
 }
 
-// trimCut returns how many leading messages [trimHistory] drops: 0 while the
+// trimCut returns how many leading messages [Replier.trimHistoryLocked] drops: 0 while the
 // history is within the hysteresis band, else the index of the first user
 // message at or after len-keep. A window holding no user message at all keeps
 // the plain len-keep cut.

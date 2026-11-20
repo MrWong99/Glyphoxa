@@ -174,8 +174,9 @@ Three things from the ADR-0024 amendment of 2026-11-20 shape this:
 - **Continuation is speaker-scoped and anchored to the reply.** Only the speaker
   whose named address opened the claim continues without a name (table-wide when
   speaker ids are unknown). The `AddressDetector` moves the window's anchor on every
-  `FirstAudio` of a turn it routed (`Matcher.ExtendContinuation`), so the 30s count
-  from the Agent's reply rather than from the address; a Barge-in revokes the claim
+  `FirstAudio` of a turn it routed and again on that turn's `TurnEnded{completed}`
+  (`Matcher.ExtendContinuation`), so the 30s count from the end of the Agent's reply
+  rather than from the address; a Barge-in revokes the claim
   (`ClearContinuation`, ADR-0027).
 - **No lone-NPC fallback in the shipped stack.** `SoleActiveNPC` exists as an opt-in
   heuristic only; a lone Character NPC is opened by name like any other. The
@@ -269,7 +270,7 @@ in-flight turn instead.
 ### 2.5 Multi-NPC: one floor, one Cast, one turn
 
 > ADR-0038 ([single-target default, programmatic roster](adr/0038-multi-npc-single-target-default-programmatic-roster.md)) ·
-> ADR-0025 ([Ensemble Turns — **design-of-record, deferred**](adr/0025-ensemble-turns-speculative-lead-reaction.md))
+> ADR-0025 ([Ensemble Turns — **design of record, not implemented**](adr/0025-ensemble-turns-speculative-lead-reaction.md))
 
 A Voice Session may host several Character NPCs. There is exactly **one Barge-in
 floor** for the whole scene, so the safe unit of work is one addressed turn. One
@@ -283,9 +284,12 @@ is never routable-but-silent or speaking-but-unroutable. This is a **programmati
 API only** — no Slash Command or RPC adds an NPC mid-scene.
 
 The **Ensemble Turn** (speculative fan-out → Lead race → Cross-talk Reaction →
-queued follow-up) is the **design-of-record** and is *not implemented*. Its
-multi-target decision set is reachable today by setting `MaxTargets > 1` or `-1`;
-its turn-taking layer is not built. ADR-0025 is deferred, not superseded.
+queued follow-up) is a **design of record** and is *not implemented*: a
+turn-taking layer for it was built but never wired, and was removed on
+2026-11-20 (ADR-0025 names the last commit that contained it). Setting
+`MaxTargets > 1` or `-1` still makes the matcher return a score-sorted set, but
+the `AddressDetector` publishes only its top decision, so one utterance always
+opens at most one turn.
 
 ### 2.6 Speaker Lanes
 
@@ -770,7 +774,7 @@ the architecture question is already answered.
 
 | ADR | Decision | State in the tree |
 |-----|----------|-------------------|
-| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md). The live matcher is single-target (`MaxTargets` 1); the turn-taking code in `pkg/voice/orchestrator/ensemble.go` is unreachable in production. |
+| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Not implemented. Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md); the unwired turn-taking code was removed on 2026-11-20 (the ADR records the last commit that had it). The live matcher is single-target (`MaxTargets` 1). |
 | [0030](adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Side-effecting Tool intents flush at turn-commit | Not built. `pkg/tool/loop.go` refuses Tools that are neither read-only nor proposal-mediated (ADR-0052). |
 
 ADRs 0048–0053 were listed here until 2026-11; all six have shipped since

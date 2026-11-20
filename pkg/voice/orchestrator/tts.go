@@ -105,12 +105,11 @@ func NewTTS(bus *voiceevent.Bus, synthesizer tts.Synthesizer, opts ...TTSOption)
 // ADR-0012's deliver-then-commit boundary (the turn module) decides which
 // sentences count as delivered.
 func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) error {
-	// Look-ahead pre-render (#375, F1): a sentence held in the pump's look-ahead lane
+	// Look-ahead pre-render (#626): a sentence held in the pump's look-ahead lane
 	// must NOT announce itself yet — TTSInvoked at pre-render time would make the relay
-	// persist a line under the reaction's id BEFORE its EnsembleReaction attributes who
-	// spoke (a misattributed "NPC" line) and make the chunker buffer text a barge could
-	// still discard. So skip the publish here; the coordinator announces the sentence at
-	// release via [TTS.PublishInvoked]. Everything else — retry, synthesis, drain, char
+	// persist, and the chunker buffer, text a barge could still discard (ADR-0040: no
+	// Line for audio the room never heard). So skip the publish here; the pipelined
+	// turn announces the sentence at release via [TTS.PublishInvoked]. Everything else — retry, synthesis, drain, char
 	// metering (ADR-0045), tts_total — is byte-identical.
 	if !voiceevent.IsPlaybackLookahead(ctx) {
 		s.bus.Publish(voiceevent.TTSInvoked{
@@ -212,9 +211,8 @@ func (s *TTS) PublishFailed(turnID string) {
 }
 
 // PublishInvoked announces a look-ahead sentence's [voiceevent.TTSInvoked] at the
-// moment it is RELEASED to play (#375, F1), not when it was pre-rendered — so the
-// relay attributes its line only AFTER the reaction's EnsembleReaction names the
-// speaker, and the chunker buffers its text only once it is committed to play.
+// moment it is RELEASED to play (#626), not when it was pre-rendered — so the
+// relay and the chunker see its text only once it is committed to play.
 func (s *TTS) PublishInvoked(turnID, sentence string) {
 	s.bus.Publish(voiceevent.TTSInvoked{
 		At:       time.Now(),

@@ -351,20 +351,20 @@ var _ StageRecorder = Discard{}
 // --- #606 playback gap ---
 
 // LookaheadEvent is the bounded event label on the look-ahead lane counter
-// (glyphoxa_voice_playback_lookahead_total, #606/ADR-0025). Exactly three values
-// reach a series (ADR-0032): the #375 lane's gap-hiding is only visible if a
-// release, a latch and a discard are counted apart.
+// (glyphoxa_voice_playback_lookahead_total, #606). Exactly three values reach a
+// series (ADR-0032): the lane's gap-hiding (#626) is only visible if a release,
+// a latch and a discard are counted apart.
 type LookaheadEvent string
 
 const (
-	// LookaheadReleased: a held Reaction sentence was moved into the play queue,
+	// LookaheadReleased: a held sentence was moved into the play queue,
 	// so its pre-paid TTS startup hid what would otherwise be an audible gap.
 	LookaheadReleased LookaheadEvent = "released"
 	// LookaheadLatched: the release arrived BEFORE the sentence was primed
 	// (release-before-prime), so the imminent prime bypasses the lane.
 	LookaheadLatched LookaheadEvent = "latched"
 	// LookaheadDiscarded: a held-but-unplayed sentence was drained and dropped
-	// (barge/yield tore the unit down) — pre-rendered audio nobody heard.
+	// (barge/yield tore the turn down) — pre-rendered audio nobody heard.
 	LookaheadDiscarded LookaheadEvent = "discarded"
 )
 

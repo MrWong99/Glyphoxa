@@ -209,15 +209,10 @@ func (c *Chunker) fold(e voiceevent.Event) {
 	case voiceevent.AddressRouted:
 		c.proj.Turn(sid, ev.TurnID).target = ev.Target
 	case voiceevent.SpeakRequested:
-		// A GM /say (#295), an Ensemble Lead (#301) and a Cross-talk Reaction
-		// (#302) all speak under a turn id that never saw AddressRouted, so WHO
-		// speaks is recorded here exactly as the relay does. Without it the chunk
-		// read "NPC: …" with no participant ref, and the NPC-knowledge ANN filter
-		// (participated_agent_ids) could never return those lines.
-		c.proj.Turn(sid, ev.TurnID).target = ev.Target
-	case voiceevent.EnsembleLead:
-		c.proj.Turn(sid, ev.TurnID).target = ev.Target
-	case voiceevent.EnsembleReaction:
+		// A GM /say (#295) speaks under a turn id that never saw AddressRouted, so
+		// WHO speaks is recorded here exactly as the relay does. Without it the
+		// chunk read "NPC: …" with no participant ref, and the NPC-knowledge ANN
+		// filter (participated_agent_ids) could never return those lines.
 		c.proj.Turn(sid, ev.TurnID).target = ev.Target
 	case voiceevent.TTSInvoked:
 		c.bufferAgentSentence(sid, ev)

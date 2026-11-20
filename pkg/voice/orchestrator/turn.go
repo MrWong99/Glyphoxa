@@ -2,7 +2,7 @@ package orchestrator
 
 // This file is the turn-lifecycle module (#444): the ONE owner of ADR-0012's
 // deliver-then-commit protocol. Every reply path — the routed Replier (batch and
-// streaming), the Ensemble Lead, both Cross-talk Reaction paths, GM /say —
+// streaming) and GM /say —
 // dispatches through a [turnRun] instead of hand-rolling the check-ctx →
 // synthesize → map-sentinel → re-check-ctx → commit dance, so the protocol is a
 // tested state machine here rather than replicated caller knowledge.
@@ -17,8 +17,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
-// ErrTextDelivered is the sentinel a producer ([StreamReplyFunc], an
-// [EnsembleSpeaker]'s Speak/SpeakReaction) returns to signal that it completed a
+// ErrTextDelivered is the sentinel a producer ([StreamReplyFunc]) returns to
+// signal that it completed a
 // turn by delivering the whole answer as TEXT (a Butler turn routed to its
 // TextSink, #299) rather than dispatching any TTS. The turn reached no first
 // audio, but it is a SUCCESS — [turnRun.finish] maps it to a
@@ -56,9 +56,8 @@ const (
 )
 
 // OutcomeOf classifies a dispatch callback's returned error into the three-class
-// contract. It is how producers (the agent emit paths, [EnsembleSpeaker]
-// implementations) interpret dispatch results without referencing the sentinel
-// errors themselves.
+// contract. It is how producers (the agent emit paths) interpret dispatch
+// results without referencing the sentinel errors themselves.
 func OutcomeOf(err error) SentenceOutcome {
 	switch {
 	case err == nil:
@@ -76,9 +75,7 @@ type synthFunc func(ctx context.Context, sentence string, v tts.Voice) error
 
 // turnRun is one turn's deliver-then-commit state machine (ADR-0012). Build one
 // per turn (per producer drain), hand its [turnRun.dispatch] to the producer as
-// the sentence callback, then map the terminal via [turnRun.finish] (the routed
-// path) or read the accumulated state (the ensemble paths, whose terminal
-// publishing differs per exit).
+// the sentence callback, then map the terminal via [turnRun.finish].
 //
 // It owns, in one place: the pre-dispatch ctx check, the synth call, the
 // ErrorFunc surfacing, the cancel-vs-start-error disambiguation, the post-drain
@@ -92,16 +89,12 @@ type turnRun struct {
 	synth   synthFunc
 	onError ErrorFunc
 
-	// mu guards attempted/ttsFailed. The sequential dispatch sites never contend
+	// mu guards ttsFailed. The sequential dispatch sites never contend
 	// for it; the pre-synthesis pipeline (#626) runs two sentences of ONE turn
-	// concurrently (sentence k+1 synthesizes while k is delivered), so both flags
+	// concurrently (sentence k+1 synthesizes while k is delivered), so the flag
 	// can be written from two goroutines and read by [turnRun.finish] on a third.
 	mu sync.Mutex
 
-	// attempted: some dispatch got past the pre-check (audio may exist) — the
-	// Cross-talk barge terminal keys on it (a barge before the first sentence
-	// interrupted nothing).
-	attempted bool
 	// ttsFailed: some sentence start-errored or failed mid-stream (#436) under a
 	// live ctx — sticky, so the turn terminates tts_error, never a silent success.
 	ttsFailed bool
@@ -123,33 +116,14 @@ func (r *Replier) newTurn(ctx context.Context) *turnRun {
 // has fired), [ErrNotDelivered] = start-error under a live turn (skip, keep
 // going), anything else = the turn was cut (stop).
 func (t *turnRun) dispatch(rep Reply) error {
-	return t.run(t.ctx, rep, ErrNotDelivered, nil)
-}
-
-// dispatchHeld is the pump look-ahead variant (#375): the turn's FIRST sentence
-// is synthesized under a [voiceevent.WithPlaybackLookahead]-marked ctx so the
-// pump HOLDS its audio, and onHeld hands the sentence text to the coordinator
-// BEFORE the synth call blocks on the pump lane. A start-error returns abort
-// instead of [ErrNotDelivered]: skip-and-continue would let the second sentence
-// enqueue on the normal path and leapfrog the still-playing Lead, so the caller
-// supplies a non-sentinel error that stops the producer's drain as a unit.
-func (t *turnRun) dispatchHeld(rep Reply, onHeld func(sentence string), abort error) error {
-	if err := t.ctx.Err(); err != nil {
-		// This early return is an EXIT of the dispatch too, so it resolves the Reply
-		// like every path inside run does — "OnResolved fires exactly once on every
-		// exit" is what a producer waiting on the hook (#626) depends on.
-		return t.resolve(rep, err)
-	}
-	onHeld(rep.Sentence)
-	return t.run(voiceevent.WithPlaybackLookahead(t.ctx), rep, abort, t.ctx)
+	return t.run(t.ctx, rep, nil)
 }
 
 // run is the shared dispatch body: dctx is the ctx the synth call runs under
-// (lookahead-marked for a held first sentence), notDelivered is the start-error
-// mapping (the sentinel, or a look-ahead abort), and checkCtx — when non-nil —
-// is the ctx liveness is judged by (dctx otherwise; they only differ by carried
-// values, never by cancellation).
-func (t *turnRun) run(dctx context.Context, rep Reply, notDelivered error, checkCtx context.Context) (err error) {
+// (lookahead-marked for a held, pre-synthesized sentence, #626), and checkCtx —
+// when non-nil — is the ctx liveness is judged by (dctx otherwise; they only
+// differ by carried values, never by cancellation).
+func (t *turnRun) run(dctx context.Context, rep Reply, checkCtx context.Context) (err error) {
 	// The sentence's outcome is final at EVERY return below, so the resolution
 	// hook (#626) is fired by one exit wrapper rather than per branch: a producer
 	// waiting on it (the agent's history commit) would deadlock on a leaked exit.
@@ -160,7 +134,6 @@ func (t *turnRun) run(dctx context.Context, rep Reply, notDelivered error, check
 	if err := checkCtx.Err(); err != nil {
 		return err // cut before the sentence: never reaches the synthesizer
 	}
-	t.mark(func() { t.attempted = true })
 	if err := t.synth(dctx, rep.Sentence, rep.Voice); err != nil {
 		if t.onError != nil {
 			t.onError(err)
@@ -176,7 +149,7 @@ func (t *turnRun) run(dctx context.Context, rep Reply, notDelivered error, check
 		// turn alive. Either way the room did not hear this sentence's whole text,
 		// so per ADR-0012's under-report bias it must not commit.
 		t.mark(func() { t.ttsFailed = true })
-		return notDelivered
+		return ErrNotDelivered
 	}
 	// Deliver-then-commit re-check (ADR-0012): the synth returns nil even when a
 	// barge/mute cancelled the turn DURING the drain. The forward boundary is
@@ -254,9 +227,8 @@ func (t *turnRun) mark(fn func()) {
 //
 // One sentence is in flight and at most ONE more is held, so the structural cap is
 // a single unplayed synthesized sentence per session at any instant — the TTS
-// spend bound: a discarded look-ahead is metered exactly like the one-sentence
-// ensemble pre-render it reuses (ADR-0045/0054), and so stays visible in the
-// Usage Ledger.
+// spend bound: a discarded look-ahead is metered like any synthesized sentence
+// (ADR-0045/0054), and so stays visible in the Usage Ledger.
 //
 // The protocol per [pipelinedTurn.dispatch] of sentence k (k >= 2):
 //  1. spawn k's [turnRun.run] under a look-ahead-marked ctx keyed to k — the pump
@@ -379,7 +351,7 @@ func (p *pipelinedTurn) spawn(dctx context.Context, rep Reply, key string) *pipe
 	s := &pipelinedSentence{key: key, done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
-		s.err = p.t.run(dctx, rep, ErrNotDelivered, p.t.ctx)
+		s.err = p.t.run(dctx, rep, p.t.ctx)
 	}()
 	return s
 }

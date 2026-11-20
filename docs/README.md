@@ -87,7 +87,7 @@ decisions are recorded as dated amendments inside the original ADR.
 | [0022](adr/0022-tts-provider-interface.md) | TTS provider interface: small core, opt-in capabilities, opaque markup |
 | [0023](adr/0023-tts-provider-matrix-elevenlabs-openai.md) | TTS provider matrix v1.0: ElevenLabs + OpenAI (amends ADR-0004) |
 | [0024](adr/0024-address-detection-deterministic-fuzzy-chain.md) | Address Detection: deterministic fuzzy chain on raw STT |
-| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction |
+| [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction (design of record; not implemented) |
 | [0026](adr/0026-bus-wiring-reactors-and-conversation.md) | Voice bus wiring: typed reactors composed into a Conversation |
 | [0027](adr/0027-barge-in-confirm-window-cancels-turn.md) | Barge-in: per-participant confirm window cancels the whole turn |
 | [0028](adr/0028-tool-framework-internal-interface-simple-registry.md) | Tool framework: one internal Tool interface, simple registry, MCP Server as a backing |

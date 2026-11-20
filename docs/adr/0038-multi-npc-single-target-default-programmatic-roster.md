@@ -2,6 +2,8 @@
 
 A Voice Session may host several Character NPCs at once (ADR-0009's single Agent table already makes them homogeneous). v1.0 wires that multi-NPC scene around three decisions: **single-target by default** (naming two NPCs fires one turn), **one shared Barge-in floor** with reply multiplexing through per-Agent self-filtering Repliers, and a **programmatic-only roster** control surface. The human-feeling Ensemble Turn (ADR-0025) is the design-of-record but its turn-taking layer is deferred, not built.
 
+> **Note (2026-11-20):** the Ensemble Turn layer this ADR defers was built but never wired, and has now been removed from the code (ADR-0025, which stays the design of record). Single-target is therefore no longer "the default behind a knob" but the only behaviour: `Config.MaxTargets > 1` still makes the matcher return a score-sorted set, yet the `AddressDetector` publishes one `AddressRouted` for its top decision, so one utterance always opens at most one turn. Where the text below says the Ensemble set is "opt-in" or "reachable via `MaxTargets`", that now means only the matcher's decision set, not a turn that answers it.
+
 ## What this decides
 
 - **Single-target is the safe default.** Address Detection (ADR-0024) returns a score-sorted set, but `Config.MaxTargets` defaults to 1, so the published decision set holds at most the top-scored Agent. Naming two NPCs in one breath fires **one** turn on the winner. The multi-target Ensemble set is opt-in via `MaxTargets > 1` (cap at N) or `-1` (unbounded). The default is single-target because there is exactly **one Barge-in floor** for the whole scene (next point), and one addressed turn is the only thing that keeps that floor's one-turn-at-a-time invariant intact.

@@ -37,15 +37,6 @@ func WithSessionID(e Event, sessionID string) Event {
 	case AddressRouted:
 		ev.SessionID = sessionID
 		return ev
-	case EnsembleRouted:
-		ev.SessionID = sessionID
-		return ev
-	case EnsembleLead:
-		ev.SessionID = sessionID
-		return ev
-	case EnsembleReaction:
-		ev.SessionID = sessionID
-		return ev
 	case SpeakRequested:
 		ev.SessionID = sessionID
 		return ev
@@ -106,12 +97,6 @@ func SessionIDOf(e Event) string {
 	case STTFinal:
 		return ev.SessionID
 	case AddressRouted:
-		return ev.SessionID
-	case EnsembleRouted:
-		return ev.SessionID
-	case EnsembleLead:
-		return ev.SessionID
-	case EnsembleReaction:
 		return ev.SessionID
 	case SpeakRequested:
 		return ev.SessionID

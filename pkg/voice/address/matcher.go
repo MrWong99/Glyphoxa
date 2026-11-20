@@ -69,8 +69,10 @@ type Config struct {
 	// score-sorted hits before the decision set is built (so only the published
 	// Agents become the next turn's continuation context). Zero defaults to 1
 	// (single-target: naming two NPCs fires one turn on the top-scored). A
-	// positive N caps at N; a negative value lifts the cap entirely, restoring
-	// the full Ensemble Turn set (ADR-0025).
+	// positive N caps at N; a negative value lifts the cap entirely. Nothing
+	// downstream answers a set today: the [orchestrator.AddressDetector]
+	// publishes only the top decision (Ensemble Turns, ADR-0025, are not
+	// implemented), so a cap above 1 only widens the continuation context.
 	MaxTargets int
 	// ButlerGMGate reports whether a SpeakerID may voice-address the Butler
 	// (ADR-0024 GM-only rule; #280 identity, GM per ADR-0050/ADR-0055 — the
@@ -147,8 +149,8 @@ func DefaultHeuristicsWithin(continuation time.Duration) []Heuristic {
 // Per utterance it fuzzily scores every Agent's name, scores each Agent through
 // the heuristic stack, and returns the set whose total reaches the threshold
 // (highest score first). The set may be empty (no target — the utterance is
-// still transcribed), hold one Agent (the usual case), or hold several (an
-// Ensemble Turn, ADR-0025). It then records the decision — who was addressed,
+// still transcribed), hold one Agent (the usual case), or hold several when
+// [Config.MaxTargets] allows it. It then records the decision — who was addressed,
 // by whom, and when — so the next turn's continuation heuristic can see it.
 //
 // A Matcher carries mutable conversational state and is safe for concurrent

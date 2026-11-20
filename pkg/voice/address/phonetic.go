@@ -8,8 +8,8 @@
 // position. Each candidate is then scored by a small stack of pluggable
 // [Heuristic]s — the name match, and the speaker's last-addressed
 // continuation. An Agent is addressed when its total score crosses a
-// configurable threshold; several Agents crossing at once yields the
-// multi-target set that drives an Ensemble Turn (ADR-0025).
+// configurable threshold; several Agents crossing at once yields a
+// multi-target set, capped by [Config.MaxTargets] (1 by default).
 //
 // The whole pipeline is a pure function over a per-utterance [DecisionContext]
 // plus the matcher's own conversational state (who was addressed last, by

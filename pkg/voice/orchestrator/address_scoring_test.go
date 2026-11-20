@@ -27,10 +27,10 @@ func newScoringDetector(agents ...address.Agent) *orchestrator.AddressDetector {
 	return orchestrator.NewAddressDetector(m)
 }
 
-// newEnsembleDetector is newScoringDetector with the single-target default cap
-// lifted (MaxTargets: -1), so a multi-NPC utterance yields the full Ensemble
-// Turn set the detector must forward verbatim.
-func newEnsembleDetector(agents ...address.Agent) *orchestrator.AddressDetector {
+// newUncappedDetector is newScoringDetector with the single-target default cap
+// lifted (MaxTargets: -1), so a multi-NPC utterance makes the matcher return its
+// full score-sorted set and the detector has to pick from it.
+func newUncappedDetector(agents ...address.Agent) *orchestrator.AddressDetector {
 	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, agents...)
 	return orchestrator.NewAddressDetector(m)
 }
@@ -101,54 +101,48 @@ func TestScoringMatcher_Mishearing_RoutesToNPC(t *testing.T) {
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
 }
 
-// TestScoringMatcher_Ensemble_PublishesOneEnsembleRouted proves the detector makes
-// a multi-Agent decision set ATOMIC (ADR-0025, #301): with the single-target cap
-// lifted (an ensemble matcher), an utterance naming two NPCs yields exactly ONE
-// address.ensemble carrying both score-sorted targets — and ZERO plain
-// address.routed events. This REWRITES the earlier
-// TestScoringMatcher_Ensemble_PublishesEveryTarget (which asserted two
-// address.routed): the #301 contract supersedes it — an Ensemble Turn is one
-// floor-holding unit, so the detector emits one event, not N.
-func TestScoringMatcher_Ensemble_PublishesOneEnsembleRouted(t *testing.T) {
+// TestScoringMatcher_UncappedSet_PublishesOnlyTopScored proves one utterance
+// opens one turn even when the matcher's single-target cap is lifted (ADR-0038):
+// an utterance naming two NPCs yields exactly ONE address.routed, for the
+// matcher's top-scored target. Ensemble Turns, which would have answered the
+// whole set, are not implemented (ADR-0025).
+func TestScoringMatcher_UncappedSet_PublishesOnlyTopScored(t *testing.T) {
 	h := voicetest.New(t)
 	butlerAg, bartAg, goblinAg := scoringAgents()
-	d := newEnsembleDetector(butlerAg, bartAg, goblinAg)
-	t.Cleanup(d.Bind(t.Context(), h.Bus))
+	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butlerAg, bartAg, goblinAg)
+	const utterance = "Bart and the Goblin start arguing"
+	// The matcher is stateful only in its continuation context, which a second
+	// identical named utterance does not change — so asking it directly first
+	// tells us which target it ranks on top.
+	set := m.TargetMatch(utterance)
+	if len(set) != 2 {
+		t.Fatalf("uncapped matcher returned %d decisions for two named NPCs, want 2", len(set))
+	}
+	t.Cleanup(orchestrator.NewAddressDetector(m).Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start arguing", TurnID: "T-e"})
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: utterance, TurnID: "T-e"})
 
-	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 1)
-	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.EnsembleRouted) bool {
-			if len(e.Targets) != 2 || e.TurnID != "T-e" {
-				return false
-			}
-			// Both named NPCs are present in the set.
-			ids := map[string]bool{}
-			for _, tgt := range e.Targets {
-				ids[tgt.AgentID] = true
-			}
-			return ids[bartTarget.AgentID] && ids[goblinTarget.AgentID]
+		func(e voiceevent.AddressRouted) bool {
+			return e.TurnID == "T-e" && e.Target.AgentID == set[0].Target.AgentID
 		},
-		"address.ensemble carrying both Bart and Goblin (score-sorted set)",
+		"address.routed → the matcher's top-scored target only",
 	)
 }
 
-// TestScoringMatcher_SingleNameUnderEnsembleCap_PublishesPlainAddressRouted proves
-// the ensemble branch is dead code for a single-target utterance even when the cap
-// is lifted (#301 AC4): one named NPC yields exactly one plain address.routed and
-// no address.ensemble, so the single-route path is untouched.
-func TestScoringMatcher_SingleNameUnderEnsembleCap_PublishesPlainAddressRouted(t *testing.T) {
+// TestScoringMatcher_SingleNameUncapped_PublishesPlainAddressRouted proves a
+// single-target utterance is untouched by a lifted cap: one named NPC yields
+// exactly one address.routed.
+func TestScoringMatcher_SingleNameUncapped_PublishesPlainAddressRouted(t *testing.T) {
 	h := voicetest.New(t)
 	butlerAg, bartAg, goblinAg := scoringAgents()
-	d := newEnsembleDetector(butlerAg, bartAg, goblinAg)
+	d := newUncappedDetector(butlerAg, bartAg, goblinAg)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart, what's the special tonight?", TurnID: "T-s"})
 
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
-	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 0)
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.AddressRouted) bool {
 			return e.Target.AgentID == bartTarget.AgentID && e.TurnID == "T-s"

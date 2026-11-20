@@ -113,8 +113,10 @@ terminal, and in the Finalize sweep; the corrected row is re-UPSERTed. Because
 goroutine, it can arrive after the turn's terminal; such a late `FirstAudio`
 restores the sentence the terminal stripped. A turn cut by a barge, supersede,
 mute or conversation teardown (`cancelled`) keeps its in-flight text (#401).
-Routed replies, `/say` and Highlight replays now end with exactly one
-`TurnEnded`, a clean one with reason `completed`; Ensemble Turns are the known
-exception until that path is removed. Residual: a sentence synthesized to zero
+Every turn — routed reply, `/say` or Highlight replay — ends with exactly one
+`TurnEnded`, a clean one with reason `completed`. The invariant is
+unconditional since 2026-11-20: the unshipped Ensemble Turn implementation, the
+one path that ended a clean turn with none and a barged Reaction with two, was
+removed (ADR-0025). Residual: a sentence synthesized to zero
 audio chunks without an error is never signalled and pairs with the next
 sentence's `FirstAudio`.
