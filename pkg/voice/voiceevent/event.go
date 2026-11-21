@@ -493,6 +493,10 @@ type BargeDetected struct {
 	// continuation claim: being interrupted means the human wants the Agent to
 	// stop, so the interrupting utterance must not continue straight back into it.
 	AgentID string
+	// TurnID is the turn that was cut (ADR-0027 amendment, 2026-11-21). Additive
+	// per ADR-0020; "" when the publisher does not know it. Address Detection
+	// uses it to judge the barge against the reply that was actually playing.
+	TurnID string
 	// SessionID is the voice_sessions uuid string of the Voice Session this event
 	// originated in (#487, session-scoped attribution). "" means session-local /
 	// pre-stamp — the single-session default before [Forward] stamps it onto the

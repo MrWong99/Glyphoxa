@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -173,10 +175,33 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	// the full continuation weight and landed straight back on the Agent the human
 	// had just cut off, so an interruption produced another turn instead of
 	// stopping one. An unattributed barge (empty AgentID) revokes nothing.
+	//
+	// One exception (ADR-0027 amendment, 2026-11-21): a split utterance. A speaker
+	// who pauses mid-request is endpointed, the Agent starts answering, and the
+	// speaker's own next words cut it off a moment later. That is not "stop" —
+	// the human has heard next to nothing to react to — and revoking the claim
+	// there left the rest of the request routed nowhere: the Agent fell silent
+	// and stayed silent. So when the speaker who opened the turn barges within
+	// [splitUtteranceGrace] of its first audio, the claim is kept and the rest of
+	// the request continues to the same Agent. The exception is spent once it
+	// is used: a second early cut in a row is the human rejecting the answer,
+	// and revokes as usual. A reply that plays to its end restores it.
+	turns := newRoutedTurns()
 	var unsubBarge func()
 	if im, interruptible := d.matcher.(InterruptibleMatcher); interruptible {
 		unsubBarge = voiceevent.On(bus, func(barge voiceevent.BargeDetected) {
 			if barge.AgentID == "" {
+				return
+			}
+			at := barge.At
+			if at.IsZero() {
+				at = time.Now()
+			}
+			if turns.keepClaim(barge.TurnID, barge.AgentID, barge.SpeakerID, at) {
+				slog.Default().Debug("orchestrator: early barge by the addressing speaker, keeping the continuation claim",
+					slog.String("speaker", barge.SpeakerID),
+					slog.String("agent", barge.AgentID),
+				)
 				return
 			}
 			im.ClearContinuation(barge.AgentID)
@@ -196,27 +221,31 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	// last sentence. Only the clean completion extends: a barge revokes the claim
 	// above, and a failed, muted, superseded or text-delivered turn leaves the
 	// anchor where the audio (if any) put it.
-	var (
-		unsubAudio func()
-		unsubEnded func()
-		turns      *routedTurns
-	)
-	if rm, replyAware := d.matcher.(ReplyAwareMatcher); replyAware {
-		turns = newRoutedTurns()
-		extend := func(turnID string) {
-			for _, agentID := range turns.agents(turnID) {
-				rm.ExtendContinuation(agentID)
-			}
+	rm, replyAware := d.matcher.(ReplyAwareMatcher)
+	extend := func(turnID string) {
+		if !replyAware {
+			return
 		}
-		unsubAudio = voiceevent.On(bus, func(audio voiceevent.FirstAudio) {
-			extend(audio.TurnID)
-		})
-		unsubEnded = voiceevent.On(bus, func(ended voiceevent.TurnEnded) {
-			if ended.Reason == voiceevent.TurnEndCompleted {
-				extend(ended.TurnID)
-			}
-		})
+		for _, agentID := range turns.agents(turnID) {
+			rm.ExtendContinuation(agentID)
+		}
 	}
+	// Subscribed even for a matcher that is not reply-aware: the first audio of
+	// a turn is also what the split-utterance exception above measures from.
+	unsubAudio := voiceevent.On(bus, func(audio voiceevent.FirstAudio) {
+		at := audio.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		turns.audible(audio.TurnID, at)
+		extend(audio.TurnID)
+	})
+	unsubEnded := voiceevent.On(bus, func(ended voiceevent.TurnEnded) {
+		if ended.Reason == voiceevent.TurnEndCompleted {
+			turns.completed(ended.TurnID)
+			extend(ended.TurnID)
+		}
+	})
 
 	unsubFinal := voiceevent.On(bus, func(final voiceevent.STTFinal) {
 		// An empty or whitespace-only final routes NOWHERE (#434). The STT stage
@@ -287,8 +316,8 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			)
 			return
 		}
-		if turns != nil && final.TurnID != "" {
-			turns.record(final.TurnID, []string{winner.Target.AgentID})
+		if final.TurnID != "" {
+			turns.record(final.TurnID, final.SpeakerID, []string{winner.Target.AgentID})
 		}
 		bus.Publish(*winner)
 	})
@@ -298,12 +327,8 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		if unsubBarge != nil {
 			unsubBarge()
 		}
-		if unsubAudio != nil {
-			unsubAudio()
-		}
-		if unsubEnded != nil {
-			unsubEnded()
-		}
+		unsubAudio()
+		unsubEnded()
 	}
 }
 
@@ -318,17 +343,35 @@ const routedTurnsCap = 16
 // its own mutex: finals and reply-audio events arrive on different goroutines.
 type routedTurns struct {
 	mu     sync.Mutex
-	byTurn map[string][]string
+	byTurn map[string]*routedTurn
 	order  []string // insertion order, oldest first, for eviction
+	// graceSpent marks an Agent whose last cut was already forgiven as a split
+	// utterance; the next early cut revokes. Cleared when a reply completes.
+	graceSpent map[string]bool
 }
+
+// routedTurn is what the detector remembers about one turn it routed.
+type routedTurn struct {
+	agents     []string
+	speakerID  string    // who addressed the Agent(s); "" when unattributed
+	firstAudio time.Time // when the reply first produced audio; zero until then
+}
+
+// splitUtteranceGrace is how soon after a reply's first audio a barge by the
+// speaker who asked still counts as that speaker finishing their own request
+// rather than interrupting the answer. The barge is confirmed about a quarter
+// of a second after the speaker's onset, so this covers speech that resumed
+// within roughly the reply's first second: the human was already about to
+// talk, not reacting to what they heard. (Observed live: 0.5 s.)
+const splitUtteranceGrace = 1500 * time.Millisecond
 
 func newRoutedTurns() *routedTurns {
-	return &routedTurns{byTurn: make(map[string][]string, routedTurnsCap)}
+	return &routedTurns{byTurn: make(map[string]*routedTurn, routedTurnsCap), graceSpent: make(map[string]bool)}
 }
 
-// record stores the Agents turnID was routed to, evicting the oldest turn past
-// the cap.
-func (r *routedTurns) record(turnID string, agentIDs []string) {
+// record stores the Agents turnID was routed to and who addressed them,
+// evicting the oldest turn past the cap.
+func (r *routedTurns) record(turnID, speakerID string, agentIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, known := r.byTurn[turnID]; !known {
@@ -338,7 +381,7 @@ func (r *routedTurns) record(turnID string, agentIDs []string) {
 		}
 		r.order = append(r.order, turnID)
 	}
-	r.byTurn[turnID] = agentIDs
+	r.byTurn[turnID] = &routedTurn{agents: agentIDs, speakerID: speakerID}
 }
 
 // agents returns the Agents turnID was routed to, or nil for an unknown turn
@@ -349,5 +392,65 @@ func (r *routedTurns) agents(turnID string) []string {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.byTurn[turnID]
+	if t := r.byTurn[turnID]; t != nil {
+		return t.agents
+	}
+	return nil
+}
+
+// audible notes when turnID's reply first produced audio. Later sentences of
+// the same reply leave the first instant in place.
+func (r *routedTurns) audible(turnID string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t := r.byTurn[turnID]; t != nil && t.firstAudio.IsZero() {
+		t.firstAudio = at
+	}
+}
+
+// keepClaim decides whether a barge that cut agentID is a split utterance: the
+// cut reply was opened by speakerID, became audible no more than
+// [splitUtteranceGrace] before at, and the Agent's previous cut was not already
+// forgiven the same way. turnID names the cut turn; when the publisher did not
+// supply it the most recent turn routed to agentID is judged instead. An
+// unattributed speaker, an unknown turn or a reply with no audio on record all
+// report false: the exception has to be proven, not assumed. Any barge that is
+// not kept leaves the Agent's exception available again — the claim it would
+// have protected is being revoked anyway.
+func (r *routedTurns) keepClaim(turnID, agentID, speakerID string, at time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := speakerID != "" && !r.graceSpent[agentID] && r.earlyBy(turnID, agentID, speakerID, at)
+	r.graceSpent[agentID] = keep
+	return keep
+}
+
+// earlyBy is the timing-and-speaker half of [routedTurns.keepClaim]. The
+// caller holds r.mu.
+func (r *routedTurns) earlyBy(turnID, agentID, speakerID string, at time.Time) bool {
+	t := r.byTurn[turnID]
+	if turnID == "" {
+		for i := len(r.order) - 1; i >= 0 && t == nil; i-- {
+			if c := r.byTurn[r.order[i]]; c != nil && slices.Contains(c.agents, agentID) {
+				t = c
+			}
+		}
+	}
+	if t == nil || !slices.Contains(t.agents, agentID) {
+		return false
+	}
+	return t.speakerID == speakerID && !t.firstAudio.IsZero() &&
+		at.Sub(t.firstAudio) <= splitUtteranceGrace
+}
+
+// completed notes that turnID's reply played to its end: its Agents have the
+// split-utterance exception available again.
+func (r *routedTurns) completed(turnID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t := r.byTurn[turnID]; t != nil {
+		for _, agentID := range t.agents {
+			delete(r.graceSpent, agentID)
+		}
+	}
 }
