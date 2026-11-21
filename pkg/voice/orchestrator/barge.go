@@ -217,6 +217,6 @@ func (b *BargeIn) fire(bus *voiceevent.Bus, sp, turnID string) {
 		return
 	}
 	now := time.Now()
-	bus.Publish(voiceevent.BargeDetected{At: now, SpeakerID: sp, AgentID: agentID})
+	bus.Publish(voiceevent.BargeDetected{At: now, SpeakerID: sp, AgentID: agentID, TurnID: turnID})
 	bus.Publish(voiceevent.TurnEnded{At: now, TurnID: turnID, Reason: voiceevent.TurnEndBarge})
 }
