@@ -1173,6 +1173,38 @@ textarea.gx-input {
   font-size: 12px;
 }
 
+/* Phone width: the bar's fixed paddings, gaps and minimum widths added up to
+ * more than the screen, so every page scrolled sideways. The title is dropped
+ * (each screen repeats it as its heading) and the rest tightens to fit. */
+@media (max-width: 480px) {
+  .gx-topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+  .gx-topbar__divider {
+    display: none;
+  }
+  .gx-topbar__titles {
+    visibility: hidden;
+  }
+  .gx-topbar__lang .gx-select {
+    min-width: 0;
+  }
+  .gx-campaign-switcher,
+  .gx-campaign-switcher__label {
+    min-width: 0;
+  }
+  .gx-campaign-switcher__trigger {
+    max-width: 100%;
+  }
+  .gx-campaign-switcher__name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 /* ===================== Markdown (components/ui/Markdown.tsx) ============ */
 /* LLM-authored prose: planning-chat bubbles, recap cards, transcript lines.
  * The root resets white-space to normal so the renderer can sit inside
