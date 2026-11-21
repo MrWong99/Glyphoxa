@@ -107,3 +107,88 @@ func TestAddressDetector_BargeUnsubscribesOnCancel(t *testing.T) {
 		t.Fatalf("cleared = %v after teardown, want nothing", got)
 	}
 }
+
+// routingClearSpy is a clearSpyMatcher that routes every utterance to Bart, so
+// the detector has a routed turn on record to judge a barge against.
+func routingClearSpy() *clearSpyMatcher {
+	return &clearSpyMatcher{routes: []voiceevent.AddressRouted{{
+		Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter},
+	}}}
+}
+
+// TestAddressDetector_EarlyBargeByTheAskerKeepsContinuation pins the
+// split-utterance exception found in live voice testing (2026-11-21): a speaker
+// pauses mid-request, the Agent starts answering, and the speaker's own next
+// words cut it off within the first moments of audio. Revoking the claim there
+// routed the rest of the request nowhere — the Agent went silent for good.
+func TestAddressDetector_EarlyBargeByTheAskerKeepsContinuation(t *testing.T) {
+	h := voicetest.New(t)
+	m := routingClearSpy()
+	t.Cleanup(orchestrator.NewAddressDetector(m).Bind(t.Context(), h.Bus))
+
+	start := time.Now()
+	h.Bus.Publish(voiceevent.STTFinal{TurnID: "T1", SpeakerID: "player-1", Text: "Bart, tell me a long story"})
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T1", At: start})
+	h.Bus.Publish(voiceevent.BargeDetected{At: start.Add(500 * time.Millisecond), SpeakerID: "player-1", AgentID: "npc-bart"})
+
+	if got := m.clearedIDs(); len(got) != 0 {
+		t.Fatalf("cleared = %v, want nothing: the asker was finishing their own request", got)
+	}
+}
+
+// TestAddressDetector_BargeStillClears covers every case the exception must NOT
+// swallow: the interruption comes once the answer is under way, from someone
+// other than the asker, from an unattributed speaker, or before any audio is on
+// record. Each is an interruption and revokes the claim as before.
+func TestAddressDetector_BargeStillClears(t *testing.T) {
+	start := time.Now()
+	cases := []struct {
+		name       string
+		firstAudio bool
+		barge      voiceevent.BargeDetected
+	}{
+		{"late barge by the asker", true, voiceevent.BargeDetected{At: start.Add(3 * time.Second), SpeakerID: "player-1", AgentID: "npc-bart"}},
+		{"early barge by someone else", true, voiceevent.BargeDetected{At: start.Add(500 * time.Millisecond), SpeakerID: "player-2", AgentID: "npc-bart"}},
+		{"early unattributed barge", true, voiceevent.BargeDetected{At: start.Add(500 * time.Millisecond), AgentID: "npc-bart"}},
+		{"no audio on record", false, voiceevent.BargeDetected{At: start.Add(500 * time.Millisecond), SpeakerID: "player-1", AgentID: "npc-bart"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := voicetest.New(t)
+			m := routingClearSpy()
+			t.Cleanup(orchestrator.NewAddressDetector(m).Bind(t.Context(), h.Bus))
+
+			h.Bus.Publish(voiceevent.STTFinal{TurnID: "T1", SpeakerID: "player-1", Text: "Bart, tell me a long story"})
+			if tc.firstAudio {
+				h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T1", At: start})
+			}
+			h.Bus.Publish(tc.barge)
+
+			if got := m.clearedIDs(); len(got) != 1 || got[0] != "npc-bart" {
+				t.Fatalf("cleared = %v, want [npc-bart]", got)
+			}
+		})
+	}
+}
+
+// TestAddressDetector_EarlyBargeJudgesTheLatestTurn pins that the exception is
+// measured against the reply that was actually cut: an old turn whose audio
+// began long ago must not be mistaken for it, and a newer turn opened by
+// another speaker must not inherit the first speaker's grace.
+func TestAddressDetector_EarlyBargeJudgesTheLatestTurn(t *testing.T) {
+	h := voicetest.New(t)
+	m := routingClearSpy()
+	t.Cleanup(orchestrator.NewAddressDetector(m).Bind(t.Context(), h.Bus))
+
+	start := time.Now()
+	h.Bus.Publish(voiceevent.STTFinal{TurnID: "T1", SpeakerID: "player-1", Text: "Bart, hello"})
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T1", At: start})
+	h.Bus.Publish(voiceevent.STTFinal{TurnID: "T2", SpeakerID: "player-2", Text: "Bart, and me?"})
+	h.Bus.Publish(voiceevent.FirstAudio{TurnID: "T2", At: start.Add(10 * time.Second)})
+	// player-1 cuts the answer to player-2 half a second in: an interruption.
+	h.Bus.Publish(voiceevent.BargeDetected{At: start.Add(10*time.Second + 500*time.Millisecond), SpeakerID: "player-1", AgentID: "npc-bart"})
+
+	if got := m.clearedIDs(); len(got) != 1 {
+		t.Fatalf("cleared = %v, want [npc-bart]: the cut reply answered another speaker", got)
+	}
+}
