@@ -343,7 +343,9 @@
 
 @media (max-width: 720px) {
   .gx-roster-layout {
-    grid-template-columns: 1fr;
+    /* minmax(0, …), not a bare 1fr: a bare track grows to its widest child and
+     * pushed the whole page sideways on a phone. */
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
