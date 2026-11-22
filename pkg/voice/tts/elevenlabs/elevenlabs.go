@@ -15,9 +15,13 @@
 package elevenlabs
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -61,22 +65,78 @@ func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h
 // phases so a black-holed synthesis endpoint fails fast instead of holding the
 // reply goroutine open. It mirrors the STT adapter and the LLM clients, but with
 // voice-tight values: a synthesis must start emitting audio in well under a
-// second (first-audio TTFB is ~0.25–0.45s in practice), so ResponseHeaderTimeout
-// is 5s — ~10× the observed max, enough headroom to never trip on a real reply
+// second (first audio measured 2026-11-22: ~0.14s warm on eleven_v4_turbo,
+// ~0.45–0.8s on eleven_v3), so ResponseHeaderTimeout is 5s — well over 5× the
+// observed max, enough headroom to never trip on a real reply
 // yet failing a hung connection in 5s rather than tens of seconds. It bounds
 // time-to-first-RESPONSE-byte only, NOT the streamed audio that follows, so a
 // long multi-sentence reply is never clipped. No overall Timeout, for the same
 // reason. The barge/per-turn ctx is still the end-to-end cancel.
 func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ResponseHeaderTimeout: 5 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+	return &http.Client{Transport: defaultTransport()}
+}
+
+// Connection-pool tuning for the synthesis hot path (#702). A reply's first
+// sentence that has to dial pays TCP+TLS (~60–130 ms measured against the real
+// API, on a ~135 ms first-audio budget for eleven_v4_turbo), so the pool keeps
+// connections warm:
+//   - idleConnsPerHost: the pipelined look-ahead (#626) runs two Synthesize calls
+//     at once, plus a [Client.Warm] or a voice preview can overlap; the stdlib
+//     default of 2 would close the surplus connection after every pair.
+//   - idleConnTimeout: long enough to span the quiet gaps of a table conversation;
+//     the vendor's own idle close (observed between ~20 and ~60 s) is what really
+//     bounds reuse, which is what [Client.Warm] is for.
+const (
+	idleConnsPerHost = 4
+	idleConnTimeout  = 90 * time.Second
+)
+
+// defaultTransport is the transport behind [defaultHTTPClient]; see there and
+// the pool constants above.
+func defaultTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          idleConnsPerHost * 4,
+		MaxIdleConnsPerHost:   idleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
 	}
+}
+
+// warmTimeout bounds one [Client.Warm] so a black-holed endpoint never holds the
+// caller's goroutine; it matches the dial and TLS bounds above.
+const warmTimeout = 5 * time.Second
+
+// Warm opens (or refreshes) a pooled connection to the API so the next synthesis
+// starts on an established TCP+TLS connection instead of dialling. It sends one
+// HEAD request to the API root — no audio, no characters billed — and drains the
+// answer, whatever its status, back into the pool. The live wiring calls it when a
+// Voice Session connects, when a participant starts speaking (the reply follows
+// within a second or two) and after a barge (which drops the connection a
+// mid-stream sentence was using).
+//
+// Only a transport failure is an error; callers treat it as advisory (the
+// synthesis would simply dial). A keyless client is a no-op: it cannot
+// synthesize, and cassette tiers must never touch the network.
+func (c *Client) Warm(ctx context.Context) error {
+	if c.apiKey == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, warmTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, strings.TrimRight(c.baseURL, "/")+"/", nil)
+	if err != nil {
+		return fmt.Errorf("elevenlabs.Warm: build request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("elevenlabs.Warm: %w", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.Body.Close()
 }
 
 // New constructs a [Client]. If apiKey is empty it falls back to the
