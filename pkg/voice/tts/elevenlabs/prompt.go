@@ -98,5 +98,5 @@ func (c *Client) AudioMarkupPrompt(voice tts.Voice) string {
 // the eleven_v3 and eleven_v4 families (eleven_v3, eleven_v3_conversational,
 // eleven_v4, eleven_v4_turbo). Older families read brackets aloud.
 func supportsAudioTags(model string) bool {
-	return strings.HasPrefix(model, "eleven_v3") || strings.HasPrefix(model, "eleven_v4")
+	return dialogueFamily(model)
 }

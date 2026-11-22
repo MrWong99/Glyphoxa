@@ -26,6 +26,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // fakeOAuthStore is an in-memory auth.OAuthStore recording what seedDevSession
@@ -1446,6 +1447,29 @@ func TestSTTKeyterms(t *testing.T) {
 	}
 }
 
+// TestTTSTransport pins the GLYPHOXA_TTS_TRANSPORT parse (#702): unset or "http"
+// keeps the HTTP synthesis path, "ws" opts into the pooled Text-to-Dialogue
+// websocket, and a typo keeps HTTP while reporting itself.
+func TestTTSTransport(t *testing.T) {
+	cases := []struct {
+		val     string
+		want    ttseleven.Transport
+		wantErr bool
+	}{
+		{"", ttseleven.TransportHTTP, false},
+		{"http", ttseleven.TransportHTTP, false},
+		{" WS ", ttseleven.TransportWS, false},
+		{"ws", ttseleven.TransportWS, false},
+		{"websocket", ttseleven.TransportHTTP, true},
+	}
+	for _, c := range cases {
+		got, err := ttsTransport(envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": c.val}))
+		if got != c.want || (err != nil) != c.wantErr {
+			t.Errorf("ttsTransport(%q) = %q, %v; want %q, error=%v", c.val, got, err, c.want, c.wantErr)
+		}
+	}
+}
+
 // TestSTTLanguageHint: pinning the recognizer to the Campaign Language is OPT-IN
 // (#701) — a table may mix languages, so only an explicit truthy value
 // ("1"/"true"/"yes"/"on", any case, trimmed) turns it on.
@@ -1464,24 +1488,44 @@ func TestSTTLanguageHint(t *testing.T) {
 	}
 }
 
-// TestApplySTTEnv is the env -> Config hop of the three STT switches: the parsed
-// value has to LAND on the wirenpc.Config every Voice Session is copied from. A
-// parser nobody assigns leaves the Config's zero value in charge — streaming and
-// keyterms off in production, with every parser test green.
-func TestApplySTTEnv(t *testing.T) {
+// TestApplyVoiceEnv pins the hop from the environment onto the session Config
+// the voice loop is started with (#701, #702): the parsed value has to LAND on
+// the wirenpc.Config every Voice Session is copied from. A parser nobody assigns
+// leaves the Config's zero value in charge — streaming and keyterms off in
+// production, with every parser test green.
+func TestApplyVoiceEnv(t *testing.T) {
+	var cfg wirenpc.Config
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "ws", "GLYPHOXA_STT_STREAMING": "0"}), slog.New(slog.DiscardHandler))
+	if cfg.TTSTransport != ttseleven.TransportWS || cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want ws and batch STT", cfg.TTSTransport, cfg.STTStreaming)
+	}
+
+	var buf bytes.Buffer
+	cfg = wirenpc.Config{}
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "websocket"}), slog.New(slog.NewTextHandler(&buf, nil)))
+	if cfg.TTSTransport == ttseleven.TransportWS || !cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want HTTP synthesis and streaming STT by default", cfg.TTSTransport, cfg.STTStreaming)
+	}
+	if !strings.Contains(buf.String(), "GLYPHOXA_TTS_TRANSPORT") {
+		t.Errorf("log = %q, want a warning naming the ignored variable", buf.String())
+	}
+
+	// The three STT switches (#701): an unset environment is streaming on,
+	// keyterms on, language hint off ...
 	var defaults wirenpc.Config
-	applySTTEnv(&defaults, envMap(nil))
+	applyVoiceEnv(&defaults, envMap(nil), slog.New(slog.DiscardHandler))
 	if !defaults.STTStreaming || !defaults.STTKeyterms || defaults.STTLanguageHint {
 		t.Errorf("unset env: streaming=%v keyterms=%v languageHint=%v, want on, on, off",
 			defaults.STTStreaming, defaults.STTKeyterms, defaults.STTLanguageHint)
 	}
 
+	// ... and each one flips when its variable says so.
 	flipped := wirenpc.Config{STTStreaming: true, STTKeyterms: true}
-	applySTTEnv(&flipped, envMap(map[string]string{
+	applyVoiceEnv(&flipped, envMap(map[string]string{
 		"GLYPHOXA_STT_STREAMING":     "0",
 		"GLYPHOXA_STT_KEYTERMS":      "0",
 		"GLYPHOXA_STT_LANGUAGE_HINT": "1",
-	}))
+	}), slog.New(slog.DiscardHandler))
 	if flipped.STTStreaming || flipped.STTKeyterms || !flipped.STTLanguageHint {
 		t.Errorf("all three set: streaming=%v keyterms=%v languageHint=%v, want off, off, on",
 			flipped.STTStreaming, flipped.STTKeyterms, flipped.STTLanguageHint)

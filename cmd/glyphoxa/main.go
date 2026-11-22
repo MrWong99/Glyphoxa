@@ -147,9 +147,10 @@ func main() {
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
-	// The STT switches: streaming (ADR-0042) and keyterms (#701) on by default,
-	// the Campaign Language hint opt-in. See applySTTEnv.
-	applySTTEnv(&cfg, os.Getenv)
+	// The voice loop's env knobs: streaming STT (ADR-0042) and keyterms (#701) on
+	// by default, the Campaign Language hint and the TTS websocket transport
+	// (#702) opt-in. See applyVoiceEnv.
+	applyVoiceEnv(&cfg, os.Getenv, log)
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.

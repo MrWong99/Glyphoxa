@@ -1,13 +1,19 @@
 package wirenpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -247,7 +253,7 @@ func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
-	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", sink, nil)
+	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), Config{keys: providerKeys{tts: "T-tts-key"}}, sink, nil)
 	defer unwire()
 	if synth == nil {
 		t.Fatal("newCycleSynth returned no synthesizer")
@@ -256,5 +262,108 @@ func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
 	case <-heads:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the cycle's TTS client was never warmed on connect")
+	}
+}
+
+// TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt pins the #702
+// transport wiring end to end: the transport the composition root parsed from
+// GLYPHOXA_TTS_TRANSPORT reaches the cycle's client (a v4 Turbo sentence rides a
+// Text-to-Dialogue websocket with "ws", a POST with the default), and the
+// release func the cycle defers closes the client, so a reconnect cycle cannot
+// leave a dialogue socket — one of the account's dialogue-session slots — open.
+func TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt(t *testing.T) {
+	for _, tc := range []struct {
+		transport   ttseleven.Transport
+		wantSockets int64
+		wantPosts   int64
+	}{
+		{ttseleven.TransportHTTP, 0, 1},
+		{ttseleven.TransportWS, 1, 0},
+	} {
+		t.Run(string(tc.transport), func(t *testing.T) {
+			var sockets, open, posts, heads atomic.Int64
+			up := websocket.Upgrader{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !websocket.IsWebSocketUpgrade(r) {
+					switch r.Method {
+					case http.MethodPost:
+						posts.Add(1)
+						_, _ = w.Write(make([]byte, 64))
+					case http.MethodHead:
+						heads.Add(1)
+					}
+					return
+				}
+				conn, err := up.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				sockets.Add(1)
+				open.Add(1)
+				defer open.Add(-1)
+				for n := 0; ; n++ {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+					if n == 0 {
+						continue // the voices registration
+					}
+					_ = conn.WriteJSON(map[string]any{"audio": "AAAAAA=="})
+					_ = conn.WriteJSON(map[string]any{"is_final_audio_for_turn": true})
+				}
+			}))
+			defer srv.Close()
+			orig := newTTS
+			t.Cleanup(func() { newTTS = orig })
+			newTTS = func(apiKey string, opts ...ttseleven.Option) *ttseleven.Client {
+				return orig(apiKey, append(opts, ttseleven.WithBaseURL(srv.URL))...)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+				go func() {
+					for range chunks {
+					}
+				}()
+			})
+			// The constructor takes the session Config whole — the transport cannot
+			// be dropped on the way from Config to the client — and says in the log
+			// which transport the cycle speaks on, so a dead knob shows in prod.
+			var logs bytes.Buffer
+			cfg := Config{TTSTransport: tc.transport, keys: providerKeys{tts: "T-tts-key"}}
+			synth, release := newCycleSynth(ctx, voiceevent.NewBus(), cfg, sink, slog.New(slog.NewTextHandler(&logs, nil)))
+			if want := "transport=" + string(tc.transport); !strings.Contains(logs.String(), want) {
+				t.Errorf("cycle log = %q, want it to name %s", logs.String(), want)
+			}
+			// The connect warm runs on its own goroutine. Let it land first: a warm
+			// that overlaps the sentence finds the voice's only socket leased and
+			// (rightly) lines up a second one, which is not what this test counts.
+			for deadline := time.Now().Add(2 * time.Second); heads.Load() == 0; time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					release()
+					t.Fatal("the connect warm never reached the server")
+				}
+			}
+			ch, err := synth.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "Willkommen.", Voice: ttseleven.DefaultVoice("v", "de")})
+			if err != nil {
+				release()
+				t.Fatalf("Synthesize: %v", err)
+			}
+			for range ch {
+			}
+			if sockets.Load() != tc.wantSockets || posts.Load() != tc.wantPosts {
+				t.Errorf("sockets = %d, POSTs = %d; want %d and %d", sockets.Load(), posts.Load(), tc.wantSockets, tc.wantPosts)
+			}
+			release()
+			deadline := time.Now().Add(2 * time.Second)
+			for open.Load() != 0 {
+				if time.Now().After(deadline) {
+					t.Fatalf("%d dialogue socket(s) still open after the cycle released its synthesizer", open.Load())
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		})
 	}
 }

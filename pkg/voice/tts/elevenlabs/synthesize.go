@@ -69,6 +69,20 @@ func (c *Client) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-c
 		return nil, fmt.Errorf("elevenlabs.Synthesize: output_format %q is not PCM (orchestrator requires PCM)", settings.OutputFormat)
 	}
 
+	// The opt-in websocket transport takes the v3/v4 families; every other
+	// model, and a sentence the socket pool has no room for, goes over HTTP.
+	if c.ws != nil && dialogueFamily(settings.ModelID) {
+		key, err := newWSKey(req.Voice.VoiceID, settings)
+		if err != nil {
+			return nil, fmt.Errorf("elevenlabs.Synthesize: %w", err)
+		}
+		ch, err := c.synthesizeWS(ctx, req.Sentence, key, sr)
+		if !errors.Is(err, errWSNoRoom) {
+			return ch, err
+		}
+	}
+	c.httpSynth.Store(true)
+
 	body := synthesizeBody{
 		Text:                            req.Sentence,
 		ModelID:                         settings.ModelID,
