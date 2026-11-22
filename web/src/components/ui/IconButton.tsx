@@ -57,8 +57,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       {...props}
       aria-label={label}
       disabled={disabled || loading}
-      aria-busy={loading || undefined}
-      data-loading={loading || undefined}
+      {...(loading ? { "aria-busy": true, "data-loading": true } : {})}
     >
       {children}
       {loading && (

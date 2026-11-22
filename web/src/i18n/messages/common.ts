@@ -28,9 +28,10 @@ export const en = {
   "common.errorDetails": "Technical details",
   "common.undo": "Undo",
   "common.dismiss": "Dismiss",
-  "common.add": "Add",
   "common.removeItem": "Remove {item}",
   "common.required": "required",
+  // The inline status beside a Save button in an editor that stays open
+  // (ADR-0017 feedback rule): one wording for every such editor.
   "common.unsavedChanges": "Unsaved changes",
   "common.saved": "Saved",
   // The plan-allowance refusal (ADR-0055), shared by every AI feature that
@@ -65,7 +66,6 @@ export const de: Record<keyof typeof en, string> = {
   "common.errorDetails": "Technische Details",
   "common.undo": "Rückgängig",
   "common.dismiss": "Ausblenden",
-  "common.add": "Hinzufügen",
   "common.removeItem": "{item} entfernen",
   "common.required": "erforderlich",
   "common.unsavedChanges": "Ungespeicherte Änderungen",

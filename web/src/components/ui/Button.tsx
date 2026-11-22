@@ -78,8 +78,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cls}
       {...props}
       disabled={disabled || loading}
-      aria-busy={loading || undefined}
-      data-loading={loading || undefined}
+      // Only while loading, so a caller's own aria-busy is left alone otherwise.
+      {...(loading ? { "aria-busy": true, "data-loading": true } : {})}
     >
       {loading ? (
         <>

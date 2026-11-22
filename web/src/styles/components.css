@@ -2235,16 +2235,22 @@ textarea.gx-input--autogrow[data-capped="true"] {
   .gx-kg-chip {
     min-height: var(--target-coarse);
   }
-  .gx-btn--sm {
+  /* Width too, for the ones a short label can leave narrow. The filter chip
+   * (.gx-kg-chip) is defined in the Campaign screen's own stylesheet, which
+   * loads after this one: only properties it does not set itself can be added
+   * from here, which min-height, min-width and justify-content are. */
+  .gx-btn--sm,
+  .gx-seg__item,
+  .gx-kg-chip {
     min-width: var(--target-coarse);
+  }
+  .gx-kg-chip {
+    justify-content: center;
   }
   .gx-icon-btn--sm,
   .gx-icon-btn--md {
     width: var(--target-coarse);
     height: var(--target-coarse);
-  }
-  .gx-kg-chip {
-    padding-inline: var(--spacing-sm);
   }
   /* The chip stays small; its remove button gets the 40px hit area as an
    * invisible halo, so a row of chips does not double in height. */

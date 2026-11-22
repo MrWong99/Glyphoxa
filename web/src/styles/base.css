@@ -52,7 +52,15 @@ h6 {
  * browser's own sizes (an h1 at 2em) and every screen picked a size by hand.
  * Scoped to the shell's content area and the Page primitive, so the landing,
  * login and legal pages keep their own headings; wrapped in :where() so it
- * adds no specificity and any class a screen puts on a heading still wins. */
+ * adds no specificity and any class a screen puts on a heading still wins.
+ *
+ *   h1      --display-sm   the page title
+ *   h2      --display-xs   a section
+ *   h3, h4  --body-md      a card or group title: body size, semibold
+ *
+ * Only the size steps down. The family stays the display face for every
+ * level, as the rule above sets it, so the h2 and h4 card titles the screens
+ * already have keep matching each other. */
 :where(.gx-content, .gx-page) h1 {
   font-size: var(--display-sm);
 }
@@ -60,11 +68,9 @@ h6 {
   font-size: var(--display-xs);
 }
 :where(.gx-content, .gx-page) :is(h3, h4) {
-  font-family: var(--font-base);
   font-size: var(--body-md);
   font-weight: var(--weight-semibold);
   line-height: var(--body-line-tight);
-  letter-spacing: normal;
 }
 
 p {
