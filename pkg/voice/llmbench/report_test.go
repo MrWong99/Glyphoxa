@@ -280,3 +280,65 @@ func reportNames(reports []CandidateReport) []string {
 	}
 	return out
 }
+
+// distinctFindings gives every detector its own count, so a column or flag
+// that prints another detector's counter shows the wrong number.
+func distinctFindings(base int) Findings {
+	return Findings{ToolMarkup: base + 1, StageDirections: base + 2, UnknownTags: base + 3, Markdown: base + 4,
+		English: base + 5, ToolNarration: base + 6, GenderSlip: base + 7}
+}
+
+// TestMarkdownTable_EachDetectorColumnShowsItsOwnCounter pins the behaviour
+// table's detector columns by header (#702 review): printing another counter
+// under "unknown [tags]" kept the suite green.
+func TestMarkdownTable_EachDetectorColumnShowsItsOwnCounter(t *testing.T) {
+	r := CandidateReport{Candidate: CandidateInfo{Name: "arm"}, Summary: Summary{Spoken: distinctFindings(0), Raw: distinctFindings(10)}}
+	behaviour := tables(MarkdownTable([]CandidateReport{r}))[1]
+	cells := func(line string) []string {
+		parts := strings.Split(strings.Trim(line, "|"), "|")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+	header, row := cells(behaviour[0]), cells(behaviour[2])
+	col := map[string]string{}
+	for i, h := range header {
+		col[h] = row[i]
+	}
+	for name, want := range map[string]string{
+		"tool markup":      "1 (11)",
+		"stage directions": "2 (12)",
+		"unknown [tags]":   "3 (13)",
+		"markdown":         "4 (14)",
+		"English":          "5 (15)",
+		"tool narration":   "6 (16)",
+		"gender slips":     "7 (17)",
+	} {
+		got, ok := col[name]
+		if !ok {
+			t.Errorf("behaviour table has no %q column: %s", name, behaviour[0])
+			continue
+		}
+		if got != want {
+			t.Errorf("column %q = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestReplyDump_EachFlagNamesItsOwnCounter pins the reply dump's flag names
+// against their counters, unknown_tags among them (#702 review).
+func TestReplyDump_EachFlagNamesItsOwnCounter(t *testing.T) {
+	dump := ReplyDump(CandidateReport{
+		Candidate: CandidateInfo{Name: "arm"},
+		Turns:     []TurnResult{{Script: "s", Speaker: "Mira", User: "Hallo", Reply: "Na.", ToolsOK: true, SpokenFindings: distinctFindings(0), RawFindings: distinctFindings(10)}},
+	})
+	for _, want := range []string{
+		"spoken: tool_markup×1, stage_directions×2, unknown_tags×3, markdown×4, english×5, tool_narration×6, gender_slip×7",
+		"raw: tool_markup×11, stage_directions×12, unknown_tags×13, markdown×14, english×15, tool_narration×16, gender_slip×17",
+	} {
+		if !strings.Contains(dump, want) {
+			t.Errorf("dump lacks %q:\n%s", want, dump)
+		}
+	}
+}
