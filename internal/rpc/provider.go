@@ -557,6 +557,14 @@ func (s *ProviderServer) saveModelOnly(
 	if err != nil {
 		return nil, internalErr(s.log, "SaveProviderConfig: model-only upsert failed", err)
 	}
+	// A write to an LLM slot that was NOT the Tenant's newest LLM row makes it
+	// so, and with it changes which provider the LLM health entry is about: the
+	// cached verdict — the other provider's — must not outlive that (#702). A
+	// model save on the slot already in effect changes neither key nor provider
+	// and keeps the verdict.
+	if slot.isLLM() && latestByComponent(configs)[storage.ComponentLLM].Provider != slot.provider && s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
+	}
 
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),

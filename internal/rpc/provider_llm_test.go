@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
@@ -235,5 +236,30 @@ func TestProviderSave_ActivateIgnoredOffLLMSlots(t *testing.T) {
 	_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "elevenlabs", Activate: true}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument || len(store.configs) != 0 {
 		t.Errorf("err = %v, rows = %d; want CodeInvalidArgument and no rows", err, len(store.configs))
+	}
+}
+
+// Switching the LLM in effect changes which provider the health probe reports,
+// so the cached verdict (for the OTHER provider) must go with it.
+func TestProviderSave_ActivateBustsHealthCache(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	srv := rpc.NewProviderServer(store, testCipher(t), nil)
+	busted := 0
+	srv.SetHealthInvalidator(func(uuid.UUID) { busted++ })
+	client, _ := clientForServer(t, srv)
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-groq-secret-1111"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Secret: "sk-ant-api-secret-9999"})
+	before := busted
+
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Activate: true})
+	if busted != before+1 {
+		t.Errorf("health cache busted %d times on activate, want 1", busted-before)
+	}
+	// A plain model-only save on the slot already in effect keeps the verdict:
+	// neither the key nor the provider changed.
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Model: "openai/gpt-oss-20b"})
+	if busted != before+1 {
+		t.Errorf("a model-only save busted the health cache (%d extra)", busted-before-1)
 	}
 }
