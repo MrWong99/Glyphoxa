@@ -67,11 +67,16 @@ func TestProviderList_ProvidedByPlatform(t *testing.T) {
 		gate := &fakeKeyGate{allowed: true}
 		got := listProvidedByPlatform(t, newFakeProviderStore(), gate, "central-token", env)
 		// image: the deployment has no GEMINI_API_KEY, so nothing provides it.
-		want := map[string]bool{"discord": true, "llm": true, "tts": true, "chat_llm": true, "image": false}
+		want := map[string]bool{"discord": true, "llm": true, "tts": true, "image": false}
 		for comp, w := range want {
 			if got[comp] != w {
 				t.Errorf("%s provided_by_platform = %v, want %v", comp, got[comp], w)
 			}
+		}
+		// The Planning chat is no credential slot any more: whether it is
+		// included is effective_chat_llm.key_source (provider_chat_test.go).
+		if _, ok := got["chat_llm"]; ok {
+			t.Error("the planning chat still reports a credential entry")
 		}
 		if gate.calls != 1 {
 			t.Errorf("entitlement consulted %d times, want once per list", gate.calls)

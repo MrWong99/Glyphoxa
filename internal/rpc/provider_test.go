@@ -33,6 +33,11 @@ type fakeProviderStore struct {
 	// channelsCalls counts SaveDiscordChannels invocations so #504 tests assert
 	// a failed guild-admin proof never reaches the binding write.
 	channelsCalls int
+
+	// chatSaves / chatDeletes record the Planning chat model choice writes, so a
+	// test can assert a refused save reached neither and what a save carried.
+	chatSaves   []storage.ChatLLMChoice
+	chatDeletes int
 }
 
 func newFakeProviderStore() *fakeProviderStore {
@@ -87,6 +92,48 @@ func (f *fakeProviderStore) UpsertProviderConfigs(_ context.Context, configs []s
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// SaveChatLLMChoice mirrors the real writer (storage.SaveChatLLMChoice): the
+// Tenant's chat rows on any other provider go, then the row for c.Provider is
+// written with a key, keyless/model-only, or — KeepKey — only onto a row that
+// holds a saved key (else ErrNotFound and NOTHING changes).
+func (f *fakeProviderStore) SaveChatLLMChoice(_ context.Context, c storage.ChatLLMChoice) (storage.ProviderConfig, error) {
+	f.chatSaves = append(f.chatSaves, c)
+	key := string(storage.ComponentChatLLM) + "|" + c.Provider
+	row, ok := f.configs[key]
+	keyed := ok && row.CredentialsLast4 != "" && row.CredentialsLast4 != storage.KeylessLast4
+	if len(c.Ciphertext) == 0 && c.KeepKey && !keyed {
+		return storage.ProviderConfig{}, storage.ErrNotFound
+	}
+	for k, cfg := range f.configs {
+		if cfg.Component == storage.ComponentChatLLM && cfg.Provider != c.Provider {
+			delete(f.configs, k)
+		}
+	}
+	if !ok {
+		row = storage.ProviderConfig{
+			ID: uuid.New(), TenantID: c.TenantID, Component: storage.ComponentChatLLM, Provider: c.Provider,
+			CredentialsCiphertext: []byte{}, CredentialsLast4: storage.KeylessLast4, CreatedAt: f.now(),
+		}
+	}
+	row.Model = c.Model
+	if len(c.Ciphertext) > 0 {
+		row.CredentialsCiphertext, row.CredentialsLast4 = c.Ciphertext, c.Last4
+	}
+	row.UpdatedAt = f.now()
+	f.configs[key] = row
+	return row, nil
+}
+
+func (f *fakeProviderStore) DeleteChatLLMConfig(_ context.Context, _ uuid.UUID) error {
+	f.chatDeletes++
+	for k, cfg := range f.configs {
+		if cfg.Component == storage.ComponentChatLLM {
+			delete(f.configs, k)
+		}
+	}
+	return nil
 }
 
 func (f *fakeProviderStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
@@ -290,8 +337,7 @@ func credByProvider(creds []*managementv1.ProviderCredential, provider string) *
 	return nil
 }
 
-// credByComponent finds a slot by its wire component — the unambiguous key now
-// that two slots share provider "groq" (#592: llm vs chat_llm).
+// credByComponent finds a slot by its wire component.
 func credByComponent(creds []*managementv1.ProviderCredential, component string) *managementv1.ProviderCredential {
 	for _, c := range creds {
 		if c.GetComponent() == component {
@@ -341,8 +387,8 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	creds := resp.Msg.GetCredentials()
-	if len(creds) != 6 {
-		t.Fatalf("credentials = %d, want 6 (discord, groq, anthropic, elevenlabs, gemini, chat)", len(creds))
+	if len(creds) != 5 {
+		t.Fatalf("credentials = %d, want 5 (discord, groq, anthropic, elevenlabs, gemini)", len(creds))
 	}
 	for _, want := range []string{"discord", "groq", "anthropic", "elevenlabs", "gemini"} {
 		c := credByProvider(creds, want)
@@ -353,17 +399,14 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 			t.Errorf("%s should be key-needed on an empty store: %+v", want, c)
 		}
 	}
-	// The planning-chat slot (#592) shares provider "groq" with the llm slot, so
-	// it is identified by its component on the wire.
-	chat := credByComponent(creds, "chat_llm")
-	if chat == nil {
-		t.Fatalf("missing planning-chat credential slot (component chat_llm)")
+	// The Planning chat is a choice, not a key slot (ADR-0062 amendment
+	// 2026-11-22): it has no credential entry and is reported in
+	// effective_chat_llm instead — one source of truth.
+	if chat := credByComponent(creds, "chat_llm"); chat != nil {
+		t.Errorf("the planning chat still has a credential entry: %+v", chat)
 	}
-	if chat.GetProvider() != "groq" {
-		t.Errorf("chat slot provider = %q, want groq", chat.GetProvider())
-	}
-	if chat.GetEverSaved() || chat.GetShowMasked() || chat.GetLast4() != "" {
-		t.Errorf("chat slot should be key-needed on an empty store: %+v", chat)
+	if resp.Msg.GetEffectiveChatLlm() == nil {
+		t.Error("effective_chat_llm is missing from the Configuration read")
 	}
 	if resp.Msg.GetGuildId() != "" || resp.Msg.GetVoiceChannelId() != "" {
 		t.Errorf("guild/voice should be empty: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())

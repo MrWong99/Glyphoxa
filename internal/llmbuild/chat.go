@@ -53,6 +53,9 @@ type ChatLLM struct {
 	Provider string
 	Model    string
 	Source   ChatSource
+	// StoredModel is the model the chat choice itself names: "" when the choice
+	// leaves it to [DefaultChatModel], and always "" off [ChatSourceChoice].
+	StoredModel string
 
 	KeySource    ChatKeySource
 	KeyConfig    *storage.ProviderConfig
@@ -140,7 +143,7 @@ func (d DeploymentDefault) SelectChat(bound *storage.ProviderConfig, tenantConfi
 		if model == "" {
 			model = DefaultChatModel(provider)
 		}
-		sel := ChatLLM{Provider: provider, Model: model, Source: ChatSourceChoice}
+		sel := ChatLLM{Provider: provider, Model: model, Source: ChatSourceChoice, StoredModel: chat.Model}
 		sel.KeySource, sel.KeyConfig, sel.KeyComponent = ChatKeyFor(provider, tenantConfigs)
 		return sel
 	}
