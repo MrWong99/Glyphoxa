@@ -125,7 +125,10 @@ boundary cannot tell the transports apart.
   channel closes when the socket's end-of-sentence marker was read.
 - **A start failure is the returned error.** `Synthesize` returns once the
   sentence has started — its first frame arrived — as the HTTP path returns at
-  the response headers. A refused handshake is the same typed HTTP error; a
+  the response headers. A refused handshake is the same typed HTTP error —
+  except a 429, the account's dialogue-session cap, which sends the sentence
+  over HTTP instead (as does a `too_many_concurrent_requests` error frame before
+  any audio); a
   socket dead before any audio or a first frame that does not arrive within 5 s
   is a retryable transport error; an error frame before any audio is a
   non-retryable start error. A *pooled* socket found dead before any audio is

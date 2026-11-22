@@ -146,16 +146,33 @@ date.
   Session). Past the per-voice cap, or at the total cap with no idle socket to
   close, the sentence goes over HTTP rather than waiting.
 - An open socket holds one **dialogue-session slot** of the plan behind the key
-  (Creator 35, Pro 70) for its whole life, so sockets are short-lived: closed
-  after 60 s idle, kept alive with `keep_alive` every 10 s (the server's limit is
-  a fixed 20 s; sent during a sentence too, since playback back-pressure can
-  stretch one read past it), and all closed when the cycle ends.
+  (Creator 35, Pro 70) for its whole life, and the slots are shared by every
+  Voice Session on that key. A socket is kept alive with `keep_alive` every 10 s
+  (the server's limit is a fixed 20 s; sent during a sentence too, since
+  playback back-pressure can stretch one read past it), closed 60 s after it
+  was last used *or kept warm*, and all are closed when the cycle ends. Note
+  what "kept warm" means: `Warm` fires on speech starts whoever is speaking, so
+  at a talking table one socket per recently used voice (two voices at most)
+  stays open until that voice has not said a sentence for 5 minutes. The plain
+  60 s only applies to a room where nobody speaks, and to the second socket of
+  a look-ahead pair.
+- **At the account's cap the sentence is spoken over HTTP.** A handshake refused
+  with 429, or a `too_many_concurrent_requests` error frame before any audio,
+  is not a failed sentence: the HTTP path has its own concurrency pool, so the
+  sentence goes there, and the client dials no socket for the next 15 s
+  (sentences that find no idle socket go over HTTP meanwhile). Which of the two
+  forms the API uses at the cap was not provoked live; both are handled.
 - There is no cancel message. A barge closes the cut sentence's socket (its
-  unread audio must never reach the next sentence) and a replacement is dialled
-  in the background.
+  unread audio must not reach the next sentence) and a replacement is dialled
+  in the background. A socket that receives audio while no sentence is
+  outstanding is closed too. That second guard is best effort — frames carry no
+  sentence id, so a frame arriving in the instant a new sentence takes the
+  socket cannot be told from that sentence's audio — and it guards against a
+  protocol violation the real API was not seen to commit.
 - `Warm` cannot pre-dial for a voice that has not spoken yet (the socket is
   per voice), so a session's first sentence dials. Afterwards a warm lines up, or
-  keeps alive, an idle socket for the two most recently used voices.
+  keeps alive, one idle socket for each of the two most recently used voices
+  that spoke in the last 5 minutes.
 - Metering is unchanged: submitted characters are counted client-side on an
   accepted start, priced by model. The socket reports no character cost at all
   (HTTP returns a `character-cost` header), so there is nothing to cross-check
@@ -188,9 +205,12 @@ and after a barge. It is not enough to pay for what it brings:
 - A socket that has to dial is 60 ms *slower* than HTTP, and the first sentence
   of every session, every voice idle for a minute and every voice past the pool
   caps dials or falls back.
-- It holds plan-capped dialogue-session slots: two per speaking voice for up to
-  a minute. On the shared platform key that is a fleet-wide ceiling HTTP does
-  not have (HTTP counts only requests in flight).
+- It holds plan-capped dialogue-session slots: two per voice while it speaks,
+  then one per recently used voice (two voices at most) for up to 5 minutes
+  after its last sentence at a table that keeps talking. On the shared platform
+  key that is a fleet-wide ceiling HTTP does not have (HTTP counts only
+  requests in flight); past it sentences fall back to HTTP, so the cost of
+  hitting it is the lost gain, not a silent NPC.
 - It is a stateful pool with its own failure modes (dead pooled sockets, the
   20 s server timeout, redial per barge) where HTTP is one stateless request.
 
