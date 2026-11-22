@@ -43,7 +43,7 @@ build with the audio tags** (see Build below).
     OpenAI-compatibility endpoint). The wired adapter is Groq for any NPC; a
     DB-loaded Agent's `provider_config` provider/model is recorded but does not
     yet drive adapter selection.
-  - `ELEVENLABS_API_KEY` — STT (scribe) and TTS (eleven_v3).
+  - `ELEVENLABS_API_KEY` — STT (Scribe v2) and TTS (`eleven_v4_turbo`, the adapter default; ADR-0023 amendment 2026-11-22).
   - `DISCORD_BOT_TOKEN` — the Discord gateway/voice connection.
 
   These three are the only credentials the binary consumes. Source them from
