@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -389,9 +390,14 @@ func (s *VoiceServer) PreviewVoice(
 	synCtx, cancel := context.WithTimeout(ctx, previewTimeout)
 	defer cancel()
 
+	// Preview the voice as an NPC gets it on first save: the adapter's default
+	// model and conversational voice settings (#702), at the 24 kHz streaming
+	// format (half the bytes of the persisted 48 kHz one; the clip is played in a
+	// browser, not encoded for Discord).
+	voice := previewVoice(voiceID)
 	ch, err := s.newSynth(key).Synthesize(synCtx, tts.SynthesizeRequest{
 		Sentence: text,
-		Voice:    tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: voiceID},
+		Voice:    voice,
 	})
 	if err != nil {
 		s.log.Warn("PreviewVoice: synthesis failed to start", "err", err)
@@ -402,7 +408,7 @@ func (s *VoiceServer) PreviewVoice(
 	// session TTS, and flush on every path out. The flush is detached from the
 	// request context (a caller who hung up still used the characters) and a
 	// failed write logs without failing a preview that already played.
-	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, chars)
+	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, elevenlabs.ModelOf(voice), chars)
 	defer call.Close(ctx)
 
 	var (
@@ -931,4 +937,16 @@ func livePingGemini(ctx context.Context, apiKey string) error {
 		return &providererr.HTTPError{Op: "gemini ping", StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	return nil
+}
+
+// previewVoice is the [tts.Voice] PreviewVoice synthesizes: voiceID with
+// [elevenlabs.DefaultSettings] — the default model and the conversational voice
+// settings a first save persists — at the adapter's 24 kHz streaming format.
+func previewVoice(voiceID string) tts.Voice {
+	settings, err := json.Marshal(elevenlabs.DefaultSettings())
+	if err != nil {
+		// DefaultSettings is a fixed, marshalable struct: a programming error.
+		panic(fmt.Sprintf("rpc.previewVoice: marshal settings: %v", err))
+	}
+	return tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: voiceID, Settings: settings}
 }

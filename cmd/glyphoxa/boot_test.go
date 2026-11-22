@@ -512,7 +512,7 @@ func TestOffSessionMeteringPosture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allowlist mode must never gate: Begin = %v", err)
 	}
-	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, 10)
+	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 10)
 	if err := call.Close(ctx); err != nil || len(st.rows) != 1 {
 		t.Errorf("allowlist mode: Close = %v, ledger rows = %d; want the usage ledgered", err, len(st.rows))
 	}

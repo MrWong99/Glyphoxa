@@ -28,7 +28,7 @@ func TestLedgerAccumulatesAndBuckets(t *testing.T) {
 	l.LLMTokens(observe.ProviderGroq, "openai/gpt-oss-120b", 1000, 500)
 	l.LLMTokens(observe.ProviderGroq, "openai/gpt-oss-120b", 200, 100)
 	l.LLMTokens(observe.ProviderGroq, "qwen/qwen3-32b", 10, 10)
-	l.TTSCharacters(observe.ProviderElevenLabs, 400)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 400)
 	l.STTAudioSeconds(observe.ProviderElevenLabs, 90*time.Second)
 
 	var got []storage.UsageRow
@@ -65,9 +65,13 @@ func TestLedgerAccumulatesAndBuckets(t *testing.T) {
 		t.Errorf("llm estimated USD = %v, want %v", llm.EstimatedUSD, wantUSD)
 	}
 
-	tts := byKey["tts/elevenlabs/"]
+	// TTS rows carry the synthesis model (#702) and are priced at its rate.
+	tts := byKey["tts/elevenlabs/eleven_v4_turbo"]
 	if tts.TTSCharacters != 400 {
 		t.Errorf("tts chars = %d, want 400", tts.TTSCharacters)
+	}
+	if want := spend.EstimateTTSUSD(observe.ProviderElevenLabs, "eleven_v4_turbo", 400); tts.EstimatedUSD != want {
+		t.Errorf("tts estimated USD = %v, want the eleven_v4_turbo rate %v", tts.EstimatedUSD, want)
 	}
 	stt := byKey["stt/elevenlabs/"]
 	if stt.STTAudioSeconds != 90 {
@@ -80,7 +84,7 @@ func TestLedgerAccumulatesAndBuckets(t *testing.T) {
 
 func TestLedgerFlushDrainsBuffer(t *testing.T) {
 	l := NewLedger(uuid.New(), fixedNow(time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)))
-	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 100)
 
 	calls := 0
 	flush := func(_ context.Context, rows []storage.UsageRow) error {
@@ -101,7 +105,7 @@ func TestLedgerFlushDrainsBuffer(t *testing.T) {
 
 func TestLedgerFlushErrorRetainsRows(t *testing.T) {
 	l := NewLedger(uuid.New(), fixedNow(time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)))
-	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 100)
 
 	boom := errors.New("db down")
 	if err := l.Flush(context.Background(), func(context.Context, []storage.UsageRow) error { return boom }); !errors.Is(err, boom) {
@@ -110,7 +114,7 @@ func TestLedgerFlushErrorRetainsRows(t *testing.T) {
 
 	// More usage lands after the failed flush; the retry must carry BOTH the
 	// merged-back snapshot and the new usage.
-	l.TTSCharacters(observe.ProviderElevenLabs, 50)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 50)
 
 	var got []storage.UsageRow
 	if err := l.Flush(context.Background(), func(_ context.Context, rows []storage.UsageRow) error {
@@ -183,7 +187,7 @@ func TestLedgerSoundGeneration(t *testing.T) {
 // sends them: nothing is lost.
 func TestFlushMergesBackAFailureThatProvablyDidNotCommit(t *testing.T) {
 	l := NewLedger(uuid.New(), nil)
-	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 100)
 
 	if err := l.Flush(context.Background(), func(context.Context, []storage.UsageRow) error {
 		return errors.New("connection refused")
@@ -211,7 +215,7 @@ func TestFlushMergesBackAFailureThatProvablyDidNotCommit(t *testing.T) {
 // twice against the Tenant's allowance.
 func TestFlushDropsABatchWhoseCommitOutcomeIsUnknown(t *testing.T) {
 	l := NewLedger(uuid.New(), nil)
-	l.TTSCharacters(observe.ProviderElevenLabs, 100)
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 100)
 
 	err := l.Flush(context.Background(), func(context.Context, []storage.UsageRow) error {
 		return fmt.Errorf("storage: commit tx: %w: %w", storage.ErrCommitOutcomeUnknown, context.DeadlineExceeded)
@@ -223,7 +227,7 @@ func TestFlushDropsABatchWhoseCommitOutcomeIsUnknown(t *testing.T) {
 		t.Errorf("err = %q, want the dropped amounts in it for the operator's log", err)
 	}
 
-	l.TTSCharacters(observe.ProviderElevenLabs, 7) // usage after the ambiguous flush
+	l.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 7) // usage after the ambiguous flush
 	var sent int64
 	if err := l.Flush(context.Background(), func(_ context.Context, rows []storage.UsageRow) error {
 		for _, r := range rows {

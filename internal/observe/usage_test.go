@@ -18,7 +18,7 @@ type baseSpy struct {
 }
 
 func (b *baseSpy) LLMTokens(Provider, string, int, int) { b.llm++ }
-func (b *baseSpy) TTSCharacters(Provider, int)          { b.tts++ }
+func (b *baseSpy) TTSCharacters(Provider, string, int)  { b.tts++ }
 func (b *baseSpy) STTAudioSeconds(Provider, time.Duration) {
 	b.stt++
 }
@@ -27,11 +27,12 @@ func (b *baseSpy) LLMRound(Provider, int, bool, time.Duration) { b.rounds++ }
 // sinkSpy records the usage fan-out.
 type sinkSpy struct {
 	llm, tts, stt int
+	ttsModel      string
 }
 
-func (s *sinkSpy) LLMTokens(Provider, string, int, int)    { s.llm++ }
-func (s *sinkSpy) TTSCharacters(Provider, int)             { s.tts++ }
-func (s *sinkSpy) STTAudioSeconds(Provider, time.Duration) { s.stt++ }
+func (s *sinkSpy) LLMTokens(Provider, string, int, int)          { s.llm++ }
+func (s *sinkSpy) TTSCharacters(_ Provider, model string, _ int) { s.tts++; s.ttsModel = model }
+func (s *sinkSpy) STTAudioSeconds(Provider, time.Duration)       { s.stt++ }
 
 // TestTeeUsageFansOutUsageOnly proves the tee forwards the three usage methods to
 // BOTH base and sink, while a non-usage method reaches base ONLY.
@@ -41,7 +42,7 @@ func TestTeeUsageFansOutUsageOnly(t *testing.T) {
 	rec := TeeUsage(base, sink)
 
 	rec.LLMTokens(ProviderGroq, "m", 1, 2)
-	rec.TTSCharacters(ProviderElevenLabs, 10)
+	rec.TTSCharacters(ProviderElevenLabs, "eleven_v4_turbo", 10)
 	rec.STTAudioSeconds(ProviderElevenLabs, time.Second)
 	rec.LLMRound(ProviderGroq, 0, false, time.Second) // non-usage: base only
 
@@ -53,6 +54,11 @@ func TestTeeUsageFansOutUsageOnly(t *testing.T) {
 	}
 	if sink.llm != 1 || sink.tts != 1 || sink.stt != 1 {
 		t.Fatalf("sink usage counts = llm:%d tts:%d stt:%d, want 1/1/1", sink.llm, sink.tts, sink.stt)
+	}
+	// The synthesis model crosses the tee: the sink (spend meter / Usage Ledger)
+	// prices TTS per model (#702).
+	if sink.ttsModel != "eleven_v4_turbo" {
+		t.Errorf("sink TTS model = %q, want eleven_v4_turbo through the tee", sink.ttsModel)
 	}
 }
 

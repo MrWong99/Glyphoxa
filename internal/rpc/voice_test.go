@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -16,10 +17,13 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // fakeVoiceStore is an in-memory voiceStore: it returns canned per-component
@@ -77,9 +81,14 @@ func (f *fakeLister) ListVoices(context.Context) ([]tts.Voice, error) {
 type fakeSynth struct {
 	chunks []tts.AudioChunk
 	err    error
+	mu     sync.Mutex
+	got    []tts.SynthesizeRequest // every request seen, under mu
 }
 
-func (f *fakeSynth) Synthesize(_ context.Context, _ tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+func (f *fakeSynth) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	f.mu.Lock()
+	f.got = append(f.got, req)
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -362,6 +371,48 @@ func TestPreviewVoice_MetersSubmittedCharactersToTheLedger(t *testing.T) {
 		if r.EstimatedUSD <= 0 {
 			t.Errorf("%s: estimated_usd = %v, want > 0", name, r.EstimatedUSD)
 		}
+	}
+}
+
+// TestPreviewVoice_SpeaksAndMetersTheDefaultModel (#702): a preview sounds like
+// the voice an NPC gets on first save — the adapter's default model and
+// conversational voice settings — and its characters land in the Usage Ledger
+// under that model at that model's (half-credit) rate.
+func TestPreviewVoice_SpeaksAndMetersTheDefaultModel(t *testing.T) {
+	t.Parallel()
+	store := &fakeVoiceStore{}
+	srv := NewVoiceServer(store, voiceTestCipher(t), nil)
+	synth := &fakeSynth{chunks: []tts.AudioChunk{{PCM: make([]byte, 480), SampleRate: 24000, Channels: 1}}}
+	srv.newSynth = func(string) tts.Synthesizer { return synth }
+	ctx := auth.WithTenant(context.Background(), uuid.New())
+
+	if _, err := srv.PreviewVoice(ctx, connect.NewRequest(&managementv1.PreviewVoiceRequest{VoiceId: "v", Text: "Grüß dich"})); err != nil {
+		t.Fatalf("PreviewVoice: %v", err)
+	}
+	if len(synth.got) != 1 {
+		t.Fatalf("synthesize calls = %d, want 1", len(synth.got))
+	}
+	voice := synth.got[0].Voice
+	var s elevenlabs.Settings
+	if err := json.Unmarshal(voice.Settings, &s); err != nil {
+		t.Fatalf("preview voice Settings %q are not ElevenLabs Settings: %v", voice.Settings, err)
+	}
+	if s.ModelID != elevenlabs.DefaultModel {
+		t.Errorf("preview model_id = %q, want the default %q", s.ModelID, elevenlabs.DefaultModel)
+	}
+	if s.VoiceSettings == nil || s.VoiceSettings.Stability == nil {
+		t.Errorf("preview voice_settings = %+v, want the conversational defaults an NPC is saved with", s.VoiceSettings)
+	}
+
+	rows := store.usageRows()
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %d, want 1", len(rows))
+	}
+	if rows[0].Model != elevenlabs.DefaultModel {
+		t.Errorf("ledger model = %q, want %q", rows[0].Model, elevenlabs.DefaultModel)
+	}
+	if want := spend.EstimateTTSUSD(observe.ProviderElevenLabs, elevenlabs.DefaultModel, 9); rows[0].EstimatedUSD != want {
+		t.Errorf("ledger estimated_usd = %v, want the %s rate %v", rows[0].EstimatedUSD, elevenlabs.DefaultModel, want)
 	}
 }
 
@@ -1144,7 +1195,7 @@ func TestPreviewVoice_AllowanceGate(t *testing.T) {
 	if *synthCalls != 1 {
 		t.Errorf("BYOK tenant: TTS provider reached %d times, want 1", *synthCalls)
 	}
-	row := billingtest.OneRow(t, usage, tenantID, storage.ComponentTTS, "elevenlabs", "")
+	row := billingtest.OneRow(t, usage, tenantID, storage.ComponentTTS, "elevenlabs", elevenlabs.DefaultModel)
 	if row.TTSCharacters != 5 {
 		t.Errorf("ledger characters = %d, want 5", row.TTSCharacters)
 	}

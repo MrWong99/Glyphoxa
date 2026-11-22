@@ -38,12 +38,13 @@ type metricsSpy struct {
 
 	// #127 usage meters.
 	sttAudio []time.Duration // STTAudioSeconds durations
-	ttsChars []ttsCharsRec   // TTSCharacters (provider, chars)
+	ttsChars []ttsCharsRec   // TTSCharacters (provider, model, chars)
 }
 
 // ttsCharsRec is one captured TTSCharacters call.
 type ttsCharsRec struct {
 	provider observe.Provider
+	model    string
 	chars    int
 }
 
@@ -83,10 +84,10 @@ func (s *metricsSpy) STTAudioSeconds(_ observe.Provider, d time.Duration) {
 	s.sttAudio = append(s.sttAudio, d)
 }
 
-func (s *metricsSpy) TTSCharacters(p observe.Provider, chars int) {
+func (s *metricsSpy) TTSCharacters(p observe.Provider, model string, chars int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ttsChars = append(s.ttsChars, ttsCharsRec{provider: p, chars: chars})
+	s.ttsChars = append(s.ttsChars, ttsCharsRec{provider: p, model: model, chars: chars})
 }
 
 func (s *metricsSpy) snapshot() ([]observe.Provider, []observe.Provider, []time.Duration, []providerCall, []providerErr) {
