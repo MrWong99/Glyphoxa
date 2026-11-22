@@ -62,7 +62,8 @@ Options:
 Every prompt reads its GX_* env var first (GX_HOST, GX_ACME_EMAIL,
 GX_DISCORD_CLIENT_ID, GX_DISCORD_CLIENT_SECRET, GX_DISCORD_BOT_TOKEN,
 GX_OPERATOR_IDS, GX_ADMISSION_MODE, GX_SIGNUP_PLAN_SLUG, GX_OLLAMA_URL,
-GX_TRUSTED_CLIENT_IP_HEADER, GX_GROQ_API_KEY, GX_ELEVENLABS_API_KEY, GX_GEMINI_API_KEY, GX_TLS,
+GX_TRUSTED_CLIENT_IP_HEADER, GX_GROQ_API_KEY, GX_ELEVENLABS_API_KEY, GX_GEMINI_API_KEY,
+GX_ANTHROPIC_API_KEY, GX_LLM_DEFAULT_PROVIDER, GX_LLM_DEFAULT_MODEL, GX_TLS,
 GX_BACKUP_DIR, GX_BACKUP_SCHEDULE, GX_BACKUP_RETENTION_DAYS, GX_PG_DISK);
 a run without a TTY takes ONLY the env vars and fails naming any missing
 required one, so unattended installs are reproducible.
@@ -249,6 +250,23 @@ else
   ask_secret_optional GX_GROQ_API_KEY "Groq API key (optional, hidden; Enter to skip)"
   ask_secret_optional GX_ELEVENLABS_API_KEY "ElevenLabs API key (optional, hidden; Enter to skip)"
   ask_secret_optional GX_GEMINI_API_KEY "Gemini API key (optional, hidden; Enter to skip)"
+  ask_secret_optional GX_ANTHROPIC_API_KEY "Anthropic API key (optional, hidden; Enter to skip)"
+
+  # The deployment-default LLM (docs/configuration.md): what a Tenant with no
+  # LLM choice of its own runs. Empty keeps the built-in default (Groq,
+  # openai/gpt-oss-120b). The binary refuses to boot on an unknown provider or
+  # one without its platform key, and so does the chart — refuse here first,
+  # naming the GX_* variable to fix.
+  ask GX_LLM_DEFAULT_PROVIDER "Default LLM provider for tenants without their own choice: groq, anthropic or gemini (empty = built-in default, Groq)" ""
+  GX_LLM_DEFAULT_PROVIDER="$(printf '%s' "$GX_LLM_DEFAULT_PROVIDER" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$GX_LLM_DEFAULT_PROVIDER" in
+    "") ;;
+    groq)      [ -n "$GX_GROQ_API_KEY" ]      || die "GX_LLM_DEFAULT_PROVIDER=groq needs GX_GROQ_API_KEY (the platform key tenants without their own key speak on)" ;;
+    anthropic) [ -n "$GX_ANTHROPIC_API_KEY" ] || die "GX_LLM_DEFAULT_PROVIDER=anthropic needs GX_ANTHROPIC_API_KEY (the platform key tenants without their own key speak on)" ;;
+    gemini)    [ -n "$GX_GEMINI_API_KEY" ]    || die "GX_LLM_DEFAULT_PROVIDER=gemini needs GX_GEMINI_API_KEY (the platform key tenants without their own key speak on)" ;;
+    *) die "GX_LLM_DEFAULT_PROVIDER must be groq, anthropic or gemini (or empty), got '$GX_LLM_DEFAULT_PROVIDER'" ;;
+  esac
+  ask GX_LLM_DEFAULT_MODEL "Default LLM model id, e.g. claude-haiku-4-5 (empty = the provider's own default)" ""
 fi
 
 ask GX_BACKUP_DIR "Nightly pg_dump backup directory on the node's disk (empty to skip backups)" ""
@@ -380,6 +398,13 @@ discordBotToken: "$(yesc "$GX_DISCORD_BOT_TOKEN")"
 elevenLabsApiKey: "$(yesc "$GX_ELEVENLABS_API_KEY")"
 geminiApiKey: "$(yesc "$GX_GEMINI_API_KEY")"
 groqApiKey: "$(yesc "$GX_GROQ_API_KEY")"
+anthropicApiKey: "$(yesc "$GX_ANTHROPIC_API_KEY")"
+
+# The deployment-default LLM: empty = the binary's built-in default (Groq,
+# openai/gpt-oss-120b). A Tenant's own choice in Configuration always wins.
+llm:
+  defaultProvider: "$(yesc "$GX_LLM_DEFAULT_PROVIDER")"
+  defaultModel: "$(yesc "$GX_LLM_DEFAULT_MODEL")"
 
 ollamaUrl: "$(yesc "$GX_OLLAMA_URL")"
 
