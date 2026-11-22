@@ -383,7 +383,8 @@ this build does not have.
 */}}
 {{- define "glyphoxa.llmDefaultKeyValueName" -}}
 {{- $names := dict "groq" "groqApiKey" "anthropic" "anthropicApiKey" "gemini" "geminiApiKey" -}}
-{{- get $names (.Values.llm.defaultProvider | default "" | trim | lower) -}}
+{{- $llm := .Values.llm | default dict -}}
+{{- get $names ($llm.defaultProvider | default "" | trim | lower) -}}
 {{- end }}
 
 {{/*
@@ -391,10 +392,13 @@ Render-time mirror of the binary's fatal boot check on the deployment-default
 LLM (#702): an unknown llm.defaultProvider, or one whose platform key is empty,
 stops `helm install/upgrade` with the value to fix instead of crash-looping the
 pods. It renders nothing; it is included from the Secret's stringData so every
-template that hashes or renders the Secret runs it. Unset is always valid.
+template that hashes or renders the Secret runs it. Unset is always valid — and
+so is a values tree with no llm block at all (a release whose reused values
+predate #702).
 */}}
 {{- define "glyphoxa.llmDefaultGuard" -}}
-{{- $provider := .Values.llm.defaultProvider | default "" | trim | lower -}}
+{{- $llm := .Values.llm | default dict -}}
+{{- $provider := $llm.defaultProvider | default "" | trim | lower -}}
 {{- if $provider -}}
 {{- $valueName := include "glyphoxa.llmDefaultKeyValueName" . -}}
 {{- if not $valueName -}}
