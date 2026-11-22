@@ -13,27 +13,52 @@ import (
 // deterministic [scrubSpoken] in the delivery path is the guarantee; this only
 // makes the mistake rarer.
 //
-// Its last sentence is the exception to that division of labour (#702): a
-// narrated action ("*wipes her hands on her apron*", which both Claude Haiku
-// models wrote under a plain persona prompt) has no deterministic backstop.
+// It is rendered only for an Agent whose every reply is spoken: a voiced
+// Persona without a [Config.TextSink]. A Butler that may answer in channel text
+// (#299) is not told that everything it writes is read aloud, because that is
+// not true of it (see [selfPrefixRule]). [spokenOutputParagraph] assembles it
+// with the sentences below.
+const spokenOutputRule = "Everything you write is spoken aloud by a voice, never shown on a screen. " +
+	"Write the way people talk: plain sentences, no markdown, no asterisks, no headings, " +
+	"no bullet or numbered lists, no emojis, no code."
+
+// spokenOutputMarkupExemption follows [spokenOutputRule] directly when the
+// Voice has an audio-markup instruction (ADR-0022), so the "no markup" rule
+// does not read as forbidding the bracketed audio tags the next block asks for.
+// It qualifies the markup sentence and nothing else: placed behind
+// [stageDirectionRule] it read as exempting actions too.
+const spokenOutputMarkupExemption = " The audio tags described below are the one exception."
+
+// stageDirectionRule forbids narrated actions (#702). It is the exception to
+// the prompt/scrub division of labour described on [spokenOutputRule]: an
+// action ("*wipes her hands on her apron*", which both Claude Haiku models
+// wrote under a plain persona prompt) has no deterministic backstop.
 // [scrubSpoken] drops the asterisks and keeps the words, because it cannot tell
 // an action from an emphasized word and never removes words — so for stage
 // directions the prompt is the only guard.
 //
-// It is rendered only for an Agent whose every reply is spoken: a voiced
-// Persona without a [Config.TextSink]. A Butler that may answer in channel text
-// (#299) is not told that everything it writes is read aloud, because that is
-// not true of it (see [selfPrefixRule]).
-const spokenOutputRule = "Everything you write is spoken aloud by a voice, never shown on a screen. " +
-	"Write the way people talk: plain sentences, no markdown, no asterisks, no headings, " +
-	"no bullet or numbered lists, no emojis, no code. " +
-	"Say only the words your character says out loud: no stage directions, no described " +
-	"actions or gestures, and never talk about yourself in the third person."
+// It says nothing about grammatical person: it sits after the Persona, and
+// whether a character speaks of itself in the third person is the Persona's to
+// decide.
+const stageDirectionRule = " Say only the words your character says out loud: no stage directions " +
+	"and no described actions or gestures. Do not narrate what your character does."
 
-// spokenOutputMarkupExemption is appended to [spokenOutputRule] when the Voice
-// has an audio-markup instruction (ADR-0022), so the "no markup" rule does not
-// read as forbidding the bracketed audio tags the next block asks for.
-const spokenOutputMarkupExemption = " The audio tags described below are the one exception."
+// stageDirectionTagRule closes the loophole the audio tags open, for a Voice
+// that has them: told "no actions", models moved the action into square
+// brackets ("[leans on the bar]"), which is not a tag of any vocabulary and
+// which a TTS engine may read aloud.
+const stageDirectionTagRule = " An audio tag only changes how the next words sound; " +
+	"never put an action or a gesture in square brackets."
+
+// spokenOutputParagraph is the spoken-output paragraph of the stable system
+// prompt: the format rule, the audio-tag exemption directly behind it when the
+// Voice has an audio-markup instruction, then the stage-direction rule.
+func spokenOutputParagraph(audioMarkup bool) string {
+	if audioMarkup {
+		return spokenOutputRule + spokenOutputMarkupExemption + stageDirectionRule + stageDirectionTagRule
+	}
+	return spokenOutputRule + stageDirectionRule
+}
 
 // scrubSpoken removes markdown formatting from one sentence on its way to TTS
 // (O12): emphasis markers, heading and bullet markers at a line start,

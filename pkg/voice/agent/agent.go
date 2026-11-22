@@ -1378,10 +1378,7 @@ func (r *Replier) systemPrompt() string {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(spokenOutputRule)
-		if markup != "" {
-			b.WriteString(spokenOutputMarkupExemption)
-		}
+		b.WriteString(spokenOutputParagraph(markup != ""))
 	}
 	if markup != "" {
 		if b.Len() > 0 {
