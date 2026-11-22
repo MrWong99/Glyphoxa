@@ -6,6 +6,9 @@ import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
 import {
   CampaignService,
+  ChatService,
+  ProviderService,
+  SessionService,
   VoiceService,
   AgentSchema,
   CampaignSchema,
@@ -14,12 +17,18 @@ import {
   GetCampaignRosterResponseSchema,
   GetCampaignTagsResponseSchema,
   GetKnowledgeGraphResponseSchema,
+  GetProviderHealthResponseSchema,
   GetRosterReadinessResponseSchema,
+  GetSessionResponseSchema,
   ListCharactersResponseSchema,
   ListDiscordVoiceMembersResponseSchema,
   ListKnowledgeProposalsResponseSchema,
+  ListMapsResponseSchema,
   ListNodeAppearancesResponseSchema,
   ListNodesResponseSchema,
+  ListPlanningThreadsResponseSchema,
+  ListProviderConfigsResponseSchema,
+  ListSessionsResponseSchema,
   ListSupportedLanguagesResponseSchema,
   ListVoicesResponseSchema,
   NodeSchema,
@@ -64,8 +73,24 @@ function mockTransport() {
     voice: "rachel",
   });
   return createRouterTransport(({ service }) => {
-    service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+    service(VoiceService, {
+      listVoices: () => create(ListVoicesResponseSchema, { voices: [] }),
+      getProviderHealth: () => create(GetProviderHealthResponseSchema, {}),
+    });
+    // The Overview's reads beside the campaign's own (its blocks are covered in
+    // OverviewPanel.test.tsx; here they only have to answer).
+    service(ProviderService, {
+      listProviderConfigs: () => create(ListProviderConfigsResponseSchema, { guildId: "123456789012345678" }),
+    });
+    service(SessionService, {
+      listSessions: () => create(ListSessionsResponseSchema, {}),
+      getSession: () => create(GetSessionResponseSchema, {}),
+    });
+    service(ChatService, {
+      listPlanningThreads: () => create(ListPlanningThreadsResponseSchema, {}),
+    });
     service(CampaignService, {
+      listMaps: () => create(ListMapsResponseSchema, {}),
       getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, bart] }),
       getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign }),
       listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
@@ -180,7 +205,7 @@ describe("Campaign host", () => {
     expect(screen.getByText(/link each discord user/i)).toBeInTheDocument();
   });
 
-  it("defaults to the Overview: a tile for every other view, each taking the GM there", async () => {
+  it("defaults to the Overview: one header, and a tile for every other view of the campaign", async () => {
     render(
       <Providers transport={mockTransport()} queryClient={makeQueryClient()}>
         <Campaign />
@@ -188,20 +213,45 @@ describe("Campaign host", () => {
     );
     // No view named → the Overview, with no router and no provider at all.
     const tiles = await screen.findByRole("list", { name: "Sections of this campaign" });
-    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning", "Settings"]) {
-      expect(within(tiles).getByRole("button", { name: new RegExp(`^${label}`) })).toBeInTheDocument();
+    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning"]) {
+      expect(within(tiles).getByRole("button", { name: new RegExp(`^${label}:`) })).toBeInTheDocument();
     }
-    // The Overview does not link to itself.
+    // The Overview does not link to itself, and Settings is a header action.
     expect(within(tiles).queryByRole("button", { name: /^Overview/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Campaign settings" })).toBeInTheDocument();
+    // The Overview brings its own header; the host does not render a second.
+    expect(await screen.findAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    expect(screen.getByText("D&D 5e · English")).toBeInTheDocument();
   });
 
   it("goes to a view from its Overview tile", async () => {
     const { moves } = renderScreen({ view: "overview" });
     const tiles = await screen.findByRole("list", { name: "Sections of this campaign" });
-    fireEvent.click(within(tiles).getByRole("button", { name: /^Players/ }));
+    fireEvent.click(await within(tiles).findByRole("button", { name: "Players: 1 player" }));
 
     expect(await screen.findByText("Kira")).toBeInTheDocument();
     expect(moves).toEqual([{ next: { screen: "campaign", view: "players", search: {} }, replace: false }]);
+  });
+
+  it("jumps from the Overview's attention band to the NPC that is not ready", async () => {
+    // Bart's entry is linked but empty, so he is not session-ready.
+    const { moves } = renderScreen({ view: "overview" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Bart in Cast" }));
+    // The host turns the panel's jump into a navigation carrying the Agent…
+    expect(moves[0]).toEqual({
+      next: { screen: "campaign", view: "cast", search: { agent: "npc-1" } },
+      replace: false,
+    });
+    // …and Cast opens on him.
+    await waitFor(() => expect(persona().value).toBe("Grumbles."));
+  });
+
+  it("goes to the Session and Setup screens from the Overview", async () => {
+    const { moves } = renderScreen({ view: "overview" });
+    fireEvent.click(await screen.findByRole("button", { name: "Start a session" }));
+    expect(moves).toEqual([{ next: { screen: "session", view: undefined, search: {} }, replace: false }]);
+    expect(await screen.findByTestId("other-screen")).toHaveTextContent("session");
   });
 
   it("mounts the Players panel on its view and leaves Cast unchanged (#279)", async () => {
@@ -276,6 +326,79 @@ describe("Campaign host", () => {
     expect(await screen.findByRole("heading", { name: /create your first campaign/i })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(container.querySelector(".gx-campaign-screen")).toHaveAttribute("data-view", "overview");
+  });
+
+  it("sits every view on the shared page container", async () => {
+    const { container } = renderScreen({ view: "players" });
+    await screen.findByText("Kira");
+    // One root: the Page primitive, still carrying the hooks views style by.
+    const root = container.querySelector(".gx-campaign-screen");
+    expect(root).toHaveClass("gx-page");
+    expect(container.querySelectorAll(".gx-page")).toHaveLength(1);
+  });
+});
+
+describe("Campaign host load states", () => {
+  // Planning is the one view the host cannot mount before the campaign is
+  // known: its reads are keyed by campaign id (ADR-0062).
+  type Roster = ReturnType<typeof create<typeof GetCampaignRosterResponseSchema>>;
+  function renderPlanning(roster: () => Roster | Promise<Roster>) {
+    const transport = createRouterTransport(({ service }) => {
+      service(CampaignService, { getCampaignRoster: roster });
+      service(ChatService, { listPlanningThreads: () => create(ListPlanningThreadsResponseSchema, {}) });
+      service(ProviderService, { listProviderConfigs: () => create(ListProviderConfigsResponseSchema, {}) });
+    });
+    const queryClient = makeQueryClient();
+    // The roster read retries a transient failure; without the backoff the
+    // test reaches the settled error at once.
+    queryClient.setDefaultOptions({ queries: { retryDelay: 0, staleTime: 30_000 } });
+    return render(
+      <Providers transport={transport} queryClient={queryClient}>
+        <Campaign view="planning" />
+      </Providers>,
+    );
+  }
+
+  it("shows a loading placeholder for Planning until the campaign is known", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderPlanning(async () => {
+      await gate;
+      return create(GetCampaignRosterResponseSchema, {
+        campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+      });
+    });
+    // A named status region, not a bare shimmer bar.
+    expect(await screen.findByRole("status", { name: "Loading…" })).toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading…" })).not.toBeInTheDocument());
+  });
+
+  it("says the campaign could not be loaded and retries on request", async () => {
+    let healthy = false;
+    let calls = 0;
+    renderPlanning(() => {
+      calls++;
+      if (!healthy) throw new ConnectError("database is restarting", Code.Unavailable);
+      return create(GetCampaignRosterResponseSchema, {
+        campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+      });
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't load the campaign");
+    // The server's own sentence is there for whoever is asked what it said.
+    expect(alert).toHaveTextContent("database is restarting");
+
+    healthy = true;
+    const before = calls;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(calls).toBeGreaterThan(before);
   });
 });
 

@@ -1,25 +1,316 @@
-/* Campaign Overview (OverviewPanel.tsx). Scoped under .gx-overview so it wins
- * over campaign.css whatever order the two stylesheets load in. */
+/* Campaign Overview (OverviewPanel.tsx). Every rule is scoped under
+ * .gx-overview so it wins over campaign.css whatever order the two
+ * stylesheets load in. */
+
+.gx-overview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  /* A grid or flex child may not be wider than the phone it is on. */
+  min-width: 0;
+}
+
+/* The page header brings its own bottom margin; the column gap replaces it. */
+.gx-overview .gx-page-header {
+  margin-bottom: 0;
+}
+
+.gx-overview .gx-overview__h {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+}
+
+.gx-overview .gx-overview__muted {
+  margin: 0;
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Sections ------------------------------------------------------------ */
+
+.gx-overview .gx-overview__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+  padding: var(--spacing-lg);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-inset);
+}
+
+.gx-overview .gx-overview__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+/* Attention and Next steps sit side by side when there is room for both, and
+ * the one that is there takes the row when the other is not. */
+.gx-overview .gx-overview__columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+/* ---- Live session -------------------------------------------------------- */
+
+.gx-overview .gx-overview__live {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--status-live-bg);
+}
+
+.gx-overview .gx-overview__live-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-overview .gx-overview__clock {
+  font-family: var(--font-mono);
+  font-size: var(--mono-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--status-live);
+}
+
+/* ---- Attention band ------------------------------------------------------ */
+
+.gx-overview .gx-overview__attn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+/* A source that is loading behind another one's placeholder renders nothing. */
+.gx-overview .gx-overview__attn-list:empty,
+.gx-overview .gx-overview__attn-state:empty {
+  display: none;
+}
+
+.gx-overview .gx-overview__attn-item {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-md);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--status-warning);
+  border-radius: var(--radius-sm);
+}
+
+.gx-overview .gx-overview__attn-item[data-tone="danger"] {
+  border-left-color: var(--status-danger);
+}
+
+.gx-overview .gx-overview__attn-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--status-warning);
+}
+
+.gx-overview .gx-overview__attn-item[data-tone="danger"] .gx-overview__attn-icon {
+  color: var(--status-danger);
+}
+
+.gx-overview .gx-overview__attn-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.gx-overview .gx-overview__attn-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-overview .gx-overview__attn-title {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+/* A name inside a sentence that opens that thing. */
+.gx-overview .gx-overview__link {
+  padding: 0;
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  color: var(--text-link);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.gx-overview .gx-overview__link:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-overview .gx-overview__clear {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.gx-overview .gx-overview__clear svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  color: var(--status-success);
+}
+
+/* ---- Next steps ---------------------------------------------------------- */
+
+.gx-overview .gx-overview__progress {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--rune);
+}
+
+.gx-overview .gx-overview__steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-overview .gx-overview__step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: left;
+  font: inherit;
+  color: var(--text-default);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.gx-overview button.gx-overview__step {
+  background: var(--surface-inset);
+  border-color: var(--border-subtle);
+  cursor: pointer;
+  transition:
+    background var(--duration-base) var(--ease-standard),
+    border-color var(--duration-base) var(--ease-standard);
+}
+
+.gx-overview button.gx-overview__step:hover {
+  background: var(--surface-card-hover);
+  border-color: var(--border-strong);
+}
+
+.gx-overview .gx-overview__step-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--text-subtle);
+}
+
+.gx-overview .gx-overview__step-mark svg {
+  width: 18px;
+  height: 18px;
+}
+
+.gx-overview .gx-overview__step[data-done="true"] .gx-overview__step-mark {
+  color: var(--status-success);
+}
+
+.gx-overview .gx-overview__step-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-overview .gx-overview__step-label {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+/* Done: still readable (it is the GM's own progress), just no longer the
+ * loudest thing in the list. */
+.gx-overview .gx-overview__step[data-done="true"] .gx-overview__step-label {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+
+.gx-overview .gx-overview__step-hint {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-overview .gx-overview__chevron {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-subtle);
+}
+
+/* ---- Stat tiles ---------------------------------------------------------- */
+
+.gx-overview .gx-overview__stats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
 
 .gx-overview .gx-overview__tiles {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  /* min(100%, …): on a phone the column may not be wider than the screen. */
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  /* Two across on a phone, six across where there is room. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 148px), 1fr));
   gap: var(--spacing-md);
 }
 
 .gx-overview .gx-overview__tiles > li {
   display: flex;
+  min-width: 0;
 }
 
 .gx-overview .gx-overview__tile {
   display: flex;
-  align-items: flex-start;
-  gap: var(--spacing-md);
+  flex-direction: column;
+  gap: var(--spacing-sm);
   width: 100%;
+  min-width: 0;
   padding: var(--spacing-md);
   text-align: left;
   font: inherit;
@@ -38,11 +329,12 @@
   background: var(--surface-card-hover);
   border-color: var(--border-strong);
 }
-/* The app's focus ring is a box-shadow set by a bare :focus-visible rule
- * (styles/base.css), and the tile's own inset shadow above outranks it — so
- * without this a keyboard user tabbing through the tiles saw nothing move. */
-.gx-overview .gx-overview__tile:focus-visible {
-  box-shadow: var(--shadow-inset), var(--focus-ring);
+
+.gx-overview .gx-overview__tile-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
 }
 
 .gx-overview .gx-overview__icon {
@@ -50,36 +342,131 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--layout-sm);
-  height: var(--layout-sm);
-  border-radius: var(--radius-md);
+  width: var(--layout-xs);
+  height: var(--layout-xs);
+  border-radius: var(--radius-sm);
   background: var(--rune-soft);
   color: var(--rune);
 }
 
-.gx-overview .gx-overview__text {
+.gx-overview .gx-overview__tile-label {
   min-width: 0;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.gx-overview .gx-overview__tile-figure {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+
+.gx-overview .gx-overview__tile-count {
+  font-family: var(--font-display);
+  font-size: var(--display-md);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.gx-overview .gx-overview__tile-count[data-unknown="true"] {
+  color: var(--text-subtle);
+}
+
+.gx-overview .gx-overview__tile-skel {
+  display: inline-block;
+  width: 2ch;
+  height: var(--display-md);
+}
+
+.gx-overview .gx-overview__tile-unit {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* ---- Last sessions ------------------------------------------------------- */
+
+.gx-overview .gx-overview__session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
 }
 
-.gx-overview .gx-overview__label {
-  font-family: var(--font-display);
-  font-size: var(--body-lg);
+.gx-overview .gx-overview__session {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: left;
+  font: inherit;
+  color: var(--text-default);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--duration-base) var(--ease-standard),
+    border-color var(--duration-base) var(--ease-standard);
+}
+
+.gx-overview .gx-overview__session:hover {
+  background: var(--surface-card-hover);
+  border-color: var(--border-strong);
+}
+
+.gx-overview .gx-overview__session-when {
+  flex: 1 1 180px;
+  min-width: 0;
   font-weight: var(--weight-semibold);
-  line-height: var(--body-line-tight);
   color: var(--text-strong);
 }
 
-.gx-overview .gx-overview__lede {
-  font-size: var(--body-sm);
-  line-height: var(--body-line);
+.gx-overview .gx-overview__session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
   color: var(--text-muted);
 }
 
+.gx-overview .gx-overview__session .gx-overview__chevron {
+  margin-left: auto;
+}
+
+/* ---- Phone --------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .gx-overview .gx-overview__section {
+    padding: var(--spacing-md);
+  }
+  .gx-overview .gx-overview__tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--spacing-sm);
+  }
+  /* The action drops under its sentence and takes the row: a full-width
+   * target instead of a small button squeezed beside wrapped text. */
+  .gx-overview .gx-overview__attn-item > .gx-btn {
+    flex: 1 1 100%;
+  }
+  .gx-overview .gx-overview__live > .gx-btn {
+    flex: 1 1 100%;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .gx-overview .gx-overview__tile {
+  .gx-overview .gx-overview__tile,
+  .gx-overview .gx-overview__step,
+  .gx-overview .gx-overview__session {
     transition: none;
   }
 }
