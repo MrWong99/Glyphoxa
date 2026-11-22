@@ -367,14 +367,15 @@ func armVoiceGMGate(ctx context.Context, bindings auth.TenantOperatorLister, get
 	return gmSpeakerGate(dev, gmID.IsGM)
 }
 
-// sttStreaming reports whether the GLYPHOXA_STT_STREAMING opt-in enables the
-// streaming-STT transport (ADR-0042, issue #180). Same truthy parse as [devMode]:
-// blank or an explicit falsy spelling ("0"/"false"/"no"/"off", any case) is OFF;
-// anything else is ON. Default OFF keeps the batch STT path byte-for-byte, so the
-// streaming path ships dark until an operator opts in.
+// sttStreaming reports whether the streaming-STT transport is enabled (ADR-0042).
+// It is ON by default since the 2026-11-22 amendment (#702):
+// GLYPHOXA_STT_STREAMING is the off-switch, and only an explicit falsy spelling
+// ("0"/"false"/"no"/"off", any case, trimmed) turns it off. Unset, blank, or
+// anything else streams. Off reproduces the batch STT path byte-for-byte; on, the
+// batch adapter remains the automatic per-utterance fallback.
 func sttStreaming(getenv func(string) string) bool {
 	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_STREAMING"))) {
-	case "", "0", "false", "no", "off":
+	case "0", "false", "no", "off":
 		return false
 	}
 	return true

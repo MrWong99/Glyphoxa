@@ -147,8 +147,8 @@ func main() {
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
-	// Streaming STT (ADR-0042, issue #180) is an env opt-in shared by voice and
-	// all mode; default OFF keeps the batch STT path byte-for-byte.
+	// Streaming STT (ADR-0042) is on by default in voice and all mode;
+	// GLYPHOXA_STT_STREAMING=0 is the off-switch back to the batch STT path.
 	cfg.STTStreaming = sttStreaming(os.Getenv)
 	// The synthesis transport (#702) is an env opt-in shared by voice and all
 	// mode; the default is the HTTP path, byte-for-byte.

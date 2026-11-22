@@ -5,7 +5,7 @@ ADR-0019/ADR-0039 deferred speaker attribution; Epic 4 needs it. Discord already
 ## What this decides
 
 - **N-lane segmentation.** Each active speaker gets a **Speaker Lane**: a Silero VAD session fed by that speaker's already-separated frame stream, emitting per-speaker utterance windows. Lane lifecycle: created on first frame from a `Frame.UserID`, reaped on channel leave or idle timeout. The mixed-lane pipeline disappears for humans; Agent playback is untouched (outbound path).
-- **The cost model that makes this cheap**: batch STT (today's default) stays a **shared worker pool** — lanes emit utterance windows into it, so STT cost per utterance is unchanged vs single-lane; only Silero state multiplies (per-lane CPU, small). Streaming STT (flag-gated, ADR-0042) opens a per-lane connection **only while that lane is speaking**, with a concurrency cap — concurrent sockets equal concurrent speakers, not channel size.
+- **The cost model that makes this cheap**: batch STT (today's default) stays a **shared worker pool** — lanes emit utterance windows into it, so STT cost per utterance is unchanged vs single-lane; only Silero state multiplies (per-lane CPU, small). Streaming STT (flag-gated, ADR-0042) opens a per-lane connection **only while that lane is speaking**, with a concurrency cap — concurrent sockets equal concurrent speakers, not channel size. *Amended 2026-11-22, see below: streaming is the default and a lane's connection is held for the lane's lifetime.*
 - **`SpeakerID` (Discord snowflake string, empty = unattributed) is added additively** to `STTPartial`, `STTFinal`, and `VADSpeechStart`, per ADR-0039's stated seam. **`BargeDetected` also gains `SpeakerID`** — lanes know who barged; cheap now, needed by Epic 8's detector and future floor rules.
 - **Cross-talk and Soft-overlap**: overlapping speech transcribes correctly on each speaker's own lane; a Soft-overlap backchannel becomes a short, correctly-attributed line on its own lane. This is the whole point — attribution errors would bake permanently into Transcript Lines and immutable Chunks.
 - **The silence clock (#91/#147) stays speaker-agnostic**: session silence = no lane speaking (OR over lane activity). No per-speaker endpointing changes.
@@ -16,7 +16,18 @@ ADR-0019/ADR-0039 deferred speaker attribution; Epic 4 needs it. Discord already
 
 - **Single-lane dominant-speaker attribution** (attribute each utterance to the dominant `Frame.UserID` in its VAD window) — cheap, but mis-attributes exactly the moments a table cares about (cross-talk, excited overlap, backchannels), and those errors persist in immutable Chunks and embedded text forever.
 - **Single-lane now, N-lane later** — ships poisoned history plus a second migration of the hot path.
-- **Always-open per-speaker streaming connections** — pays provider-connection cost for silent participants; per-speech-burst sockets with a cap achieve the same attribution.
+- **Always-open per-speaker streaming connections** — pays provider-connection cost for silent participants; per-speech-burst sockets with a cap achieve the same attribution. *Partly adopted 2026-11-22, see the amendment below.*
+
+## Amendment 2026-11-22 — a lane holds its streaming connection while it lives (#702)
+
+Two statements above no longer describe the system; ADR-0042's amendment of the same date is the record of why.
+
+- **Streaming STT is the default, not flag-gated**, and batch STT is its per-utterance fallback (`GLYPHOXA_STT_STREAMING=0` selects batch).
+- **A streaming lane holds one realtime connection for as long as the lane exists**, not only while it is speaking. A connection opened per speech burst is not up at speech start, and an utterance that begins without one is transcribed batch (there is no mid-utterance catch-up); and the provider closes a session 15 s after the last client message — so "only while speaking" in practice meant the first utterance after every pause went to batch. The connection is now dialed when the lane is created, kept alive across silence with an empty audio chunk (not billed as audio), and redialed when it dies.
+- **The cost model changes accordingly.** Concurrent sockets equal the **Speaker Lanes alive**, not the concurrent speakers: a lane is reaped on channel leave or after two minutes without speech, so a participant who talks at least that often holds a connection for the whole Voice Session. The cap is unchanged — `GLYPHOXA_STT_STREAM_MAX_LANES`, default 4, **per Voice Session**; a lane past it transcribes batch. Size the provider's realtime concurrency as *sessions × min(active participants, cap)* (three concurrent tables on one platform key can hold 12 connections), not as one per table. Audio billing is unchanged: silence is still never streamed.
+- **"Always-open per-speaker streaming connections" is therefore partly adopted.** What was rejected — paying connection cost for *silent* participants — is still bounded: a participant who sends no audio never gets a lane, and one who stops speaking loses the lane, and its connection, at the two-minute idle reap. The unattributed default lane dials only on its first speech.
+
+Unverified and left to the soak: the provider plan's realtime concurrency and session-duration limits. If the concurrency limit is hit, lanes past it fall back to batch (`glyphoxa_voice_stt_final_total{transport="batch_fallback",reason="stream_down"}`).
 
 ## Relationship to other ADRs
 

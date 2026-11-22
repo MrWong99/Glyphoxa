@@ -49,19 +49,20 @@ func (r *recordingStage) TTSTimeToFirstByte(p Provider, d time.Duration) {
 }
 
 // The spans this subscriber does not own are no-ops on the recorder.
-func (r *recordingStage) VADHangover(time.Duration)                   {}
-func (r *recordingStage) CodecDecode(time.Duration)                   {}
-func (r *recordingStage) CodecEncode(time.Duration)                   {}
-func (r *recordingStage) STTRequest(Provider, time.Duration)          {}
-func (r *recordingStage) TTSTotal(Provider, time.Duration)            {}
-func (r *recordingStage) LLMRound(Provider, int, bool, time.Duration) {}
-func (r *recordingStage) LLMTurn(Provider, time.Duration)             {}
-func (r *recordingStage) ProviderCall(Stage, Provider, Outcome)       {}
-func (r *recordingStage) ProviderError(Stage, Provider)               {}
-func (r *recordingStage) LLMTokens(Provider, string, int, int)        {}
-func (r *recordingStage) TTSCharacters(Provider, string, int)         {}
-func (r *recordingStage) STTAudioSeconds(Provider, time.Duration)     {}
-func (r *recordingStage) MalformedToolGen(Provider, MalformedPath)    {}
+func (r *recordingStage) VADHangover(time.Duration)                       {}
+func (r *recordingStage) CodecDecode(time.Duration)                       {}
+func (r *recordingStage) CodecEncode(time.Duration)                       {}
+func (r *recordingStage) STTRequest(Provider, time.Duration)              {}
+func (r *recordingStage) TTSTotal(Provider, time.Duration)                {}
+func (r *recordingStage) LLMRound(Provider, int, bool, time.Duration)     {}
+func (r *recordingStage) LLMTurn(Provider, time.Duration)                 {}
+func (r *recordingStage) ProviderCall(Stage, Provider, Outcome)           {}
+func (r *recordingStage) ProviderError(Stage, Provider)                   {}
+func (r *recordingStage) LLMTokens(Provider, string, int, int)            {}
+func (r *recordingStage) TTSCharacters(Provider, string, int)             {}
+func (r *recordingStage) STTAudioSeconds(Provider, time.Duration)         {}
+func (r *recordingStage) STTFinal(Provider, STTTransport, STTFinalReason) {}
+func (r *recordingStage) MalformedToolGen(Provider, MalformedPath)        {}
 func (r *recordingStage) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

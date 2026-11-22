@@ -108,6 +108,25 @@ type spyStage struct {
 	calls        []spyProviderCall
 	errs         int
 	audio        []time.Duration // #127 STTAudioSeconds durations
+	finals       []spyFinal      // #702 STTFinal transport/reason counts
+}
+
+// spyFinal is one captured STTFinal's bounded labels.
+type spyFinal struct {
+	transport observe.STTTransport
+	reason    observe.STTFinalReason
+}
+
+func (s *spyStage) STTFinal(_ observe.Provider, tr observe.STTTransport, why observe.STTFinalReason) {
+	s.mu.Lock()
+	s.finals = append(s.finals, spyFinal{transport: tr, reason: why})
+	s.mu.Unlock()
+}
+
+func (s *spyStage) finalCounts() []spyFinal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]spyFinal(nil), s.finals...)
 }
 
 // spyProviderCall is one captured ProviderCall's bounded labels.
@@ -663,7 +682,10 @@ func TestStreamManager_AwaitCommitErrorFallsBack(t *testing.T) {
 	b := m.backoff
 	m.mu.Unlock()
 	if b != 8*time.Second {
-		t.Errorf("a recoverable commit error changed the backoff to %v; want it unchanged", b)
+		t.Errorf("a commit error with no session to retire changed the backoff to %v; want it unchanged", b)
+	}
+	if got := spy.finalCounts(); len(got) != 1 || got[0] != (spyFinal{observe.STTTransportBatchFallback, observe.STTFinalCommitError}) {
+		t.Errorf("stt_final = %+v, want one batch_fallback/commit_error", got)
 	}
 }
 

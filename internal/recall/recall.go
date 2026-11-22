@@ -151,6 +151,13 @@ type Recaller struct {
 	pending    string
 	pendingSID string // session id of the latest pending partial (#487)
 	hasPending bool
+	// mailSeq orders partials against finals (#700): every arrival takes the next
+	// number, so a partial already taken by the speculator can be told apart from
+	// one that arrived after its session's latest final.
+	mailSeq      uint64
+	pendingSeq   uint64
+	lastFinalSID string
+	lastFinalSeq uint64
 
 	// lastEmbed* gate the speculator; touched only by the speculator goroutine.
 	lastEmbedNorm string
@@ -159,6 +166,9 @@ type Recaller struct {
 	cacheMu sync.Mutex
 	cache   map[uuid.UUID]specCache // per campaign
 	flights map[uuid.UUID]*flight   // per campaign: the latest final's speculation, joined by Recall
+	// spec is the partials' embed currently in flight on the speculator goroutine
+	// (at most one), nil otherwise. A final joins or cancels it (#700).
+	spec *flight
 
 	finalSlots chan struct{}  // bounds concurrent final speculations
 	finals     sync.WaitGroup // their goroutines, awaited by Close

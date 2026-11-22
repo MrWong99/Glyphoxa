@@ -24,6 +24,17 @@ type StreamConfig struct {
 	// not cumulative. Invoked serially from the stream's read goroutine, so it
 	// must not block. A nil OnPartial drops partials silently.
 	OnPartial func(text string)
+
+	// OnClosed is called exactly once when the session ends, with the cause (a
+	// *[StreamError]): a provider close, a fatal error frame, a transport failure,
+	// context cancellation, or the owner's own [Stream.Close]. It is how the owner
+	// learns of a death WHEN IT HAPPENS rather than on its next Send or Commit —
+	// a provider that closes idle sessions would otherwise cost the next utterance
+	// its stream. It runs on one of the session's own goroutines and has returned
+	// by the time Close returns, so it must not block and must not call Close. It
+	// may fire before OpenStream has returned the [Stream] to the caller. A nil
+	// OnClosed is ignored.
+	OnClosed func(err error)
 }
 
 // CommitResult is the resolution of one [Stream.Commit]. Exactly one of the
