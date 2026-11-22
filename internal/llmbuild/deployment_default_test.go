@@ -28,8 +28,14 @@ func TestDeploymentDefault_UnsetIsGroqCodeDefault(t *testing.T) {
 		t.Errorf("VoiceModel = %q, want openai/gpt-oss-120b", got)
 	}
 	p, m := d.Select(nil)
-	if p != "groq" || m != "" {
-		t.Errorf("Select(nil) = (%q, %q), want (groq, \"\") — the adapter fills its own default, as before", p, m)
+	if p != "groq" || m != "openai/gpt-oss-120b" {
+		t.Errorf("Select(nil) = (%q, %q), want (groq, openai/gpt-oss-120b) — the code default, named", p, m)
+	}
+	// One model default per config (#702 review): a model-less row on a
+	// provider that is NOT the deployment default still resolves to a model —
+	// the one a Voice Session runs — never to "" for an adapter to fill.
+	if p, m := d.Select(&storage.ProviderConfig{Provider: "anthropic"}); p != "anthropic" || m != "claude-haiku-5-5" {
+		t.Errorf("Select(model-less anthropic row) = (%q, %q), want (anthropic, claude-haiku-5-5)", p, m)
 	}
 }
 
@@ -149,7 +155,7 @@ func TestDeploymentDefault_NormalizesCaseAndSpace(t *testing.T) {
 // MTok), dozens of times the real rate, which drains a trial allowance (#702).
 func TestDefaultModelsArePriced(t *testing.T) {
 	for provider := range platformKeyEnv {
-		for _, model := range []string{DefaultModel(provider), DefaultVoiceModel(provider)} {
+		for _, model := range []string{DefaultVoiceModel(provider)} {
 			if !spend.LLMPriced(observe.Provider(provider), model) {
 				t.Errorf("default model (%s, %s) has no price row in internal/spend/prices.go", provider, model)
 			}

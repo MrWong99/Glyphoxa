@@ -70,3 +70,32 @@ func TestRecap_DeploymentDefaultKeyIsEntitlementGated(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoPlatformKeyEntitlement", err)
 	}
 }
+
+// One model default per resolved config (#702 review): a model-less Anthropic
+// row — what "Use for voice" stores — recaps on the SAME model the voice
+// session and the Configuration screen name for it, never on the adapter's
+// flagship fallback.
+func TestRecap_ModellessAnthropicRowRunsTheVoiceModel(t *testing.T) {
+	st := newFakeStore()
+	tenantID := uuid.New()
+	st.byComponent[tenantID] = storage.ProviderConfig{Provider: "anthropic", CredentialsLast4: "env"}
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "The Keeper."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+
+	rec := &capRec{}
+	var gotModel string
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil,
+		WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+			return &stubProvider{text: "A recap.", usage: &llm.Usage{InputTokens: 10, OutputTokens: 5}, capture: func(req llm.Request) { gotModel = req.Model }}, nil
+		}))
+	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
+		t.Fatalf("Recap: %v", err)
+	}
+	want := llmbuild.DeploymentDefault{}.VoiceModel("anthropic", "")
+	if gotModel != want {
+		t.Errorf("request model = %q, want %q", gotModel, want)
+	}
+	if len(rec.calls) != 1 || rec.calls[0].model != want {
+		t.Errorf("priced %+v, want model %q", rec.calls, want)
+	}
+}

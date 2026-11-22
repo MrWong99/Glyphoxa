@@ -52,7 +52,7 @@ func TestAssistCallsReachTheUsageLedger(t *testing.T) {
 
 			_ = tc.run(eng, c)
 
-			row := billingtest.OneRow(t, usage, c.TenantID, storage.ComponentLLM, "groq", llmbuild.DefaultModel("groq"))
+			row := billingtest.OneRow(t, usage, c.TenantID, storage.ComponentLLM, "groq", llmbuild.DefaultVoiceModel("groq"))
 			if row.LLMInputTokens != 42 || row.LLMOutputTokens != 7 {
 				t.Errorf("ledger tokens = %d/%d, want 42/7", row.LLMInputTokens, row.LLMOutputTokens)
 			}
@@ -71,7 +71,7 @@ func TestAssistFailedCallStillLedgersReportedUsage(t *testing.T) {
 	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err == nil {
 		t.Fatal("err = nil, want the stream error")
 	}
-	billingtest.OneRow(t, usage, c.TenantID, storage.ComponentLLM, "groq", llmbuild.DefaultModel(""))
+	billingtest.OneRow(t, usage, c.TenantID, storage.ComponentLLM, "groq", llmbuild.DefaultVoiceModel(""))
 }
 
 // A platform-key Tenant whose allowance is spent is refused before the

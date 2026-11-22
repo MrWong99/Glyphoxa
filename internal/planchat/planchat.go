@@ -247,12 +247,9 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	if err != nil {
 		return Result{}, fmt.Errorf("planchat: build provider: %w", err)
 	}
-	// An explicit model keeps the adapter's usage metering priced on a real
-	// model id — the (groq, "") price-map miss the recap engine also guards
-	// against (#272 review).
-	if model == "" {
-		model = llmbuild.DefaultModel(providerID)
-	}
+	// Select never returns an empty model, so the adapter's usage metering is
+	// priced on the real model id (#272 review) — the one the voice session and
+	// the Configuration screen name for this config (#702 review).
 
 	history, err := e.store.ListPlanningMessages(ctx, campaign.ID, threadID)
 	if err != nil {

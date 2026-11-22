@@ -95,9 +95,9 @@ func TestGeneratePersonaMetersUsage(t *testing.T) {
 }
 
 // TestGeneratePersonaPricesSavedConfigWithoutModel: a saved LLM config that
-// names a provider but no model is priced on that provider's default model,
-// never on (provider, "") — which misses the price map and is charged at the
-// conservative fallback rate.
+// names a provider but no model requests AND prices the one default model the
+// voice session runs for that provider (#702 review) — never (provider, ""),
+// which misses the price map, and never a second, off-session-only default.
 func TestGeneratePersonaPricesSavedConfigWithoutModel(t *testing.T) {
 	st := newFakeStore()
 	c := seedCampaign(st, "")
@@ -116,11 +116,11 @@ func TestGeneratePersonaPricesSavedConfigWithoutModel(t *testing.T) {
 	if len(rec.calls) != 1 {
 		t.Fatalf("LLMTokens calls = %d, want 1", len(rec.calls))
 	}
-	if got := rec.calls[0]; got.provider != observe.ProviderAnthropic || got.model != anthropic.DefaultModel {
-		t.Errorf("priced (%s,%s), want (anthropic, %s)", got.provider, got.model, anthropic.DefaultModel)
+	if got := rec.calls[0]; got.provider != observe.ProviderAnthropic || got.model != anthropic.HaikuVoiceModel {
+		t.Errorf("priced (%s,%s), want (anthropic, %s)", got.provider, got.model, anthropic.HaikuVoiceModel)
 	}
-	if req.Model != "" {
-		t.Errorf("request model = %q, want empty (the adapter fills its own default)", req.Model)
+	if req.Model != anthropic.HaikuVoiceModel {
+		t.Errorf("request model = %q, want %q (requested = priced)", req.Model, anthropic.HaikuVoiceModel)
 	}
 }
 

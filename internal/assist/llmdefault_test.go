@@ -7,6 +7,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/billing/billingtest"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
@@ -50,5 +51,29 @@ func TestGeneratePersona_NoConfigRunsDeploymentDefault(t *testing.T) {
 	}
 	if got := rec.calls[0]; got.provider != observe.ProviderAnthropic || got.model != "claude-haiku-4-5" {
 		t.Errorf("priced (%s,%s), want (anthropic, claude-haiku-4-5)", got.provider, got.model)
+	}
+}
+
+// One model default per resolved config (#702 review): a model-less Anthropic
+// row drafts on the model the voice session runs for it, requested and priced.
+func TestGeneratePersona_ModellessAnthropicRowRunsTheVoiceModel(t *testing.T) {
+	st := newFakeStore()
+	c := seedCampaign(st, "")
+	st.byComponent[c.TenantID] = storage.ProviderConfig{Provider: "anthropic", CredentialsLast4: "env"}
+	rec := &capRec{}
+	var req llm.Request
+	eng := NewEngine(st, nil, billingtest.Ungated(), rec, nil,
+		WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+			return &stubProvider{text: "You are someone.", usage: &llm.Usage{InputTokens: 42, OutputTokens: 7}, capture: func(r llm.Request) { req = r }}, nil
+		}))
+	if _, err := eng.GeneratePersona(context.Background(), c, PersonaInput{Prompt: "x"}); err != nil {
+		t.Fatalf("GeneratePersona: %v", err)
+	}
+	want := llmbuild.DeploymentDefault{}.VoiceModel("anthropic", "")
+	if req.Model != want {
+		t.Errorf("request model = %q, want %q", req.Model, want)
+	}
+	if len(rec.calls) != 1 || rec.calls[0].model != want {
+		t.Errorf("priced %+v, want model %q", rec.calls, want)
 	}
 }

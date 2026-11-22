@@ -271,14 +271,10 @@ func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llm
 	if err != nil {
 		return nil, nil, fmt.Errorf("assist: build llm provider: %w", err)
 	}
-	// A config without a model sends request model "" (the adapter fills its own
-	// default) but prices on that real model id, for every provider: (provider,
-	// "") misses the price map and is charged at the conservative fallback rate
-	// (#272 review).
+	// Select never returns an empty model: a config without one runs the SAME
+	// default the voice session and the Configuration screen name for it, so the
+	// model requested and the model priced are one id (#272 review, #702 review).
 	priceModel := model
-	if priceModel == "" {
-		priceModel = llmbuild.DefaultModel(providerID)
-	}
 
 	return &llmcall.Caller{
 		Ctx:        ctx,

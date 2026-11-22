@@ -58,3 +58,23 @@ func TestExchange_NoConfigRunsDeploymentDefault(t *testing.T) {
 		t.Errorf("request models = %v, want claude-haiku-4-5", provider.models)
 	}
 }
+
+// One model default per resolved config (#702 review): a model-less Anthropic
+// row plans on the model the voice session runs for it.
+func TestExchange_ModellessAnthropicRowRunsTheVoiceModel(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.tenant[storage.ComponentLLM] = storage.ProviderConfig{Provider: "anthropic", CredentialsLast4: "env"}
+	provider := &modelSpy{scriptedProvider: scriptedProvider{scripts: [][]llm.StreamEvent{textDone("A plan.")}}}
+	eng := NewEngine(st, nil, &fakeSearcher{}, &fakeWriter{}, fakeRecapper{}, billing.NewOffSession(st, nil, nil), nil, nil,
+		WithProviderFactory(func(_, _ string) (llm.Provider, error) { return provider, nil }))
+
+	var ev collectEvents
+	if _, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "Plan it", &ev); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	want := llmbuild.DeploymentDefault{}.VoiceModel("anthropic", "")
+	if len(provider.models) == 0 || provider.models[0] != want {
+		t.Errorf("request models = %v, want %q", provider.models, want)
+	}
+}

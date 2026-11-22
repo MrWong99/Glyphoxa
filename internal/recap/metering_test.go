@@ -96,9 +96,9 @@ func TestMeteringReportedUsageOnError(t *testing.T) {
 	}
 }
 
-// TestMeteringDefaultPathPricesGroqModel: the default path (no provider config) sends
-// request model "" but prices on groq.DefaultModel, so the spend meter never misses
-// (groq, "") (#272 review).
+// TestMeteringDefaultPathPricesGroqModel: the default path (no provider config)
+// requests AND prices groq.DefaultModel by name — one id for both, so the spend
+// meter never misses (groq, "") (#272 review, #702 review).
 func TestMeteringDefaultPathPricesGroqModel(t *testing.T) {
 	st := newFakeStore()
 	tenantID := uuid.New()
@@ -114,8 +114,8 @@ func TestMeteringDefaultPathPricesGroqModel(t *testing.T) {
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
-	if reqModel != "" {
-		t.Errorf("request model = %q, want \"\" (adapter default, cassette-stable)", reqModel)
+	if reqModel != groq.DefaultModel {
+		t.Errorf("request model = %q, want %q (the model that is priced)", reqModel, groq.DefaultModel)
 	}
 	if len(rec.calls) != 1 || rec.calls[0].model != groq.DefaultModel {
 		t.Errorf("priced model = %q, want groq.DefaultModel %q", rec.calls[0].model, groq.DefaultModel)

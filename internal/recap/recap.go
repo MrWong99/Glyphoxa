@@ -220,15 +220,11 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)
 	}
-	// A config without a model sends request model "" (the adapter fills its own
-	// default, which keeps the recorded cassettes stable), but the spend sink must
-	// price on that real model id: (provider, "") misses the price map and
-	// warn-spams / prices at the conservative fallback (#272 review). The default
-	// comes from the one shared helper, for every provider, not just the env path.
+	// Select never returns an empty model: a config without one runs the SAME
+	// default the voice session and the Configuration screen name for it, so the
+	// model requested and the model the spend sink prices are one id (#272
+	// review, #702 review).
 	priceModel := model
-	if priceModel == "" {
-		priceModel = llmbuild.DefaultModel(providerID)
-	}
 
 	// Metering. The recorder is the CALLER's when the ctx carries one
 	// ([WithMetering]: a recap run from a live session's Tool or a planning chat

@@ -217,41 +217,20 @@ func TestEnvFallbackAllowed(t *testing.T) {
 	}
 }
 
-// TestDefaultModel_MirrorsNewsProviderSet pins that every provider id [New]
-// dispatches resolves to that adapter's own default model, and that the empty
-// id (the env default) is Groq. A caller that fills an empty model through this
-// requests and prices one and the same real model id.
-func TestDefaultModel_MirrorsNewsProviderSet(t *testing.T) {
+// TestDefaultVoiceModel_OneDefaultPerProvider pins the one model default
+// (#702): every provider id [New] dispatches resolves to that adapter's own
+// default, the empty id (the code default) is Groq — and Anthropic is Claude
+// Haiku, NOT the adapter's flagship fallback, for voice and off-session alike.
+func TestDefaultVoiceModel_OneDefaultPerProvider(t *testing.T) {
 	t.Parallel()
 	for id, want := range map[string]string{
 		"":                   groq.DefaultModel,
 		groq.ProviderID:      groq.DefaultModel,
-		anthropic.ProviderID: anthropic.DefaultModel,
+		anthropic.ProviderID: "claude-haiku-5-5",
 		gemini.ProviderID:    gemini.DefaultModel,
 	} {
-		if got := DefaultModel(id); got != want {
-			t.Errorf("DefaultModel(%q) = %q, want %q", id, got, want)
+		if got := DefaultVoiceModel(id); got != want {
+			t.Errorf("DefaultVoiceModel(%q) = %q, want %q", id, got, want)
 		}
-	}
-}
-
-// TestDefaultVoiceModel_AnthropicIsHaikuNotTheFlagship pins the voice default
-// (#702): a Voice Session on an Anthropic Provider Config that names no model
-// must not fall through to the adapter's flagship fallback — a model priced
-// and paced for off-session work — but to the Haiku the voice path is tuned
-// and priced for. Every other provider keeps its one default, and the
-// off-session [DefaultModel] is untouched.
-func TestDefaultVoiceModel_AnthropicIsHaikuNotTheFlagship(t *testing.T) {
-	t.Parallel()
-	if got := DefaultVoiceModel(anthropic.ProviderID); got != "claude-haiku-5-5" {
-		t.Errorf("DefaultVoiceModel(anthropic) = %q, want claude-haiku-5-5", got)
-	}
-	for _, id := range []string{"", groq.ProviderID, gemini.ProviderID} {
-		if got, want := DefaultVoiceModel(id), DefaultModel(id); got != want {
-			t.Errorf("DefaultVoiceModel(%q) = %q, want the provider default %q", id, got, want)
-		}
-	}
-	if got := DefaultModel(anthropic.ProviderID); got != anthropic.DefaultModel {
-		t.Errorf("DefaultModel(anthropic) = %q, want it unchanged (%q) for the off-session callers", got, anthropic.DefaultModel)
 	}
 }

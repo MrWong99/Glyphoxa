@@ -96,11 +96,12 @@ func (d DeploymentDefault) Provider() string {
 }
 
 // Select resolves a Tenant's effective LLM Provider Config (nil = no row) to
-// the provider to build and the model to request. The provider is never empty.
-// The model is the row's, else the deployment model when the provider is the
-// deployment default, else "" — the caller's cue to let the adapter fill its
-// own default (the off-session engines) or to name the voice default
-// ([DeploymentDefault.VoiceModel]).
+// the provider to build and the model to request. NEITHER is ever empty: the
+// model is the row's, else the one [DeploymentDefault.VoiceModel] names for
+// that provider. There is ONE model default per resolved config — the voice
+// session, recap, assist, the planning chat and the Configuration screen all
+// take it from here — so a model-less row cannot run (and be billed as) one
+// model in a Voice Session and another off-session.
 func (d DeploymentDefault) Select(cfg *storage.ProviderConfig) (providerID, model string) {
 	providerID = d.Provider()
 	if cfg != nil {
@@ -109,10 +110,7 @@ func (d DeploymentDefault) Select(cfg *storage.ProviderConfig) (providerID, mode
 		}
 		model = cfg.Model
 	}
-	if model == "" && providerID == d.Provider() {
-		model = d.model
-	}
-	return providerID, model
+	return providerID, d.VoiceModel(providerID, model)
 }
 
 // Priced reports whether the deployment default's voice model has a price row
@@ -122,8 +120,9 @@ func (d DeploymentDefault) Priced() bool {
 	return spend.LLMPriced(observe.Provider(d.Provider()), d.VoiceModel(d.Provider(), ""))
 }
 
-// VoiceModel names the model a voice Agent on providerID runs: model when the
-// Provider Config names one, else the deployment model when providerID is the
+// VoiceModel names the model a config on providerID runs — in a Voice Session
+// and off-session alike ([DeploymentDefault.Select]): model when the Provider
+// Config names one, else the deployment model when providerID is the
 // deployment default, else the provider's voice default ([DefaultVoiceModel]).
 // It is never empty, so the model requested and the model the spend meter
 // prices are one and the same.
