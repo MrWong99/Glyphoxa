@@ -1463,3 +1463,27 @@ func TestSTTLanguageHint(t *testing.T) {
 		}
 	}
 }
+
+// TestApplySTTEnv is the env -> Config hop of the three STT switches: the parsed
+// value has to LAND on the wirenpc.Config every Voice Session is copied from. A
+// parser nobody assigns leaves the Config's zero value in charge — streaming and
+// keyterms off in production, with every parser test green.
+func TestApplySTTEnv(t *testing.T) {
+	var defaults wirenpc.Config
+	applySTTEnv(&defaults, envMap(nil))
+	if !defaults.STTStreaming || !defaults.STTKeyterms || defaults.STTLanguageHint {
+		t.Errorf("unset env: streaming=%v keyterms=%v languageHint=%v, want on, on, off",
+			defaults.STTStreaming, defaults.STTKeyterms, defaults.STTLanguageHint)
+	}
+
+	flipped := wirenpc.Config{STTStreaming: true, STTKeyterms: true}
+	applySTTEnv(&flipped, envMap(map[string]string{
+		"GLYPHOXA_STT_STREAMING":     "0",
+		"GLYPHOXA_STT_KEYTERMS":      "0",
+		"GLYPHOXA_STT_LANGUAGE_HINT": "1",
+	}))
+	if flipped.STTStreaming || flipped.STTKeyterms || !flipped.STTLanguageHint {
+		t.Errorf("all three set: streaming=%v keyterms=%v languageHint=%v, want off, off, on",
+			flipped.STTStreaming, flipped.STTKeyterms, flipped.STTLanguageHint)
+	}
+}

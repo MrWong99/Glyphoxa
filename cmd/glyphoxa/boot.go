@@ -28,6 +28,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
 	soundelevenlabs "github.com/MrWong99/Glyphoxa/pkg/voice/soundgen/elevenlabs"
 )
@@ -406,6 +407,21 @@ func sttLanguageHint(getenv func(string) string) bool {
 		return true
 	}
 	return false
+}
+
+// applySTTEnv puts the three STT switches on cfg, the Config every Voice Session
+// is copied from:
+//
+//   - GLYPHOXA_STT_STREAMING=0 turns streaming STT off, back to the batch path
+//     ([sttStreaming], ADR-0042);
+//   - GLYPHOXA_STT_KEYTERMS=0 stops sending the names at the table as keyterms
+//     ([sttKeyterms], #701);
+//   - GLYPHOXA_STT_LANGUAGE_HINT=1 pins the recognizer to the Campaign Language
+//     ([sttLanguageHint]).
+func applySTTEnv(cfg *wirenpc.Config, getenv func(string) string) {
+	cfg.STTStreaming = sttStreaming(getenv)
+	cfg.STTKeyterms = sttKeyterms(getenv)
+	cfg.STTLanguageHint = sttLanguageHint(getenv)
 }
 
 // privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published
