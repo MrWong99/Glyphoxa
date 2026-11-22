@@ -16,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 )
 
 // These tests pin the Planning chat model choice (ADR-0062 amendment
@@ -265,9 +266,31 @@ func TestExchange_UsageLogNamesProviderModelAndSources(t *testing.T) {
 	}
 }
 
-// The default factory is the chat one: an engine built without a factory hands
-// Anthropic the chat thinking policy. Pinned through the missing-key refusal of
-// the real adapter (no network), which names the provider that was built.
+// An engine built without a factory uses the CHAT one (llmbuild.NewChat): its
+// Anthropic client thinks at effort medium on the chat default. Swapping the
+// default back to llmbuild.New would send Sonnet no thinking config at all and
+// leave the 16000-token cap without the policy it was sized for.
+func TestNewEngine_DefaultFactoryIsTheChatFactory(t *testing.T) {
+	st := newFakeStore(uuid.New())
+	eng := NewEngine(st, nil, &fakeSearcher{}, &fakeWriter{}, fakeRecapper{}, billing.NewOffSession(st, nil, nil), nil, nil)
+
+	p, err := eng.newProvider(anthropic.ProviderID, "k")
+	if err != nil {
+		t.Fatalf("build anthropic: %v", err)
+	}
+	client, ok := p.(*anthropic.Client)
+	if !ok {
+		t.Fatalf("anthropic provider is %T, want *anthropic.Client", p)
+	}
+	want := anthropic.Thinking{Mode: anthropic.ThinkingAdaptive, Effort: "medium"}
+	if got := client.ThinkingFor(anthropic.ChatModel); got != want {
+		t.Errorf("thinking for %s = %+v, want %+v", anthropic.ChatModel, got, want)
+	}
+}
+
+// The default factory builds the provider the choice names. Pinned through the
+// missing-key refusal of the real adapter (no network), which names the
+// provider that was built.
 func TestNewEngine_DefaultFactoryBuildsTheChosenProvider(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("GROQ_API_KEY", "")

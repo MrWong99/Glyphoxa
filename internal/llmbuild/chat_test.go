@@ -9,6 +9,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
@@ -74,6 +75,44 @@ func TestNewChat_BuildsEachProvider(t *testing.T) {
 		if err != nil || p == nil {
 			t.Errorf("NewChat(%q) = (%v, %v), want a provider", id, p, err)
 		}
+	}
+}
+
+// NewChat and New differ in exactly one thing: the Anthropic client's thinking
+// policy. The chat one reasons at effort medium on the chat default; the voice
+// one (New) keeps the voice policy, so a Voice Session's requests are the ones
+// they were. Dropping WithThinkingFor from NewChat fails here.
+func TestNewChat_AnthropicThinksUnderTheChatPolicy(t *testing.T) {
+	t.Parallel()
+	policyOf := func(build func(string, string) (llm.Provider, error)) func(string) anthropic.Thinking {
+		t.Helper()
+		p, err := build(anthropic.ProviderID, "k")
+		if err != nil {
+			t.Fatalf("build anthropic: %v", err)
+		}
+		client, ok := p.(*anthropic.Client)
+		if !ok {
+			t.Fatalf("anthropic provider is %T, want *anthropic.Client", p)
+		}
+		return client.ThinkingFor
+	}
+	chat, voice := policyOf(NewChat), policyOf(New)
+	medium := anthropic.Thinking{Mode: anthropic.ThinkingAdaptive, Effort: "medium"}
+
+	for _, model := range []string{DefaultChatModel(anthropic.ProviderID), "claude-opus-5-5", "claude-haiku-5-5"} {
+		if got := chat(model); got != medium {
+			t.Errorf("chat policy for %s = %+v, want adaptive at effort medium", model, got)
+		}
+	}
+	if got := chat("claude-haiku-4-5"); got != (anthropic.Thinking{}) {
+		t.Errorf("chat policy for claude-haiku-4-5 = %+v, want nothing sent", got)
+	}
+	// Voice is untouched: Haiku 5.5 at effort low, nothing for any other model.
+	if got := voice("claude-haiku-5-5"); got != (anthropic.Thinking{Mode: anthropic.ThinkingAdaptive, Effort: "low"}) {
+		t.Errorf("voice policy for claude-haiku-5-5 = %+v, want adaptive at effort low", got)
+	}
+	if got := voice("claude-sonnet-5-5"); got != (anthropic.Thinking{}) {
+		t.Errorf("voice policy for claude-sonnet-5-5 = %+v, want nothing sent", got)
 	}
 }
 

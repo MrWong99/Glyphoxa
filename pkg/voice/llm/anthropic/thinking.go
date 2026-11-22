@@ -134,6 +134,14 @@ func WithThinkingFor(policy func(model string) Thinking) Option {
 	}
 }
 
+// ThinkingFor reports what this client sends for model: the answer of its
+// thinking policy ([DefaultThinking] unless [WithThinkingFor] replaced it). It
+// lets a caller that built the client through a factory pin WHICH policy it
+// got — the voice one or the chat one — without sending a request.
+func (c *Client) ThinkingFor(model string) Thinking {
+	return c.thinking(model)
+}
+
 // wireThinking is the Messages API `thinking` object.
 type wireThinking struct {
 	Type string `json:"type"`
