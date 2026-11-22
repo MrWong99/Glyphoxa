@@ -278,13 +278,16 @@ func TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt(t *testing.T)
 		{ttseleven.TransportWS, 1, 0},
 	} {
 		t.Run(string(tc.transport), func(t *testing.T) {
-			var sockets, open, posts atomic.Int64
+			var sockets, open, posts, heads atomic.Int64
 			up := websocket.Upgrader{}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !websocket.IsWebSocketUpgrade(r) {
-					if r.Method == http.MethodPost {
+					switch r.Method {
+					case http.MethodPost:
 						posts.Add(1)
 						_, _ = w.Write(make([]byte, 64))
+					case http.MethodHead:
+						heads.Add(1)
 					}
 					return
 				}
@@ -323,6 +326,15 @@ func TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt(t *testing.T)
 				}()
 			})
 			synth, release := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", tc.transport, sink, nil)
+			// The connect warm runs on its own goroutine. Let it land first: a warm
+			// that overlaps the sentence finds the voice's only socket leased and
+			// (rightly) lines up a second one, which is not what this test counts.
+			for deadline := time.Now().Add(2 * time.Second); heads.Load() == 0; time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					release()
+					t.Fatal("the connect warm never reached the server")
+				}
+			}
 			ch, err := synth.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "Willkommen.", Voice: ttseleven.DefaultVoice("v", "de")})
 			if err != nil {
 				release()
