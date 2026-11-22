@@ -1427,3 +1427,39 @@ func TestVoiceMediaStallWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestSTTKeyterms: biasing the recognizer towards the names at the table is the
+// default (#701). GLYPHOXA_STT_KEYTERMS is the off-switch, parsed like
+// GLYPHOXA_STT_STREAMING: only an explicit falsy value turns it off.
+func TestSTTKeyterms(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", true}, {"   ", true}, {"1", true}, {"true", true}, {"yes", true}, {"banana", true},
+		{"0", false}, {"false", false}, {"False", false}, {"OFF", false}, {" no ", false},
+	}
+	for _, c := range cases {
+		if got := sttKeyterms(envMap(map[string]string{"GLYPHOXA_STT_KEYTERMS": c.val})); got != c.want {
+			t.Errorf("sttKeyterms(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
+// TestSTTLanguageHint: pinning the recognizer to the Campaign Language is OPT-IN
+// (#701) — a table may mix languages, so only an explicit truthy value
+// ("1"/"true"/"yes"/"on", any case, trimmed) turns it on.
+func TestSTTLanguageHint(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"   ", false}, {"0", false}, {"false", false}, {"off", false}, {"banana", false},
+		{"1", true}, {"true", true}, {"TRUE", true}, {" yes ", true}, {"on", true},
+	}
+	for _, c := range cases {
+		if got := sttLanguageHint(envMap(map[string]string{"GLYPHOXA_STT_LANGUAGE_HINT": c.val})); got != c.want {
+			t.Errorf("sttLanguageHint(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}

@@ -150,6 +150,11 @@ func main() {
 	// Streaming STT (ADR-0042) is on by default in voice and all mode;
 	// GLYPHOXA_STT_STREAMING=0 is the off-switch back to the batch STT path.
 	cfg.STTStreaming = sttStreaming(os.Getenv)
+	// The names at the table go to the recognizer as keyterms on both STT
+	// transports (#701); GLYPHOXA_STT_KEYTERMS=0 is the off-switch. Pinning the
+	// recognizer to the Campaign Language is opt-in (GLYPHOXA_STT_LANGUAGE_HINT=1).
+	cfg.STTKeyterms = sttKeyterms(os.Getenv)
+	cfg.STTLanguageHint = sttLanguageHint(os.Getenv)
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.

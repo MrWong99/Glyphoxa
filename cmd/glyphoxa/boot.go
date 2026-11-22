@@ -380,6 +380,34 @@ func sttStreaming(getenv func(string) string) bool {
 	return true
 }
 
+// sttKeyterms reports whether the recognizer is biased towards the names at the
+// table (#701, ADR-0042 amendment 2026-11-22): the Voice Session's Cast, Butler
+// and player-character names are sent to the STT provider as keyterms on both
+// transports. ON by default; GLYPHOXA_STT_KEYTERMS is the off-switch, parsed like
+// GLYPHOXA_STT_STREAMING — only an explicit falsy spelling turns it off. Off
+// sends the pre-#701 requests and drops the provider's keyterm surcharge.
+func sttKeyterms(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_KEYTERMS"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// sttLanguageHint reports whether the recognizer is pinned to the Campaign
+// Language (language_code on both STT transports) instead of detecting the
+// language per utterance. OFF by default — a table may mix languages — and only
+// an explicit truthy GLYPHOXA_STT_LANGUAGE_HINT ("1"/"true"/"yes"/"on", any case,
+// trimmed) turns it on: a typo must not silently stop a bilingual table being
+// understood.
+func sttLanguageHint(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_LANGUAGE_HINT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published
 // privacy-policy page, which the Bot links from the transcription disclosure it
 // posts at Voice Session start (#519). Trimmed; blank means "not published", and
