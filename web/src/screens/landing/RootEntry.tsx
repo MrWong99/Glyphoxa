@@ -62,9 +62,11 @@ export function RootEntry() {
         void navigate({ href: back, replace: true });
         return;
       }
+      // The tenant index decides where the app opens (the campaign's Overview,
+      // ADR-0063 amendment) — one place owns that, not this component.
       void navigate({
-        to: "/t/$tenantSlug/$screen",
-        params: { tenantSlug: DEFAULT_TENANT, screen: "configuration" },
+        to: "/t/$tenantSlug",
+        params: { tenantSlug: DEFAULT_TENANT },
         replace: true,
       });
     }

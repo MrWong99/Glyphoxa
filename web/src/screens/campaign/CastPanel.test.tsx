@@ -1,0 +1,771 @@
+import { describe, it, expect, vi } from "vitest";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
+import { create } from "@bufbuild/protobuf";
+
+import {
+  CampaignService,
+  VoiceService,
+  AgentSchema,
+  CampaignSchema,
+  GetCampaignRosterResponseSchema,
+  CreateAgentResponseSchema,
+  UpdateAgentResponseSchema,
+  DeleteAgentResponseSchema,
+  ListVoicesResponseSchema,
+  VoiceSchema,
+  PreviewVoiceResponseSchema,
+  ToolGrantSchema,
+  ListToolGrantsResponseSchema,
+  UpdateToolGrantResponseSchema,
+  GeneratePersonaResponseSchema,
+  GetKnowledgeGraphResponseSchema,
+  GetRosterReadinessResponseSchema,
+} from "@gen/glyphoxa/management/v1/management_pb";
+import { Providers } from "@/app/Providers";
+import { MemoryScreenNav, useScreenNav, type ScreenLocation } from "@/app/screenNav";
+import { makeQueryClient } from "@/lib/queryClient";
+import { CampaignScreenProvider, type CampaignScreen } from "./campaignContext";
+import { CastPanel } from "./CastPanel";
+
+// An in-memory campaign store served over a router transport (no network): the
+// roster mutates in this closure, so a Save → invalidate → refetch proves the
+// edit round-trips and reloads identically (the #71 acceptance), and the Butler
+// invariants are exercised against the same handlers the live screen calls.
+function mockTransport() {
+  const campaign = create(CampaignSchema, {
+    id: "c1",
+    name: "The Sunless Citadel",
+    system: "D&D 5e",
+    language: "en",
+  });
+  const butler = create(AgentSchema, {
+    id: "butler-1",
+    campaignId: "c1",
+    role: "butler",
+    name: "Glyphoxa",
+    title: "",
+    addressOnly: true,
+    speakerColor: 0,
+  });
+  const npcs = [
+    create(AgentSchema, {
+      id: "npc-1",
+      campaignId: "c1",
+      role: "character",
+      name: "Bart",
+      title: "Gruff innkeeper",
+      persona: "Grumbles.",
+      voice: "rachel",
+      addressOnly: false,
+      speakerColor: 0,
+    }),
+  ];
+  let nextId = 2;
+
+  // LIVE voice catalog the select renders (#70). It includes the NPC's persisted
+  // "rachel" id so the trigger shows its live label, proving the dropdown is fed
+  // by VoiceService rather than a static list.
+  const liveVoices = [
+    create(VoiceSchema, { provider: "elevenlabs", voiceId: "rachel", name: "Rachel", label: "ElevenLabs · Rachel" }),
+    create(VoiceSchema, { provider: "elevenlabs", voiceId: "marcus", name: "Marcus", label: "ElevenLabs · Marcus" }),
+  ];
+  const previewCalls: string[] = [];
+
+  // Per-agent Tool grant state (#117). The catalog is dice-only (matching the
+  // server's built-in Registry): the Butler comes granted, Bart ungranted. An
+  // unknown agent (a freshly added NPC) defaults to dice-ungranted so the section
+  // always renders the catalog. dice supports no scope, so no scope editor shows.
+  const grants: Record<string, { granted: boolean; config: string }> = {
+    "butler-1": { granted: true, config: "" },
+    "npc-1": { granted: false, config: "" },
+  };
+  const grantEntry = (agentId: string) => {
+    const state = grants[agentId] ?? { granted: false, config: "" };
+    return create(ToolGrantSchema, {
+      toolName: "dice",
+      description: "Roll dice.",
+      granted: state.granted,
+      config: state.config,
+      supportsScope: false,
+    });
+  };
+
+  const transport = createRouterTransport(({ service }) => {
+    service(VoiceService, {
+      listVoices: () => create(ListVoicesResponseSchema, { voices: liveVoices }),
+      previewVoice: (req) => {
+        previewCalls.push(req.voiceId);
+        return create(PreviewVoiceResponseSchema, {
+          audio: new Uint8Array([1, 2, 3, 4]),
+          sampleRate: 24000,
+          channels: 1,
+          mimeType: "audio/wav",
+        });
+      },
+    });
+    service(CampaignService, {
+      getCampaignRoster: () =>
+        create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, ...npcs] }),
+      createAgent: (req) => {
+        const agent = create(AgentSchema, {
+          id: `npc-${nextId++}`,
+          campaignId: "c1",
+          role: "character",
+          name: req.name,
+          title: req.title,
+          persona: req.persona,
+          voice: req.voice,
+          addressOnly: req.addressOnly,
+          speakerColor: npcs.length % 6,
+        });
+        npcs.push(agent);
+        return create(CreateAgentResponseSchema, { agent });
+      },
+      updateAgent: (req) => {
+        const target = req.id === butler.id ? butler : npcs.find((n) => n.id === req.id);
+        if (!target) throw new Error("not found");
+        target.name = req.name;
+        target.title = req.title;
+        target.persona = req.persona;
+        target.voice = req.voice;
+        // The Butler stays Address-Only no matter what the client asks (server rule).
+        target.addressOnly = target.role === "butler" ? true : req.addressOnly;
+        return create(UpdateAgentResponseSchema, { agent: target });
+      },
+      deleteAgent: (req) => {
+        const i = npcs.findIndex((n) => n.id === req.id);
+        if (i >= 0) npcs.splice(i, 1);
+        return create(DeleteAgentResponseSchema, {});
+      },
+      listToolGrants: (req) =>
+        create(ListToolGrantsResponseSchema, { grants: [grantEntry(req.agentId)] }),
+      updateToolGrant: (req) => {
+        grants[req.agentId] = { granted: req.granted, config: req.granted ? req.config : "" };
+        return create(UpdateToolGrantResponseSchema, { grant: grantEntry(req.agentId) });
+      },
+      // The Session-prep mode's two reads (#544); empty answers are enough to
+      // prove the mode mounts.
+      getKnowledgeGraph: () => create(GetKnowledgeGraphResponseSchema, {}),
+      getRosterReadiness: () => create(GetRosterReadinessResponseSchema, {}),
+    });
+  });
+  return { transport, npcs, previewCalls, grants };
+}
+
+// The panel mounts on nothing but its own RPCs: no host, no router. (The host's
+// side — the view switch, the campaign header, selection surviving a view
+// change — is Campaign.test.tsx.)
+function renderScreen() {
+  const { transport, npcs, previewCalls, grants } = mockTransport();
+  render(
+    <Providers transport={transport} queryClient={makeQueryClient()}>
+      <CastPanel />
+    </Providers>,
+  );
+  return { npcs, previewCalls, grants };
+}
+
+// The Tools section and the addressing switch live inside a closed-by-default
+// AdvancedCard whose body is unmounted while closed — every assertion against
+// them must open the card first. The editor remounts (keyed) when the selected
+// agent changes, so the card must be re-opened after each selection change.
+function openAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: /advanced: tools & addressing/i }));
+}
+
+// scopedTransport serves a single scope-supporting Tool (remember_knowledge)
+// whose grant state mutates in-closure and records every UpdateToolGrant call, so
+// a test can prove what the grant Switch versus the Save-scope button actually
+// send (#215). It mirrors the handler: a granted=true call with an empty config
+// stores no scope (a fresh grant), and granted=false clears it.
+function scopedTransport(initial: { granted: boolean; config: string }) {
+  const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+  const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+  const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+  let state = { ...initial };
+  const calls: { granted: boolean; config: string }[] = [];
+  const entry = () =>
+    create(ToolGrantSchema, {
+      toolName: "remember_knowledge",
+      description: "Remember a fact.",
+      granted: state.granted,
+      config: state.config,
+      supportsScope: true,
+    });
+  const transport = createRouterTransport(({ service }) => {
+    service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+    service(CampaignService, {
+      getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+      listToolGrants: () => create(ListToolGrantsResponseSchema, { grants: [entry()] }),
+      updateToolGrant: (req) => {
+        calls.push({ granted: req.granted, config: req.config });
+        state = { granted: req.granted, config: req.granted ? req.config : "" };
+        return create(UpdateToolGrantResponseSchema, { grant: entry() });
+      },
+    });
+  });
+  return { transport, calls, state: () => state };
+}
+
+describe("CastPanel", () => {
+  it("renders the roster on its own RPCs — no host, no router", async () => {
+    renderScreen();
+    // Both the Butler and the NPC appear in the roster.
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
+    expect(screen.getByText("Glyphoxa")).toBeInTheDocument();
+    // The campaign header is the host's, not the panel's.
+    expect(screen.queryByRole("heading", { name: "The Sunless Citadel" })).not.toBeInTheDocument();
+  });
+
+  it("shows a skeleton while the roster loads, then the roster", async () => {
+    renderScreen();
+    expect(screen.getByTestId("roster-loading")).toBeInTheDocument();
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
+    expect(screen.queryByTestId("roster-loading")).not.toBeInTheDocument();
+  });
+
+  it("says why when the roster cannot be loaded", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => {
+          throw new ConnectError("roster store offline", Code.Unavailable);
+        },
+      });
+    });
+    // A failed roster read is retried (it is only CodeNotFound that settles at
+    // once); no backoff here so the test reaches the settled error quickly.
+    const queryClient = makeQueryClient();
+    queryClient.setDefaultOptions({ queries: { retryDelay: 0 } });
+    render(
+      <Providers transport={transport} queryClient={queryClient}>
+        <CastPanel />
+      </Providers>,
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't load the campaign.*roster store offline/i);
+  });
+
+  it("locks the Butler: Address-Only is forced on and its switch is disabled", async () => {
+    renderScreen();
+    // Select the Butler; the addressing switch sits in the advanced card.
+    fireEvent.click(await screen.findByText("Glyphoxa"));
+    openAdvanced();
+    const sw = screen.getByLabelText(/only answers when called by name/i);
+    expect(sw).toBeDisabled();
+    expect(sw).toBeChecked();
+    // The Butler is not deletable.
+    expect(screen.queryByRole("button", { name: /delete npc/i })).not.toBeInTheDocument();
+  });
+
+  it("round-trips an NPC edit to the store and reloads it identically", async () => {
+    const { npcs } = renderScreen();
+    // Select the NPC and rename it.
+    fireEvent.click(await screen.findByText("Bart"));
+    const name = screen.getByLabelText("Name") as HTMLInputElement;
+    expect(name.value).toBe("Bart");
+    fireEvent.change(name, { target: { value: "Bartholomew" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    // The edit persisted to the store…
+    expect(await screen.findByText("Bartholomew")).toBeInTheDocument();
+    expect(npcs[0].name).toBe("Bartholomew");
+    // …and the old name is gone (the roster re-read the store).
+    expect(screen.queryByText("Bart")).not.toBeInTheDocument();
+  });
+
+  it("adds an NPC and deletes it, keeping the store in sync", async () => {
+    const { npcs } = renderScreen();
+    await screen.findByText("Bart");
+    expect(npcs).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /add npc/i }));
+    expect(await screen.findByText("New NPC")).toBeInTheDocument();
+    expect(npcs).toHaveLength(2);
+
+    // Delete the freshly added NPC (it is auto-selected after creation). The
+    // destructive act is gated behind a ConfirmDialog — nothing mutates until
+    // the dialog's own confirm is pressed.
+    fireEvent.click(screen.getByRole("button", { name: /delete npc/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /delete npc/i }));
+    // The new NPC leaves the roster once the store re-reads; the original stays.
+    await waitFor(() => expect(screen.queryByText("New NPC")).not.toBeInTheDocument());
+    expect(npcs).toHaveLength(1);
+    expect(screen.getByText("Bart")).toBeInTheDocument();
+  });
+
+  it("shows a success cue after Save changes succeeds", async () => {
+    renderScreen();
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    // A live status region confirms the persist landed.
+    expect(await screen.findByText(/^saved$/i)).toBeInTheDocument();
+  });
+
+  it("surfaces an error cue when Save changes fails", async () => {
+    // A transport whose UpdateAgent rejects, so the editor must show an error.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        updateAgent: () => {
+          throw new Error("boom");
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't save/i);
+  });
+
+  it("disables Save while in flight and cannot be double-submitted", async () => {
+    // A deferred UpdateAgent holds the mutation pending until we resolve it.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    let resolveUpdate: () => void = () => {};
+    let updateCalls = 0;
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        updateAgent: async () => {
+          updateCalls += 1;
+          await new Promise<void>((r) => (resolveUpdate = r));
+          return create(UpdateAgentResponseSchema, { agent: npc });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    const saveBtn = screen.getByRole("button", { name: /save changes/i });
+    fireEvent.click(saveBtn);
+
+    // In flight: the button reads "Saving…" and is disabled.
+    const pending = await screen.findByRole("button", { name: /saving/i });
+    expect(pending).toBeDisabled();
+    // A second click while pending is a no-op (disabled → no extra RPC).
+    fireEvent.click(pending);
+    expect(updateCalls).toBe(1);
+
+    resolveUpdate();
+    expect(await screen.findByText(/^saved$/i)).toBeInTheDocument();
+  });
+
+  it("renders the voice select from the live ListVoices catalog", async () => {
+    renderScreen();
+    // Select Bart (persisted voice id "rachel"); the trigger shows the LIVE label
+    // resolved from the catalog, not the raw id — proving the dropdown is fed by
+    // VoiceService.ListVoices.
+    fireEvent.click(await screen.findByText("Bart"));
+    expect(await screen.findByText("ElevenLabs · Rachel")).toBeInTheDocument();
+  });
+
+  it("surfaces an error cue when the voice preview fails", async () => {
+    // A degraded TTS (PreviewVoice rejects) must render, not just stop the spinner.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        listVoices: () => create(ListVoicesResponseSchema, { voices: [] }),
+        previewVoice: () => {
+          throw new Error("tts unavailable");
+        },
+      });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /preview voice/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't preview/i);
+  });
+
+  it("previews the selected voice via the PreviewVoice RPC", async () => {
+    const { previewCalls } = renderScreen();
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /preview voice/i }));
+    // The preview RPC fired for the selected voice (audio playback is a no-op in
+    // jsdom; the RPC call is the observable behaviour).
+    await waitFor(() => expect(previewCalls).toEqual(["rachel"]));
+  });
+
+  it("shows the per-agent Tools section with each grant's current state (#117)", async () => {
+    renderScreen();
+    // Bart (npc-1) is dice-ungranted; the toggle renders unchecked.
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+    const dice = await screen.findByLabelText("Dice rolls");
+    expect(dice).not.toBeChecked();
+
+    // The Butler (butler-1) is dice-granted; its toggle renders checked. The
+    // editor remounted on selection, so the advanced card is closed again.
+    fireEvent.click(screen.getByText("Glyphoxa"));
+    openAdvanced();
+    expect(await screen.findByLabelText("Dice rolls")).toBeChecked();
+  });
+
+  it("toggles a grant on and it persists across a reload (#117 AC2)", async () => {
+    const { grants } = renderScreen();
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+    const dice = await screen.findByLabelText("Dice rolls");
+    expect(dice).not.toBeChecked();
+
+    fireEvent.click(dice);
+
+    // The mutation persisted to the store and the invalidated query re-read it as
+    // granted — the toggle sticks after the reload the invalidation triggers.
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeChecked());
+    expect(grants["npc-1"].granted).toBe(true);
+  });
+
+  it("disables the grant toggle while its mutation is in flight (#117)", async () => {
+    // A deferred UpdateToolGrant holds the toggle pending until we resolve it.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    let resolveUpdate: () => void = () => {};
+    let updateCalls = 0;
+    let granted = false;
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        listToolGrants: () =>
+          create(ListToolGrantsResponseSchema, {
+            grants: [create(ToolGrantSchema, { toolName: "dice", description: "Roll dice.", granted })],
+          }),
+        updateToolGrant: async (req) => {
+          updateCalls += 1;
+          await new Promise<void>((r) => (resolveUpdate = r));
+          granted = req.granted;
+          return create(UpdateToolGrantResponseSchema, {
+            grant: create(ToolGrantSchema, { toolName: "dice", granted }),
+          });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+    const dice = await screen.findByLabelText("Dice rolls");
+    fireEvent.click(dice);
+
+    // In flight: the toggle is disabled, so a second click can't double-submit.
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeDisabled());
+    fireEvent.click(screen.getByLabelText("Dice rolls"));
+    expect(updateCalls).toBe(1);
+
+    resolveUpdate();
+    await waitFor(() => expect(screen.getByLabelText("Dice rolls")).toBeChecked());
+  });
+
+  it("renders a scope editor only for a Tool that supports one, and round-trips its config (#117 AC3)", async () => {
+    // A scope-supporting Tool exercises the editor half of AC3; dice (no scope)
+    // proves the editor is absent for a Tool without one.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    const configs: string[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        listToolGrants: () =>
+          create(ListToolGrantsResponseSchema, {
+            grants: [
+              create(ToolGrantSchema, { toolName: "dice", description: "Roll dice.", granted: true, supportsScope: false }),
+              create(ToolGrantSchema, {
+                toolName: "remember_knowledge",
+                description: "Remember a fact.",
+                granted: true,
+                supportsScope: true,
+                config: '{"scope":"self"}',
+              }),
+            ],
+          }),
+        updateToolGrant: (req) => {
+          configs.push(req.config);
+          return create(UpdateToolGrantResponseSchema, {
+            grant: create(ToolGrantSchema, { toolName: req.toolName, granted: req.granted, config: req.config, supportsScope: true }),
+          });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+
+    // dice supports no scope → no scope field; remember_knowledge does → one
+    // shows, under friendly labels (never the wire names) and tucked behind
+    // the closed "Advanced" disclosure.
+    await screen.findByLabelText("Dice rolls");
+    expect(screen.queryByText("dice")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/dice rolls scope/i)).not.toBeInTheDocument();
+    const advanced = screen.getByText(/advanced: scope \(json\)/i).closest("details") as HTMLDetailsElement;
+    expect(advanced.open).toBe(false);
+    fireEvent.click(screen.getByText(/advanced: scope \(json\)/i));
+    const scope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
+    expect(scope.value).toBe('{"scope":"self"}');
+
+    // Edit the scope and save it: the new config round-trips through UpdateToolGrant.
+    fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
+    fireEvent.click(screen.getByRole("button", { name: /save scope/i }));
+    await waitFor(() => expect(configs).toContain('{"scope":"campaign"}'));
+  });
+
+  it("Generate persona sends the live (unsaved) name/title, not the stored cast entry (#480)", async () => {
+    // The stored NPC still carries the "New NPC" placeholder; the GM types a
+    // real name WITHOUT saving, then generates. The RPC must carry the live
+    // form values — the repro drafted "Du bist New NPC" otherwise.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, {
+      id: "n1",
+      campaignId: "c1",
+      role: "character",
+      name: "New NPC",
+      title: "Stored Title",
+      voice: "rachel",
+    });
+    const seen: { name?: string; title?: string }[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        generatePersona: (req) => {
+          seen.push({ name: req.name, title: req.title });
+          return create(GeneratePersonaResponseSchema, { persona: "**Du bist Jule Brandt**" });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("New NPC"));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Jule Brandt" } });
+    fireEvent.change(screen.getByLabelText("Role shown under the name"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Draft with AI"), { target: { value: "a stern harbourmaster" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate draft/i }));
+
+    // The RPC carried the live form values — including the cleared title, whose
+    // presence tells the server NOT to fall back to the stored one.
+    await waitFor(() => expect(seen).toHaveLength(1));
+    expect(seen[0]).toEqual({ name: "Jule Brandt", title: "" });
+    // The draft landed in the persona field for review (still unsaved).
+    await waitFor(() =>
+      expect((screen.getByLabelText("Personality & backstory") as HTMLTextAreaElement).value).toBe(
+        "**Du bist Jule Brandt**",
+      ),
+    );
+  });
+
+  it("the grant Switch never persists an unsaved scope edit; only Save scope does (#215)", async () => {
+    const { transport, calls } = scopedTransport({ granted: true, config: '{"scope":"self"}' });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+    const scope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
+    expect(scope.value).toBe('{"scope":"self"}');
+
+    // Edit the scope but do NOT click Save scope, then flip the grant Switch off.
+    fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
+    fireEvent.click(screen.getByLabelText("Remember facts"));
+
+    // The toggle mutation fired for the revoke and carried NO config — the unsaved
+    // draft was never sent, so a stray edit can't silently persist on a toggle.
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].granted).toBe(false);
+    expect(calls[0].config).toBe("");
+  });
+
+  it("toggling a grant off then on does not resurrect the pre-revoke scope (#215)", async () => {
+    const { transport, calls, state } = scopedTransport({ granted: true, config: '{"scope":"self"}' });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CastPanel />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    openAdvanced();
+    const sw = await screen.findByLabelText("Remember facts");
+    expect(sw).toBeChecked();
+
+    // Revoke (deletes the row), then re-grant.
+    fireEvent.click(sw);
+    await waitFor(() => expect(screen.getByLabelText("Remember facts")).not.toBeChecked());
+    fireEvent.click(screen.getByLabelText("Remember facts"));
+    await waitFor(() => expect(screen.getByLabelText("Remember facts")).toBeChecked());
+
+    // The re-grant is a FRESH grant with no scope — the deleted config is gone, not
+    // resurrected from local state — and the reappeared editor shows the server
+    // value (empty), not the stale pre-revoke draft.
+    expect(state().config).toBe("");
+    const rescope = (await screen.findByLabelText("Remember facts scope")) as HTMLInputElement;
+    expect(rescope.value).toBe("");
+    const onCall = calls[calls.length - 1];
+    expect(onCall.granted).toBe(true);
+    expect(onCall.config).toBe("");
+  });
+});
+
+const persona = () => screen.getByLabelText("Personality & backstory") as HTMLTextAreaElement;
+
+describe("CastPanel ?agent= deep link", () => {
+  // The route guarantees ?agent= only ever arrives on the cast view
+  // (router.test.tsx); the panel's job is the consume-then-strip.
+  it("opens the editor on that NPC once, then strips the param without a history entry", async () => {
+    const { transport } = mockTransport();
+    const moves: { next: ScreenLocation; replace: boolean }[] = [];
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <MemoryScreenNav
+          initial={{ screen: "campaign", view: "cast", search: { agent: "npc-1" } }}
+          onNavigate={(next, opts) => moves.push({ next, replace: opts.replace })}
+        >
+          <CastPanel />
+        </MemoryScreenNav>
+      </Providers>,
+    );
+    // Bart's editor, not the Butler's (the default selection).
+    await waitFor(() => expect(persona().value).toBe("Grumbles."));
+    // Stripped by REPLACE, on the same view: the URL does not pin the selection
+    // and Back does not step through the deep link.
+    expect(moves).toEqual([
+      { next: { screen: "campaign", view: "cast", search: {} }, replace: true },
+    ]);
+
+    // Once: picking someone else afterwards is not undone by the consumed param.
+    fireEvent.click(screen.getByText("Glyphoxa").closest("button") as HTMLButtonElement);
+    await waitFor(() => expect(persona().value).toBe(""));
+    expect(moves).toHaveLength(1);
+  });
+
+  it("asks before a jump replaces an editor with unsaved edits", async () => {
+    const { transport } = mockTransport();
+    let jump: (agentID: string) => void = () => {};
+    function Jump() {
+      // Stands in for a palette hit landing on ?agent= while Cast is open.
+      const nav = useScreenNav();
+      jump = (agentID) => nav.setSearch({ agent: agentID });
+      return null;
+    }
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <MemoryScreenNav initial={{ screen: "campaign", view: "cast" }}>
+          <Jump />
+          <CastPanel />
+        </MemoryScreenNav>
+      </Providers>,
+    );
+    // The Butler is selected by default; type into its editor without saving.
+    await screen.findByText("Bart");
+    fireEvent.change(persona(), { target: { value: "Dry, exact, a little tired." } });
+
+    act(() => jump("npc-1"));
+    expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument());
+    // Cancelled: still the Butler's editor, the typing intact.
+    expect(persona().value).toBe("Dry, exact, a little tired.");
+  });
+});
+
+describe("CastPanel cross-view jumps", () => {
+  // The panel takes no navigation props: a fix in the Session-prep view that
+  // lives in the World wiki goes through the host (useCampaignScreen).
+  function renderInHost() {
+    const openNode = vi.fn();
+    const openView = vi.fn();
+    const host: CampaignScreen = {
+      campaign: undefined,
+      roster: [],
+      openNode,
+      openAgent: vi.fn(),
+      openView,
+    };
+    const campaign = create(CampaignSchema, { id: "c1", name: "X" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    // Bart has a linked but EMPTY wiki entry; Mira has none at all.
+    const bart = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", persona: "Grumbles.", voice: "rachel" });
+    const mira = create(AgentSchema, { id: "n2", campaignId: "c1", role: "character", name: "Mira", persona: "Schemes.", voice: "rachel" });
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () =>
+          create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, bart, mira] }),
+        getKnowledgeGraph: () =>
+          create(GetKnowledgeGraphResponseSchema, {
+            nodes: [{ id: "node-bart", nodeType: 2, name: "Bart", agentId: "n1", bodyLen: 0 }],
+            edges: [],
+          }),
+        getRosterReadiness: () =>
+          create(GetRosterReadinessResponseSchema, {
+            agents: [{ agentId: "n1", linked: true, factCount: 3, chars: 400, maxChars: 4000 }],
+          }),
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CampaignScreenProvider value={host}>
+          <CastPanel />
+        </CampaignScreenProvider>
+      </Providers>,
+    );
+    return { openNode, openView };
+  }
+
+  it("opens the NPC's wiki entry from an unmet 'Entry has content' mark", async () => {
+    const { openNode, openView } = renderInHost();
+    fireEvent.click(await screen.findByRole("button", { name: "Session prep" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Bart: Entry has content — missing, fix it" }),
+    );
+    expect(openNode).toHaveBeenCalledWith("node-bart");
+    expect(openView).not.toHaveBeenCalled();
+  });
+
+  it("opens the World wiki from an unmet 'Wiki entry linked' mark", async () => {
+    const { openNode, openView } = renderInHost();
+    fireEvent.click(await screen.findByRole("button", { name: "Session prep" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Mira: Wiki entry linked — missing, fix it" }),
+    );
+    expect(openView).toHaveBeenCalledWith("knowledge");
+    expect(openNode).not.toHaveBeenCalled();
+  });
+});

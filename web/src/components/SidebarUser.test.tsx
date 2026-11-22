@@ -35,6 +35,19 @@ describe("SidebarUser", () => {
     expect(screen.getByText("operator")).toBeInTheDocument();
   });
 
+  it("shows no presence dot — the avatar is an identity, not a live-session signal", () => {
+    // It used to carry a hardcoded green "live" dot on every screen, whether or
+    // not a Voice Session was running. The real signal is the shell's
+    // (useLiveSession), on the Session nav item and in the topbar.
+    const { container } = render(
+      <Providers transport={createRouterTransport(() => {})} queryClient={makeQueryClient()}>
+        <SidebarUser user={create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" })} />
+      </Providers>,
+    );
+    expect(container.querySelector(".gx-avatar")).toBeInTheDocument();
+    expect(container.querySelector(".gx-avatar__status")).not.toBeInTheDocument();
+  });
+
   it("logs out — calls Logout and redirects to /login", async () => {
     let loggedOut = false;
     const transport = createRouterTransport(({ service }) => {

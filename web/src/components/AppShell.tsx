@@ -1,21 +1,10 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link, Outlet, useParams } from "@tanstack/react-router";
+import { useQuery } from "@connectrpc/connect-query";
 import { Toaster } from "sonner";
-import {
-  BookOpen,
-  Dices,
-  Lightbulb,
-  Map as MapIcon,
-  MessagesSquare,
-  PanelLeft,
-  ScrollText,
-  Search,
-  Settings,
-  Swords,
-  Users,
-  UsersRound,
-} from "lucide-react";
+import { Dices, PanelLeft, Search } from "lucide-react";
 
+import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
@@ -24,42 +13,33 @@ import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
 import { CommandPalette } from "./CommandPalette";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { useI18n, type MessageKey } from "@/i18n";
-import { isCampaignView, type CampaignView } from "@/screens/campaign/views";
+import {
+  CAMPAIGN_DESTINATIONS,
+  SCREEN_DESTINATIONS,
+  campaignDestination,
+  screenDestination,
+} from "@/app/destinations";
+import { useI18n } from "@/i18n";
+import { isNotFound } from "@/lib/connectError";
+import { formatElapsed, useElapsedSeconds, useLiveSession } from "@/lib/useLiveSession";
+import { isCampaignView } from "@/screens/campaign/views";
+
+import "./appShell.css";
 
 // The persistent app shell — sidebar + topbar — ported from the handoff
 // ui_kits/glyphoxa-web/shell.jsx (its inline styles lifted onto .gx-shell* /
-// .gx-topbar* in styles/components.css) and driven by TanStack Router's active
-// route rather than page state (ADR-0018). The Tenant lives in the path
-// (/t/:tenantSlug/...); for the single-operator MVP (ADR-0039) it is a thin
-// pass-through slug. The sidebar user footer now shows the real signed-in
-// operator (ADR-0016), passed in by the AuthGate that wraps the shell.
-
-type NavItem = { to: string; label: MessageKey; icon: ReactNode; title: MessageKey };
-
-const NAV: NavItem[] = [
-  { to: "configuration", label: "shell.navSetup", icon: <Settings size={18} />, title: "shell.titleSetup" },
-  { to: "campaign", label: "shell.navCampaign", icon: <Swords size={18} />, title: "shell.titleCampaign" },
-  { to: "session", label: "shell.navSession", icon: <ScrollText size={18} />, title: "shell.titleSession" },
-];
-
-// The Campaign screen's sub-views as sidebar sub-navigation (ADR-0063) — the
-// screen's former in-page tab bar, one Link per view, reusing the tab labels.
-// Rendered accordion-style under the Campaign item while it is active; the
-// active sub-view comes from the route's :view path param.
-const CAMPAIGN_SUBNAV: { view: CampaignView; label: MessageKey; icon: ReactNode }[] = [
-  { view: "cast", label: "campaign.tabCast", icon: <Users size={15} /> },
-  // The internal "Knowledge Graph" never faces the GM — the item reads
-  // "World wiki" (the copy-simplification glossary).
-  { view: "knowledge", label: "campaign.tabWiki", icon: <BookOpen size={15} /> },
-  { view: "maps", label: "campaign.tabMaps", icon: <MapIcon size={15} /> },
-  { view: "players", label: "campaign.tabPlayers", icon: <UsersRound size={15} /> },
-  // "Knowledge Proposals" simplifies to "Suggestions" for the same reason the
-  // graph became a wiki: GMs, not developers.
-  { view: "proposals", label: "campaign.tabSuggestions", icon: <Lightbulb size={15} /> },
-  // Butler planning chat (#592, ADR-0062).
-  { view: "planning", label: "chat.tabPlanning", icon: <MessagesSquare size={15} /> },
-];
+// .gx-topbar* in styles/components.css; what the shell has grown since lives in
+// ./appShell.css) and driven by TanStack Router's active route rather than page
+// state (ADR-0018). The Tenant lives in the path (/t/:tenantSlug/...); for the
+// single-operator MVP (ADR-0039) it is a thin pass-through slug. The sidebar
+// user footer shows the real signed-in operator (ADR-0016), passed in by the
+// AuthGate that wraps the shell.
+//
+// The sidebar is campaign-first (ADR-0063 amendment): a section labelled with
+// the Active Campaign's name lists that campaign's views on EVERY screen — not
+// only while the Campaign screen is open — then Session, and, pinned at the
+// bottom, the two Tenant-wide destinations: Campaigns and Setup. The lists
+// themselves are app/destinations.ts.
 
 // The sidebar's off-canvas drawer breakpoint. Must stay in sync with the
 // @media block in styles/components.css; every JS check goes through
@@ -68,22 +48,92 @@ const DRAWER_BREAKPOINT = "(max-width: 880px)";
 const isDrawerViewport = () =>
   typeof window !== "undefined" && (window.matchMedia?.(DRAWER_BREAKPOINT).matches ?? false);
 
+// How often the pending-suggestions count is re-read while a Voice Session is
+// live — that is when the Butler and the NPCs file them. Idle, the count only
+// moves when the GM reviews one (which invalidates the read) or refocuses the
+// tab.
+const PROPOSALS_REFETCH_MS = 60_000;
+
+// The pending-suggestions read is ONE cache entry shared with the Suggestions
+// view and the graph overlay, and React Query runs a refetch with the options
+// of the observer that starts it — on a window refocus the first one
+// subscribed, which is the shell. So the shell must not be stricter than they
+// are: with a bare retry:false here, one failed refetch put the shared query in
+// error and the Suggestions view swapped its whole list for an error line.
+// Failures are retried like any other read; only the settled "this Tenant has
+// no campaign yet" answer (CodeNotFound) is not — backing off on that would
+// just delay the empty state.
+const proposalsRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
+
 export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
   const { t } = useI18n();
-  // view is present only under the campaign sub-view route (ADR-0063); it
-  // drives the sub-navigation's active highlight. Derived by hand rather than
-  // via Link activeProps so the mocked-router unit test can observe it, and
-  // because the parent Campaign link needs the value anyway (see below).
+  // Derived by hand rather than via Link activeProps so the mocked-router unit
+  // test can observe it, and because the topbar needs the values anyway.
   const { screen, view } = useParams({ strict: false }) as { screen?: string; view?: string };
-  const active = NAV.find((n) => n.to === screen);
   const activeView = screen === "campaign" && isCampaignView(view) ? view : undefined;
+  const activeScreen = screenDestination(screen);
 
-  // The browser tab names the screen ("Session · Glyphoxa") — with several
-  // Glyphoxa tabs open, an all-"Glyphoxa" tab strip is a guessing game.
-  const screenTitle = active ? t(active.title) : null;
+  // The Active Campaign names the sidebar section, the breadcrumb and the
+  // browser tab. retry:false like every other observer of this shared cache
+  // entry (the switcher, Setup, Session), so a fresh install's CodeNotFound
+  // settles at once whichever of them mounted first. Rendered from DATA, which
+  // React Query retains through a failed background refetch — a transient blip
+  // never blanks a name already shown.
+  const activeQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
+  const campaignName = activeQ.data?.campaign?.name;
+  const noCampaign = !activeQ.data && activeQ.isError && isNotFound(activeQ.error);
+
+  // Live and attention signals, on every screen.
+  const { live, startedMs } = useLiveSession();
+  // The same cache entry the Suggestions view reads, so approving or dismissing
+  // one there moves this count without a second source of truth. A count that
+  // cannot be read is simply not shown; a count already shown survives a failed
+  // refetch (it is rendered from retained data).
+  const proposalsQ = useQuery(
+    CampaignService.method.listKnowledgeProposals,
+    {},
+    {
+      staleTime: PROPOSALS_REFETCH_MS,
+      retry: proposalsRetry,
+      refetchInterval: live ? PROPOSALS_REFETCH_MS : false,
+    },
+  );
+  const pendingSuggestions = proposalsQ.data?.proposals.length ?? 0;
+
+  // What the topbar and the browser tab call this page. Campaign views and the
+  // Session screen are about ONE campaign, so they carry its name; Campaigns
+  // and Setup are Tenant-wide and do not.
+  const pageTitle = activeView
+    ? t(campaignDestination(activeView).label)
+    : activeScreen
+      ? t(activeScreen.title)
+      : null;
+  const crumbCampaign = activeView || screen === "session" ? campaignName : undefined;
+
+  // "<View> · <Campaign> · Glyphoxa" — with several Glyphoxa tabs open, an
+  // all-"Glyphoxa" tab strip is a guessing game, and two campaigns' Cast tabs
+  // are no better.
+  const documentTitle = [pageTitle, crumbCampaign, "Glyphoxa"].filter(Boolean).join(" · ");
   useEffect(() => {
-    document.title = screenTitle ? `${screenTitle} · Glyphoxa` : "Glyphoxa";
-  }, [screenTitle]);
+    document.title = documentTitle;
+  }, [documentTitle]);
+  // Nothing else writes the tab title, so the shell hands it back when it
+  // unmounts: a lapsed session leaves by an in-app navigation to /login, and
+  // the public page must not keep a campaign's name in the tab.
+  useEffect(
+    () => () => {
+      document.title = "Glyphoxa";
+    },
+    [],
+  );
+
+  // A new screen or view starts at its top. .gx-content is the scroll
+  // container (the shell itself never scrolls), so without this a GM who
+  // scrolled down the wiki would land halfway down Cast.
+  const contentRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [screen, view]);
 
   // Sidebar collapse (#88 slice 4). On narrow viewports the sidebar is an
   // off-canvas drawer the topbar toggle opens; on wide viewports the toggle hides
@@ -104,6 +154,8 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
     if (isDrawerViewport()) setCollapsed(true);
   };
 
+  const sectionLabelId = useId();
+
   return (
     <div className="gx-shell" data-collapsed={collapsed ? "true" : undefined}>
       <button
@@ -114,65 +166,117 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
         onClick={() => setCollapsed(true)}
       />
       <aside className="gx-sidebar">
-        <div className="gx-sidebar__brand">
+        {/* The brand is the way home: the tenant index, which opens the
+            campaign's Overview. */}
+        <Link
+          className="gx-sidebar__brand"
+          to="/t/$tenantSlug"
+          params={{ tenantSlug }}
+          aria-label={t("shell.home")}
+          onClick={closeDrawerOnMobile}
+        >
           <span className="gx-sidebar__sigil">
             <Dices size={17} />
           </span>
           <span className="gx-sidebar__wordmark gx-gradient-text">Glyphoxa</span>
-        </div>
+        </Link>
 
-        <nav className="gx-nav">
-          {NAV.map((item) => (
-            <Fragment key={item.to}>
-              {item.to === "campaign" && activeView ? (
-                // While a Campaign sub-view is open, the parent item links to
-                // the CURRENT sub-view — a bare /campaign would redirect to
-                // cast and stomp the open view (a habit-click hazard the old
-                // in-page tabs didn't have).
-                <Link
-                  className="gx-nav__item"
-                  to="/t/$tenantSlug/$screen/$view"
-                  params={{ tenantSlug, screen: "campaign", view: activeView }}
-                  data-active="true"
-                  onClick={closeDrawerOnMobile}
-                >
-                  {item.icon}
-                  {t(item.label)}
-                </Link>
-              ) : (
-                <Link
-                  className="gx-nav__item"
-                  to="/t/$tenantSlug/$screen"
-                  params={{ tenantSlug, screen: item.to }}
-                  activeProps={{ "data-active": "true" }}
-                  onClick={closeDrawerOnMobile}
-                >
-                  {item.icon}
-                  {t(item.label)}
-                </Link>
-              )}
-              {/* Campaign sub-views (ADR-0063): the screen's former in-page
-                  tabs, revealed while Campaign is the active screen. */}
-              {item.to === "campaign" && screen === "campaign" && (
-                <div className="gx-nav__sub" role="group" aria-label={t("campaign.viewTablist")}>
-                  {CAMPAIGN_SUBNAV.map((sub) => (
+        <nav className="gx-nav" aria-label={t("shell.navLabel")}>
+          <div className="gx-nav__main">
+            {/* The campaign's views — always rendered, whatever screen is open,
+                so World wiki is one click from Session or Setup (ADR-0063
+                amendment). The group is named by its heading: "Campaign" plus
+                the Active Campaign's name. */}
+            <div className="gx-nav__section" role="group" aria-labelledby={sectionLabelId}>
+              <div className="gx-nav__section-head" id={sectionLabelId}>
+                <span className="gx-overline">{t("shell.navCampaign")}</span>
+                {campaignName ? (
+                  // title: the name ellipsizes in a fixed-width sidebar.
+                  <span className="gx-nav__section-name" title={campaignName}>
+                    {campaignName}
+                  </span>
+                ) : noCampaign ? (
+                  <span className="gx-nav__section-name gx-nav__section-name--none">
+                    {t("shell.noCampaign")}
+                  </span>
+                ) : activeQ.isPending ? (
+                  <span className="gx-skeleton" data-testid="nav-campaign-loading" />
+                ) : null}
+              </div>
+              <div className="gx-nav__sub">
+                {CAMPAIGN_DESTINATIONS.map((d) => {
+                  const Icon = d.icon;
+                  const label = t(d.label);
+                  const isActive = activeView === d.view;
+                  const count = d.view === "proposals" ? pendingSuggestions : 0;
+                  return (
                     <Link
-                      key={sub.view}
+                      key={d.view}
                       className="gx-nav__subitem"
                       to="/t/$tenantSlug/$screen/$view"
-                      params={{ tenantSlug, screen: "campaign", view: sub.view }}
-                      data-active={activeView === sub.view ? "true" : undefined}
-                      aria-current={activeView === sub.view ? "page" : undefined}
+                      params={{ tenantSlug, screen: "campaign", view: d.view }}
+                      data-active={isActive ? "true" : undefined}
+                      aria-current={isActive ? "page" : undefined}
+                      // The count rides in the accessible name ("Suggestions,
+                      // 3 pending"); the pill below is its visual twin.
+                      aria-label={count > 0 ? t("shell.suggestionsPending", { label, count }) : undefined}
                       onClick={closeDrawerOnMobile}
                     >
-                      {sub.icon}
-                      {t(sub.label)}
+                      <Icon size={18} aria-hidden="true" />
+                      <span className="gx-nav__label">{label}</span>
+                      {count > 0 && (
+                        <span className="gx-nav__count" aria-hidden="true">
+                          {count > 99 ? "99+" : count}
+                        </span>
+                      )}
                     </Link>
-                  ))}
-                </div>
-              )}
-            </Fragment>
-          ))}
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="gx-nav__rule" aria-hidden="true" />
+
+            {SCREEN_DESTINATIONS.filter((d) => d.screen === "session").map((d) => {
+              const Icon = d.icon;
+              return (
+                <Link
+                  key={d.screen}
+                  className="gx-nav__item"
+                  to="/t/$tenantSlug/$screen"
+                  params={{ tenantSlug, screen: d.screen }}
+                  data-active={screen === d.screen ? "true" : undefined}
+                  aria-current={screen === d.screen ? "page" : undefined}
+                  onClick={closeDrawerOnMobile}
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span className="gx-nav__label">{t(d.label)}</span>
+                  {live && <NavLiveMarker startedMs={startedMs} />}
+                </Link>
+              );
+            })}
+          </div>
+
+          {/* Tenant-wide destinations, pinned under the scrolling list. */}
+          <div className="gx-nav__foot">
+            {SCREEN_DESTINATIONS.filter((d) => d.screen !== "session").map((d) => {
+              const Icon = d.icon;
+              return (
+                <Link
+                  key={d.screen}
+                  className="gx-nav__item"
+                  to="/t/$tenantSlug/$screen"
+                  params={{ tenantSlug, screen: d.screen }}
+                  data-active={screen === d.screen ? "true" : undefined}
+                  aria-current={screen === d.screen ? "page" : undefined}
+                  onClick={closeDrawerOnMobile}
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span className="gx-nav__label">{t(d.label)}</span>
+                </Link>
+              );
+            })}
+          </div>
         </nav>
 
         <SidebarUser user={user} />
@@ -192,8 +296,42 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           />
           <div className="gx-topbar__divider" />
           <div className="gx-topbar__titles">
-            <div className="gx-topbar__title">{active ? t(active.title) : "Glyphoxa"}</div>
+            {pageTitle && crumbCampaign ? (
+              // "<Campaign> / <View>": which campaign this page is about, then
+              // where in it. The campaign crumb leads to its Overview — except
+              // on the Overview itself, where a link to the current page would
+              // be a dead control.
+              <nav className="gx-crumbs" aria-label={t("shell.breadcrumb")}>
+                <ol>
+                  <li className="gx-crumbs__campaign">
+                    {activeView === "overview" ? (
+                      <span title={crumbCampaign}>{crumbCampaign}</span>
+                    ) : (
+                      <Link
+                        to="/t/$tenantSlug/$screen/$view"
+                        params={{ tenantSlug, screen: "campaign", view: "overview" }}
+                        title={crumbCampaign}
+                      >
+                        {crumbCampaign}
+                      </Link>
+                    )}
+                  </li>
+                  <li className="gx-crumbs__page" aria-current="page">
+                    <span className="gx-crumbs__sep" aria-hidden="true">
+                      /
+                    </span>
+                    <span className="gx-topbar__title">{pageTitle}</span>
+                  </li>
+                </ol>
+              </nav>
+            ) : (
+              <div className="gx-topbar__title">{pageTitle ?? "Glyphoxa"}</div>
+            )}
           </div>
+          {/* A Voice Session is live and the GM is somewhere else: say so, and
+              offer the way back. On the Session screen itself the screen's own
+              controls already do. */}
+          {live && screen !== "session" && <LivePill tenantSlug={tenantSlug} startedMs={startedMs} />}
           <Button
             variant="ghost"
             size="sm"
@@ -211,7 +349,7 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           <LanguageSwitcher className="gx-topbar__lang" />
         </header>
 
-        <main className="gx-content">
+        <main className="gx-content" ref={contentRef}>
           <Outlet />
         </main>
 
@@ -233,5 +371,48 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           clean DOM and their deterministic inline cues instead of toast portals. */}
       <Toaster theme="dark" position="bottom-right" richColors />
     </div>
+  );
+}
+
+// The clocks are their own components on purpose: useElapsedSeconds re-renders
+// its caller every second, and that caller must not be the whole shell.
+
+// NavLiveMarker is the live cue on the sidebar's Session item: a pulsing dot
+// and the session's running time. The word "Live" is there for screen readers;
+// sighted users read the dot.
+function NavLiveMarker({ startedMs }: { startedMs: number | null }) {
+  const { t } = useI18n();
+  const elapsed = useElapsedSeconds(startedMs);
+  return (
+    <span className="gx-nav__live" data-testid="nav-live">
+      <span className="gx-live-dot" aria-hidden="true" />
+      <span className="gx-shell__sr">{t("shell.live")}</span>
+      {startedMs != null && <span className="gx-nav__live-time">{formatElapsed(elapsed)}</span>}
+    </span>
+  );
+}
+
+// LivePill is the topbar's "Live 01:12:40 · Open session" link to the Session
+// screen. As the bar narrows it sheds its parts from the right — the words,
+// then the clock, then "Live", down to the pulsing dot — but only VISUALLY
+// (see the width steps in appShell.css): the link keeps its full accessible
+// name at every width, and the title gives a pointer user the same on hover.
+function LivePill({ tenantSlug, startedMs }: { tenantSlug: string; startedMs: number | null }) {
+  const { t } = useI18n();
+  const elapsed = useElapsedSeconds(startedMs);
+  return (
+    <Link
+      className="gx-live-pill"
+      to="/t/$tenantSlug/$screen"
+      params={{ tenantSlug, screen: "session" }}
+      title={`${t("shell.live")} · ${t("shell.openSession")}`}
+    >
+      <span className="gx-live-dot" aria-hidden="true" />
+      <span className="gx-live-pill__label">{t("shell.live")}</span>
+      {startedMs != null && <span className="gx-live-pill__time">{formatElapsed(elapsed)}</span>}
+      <span className="gx-live-pill__more">
+        <span aria-hidden="true">·</span> {t("shell.openSession")}
+      </span>
+    </Link>
   );
 }

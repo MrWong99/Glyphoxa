@@ -3,6 +3,7 @@ import * as RAlert from "@radix-ui/react-alert-dialog";
 
 import { Button } from "./Button";
 import { Input } from "./Input";
+import { useRestoreFocus } from "./useRestoreFocus";
 import { useI18n } from "@/i18n";
 
 // ConfirmDialog — a modal confirmation gate on a Radix AlertDialog (ADR-0017:
@@ -17,6 +18,10 @@ import { useI18n } from "@/i18n";
 // dialog then renders a text field and keeps confirm disabled until the operator
 // re-types that exact string (e.g. the campaign name). The typed value resets
 // whenever the dialog closes, so a reopened dialog never inherits a prior entry.
+//
+// It is always driven controlled, so it has no Radix Trigger for Radix to give
+// focus back to; useRestoreFocus returns focus to whatever opened it (when that
+// element still exists) instead of leaving a keyboard user on <body>.
 
 export function ConfirmDialog({
   open,
@@ -46,6 +51,7 @@ export function ConfirmDialog({
   confirmTextLabel?: ReactNode;
 }) {
   const { t } = useI18n();
+  const restoreFocus = useRestoreFocus();
   const [typed, setTyped] = useState("");
 
   // Default labels resolve here, not in the parameter list — a default
@@ -72,7 +78,7 @@ export function ConfirmDialog({
       <RAlert.Portal>
         <RAlert.Overlay className="gx-confirm__overlay" />
         {/* Radix auto-wires aria-describedby to the Description below when present. */}
-        <RAlert.Content className="gx-confirm">
+        <RAlert.Content className="gx-confirm" {...restoreFocus}>
           <RAlert.Title className="gx-confirm__title">{title}</RAlert.Title>
           {description && (
             <RAlert.Description className="gx-confirm__desc">{description}</RAlert.Description>

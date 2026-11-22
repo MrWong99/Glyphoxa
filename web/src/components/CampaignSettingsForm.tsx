@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
@@ -40,10 +40,13 @@ export function CampaignSettingsForm({
   campaign,
   onSaved,
   onCancel,
+  onDirtyChange,
 }: {
   campaign: Campaign;
   onSaved: () => void;
   onCancel: () => void;
+  /** Reports whether the fields differ from what was last saved. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -79,30 +82,59 @@ export function CampaignSettingsForm({
 
   const canSubmit = name.trim() !== "" && !update.isPending;
 
+  // What Save would send right now. Derived once per render so the save and the
+  // unsaved-edits report below can never disagree about what "changed" means.
+  //
+  // The knob fields are always sent explicitly: an empty field is 0 = "back
+  // to the engine default" (a real write), never an omission. The server is
+  // the range authority (0–10) — an out-of-range value comes back as the
+  // save error, matching the spend-caps posture. The isFinite fallbacks keep
+  // a non-numeric value (unreachable through a real number input) from riding
+  // as NaN — which an int32 field would serialize as JSON null, dodging the
+  // designed server refusal.
+  const barNum = Number(highlightBar);
+  const bar = highlightBar.trim() === "" || !Number.isFinite(barNum) ? 0 : barNum;
+  const confirmNum = Math.round(Number(highlightConfirm));
+  const confirm = highlightConfirm.trim() === "" || !Number.isFinite(confirmNum) ? 0 : confirmNum;
+  // Name is trimmed (the server rejects empty); System/Language ride opaque.
+  const values = {
+    name: name.trim(),
+    system,
+    language,
+    tapeArmed,
+    highlightBar: bar,
+    highlightConfirmWindows: confirm,
+  };
+
+  // Unsaved-edits report for a host that guards navigation (the full-page
+  // campaign settings view). The baseline is what was last SAVED — seeded from
+  // the campaign, then moved to the submitted values on each successful save —
+  // not the campaign prop: that only catches up when the post-save refetch
+  // lands, and a form that has just been saved must not read as dirty in
+  // between.
+  const [saved, setSaved] = useState(() => ({
+    name: campaign.name,
+    system: campaign.system,
+    language: campaign.language,
+    tapeArmed: campaign.tapeArmed,
+    highlightBar: campaign.highlightBar,
+    highlightConfirmWindows: campaign.highlightConfirmWindows,
+  }));
+  const isDirty = (Object.keys(saved) as (keyof typeof saved)[]).some((k) => values[k] !== saved[k]);
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(
+    () => () => onDirtyChange?.(false), // unmount lifts the guard
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
-    // The knob fields are always sent explicitly: an empty field is 0 = "back
-    // to the engine default" (a real write), never an omission. The server is
-    // the range authority (0–10) — an out-of-range value comes back as the
-    // save error, matching the spend-caps posture. The isFinite fallbacks keep
-    // a non-numeric value (unreachable through a real number input) from riding
-    // as NaN — which an int32 field would serialize as JSON null, dodging the
-    // designed server refusal.
-    const barNum = Number(highlightBar);
-    const bar = highlightBar.trim() === "" || !Number.isFinite(barNum) ? 0 : barNum;
-    const confirmNum = Math.round(Number(highlightConfirm));
-    const confirm = highlightConfirm.trim() === "" || !Number.isFinite(confirmNum) ? 0 : confirmNum;
-    // Name is trimmed (the server rejects empty); System/Language ride opaque.
-    update.mutate({
-      id: campaign.id,
-      name: name.trim(),
-      system,
-      language,
-      tapeArmed,
-      highlightBar: bar,
-      highlightConfirmWindows: confirm,
-    });
+    const submitted = values;
+    update.mutate({ id: campaign.id, ...submitted }, { onSuccess: () => setSaved(submitted) });
   };
 
   return (
