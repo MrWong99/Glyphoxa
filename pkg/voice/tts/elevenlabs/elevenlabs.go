@@ -81,11 +81,14 @@ func defaultHTTPClient() *http.Client {
 // API, on a ~135 ms first-audio budget for eleven_v4_turbo), so the pool keeps
 // connections warm:
 //   - idleConnsPerHost: the pipelined look-ahead (#626) runs two Synthesize calls
-//     at once, plus a [Client.Warm] or a voice preview can overlap; the stdlib
-//     default of 2 would close the surplus connection after every pair.
-//   - idleConnTimeout: long enough to span the quiet gaps of a table conversation;
-//     the vendor's own idle close (observed between ~20 and ~60 s) is what really
-//     bounds reuse, which is what [Client.Warm] is for.
+//     at once — which the stdlib default of 2 idle per host already keeps — but a
+//     [Client.Warm] (speech start, barge) or a voice preview can overlap that pair,
+//     making three; at 2 the pool closes the surplus one after every such round
+//     and the next round re-dials. 4 leaves one spare.
+//   - idleConnTimeout: the stdlib DefaultTransport value. This transport set none
+//     before (idle connections kept forever); 90 s still spans the quiet gaps of a
+//     table conversation (a connection idle 45 s was measured still reused, no
+//     vendor-side idle close reproduced) while not holding long-dead sockets.
 const (
 	idleConnsPerHost = 4
 	idleConnTimeout  = 90 * time.Second

@@ -111,3 +111,67 @@ func TestSynthesize_LookaheadPair_StaysWarm(t *testing.T) {
 		t.Errorf("connections grew from %d to %d across look-ahead pairs; idle connections are being dropped", first, got)
 	}
 }
+
+// TestSynthesize_LookaheadPairPlusWarm_StaysWarm: the look-ahead pair (#626) can
+// overlap a [elevenlabs.Client.Warm] (a speech start or barge lands while both
+// sentences stream), so three connections are open at once. The default
+// transport must keep all three idle afterwards; the stdlib default of two idle
+// per host would close one after every such round and the next round re-dials.
+// The server holds each round's requests until all three have arrived, so the
+// three genuinely overlap.
+func TestSynthesize_LookaheadPairPlusWarm_StaysWarm(t *testing.T) {
+	var conns, arrived atomic.Int32
+	var mu sync.Mutex
+	release := make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gate := release
+		if arrived.Add(1)%3 == 0 {
+			close(release)
+			release = make(chan struct{})
+		}
+		mu.Unlock()
+		<-gate
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodPost {
+			_, _ = w.Write(make([]byte, 256))
+		}
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL))
+
+	round := func() {
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				synthesizeAndDrain(t, c)
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := c.Warm(context.Background()); err != nil {
+				t.Errorf("Warm: %v", err)
+			}
+		}()
+		wg.Wait()
+	}
+	round()
+	if got := conns.Load(); got != 3 {
+		t.Fatalf("connections after the first overlapping round = %d, want 3", got)
+	}
+	for range 3 {
+		round()
+	}
+	if got := conns.Load(); got != 3 {
+		t.Errorf("connections grew from 3 to %d across overlapping rounds; the pool drops idle connections", got)
+	}
+}
