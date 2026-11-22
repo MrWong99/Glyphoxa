@@ -233,23 +233,29 @@ func TestOpenStream_OversizedTermList_StaysInsideTheHardLimits(t *testing.T) {
 // keyterm): the upgrade succeeds, then an invalid_request frame arrives where
 // session_started should, and the session is dead.
 func TestErrorFrame_InvalidRequest_InsteadOfSessionStarted_IsFatal(t *testing.T) {
-	ss := newScriptedServer(t, func(conn *websocket.Conn) {
-		_ = conn.WriteJSON(errorMsg("invalid_request", "Too many keyterms"))
-		echoUntilClose(conn)
-	})
-	defer ss.Close()
+	// The empty detail is the case only the explicit invalid_request entry makes
+	// fatal: an unknown code is fatal just for carrying error text.
+	for _, detail := range []string{"Too many keyterms", ""} {
+		t.Run("detail="+detail, func(t *testing.T) {
+			ss := newScriptedServer(t, func(conn *websocket.Conn) {
+				_ = conn.WriteJSON(errorMsg("invalid_request", detail))
+				echoUntilClose(conn)
+			})
+			defer ss.Close()
 
-	closed := make(chan error, 1)
-	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000, OnClosed: func(err error) { closed <- err }})
-	defer s.Close()
+			closed := make(chan error, 1)
+			s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000, OnClosed: func(err error) { closed <- err }})
+			defer s.Close()
 
-	select {
-	case err := <-closed:
-		se := asStreamError(t, err)
-		if se.Code != "invalid_request" || !se.Fatal {
-			t.Errorf("OnClosed cause = %v, want a fatal invalid_request", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the session survived an invalid_request frame")
+			select {
+			case err := <-closed:
+				se := asStreamError(t, err)
+				if se.Code != "invalid_request" || !se.Fatal {
+					t.Errorf("OnClosed cause = %v, want a fatal invalid_request", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the session survived an invalid_request frame")
+			}
+		})
 	}
 }

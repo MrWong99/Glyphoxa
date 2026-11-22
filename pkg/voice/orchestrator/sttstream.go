@@ -139,8 +139,10 @@ var authClassCodes = map[string]bool{
 	"auth_error":       true,
 	"unaccepted_terms": true,
 	"quota_exceeded":   true,
-	// A refused session configuration (#701: a keyterm list past the provider's
-	// limits) is refused again by every redial.
+	// A refused session configuration is refused again by every redial. A
+	// refusal over the session's keyterms is the exception and is not in this set:
+	// the adapter drops them and reports [stt.CodeTermsRefused], which is redialed
+	// on the ordinary schedule (#701).
 	"invalid_request": true,
 }
 
@@ -220,7 +222,9 @@ func WithStreamSpeakerID(id string) StreamManagerOption {
 // WithStreamTerms sets the words every session this manager dials should expect —
 // the names at the table, by priority ([stt.StreamConfig.Terms], #701). The
 // batch recognizer the manager falls back to must be given the same list where it
-// is built, or a fallback utterance is transcribed without it.
+// is built, or a fallback utterance is transcribed without it. The manager offers
+// the list on every dial; an adapter whose provider refuses it stops sending it
+// ([stt.CodeTermsRefused]) — the manager does not edit the list itself.
 func WithStreamTerms(terms []string) StreamManagerOption {
 	return func(m *StreamManager) { m.terms = terms }
 }

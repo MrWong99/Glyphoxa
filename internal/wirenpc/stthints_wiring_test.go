@@ -37,6 +37,10 @@ type fakeScribe struct {
 	batches []sttRequest
 	dials   []sttRequest
 	commits int
+	// refuseKeyterms makes the provider refuse any request that carries keyterms,
+	// each transport in its own way: a 400 for the batch POST, an invalid_request
+	// frame in place of session_started for a realtime session.
+	refuseKeyterms bool
 }
 
 func newFakeScribe(t *testing.T) *fakeScribe {
@@ -54,19 +58,28 @@ func newFakeScribe(t *testing.T) *fakeScribe {
 			keyterms: r.MultipartForm.Value["keyterms"],
 			language: r.MultipartForm.Value["language_code"],
 		})
+		refuse := f.refuseKeyterms && len(r.MultipartForm.Value["keyterms"]) > 0
 		f.mu.Unlock()
+		if refuse {
+			http.Error(w, `{"detail":{"status":"invalid_keyword_length","param":"keywords"}}`, http.StatusBadRequest)
+			return
+		}
 		_, _ = w.Write([]byte(`{"text":"hi"}`))
 	})
 	mux.HandleFunc("/v1/speech-to-text/realtime", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		f.mu.Lock()
 		f.dials = append(f.dials, sttRequest{keyterms: q["keyterms"], language: q["language_code"]})
+		refuse := f.refuseKeyterms && len(q["keyterms"]) > 0
 		f.mu.Unlock()
 		conn, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer conn.Close()
+		if refuse {
+			_ = conn.WriteJSON(map[string]any{"message_type": "invalid_request", "error": "Total length of keyterms cannot exceed 1000 characters."})
+		}
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -129,8 +142,13 @@ func hintedSession() Config {
 // request, a streamed commit and both lanes' dials.
 func speakSTT(t *testing.T, cfg Config, scribe *fakeScribe) (batches, dials []sttRequest) {
 	t.Helper()
+	return speakSTTLogged(t, cfg, scribe, slog.New(slog.DiscardHandler))
+}
+
+// speakSTTLogged is [speakSTT] with the session's logger supplied.
+func speakSTTLogged(t *testing.T, cfg Config, scribe *fakeScribe, log *slog.Logger) (batches, dials []sttRequest) {
+	t.Helper()
 	pointSTTAt(t, scribe.Server)
-	log := slog.New(slog.DiscardHandler)
 	cfg = sessionConfig(cfg, log)
 	bus := voiceevent.NewBus()
 	deps := cycleConversationDeps(bus, log, cfg, nil, &fakeCyclePump{}, nil)
@@ -199,6 +217,48 @@ func TestSTTHints_ReachBothTransportsOfOneSession(t *testing.T) {
 	for i, got := range dials {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("realtime dial %d carried %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+// TestSTTHints_ProviderRefusesTheList_SessionKeepsHearing is the fail-open proof
+// through the session's real wiring (#701 review). The provider refuses the
+// session's keyterm list on both transports. Nothing is lost: the utterances are
+// still transcribed — the batch one in the same call, the streamed ones after a
+// redial — the session stops offering the list, and the operator gets ONE
+// warning on the session's own logger, without the names in it.
+func TestSTTHints_ProviderRefusesTheList_SessionKeepsHearing(t *testing.T) {
+	cfg := hintedSession()
+	cfg.STTKeyterms = true
+	scribe := newFakeScribe(t)
+	scribe.refuseKeyterms = true
+	logs := &safeBuffer{}
+	// speakSTTLogged returns only once a batch request AND a streamed commit were
+	// answered, which a refused list would prevent on both transports.
+	batches, dials := speakSTTLogged(t, cfg, scribe,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	offered := false
+	for _, r := range append(batches, dials...) {
+		offered = offered || len(r.keyterms) > 0
+	}
+	if !offered {
+		t.Fatal("the session never offered its keyterms, so nothing was refused")
+	}
+	if last := batches[len(batches)-1]; len(last.keyterms) != 0 {
+		t.Errorf("the last batch request still carried the refused keyterms %q", last.keyterms)
+	}
+	if last := dials[len(dials)-1]; len(last.keyterms) != 0 {
+		t.Errorf("the last realtime dial still carried the refused keyterms %q", last.keyterms)
+	}
+
+	out := logs.String()
+	if n := strings.Count(out, "provider refused the keyterm list"); n != 1 {
+		t.Errorf("want one refusal warning on the session's logger, got %d:\n%s", n, out)
+	}
+	for _, name := range []string{"Florian", "Artusas", "Glyphoxa"} {
+		if strings.Contains(out, name) {
+			t.Errorf("a warning names a term (%q):\n%s", name, out)
 		}
 	}
 }

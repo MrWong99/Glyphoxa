@@ -26,7 +26,8 @@ type StreamConfig struct {
 	// they do not constrain it, and a provider may rewrite a true homophone to a
 	// term ("Floh" to "Flo"). They are fixed for the session; a changed list needs
 	// a new session. Empty sends none. An adapter without such a feature ignores
-	// them.
+	// them, and one whose provider refuses the list stops sending it rather than
+	// fail every session ([CodeTermsRefused]).
 	Terms []string
 
 	// OnPartial receives the mutable interim transcript of the in-progress
@@ -118,6 +119,13 @@ const (
 	// writes queued ahead of it still reach the provider, so its buffered audio
 	// no longer lines up with the caller's utterance — reopen the session.
 	CodeQueueFull = "queue_full"
+
+	// CodeTermsRefused marks a session the provider refused to start because of
+	// its [StreamConfig.Terms]. Fatal for that session, but NOT durable: the
+	// adapter has stopped sending terms (it fails open, #701), so a redial with
+	// the same StreamConfig is expected to succeed — unbiased. A caller should
+	// redial on its ordinary schedule rather than treat it as a misconfiguration.
+	CodeTermsRefused = "terms_refused"
 )
 
 // StreamError is the typed error surfaced by every streaming operation. Code is

@@ -424,7 +424,9 @@ type sttWiring struct {
 // consequence: everything still transcribes, the names are just misheard again on
 // that transport.
 func buildSTT(d conversationDeps, stageMetrics observe.StageRecorder, retryPolicy retry.Policy) sttWiring {
-	var recognizer stt.Recognizer = newSTT(d.keys.stt, d.sttHints.clientOptions()...)
+	// The client gets the session's logger for the one thing it decides alone: to
+	// carry on without keyterms after the provider refused the list (fail open).
+	var recognizer stt.Recognizer = newSTT(d.keys.stt, append(d.sttHints.clientOptions(), stteleven.WithLogger(d.log))...)
 	return sttWiring{
 		stage: orchestrator.NewSTT(d.bus, recognizer,
 			orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),

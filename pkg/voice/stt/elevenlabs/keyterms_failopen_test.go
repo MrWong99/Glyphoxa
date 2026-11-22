@@ -10,9 +10,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 )
 
@@ -164,5 +168,157 @@ func TestTranscribe_ServerErrorWithKeyterms_IsNotARefusal(t *testing.T) {
 	reqs := scribe.requests()
 	if len(reqs) != 2 || !hasKeyterms(reqs[1]) {
 		t.Errorf("want two requests, both with keyterms; got %q", reqs)
+	}
+}
+
+// refusedDetail is the realtime endpoint's answer to a keyterm list one character
+// over its budget, verbatim (measured 2026-11-22).
+const refusedDetail = "Total length of keyterms cannot exceed 1000 characters. You provided 1001 characters."
+
+// closedCause waits for a session's OnClosed and returns its cause.
+func closedCause(t *testing.T, closed <-chan error) *stt.StreamError {
+	t.Helper()
+	select {
+	case err := <-closed:
+		return asStreamError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session was not closed")
+		return nil
+	}
+}
+
+// TestOpenStream_KeytermsRefused_FailsOpen: the realtime endpoint answers a
+// keyterm list it refuses with invalid_request where session_started should be.
+// The adapter reports that session dead with [stt.CodeTermsRefused] — a cause the
+// caller redials promptly, not a durable misconfiguration — and the redial, given
+// the very same terms, goes out without them and starts. The batch path of the
+// same client drops them too: one session, one list, on both transports.
+func TestOpenStream_KeytermsRefused_FailsOpen(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		dials [][]string
+		posts [][]string
+	)
+	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/speech-to-text/realtime", func(w http.ResponseWriter, r *http.Request) {
+		terms := r.URL.Query()["keyterms"]
+		mu.Lock()
+		dials = append(dials, terms)
+		mu.Unlock()
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if hasKeyterms(terms) {
+			_ = conn.WriteJSON(errorMsg("invalid_request", refusedDetail))
+		} else {
+			_ = conn.WriteJSON(map[string]any{"message_type": "session_started"})
+		}
+		echoUntilClose(conn)
+	})
+	mux.HandleFunc("/v1/speech-to-text", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(1 << 20)
+		mu.Lock()
+		posts = append(posts, r.MultipartForm.Value["keyterms"])
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var logs bytes.Buffer
+	terms := []string{"Flo", "Artusas"}
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL), elevenlabs.WithTerms(terms),
+		elevenlabs.WithLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))))
+
+	closed := make(chan error, 1)
+	refused, err := c.OpenStream(context.Background(), stt.StreamConfig{
+		SampleRate: 16000, Terms: terms, OnClosed: func(err error) { closed <- err }})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer refused.Close()
+	cause := closedCause(t, closed)
+	if cause.Code != stt.CodeTermsRefused || !cause.Fatal {
+		t.Fatalf("OnClosed cause = %v, want a fatal %s", cause, stt.CodeTermsRefused)
+	}
+
+	stillUp := make(chan error, 1)
+	redial, err := c.OpenStream(context.Background(), stt.StreamConfig{
+		SampleRate: 16000, Terms: terms, OnClosed: func(err error) { stillUp <- err }})
+	if err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+	defer redial.Close()
+	if _, err := c.Transcribe(context.Background(), oneFrame(t)); err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	select {
+	case err := <-stillUp:
+		t.Fatalf("the redialled session died too: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dials) != 2 || !hasKeyterms(dials[0]) || hasKeyterms(dials[1]) {
+		t.Errorf("want a dial with keyterms, then one without; got %q", dials)
+	}
+	if len(posts) != 1 || hasKeyterms(posts[0]) {
+		t.Errorf("the batch path must drop the refused keyterms as well; got %q", posts)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "level=WARN"); n != 1 {
+		t.Errorf("want exactly one warning, got %d:\n%s", n, out)
+	}
+}
+
+// TestOpenStream_InvalidRequest_NotAKeytermRefusal: invalid_request only means
+// "the keyterms were refused" when keyterms were sent and the session had not
+// started. Without keyterms, or once session_started has arrived, it stays the
+// durable invalid_request it was — and a list is not given up over it.
+func TestOpenStream_InvalidRequest_NotAKeytermRefusal(t *testing.T) {
+	cases := []struct {
+		name    string
+		terms   []string
+		started bool
+	}{
+		{"no keyterms were sent", nil, false},
+		{"the session had already started", []string{"Flo"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ss := newScriptedServer(t, func(conn *websocket.Conn) {
+				if tc.started {
+					_ = conn.WriteJSON(map[string]any{"message_type": "session_started"})
+				}
+				_ = conn.WriteJSON(errorMsg("invalid_request", "nope"))
+				echoUntilClose(conn)
+			})
+			defer ss.Close()
+
+			c := elevenlabs.New("k", elevenlabs.WithBaseURL(ss.URL))
+			closed := make(chan error, 1)
+			s, err := c.OpenStream(context.Background(), stt.StreamConfig{
+				SampleRate: 16000, Terms: tc.terms, OnClosed: func(err error) { closed <- err }})
+			if err != nil {
+				t.Fatalf("OpenStream: %v", err)
+			}
+			defer s.Close()
+			if cause := closedCause(t, closed); cause.Code != "invalid_request" {
+				t.Errorf("cause = %v, want invalid_request", cause)
+			}
+
+			again, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000, Terms: tc.terms})
+			if err != nil {
+				t.Fatalf("redial: %v", err)
+			}
+			defer again.Close()
+			if got := ss.lastReq.Load().query["keyterms"]; len(got) != len(tc.terms) {
+				t.Errorf("the redial carried keyterms %q, want the session's %q", got, tc.terms)
+			}
+		})
 	}
 }
