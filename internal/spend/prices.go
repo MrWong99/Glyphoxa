@@ -47,6 +47,18 @@ var llmPrices = map[llmKey]llmRate{
 	{observe.ProviderGroq, "openai/gpt-oss-20b"}:                        {inputPerMTok: 0.075, outputPerMTok: 0.30},
 	{observe.ProviderGroq, "meta-llama/llama-4-scout-17b-16e-instruct"}: {inputPerMTok: 0.11, outputPerMTok: 0.34},
 	{observe.ProviderGroq, "qwen/qwen3-32b"}:                            {inputPerMTok: 0.29, outputPerMTok: 0.59},
+	// Groq qwen3.8-27b (preview) — console.groq.com/docs/models, retrieved
+	// 2026-11-22: $0.80 / $4.00. A voice-LLM bench candidate (#702). ESTIMATE.
+	{observe.ProviderGroq, "qwen/qwen3.8-27b"}: {inputPerMTok: 0.80, outputPerMTok: 4.00},
+	// Claude Haiku — platform.claude.com pricing, retrieved 2026-11-22 (#702).
+	// Haiku 5.5 has two rate cards by prompt length: $0.10 / $0.50 up to 100K
+	// prompt tokens (priced here; a voice prompt is a few thousand) and
+	// $0.50 / $2.50 above. Cache reads (0.1x) and writes (1.25x) have no rate
+	// here: the adapter reports them inside the input count, at the full input
+	// rate. Thinking tokens are billed as output. ESTIMATES.
+	{observe.ProviderAnthropic, "claude-haiku-5-5"}:          {inputPerMTok: 0.10, outputPerMTok: 0.50},
+	{observe.ProviderAnthropic, "claude-haiku-4-5"}:          {inputPerMTok: 1.00, outputPerMTok: 5.00},
+	{observe.ProviderAnthropic, "claude-haiku-4-5-20251001"}: {inputPerMTok: 1.00, outputPerMTok: 5.00},
 	// Gemini 2.5 Flash Image — image generation billed as tokens (#311, ADR-0004
 	// amendment). ESTIMATE captured 2026-07-11; 1 image ≈ 1290 output tokens ≈
 	// $0.039. Priced through the LLM sink because Gemini meters a generated image

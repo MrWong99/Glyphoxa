@@ -39,6 +39,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -600,6 +601,7 @@ func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []or
 
 	reply, err := r.engine.Generate(ctx, messages)
 	if err != nil {
+		r.forgetRefused(turn, err)
 		if r.cfg.OnError != nil {
 			r.cfg.OnError(err)
 		}
@@ -931,6 +933,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 	// a turn failure: report only a genuine engine error — which includes the
 	// turn's OWN TurnTimeout expiry (the parent stays live; a hung provider is a
 	// terminal failure, not a barge — #473 review).
+	r.forgetRefused(turn, genErr)
 	if turnErr != nil && parent.Err() == nil {
 		if r.cfg.OnError != nil {
 			r.cfg.OnError(turnErr)
@@ -957,6 +960,7 @@ func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string
 func (r *Replier) fallbackTurn(ctx, parent context.Context, turn uint64, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	reply, err := r.engine.Generate(ctx, messages)
 	if err != nil {
+		r.forgetRefused(turn, err)
 		if parent.Err() == nil {
 			if r.cfg.OnError != nil {
 				r.cfg.OnError(err)
@@ -1015,6 +1019,7 @@ func (r *Replier) fallbackTurn(ctx, parent context.Context, turn uint64, message
 func (r *Replier) textModalityTurn(ctx, parent context.Context, turn uint64, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	answer, err := r.engine.Generate(ctx, messages)
 	if err != nil {
+		r.forgetRefused(turn, err)
 		if parent.Err() == nil {
 			if r.cfg.OnError != nil {
 				r.cfg.OnError(err)
@@ -1133,6 +1138,35 @@ func (r *Replier) commitSpoken(turn uint64, spoken string) {
 	}
 	r.history = slices.Insert(r.history, at, msg)
 	r.turnOf = slices.Insert(r.turnOf, at, turn)
+}
+
+// forgetRefused takes turn out of the history when err is a provider refusal
+// ([providererr.RefusalError], #702): a safety classifier declined the request,
+// and it would decline every later one that still carries the same line — the
+// history resends it until it is trimmed away, so one refused line would leave
+// the Agent speaking only its fallback for the rest of the scene. The provider's
+// own guidance for a refusal is the same: do not continue from the refused turn.
+// Everything the turn put into the history goes: its user line, and whatever
+// part of a reply was delivered before the refusal ended the stream.
+//
+// Any other failure keeps the user line — the question was asked, and the next
+// turn should know. The turn itself still fails the usual way; this only
+// decides what the next request is built from.
+func (r *Replier) forgetRefused(turn uint64, err error) {
+	var refusal *providererr.RefusalError
+	if !errors.As(err, &refusal) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	history, turnOf := r.history[:0], r.turnOf[:0]
+	for i, id := range r.turnOf {
+		if id != turn {
+			history, turnOf = append(history, r.history[i]), append(turnOf, id)
+		}
+	}
+	clear(r.history[len(history):])
+	r.history, r.turnOf = history, turnOf
 }
 
 // providerEngine is the default [Engine]: one [llm.Provider] completion per
@@ -1378,10 +1412,7 @@ func (r *Replier) systemPrompt() string {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(spokenOutputRule)
-		if markup != "" {
-			b.WriteString(spokenOutputMarkupExemption)
-		}
+		b.WriteString(spokenOutputParagraph(markup != ""))
 	}
 	if markup != "" {
 		if b.Len() > 0 {

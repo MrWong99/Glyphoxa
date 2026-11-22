@@ -46,19 +46,28 @@ func (f *fakeControlStore) putSession(vs storage.VoiceSession) {
 }
 
 func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID, campaignID uuid.UUID, voiceChannelID string) (storage.VoiceSessionIntent, error) {
+	// One critical section, like the real store's single INSERT: the active check,
+	// the insert and the returned snapshot all happen under the lock. The row is
+	// visible to a concurrent ClaimLoop the moment it is in the map, so the copy
+	// handed back must be taken before the lock is released — and the row must be
+	// complete (channel included) before a claimer can see it.
 	f.fakeIntentStore.mu.Lock()
+	defer f.fakeIntentStore.mu.Unlock()
 	for _, i := range f.intents {
 		if i.TenantID == tenantID &&
 			(i.Status == storage.VoiceIntentPending || i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) {
-			f.fakeIntentStore.mu.Unlock()
 			return storage.VoiceSessionIntent{}, storage.ErrIntentActive
 		}
 	}
-	f.fakeIntentStore.mu.Unlock()
-	intent := f.add(tenantID, campaignID)
-	f.fakeIntentStore.mu.Lock()
-	intent.VoiceChannelID = voiceChannelID
-	f.fakeIntentStore.mu.Unlock()
+	intent := &storage.VoiceSessionIntent{
+		ID:             uuid.New(),
+		TenantID:       tenantID,
+		CampaignID:     campaignID,
+		VoiceChannelID: voiceChannelID,
+		Status:         storage.VoiceIntentPending,
+		CreatedAt:      time.Now(),
+	}
+	f.intents[intent.ID] = intent
 	return *intent, nil
 }
 

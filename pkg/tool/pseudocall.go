@@ -57,6 +57,9 @@ type PseudoCall struct {
 //   - orphan `</function>` closers left behind when a JSON string arg itself
 //     contained the literal `</function>` — stripped so no garbage is spoken.
 //
+// It also strips — never recovers — the leak shapes of other model families
+// (see leaktags.go): each of those is reported with nil Args.
+//
 // Text with none of these is returned byte-identical with a nil slice. Excision
 // joints are whitespace-collapsed locally (so "Los! <call>" → "Los!") while
 // untouched prose — including newlines in Butler markdown — stays byte-identical.
@@ -105,6 +108,11 @@ func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 
 	// Orphan closers left by an inner literal </function> in a JSON string arg.
 	clean = strings.ReplaceAll(clean, pseudoClose, "")
+
+	// The other families' leak shapes (Claude's tool-call block, tool_use /
+	// tool_call wrappers, reasoning blocks): strip-only, see leaktags.go (#702).
+	clean, leaks := stripLeakElements(clean)
+	calls = append(calls, leaks...)
 
 	if len(calls) == 0 {
 		// Byte-identical identity for prose with nothing to scrub.

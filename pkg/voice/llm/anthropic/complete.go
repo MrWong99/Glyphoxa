@@ -34,11 +34,17 @@ const (
 type messagesBody struct {
 	Model      string          `json:"model"`
 	MaxTokens  int             `json:"max_tokens"`
-	System     string          `json:"system,omitempty"`
+	System     any             `json:"system,omitempty"` // string, or []systemBlock when cached
 	Messages   []wireMessage   `json:"messages"`
 	Tools      []wireTool      `json:"tools,omitempty"`
 	ToolChoice *wireToolChoice `json:"tool_choice,omitempty"`
 	Stream     bool            `json:"stream"`
+
+	// Thinking and OutputConfig are the per-model reasoning fields (#702). Both
+	// are omitted unless the client's thinking policy names the model, and they
+	// sit last so a request without them is byte-identical to the pre-#702 body.
+	Thinking     *wireThinking     `json:"thinking,omitempty"`
+	OutputConfig *wireOutputConfig `json:"output_config,omitempty"`
 }
 
 // wireMessage is one Anthropic message: a role plus a list of content blocks.
@@ -67,6 +73,20 @@ type contentBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	// raw, when set, is the whole block as it goes on the wire — a replayed
+	// thinking block, which must return exactly as the API sent it (#702).
+	raw json.RawMessage
+}
+
+// MarshalJSON writes a replayed block verbatim and every other block as its
+// tagged fields (the same bytes the plain struct encoding produced).
+func (b contentBlock) MarshalJSON() ([]byte, error) {
+	if b.raw != nil {
+		return b.raw, nil
+	}
+	type plain contentBlock
+	return json.Marshal(plain(b))
 }
 
 // wireTool mirrors one entry of the Anthropic tools array.
@@ -99,7 +119,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 		return nil, fmt.Errorf("anthropic.Complete: missing API key (set %s or pass it to New)", APIKeyEnv)
 	}
 
-	system, messages := toWireMessages(req.Messages)
+	system, messages, replayed := toWireMessages(req.Messages, c.thoughts)
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("anthropic.Complete: request has no user/assistant messages")
 	}
@@ -116,7 +136,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	body := messagesBody{
 		Model:     model,
 		MaxTokens: maxTokens,
-		System:    system,
+		System:    c.wireSystem(model, system),
 		Messages:  messages,
 		Tools:     toWireTools(req.Tools),
 		Stream:    true,
@@ -124,7 +144,46 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if len(body.Tools) > 0 {
 		body.ToolChoice = wireToolChoiceFor(req.ToolChoice)
 	}
+	body.Thinking, body.OutputConfig = c.thinking(model).wireFields()
 
+	resp, err := c.post(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusBadRequest && len(replayed) > 0 {
+		// The API binds a thinking block to the conversation that produced it and
+		// answers 400 when one is replayed after anything in front of it changed.
+		// The adapter cannot see every edit its callers make (a regenerated turn
+		// reuses tool-call ids), so it forgets the refused blocks and retries once
+		// without them — the documented recovery; the model simply thinks again.
+		herr := readErrorResponse(resp, "Complete")
+		resp.Body.Close()
+		if !strings.Contains(herr.Error(), "thinking") {
+			return nil, herr
+		}
+		// Not silent: every occurrence is a refused request plus a round in which
+		// the model thinks again, and nothing above the adapter can see it.
+		c.log.Warn("anthropic: the API refused a replayed thinking block; retrying the request without it",
+			"model", model, "tool_use_ids", len(replayed), "err", herr)
+		c.thoughts.forget(replayed)
+		_, body.Messages, _ = toWireMessages(req.Messages, nil)
+		if resp, err = c.post(ctx, body); err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, readErrorResponse(resp, "Complete")
+	}
+
+	ch := make(chan llm.StreamEvent)
+	go streamEvents(ctx, resp.Body, ch, c.thoughts)
+	return ch, nil
+}
+
+// post sends one Messages request for body and returns the raw response; the
+// caller owns the status check and the body.
+func (c *Client) post(ctx context.Context, body messagesBody) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic.Complete: marshal body: %w", err)
@@ -135,7 +194,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if err != nil {
 		return nil, fmt.Errorf("anthropic.Complete: build request: %w", err)
 	}
-	httpReq.Header.Set("x-api-key", c.apiKey)
+	setAuth(httpReq.Header, c.apiKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "text/event-stream")
@@ -144,23 +203,37 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if err != nil {
 		return nil, fmt.Errorf("anthropic.Complete: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		return nil, readErrorResponse(resp, "Complete")
-	}
-
-	ch := make(chan llm.StreamEvent)
-	go streamEvents(ctx, resp.Body, ch)
-	return ch, nil
+	return resp, nil
 }
 
-// toWireMessages splits the [llm] conversation into the Anthropic system string
-// and the user/assistant/tool message list. The first [llm.RoleSystem] message
-// becomes the system field; subsequent system messages are folded into it
-// (newline-joined) so a multi-part Persona survives. Tool-role messages map to
+// oauthTokenPrefix marks an Anthropic OAuth access token (the `ant` CLI login),
+// as opposed to an API key ("sk-ant-api…").
+const oauthTokenPrefix = "sk-ant-oat"
+
+// setAuth sets the credential header for key. An API key travels as x-api-key;
+// an OAuth access token is only accepted as "Authorization: Bearer" (sent as
+// x-api-key the API answers 401 "invalid x-api-key"). No beta header is needed
+// for the token on anthropic-version 2023-06-01 (verified live, #702). Such a
+// token expires within hours and only the CLI refreshes it, so it suits a bench
+// run or a developer machine, not a deployment's static key.
+func setAuth(h http.Header, key string) {
+	if strings.HasPrefix(key, oauthTokenPrefix) {
+		h.Set("Authorization", "Bearer "+key)
+		return
+	}
+	h.Set("x-api-key", key)
+}
+
+// toWireMessages splits the [llm] conversation into the system messages' texts
+// (in order; [Client.wireSystem] renders them as the system field) and the
+// user/assistant/tool message list. System messages are lifted out wherever
+// they sit, so a multi-part Persona and the volatile tail survive. Tool-role messages map to
 // user-role tool_result blocks per the Anthropic protocol (ADR-0028).
-func toWireMessages(msgs []llm.Message) (system string, out []wireMessage) {
-	var systemParts []string
+//
+// thoughts, when non-nil, supplies the thinking blocks to put back in front of
+// an assistant turn's tool calls (see passthrough.go); replayed lists the
+// tool_use ids of every assistant turn whose blocks went into this request.
+func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (systemParts []string, out []wireMessage, replayed []string) {
 	for _, m := range msgs {
 		switch m.Role {
 		case llm.RoleSystem:
@@ -168,14 +241,41 @@ func toWireMessages(msgs []llm.Message) (system string, out []wireMessage) {
 				systemParts = append(systemParts, m.Text)
 			}
 		case llm.RoleAssistant:
-			out = append(out, wireMessage{Role: "assistant", Content: assistantBlocks(m)})
+			blocks := assistantBlocks(m)
+			if thinking := storedThinking(m, thoughts); len(thinking) > 0 {
+				blocks = append(thinking, blocks...)
+				// Every id of the turn: the blocks are stored under each of them.
+				for _, tc := range m.ToolCalls {
+					replayed = append(replayed, tc.ID)
+				}
+			}
+			out = append(out, wireMessage{Role: "assistant", Content: blocks})
 		case llm.RoleTool:
 			out = append(out, wireMessage{Role: "user", Content: toolResultBlocks(m)})
 		default: // RoleUser and any unknown role
 			out = append(out, wireMessage{Role: "user", Content: []contentBlock{{Type: "text", Text: m.Text}}})
 		}
 	}
-	return strings.Join(systemParts, "\n\n"), out
+	return systemParts, out, replayed
+}
+
+// storedThinking returns the thinking blocks remembered for the assistant turn
+// m — looked up by its tool_use ids, the first one that has any. A turn without
+// tool calls, or one the store never saw (another provider's history, a model
+// that did not think), has none.
+func storedThinking(m llm.Message, thoughts *thinkingStore) []contentBlock {
+	for _, tc := range m.ToolCalls {
+		raws := thoughts.get(tc.ID)
+		if len(raws) == 0 {
+			continue
+		}
+		blocks := make([]contentBlock, len(raws))
+		for i, raw := range raws {
+			blocks[i] = contentBlock{raw: raw}
+		}
+		return blocks
+	}
+	return nil
 }
 
 // assistantBlocks renders an assistant [llm.Message] as Anthropic content
@@ -279,7 +379,7 @@ func readErrorResponse(resp *http.Response, op string) error {
 // per-index content blocks: a content_block_start for a tool_use block records
 // its id/name; the input_json_delta lines accumulate the arguments string; the
 // content_block_stop flushes a completed tool_use as one [llm.EventToolCall].
-func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEvent) {
+func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEvent, thoughts *thinkingStore) {
 	defer close(ch)
 	defer r.Close()
 
@@ -291,6 +391,17 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		input strings.Builder
 	}
 	tools := map[int]*pendingTool{}
+
+	// Thinking blocks of this assistant turn, in stream order: the open ones
+	// accumulate their text and signature by stream index, and each finished
+	// block is kept so the turn's tool_use ids can be stored against them
+	// (passthrough.go).
+	type pendingThought struct {
+		text      strings.Builder
+		signature strings.Builder
+	}
+	thinking := map[int]*pendingThought{}
+	var thought []json.RawMessage
 
 	// inputTokens is stashed from message_start's usage (Anthropic reports the
 	// prompt tokens there) and combined with message_delta's output_tokens into the
@@ -349,11 +460,20 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		case "message_start":
 			// Stash the prompt-token count; message_delta later carries output_tokens.
 			if ev.Message != nil && ev.Message.Usage != nil {
-				inputTokens = ev.Message.Usage.InputTokens
+				inputTokens = ev.Message.Usage.promptTokens()
 			}
 		case "content_block_start":
-			if ev.ContentBlock.Type == "tool_use" {
+			switch ev.ContentBlock.Type {
+			case "tool_use":
 				tools[ev.Index] = &pendingTool{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+			case "thinking":
+				pt := &pendingThought{}
+				pt.text.WriteString(ev.ContentBlock.Thinking)
+				pt.signature.WriteString(ev.ContentBlock.Signature)
+				thinking[ev.Index] = pt
+			case "redacted_thinking":
+				// Arrives whole; there are no deltas for it.
+				thought = append(thought, redactedThinkingBlock(ev.ContentBlock.Data))
 			}
 		case "content_block_delta":
 			switch ev.Delta.Type {
@@ -367,10 +487,26 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 				if pt := tools[ev.Index]; pt != nil {
 					pt.input.WriteString(ev.Delta.PartialJSON)
 				}
+			case "thinking_delta":
+				if pt := thinking[ev.Index]; pt != nil {
+					pt.text.WriteString(ev.Delta.Thinking)
+				}
+			case "signature_delta":
+				if pt := thinking[ev.Index]; pt != nil {
+					pt.signature.WriteString(ev.Delta.Signature)
+				}
 			}
 		case "content_block_stop":
+			if pt := thinking[ev.Index]; pt != nil {
+				delete(thinking, ev.Index)
+				thought = append(thought, thinkingBlock(pt.text.String(), pt.signature.String()))
+			}
 			if pt := tools[ev.Index]; pt != nil {
 				delete(tools, ev.Index)
+				// Remember this turn's thinking under the tool_use id BEFORE the
+				// call is handed out: the consumer may send the next round as soon
+				// as it has the call.
+				thoughts.put(pt.id, thought)
 				input := pt.input.String()
 				if input == "" {
 					input = "{}" // a no-argument tool streams no input_json_delta
@@ -398,6 +534,16 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 				}}) {
 					return
 				}
+			}
+			if ev.Delta.StopReason == stopReasonRefusal {
+				// A safety-classifier decline: HTTP 200, no text. It ends the stream
+				// as a classified error, not as a reply that happens to be empty.
+				msg := "anthropic: the model refused the request (stop_reason refusal"
+				if c := ev.Delta.StopDetails.Category; c != "" {
+					msg += ", category " + c
+				}
+				send(llm.StreamEvent{Type: llm.EventError, Err: msg + ")", ErrClass: llm.ErrClassRefusal})
+				return
 			}
 			if ev.Delta.StopReason != "" {
 				if !send(llm.StreamEvent{Type: llm.EventDone, StopReason: ev.Delta.StopReason}) {
@@ -427,12 +573,22 @@ type sseEvent struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		// thinking / redacted_thinking blocks (replayed on the next tool round).
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		Data      string `json:"data"`
 	} `json:"content_block"`
 	Delta struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
+		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
+		// StopDetails is set with stop_reason "refusal": which classifier declined.
+		StopDetails struct {
+			Category string `json:"category"`
+		} `json:"stop_details"`
 	} `json:"delta"`
 	// Message carries the prompt-token usage on message_start; Usage carries the
 	// output-token usage on message_delta (#127). Both are pointers so an absent
@@ -444,9 +600,34 @@ type sseEvent struct {
 	Usage *usageWire `json:"usage"`
 }
 
+// stopReasonRefusal is the stop_reason of a safety-classifier decline.
+const stopReasonRefusal = "refusal"
+
 // usageWire is the Anthropic usage object as it appears on message_start
-// (input_tokens) and message_delta (output_tokens).
+// (the prompt-side counts) and message_delta (output_tokens).
 type usageWire struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+
+	// With prompt caching the API reports cached prompt tokens HERE and not in
+	// input_tokens: the tokens written to the cache and the tokens read from it.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// promptTokens is the prompt side of a request as input-rate token equivalents:
+// the uncached tokens, plus those written to and read from the prompt cache
+// (the adapter caches the stable system prompt for the voice model, see
+// caching.go). input_tokens alone under-counts a cached prompt about 35-fold
+// (#702).
+//
+// The spend table has one rate per direction, and a spend cap reads this
+// figure, so it must not come out below the bill for any single request. A
+// cache read is billed at a tenth of the input rate and counted in full here —
+// an over-estimate. A 5-minute cache write is billed at 1.25x the input rate,
+// so its tokens are counted 1.25x (rounded up): a request that writes a prefix
+// nobody reads back within five minutes is metered at what it cost, not a
+// quarter under.
+func (u *usageWire) promptTokens() int {
+	return u.InputTokens + (u.CacheCreationInputTokens*5+3)/4 + u.CacheReadInputTokens
 }

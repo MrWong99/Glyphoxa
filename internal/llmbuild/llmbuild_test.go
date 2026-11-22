@@ -234,3 +234,24 @@ func TestDefaultModel_MirrorsNewsProviderSet(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultVoiceModel_AnthropicIsHaikuNotTheFlagship pins the voice default
+// (#702): a Voice Session on an Anthropic Provider Config that names no model
+// must not fall through to the adapter's flagship fallback — a model priced
+// and paced for off-session work — but to the Haiku the voice path is tuned
+// and priced for. Every other provider keeps its one default, and the
+// off-session [DefaultModel] is untouched.
+func TestDefaultVoiceModel_AnthropicIsHaikuNotTheFlagship(t *testing.T) {
+	t.Parallel()
+	if got := DefaultVoiceModel(anthropic.ProviderID); got != "claude-haiku-5-5" {
+		t.Errorf("DefaultVoiceModel(anthropic) = %q, want claude-haiku-5-5", got)
+	}
+	for _, id := range []string{"", groq.ProviderID, gemini.ProviderID} {
+		if got, want := DefaultVoiceModel(id), DefaultModel(id); got != want {
+			t.Errorf("DefaultVoiceModel(%q) = %q, want the provider default %q", id, got, want)
+		}
+	}
+	if got := DefaultModel(anthropic.ProviderID); got != anthropic.DefaultModel {
+		t.Errorf("DefaultModel(anthropic) = %q, want it unchanged (%q) for the off-session callers", got, anthropic.DefaultModel)
+	}
+}
