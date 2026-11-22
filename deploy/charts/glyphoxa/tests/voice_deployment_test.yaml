@@ -671,3 +671,52 @@ tests:
             name: certs
             secret:
               secretName: extra-certs
+
+  - it: sources the Anthropic key from the Secret
+    # ANTHROPIC_API_KEY (#702) reaches the pod exactly like GROQ_API_KEY: the
+    # Anthropic adapter's env fallback, for a deployment whose default LLM — or
+    # a Tenant's choice on the Platform Keys — is Claude.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ANTHROPIC_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: anthropic-api-key
+
+  - it: sets no default-LLM env on a stock install
+    # Unset means the binary's code default (Groq, openai/gpt-oss-120b): no env
+    # var at all, so a stock install is byte-identical to before #702.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LLM_DEFAULT_PROVIDER
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LLM_DEFAULT_MODEL
+          any: true
+
+  - it: renders the deployment-default LLM an operator sets
+    # One `llm` block feeds BOTH pods: the voice loop and the web tier's
+    # off-session engines and Configuration screen must agree on the default.
+    set:
+      anthropicApiKey: unit-test-anthropic-placeholder
+      llm:
+        defaultProvider: anthropic
+        defaultModel: claude-haiku-4-5
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LLM_DEFAULT_PROVIDER
+            value: "anthropic"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LLM_DEFAULT_MODEL
+            value: "claude-haiku-4-5"
