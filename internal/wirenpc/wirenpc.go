@@ -210,11 +210,13 @@ type Config struct {
 	// nothing. The live binary injects the Prometheus adapter; the benchmark
 	// injects its own; the keyless default is the no-op recorder.
 	StageMetrics observe.StageRecorder
-	// STTStreaming opts the voice loop into the streaming-STT transport (ADR-0042,
-	// issue #180): when the wired STT recognizer supports it, utterances stream over
-	// a persistent websocket and finalize on a local-VAD manual commit, with the
-	// batch adapter as automatic fallback. Default OFF reproduces today's batch path
-	// byte-for-byte. Parsed from GLYPHOXA_STT_STREAMING in cmd/glyphoxa.
+	// STTStreaming puts the voice loop on the streaming-STT transport (ADR-0042):
+	// when the wired STT recognizer supports it, utterances stream over a
+	// persistent websocket and finalize on a local-VAD manual commit, with the
+	// batch adapter as automatic fallback. The zero value is OFF — the batch path
+	// byte-for-byte, which is what tests and rigs that build a Config get — while
+	// the binary turns it ON unless GLYPHOXA_STT_STREAMING says otherwise
+	// (cmd/glyphoxa sttStreaming, default on since #702).
 	STTStreaming bool
 	// Bus, when non-nil, is the process-wide voiceevent.Bus the orchestrator
 	// publishes onto INSTEAD of a fresh per-cycle bus (issue #73, ADR-0014).

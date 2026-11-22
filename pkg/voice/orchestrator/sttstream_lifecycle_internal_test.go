@@ -603,3 +603,48 @@ func TestStreamManager_DialOnDemand_WaitsForTheFirstSpeech(t *testing.T) {
 		t.Errorf("stt_final = %+v, want %+v", got, want)
 	}
 }
+
+// TestStreamManager_LogsAnUnexpectedSessionEnd_NotTheTeardown: the end of a live
+// session is worth a log line — unless it is the manager's own shutdown (a reaped
+// lane, the Voice Session ending), where the adapter reports the close it was
+// just asked for and "reconnecting" would be a lie repeated for every lane.
+func TestStreamManager_LogsAnUnexpectedSessionEnd_NotTheTeardown(t *testing.T) {
+	d := newDialScript()
+	clock := newLifeClock()
+	logs := &lockedBuffer{}
+	m := NewStreamManager(d, WithStreamLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	m.now = clock.now
+	m.sleep = clock.sleep
+	ctx, cancel := context.WithCancel(t.Context())
+	stop := m.bind(ctx, voiceevent.NewBus())
+	d.awaitDial(t)
+	if !m.WaitStreamUp(2 * time.Second) {
+		t.Fatal("never up")
+	}
+
+	clock.advance(time.Minute)
+	d.kill(0, idleClose())
+	d.awaitDial(t)
+	if !m.WaitStreamUp(2 * time.Second) {
+		t.Fatal("never redialed")
+	}
+	if n := strings.Count(logs.String(), "session ended"); n != 1 {
+		t.Fatalf("session-ended log lines = %d, want 1 for the unexpected close\n%s", n, logs.String())
+	}
+
+	cancel() // the Voice Session ends: the adapter closes the session and says so
+	d.kill(1, &stt.StreamError{Code: stt.CodeTransport, Fatal: true, Err: context.Canceled})
+	stop()
+	if n := strings.Count(logs.String(), "session ended"); n != 1 {
+		t.Errorf("the teardown logged a session end (%d lines total):\n%s", n, logs.String())
+	}
+	if !d.session(1).isClosed() {
+		t.Error("the live session was not closed at teardown")
+	}
+}
+
+func (f *fakeStream) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}

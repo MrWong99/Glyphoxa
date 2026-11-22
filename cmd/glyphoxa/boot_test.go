@@ -704,18 +704,20 @@ func TestGMSpeakerGate(t *testing.T) {
 	}
 }
 
-// TestSTTStreaming: the streaming-STT opt-in (ADR-0042, issue #180) is on only
-// when GLYPHOXA_STT_STREAMING holds a non-blank, non-falsy value, so the batch
-// path stays the byte-for-byte default until an operator explicitly opts in.
+// TestSTTStreaming: streaming STT is the default (ADR-0042 amendment 2026-11-22,
+// #702). GLYPHOXA_STT_STREAMING is the off-switch — only an explicit falsy value
+// ("0"/"false"/"no"/"off", any case, trimmed) keeps a deployment on batch STT; an
+// unset or blank variable streams.
 func TestSTTStreaming(t *testing.T) {
 	cases := []struct {
 		val  string
 		want bool
 	}{
-		{"", false},
-		{"   ", false},
+		{"", true},
+		{"   ", true},
 		{"0", false},
 		{"false", false},
+		{"False", false},
 		{"OFF", false},
 		{" no ", false},
 		{"1", true},

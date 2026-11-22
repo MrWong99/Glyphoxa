@@ -63,6 +63,10 @@ type StreamManager struct {
 
 	mu  sync.Mutex
 	bus *voiceevent.Bus // captured at bind; where STTPartial is published
+	// bindCtx is the maintainer's context, captured at bind. Once it is done the
+	// manager is shutting down: a session's end is then the teardown itself, not a
+	// death to recover from (see dropSession).
+	bindCtx context.Context
 	// stream is the current live session, nil while down (the maintainer is dialing).
 	stream stt.Stream
 	// backoff is the current re-establish delay. It grows on a failed dial and on
@@ -249,6 +253,9 @@ func (m *StreamManager) bind(ctx context.Context, bus *voiceevent.Bus) func() {
 	m.mu.Unlock()
 
 	mctx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.bindCtx = mctx
+	m.mu.Unlock()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -448,6 +455,13 @@ func (m *StreamManager) sessionClosed(h *dialHandle, cause error) {
 func (m *StreamManager) dropSession(s stt.Stream, cause error) bool {
 	m.mu.Lock()
 	if s == nil || m.stream != s {
+		m.mu.Unlock()
+		return false
+	}
+	if m.bindCtx != nil && m.bindCtx.Err() != nil {
+		// Shutting down: the adapter is reporting the close the cancelled context
+		// asked for. Leave the session installed for bind's stop func to Close;
+		// there is nothing to redial and nothing worth logging.
 		m.mu.Unlock()
 		return false
 	}

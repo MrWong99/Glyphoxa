@@ -141,8 +141,8 @@ type conversationDeps struct {
 	// Keyless cassette tests replay the Anthropic adapter behind the same
 	// llm.Provider interface.
 	llmProviderID string
-	// sttStreaming opts into the streaming-STT transport (ADR-0042); false is
-	// the byte-for-byte batch default. See [Config.STTStreaming].
+	// sttStreaming selects the streaming-STT transport (ADR-0042); false is the
+	// byte-for-byte batch path. See [Config.STTStreaming].
 	sttStreaming bool
 
 	// memory / facts / directives fill the per-turn Hot Context slots on every
@@ -375,7 +375,8 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 		orchestrator.WithBargeIn(bargeGroup(d)),
 		// Streaming STT (ADR-0042, issue #180): a nil manager is byte-for-byte the
 		// batch path, so this option is unconditional — buildStreamManager returns nil
-		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.
+		// when streaming is switched off (GLYPHOXA_STT_STREAMING=0) or the adapter is
+		// not a StreamingRecognizer.
 		orchestrator.WithStreamingSTT(streamMgr),
 		// Speaker Lanes (ADR-0050): attributed inbound frames open per-speaker VAD
 		// lanes so utterances are segmented and attributed independently. A single
