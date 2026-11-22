@@ -135,6 +135,8 @@ func (t *recorderTap) TurnOutcome(observe.TurnOutcome, observe.TurnReason) {}
 func (t *recorderTap) LLMTokens(observe.Provider, string, int, int)    {}
 func (t *recorderTap) TTSCharacters(observe.Provider, int)             {}
 func (t *recorderTap) STTAudioSeconds(observe.Provider, time.Duration) {}
+func (t *recorderTap) STTFinal(observe.Provider, observe.STTTransport, observe.STTFinalReason) {
+}
 
 // MalformedToolGen (#398) is a provider-flake counter, not a latency stage, so the
 // bench tap ignores it.

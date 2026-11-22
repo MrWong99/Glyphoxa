@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -801,6 +802,16 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 			return nil
 		}
 		// Commit errored or timed out: degrade to the batch adapter below.
+	}
+	if job.stream == nil {
+		// A lane with a stream is counted by its StreamManager, which knows whether
+		// the utterance streamed and why not. A lane without one is counted here
+		// (#702): batch is its only path, and the reason says which knob made it so.
+		why := observe.STTFinalStreamingOff
+		if s.laneStreamFactory != nil && job.speakerID != "" {
+			why = observe.STTFinalLaneCap
+		}
+		s.stt.countFinal(observe.STTTransportBatch, why)
 	}
 	return s.stt.Transcribe(ctx, job.seg)
 }

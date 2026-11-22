@@ -148,7 +148,10 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 		return nil, fmt.Errorf("elevenlabs.OpenStream: unsupported sample rate %d (only %d supported)", cfg.SampleRate, supportedSampleRate)
 	}
 	if c.apiKey == "" {
-		return nil, fmt.Errorf("elevenlabs.OpenStream: missing API key (set %s or pass it to New)", APIKeyEnv)
+		// Durable, like a rejected key: auth_error makes the stream manager wait at
+		// its backoff cap rather than retry a dial that cannot succeed.
+		return nil, &stt.StreamError{Code: "auth_error", Fatal: true,
+			Err: fmt.Errorf("elevenlabs.OpenStream: missing API key (set %s or pass it to New)", APIKeyEnv)}
 	}
 
 	u, err := streamURL(c.baseURL, cfg.Language)

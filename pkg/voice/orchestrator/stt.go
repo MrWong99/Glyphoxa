@@ -208,6 +208,12 @@ func (s *STT) PublishFinal(ctx context.Context, t stt.Transcript) {
 	})
 }
 
+// countFinal counts one utterance on the stt_final series (#702) under this
+// stage's provider label, for the [Segmenter]'s lanes that have no stream.
+func (s *STT) countFinal(transport observe.STTTransport, reason observe.STTFinalReason) {
+	s.rec.STTFinal(s.provider, transport, reason)
+}
+
 // speechEndAtKey carries the segment's [voiceevent.VADSpeechEnd.At] from the
 // [Segmenter] to [STT.Transcribe] without widening the Transcribe signature
 // (which tracer-bullet tests and the cassette path call directly). Unexported

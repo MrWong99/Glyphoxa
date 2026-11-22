@@ -279,6 +279,12 @@ func TestOpenStream_NoKey_NoEnv_Errors(t *testing.T) {
 	if !strings.Contains(err.Error(), "missing API key") {
 		t.Errorf("error %q does not mention missing API key", err)
 	}
+	// A missing key is as durable as a rejected one: it must carry the auth_error
+	// code so the stream manager waits at the backoff cap instead of redialing a
+	// dial that cannot succeed at 1, 2, 4, … seconds (#702).
+	if se := asStreamError(t, err); se.Code != "auth_error" || !se.Fatal {
+		t.Errorf("error = %v, want a fatal auth_error", se)
+	}
 }
 
 // --- Test 11a: OpenStream rejects unsupported sample rate ---

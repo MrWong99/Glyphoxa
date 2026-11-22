@@ -313,7 +313,7 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	// stream (stamping its SpeakerID on partials) under a concurrency cap, so
 	// concurrent sockets track concurrent speakers, not channel size. Nil unless
 	// streaming is on AND the adapter streams — the byte-for-byte batch default.
-	laneStreamFactory := buildLaneStreamFactory(recognizer, d.sttStreaming, stageMetrics)
+	laneStreamFactory := buildLaneStreamFactory(recognizer, d.sttStreaming, stageMetrics, log)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
 	// NPC carries its own grants (spec.grants — from its tool_agent_grant rows on
@@ -450,7 +450,8 @@ func engineFactory(provider llm.Provider, reg *tool.Registry, language string, s
 // byte-for-byte batch default). It is the selection seam (ADR-0042, issue #180):
 // keeping it a small pure function lets the gating be unit-tested without standing
 // up the whole Silero VAD pipeline. The provider label is elevenlabs (the only
-// streaming STT adapter in the MVP matrix, ADR-0039).
+// streaming STT adapter in the MVP matrix, ADR-0039). log receives the manager's
+// dial-failure / reconnect / session-ended lines.
 func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) *orchestrator.StreamManager {
 	if !streaming {
 		return nil
@@ -465,7 +466,13 @@ func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics 
 		return nil
 	}
 	return orchestrator.NewStreamManager(sr,
-		orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs))
+		orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs),
+		orchestrator.WithStreamLogger(log),
+		// This is the DEFAULT (unattributed) lane. Inbound Discord frames are
+		// speaker-stamped, so real speech lands on the per-speaker lanes and this
+		// lane normally never speaks: dial it on its first speech rather than hold
+		// a kept-alive realtime connection open for the whole Voice Session (#702).
+		orchestrator.WithStreamDialOnDemand())
 }
 
 // defaultStreamMaxLanes caps concurrent per-lane streaming-STT sockets (ADR-0050):
@@ -495,7 +502,7 @@ func streamMaxLanes() int {
 // batch default). It is the lane analogue of [buildStreamManager]: each lane's
 // manager stamps its SpeakerID on partials (ADR-0050). The provider label is
 // elevenlabs (the only streaming STT adapter in the MVP matrix, ADR-0039).
-func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder) func(speakerID string) *orchestrator.StreamManager {
+func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) func(speakerID string) *orchestrator.StreamManager {
 	if !streaming {
 		return nil
 	}
@@ -506,6 +513,7 @@ func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetr
 	return func(speakerID string) *orchestrator.StreamManager {
 		return orchestrator.NewStreamManager(sr,
 			orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs),
+			orchestrator.WithStreamLogger(log),
 			orchestrator.WithStreamSpeakerID(speakerID))
 	}
 }

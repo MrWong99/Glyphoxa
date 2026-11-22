@@ -321,7 +321,59 @@ type StageRecorder interface {
 	// since both calls billed). (glyphoxa_voice_stt_audio_seconds_total{provider})
 	// — WIRED by the STT batch stage and the StreamManager.
 	STTAudioSeconds(provider Provider, d time.Duration)
+
+	// STTFinal counts one utterance by the transport that produced — or was asked
+	// to produce — its final transcript, and why (#702, ADR-0042 amendment
+	// 2026-11-22). It is what tells a streamed final from a batch fallback: the
+	// latency histograms and provider counters record both identically, so without
+	// it streaming can quietly stop streaming.
+	// (glyphoxa_voice_stt_final_total{provider,transport,reason}) — WIRED by the
+	// StreamManager (every utterance of a lane that has a stream) and the Segmenter
+	// (lanes without one). It is a method of this interface, not a capability found
+	// by type assertion, so it survives [TeeUsage].
+	STTFinal(provider Provider, transport STTTransport, reason STTFinalReason)
 }
+
+// STTTransport is the bounded transport label on the stt_final counter.
+type STTTransport string
+
+const (
+	// STTTransportStream: the final is the streamed session's committed transcript.
+	STTTransportStream STTTransport = "stream"
+	// STTTransportBatchFallback: the lane streams, but this utterance went to the
+	// batch recognizer — reason says why.
+	STTTransportBatchFallback STTTransport = "batch_fallback"
+	// STTTransportBatch: the lane has no stream at all, so batch is its only path.
+	STTTransportBatch STTTransport = "batch"
+)
+
+// STTFinalReason is the bounded reason label on the stt_final counter. Each value
+// belongs to exactly one [STTTransport].
+type STTFinalReason string
+
+const (
+	// STTFinalCommitted (stream): the manual commit resolved with a transcript.
+	STTFinalCommitted STTFinalReason = "committed"
+
+	// STTFinalStreamDown (batch_fallback): no live session when speech started —
+	// still dialing, backing off, or it died while the speaker was silent.
+	STTFinalStreamDown STTFinalReason = "stream_down"
+	// STTFinalStreamDied (batch_fallback): the session died, or a send failed,
+	// while the utterance was streaming.
+	STTFinalStreamDied STTFinalReason = "stream_died"
+	// STTFinalCommitError (batch_fallback): the commit was refused or resolved
+	// with an error.
+	STTFinalCommitError STTFinalReason = "commit_error"
+	// STTFinalCommitTimeout (batch_fallback): the commit did not resolve in time.
+	STTFinalCommitTimeout STTFinalReason = "commit_timeout"
+
+	// STTFinalStreamingOff (batch): streaming STT is disabled, or the wired
+	// recognizer cannot stream.
+	STTFinalStreamingOff STTFinalReason = "streaming_off"
+	// STTFinalLaneCap (batch): the Speaker Lane is past the concurrent-stream cap
+	// (GLYPHOXA_STT_STREAM_MAX_LANES).
+	STTFinalLaneCap STTFinalReason = "lane_cap"
+)
 
 // Discard is the no-op StageRecorder used when none is configured, so call sites
 // never nil-check. It mirrors pkg/voice's discardMetrics.
@@ -344,6 +396,8 @@ func (Discard) LLMTokens(Provider, string, int, int)        {}
 func (Discard) MalformedToolGen(Provider, MalformedPath)    {}
 func (Discard) TTSCharacters(Provider, int)                 {}
 func (Discard) STTAudioSeconds(Provider, time.Duration)     {}
+func (Discard) STTFinal(Provider, STTTransport, STTFinalReason) {
+}
 
 // Static assertion that the no-op satisfies the contract.
 var _ StageRecorder = Discard{}
