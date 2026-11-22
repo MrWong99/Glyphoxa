@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -654,20 +655,41 @@ func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
 // sends land in the buffered channel and are dropped), and complete=false
 // tells the caller not to cache.
 func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, lastBotTag string) (providers []*managementv1.ProviderHealth, complete bool) {
+	// The LLM check reports under the provider in effect for the Tenant (#702),
+	// which only the check itself learns (a store read that must stay inside
+	// the probe's deadline). It publishes the name as soon as it knows it, so a
+	// probe that times out AFTER the read names the right provider; before
+	// that, the placeholder can only be the deployment default's.
+	var llmProvider atomic.Pointer[string]
+	static := func(name string) func() string { return func() string { return name } }
 	checks := []struct {
-		name string
+		// component is what the entry is the health OF — the unique key, stamped
+		// on every result: two entries can share a provider (Gemini as LLM and
+		// as image slot).
+		component string
+		// name is the provider a timeout placeholder is reported under.
+		name func() string
 		run  func(context.Context, uuid.UUID) *managementv1.ProviderHealth
 	}{
-		// The LLM check reports under the provider in effect for the Tenant
-		// (#702), which only the check itself learns (a store read that must
-		// stay inside the probe's deadline). The name here is the timeout
-		// placeholder: the deployment default's.
-		{s.llmDefault.Provider(), s.healthLLM},
-		{"elevenlabs", s.healthTTS},
-		{"gemini", s.healthImage},
-		{"discord", func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+		{string(storage.ComponentLLM), func() string {
+			if p := llmProvider.Load(); p != nil {
+				return *p
+			}
+			return s.llmDefault.Provider()
+		}, func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+			return s.healthLLM(ctx, tenantID, func(provider string) { llmProvider.Store(&provider) })
+		}},
+		{string(storage.ComponentTTS), static("elevenlabs"), s.healthTTS},
+		{string(storage.ComponentImage), static("gemini"), s.healthImage},
+		{"discord", static("discord"), func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
 			return s.healthDiscord(ctx, tenantID, lastBotTag)
 		}},
+	}
+	stamp := func(providers []*managementv1.ProviderHealth) []*managementv1.ProviderHealth {
+		for i, check := range checks {
+			providers[i].Component = check.component
+		}
+		return providers
 	}
 
 	type slot struct {
@@ -700,20 +722,22 @@ func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, la
 			}
 			for i, check := range checks {
 				if providers[i] == nil {
-					providers[i] = s.degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
+					providers[i] = s.degraded(check.name(), fmt.Errorf("health probe timed out: %w", ctx.Err()))
 				}
 			}
-			return providers, false
+			return stamp(providers), false
 		}
 	}
-	return providers, true
+	return stamp(providers), true
 }
 
 // healthLLM pings the LLM provider in effect for the Tenant (#702) — the
 // provider of its newest LLM Provider Config, else the deployment default —
 // with the key a Voice Session would use, and reports under that provider's
 // name. A Tenant on Anthropic is never shown Groq's health, and vice versa.
-func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+// resolved is told the provider as soon as the Tenant's row is read, before
+// any network call — the caller's name for a timeout placeholder.
+func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID, resolved func(provider string)) *managementv1.ProviderHealth {
 	// ONE read of the Tenant's newest LLM row decides both the provider and
 	// the key, so the badge cannot name one provider and probe another's key.
 	provider := s.llmDefault.Provider()
@@ -726,6 +750,7 @@ func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *manage
 	case !errors.Is(err, storage.ErrNotFound):
 		return s.degraded(provider, internalErr(s.log, "healthLLM: store read failed", err))
 	}
+	resolved(provider)
 	envKey, known := llmbuild.PlatformKeyEnv(provider)
 	ping := s.llmPing(provider)
 	if !known || ping == nil {

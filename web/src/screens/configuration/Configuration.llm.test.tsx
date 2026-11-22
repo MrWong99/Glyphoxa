@@ -43,6 +43,11 @@ function backend(opts: {
   newest?: "groq" | "anthropic";
   platformDefault?: { provider: "groq" | "anthropic"; model: string };
   healthy?: string[];
+  // health replaces the `healthy` shorthand with explicit entries, each tagged
+  // with the component it is the health of (what a current server sends).
+  health?: { provider: string; component: string; status: HealthStatus }[];
+  // imageSaved gives the Gemini image slot a saved key.
+  imageSaved?: boolean;
   saves?: SaveProviderConfigRequest[];
 }) {
   const slots: Record<"groq" | "anthropic", Slot> = {
@@ -77,9 +82,11 @@ function backend(opts: {
       getProviderHealth: () =>
         create(GetProviderHealthResponseSchema, {
           // Exactly one LLM entry: the provider in effect.
-          providers: (opts.healthy ?? []).map((provider) =>
-            create(ProviderHealthSchema, { provider, status: HealthStatus.HEALTHY }),
-          ),
+          providers: opts.health
+            ? opts.health.map((h) => create(ProviderHealthSchema, h))
+            : (opts.healthy ?? []).map((provider) =>
+                create(ProviderHealthSchema, { provider, status: HealthStatus.HEALTHY }),
+              ),
         }),
       listModels: (req) => create(ListModelsResponseSchema, { models: MODELS[req.provider] ?? [] }),
     });
@@ -91,7 +98,13 @@ function backend(opts: {
             cred("groq"),
             cred("anthropic"),
             create(ProviderCredentialSchema, { component: "tts", provider: "elevenlabs" }),
-            create(ProviderCredentialSchema, { component: "image", provider: "gemini" }),
+            create(ProviderCredentialSchema, {
+              component: "image",
+              provider: "gemini",
+              everSaved: Boolean(opts.imageSaved),
+              showMasked: Boolean(opts.imageSaved),
+              last4: opts.imageSaved ? "7777" : "",
+            }),
           ],
           effectiveLlm: create(EffectiveLlmSchema, effective()),
         }),
@@ -235,6 +248,39 @@ describe("Configuration voice-LLM choice (#702)", () => {
     await waitFor(() => expect(saves).toHaveLength(1));
     expect(saves[0]).toMatchObject({ provider: "anthropic", secret: "sk-ant-api-secret-9999", slot: "" });
     expect(await screen.findByLabelText("Anthropic saved")).toBeInTheDocument();
+  });
+
+  // Gemini as the deployment's default LLM makes two "gemini" health entries;
+  // the image row must show the IMAGE key's verdict, not the LLM's.
+  it("matches a health entry to its row by component, not by provider name", async () => {
+    renderScreen(
+      backend({
+        imageSaved: true,
+        health: [
+          { provider: "gemini", component: "llm", status: HealthStatus.HEALTHY },
+          { provider: "gemini", component: "image", status: HealthStatus.DEGRADED },
+        ],
+      }),
+    );
+    const image = (await screen.findByLabelText("Gemini saved")).closest(".gx-provider-row") as HTMLElement;
+    expect(await within(image).findByText(/having trouble/i)).toBeInTheDocument();
+    expect(within(image).queryByText(/^working$/i)).not.toBeInTheDocument();
+  });
+
+  // A probe that timed out before the tenant's LLM row was read can only name
+  // the deployment default: the LLM entry still belongs to the row in use.
+  it("shows the LLM health entry on the row in use even under another provider's name", async () => {
+    renderScreen(
+      backend({
+        slots: { anthropic: { last4: "9999" }, groq: { last4: "1111" } },
+        newest: "anthropic",
+        health: [{ provider: "groq", component: "llm", status: HealthStatus.DEGRADED }],
+      }),
+    );
+    const anthropic = (await screen.findByLabelText("Anthropic saved")).closest(".gx-provider-row") as HTMLElement;
+    expect(await within(anthropic).findByText(/having trouble/i)).toBeInTheDocument();
+    const groq = screen.getByLabelText("Groq saved").closest(".gx-provider-row") as HTMLElement;
+    expect(within(groq).queryByText(/having trouble/i)).not.toBeInTheDocument();
   });
 
   // A key saved into the slot NOT in use becomes the tenant's newest LLM row,

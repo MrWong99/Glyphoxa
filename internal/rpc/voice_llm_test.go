@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -301,5 +302,108 @@ func TestListModels_NoKeyAnywhereIsQuiet(t *testing.T) {
 	}
 	if logged.Len() != 0 {
 		t.Errorf("a missing key was logged as a catalog failure: %s", logged.String())
+	}
+}
+
+// healthByComponent indexes a health response by what each entry is the health
+// OF — the only key that is unique (#702 review).
+func healthByComponent(t *testing.T, srv *VoiceServer) map[string]*managementv1.ProviderHealth {
+	t.Helper()
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	out := map[string]*managementv1.ProviderHealth{}
+	for _, p := range resp.Msg.GetProviders() {
+		if _, dup := out[p.GetComponent()]; dup || p.GetComponent() == "" {
+			t.Errorf("health entry %+v: component must be set and unique", p)
+		}
+		out[p.GetComponent()] = p
+	}
+	return out
+}
+
+// Gemini as the deployment's default LLM makes TWO "gemini" entries — the LLM
+// on the platform key and the image slot on the Tenant's own — and they must
+// stay tellable apart: a dead image key is the image entry's verdict, not
+// hidden behind the LLM's.
+func TestGetProviderHealth_GeminiLLMAndImageAreSeparateEntries(t *testing.T) {
+	t.Parallel()
+	d, err := llmbuild.DeploymentDefaultFromEnv(func(k string) string {
+		return map[string]string{llmbuild.EnvDefaultProvider: "gemini", "GEMINI_API_KEY": "platform-gemini"}[k]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(&fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentImage: savedConfig(t, cipher, storage.ComponentImage, "gemini", "dead-image-key"),
+	}}, cipher, nil)
+	srv.SetLLMDefault(d)
+	srv.lookupEnv = platformKeysSet
+	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
+	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
+	srv.pingImage = func(_ context.Context, key string) error {
+		if key == "dead-image-key" {
+			return errors.New("API key not valid")
+		}
+		return nil
+	}
+
+	entries := healthByComponent(t, srv)
+	if h := entries["llm"]; h == nil || h.GetProvider() != "gemini" || h.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+		t.Errorf("llm entry = %+v, want gemini healthy (the platform key)", h)
+	}
+	if h := entries["image"]; h == nil || h.GetProvider() != "gemini" || h.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
+		t.Errorf("image entry = %+v, want gemini degraded (the Tenant's dead key)", h)
+	}
+	for _, c := range []string{"tts", "discord"} {
+		if entries[c] == nil {
+			t.Errorf("no %q entry", c)
+		}
+	}
+}
+
+// A Tenant whose plan excludes the Platform Keys is told so on the LLM entry —
+// even when the deployment HAS the key — and the provider is never pinged.
+func TestGetProviderHealth_LLMEntitlementRefusalIsReported(t *testing.T) {
+	t.Parallel()
+	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.SetKeyEntitlement(&scriptedEnt{allowed: false})
+	srv.lookupEnv = platformKeysSet
+	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
+	srv.pingImage = func(context.Context, string) error { return nil }
+	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
+	srv.pingLLM = func(context.Context, string) error {
+		t.Error("the LLM was pinged on a platform key the Tenant is not entitled to")
+		return nil
+	}
+	h := healthByComponent(t, srv)["llm"]
+	if h == nil || h.GetProvider() != "groq" || h.GetCode() != "plan_excludes_platform_keys" {
+		t.Errorf("llm entry = %+v, want groq degraded plan_excludes_platform_keys", h)
+	}
+}
+
+// A probe that times out AFTER the Tenant's LLM row was read reports the
+// timeout under the provider that row names, not the deployment default's.
+func TestGetProviderHealth_TimeoutNamesTheProviderInEffect(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	store := &fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "anthropic", "sk-ant-secret"),
+	}}
+	srv := NewVoiceServer(store, cipher, nil)
+	srv.probeTimeout = 50 * time.Millisecond
+	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
+	srv.pingImage = func(context.Context, string) error { return nil }
+	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	// A ping that ignores its context: only the probe deadline ends the wait.
+	srv.pingAnthropic = func(context.Context, string) error { <-release; return nil }
+
+	h := healthByComponent(t, srv)["llm"]
+	if h == nil || h.GetProvider() != "anthropic" || h.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
+		t.Errorf("llm entry = %+v, want a degraded ANTHROPIC entry — the provider in effect", h)
 	}
 }

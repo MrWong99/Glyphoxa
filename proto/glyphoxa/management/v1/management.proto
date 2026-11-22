@@ -2869,6 +2869,13 @@ message ProviderHealth {
   // "check_failed". Empty when healthy. New codes may be added; an unknown
   // code renders detail.
   string code = 5;
+  // component is what the entry is the health OF: "llm", "tts", "image" or
+  // "discord". provider alone cannot say: Gemini backs the image slot and can
+  // also be the deployment's default LLM, which makes two "gemini" entries with
+  // different keys and verdicts; and a probe that times out before the Tenant's
+  // LLM row is read can only name the deployment default's provider. A screen
+  // matches a row by component (#702). Empty from a server that predates it.
+  string component = 6;
 }
 
 // GetProviderHealthRequest is the (empty) request; the tenant is resolved

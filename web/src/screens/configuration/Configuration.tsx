@@ -158,8 +158,21 @@ function llmProviderLabel(provider: string): string {
   return BYOK_SLOTS.find((s) => s.voiceLlm && s.provider === provider)?.label ?? provider;
 }
 
-function healthFor(health: ProviderHealth[], provider: string): ProviderHealth | undefined {
-  return health.find((h) => h.provider === provider);
+// The health entry of one row. Entries are keyed by `component` — what the
+// entry is the health OF — because a provider name is not unique: Gemini backs
+// the image slot and can be the deployment's default LLM too (#702). There is
+// exactly one "llm" entry, the LLM in use, so it belongs to the voice-LLM row
+// in use whatever provider name it carries (a probe that timed out before the
+// tenant's row was read can only name the deployment default). A server that
+// predates `component` is matched by provider, as before.
+function healthFor(
+  health: ProviderHealth[],
+  slot: { component: string; provider: string },
+  llmInUse = false,
+): ProviderHealth | undefined {
+  if (!health.some((h) => h.component)) return health.find((h) => h.provider === slot.provider);
+  if (slot.component === "llm" && !llmInUse) return undefined;
+  return health.find((h) => h.component === slot.component);
 }
 
 export function Configuration() {
@@ -330,7 +343,7 @@ export function Configuration() {
               credential={credential}
               // The probe result is per-provider; a hideHealth slot renders no
               // badge at all (see ByokSlot.hideHealth), so it gets none passed.
-              health={slot.hideHealth ? undefined : healthFor(health, slot.provider)}
+              health={slot.hideHealth ? undefined : healthFor(health, slot, llmInUse)}
               hideHealth={slot.hideHealth}
               // A voice-LLM slot the tenant is not on needs no key: it is a
               // choice, so it reads "Optional" where the one in use reads "Key
@@ -363,7 +376,7 @@ export function Configuration() {
             optional
             placeholder={t("config.pasteBotToken")}
             credential={credentialFor(creds, "discord")}
-            health={healthFor(health, "discord")}
+            health={healthFor(health, { component: "discord", provider: "discord" })}
             // Token-only save: the ID fields stay OFF the wire (they have proto3
             // presence), so replacing the token can never clobber the stored IDs —
             // even while the config load is still resolving (#142).
