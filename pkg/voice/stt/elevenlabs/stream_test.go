@@ -682,11 +682,12 @@ func TestErrorFrame_InsufficientAudio_ResolvesEmptyNoError(t *testing.T) {
 	}
 }
 
-// --- Test 8: 90s auto-commit carries onto the next manual commit ---
+// --- Test 8: the provider's auto-commit carries onto the next manual commit ---
 
 func TestAutoCommit_PrependedToNextCommit(t *testing.T) {
 	ss := newScriptedServer(t, func(conn *websocket.Conn) {
-		// Unsolicited committed_transcript (the provider's 90s auto-commit),
+		// Unsolicited committed_transcript (the provider's auto-commit, after
+		// about 36 s of accumulated audio per its docs),
 		// then a partial as a synchronization barrier so the client is proven
 		// to have processed the auto-commit before it registers a pending commit.
 		_ = conn.WriteJSON(committedMsg("auto part"))

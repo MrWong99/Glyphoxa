@@ -333,9 +333,11 @@ func TestHardCap_EndsSessionCleanly(t *testing.T) {
 // makes the subsequent status/end_reason asserts deterministic.
 func waitInactive(t *testing.T, mgr *session.Manager, store *fakeStore, id uuid.UUID) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// AnyActive, not AnyLive: the slot is released after the terminal row and the
+	// finalizers, so a Start right after this returns is accepted (#708 stress run).
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if !mgr.AnyLive() && store.session(id).Status != storage.VoiceSessionRunning {
+		if !mgr.AnyActive() && store.session(id).Status != storage.VoiceSessionRunning {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

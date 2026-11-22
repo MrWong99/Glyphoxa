@@ -647,6 +647,93 @@ func TestWS_DialogueSessionCapFallsBackToHTTP(t *testing.T) {
 	})
 }
 
+// TestWS_WarmDoesNotDialDuringTheCapHold: a Warm inside the cap hold lines up
+// no socket — a background pre-dial would only be refused again (#706 review:
+// the hold check in prewarm had no biting test, because the pre-dial landed
+// after the assertion). The background dials are waited for before counting.
+func TestWS_WarmDoesNotDialDuringTheCapHold(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	srv.refuse.Store(http.StatusTooManyRequests)
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(time.Hour))
+	ctx := context.Background()
+
+	pcm, _, terminal := collect(t, say(t, c, ctx, wsVoice("voice-1"), "Erster Satz."))
+	if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+		t.Fatalf("at the cap: audio %q, terminal %v; want the HTTP path's audio", pcm, terminal)
+	}
+	if err := c.Warm(ctx); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	elevenlabs.WaitWSBackground(c)
+	if n := srv.refused.Load(); n != 1 {
+		t.Errorf("refused handshakes = %d, want 1: Warm dialled during the cap hold", n)
+	}
+}
+
+// TestWS_DeadPooledSocketDuringTheCapHoldIsOneFallback: a sentence whose pooled
+// socket is dead cannot move to a fresh one while dials are held, so it goes
+// over HTTP — counted as the fallback it is, not also as a redial (#706
+// review).
+func TestWS_DeadPooledSocketDuringTheCapHoldIsOneFallback(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		m, _ := c.sentence()
+		c.audio(sentencePCM(m.Inputs[0].Text))
+		c.final()
+		c.sentence() // the second sentence finds the socket dying
+		_ = c.Close()
+	})
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(time.Hour))
+	ctx := context.Background()
+	mustDrain(t, say(t, c, ctx, wsVoice("voice-1"), "Erster Satz."))
+
+	// Another voice hits the account's cap: dials are held from here on.
+	srv.refuse.Store(http.StatusTooManyRequests)
+	if pcm, _, _ := collect(t, say(t, c, ctx, wsVoice("voice-2"), "Ich auch.")); !bytes.Equal(pcm, httpPCM) {
+		t.Fatalf("voice-2 at the cap: audio %q, want the HTTP path's audio", pcm)
+	}
+
+	pcm, _, terminal := collect(t, say(t, c, ctx, wsVoice("voice-1"), "Zweiter Satz."))
+	if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+		t.Fatalf("dead socket in the hold: audio %q, terminal %v; want the HTTP path's audio", pcm, terminal)
+	}
+	if st := c.WSStats(); st.Fallbacks != 2 || st.Redials != 0 {
+		t.Errorf("stats = %+v, want 2 fallbacks and no redial (the sentence never reached a fresh socket)", st)
+	}
+}
+
+// TestWS_FreshSocketRefusedForTheCap_IsAFallbackNotARedial (#709 review): the
+// pooled socket is dead, the fresh dial is accepted, and the API then announces
+// the account's dialogue-session cap as an error frame before any audio. The
+// sentence goes over HTTP: one fallback, and no redial — it never got audio
+// from the fresh socket.
+func TestWS_FreshSocketRefusedForTheCap_IsAFallbackNotARedial(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		if c.n > 1 {
+			c.read()
+			c.sentence()
+			c.fail("too_many_concurrent_requests", "Too many concurrent dialogue sessions.")
+			return
+		}
+		c.read()
+		m, _ := c.sentence()
+		c.audio(sentencePCM(m.Inputs[0].Text))
+		c.final()
+		c.sentence() // the next sentence finds this socket dead
+		_ = c.Close()
+	})
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(time.Hour))
+	ctx := context.Background()
+	mustDrain(t, say(t, c, ctx, wsVoice("voice-1"), "Erster Satz."))
+	pcm, _, terminal := collect(t, say(t, c, ctx, wsVoice("voice-1"), "Zweiter Satz."))
+	if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+		t.Fatalf("audio %q, terminal %v; want the HTTP path's audio", pcm, terminal)
+	}
+	if st := c.WSStats(); st.Fallbacks != 1 || st.Redials != 0 {
+		t.Errorf("stats = %+v, want 1 fallback and no redial", st)
+	}
+}
+
 // TestWS_SessionCapErrorFrameFallsBackToHTTP: the same cap, announced after the
 // upgrade as an error frame before any audio.
 func TestWS_SessionCapErrorFrameFallsBackToHTTP(t *testing.T) {

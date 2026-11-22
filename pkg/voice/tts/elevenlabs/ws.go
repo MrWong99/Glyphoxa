@@ -180,7 +180,7 @@ var (
 type WSStats struct {
 	Dials     int64 // sockets opened (for a sentence or ahead of one)
 	Reuses    int64 // sentences that rode an already-open socket
-	Redials   int64 // sentences moved to a fresh socket because the pooled one was dead
+	Redials   int64 // sentences that started on a fresh socket because the pooled one was dead
 	Fallbacks int64 // sentences sent over HTTP: the pool or the account's dialogue-session pool was at its cap
 	Open      int   // sockets open right now
 }
@@ -751,6 +751,13 @@ func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, s
 			timer.Stop()
 		}
 		if err == nil {
+			if attempt > 0 {
+				// Counted once the fresh socket delivered the first frame: a
+				// sentence that never got audio from one (a cap hold, a full
+				// pool, a cap error frame, a failed dial) went over HTTP or
+				// failed, and is not a redial.
+				p.redials.Add(1)
+			}
 			ch := make(chan tts.AudioChunk)
 			go conn.stream(ctx, first, ch, sampleRate)
 			return ch, nil
@@ -768,7 +775,6 @@ func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, s
 			return nil, errWSNoRoom
 		}
 		if reused && attempt == 0 {
-			p.redials.Add(1)
 			continue
 		}
 		var se *StreamError

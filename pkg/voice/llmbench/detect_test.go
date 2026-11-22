@@ -54,6 +54,28 @@ func TestDetect_StageDirections(t *testing.T) {
 	}
 }
 
+// TestDetect_LongBracketsStillCountTowardEnglishAndToolNarration (#709
+// review): only an audio-tag-sized bracket (up to 40 characters) is stripped
+// before the English and tool-narration checks — the tag vocabulary is English
+// by design. A longer bracketed span is the model talking, so its English and
+// its tool talk still count there, as they did before the unknown-tag check
+// stopped capping its span; it is ALSO an unknown tag. The columns stay
+// comparable across bench runs.
+func TestDetect_LongBracketsStillCountTowardEnglishAndToolNarration(t *testing.T) {
+	for text, want := range map[string]Findings{
+		"[I need to look up the knowledge graph with the kg_query tool] Hallo, was darf es sein?": {UnknownTags: 1, English: 1, ToolNarration: 3},
+		"[leans heavily on the polished oak bar and sighs] Na, was darf's sein?":                  {UnknownTags: 1, English: 1},
+		"[sighs] Na, was darf's sein?": {},
+	} {
+		f := Detect(text, DetectOptions{NPCName: "Flo"})
+		got := Findings{UnknownTags: f.UnknownTags, English: f.English, ToolNarration: f.ToolNarration}
+		if got != want {
+			t.Errorf("Detect(%q) = {UnknownTags:%d English:%d ToolNarration:%d}, want {UnknownTags:%d English:%d ToolNarration:%d}",
+				text, got.UnknownTags, got.English, got.ToolNarration, want.UnknownTags, want.English, want.ToolNarration)
+		}
+	}
+}
+
 // TestDetect_UnknownTags pins the bracket check (#702 review): the TTS prompt
 // offers a fixed tag vocabulary and warns that any other bracket may be read
 // aloud. The models moved their stage directions into brackets — these are
@@ -72,7 +94,11 @@ func TestDetect_UnknownTags(t *testing.T) {
 		"[Pause] Na gut. [ clears throat ] Also.":                0, // case and padding are not a new tag
 		"[cheerfully] Hallo![/cheerfully]":                       0, // a closing tag is counted as tool markup
 		"Der Preis steht an der Tafel, zwei Silber [pro Nacht].": 1,
-		"Kein einziger Tag hier, nur Worte.":                     0,
+		// A stage direction longer than 40 characters is still one (#702
+		// review: the span was capped at 40, so a long action slipped through).
+		"[leans heavily on the polished oak bar and sighs] Na, was darf's sein?":                                            1,
+		"[wipes a tankard with a rag, glances at the door, then leans in close to the table and lowers her voice] Hört zu.": 1,
+		"Kein einziger Tag hier, nur Worte.": 0,
 	} {
 		if f := Detect(text, DetectOptions{NPCName: "Flo"}); f.UnknownTags != want {
 			t.Errorf("Detect(%q).UnknownTags = %d, want %d", text, f.UnknownTags, want)

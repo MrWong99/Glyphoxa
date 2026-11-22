@@ -53,6 +53,18 @@ func (m *Manager) BaseFactsForTest() agent.FactsRecaller {
 	return m.base.Facts
 }
 
+// AnyActive reports whether any Voice Session still holds its active slot —
+// including one in its end window. The slot is released last, after the
+// terminal row is written and the finalizers ran, so "not active" is the wait
+// condition for "the session is over": the row is terminal and a new Start is
+// accepted. ([Manager.AnyLive] flips earlier, at the start of the end window.)
+// Test-only.
+func (m *Manager) AnyActive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active) > 0
+}
+
 // AnyLive reports whether ANY Voice Session is running in this Manager (a
 // session in its end window, as.ended, no longer counts) — the tests' wait
 // condition for a session to start or wind down. Test-only: production reads
