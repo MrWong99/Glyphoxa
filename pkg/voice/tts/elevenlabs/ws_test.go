@@ -679,6 +679,101 @@ func TestWS_KeepAliveIsSentWhileIdle(t *testing.T) {
 	}
 }
 
+// TestWS_KeepAliveIsSentWhileASentenceIsHeld: playback back-pressure can hold a
+// look-ahead sentence on its socket for longer than the server's 20 s inactivity
+// limit with no client message in between, so keep_alive goes out while a
+// sentence is leased too. Here the server only finishes the sentence once it has
+// seen keep-alives arrive during it.
+func TestWS_KeepAliveIsSentWhileASentenceIsHeld(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		m, ok := c.sentence()
+		if !ok {
+			return
+		}
+		c.audio(sentencePCM(m.Inputs[0].Text))
+		for n := 0; n < 3; { // the sentence is still open: no final yet
+			k, ok := c.read()
+			if !ok {
+				return
+			}
+			if k.KeepAlive {
+				n++
+			}
+		}
+		c.final()
+		c.sentence()
+	})
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, time.Minute, 0, 0, 0))
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz."))
+	if terminal != nil || !bytes.Equal(pcm, sentencePCM("Ein Satz. ")) {
+		t.Errorf("audio %q, terminal %v; want the sentence finished once its keep-alives arrived", pcm, terminal)
+	}
+}
+
+// TestWS_SampleSplitAcrossFramesStaysAligned: frames are not promised to end on
+// a sample boundary. A dangling low byte is carried into the next frame, never
+// dropped — dropping it would shift every sample after it.
+func TestWS_SampleSplitAcrossFramesStaysAligned(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		c.sentence()
+		c.audio([]byte("ABC"))
+		c.audio([]byte("DEF"))
+		c.audio([]byte("GH"))
+		c.final()
+		c.sentence()
+	})
+	c := wsClient(t, srv)
+	ch := say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz.")
+	var got []string
+	for chunk := range ch {
+		if chunk.Err != nil {
+			t.Fatalf("terminal error: %v", chunk.Err)
+		}
+		got = append(got, string(chunk.PCM))
+	}
+	if want := []string{"AB", "CDEF", "GH"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("chunks = %q, want %q", got, want)
+	}
+}
+
+// TestWS_CancelBeforeFirstAudioClosesSocketAndPreDials: a barge can land while
+// the sentence is still waiting for its first frame. The call returns the ctx
+// error, the socket (with the sentence the server is about to render) is closed,
+// and a replacement is dialled for the reply that follows.
+func TestWS_CancelBeforeFirstAudioClosesSocketAndPreDials(t *testing.T) {
+	asked := make(chan struct{})
+	srv := newTTDServer(t, func(c *ttdConn) {
+		if c.n > 1 {
+			echoScript(c)
+			return
+		}
+		c.read()
+		c.sentence()
+		close(asked)
+		c.sentence() // says nothing; returns when the client closes the socket
+	})
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-asked
+		cancel()
+	}()
+	ch, err := c.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "Wird nie gesprochen.", Voice: voice})
+	if ch != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Synthesize = (%v, %v), want the cancellation", ch, err)
+	}
+	eventually(t, "the cut socket closed and a replacement dialled", func() bool {
+		return srv.upgrades.Load() == 2 && srv.open.Load() == 1 && c.WSStats().Open == 1
+	})
+	drain(t, say(t, c, context.Background(), voice, "Die Antwort."))
+	if st := c.WSStats(); st.Dials != 2 || st.Reuses != 1 {
+		t.Errorf("stats = %+v, want the reply on the pre-dialled socket", st)
+	}
+}
+
 // TestWS_IdleSocketIsClosedAfterTTL: every open socket holds one of the
 // account's dialogue-session slots, so a table that fell silent must give them
 // back; the next sentence dials again.
