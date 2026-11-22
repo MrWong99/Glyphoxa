@@ -608,12 +608,19 @@ type usageWire struct {
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
-// promptTokens is every prompt token the request was billed for: the uncached
-// ones plus those written to and read from the prompt cache (the adapter caches
-// the stable system prompt for the voice model, see caching.go). input_tokens
-// alone under-counts a cached prompt about 35-fold (#702). Summing prices a
-// cache read at the full input rate — the spend table has one rate per
-// direction — which over-estimates, the safe side for a spend cap.
+// promptTokens is the prompt side of a request as input-rate token equivalents:
+// the uncached tokens, plus those written to and read from the prompt cache
+// (the adapter caches the stable system prompt for the voice model, see
+// caching.go). input_tokens alone under-counts a cached prompt about 35-fold
+// (#702).
+//
+// The spend table has one rate per direction, and a spend cap reads this
+// figure, so it must not come out below the bill for any single request. A
+// cache read is billed at a tenth of the input rate and counted in full here —
+// an over-estimate. A 5-minute cache write is billed at 1.25x the input rate,
+// so its tokens are counted 1.25x (rounded up): a request that writes a prefix
+// nobody reads back within five minutes is metered at what it cost, not a
+// quarter under.
 func (u *usageWire) promptTokens() int {
-	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	return u.InputTokens + (u.CacheCreationInputTokens*5+3)/4 + u.CacheReadInputTokens
 }

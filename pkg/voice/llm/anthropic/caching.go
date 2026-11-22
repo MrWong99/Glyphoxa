@@ -12,8 +12,10 @@ import "strings"
 // minutes ago, against a 25% surcharge on the request that writes it. One read
 // per write already pays for the write, and a tool turn alone is a write
 // followed by a read seconds later, so for a live session this is a cost
-// reduction. It was measured to make no difference to latency at this prompt
-// size.
+// reduction. It is a cost INCREASE of up to 25% of the prefix for a request
+// that is never followed by another within five minutes — a single-round turn
+// of an NPC addressed that rarely, or an off-session caller that names this
+// model. It was measured to make no difference to latency at this prompt size.
 //
 // The breakpoint goes on the FIRST system message only. Everything after it —
 // the volatile tail the Agent loop appends per turn (facts, recalled memory, a
@@ -24,9 +26,10 @@ import "strings"
 // model keeps its plain system string, byte for byte.
 //
 // Metering: the API reports cached tokens outside input_tokens; the adapter
-// adds them back ([usageWire.promptTokens]) and the spend table prices them at
-// the full input rate. Caching therefore lowers the real bill, not the metered
-// estimate, which stays an upper bound.
+// adds them back as input-rate equivalents ([usageWire.promptTokens]): a read
+// counts in full although it is billed at a tenth, a write counts 1.25x as it
+// is billed. The metered estimate is therefore an upper bound of the bill on
+// every request, and caching lowers the real bill, not the estimate.
 
 // DefaultPromptCaching is the adapter's built-in gate: prompt caching is on for
 // claude-haiku-5-5 (the voice model; it caches a prefix of 512 tokens or more)

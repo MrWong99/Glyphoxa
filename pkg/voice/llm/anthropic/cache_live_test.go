@@ -127,8 +127,9 @@ func TestLive_Haiku55_SecondRequestReadsThePromptCache(t *testing.T) {
 	}
 	for i, got := range []int{first, second} {
 		u := spy.usages[i]
-		if want := num(u, "input_tokens") + num(u, "cache_creation_input_tokens") + num(u, "cache_read_input_tokens"); got != want {
-			t.Errorf("request %d: adapter reported %d input tokens, want the whole prompt %d", i+1, got, want)
+		// Written tokens count 1.25x, rounded up: what a cache write is billed.
+		if want := num(u, "input_tokens") + (num(u, "cache_creation_input_tokens")*5+3)/4 + num(u, "cache_read_input_tokens"); got != want {
+			t.Errorf("request %d: adapter reported %d input tokens, want the whole prompt at input-rate equivalents, %d", i+1, got, want)
 		}
 	}
 }
