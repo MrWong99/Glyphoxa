@@ -2015,6 +2015,23 @@ message ProviderCredential {
   // renders "Included" instead of "Key needed"; saving an own key still
   // overrides it (a saved BYOK key always wins). Always false once ever_saved.
   bool provided_by_platform = 8;
+  // in_effect is true on the one LLM slot ("groq" or "anthropic") the Tenant's
+  // Voice Sessions currently run on (#702): the slot its most recently saved
+  // LLM Provider Config names or, with no saved row, the deployment default's
+  // slot. Always false on non-LLM slots. Mirrors effective_llm.provider.
+  bool in_effect = 9;
+}
+
+// EffectiveLlm names the voice LLM in effect for the Tenant (#702): what a
+// Voice Session started now would run.
+message EffectiveLlm {
+  // provider is the LLM provider id in effect ("groq", "anthropic", "gemini").
+  string provider = 1;
+  // model is the concrete model id a voice Agent runs on it (never empty).
+  string model = 2;
+  // platform_default is true when the Tenant has no LLM Provider Config of its
+  // own and so runs the deployment default; false when its own row decides.
+  bool platform_default = 3;
 }
 
 // ListProviderConfigsRequest is the (empty) request; the tenant is resolved
@@ -2043,11 +2060,15 @@ message ListProviderConfigsResponse {
   // is "failed" (the classified terminal reason, e.g. "invalid_bot_token: …"),
   // empty otherwise.
   string integration_detail = 6;
+  // effective_llm is the voice LLM in effect for the Tenant: its own row, or
+  // the deployment default (#702).
+  EffectiveLlm effective_llm = 7;
 }
 
 // SaveProviderConfigRequest seals one BYOK provider key.
 message SaveProviderConfigRequest {
-  // provider is the BYOK slot to save: "groq" or "elevenlabs".
+  // provider is the BYOK slot to save: "groq", "anthropic", "elevenlabs" or
+  // "gemini".
   string provider = 1;
   // secret is the plaintext API key to seal. Write-only: never returned. An
   // EMPTY secret with existing stored rows is a model-only update (#227): the
@@ -2064,6 +2085,13 @@ message SaveProviderConfigRequest {
   // same provider can back two slots. Empty means the slot IS the provider
   // (every pre-0062 slot).
   string slot = 4;
+  // activate makes this LLM slot the one in effect for the Tenant (#702): the
+  // Tenant's most recently saved LLM row decides its provider, so activating
+  // re-saves the slot's row (key and model untouched unless given). A slot the
+  // platform provides and the Tenant never saved a key for gets a keyless row
+  // that keeps riding the platform key. Saving a secret always activates; this
+  // flag is for switching WITHOUT re-entering one. Ignored on non-LLM slots.
+  bool activate = 5;
 }
 
 // SaveProviderConfigResponse returns the saved key's masked metadata.
@@ -2799,7 +2827,7 @@ message PreviewVoiceResponse {
 
 // ListModelsRequest names the provider whose model catalog to return.
 message ListModelsRequest {
-  // provider is the LLM provider slot (e.g. "groq").
+  // provider is the LLM provider slot: "groq" or "anthropic".
   string provider = 1;
 }
 
@@ -2823,7 +2851,9 @@ enum HealthStatus {
 // ProviderHealth is one provider's tested status, upgrading the screen's badge
 // from key-presence to a real signal.
 message ProviderHealth {
-  // provider is the slot tested ("groq", "elevenlabs", "discord").
+  // provider is the slot tested ("groq", "anthropic", "elevenlabs", "gemini",
+  // "discord"). Exactly one LLM entry is reported: the provider in effect for
+  // the Tenant (#702), never a slot its sessions do not use.
   string provider = 1;
   // status is the tested liveness.
   HealthStatus status = 2;

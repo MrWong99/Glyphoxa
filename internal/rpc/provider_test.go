@@ -53,11 +53,20 @@ func (f *fakeProviderStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) 
 	return out, nil
 }
 
+// GetProviderConfigByComponent mirrors the real query: the Component's most
+// recently updated row (two LLM slots share a Component, #702).
 func (f *fakeProviderStore) GetProviderConfigByComponent(_ context.Context, _ uuid.UUID, component storage.Component) (storage.ProviderConfig, error) {
+	var (
+		latest storage.ProviderConfig
+		found  bool
+	)
 	for _, c := range f.configs {
-		if c.Component == component {
-			return c, nil
+		if c.Component == component && (!found || c.UpdatedAt.After(latest.UpdatedAt)) {
+			latest, found = c, true
 		}
+	}
+	if found {
+		return latest, nil
 	}
 	return storage.ProviderConfig{}, storage.ErrNotFound
 }
@@ -332,10 +341,10 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	creds := resp.Msg.GetCredentials()
-	if len(creds) != 5 {
-		t.Fatalf("credentials = %d, want 5 (discord, groq, elevenlabs, gemini, chat)", len(creds))
+	if len(creds) != 6 {
+		t.Fatalf("credentials = %d, want 6 (discord, groq, anthropic, elevenlabs, gemini, chat)", len(creds))
 	}
-	for _, want := range []string{"discord", "groq", "elevenlabs", "gemini"} {
+	for _, want := range []string{"discord", "groq", "anthropic", "elevenlabs", "gemini"} {
 		c := credByProvider(creds, want)
 		if c == nil {
 			t.Fatalf("missing credential slot %q", want)

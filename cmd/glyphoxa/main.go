@@ -1732,6 +1732,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// gap): health pings, model/voice catalogs, and the TTS preview refuse the
 	// env fallback for an unentitled tenant in `open` mode.
 	voiceSrv.SetKeyEntitlement(keyEnt)
+	// The deployment-default LLM (#702): a Tenant with no LLM row is shown —
+	// and health-probed on — the provider its sessions actually run.
+	voiceSrv.SetLLMDefault(llmDefault)
 	// PreviewVoice is paid TTS: gate it on the plan allowance and ledger it
 	// through the shared off-session seam (#658).
 	voiceSrv.SetOffSessionMetering(offSession)
@@ -1744,6 +1747,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// slot the Platform Keys serve as "Included" (W9), never contradicting what
 	// the call-time resolution would do.
 	providerSrv.SetKeyEntitlement(keyEnt)
+	providerSrv.SetLLMDefault(llmDefault)
 	// Saving Discord settings also reconciles the standing presence so the new
 	// token / Guild registers the slash-command surface without a restart (#102).
 	if presenceRefresh != nil {

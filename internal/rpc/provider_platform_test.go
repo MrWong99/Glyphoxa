@@ -42,7 +42,13 @@ func listProvidedByPlatform(t *testing.T, store *fakeProviderStore, gate *fakeKe
 	}
 	out := map[string]bool{}
 	for _, c := range resp.Msg.GetCredentials() {
-		out[c.GetComponent()] = c.GetProvidedByPlatform()
+		// Two slots share the "llm" Component (#702); "llm" stays the Groq
+		// slot these cases were written for, Anthropic gets its own key.
+		key := c.GetComponent()
+		if key == "llm" && c.GetProvider() != "groq" {
+			key = "llm/" + c.GetProvider()
+		}
+		out[key] = c.GetProvidedByPlatform()
 	}
 	return out
 }
