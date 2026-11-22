@@ -72,7 +72,16 @@ var (
 	// text: a closing bracket tag like "[/final]", or a pipe token.
 	controlTokenRE = regexp.MustCompile(`\[/\w+\]|<\|[^|<>\n]{1,40}\|>`)
 
-	audioTagRE  = regexp.MustCompile(`\[[^\[\]\n]{1,40}\]`)
+	// audioTagRE matches one bracketed span on one line. Its length is not
+	// capped: a stage direction in brackets runs as long as the model likes
+	// ("[wipes a tankard, glances at the door, then leans in …]"), and the
+	// span is already bounded by the line and by the next bracket.
+	audioTagRE = regexp.MustCompile(`\[[^\[\]\n]+\]`)
+	// tagSizedRE matches a bracketed span short enough to be an audio tag. Only
+	// these are stripped before the English and tool-narration checks (the tag
+	// vocabulary is English by design); a longer span is the model talking, so
+	// its English and tool talk still count there — it is an unknown tag too.
+	tagSizedRE  = regexp.MustCompile(`\[[^\[\]\n]{1,40}\]`)
 	boldRE      = regexp.MustCompile(`\*\*[^*\n]+\*\*|__[^_\n]+__`)
 	asteriskRE  = regexp.MustCompile(`\*[^*\n]{2,120}\*`)
 	parenActRE  = regexp.MustCompile(`(?i)\((lacht|grinst|nickt|seufzt|lächelt|zwinkert|schmunzelt|kichert|flüstert|räuspert|laughs|smiles|sighs|nods|grins|winks)[^)\n]{0,80}\)`)
@@ -158,7 +167,7 @@ func Detect(text string, opts DetectOptions) Findings {
 
 	// English leakage, per sentence, ignoring the bracketed audio tags (their
 	// vocabulary is English by design).
-	for _, sentence := range sentenceRE.FindAllString(audioTagRE.ReplaceAllString(text, " "), -1) {
+	for _, sentence := range sentenceRE.FindAllString(tagSizedRE.ReplaceAllString(text, " "), -1) {
 		en, de := 0, 0
 		for _, w := range wordRE.FindAllString(strings.ToLower(sentence), -1) {
 			if englishWords[w] {
@@ -173,7 +182,7 @@ func Detect(text string, opts DetectOptions) Findings {
 		}
 	}
 
-	f.ToolNarration = len(narrationRE.FindAllString(audioTagRE.ReplaceAllString(text, " "), -1))
+	f.ToolNarration = len(narrationRE.FindAllString(tagSizedRE.ReplaceAllString(text, " "), -1))
 
 	if opts.FemaleSpeaker {
 		f.GenderSlip = len(genderRE.FindAllString(text, -1))
