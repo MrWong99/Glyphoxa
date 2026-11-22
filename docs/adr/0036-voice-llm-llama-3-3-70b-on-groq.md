@@ -113,16 +113,33 @@ less, and that was not measured.
   not justify moving every self-host to a different vendor and a second API
   key unasked — hence no change to the code default.
 - **One resolution, shared by everything.** `llmbuild.DeploymentDefault.Select`
-  turns "the primary Agent's bound config, else the Tenant's newest `llm` row,
-  else nothing" into a provider and a model. The Voice Session, the Highlight
-  classifier, recap, assist, the planning chat, the model catalog and the LLM
-  health probe all call it. There is no second place where "no row" is read as
-  Groq, so the adapter built, the key env spent, the span label and the price
+  turns "the Tenant's newest `llm` row, else nothing" into a provider **and a
+  model, neither ever empty**. The Voice Session, the Highlight classifier,
+  recap, assist, the planning chat, the model catalog, the Configuration read
+  and the LLM health probe all call it. There is no second place where "no row"
+  is read as Groq — an empty provider id is an error in `llmbuild.New`, not
+  Groq — so the adapter built, the key env spent, the span label and the price
   row cannot disagree.
-- **Tenant and Agent rows still win.** The deployment default applies only when
-  no row exists. A row on the default provider that names no model follows the
-  deployment model; a row on another provider gets that provider's own default,
-  never a model id belonging to a different API.
+- **One model default per config.** A row that names no model runs the same
+  model everywhere: the deployment model when the row is on the default
+  provider, else that provider's default — `openai/gpt-oss-120b` on Groq,
+  **`claude-haiku-5-5` on Anthropic**. The Anthropic adapter's own fallback is
+  its flagship (`claude-opus-4-8`, $5 / $25); no engine falls through to it.
+  Recap, assist and the planning chat used to, while voice ran Haiku — one
+  config, two models, the off-session one ~50x the price the screen showed.
+- **Tenant rows still win.** The deployment default applies only when no row
+  exists. A row on another provider never receives a model id belonging to a
+  different API: an NPC's model comes only from a row of the provider whose
+  adapter serves the session.
+- **Agent-bound LLM rows are retired as a source.** `agents.llm_provider_config_id`
+  was only ever written by the demo seed, always pointing at the Tenant's one
+  LLM row. With two slots it would pin a seeded campaign's adapter to the row
+  the Tenant switched *away* from, while the screen named the other. The seed
+  no longer binds, migration `00060` clears the existing bindings (a no-op for
+  behaviour: the bound row was the Tenant row), and the Tenant's row is the one
+  source the session, the off-session engines and `effective_llm` all read. The
+  column and the "bound config wins" code path remain for a future per-Agent
+  choice; whoever adds a writer for it must extend `effective_llm` with it.
 - **Fail fast.** An unknown provider, or a named provider whose platform key
   env is empty, stops the boot naming the variable. Unset needs no key: a
   BYOK-only deployment still boots without any platform LLM key. The Helm chart
@@ -132,17 +149,37 @@ less, and that was not measured.
   provider's env key it would have spent. A BYOK-plan Tenant with no saved key
   is refused on an Anthropic default exactly as on Groq.
 - **Nothing offered unasked is unpriced.** A model without a price row is
-  metered at the conservative fallback ($5 / $15 per MTok), dozens of times the
-  real rate of a small model. Every provider default, every voice default and
-  every fallback catalog entry has a row and a test that says so; the adapter
-  defaults `claude-opus-4-8` and `gemini-2.5-flash` gained theirs here. A
-  deployment default set to an unpriced id boots with a WARN.
+  metered at one flat fallback ($5 / $15 per MTok): dozens of times the real
+  rate of a small model, but *below* the real rate of an Opus-class one
+  (`claude-opus-4-8` output is $25). Every provider default and every fallback
+  catalog entry has a row and a test that says so; `claude-opus-4-8` and
+  `gemini-2.5-flash` gained theirs here (the Gemini figure is recalled, not
+  re-retrieved — verify it before making Gemini a default). A deployment
+  default set to an unpriced id boots with a WARN.
+- **The platform key runs only priced models.** The flat fallback over-meters
+  a cheap unpriced model (a trial allowance gone in a handful of turns) and
+  under-meters a dear one (the platform pays past the allowance). So a keyless
+  LLM row — a Tenant riding the Platform Key — may only store a model the price
+  table has a row for; `SaveProviderConfig` refuses any other id, and
+  `ListModels` on the platform key lists none. The empty model (the default) is
+  always allowed. A Tenant's own key keeps free-text entry and the full
+  catalog: its spend is its own bill.
 
 ### Consequences
 
-- The seed still records `groq` / `openai/gpt-oss-120b` (`internal/wirenpc`
-  `llmProvider`/`llmModel`): it writes a row, and a row wins. A deployment that
-  wants its seeded demo campaign on the deployment default deletes that row.
+- The seed still records a Tenant row `groq` / `openai/gpt-oss-120b`
+  (`internal/wirenpc` `llmProvider`/`llmModel`), and a row wins: the seeded
+  tenant runs Groq until it chooses otherwise in Configuration. It no longer
+  binds that row to the seeded NPC.
+- A self-host on env keys (keyless rows) that wants a model the price table
+  does not know either saves its key in Configuration (its own key: free text)
+  or names the model in `GLYPHOXA_LLM_DEFAULT_MODEL` (the operator's explicit
+  choice; boots with a WARN).
+- A key saved into the LLM slot not in use becomes the newest row and so the
+  LLM in effect; the screen says so next to the key field. There is no
+  separate "active" marker, and no action that returns a Tenant with a row to
+  "follow the platform default" — it can switch to the default provider's slot,
+  which pins that provider. An explicit marker is a follow-up.
 - "Gemini 2.5 Flash-Lite as the automatic fallback" above was never built and
   is not built here; `gemini` is selectable as a default like the other two.
 - Whether the Haiku naturalness lead survives judges from another model family

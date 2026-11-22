@@ -194,13 +194,18 @@ You need **one** of the two LLM rows, not both. The line above the rows —
 LLM a session started now would run: your own choice, or the deployment's
 default when you have made none. The row in use carries an **In use** badge and
 is the one whose health is checked; the other reads **Optional**. Saving a key
-into a row puts you on it, and **Use for voice** on the other row switches back
-without re-entering its key.
+into a row puts you on it — the row not in use says so under its key field —
+and **Use for voice** on the other row switches back without re-entering its
+key.
 
 Both LLM rows carry a **model** combobox listing that provider's live catalog.
-It accepts a typed model id that is not in the catalog. Change the model on an
-already-saved key and a **Save model** button appears; it re-seals the existing
-key untouched.
+With your own key it accepts a typed model id that is not in the catalog. On
+the platform's key (the row reads **Included**) only models with a known price
+are listed and accepted, so what you are metered matches what the model costs.
+Leave the model alone and the row runs the default (`openai/gpt-oss-120b` on
+Groq, `claude-haiku-5-5` on Anthropic) for voice, recaps, drafts and the
+planning chat alike. Change the model on an already-saved key and a **Save
+model** button appears; it re-seals the existing key untouched.
 
 ### 3b. Health badges
 

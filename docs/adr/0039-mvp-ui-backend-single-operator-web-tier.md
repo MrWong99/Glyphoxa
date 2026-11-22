@@ -107,18 +107,26 @@ The per-Tenant integration state gains `reconnecting` (a token is resolved but i
 longer holds for the LLM: the matrix is **Groq or Anthropic** (ADR-0004,
 amendment 2026-11-22). Three things on the management surface follow.
 
-- **The hybrid credential source has a third rung.** Agent-bound config, else
-  the Tenant's row, else — where this ADR said "the adapter's ENV key", meaning
+- **The hybrid credential source ends in the deployment default.** The
+  Tenant's row, else — where this ADR said "the adapter's ENV key", meaning
   Groq's — the **deployment default** provider's env key (ADR-0036, amendment
   2026-11-22). The `credentials_last4 == "env"` discriminator is unchanged, and
   is now also what a Tenant's keyless choice of a platform-provided slot stores.
 - **The screen says which LLM is in effect.** `ListProviderConfigs` returns
   `effective_llm` — provider, concrete model, and whether it is the Tenant's own
   row or the platform default — computed by the same resolution a Voice Session
-  start uses, and marks the matching slot `in_effect`. Without it two LLM rows
+  start uses (the Tenant's newest `llm` row through
+  `llmbuild.DeploymentDefault.Select`; Agent-bound LLM rows, which would have
+  outranked it, are retired — ADR-0036, amendment 2026-11-22), and marks the
+  matching slot `in_effect`. Without it two LLM rows
   cannot tell a Tenant which one its sessions run.
 - **Health is the effective provider's.** `GetProviderHealth` reports exactly
   one LLM entry, named after and probed with the key of the provider in effect.
+  Every entry carries its `component` (`llm`, `tts`, `image`, `discord`), and
+  the screen matches rows by it: a provider name is not unique (Gemini as the
+  default LLM and as the image slot are two entries with two keys), and a probe
+  that times out before the Tenant's row is read can only name the deployment
+  default.
   The earlier behaviour — always "a Groq ping" — showed an Anthropic-backed
   Tenant the health of a provider its sessions never call. The 2026-07-06
   amendment's live catalog likewise becomes per-provider: `ListModels` serves
