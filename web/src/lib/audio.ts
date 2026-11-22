@@ -13,11 +13,25 @@
 // distinguishable from silence. It is defensively no-op outside a real browser
 // (e.g. jsdom under test, where URL.createObjectURL is unimplemented) so
 // callers can fire-and-forget.
-export function playAudioBlob(audio: Uint8Array, mimeType: string): Promise<void> {
+//
+// Two optional hooks for a caller that offers a Stop button (the voice picker):
+// `signal` stops the playback and releases the element when it aborts, and
+// `onEnded` is called once when the playback is over on its own account
+// (finished, errored, or never started because there is no media pipeline).
+// It is not called for an abort or a rejected play(): the caller did the one
+// and hears about the other through the returned promise.
+export function playAudioBlob(
+  audio: Uint8Array,
+  mimeType: string,
+  opts: { signal?: AbortSignal; onEnded?: () => void } = {},
+): Promise<void> {
+  const { signal, onEnded } = opts;
+  if (signal?.aborted) return Promise.resolve();
   let el: HTMLAudioElement;
   let cleanup: () => void;
   try {
     if (typeof Audio === "undefined" || typeof URL?.createObjectURL !== "function") {
+      onEnded?.();
       return Promise.resolve();
     }
     const blob = new Blob([audio as BlobPart], { type: mimeType || "audio/wav" });
@@ -30,11 +44,29 @@ export function playAudioBlob(audio: Uint8Array, mimeType: string): Promise<void
       URL.revokeObjectURL(url);
       el.remove();
     };
-    el.addEventListener("ended", cleanup, { once: true });
-    el.addEventListener("error", cleanup, { once: true });
+    const over = () => {
+      if (done) return;
+      cleanup();
+      onEnded?.();
+    };
+    el.addEventListener("ended", over, { once: true });
+    el.addEventListener("error", over, { once: true });
+    signal?.addEventListener(
+      "abort",
+      () => {
+        try {
+          el.pause();
+        } catch {
+          // No media pipeline to pause; releasing the element is what matters.
+        }
+        cleanup();
+      },
+      { once: true },
+    );
     el.style.display = "none";
     document.body.appendChild(el);
   } catch {
+    onEnded?.();
     return Promise.resolve();
   }
   return Promise.resolve(el.play()).catch((err: unknown) => {

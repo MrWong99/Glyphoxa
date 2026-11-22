@@ -78,4 +78,37 @@ describe("playAudioBlob", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
     expect(instances[0].isConnected).toBe(false);
   });
+
+  // The voice picker's Stop button: an abort ends the playback and releases
+  // the element, and does not report it as having finished by itself.
+  it("stops and detaches when the signal aborts, without calling onEnded", async () => {
+    const stop = new AbortController();
+    const onEnded = vi.fn();
+    const pause = vi.fn();
+    await playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { signal: stop.signal, onEnded });
+    Object.defineProperty(instances[0], "pause", { value: pause, configurable: true });
+
+    stop.abort();
+    expect(pause).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+    expect(instances[0].isConnected).toBe(false);
+    expect(onEnded).not.toHaveBeenCalled();
+  });
+
+  it("plays nothing when the signal was already aborted", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    await playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { signal: stop.signal });
+    expect(instances).toHaveLength(0);
+  });
+
+  it("calls onEnded once when the playback finishes on its own", async () => {
+    const onEnded = vi.fn();
+    await playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { onEnded });
+    expect(onEnded).not.toHaveBeenCalled();
+
+    instances[0].dispatchEvent(new Event("ended"));
+    instances[0].dispatchEvent(new Event("ended"));
+    expect(onEnded).toHaveBeenCalledTimes(1);
+  });
 });
