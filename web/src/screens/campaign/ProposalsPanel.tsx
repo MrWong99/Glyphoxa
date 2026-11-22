@@ -618,7 +618,9 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
       ) : (
         <div className="gx-inbox__groups" aria-label={t("inbox.listLabel")} role="group">
           {groups.map((g) => (
-            <section key={g.group.key} className="gx-inbox__group" aria-label={g.group.title}>
+            // A group, not a <section>: a named section is a landmark, and a
+            // long queue would bury the page's real ones under one per entry.
+            <div key={g.group.key} className="gx-inbox__group" role="group" aria-label={g.group.title}>
               <h3 className="gx-inbox__group-title">
                 {g.group.nodeID ? (
                   <button
@@ -660,7 +662,7 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
                   );
                 })}
               </ul>
-            </section>
+            </div>
           ))}
         </div>
       )}

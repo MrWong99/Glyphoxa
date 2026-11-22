@@ -226,14 +226,14 @@ describe("Suggestions inbox: reading", () => {
     await resolved();
 
     // "Bart" and "bart" are one entry: both facts sit under it.
-    const bart = screen.getByRole("region", { name: "Bart" });
+    const bart = screen.getByRole("group", { name: "Bart" });
     expect(within(bart).getAllByRole("listitem")).toHaveLength(2);
     expect(within(bart).getByRole("heading", { level: 3 })).toHaveTextContent("Bart2");
     // A connection sits under the entry it starts from.
-    expect(within(screen.getByRole("region", { name: "Gundren" })).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(screen.getByRole("group", { name: "Gundren" })).getAllByRole("listitem")).toHaveLength(1);
     // A suggested entry and an unreadable row have groups of their own.
-    expect(screen.getByRole("region", { name: "New entry: Zhentarim" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Unreadable suggestions" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "New entry: Zhentarim" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Unreadable suggestions" })).toBeInTheDocument();
   });
 
   it("opens an entry from its name: the group, the subject and the target", async () => {
@@ -286,8 +286,8 @@ describe("Suggestions inbox: reading", () => {
     expect(alert).toHaveTextContent("Couldn't check the suggestions against the World wiki");
 
     // Both suggestions are there, grouped by the name they carry…
-    expect(screen.getByRole("region", { name: "Ilva" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Bart" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Ilva" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Bart" })).toBeInTheDocument();
     // …with no forecast and no link: either would be a guess.
     expect(screen.queryByText(/can't be added yet/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /in the World wiki$/ })).not.toBeInTheDocument();
