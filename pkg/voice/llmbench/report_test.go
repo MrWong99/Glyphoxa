@@ -95,24 +95,66 @@ func sampleReport() CandidateReport {
 	}
 }
 
-func TestMarkdownTable_OneRowPerCandidate(t *testing.T) {
+// tables splits the rendered comparison into its markdown tables (header,
+// rule, rows).
+func tables(md string) [][]string {
+	var out [][]string
+	var cur []string
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, "|") {
+			cur = append(cur, line)
+			continue
+		}
+		if len(cur) > 0 {
+			out, cur = append(out, cur), nil
+		}
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func TestMarkdownTable_LatencyAndBehaviourTables(t *testing.T) {
 	md := MarkdownTable([]CandidateReport{sampleReport()})
-	lines := strings.Split(strings.TrimSpace(md), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("table has %d lines, want header + rule + 1 row:\n%s", len(lines), md)
+	tabs := tables(md)
+	if len(tabs) != 2 {
+		t.Fatalf("rendered %d tables, want 2 (latency and cost; behaviour):\n%s", len(tabs), md)
 	}
-	for _, want := range []string{"first sentence p50 / p95", "tools OK", "prose before tool", "silent", "$ / 100 turns"} {
-		if !strings.Contains(lines[0], want) {
-			t.Errorf("header lacks %q: %s", want, lines[0])
+	for i, tab := range tabs {
+		if len(tab) != 3 {
+			t.Fatalf("table %d has %d lines, want header + rule + 1 row:\n%s", i, len(tab), md)
+		}
+		if strings.Count(tab[0], "|") != strings.Count(tab[2], "|") || strings.Count(tab[0], "|") != strings.Count(tab[1], "|") {
+			t.Errorf("table %d: header, rule and row have different column counts:\n%s", i, md)
+		}
+		if !strings.Contains(tab[2], "fake-arm") {
+			t.Errorf("table %d row does not name the candidate: %s", i, tab[2])
 		}
 	}
-	for _, want := range []string{"fake-arm", "100 / 300", "400 / 600", "80%", "50%", "$0.120"} {
-		if !strings.Contains(lines[2], want) {
-			t.Errorf("row lacks %q: %s", want, lines[2])
+
+	latency, behaviour := tabs[0], tabs[1]
+	for _, want := range []string{"first sentence p50 / p95", "one-round turns", "tool turns", "$ / 100 turns"} {
+		if !strings.Contains(latency[0], want) {
+			t.Errorf("latency header lacks %q: %s", want, latency[0])
 		}
 	}
-	if strings.Count(lines[0], "|") != strings.Count(lines[2], "|") {
-		t.Errorf("header and row have different column counts:\n%s", md)
+	// first delta 100/300, first sentence 400/600; the one-round turns with a
+	// sentence are #0 (200) and #2 (600); the one tool turn with one is #1 (400).
+	for _, want := range []string{"100 / 300", "400 / 600", "200 / 600", "400 / 400", "$0.120"} {
+		if !strings.Contains(latency[2], want) {
+			t.Errorf("latency row lacks %q: %s", want, latency[2])
+		}
+	}
+	for _, want := range []string{"tools OK", "prose before tool", "silent", "guard signals", "gender slips"} {
+		if !strings.Contains(behaviour[0], want) {
+			t.Errorf("behaviour header lacks %q: %s", want, behaviour[0])
+		}
+	}
+	for _, want := range []string{"80%", "50% (2)", "text_leak×2"} {
+		if !strings.Contains(behaviour[2], want) {
+			t.Errorf("behaviour row lacks %q: %s", want, behaviour[2])
+		}
 	}
 }
 

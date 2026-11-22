@@ -47,6 +47,11 @@ type Summary struct {
 	FirstDelta    Dist `json:"first_delta"`
 	FirstSentence Dist `json:"first_sentence"`
 	End           Dist `json:"end"`
+	// FirstSentenceOneRound is the first-sentence latency over the turns that
+	// took a single completion (plain conversation); FirstSentenceToolTurns
+	// over the turns that took more (at least one tool round came first).
+	FirstSentenceOneRound  Dist `json:"first_sentence_one_round"`
+	FirstSentenceToolTurns Dist `json:"first_sentence_tool_turns"`
 
 	// ToolsOKPct is the share of turns whose tool use was right: every expected
 	// Tool called, nothing unexpected (a no-tool turn must call nothing).
@@ -108,7 +113,7 @@ func pct(part, whole int) float64 {
 // Summarize reduces turns to a [Summary].
 func Summarize(turns []TurnResult) Summary {
 	s := Summary{Turns: len(turns), Malformed: map[string]int{}}
-	var delta, sentence, end []float64
+	var delta, sentence, end, oneRound, toolTurn []float64
 	ok, toolTurns, toolTurnsOK, valid := 0, 0, 0, 0
 	for _, t := range turns {
 		if t.Error != "" {
@@ -119,6 +124,11 @@ func Summarize(turns []TurnResult) Summary {
 		}
 		if t.FirstSentenceMS >= 0 {
 			sentence = append(sentence, t.FirstSentenceMS)
+			if t.Rounds > 1 {
+				toolTurn = append(toolTurn, t.FirstSentenceMS)
+			} else {
+				oneRound = append(oneRound, t.FirstSentenceMS)
+			}
 		}
 		end = append(end, t.EndMS)
 		if t.ToolsOK {
@@ -154,6 +164,7 @@ func Summarize(turns []TurnResult) Summary {
 		s.CostUSD += t.CostUSD
 	}
 	s.FirstDelta, s.FirstSentence, s.End = dist(delta), dist(sentence), dist(end)
+	s.FirstSentenceOneRound, s.FirstSentenceToolTurns = dist(oneRound), dist(toolTurn)
 	s.ToolsOKPct = pct(ok, len(turns))
 	s.ToolTurnsOKPct = pct(toolTurnsOK, toolTurns)
 	s.SchemaValidPct = pct(valid, s.ToolCalls)
@@ -177,25 +188,58 @@ func pair(d Dist) string {
 // parentheses what the model wrote before the production scrub.
 func leak(spoken, raw int) string { return fmt.Sprintf("%d (%d)", spoken, raw) }
 
-// MarkdownTable renders the comparison table, one row per candidate. Timings
-// are milliseconds from the start of the turn. Findings are "spoken (raw)".
+// signals renders the production path's malformed-generation counters, e.g.
+// "3 (roll_claim×2, text_leak×1)".
+func signals(m map[string]int) string {
+	if len(m) == 0 {
+		return "0"
+	}
+	keys := make([]string, 0, len(m))
+	total := 0
+	for k, v := range m {
+		keys = append(keys, k)
+		total += v
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s×%d", k, m[k])
+	}
+	return fmt.Sprintf("%d (%s)", total, strings.Join(parts, ", "))
+}
+
+// MarkdownTable renders the comparison as two tables, one row per candidate
+// each: latency and cost, then behaviour. Timings are milliseconds from the
+// start of the turn. Detector findings are "spoken (raw)".
 func MarkdownTable(reports []CandidateReport) string {
 	var b strings.Builder
-	b.WriteString("| candidate | turns | errors | first delta p50 / p95 | first sentence p50 / p95 | end p50 / p95 | tools OK | tool turns OK | schema-valid calls | prose before tool | silent | tool markup | stage directions | markdown | English | tool narration | gender slips | $ / 100 turns |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| candidate | turns | errors | first delta p50 / p95 | first sentence p50 / p95 | first sentence, one-round turns | first sentence, tool turns | end p50 / p95 | rounds / turn | $ / 100 turns |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range reports {
 		s := r.Summary
-		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s | %s | %.0f%% | %.0f%% | %.0f%% (%d) | %d | %d | %s | %s | %s | %s | %s | %s | $%.3f |\n",
+		rounds := 0.0
+		if s.Turns > 0 {
+			rounds = float64(s.Rounds) / float64(s.Turns)
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s | %s | %s | %s | %.2f | $%.3f |\n",
 			r.Candidate.Name, s.Turns, s.Errors,
-			pair(s.FirstDelta), pair(s.FirstSentence), pair(s.End),
-			s.ToolsOKPct, s.ToolTurnsOKPct, s.SchemaValidPct, s.ToolCalls, s.PreToolTurns, s.Silent,
+			pair(s.FirstDelta), pair(s.FirstSentence), pair(s.FirstSentenceOneRound), pair(s.FirstSentenceToolTurns), pair(s.End),
+			rounds, s.CostPer100TurnsUSD)
+	}
+
+	b.WriteString("\n| candidate | tools OK | tool turns OK | schema-valid calls | prose before tool | silent | guard signals | tool markup | stage directions | markdown | English | tool narration | gender slips |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, r := range reports {
+		s := r.Summary
+		fmt.Fprintf(&b, "| %s | %.0f%% | %.0f%% | %.0f%% (%d) | %d | %d | %s | %s | %s | %s | %s | %s | %s |\n",
+			r.Candidate.Name,
+			s.ToolsOKPct, s.ToolTurnsOKPct, s.SchemaValidPct, s.ToolCalls, s.PreToolTurns, s.Silent, signals(s.Malformed),
 			leak(s.Spoken.ToolMarkup, s.Raw.ToolMarkup),
 			leak(s.Spoken.StageDirections, s.Raw.StageDirections),
 			leak(s.Spoken.Markdown, s.Raw.Markdown),
 			leak(s.Spoken.English, s.Raw.English),
 			leak(s.Spoken.ToolNarration, s.Raw.ToolNarration),
-			leak(s.Spoken.GenderSlip, s.Raw.GenderSlip),
-			s.CostPer100TurnsUSD)
+			leak(s.Spoken.GenderSlip, s.Raw.GenderSlip))
 	}
 	return b.String()
 }

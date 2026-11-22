@@ -11,8 +11,8 @@ import (
 // of occurrences (sentences, for English), so findings add up across turns.
 type Findings struct {
 	// ToolMarkup: pseudo tool calls and leaked markup — every shape the
-	// production scrubber knows (pkg/tool), any other XML-like element, and a
-	// bare JSON object naming a Tool.
+	// production scrubber knows (pkg/tool), any other XML-like element, a bare
+	// JSON object naming a Tool, and chat-template control tokens.
 	ToolMarkup int `json:"tool_markup"`
 	// StageDirections: narrated actions — asterisk- or parenthesis-wrapped, or
 	// the NPC described in the third person.
@@ -59,6 +59,10 @@ var (
 	// toolJSONRE matches a bare JSON object naming one of the bench Tools.
 	toolJSONRE = regexp.MustCompile(`\{\s*"(name|tool|function)"\s*:\s*"(dice|recap|kg_query|transcript_search|remember_knowledge)"`)
 
+	// controlTokenRE matches chat-template control tokens that escaped into the
+	// text: a closing bracket tag like "[/final]", or a pipe token.
+	controlTokenRE = regexp.MustCompile(`\[/\w+\]|<\|[^|<>\n]{1,40}\|>`)
+
 	audioTagRE  = regexp.MustCompile(`\[[^\[\]\n]{1,40}\]`)
 	boldRE      = regexp.MustCompile(`\*\*[^*\n]+\*\*|__[^_\n]+__`)
 	asteriskRE  = regexp.MustCompile(`\*[^*\n]{2,120}\*`)
@@ -99,7 +103,8 @@ func Detect(text string, opts DetectOptions) Findings {
 	// Tool markup: the production scrubber's shapes, then anything else that
 	// still looks like an element or a tool-call object.
 	clean, calls := tool.ExtractPseudoCalls(text)
-	f.ToolMarkup = len(calls) + len(anyElementRE.FindAllString(clean, -1)) + len(toolJSONRE.FindAllString(clean, -1))
+	f.ToolMarkup = len(calls) + len(anyElementRE.FindAllString(clean, -1)) + len(toolJSONRE.FindAllString(clean, -1)) +
+		len(controlTokenRE.FindAllString(clean, -1))
 
 	// Markdown. Bold is counted here and removed before the asterisk check, so
 	// "**wichtig**" is formatting, not a stage direction.

@@ -26,6 +26,8 @@ func TestDetect_ToolMarkup(t *testing.T) {
 		lt + "tool_call>{}" + lt + "/tool_call>",
 		"Hier: " + lt + "result>17" + lt + "/result>", // an element the scrubber does not know
 		`{"name": "dice", "arguments": {"count": 2, "sides": 6}}`,
+		"Das kann ich nicht für die Chronik erledigen.[/final]", // a chat-template control token
+		"Gern." + lt + "|end|>",
 	} {
 		if f := Detect(text, DetectOptions{NPCName: "Flo"}); f.ToolMarkup == 0 {
 			t.Errorf("Detect(%q).ToolMarkup = 0, want the leak found", text)
