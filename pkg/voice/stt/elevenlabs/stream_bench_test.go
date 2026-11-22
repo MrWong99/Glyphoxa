@@ -18,7 +18,8 @@ import (
 // shapes readPump switches on (message_type / text / error, see stream.go) and
 // ADR-0042's message semantics: partial_transcript flows during speech, the
 // local VAD's manual commit turns into committed_transcript (= STTFinal),
-// insufficient_audio_activity is the empty utterance, and everything else is an
+// insufficient_audio_activity resolves a pending commit empty (see readPump for
+// why that is a guess, not the frame's documented meaning), and everything else is an
 // error frame classified by routeErrorFrame.
 type sttFrame struct {
 	name      string

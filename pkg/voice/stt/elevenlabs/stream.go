@@ -502,7 +502,12 @@ func (s *stream) readPump() {
 		case msgCommitted:
 			s.resolveCommitted(msg.Text)
 		case msgInsufficientAudio:
-			// Empty utterance: resolve like the batch adapter's empty text.
+			// The provider documents this frame as "not enough audio activity to
+			// maintain the connection", not as a commit's answer — live, a
+			// silence-only commit came back as an empty committed_transcript, and
+			// the idle close sent no frame at all. Resolving the front commit as
+			// an empty utterance is a harmless guess should one ever arrive with
+			// a commit pending (with none, it is a no-op).
 			s.resolveEmpty()
 		default:
 			if s.routeErrorFrame(msg.MessageType, msg.Error) {

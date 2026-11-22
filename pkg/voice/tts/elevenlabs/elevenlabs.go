@@ -128,10 +128,14 @@ const warmTimeout = 5 * time.Second
 // Warm opens (or refreshes) a pooled connection to the API so the next synthesis
 // starts on an established TCP+TLS connection instead of dialling. It sends one
 // HEAD request to the API root — no audio, no characters billed — and drains the
-// answer, whatever its status, back into the pool. The live wiring calls it when a
-// Voice Session connects, when a participant starts speaking (the reply follows
-// within a second or two) and after a barge (which drops the connection a
-// mid-stream sentence was using).
+// answer, whatever its status, back into the pool. The live wiring
+// (internal/wirenpc wireTTSWarm) calls it when a Voice Session connects, after a
+// barge (which drops the connection a mid-stream sentence was using) and when a
+// participant starts speaking (the reply follows within a second or two) — but
+// only once the pool has been quiet for 20 s (ttsWarmQuiet): inside that window
+// a live pooled connection is still there, and a HEAD would occupy the one idle
+// connection the reply's first sentence needs. Voice preview (internal/rpc)
+// builds its own client per call and never warms.
 //
 // Only a transport failure is an error; callers treat it as advisory (the
 // synthesis would simply dial). A keyless client is a no-op: it cannot
