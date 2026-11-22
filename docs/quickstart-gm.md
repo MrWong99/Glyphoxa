@@ -181,6 +181,7 @@ two **Provider Config** rows:
 | Row | Component | Where to get the key |
 |---|---|---|
 | **Groq** (LLM) | the Agent's reasoning | <https://console.groq.com> |
+| **Anthropic** (LLM) | the Agent's reasoning, as the alternative to Groq | <https://platform.claude.com> |
 | **ElevenLabs** (Speech) | STT **and** TTS | <https://elevenlabs.io> |
 
 Paste and **Save**. Each secret is sealed server-side with `$GLYPHOXA_SECRET` and
@@ -188,8 +189,16 @@ never read back; the row switches to `••••••••` + **Replace**. I
 `$GLYPHOXA_SECRET` is unset the save is *rejected* and the row shows
 `Couldn't save: …` — the key was **not** stored.
 
-The Groq row also carries a **model** combobox listing the live Groq catalog. It
-accepts a typed model id that is not in the catalog. Change the model on an
+You need **one** of the two LLM rows, not both. The line above the rows —
+*Voice model in use: Groq / openai/gpt-oss-120b (platform default)* — says which
+LLM a session started now would run: your own choice, or the deployment's
+default when you have made none. The row in use carries an **In use** badge and
+is the one whose health is checked; the other reads **Optional**. Saving a key
+into a row puts you on it, and **Use for voice** on the other row switches back
+without re-entering its key.
+
+Both LLM rows carry a **model** combobox listing that provider's live catalog.
+It accepts a typed model id that is not in the catalog. Change the model on an
 already-saved key and a **Save model** button appears; it re-seals the existing
 key untouched.
 
