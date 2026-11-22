@@ -39,3 +39,13 @@ func WithWSCapBackoff(d time.Duration) Option {
 		}
 	}
 }
+
+// WithWSWarmFor overrides how long after its last sentence Warm keeps a voice's
+// socket lined up. It must come after WithTransport(TransportWS).
+func WithWSWarmFor(d time.Duration) Option {
+	return func(c *Client) {
+		if c.ws != nil {
+			c.ws.tune.warmFor = d
+		}
+	}
+}

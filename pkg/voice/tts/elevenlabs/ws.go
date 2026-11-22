@@ -51,9 +51,17 @@ const (
 	wsKeepAliveInterval = 10 * time.Second
 
 	// wsIdleTTL is how long a socket may sit unleased before it is closed, so a
-	// silent table stops holding dialogue-session slots. [Client.Warm] (a speech
-	// start) refreshes it.
+	// table stops holding dialogue-session slots it has no use for. [Client.Warm]
+	// (a speech start) restarts the clock of one socket per recently used voice;
+	// see [wsWarmFor].
 	wsIdleTTL = 60 * time.Second
+
+	// wsWarmFor is how long after a voice's last sentence [Client.Warm] goes on
+	// keeping a socket lined up for it. Warm fires on speech starts whoever is
+	// speaking, so without this bound a voice addressed once would hold its slot
+	// for as long as the players keep talking among themselves; it also ages out
+	// the key of a voice whose settings were edited.
+	wsWarmFor = 5 * time.Minute
 
 	// wsFirstAudioTimeout bounds the wait for a sentence's first frame; the
 	// websocket twin of the HTTP transport's ResponseHeaderTimeout.
@@ -88,6 +96,7 @@ type wsTuning struct {
 	idleTTL    time.Duration
 	firstAudio time.Duration
 	capBackoff time.Duration
+	warmFor    time.Duration
 	perKey     int
 	total      int
 }
@@ -98,6 +107,7 @@ func defaultWSTuning() wsTuning {
 		idleTTL:    wsIdleTTL,
 		firstAudio: wsFirstAudioTimeout,
 		capBackoff: wsCapBackoff,
+		warmFor:    wsWarmFor,
 		perKey:     wsSocketsPerKey,
 		total:      wsSocketsTotal,
 	}
@@ -206,7 +216,7 @@ type wsPool struct {
 	open    map[wsKey]int        // sockets open or being dialled, per key
 	dialing map[wsKey]int        // background pre-dials in flight, per key
 	total   int                  // sum of open
-	recent  []wsKey              // most recently used first, at most wsWarmKeys
+	recent  []wsRecent           // most recently used first, at most wsWarmKeys
 	held    time.Time            // no dial before this instant (see holdDials)
 	wg      sync.WaitGroup       // socket goroutines and background dials
 
@@ -268,12 +278,18 @@ func (p *wsPool) acquire(ctx context.Context, key wsKey, fresh bool) (c *wsConn,
 	return c, false, nil
 }
 
+// wsRecent is a voice [Client.Warm] may keep a socket lined up for.
+type wsRecent struct {
+	key  wsKey
+	used time.Time // when its last sentence asked for a socket
+}
+
 // touchLocked moves key to the front of the recently-used list.
 func (p *wsPool) touchLocked(key wsKey) {
-	out := append(make([]wsKey, 0, wsWarmKeys), key)
-	for _, k := range p.recent {
-		if k != key && len(out) < wsWarmKeys {
-			out = append(out, k)
+	out := append(make([]wsRecent, 0, wsWarmKeys), wsRecent{key: key, used: time.Now()})
+	for _, r := range p.recent {
+		if r.key != key && len(out) < wsWarmKeys {
+			out = append(out, r)
 		}
 	}
 	p.recent = out
@@ -381,10 +397,11 @@ func (p *wsPool) release(c *wsConn) {
 	p.mu.Unlock()
 }
 
-// prewarm makes sure key has an idle socket: it refreshes the idle clock of the
-// ones it has, or dials one in the background when it has none (and none is
-// already on its way, and the caps allow). It never closes another voice's
-// socket to make room.
+// prewarm makes sure key has an idle socket: it restarts the idle clock of the
+// one a sentence would take next (a second idle socket, left by a look-ahead
+// pair, is let run out), or dials one in the background when it has none (and
+// none is already on its way, and the caps allow). It never closes another
+// voice's socket to make room.
 func (p *wsPool) prewarm(key wsKey) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -392,10 +409,7 @@ func (p *wsPool) prewarm(key wsKey) {
 		return
 	}
 	if l := p.idle[key]; len(l) > 0 {
-		now := time.Now()
-		for _, c := range l {
-			c.idleSince = now
-		}
+		l[len(l)-1].idleSince = time.Now()
 		return
 	}
 	if p.dialing[key] > 0 || time.Now().Before(p.held) {
@@ -439,10 +453,20 @@ func (p *wsPool) holdDials() {
 	p.mu.Unlock()
 }
 
-// warm pre-dials the most recently used voices and reports whether it knew any.
+// warm lines up a socket for each of the most recently used voices that spoke
+// within the warm window, forgets the ones that did not, and reports whether it
+// knew any.
 func (p *wsPool) warm() bool {
 	p.mu.Lock()
-	keys := append([]wsKey(nil), p.recent...)
+	keys := make([]wsKey, 0, len(p.recent))
+	live := p.recent[:0]
+	for _, r := range p.recent {
+		if time.Since(r.used) < p.tune.warmFor {
+			live = append(live, r)
+			keys = append(keys, r.key)
+		}
+	}
+	p.recent = live
 	p.mu.Unlock()
 	for _, k := range keys {
 		p.prewarm(k)

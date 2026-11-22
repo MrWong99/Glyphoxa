@@ -806,6 +806,70 @@ func TestWS_WarmKeepsAnIdleSocketPastItsTTL(t *testing.T) {
 	}
 }
 
+// TestWS_WarmStopsHoldingAVoiceThatWentQuiet: Warm fires on every speech start
+// at the table, whoever is speaking. A voice that has not said a sentence for a
+// while must stop being kept warm — else players talking among themselves would
+// hold its dialogue-session slots for the whole session — and Warm must not dial
+// it again either.
+func TestWS_WarmStopsHoldingAVoiceThatWentQuiet(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 40*time.Millisecond, 0, 0, 0), elevenlabs.WithWSWarmFor(80*time.Millisecond))
+	ctx := context.Background()
+	drain(t, say(t, c, ctx, wsVoice("voice-1"), "Ein Satz."))
+	warm := func() {
+		t.Helper()
+		if err := c.Warm(ctx); err != nil {
+			t.Fatalf("Warm: %v", err)
+		}
+	}
+	eventually(t, "the quiet voice's socket to be let go under steady warms", func() bool {
+		warm()
+		time.Sleep(10 * time.Millisecond)
+		return c.WSStats().Open == 0 && srv.open.Load() == 0
+	})
+	heads := srv.heads.Load()
+	for i := 0; i < 5; i++ {
+		warm()
+	}
+	if st := c.WSStats(); st.Dials != 1 || st.Open != 0 {
+		t.Errorf("stats = %+v, want no socket dialled for a voice that went quiet", st)
+	}
+	if n := srv.heads.Load(); n != heads+5 {
+		t.Errorf("HEADs = %d, want %d (with no voice to warm, Warm warms the HTTP pool)", n, heads+5)
+	}
+}
+
+// TestWS_WarmHoldsOneSocketPerVoice: the look-ahead pair leaves a voice with two
+// idle sockets, but the reply to a speech start begins with ONE sentence, so
+// Warm keeps one of them past its TTL and lets the other go.
+func TestWS_WarmHoldsOneSocketPerVoice(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 60*time.Millisecond, 0, 0, 0))
+	ctx := context.Background()
+	voice := wsVoice("voice-1")
+	a := say(t, c, ctx, voice, "Eins.")
+	b := say(t, c, ctx, voice, "Zwei.")
+	drain(t, a)
+	drain(t, b)
+	if st := c.WSStats(); st.Open != 2 {
+		t.Fatalf("stats = %+v, want the pair open", st)
+	}
+	warm := func() bool {
+		if err := c.Warm(ctx); err != nil {
+			t.Errorf("Warm: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		return c.WSStats().Open == 1
+	}
+	eventually(t, "the pair to shrink to one socket under steady warms", warm)
+	for i := 0; i < 12; i++ { // twice the TTL
+		warm()
+	}
+	if st := c.WSStats(); st.Open != 1 || st.Dials != 2 {
+		t.Errorf("stats = %+v, want one of the two sockets kept and none dialled", st)
+	}
+}
+
 // TestWS_CloseTearsEverythingDown: Close shuts idle and leased sockets alike and
 // leaves no goroutine behind; a sentence still streaming ends in a terminal Err
 // chunk, and the server sees every connection go.
