@@ -7,7 +7,21 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
+
+// newCycleSynth builds one cycle's outbound synthesizer: the ElevenLabs client
+// for the resolved TTS key (#69: the decrypted BYOK key, or "" to fall back to
+// ELEVENLABS_API_KEY) wrapped in the [wire.TeeSynthesizer] that feeds sink, with
+// the client's connection kept warm for the cycle ([wireTTSWarm], #702). Building
+// both here keeps the pre-warm on the very client the cycle synthesizes on, so
+// the synthesizer cannot be wired without it. A keyless client warms nothing.
+// unwire removes the warm subscriptions; ctx bounds every warm.
+func newCycleSynth(ctx context.Context, bus *voiceevent.Bus, ttsKey string, sink wire.PlaybackSink, log *slog.Logger) (synth *wire.TeeSynthesizer, unwire func()) {
+	client := newTTS(ttsKey)
+	unwire = wireTTSWarm(ctx, bus, client, log)
+	return wire.NewTeeSynthesizer(client, sink, bus), unwire
+}
 
 // ttsWarmer is the synthesis-connection pre-warm the ElevenLabs adapter offers
 // ([ttseleven.Client.Warm]).

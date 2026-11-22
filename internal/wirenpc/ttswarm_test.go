@@ -3,11 +3,16 @@ package wirenpc
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
 // warmSpy counts Warm calls, signalling each on calls.
@@ -217,4 +222,39 @@ func TestWireTTSWarm_FailedWarmDoesNotCountAsPoolActivity(t *testing.T) {
 	expectWarm(t, (*warmSpy)(spy), "on a speech start right after a failed warm", func() {
 		bus.Publish(voiceevent.VADSpeechStart{At: clk.Now()})
 	})
+}
+
+// TestNewCycleSynth_WarmsTheClientItBuilds pins the production wiring: the one
+// constructor connectAndServe gets its outbound synthesizer from also wires the
+// pre-warm onto the very client it built, so a refactor cannot keep the
+// synthesizer and silently drop the warm. The newTTS seam points the client at
+// a server that records the warm's HEAD.
+func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
+	heads := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			heads <- struct{}{}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	orig := newTTS
+	t.Cleanup(func() { newTTS = orig })
+	newTTS = func(apiKey string, opts ...ttseleven.Option) *ttseleven.Client {
+		return orig(apiKey, append(opts, ttseleven.WithBaseURL(srv.URL))...)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
+	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", sink, nil)
+	defer unwire()
+	if synth == nil {
+		t.Fatal("newCycleSynth returned no synthesizer")
+	}
+	select {
+	case <-heads:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the cycle's TTS client was never warmed on connect")
+	}
 }

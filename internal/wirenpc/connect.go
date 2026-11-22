@@ -257,13 +257,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer pump.Close()
 
 	// cfg.keys.tts is the resolved BYOK TTS key (issue #69): the decrypted saved
-	// key when one is configured, or "" to fall back to ELEVENLABS_API_KEY.
-	ttsClient := newTTS(cfg.keys.tts)
-	// Keep the synthesis connection warm for the cycle (#702): warm now, on each
-	// speech start and after each barge, so a reply's first sentence rides an
-	// established TCP+TLS connection. A keyless client warms nothing.
-	defer wireTTSWarm(cycleCtx, bus, ttsClient, log)()
-	teeSynth := wire.NewTeeSynthesizer(ttsClient, pump, bus)
+	// key when one is configured, or "" to fall back to ELEVENLABS_API_KEY. The
+	// synthesizer comes with its connection kept warm for the cycle (#702).
+	teeSynth, unwireWarm := newCycleSynth(cycleCtx, bus, cfg.keys.tts, pump, log)
+	defer unwireWarm()
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
 	// SLO histograms (response_latency, address_detect, per-sentence tts_ttfb) from
