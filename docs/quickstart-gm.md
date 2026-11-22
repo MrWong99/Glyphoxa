@@ -280,8 +280,20 @@ control beside the title: **Cast** and **Knowledge**.
 ### 4a. Cast — the roster
 
 The roster lists the **Butler** first (gold badge, role locked, cannot be deleted
-— exactly one per Campaign) then every **Character NPC**. **+ Add NPC** creates
-one named *New NPC* and selects it.
+— exactly one per Campaign) then every **Character NPC**, each with the name of
+its voice. **+ Add NPC**, above the list, opens the **New NPC** dialog: a
+**Name** (the one required answer), a role, an optional one-line **Concept** and
+an optional voice. Nothing is created until you press **Create NPC**; the new
+NPC is then selected. If you gave a concept, a Persona is drafted from it and
+placed in the editor as an *unsaved* draft for you to review.
+
+A warning sign on a roster row means that NPC is not session-ready; hover or
+focus the row to see what is missing (no voice, no personality, no linked or an
+empty wiki entry, no facts in reach). The line above the list sums it up ("5
+NPCs · 2 need attention") and its second half filters the roster to those NPCs.
+The **Readiness** segment at the top shows the same checks for the whole cast:
+"X of Y NPCs ready", a to-do list of the NPCs that need attention, and every
+check as a link to where it is fixed.
 
 > **The Butler answers only the GM, and only by name.** It is required and
 > undeletable ([ADR-0009](adr/0009-single-agent-table-auto-butler.md)), and it is
@@ -295,31 +307,40 @@ The editor pane on the right holds:
 
 - **Name** and **Title** — the Title is a subtitle ("the innkeeper"). The Name is
   what **Address Detection** fuzzy-matches when a player says it out loud.
+- **Also answers to** — the Agent's aliases: nicknames, titles and the spellings
+  speech-to-text tends to produce ("Meera" for Mira). Type one and press Enter.
+  Address Detection matches them like the Name, and `/glyphoxa mute` resolves
+  them. The Butler has them too.
+- **Only answers when called by name** (Address-Only) — when on, this Character
+  NPC replies only when addressed by name; it is excluded from Address
+  Detection's last-speaker and single-NPC fallbacks. The Butler's switch is
+  forced on and disabled: it is always Address-Only.
 - **Persona** — Markdown describing personality, backstory and speech style. It is
   injected into the Agent's LLM prompt. This is the single biggest lever you have
   on how the NPC sounds; write a paragraph, not a word.
-- **Voice** — a searchable dropdown of the *live* ElevenLabs voice catalog. Pick
-  one, then **Preview voice** to hear a short sample in the browser. A failed
-  preview prints `Couldn't preview: …` inline (usually a missing or Degraded
-  ElevenLabs key). With no catalog the dropdown still shows the NPC's persisted
-  voice id, so a degraded TTS never wedges the screen.
-- **Address only — waits to be named** — when on, this Character NPC replies only
-  when addressed by name; it is excluded from Address Detection's last-speaker and
-  single-NPC fallbacks. The Butler's switch is forced on and disabled: it is
-  always Address-Only.
-- **Tools** — the **Tool Grant** toggles. One row per built-in Tool the server
-  exposes (`dice`, transcript search, Knowledge Graph query,
+- **Voice** — a searchable dropdown of the *live* ElevenLabs voice catalog, with
+  **Preview voice** for the chosen one and **Browse voices**, which opens the
+  voice picker: every voice with its language and its own play button, a
+  **Sample line** you can type for the voices to speak, and a filter for the
+  campaign's language. Nothing plays by itself, because every sample spends
+  text-to-speech characters; one sample plays at a time and closing the picker
+  stops it. A failed preview prints `Couldn't preview: …` inline (usually a
+  missing or Degraded ElevenLabs key). With no catalog the dropdown still shows
+  the NPC's persisted voice id, so a degraded TTS never wedges the screen.
+- **Advanced: tools** — the **Tool Grant** toggles. One row per built-in Tool the
+  server exposes (`dice`, transcript search, Knowledge Graph query,
   `remember_knowledge`, recap, and the map Tools). Granting a Tool is what lets that Agent invoke it. A
   Tool that supports per-grant scoping also shows a raw-JSON scope field with a
   **Save scope** button; `dice` supports no scope, so it renders only the switch.
-  **Grant changes take effect in the next Voice Session.**
+  Unlike the fields above, **a grant is written at once** (no Save) and takes
+  effect in the next Voice Session.
 
-Press **Save changes**. **Delete NPC** removes a Character NPC (never the Butler).
-
-> **Aliases.** A Character NPC's aliases are part of the domain model — Address
-> Detection matches them, and `/glyphoxa mute` resolves them — but **this build of
-> the console ships no alias editor**. An NPC created in the console has no
-> aliases; only its Name matches. Don't plan a session around them.
+The bar at the bottom of the editor stays on screen while you scroll. It shows
+**Unsaved changes** as soon as a field differs from what is stored; **Save
+changes** (also Ctrl+S, or ⌘S on a Mac) stores them, **Revert** puts the stored
+values back, and **Saved** shows only while the form is what the server holds.
+Leaving an editor with unsaved changes asks first. **Delete NPC** removes a
+Character NPC (never the Butler), after a confirmation.
 
 ### 4b. Knowledge — the Knowledge Graph
 
