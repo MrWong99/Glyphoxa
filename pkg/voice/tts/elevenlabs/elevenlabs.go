@@ -4,6 +4,10 @@
 // inline bracketed audio-tag vocabulary the agent prompt teaches
 // ([Client.AudioMarkupPrompt]).
 //
+// Synthesis is one HTTP stream per sentence by default. [WithTransport] opts the
+// v3/v4 families into pooled Text-to-Dialogue websockets instead (ws.go); a
+// client built that way holds sockets and must be released with [Client.Close].
+//
 // Per ADR-0023 the [Client] satisfies the full v1.0 capability matrix:
 // [tts.Synthesizer] (plus the required AudioMarkupPrompt), [tts.VoiceLister],
 // [tts.VoiceCloner], [tts.VoiceDesigner], and [tts.DialogueSynthesizer].
@@ -22,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,11 +45,18 @@ const (
 
 // Client is the ElevenLabs TTS adapter. Construct with [New]; the zero value
 // is not usable. Safe for concurrent use across goroutines (the underlying
-// http.Client is).
+// http.Client is, and the websocket transport leases a socket per call).
 type Client struct {
 	apiKey  string
 	baseURL string
 	http    *http.Client
+
+	// ws is the dialogue-socket pool of the opt-in websocket transport
+	// ([WithTransport]); nil on the default HTTP transport.
+	ws *wsPool
+	// httpSynth records that a sentence went over HTTP, so [Client.Warm] on a
+	// websocket client knows the HTTP pool is still worth warming.
+	httpSynth atomic.Bool
 }
 
 // Option mutates a [Client] during construction.
@@ -126,6 +138,13 @@ const warmTimeout = 5 * time.Second
 // synthesize, and cassette tiers must never touch the network.
 func (c *Client) Warm(ctx context.Context) error {
 	if c.apiKey == "" {
+		return nil
+	}
+	// Websocket transport: a dialogue socket is bound to one voice, so there is
+	// nothing to pre-dial until a voice has spoken. From then on Warm lines up
+	// (or keeps alive) an idle socket for the most recently used voices, in the
+	// background, and skips the HEAD unless some sentence went over HTTP.
+	if c.ws != nil && c.ws.warm() && !c.httpSynth.Load() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, warmTimeout)

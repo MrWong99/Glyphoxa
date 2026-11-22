@@ -26,6 +26,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // fakeOAuthStore is an in-memory auth.OAuthStore recording what seedDevSession
@@ -1425,5 +1426,49 @@ func TestVoiceMediaStallWindow(t *testing.T) {
 		if got := voiceMediaStallWindow(envMap(map[string]string{"GLYPHOXA_VOICE_MEDIA_STALL_WINDOW": c.val})); got != c.want {
 			t.Errorf("voiceMediaStallWindow(%q) = %v, want %v", c.val, got, c.want)
 		}
+	}
+}
+
+// TestTTSTransport pins the GLYPHOXA_TTS_TRANSPORT parse (#702): unset or "http"
+// keeps the HTTP synthesis path, "ws" opts into the pooled Text-to-Dialogue
+// websocket, and a typo keeps HTTP while reporting itself.
+func TestTTSTransport(t *testing.T) {
+	cases := []struct {
+		val     string
+		want    ttseleven.Transport
+		wantErr bool
+	}{
+		{"", ttseleven.TransportHTTP, false},
+		{"http", ttseleven.TransportHTTP, false},
+		{" WS ", ttseleven.TransportWS, false},
+		{"ws", ttseleven.TransportWS, false},
+		{"websocket", ttseleven.TransportHTTP, true},
+	}
+	for _, c := range cases {
+		got, err := ttsTransport(envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": c.val}))
+		if got != c.want || (err != nil) != c.wantErr {
+			t.Errorf("ttsTransport(%q) = %q, %v; want %q, error=%v", c.val, got, err, c.want, c.wantErr)
+		}
+	}
+}
+
+// TestApplyVoiceEnv pins the hop from the environment onto the session Config
+// the voice loop is started with (#702): a parsed knob that never reaches the
+// Config is a knob that silently does nothing in production.
+func TestApplyVoiceEnv(t *testing.T) {
+	var cfg wirenpc.Config
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "ws", "GLYPHOXA_STT_STREAMING": "0"}), slog.New(slog.DiscardHandler))
+	if cfg.TTSTransport != ttseleven.TransportWS || cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want ws and batch STT", cfg.TTSTransport, cfg.STTStreaming)
+	}
+
+	var buf bytes.Buffer
+	cfg = wirenpc.Config{}
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "websocket"}), slog.New(slog.NewTextHandler(&buf, nil)))
+	if cfg.TTSTransport == ttseleven.TransportWS || !cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want HTTP synthesis and streaming STT by default", cfg.TTSTransport, cfg.STTStreaming)
+	}
+	if !strings.Contains(buf.String(), "GLYPHOXA_TTS_TRANSPORT") {
+		t.Errorf("log = %q, want a warning naming the ignored variable", buf.String())
 	}
 }

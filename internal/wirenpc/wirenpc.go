@@ -218,6 +218,12 @@ type Config struct {
 	// the binary turns it ON unless GLYPHOXA_STT_STREAMING says otherwise
 	// (cmd/glyphoxa sttStreaming, default on since #702).
 	STTStreaming bool
+	// TTSTransport selects how the cycle's ElevenLabs client synthesizes (#702):
+	// the zero value and [ttseleven.TransportHTTP] are the per-sentence HTTP
+	// stream, byte-for-byte; [ttseleven.TransportWS] moves sentences of the v3/v4
+	// model families onto pooled Text-to-Dialogue websockets. Parsed from
+	// GLYPHOXA_TTS_TRANSPORT in cmd/glyphoxa.
+	TTSTransport ttseleven.Transport
 	// Bus, when non-nil, is the process-wide voiceevent.Bus the orchestrator
 	// publishes onto INSTEAD of a fresh per-cycle bus (issue #73, ADR-0014).
 	// The web tier injects ONE bus so the SSE transcript relay can subscribe
