@@ -39,6 +39,12 @@ type messagesBody struct {
 	Tools      []wireTool      `json:"tools,omitempty"`
 	ToolChoice *wireToolChoice `json:"tool_choice,omitempty"`
 	Stream     bool            `json:"stream"`
+
+	// Thinking and OutputConfig are the per-model reasoning fields (#702). Both
+	// are omitted unless the client's thinking policy names the model, and they
+	// sit last so a request without them is byte-identical to the pre-#702 body.
+	Thinking     *wireThinking     `json:"thinking,omitempty"`
+	OutputConfig *wireOutputConfig `json:"output_config,omitempty"`
 }
 
 // wireMessage is one Anthropic message: a role plus a list of content blocks.
@@ -124,6 +130,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if len(body.Tools) > 0 {
 		body.ToolChoice = wireToolChoiceFor(req.ToolChoice)
 	}
+	body.Thinking, body.OutputConfig = c.thinking(model).wireFields()
 
 	payload, err := json.Marshal(body)
 	if err != nil {

@@ -49,6 +49,10 @@ type Client struct {
 	baseURL string
 	model   string
 	http    *http.Client
+
+	// thinking is the per-model reasoning policy ([DefaultThinking] unless
+	// [WithThinkingFor] replaced it).
+	thinking func(model string) Thinking
 }
 
 // Option mutates a [Client] during construction.
@@ -91,6 +95,8 @@ func New(apiKey string, opts ...Option) *Client {
 		baseURL: DefaultBaseURL,
 		model:   DefaultModel,
 		http:    defaultHTTPClient(),
+
+		thinking: DefaultThinking,
 	}
 	for _, opt := range opts {
 		opt(c)
