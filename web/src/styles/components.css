@@ -29,10 +29,6 @@
     box-shadow var(--duration-base) var(--ease-standard),
     transform var(--duration-fast) var(--ease-standard);
 }
-.gx-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
 .gx-btn:disabled {
   opacity: 0.5;
   pointer-events: none;
@@ -56,18 +52,21 @@
   display: flex;
   width: 100%;
 }
+/* The fill is --arcane-fill, not --arcane: white on violet-50 is 4.15:1, on
+ * the fill pair 5.7:1 and 8.0:1 (tokens.test.ts). Hover goes one step darker
+ * and gains the glow, so the label stays AA in every state. */
 .gx-btn--primary {
-  background: var(--arcane);
-  border-color: var(--arcane);
+  background: var(--arcane-fill);
+  border-color: var(--arcane-fill);
   color: var(--text-on-arcane);
 }
 .gx-btn--primary:hover {
-  background: var(--arcane-hover);
-  border-color: var(--arcane-hover);
+  background: var(--arcane-fill-hover);
+  border-color: var(--arcane-fill-hover);
   box-shadow: var(--glow-arcane-soft);
 }
 .gx-btn--primary:active {
-  background: var(--arcane-active);
+  background: var(--arcane-fill-hover);
 }
 .gx-btn--secondary {
   background: transparent;
@@ -114,6 +113,96 @@
 .gx-btn__icon svg {
   width: 100%;
   height: 100%;
+}
+/* Icon-only: a square box at the size's own height (the name is the
+ * aria-label). The padding is the size's vertical padding on all four sides,
+ * and the icon box is one line tall, so the button is as high as a labelled
+ * one beside it. */
+.gx-btn--icon.gx-btn--sm {
+  padding: 5px;
+}
+.gx-btn--icon.gx-btn--md {
+  padding: 8px;
+}
+.gx-btn--icon.gx-btn--lg {
+  padding: 11px;
+}
+.gx-btn--icon .gx-btn__icon {
+  width: 1.25em;
+  height: 1.25em;
+}
+/* Loading: the label and icons stay in flow at opacity 0, so the button keeps
+ * its width and its accessible name, and the spinner sits over them. The
+ * button is disabled while it loads; it is dimmed less than a plain disabled
+ * one so the spinner stays legible. */
+.gx-btn[data-loading="true"] {
+  position: relative;
+}
+.gx-btn[data-loading="true"]:disabled {
+  opacity: 0.8;
+}
+.gx-btn__content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5ch;
+  opacity: 0;
+}
+.gx-btn__spinner {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* ===================== IconButton (components/ui/IconButton.tsx) =========
+ * A square, borderless button around one icon: row actions, close buttons,
+ * toolbars. 28px (sm) and 36px (md) boxes; the icon is sized by the caller.
+ */
+.gx-icon-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+.gx-icon-btn--sm {
+  width: var(--control-sm);
+  height: var(--control-sm);
+}
+.gx-icon-btn--md {
+  width: var(--control-md);
+  height: var(--control-md);
+}
+.gx-icon-btn:hover,
+.gx-icon-btn[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--arcane) 14%, transparent);
+  color: var(--text-strong);
+}
+.gx-icon-btn--danger:hover {
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+}
+.gx-icon-btn:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.gx-icon-btn[data-loading="true"]:disabled {
+  opacity: 0.8;
+}
+.gx-icon-btn[data-loading="true"] > :not(.gx-btn__spinner) {
+  opacity: 0;
 }
 
 /* ===================== Card (components/core/Card.jsx) ================== */
@@ -248,9 +337,9 @@
   border-color: var(--border-default);
 }
 .gx-badge--solid {
-  background: var(--arcane);
-  color: #fff;
-  border-color: var(--arcane);
+  background: var(--arcane-fill);
+  color: var(--text-on-arcane);
+  border-color: var(--arcane-fill);
 }
 
 /* ===================== Avatar (components/core/Avatar.jsx) ============== */
@@ -371,7 +460,9 @@
   font-size: var(--body-sm);
   color: var(--text-strong);
   background: var(--surface-inset);
-  border: 1px solid var(--border-default);
+  /* --border-control, not --border-default: the edge of a control has to
+   * reach 3:1 against the card it sits on (WCAG 1.4.11). */
+  border: 1px solid var(--border-control);
   border-radius: var(--radius-sm);
   padding: 9px 12px;
   line-height: 1.4;
@@ -382,12 +473,16 @@
   color: var(--text-subtle);
 }
 .gx-input:hover {
-  border-color: var(--border-strong);
+  border-color: var(--border-control-hover);
 }
+/* Focus on a text control is the brighter border plus the glow (it shows for
+ * a mouse click too, which is right for a field you are about to type in).
+ * The border steps up to violet-40 now that the resting border is itself a
+ * visible violet. */
 .gx-input:focus {
   outline: none;
-  border-color: var(--arcane);
-  box-shadow: 0 0 0 3px rgba(144, 89, 255, 0.22);
+  border-color: var(--arcane-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arcane) 32%, transparent);
 }
 .gx-input--has-icon {
   padding-left: 34px;
@@ -406,6 +501,31 @@ textarea.gx-input {
   resize: vertical;
   min-height: 84px;
   line-height: 1.5;
+}
+/* Textarea autoGrow: the height follows the text (set inline by the
+ * component), so there is no resize handle, and no inner scrollbar until the
+ * component caps the height at maxRows. */
+textarea.gx-input--autogrow {
+  resize: none;
+  overflow-y: hidden;
+  min-height: 0;
+}
+textarea.gx-input--autogrow[data-capped="true"] {
+  overflow-y: auto;
+}
+/* Required marker beside a field label. Decorative: the control itself
+ * carries aria-required. */
+.gx-field__required {
+  margin-left: 2px;
+  color: var(--status-danger);
+}
+/* A field whose control is a group (a SegmentedControl, a set of checkboxes)
+ * rather than one labelable element. */
+.gx-field--group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
 }
 
 /* ===================== Select (components/forms/Select.jsx) =============
@@ -437,7 +557,7 @@ textarea.gx-input {
   font-size: var(--body-sm);
   color: var(--text-strong);
   background: var(--surface-inset);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius-sm);
   padding: 9px 34px 9px 12px;
   line-height: 1.4;
@@ -447,13 +567,13 @@ textarea.gx-input {
     box-shadow var(--duration-base) var(--ease-standard);
 }
 .gx-select:hover {
-  border-color: var(--border-strong);
+  border-color: var(--border-control-hover);
 }
 .gx-select:focus,
 .gx-select[data-state="open"] {
   outline: none;
-  border-color: var(--arcane);
-  box-shadow: 0 0 0 3px rgba(144, 89, 255, 0.22);
+  border-color: var(--arcane-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arcane) 32%, transparent);
 }
 .gx-select:disabled,
 .gx-select[data-disabled] {
@@ -476,7 +596,17 @@ textarea.gx-input {
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-md);
   padding: 4px;
-  z-index: 60;
+  /* This class is also the surface of the panels that open IN PLACE under
+   * their trigger (the Combobox list, the campaign switcher panel, the
+   * row-actions menu). Those stay below the modal pair, as they always were:
+   * a dialog opened while one is up covers and dims it. */
+  z-index: var(--z-dropdown);
+}
+/* The Radix Select list itself is portalled to <body>, so a select inside a
+ * dialog needs to open above the modal pair. (Radix copies this z-index onto
+ * the wrapper it positions.) */
+.gx-select__content[role="listbox"] {
+  z-index: var(--z-popover);
 }
 .gx-select__item {
   font-family: var(--font-base);
@@ -486,7 +616,21 @@ textarea.gx-input {
   border-radius: var(--radius-xs);
   cursor: pointer;
   user-select: none;
+}
+/* An OPTION (a Radix Select item, a cmdk Combobox item) shows where the
+ * keyboard is with its highlight below, so it drops the focus outline. The
+ * reset is scoped to role=option on purpose: this class is also on real
+ * buttons (the campaign switcher's rows, the row-actions menu's items) whose
+ * only focus indicator IS the global outline. A bare `outline: none` here,
+ * at the same specificity as :focus-visible and later in the bundle, left
+ * those with no visible focus at all. */
+.gx-select__item[role="option"] {
   outline: none;
+}
+/* On those buttons the outline is drawn inside the row: they sit in a
+ * scrolling list that would clip one drawn outside. */
+button.gx-select__item:focus-visible {
+  outline-offset: calc(-1 * var(--focus-outline-width));
 }
 .gx-select__item[data-highlighted] {
   background: rgba(144, 89, 255, 0.18);
@@ -498,6 +642,12 @@ textarea.gx-input {
  * the live ElevenLabs voice catalog (#88 slice 2). Reuses the .gx-select trigger
  * + .gx-select__content popover vocabulary; adds the filter input + bounded list.
  */
+/* In a flex row the field may shrink below the width of a long option name
+ * (the trigger text is nowrap and ellipsises); without this the voice picker
+ * pushed its row wider than a phone screen. */
+.gx-combobox {
+  min-width: 0;
+}
 .gx-combobox__anchor {
   position: relative;
 }
@@ -514,6 +664,7 @@ textarea.gx-input {
   flex: 0 0 auto;
 }
 .gx-combobox__value {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -535,6 +686,13 @@ textarea.gx-input {
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
   border-bottom: 1px solid var(--border-subtle);
+}
+/* The filter field has no box of its own to outline (it fills this row), so
+ * the row carries the focus indicator, drawn inside the popover's edge. */
+.gx-combobox__search:focus-within {
+  outline: var(--focus-outline-width) solid var(--focus-outline-color);
+  outline-offset: calc(-1 * var(--focus-outline-width));
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 .gx-combobox__search-icon {
   color: var(--text-muted);
@@ -593,7 +751,7 @@ textarea.gx-input {
   height: 22px;
   border-radius: var(--radius-pill);
   background: var(--surface-inset);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-control);
   transition: background var(--duration-base) var(--ease-standard),
     border-color var(--duration-base) var(--ease-standard),
     box-shadow var(--duration-base) var(--ease-standard);
@@ -621,9 +779,6 @@ textarea.gx-input {
 .gx-switch__track[data-state="checked"] .gx-switch__thumb {
   transform: translateX(16px);
   background: #fff;
-}
-.gx-switch__track:focus-visible {
-  box-shadow: var(--focus-ring);
 }
 .gx-switch__track:disabled,
 .gx-switch__track[data-disabled] {
@@ -875,13 +1030,22 @@ textarea.gx-input {
   min-height: 0;
   overflow-y: auto;
 }
+/* One gutter for every screen in the content area: --page-gutter (32px, 24px
+ * at 880 and below, 16px at 640 and below). The Campaign and Session roots
+ * set a fixed 32px in their own co-located files, which left a phone 64px
+ * narrower than it had to be; the parent selector outranks those single-class
+ * rules without editing them. New screens use the Page primitive instead. */
+.gx-content .gx-campaign-screen,
+.gx-content .gx-session {
+  padding: var(--page-gutter);
+}
 
 /* ===================== Providers screen (ui_kits/settings.jsx) ==========
  * Screen-level layout for the Configuration (Providers) screen.
  */
 .gx-providers {
-  padding: 28px;
-  max-width: 820px;
+  padding: var(--page-gutter);
+  max-width: var(--page-width-narrow);
   margin: 0 auto;
 }
 .gx-providers__lede {
@@ -1041,7 +1205,7 @@ textarea.gx-input {
     top: 0;
     left: 0;
     bottom: 0;
-    z-index: 60;
+    z-index: var(--z-drawer);
     box-shadow: var(--shadow-lg);
   }
   /* When open, a full-bleed scrim sits behind the drawer; clicking it shuts. */
@@ -1049,7 +1213,7 @@ textarea.gx-input {
     display: block;
     position: fixed;
     inset: 0;
-    z-index: 55;
+    z-index: var(--z-scrim);
     background: rgba(0, 0, 0, 0.55);
     cursor: pointer;
   }
@@ -1076,11 +1240,6 @@ textarea.gx-input {
   .gx-editor__grid {
     grid-template-columns: 1fr;
   }
-
-  /* Tighter screen gutters on small viewports. */
-  .gx-providers {
-    padding: var(--spacing-md);
-  }
 }
 
 /* ===================== Confirm dialog (#209) ===========================
@@ -1091,24 +1250,29 @@ textarea.gx-input {
 .gx-confirm__overlay {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: var(--z-overlay);
   background: rgba(0, 0, 0, 0.6);
 }
-.gx-confirm {
+/* The modal surface, shared by ConfirmDialog and Dialog (ui/Dialog.tsx):
+ * fixed, above the overlay, on the overlay surface with the large shadow. */
+.gx-confirm,
+.gx-dialog {
   position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 91;
-  width: min(440px, calc(100vw - 2 * var(--spacing-lg)));
+  z-index: var(--z-modal);
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-lg);
   background: var(--surface-overlay);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
+}
+.gx-confirm {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(440px, calc(100vw - 2 * var(--spacing-lg)));
+  gap: var(--spacing-sm);
+  padding: var(--spacing-lg);
 }
 .gx-confirm__title {
   margin: 0;
@@ -1265,7 +1429,7 @@ textarea.gx-input {
 .gx-md__code {
   font-family: var(--font-mono);
   font-size: 0.9em;
-  background: var(--surface-raised, rgba(255, 255, 255, 0.06));
+  background: var(--surface-raised);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   padding: 0 4px;
@@ -1273,7 +1437,7 @@ textarea.gx-input {
 .gx-md__pre {
   margin: 0 0 var(--spacing-sm);
   padding: var(--spacing-sm);
-  background: var(--surface-inset, rgba(0, 0, 0, 0.25));
+  background: var(--surface-inset);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   overflow-x: auto;
@@ -1318,7 +1482,7 @@ textarea.gx-input {
 .gx-md__table th {
   font-weight: var(--weight-semibold);
   color: var(--text-strong);
-  background: var(--surface-raised, rgba(255, 255, 255, 0.06));
+  background: var(--surface-raised);
 }
 /* data-align carries the delimiter row's :--- / :---: / ---: choice. */
 .gx-md__table [data-align="center"] {
@@ -1326,4 +1490,883 @@ textarea.gx-input {
 }
 .gx-md__table [data-align="right"] {
   text-align: right;
+}
+
+/* =========================================================================
+ * Design-system layer (ADR-0017, 2026-11 amendment). Everything below backs a
+ * wrapper in components/ui/: overlays, state, layout and form primitives.
+ * Colours, sizes and layers come from tokens.css; tints are color-mix() over
+ * a token, never a literal.
+ * ========================================================================= */
+
+/* ===================== Dialog (components/ui/Dialog.tsx) =================
+ * A Radix Dialog in two shapes that share the confirm dialog's surface (see
+ * the .gx-confirm rules above), its overlay, title, description and action
+ * row:
+ *   modal  centred card
+ *   sheet  a drawer on the right edge; at 880px and below a sheet rising from
+ *          the bottom edge
+ * The header and footer stay put and the body scrolls, so a long form never
+ * pushes its own Save button off screen.
+ */
+.gx-dialog {
+  --gx-dialog-width: 560px;
+  padding: 0;
+  gap: 0;
+}
+.gx-dialog[data-size="sm"] {
+  --gx-dialog-width: 440px;
+}
+.gx-dialog[data-size="lg"] {
+  --gx-dialog-width: 720px;
+}
+/* The content element takes focus when nothing inside can; a ring around the
+ * whole surface would say nothing. Focus inside it is drawn as usual. */
+.gx-dialog:focus-visible {
+  outline: none;
+}
+.gx-dialog--modal {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(var(--gx-dialog-width), calc(100vw - 2 * var(--page-gutter)));
+  max-height: calc(100dvh - 2 * var(--page-gutter));
+}
+.gx-dialog--modal[data-state="open"] {
+  animation: gx-dialog-in var(--duration-base) var(--ease-out);
+}
+.gx-dialog--sheet {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(var(--gx-dialog-width), 100vw);
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+}
+.gx-dialog--sheet[data-state="open"] {
+  animation: gx-sheet-in-right var(--duration-slow) var(--ease-out);
+}
+.gx-confirm__overlay[data-state="open"] {
+  animation: gx-fade-in var(--duration-base) var(--ease-standard);
+}
+.gx-dialog__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  /* Right padding clears the close button. */
+  padding: var(--spacing-lg) calc(var(--spacing-lg) + var(--control-md)) var(--spacing-md)
+    var(--spacing-lg);
+}
+.gx-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--spacing-lg) var(--spacing-lg);
+}
+.gx-dialog__footer {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-top: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.gx-dialog__close {
+  position: absolute;
+  top: var(--spacing-md);
+  right: var(--spacing-md);
+}
+@media (max-width: 880px) {
+  .gx-dialog--sheet {
+    top: auto;
+    left: 0;
+    width: auto;
+    max-height: calc(100dvh - var(--spacing-2xl));
+    border-width: 1px 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .gx-dialog--sheet[data-state="open"] {
+    animation-name: gx-sheet-in-bottom;
+  }
+}
+@media (max-width: 640px) {
+  /* Phone: full-width buttons stacked with the primary action on top (it is
+   * last in the row on desktop). Deliberate trade-off: Tab order stays the
+   * DOM order (Cancel, then the primary action), so with a keyboard on a
+   * narrow window focus moves up the stack. */
+  .gx-dialog__footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+}
+@keyframes gx-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes gx-dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
+}
+@keyframes gx-sheet-in-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+@keyframes gx-sheet-in-bottom {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+/* ===================== Popover (components/ui/Popover.tsx) ===============
+ * A Radix Popover: non-modal, anchored to its trigger, portalled to <body>.
+ */
+.gx-popover {
+  z-index: var(--z-popover);
+  max-width: min(360px, calc(100vw - 2 * var(--spacing-md)));
+  max-height: var(--radix-popover-content-available-height);
+  overflow-y: auto;
+  padding: var(--spacing-md);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--text-default);
+  font-size: var(--body-sm);
+}
+/* Like the dialog surface: Radix focuses the panel itself (a popover with
+ * nothing focusable; a menu when the pointer leaves its items), and a ring
+ * around the whole surface would say nothing. */
+.gx-popover:focus-visible,
+.gx-menu:focus-visible {
+  outline: none;
+}
+.gx-popover[data-state="open"],
+.gx-menu[data-state="open"],
+.gx-tooltip {
+  animation: gx-fade-in var(--duration-fast) var(--ease-standard);
+}
+
+/* ===================== Menu (components/ui/Menu.tsx) =====================
+ * A Radix DropdownMenu. Rows read like .gx-select__item; the highlighted row
+ * (hover or arrow keys) is the tinted one.
+ */
+.gx-menu {
+  z-index: var(--z-popover);
+  min-width: 180px;
+  max-width: min(320px, calc(100vw - 2 * var(--spacing-md)));
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow-y: auto;
+  padding: var(--spacing-xs);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.gx-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  line-height: var(--body-line-tight);
+  color: var(--text-default);
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.gx-menu__item[data-highlighted] {
+  background: color-mix(in srgb, var(--arcane) 18%, transparent);
+  color: var(--text-strong);
+}
+.gx-menu__item[data-disabled] {
+  color: var(--text-subtle);
+  cursor: not-allowed;
+}
+.gx-menu__item--danger {
+  color: var(--status-danger);
+}
+.gx-menu__item--danger[data-highlighted] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+}
+.gx-menu__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+.gx-menu__icon svg {
+  width: 100%;
+  height: 100%;
+}
+.gx-menu__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gx-menu__hint {
+  flex: 0 0 auto;
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+.gx-menu__label {
+  padding: 6px 10px 4px;
+  font-size: var(--body-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.gx-menu__separator {
+  height: 1px;
+  margin: var(--spacing-xs) calc(var(--spacing-xs) * -1);
+  background: var(--border-subtle);
+}
+
+/* ===================== Tooltip (components/ui/Tooltip.tsx) ============== */
+.gx-tooltip {
+  z-index: var(--z-tooltip);
+  max-width: min(260px, calc(100vw - 2 * var(--spacing-md)));
+  padding: 5px var(--spacing-sm);
+  background: var(--surface-void);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  line-height: var(--body-line-tight);
+  pointer-events: none;
+}
+
+/* ===================== Skeleton (components/ui/Skeleton.tsx) =============
+ * Shapes on the .gx-skeleton shimmer defined above (which on its own stays the
+ * 10ch bar the older call sites use). A skeleton stands in for the layout that
+ * is loading, so a list loads as rows and an image as a block of its ratio.
+ */
+.gx-skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+}
+.gx-skeleton--line {
+  display: block;
+  width: 100%;
+  height: 0.9em;
+  margin: 0.3em 0;
+}
+.gx-skeleton--line[data-short="true"] {
+  width: 62%;
+}
+.gx-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+}
+.gx-skeleton-row__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gx-skeleton-row__text .gx-skeleton--line:first-child {
+  width: 40%;
+}
+.gx-skeleton--avatar {
+  display: block;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-pill);
+}
+.gx-skeleton--block {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+}
+
+/* ===================== EmptyState / ErrorState ===========================
+ * components/ui/EmptyState.tsx and ErrorState.tsx. "panel" fills the place
+ * the content would have taken; "inline" is one quiet row inside a card or a
+ * list that already has a frame.
+ */
+.gx-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  text-align: center;
+  color: var(--text-muted);
+}
+.gx-empty--panel {
+  padding: var(--spacing-2xl) var(--spacing-lg);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+}
+.gx-empty--inline {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) 0;
+  text-align: left;
+}
+.gx-empty__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  color: var(--arcane-hover);
+}
+.gx-empty--inline .gx-empty__icon {
+  width: 32px;
+  height: 32px;
+}
+.gx-empty--danger .gx-empty__icon {
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+}
+.gx-empty__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+.gx-empty--panel .gx-empty__text {
+  align-items: center;
+}
+.gx-empty--inline .gx-empty__text {
+  flex: 1 1 auto;
+}
+/* Stated in full (not left to the heading scale): the title can be a p or any
+ * heading level, and it must look the same either way. */
+.gx-empty__title {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  letter-spacing: normal;
+  color: var(--text-strong);
+}
+.gx-empty__desc {
+  margin: 0;
+  max-width: 52ch;
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+}
+.gx-empty__action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+}
+.gx-empty--inline .gx-empty__action {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-top: 0;
+}
+/* The raw error text, folded: it is the server's own English sentence, useful
+ * when reporting a problem and noise otherwise. */
+.gx-error__details {
+  max-width: 100%;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+.gx-error__details > summary {
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.gx-error__message {
+  margin: var(--spacing-xs) 0 0;
+  padding: var(--spacing-sm);
+  max-width: 64ch;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--mono-xs);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-default);
+}
+@media (max-width: 640px) {
+  .gx-empty--panel {
+    padding: var(--spacing-xl) var(--spacing-md);
+  }
+  .gx-empty--inline {
+    flex-wrap: wrap;
+  }
+}
+
+/* ===================== Alert (components/ui/Alert.tsx) ===================
+ * An inline message that stays on the page (a toast is for an event; this is
+ * for a state). Tone picks the tint, the icon and the ARIA role.
+ */
+.gx-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--gx-alert-edge);
+  border-radius: var(--radius-md);
+  background: var(--gx-alert-bg);
+  color: var(--text-default);
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+}
+.gx-alert--danger {
+  --gx-alert-bg: var(--status-danger-bg);
+  --gx-alert-fg: var(--status-danger);
+  --gx-alert-edge: color-mix(in srgb, var(--status-danger) 34%, transparent);
+}
+.gx-alert--warning {
+  --gx-alert-bg: var(--status-warning-bg);
+  --gx-alert-fg: var(--status-warning);
+  --gx-alert-edge: color-mix(in srgb, var(--status-warning) 34%, transparent);
+}
+.gx-alert--info {
+  --gx-alert-bg: var(--status-info-bg);
+  --gx-alert-fg: var(--rune);
+  --gx-alert-edge: color-mix(in srgb, var(--status-info) 40%, transparent);
+}
+.gx-alert--success {
+  --gx-alert-bg: var(--status-live-bg);
+  --gx-alert-fg: var(--status-success);
+  --gx-alert-edge: color-mix(in srgb, var(--status-success) 34%, transparent);
+}
+.gx-alert__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  /* Centres a 16px icon on the first line of text. */
+  margin-top: calc((var(--body-sm) * var(--body-line) - 16px) / 2);
+  color: var(--gx-alert-fg);
+}
+.gx-alert__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.gx-alert__title {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+.gx-alert__body > :last-child {
+  margin-bottom: 0;
+}
+.gx-alert__action {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+@media (max-width: 640px) {
+  .gx-alert {
+    flex-wrap: wrap;
+  }
+  .gx-alert__body {
+    flex-basis: calc(100% - 16px - var(--spacing-sm));
+  }
+  .gx-alert__action {
+    margin-left: calc(16px + var(--spacing-sm));
+  }
+}
+
+/* ===================== Page (components/ui/Page.tsx) =====================
+ * The screen container and its header. One centred column on --page-gutter;
+ * "narrow" for forms and settings, "wide" for lists with a detail pane.
+ */
+.gx-page {
+  width: 100%;
+  max-width: var(--page-width-wide);
+  margin: 0 auto;
+  padding: var(--page-gutter);
+}
+.gx-page--narrow {
+  max-width: var(--page-width-narrow);
+}
+.gx-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+.gx-page-header__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.gx-page-header__title {
+  font-size: var(--display-sm);
+  overflow-wrap: anywhere;
+}
+.gx-page-header__desc {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--text-muted);
+}
+.gx-page-header__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+@media (max-width: 640px) {
+  .gx-page-header {
+    align-items: stretch;
+  }
+  .gx-page-header__text {
+    flex-basis: 100%;
+  }
+  .gx-page-header__actions {
+    flex: 1 1 100%;
+  }
+}
+
+/* ===================== SegmentedControl ==================================
+ * components/ui/SegmentedControl.tsx. One choice out of a few (a view switch).
+ * The chosen segment is filled; the others are plain text at full strength,
+ * not dimmed, so a choice you have not made does not look disabled.
+ */
+.gx-seg {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 3px;
+  gap: 2px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+.gx-seg__item {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px var(--spacing-md);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+.gx-seg--sm .gx-seg__item {
+  padding: 3px 10px;
+  font-size: var(--body-xs);
+}
+.gx-seg__item:hover {
+  color: var(--text-strong);
+}
+.gx-seg__item[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--arcane) 26%, var(--surface-card));
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+.gx-seg__item:disabled {
+  color: var(--text-subtle);
+  cursor: not-allowed;
+}
+.gx-seg__count {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+.gx-seg--block {
+  display: flex;
+}
+.gx-seg--block .gx-seg__item {
+  flex: 1 1 0;
+}
+
+/* ===================== ChipInput (components/ui/ChipInput.tsx) ===========
+ * A list of short strings (aliases, tags) edited in one box: the chips and
+ * the text field share the input's frame, so it reads as one control.
+ */
+.gx-chipinput {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 5px var(--spacing-sm);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  cursor: text;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-base) var(--ease-standard);
+}
+.gx-chipinput:hover {
+  border-color: var(--border-control-hover);
+}
+.gx-chipinput:focus-within {
+  border-color: var(--arcane-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arcane) 32%, transparent);
+}
+.gx-chipinput[data-invalid="true"] {
+  border-color: var(--status-danger);
+}
+.gx-chipinput[data-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.gx-chipinput__list {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px 4px 2px var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--arcane) 14%, transparent);
+  color: var(--text-default);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--body-line-tight);
+}
+.gx-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-chip__remove {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.gx-chip__remove:hover {
+  background: color-mix(in srgb, var(--arcane) 24%, transparent);
+  color: var(--text-strong);
+}
+.gx-chipinput__input {
+  flex: 1 1 8ch;
+  min-width: 8ch;
+  padding: 3px 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  line-height: 1.4;
+}
+.gx-chipinput__input::placeholder {
+  color: var(--text-subtle);
+}
+.gx-chipinput__input:disabled {
+  cursor: not-allowed;
+}
+
+/* ===================== Toasts (sonner) ===================================
+ * The one <Toaster> lives in AppShell with theme="dark" richColors, which is
+ * sonner's own black and saturated palette. sonner reads its colours from
+ * custom properties it sets on the toaster element; setting the same
+ * properties on each toast re-points them at the app's surface and status
+ * tokens, whatever order the two stylesheets load in (a value set on the
+ * element itself always beats an inherited one).
+ */
+[data-sonner-toast] {
+  --normal-bg: var(--surface-overlay);
+  --normal-bg-hover: var(--surface-card-hover);
+  --normal-border: var(--border-strong);
+  --normal-border-hover: var(--border-strong);
+  --normal-text: var(--text-default);
+  --success-bg: color-mix(in srgb, var(--status-success) 12%, var(--surface-overlay));
+  --success-border: color-mix(in srgb, var(--status-success) 40%, var(--surface-overlay));
+  --success-text: var(--status-success);
+  --info-bg: color-mix(in srgb, var(--status-info) 14%, var(--surface-overlay));
+  --info-border: color-mix(in srgb, var(--status-info) 46%, var(--surface-overlay));
+  --info-text: var(--rune);
+  --warning-bg: color-mix(in srgb, var(--status-warning) 12%, var(--surface-overlay));
+  --warning-border: color-mix(in srgb, var(--status-warning) 40%, var(--surface-overlay));
+  --warning-text: var(--status-warning);
+  --error-bg: color-mix(in srgb, var(--status-danger) 14%, var(--surface-overlay));
+  --error-border: color-mix(in srgb, var(--status-danger) 44%, var(--surface-overlay));
+  --error-text: var(--color-red-20);
+  --border-radius: var(--radius-md);
+  font-family: var(--font-base);
+  /* A modal dialog switches pointer events off for everything outside it
+   * (Radix sets pointer-events: none on <body>). A toast is not part of the
+   * page under the dialog: its Undo must stay clickable. */
+  pointer-events: auto;
+}
+/* The rules below need the toaster in the selector to outrank sonner's own,
+ * which are injected after this stylesheet. */
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] {
+  box-shadow: var(--shadow-md);
+  font-size: var(--body-sm);
+  line-height: var(--body-line-tight);
+}
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-button] {
+  height: var(--control-sm);
+  padding: 0 var(--spacing-sm);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-bold);
+}
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-button]:hover {
+  border-color: var(--arcane-hover);
+  background: color-mix(in srgb, var(--arcane) 18%, transparent);
+}
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-button]:focus-visible,
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-close-button]:focus-visible {
+  box-shadow: none;
+  outline: var(--focus-outline-width) solid var(--focus-outline-color);
+  outline-offset: var(--focus-outline-offset);
+}
+
+/* ===================== Touch targets =====================================
+ * A finger needs more room than a cursor. On a touch screen every small
+ * control grows to --target-coarse (40px): small buttons, icon buttons, the
+ * sidebar's sub-items, segments, filter chips, chip remove buttons and menu
+ * rows. Desktop density is untouched.
+ */
+@media (pointer: coarse) {
+  .gx-btn--sm,
+  .gx-nav__subitem,
+  .gx-seg__item,
+  .gx-menu__item,
+  .gx-kg-chip {
+    min-height: var(--target-coarse);
+  }
+  /* Width too, for the ones a short label can leave narrow. The filter chip
+   * (.gx-kg-chip) is defined in the Campaign screen's own stylesheet, which
+   * loads after this one: only properties it does not set itself can be added
+   * from here, which min-height, min-width and justify-content are. */
+  .gx-btn--sm,
+  .gx-seg__item,
+  .gx-kg-chip {
+    min-width: var(--target-coarse);
+  }
+  .gx-kg-chip {
+    justify-content: center;
+  }
+  .gx-icon-btn--sm,
+  .gx-icon-btn--md {
+    width: var(--target-coarse);
+    height: var(--target-coarse);
+  }
+  /* The chip stays small; its remove button gets the 40px hit area as an
+   * invisible halo, so a row of chips does not double in height. */
+  .gx-chip__remove {
+    position: relative;
+  }
+  .gx-chip__remove::after {
+    content: "";
+    position: absolute;
+    inset: calc((20px - var(--target-coarse)) / 2);
+  }
+  .gx-chipinput {
+    min-height: var(--target-coarse);
+  }
+}
+
+/* ===================== Forced colours ====================================
+ * Windows High Contrast and similar. The system replaces every colour and
+ * drops box-shadows and background images, so anything this theme says with a
+ * shadow, a tint or a gradient is said with a border or an outline in a system
+ * colour here. Last in the file, so it outranks the rules above at equal
+ * specificity.
+ */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+  /* Form controls show focus as a border colour plus a glow; give them the
+   * outline everything else has. */
+  .gx-input:focus,
+  .gx-select:focus,
+  .gx-chipinput:focus-within {
+    outline: var(--focus-outline-width) solid Highlight;
+    outline-offset: var(--focus-outline-offset);
+  }
+  /* Selection and pressed state are a fill and an inset shadow here. */
+  .gx-selectable[data-active="true"],
+  .gx-nav__item[data-active="true"],
+  .gx-nav__subitem[data-active="true"],
+  .gx-seg__item[aria-pressed="true"],
+  .gx-menu__item[data-highlighted],
+  .gx-select__item[data-highlighted] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  /* Surfaces need no rule: every button, badge, chip, segment, alert and
+   * floating surface carries a real border (transparent on some), and the
+   * system paints a transparent border in its own colour. */
+  .gx-btn:disabled,
+  .gx-icon-btn:disabled {
+    border-color: GrayText;
+    color: GrayText;
+    opacity: 1;
+  }
+  /* The checked switch is a violet fill; say it with system colours. */
+  .gx-switch__track[data-state="checked"] {
+    background: Highlight;
+    border-color: Highlight;
+  }
+  .gx-switch__track[data-state="checked"] .gx-switch__thumb {
+    background: HighlightText;
+  }
+  .gx-switch__thumb {
+    background: CanvasText;
+  }
+  /* Skeletons and the spinner are background and border tricks. */
+  .gx-skeleton {
+    background: GrayText;
+    forced-color-adjust: none;
+    opacity: 0.4;
+  }
+  .gx-spinner {
+    border-color: GrayText;
+    border-top-color: CanvasText;
+  }
 }
