@@ -23,6 +23,11 @@ import { ProposalsPanel } from "./ProposalsPanel";
 import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "./views";
 
 import "./campaign.css";
+import "./campaignHost.css";
+
+// The views that read line by line (a queue of sentences, a form) sit on the
+// narrow page; the ones with a list and a detail pane take the wide one.
+const NARROW_VIEWS: ReadonlySet<CampaignView> = new Set(["proposals", "settings"]);
 
 // The Campaign screen is a thin HOST (ADR-0063 amendment). It does four things
 // and nothing else:
@@ -151,7 +156,11 @@ function CampaignHost({ view }: { view: CampaignView }) {
           gx-campaign-screen and data-view stay on the root: a view's stylesheet
           targets the screen through them (a view that needs the full height,
           say) without the host knowing about it. */}
-      <Page className="gx-campaign-screen" data-view={view}>
+      <Page
+        className="gx-campaign-screen"
+        width={NARROW_VIEWS.has(view) ? "narrow" : "wide"}
+        data-view={view}
+      >
         {/* The view tabs that used to sit beside the title live in the sidebar
             (ADR-0063); the header keeps the campaign's identity and says what
             the view is for. The Overview renders its own. */}

@@ -31,8 +31,11 @@ import {
   ListSessionsResponseSchema,
   ListSupportedLanguagesResponseSchema,
   ListVoicesResponseSchema,
+  KnowledgeProposalSchema,
   NodeSchema,
   NodeType,
+  ProposedFactSchema,
+  type KnowledgeProposal,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { MemoryScreenNav, useScreenNav, type ScreenLocation } from "@/app/screenNav";
@@ -48,7 +51,7 @@ import { CAMPAIGN_VIEWS, type CampaignView } from "./views";
 
 // One campaign with a Butler and one NPC, plus just enough of every panel's
 // reads for each view to mount.
-function mockTransport() {
+function mockTransport(opts: { proposals?: KnowledgeProposal[] } = {}) {
   const campaign = create(CampaignSchema, {
     id: "c1",
     name: "The Sunless Citadel",
@@ -101,7 +104,7 @@ function mockTransport() {
         }),
       listDiscordVoiceMembers: () => create(ListDiscordVoiceMembersResponseSchema, {}),
       // Suggestions view (#300).
-      listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: [] }),
+      listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: opts.proposals ?? [] }),
       // World wiki: Bart's entry, linked to the NPC but still empty.
       listNodes: () =>
         create(ListNodesResponseSchema, {
@@ -156,10 +159,13 @@ type Move = { next: ScreenLocation; replace: boolean };
 // The harness stands in for the route layer: MemoryScreenNav holds the location
 // and applies the router's rules, and the screen is rendered for whatever view
 // that location names — exactly what subviewRoute does with the path param.
-function renderScreen(initial: { view?: CampaignView; search?: ScreenLocation["search"] } = {}) {
+function renderScreen(
+  initial: { view?: CampaignView; search?: ScreenLocation["search"] } = {},
+  opts: { proposals?: KnowledgeProposal[] } = {},
+) {
   const moves: Move[] = [];
   const view = render(
-    <Providers transport={mockTransport()} queryClient={makeQueryClient()}>
+    <Providers transport={mockTransport(opts)} queryClient={makeQueryClient()}>
       <MemoryScreenNav
         initial={{ screen: "campaign", view: initial.view ?? "cast", search: initial.search }}
         onNavigate={(next, opts) => moves.push({ next, replace: opts.replace })}
@@ -278,6 +284,36 @@ describe("Campaign host", () => {
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
   });
 
+  it("opens the wiki on the entry a suggestion is about, from its name in the inbox", async () => {
+    const { moves } = renderScreen(
+      { view: "proposals" },
+      {
+        proposals: [
+          create(KnowledgeProposalSchema, {
+            id: "p1",
+            authoringAgentName: "Glyphoxa",
+            write: {
+              case: "fact",
+              value: create(ProposedFactSchema, { subject: "Bart of the Tankard", fact: "He waters the ale." }),
+            },
+          }),
+        ],
+      },
+    );
+    // The subject resolves to the wiki's entry, so its name is a way there.
+    const names = await screen.findAllByRole("button", { name: "Open Bart of the Tankard in the World wiki" });
+    fireEvent.click(names[0]);
+
+    expect(moves[0]).toEqual({
+      next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
+      replace: false,
+    });
+    // The wiki opens on that entry.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
+    );
+  });
+
   it("mounts the campaign's settings as a page of their own", async () => {
     renderScreen({ view: "settings" });
     // The form is seeded from the Active Campaign.
@@ -335,6 +371,18 @@ describe("Campaign host", () => {
     const root = container.querySelector(".gx-campaign-screen");
     expect(root).toHaveClass("gx-page");
     expect(container.querySelectorAll(".gx-page")).toHaveLength(1);
+    // A view with a list and a detail pane takes the wide page…
+    expect(root).not.toHaveClass("gx-page--narrow");
+
+    // …and one that is read line by line (the inbox, the settings form) the
+    // narrow one, so its header and content share a centred column.
+    switchView("proposals");
+    await waitFor(() => expect(container.querySelector(".gx-campaign-screen")).toHaveClass("gx-page--narrow"));
+    switchView("settings");
+    await waitFor(() =>
+      expect(container.querySelector(".gx-campaign-screen")).toHaveAttribute("data-view", "settings"),
+    );
+    expect(container.querySelector(".gx-campaign-screen")).toHaveClass("gx-page--narrow");
   });
 });
 
