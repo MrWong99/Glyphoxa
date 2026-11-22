@@ -130,6 +130,11 @@ type PrometheusRecorder struct {
 	// the struct, rather than editing a neighbour's block — several metric slices
 	// land in parallel and a shared edit point is a guaranteed conflict.
 
+	// #702: one count per utterance by the STT transport that produced its final
+	// and why — the only series that tells a streamed final from a batch fallback.
+	// Three closed enums (ADR-0032); the utterance/session/speaker are never labels.
+	sttFinal *prometheus.CounterVec // provider, transport, reason
+
 	// #623: disgo audio-send failures, fed from the slog filter the same way
 	// daveDecryptErrs is. Unlabelled (ADR-0032 §2.1).
 	audioSendErrs prometheus.Counter
@@ -436,6 +441,14 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	// A new instrument constructs its own field and registers it in its OWN
 	// MustRegister call HERE, after the big list above — that list is a shared edit
 	// point and several metric slices land in parallel.
+
+	// #702: streamed vs batch-fallback finals. Streaming share:
+	// sum(rate(glyphoxa_voice_stt_final_total{transport="stream"}[5m]))
+	//   / sum(rate(glyphoxa_voice_stt_final_total{transport!="batch"}[5m])).
+	r.sttFinal = counterVec("stt_final_total",
+		"Utterances by the STT transport that produced their final transcript (stream, batch_fallback, batch) and why (#702, ADR-0042).",
+		"provider", "transport", "reason")
+	reg.MustRegister(r.sttFinal)
 
 	// #623: send-path failures, so a turn abandoned with no_first_audio can be told
 	// apart from other abandonment causes.
@@ -843,3 +856,30 @@ func (r *PrometheusRecorder) UDPKeepaliveSendError() { r.udpKeepaliveSendErrs.In
 // window, so the connect cycle was ended to rebuild the voice connection. The
 // guild arg is discarded like every voice.MetricsRecorder label (ADR-0032).
 func (r *PrometheusRecorder) MediaStallRebuild(string) { r.mediaStallRebuilds.Inc() }
+
+// --- #702 streamed vs batch-fallback STT finals ---
+
+// sttTransports and sttFinalReasons are the closed label sets of stt_final_total;
+// anything else is clamped to "other" so a caller bug cannot mint a series
+// (ADR-0032).
+var (
+	sttTransports = map[STTTransport]bool{
+		STTTransportStream: true, STTTransportBatchFallback: true, STTTransportBatch: true,
+	}
+	sttFinalReasons = map[STTFinalReason]bool{
+		STTFinalCommitted: true, STTFinalStreamDown: true, STTFinalStreamDied: true,
+		STTFinalCommitError: true, STTFinalCommitTimeout: true,
+		STTFinalStreamingOff: true, STTFinalLaneCap: true,
+	}
+)
+
+// STTFinal counts one utterance by STT transport and reason (#702).
+func (r *PrometheusRecorder) STTFinal(p Provider, transport STTTransport, reason STTFinalReason) {
+	if !sttTransports[transport] {
+		transport = "other"
+	}
+	if !sttFinalReasons[reason] {
+		reason = "other"
+	}
+	r.sttFinal.WithLabelValues(string(p), string(transport), string(reason)).Inc()
+}

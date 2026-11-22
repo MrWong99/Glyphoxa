@@ -107,7 +107,7 @@ A Voice Session is the Bot's presence in one Discord voice channel, bound to a
 Discord Opus (DAVE-decrypted)
   → per-speaker Opus decode + resample + reframe   pkg/voice/wire/codec, pkg/voice/wire/codec/dsp
   → VAD (Silero, one session per Speaker Lane, §2.6) pkg/voice/vad/silero
-  → STT (batch POST, or streaming websocket)       pkg/voice/stt, pkg/voice/stt/elevenlabs
+  → STT (streaming websocket, batch POST fallback) pkg/voice/stt, pkg/voice/stt/elevenlabs
   → Address Detection (deterministic fuzzy chain)  pkg/voice/address
   → Agent turn (Hot Context → LLM → tool loop)     pkg/voice/agent, pkg/voice/agenttool
   → TTS, sentence-at-a-time                        pkg/voice/tts/elevenlabs
@@ -132,14 +132,40 @@ there is no mid-session migration (ADR-0006, `pkg/voice/dave.go`).
 
 Two transports behind one `stt` interface:
 
-- **Batch** (default) — one `/v1/speech-to-text` POST per endpointed utterance
-  (`pkg/voice/stt/elevenlabs/transcribe.go`). Dominates response latency (~1.5 s).
-- **Streaming** — ElevenLabs Scribe v2 Realtime over a persistent websocket
-  (`pkg/voice/stt/elevenlabs/stream.go`, `pkg/voice/stt/streaming.go`), opt-in via
-  `GLYPHOXA_STT_STREAMING`, with automatic fallback to the batch adapter when the
-  stream is down. **Local VAD stays the endpointing authority**
-  (`commit_strategy: "manual"`); provider-side endpointing was rejected because
-  Barge-in needs a local, network-independent VAD anyway.
+- **Streaming** (default since 2026-11-22, #702) — ElevenLabs Scribe v2 Realtime
+  over a persistent websocket per Speaker Lane
+  (`pkg/voice/stt/elevenlabs/stream.go`, `pkg/voice/stt/streaming.go`,
+  `pkg/voice/orchestrator/sttstream.go`). **Local VAD stays the endpointing
+  authority** (`commit_strategy: "manual"`); provider-side endpointing was
+  rejected because Barge-in needs a local, network-independent VAD anyway.
+  Measured live: the commit round-trip is ~150–180 ms, speech-end → routed
+  150–290 ms.
+- **Batch** — one `/v1/speech-to-text` POST per endpointed utterance
+  (`pkg/voice/stt/elevenlabs/transcribe.go`). Measured speech-end → routed:
+  430–650 ms, so streaming buys roughly 350 ms per turn (the "~1.5 s" this
+  section and ADR-0042 used to quote was never reproduced). It is the automatic
+  per-utterance fallback whenever an utterance cannot stream, and the only path
+  with `GLYPHOXA_STT_STREAMING=0`.
+
+The Segmenter buffers every utterance locally and only mirrors frames to the
+stream, so a fallback loses nothing. Three things keep streaming actually
+streaming on a real table (ADR-0042 amendment 2026-11-22):
+
+- **Idle keepalive.** The provider closes a realtime session 15 s after the last
+  client *text* message; websocket pings do not count. The adapter sends an empty
+  `input_audio_chunk` after 5 s of client silence.
+- **Death notification.** The adapter reports a session's end the moment it
+  happens (`stt.StreamConfig.OnClosed`); the manager redials at once if the
+  session had been healthy (≥ 10 s), with bounded backoff otherwise, instead of
+  finding out on the next utterance.
+- **Any commit error retires the session**, so audio the provider still holds
+  uncommitted can never fold into the next utterance's final.
+
+`glyphoxa_voice_stt_final_total{provider,transport,reason}` counts every utterance
+by the transport that produced its final — `stream`/`committed`,
+`batch_fallback`/`stream_down|stream_died|commit_error|commit_timeout`, or
+`batch`/`streaming_off|lane_cap` — which is the only series that tells a streamed
+final from a fallback.
 
 Streaming adds `STTPartial` to the taxonomy: mutable interim text of the
 in-progress utterance. Only the committed `STTFinal` reaches Address Detection and
@@ -612,9 +638,12 @@ amendment, **user-facing search reads the Line grain, not the chunk grain** — 
 line hit carries an exact speaker and timestamp and can deep-link into the Session
 screen.
 
-`internal/recall` speculates retrieval over `STTPartial` and, on a matching
-`STTFinal`, injects the prefetched chunks at zero added latency; on mismatch it
-runs inline under a hard ~250 ms budget and degrades to no-memory (ADR-0042).
+`internal/recall` speculates retrieval over the `STTPartial`s that close a
+sentence and, on a matching `STTFinal`, injects the prefetched chunks at zero
+added latency. The final preempts that speculation — it joins an in-flight embed
+of the same text and cancels one of another — and otherwise embeds inline under a
+hard budget (500 ms by default, `GLYPHOXA_RECALL_BUDGET`), degrading to no-memory
+past it (ADR-0042 and its amendments).
 
 ### 6.3 Knowledge Graph
 

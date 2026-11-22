@@ -551,6 +551,15 @@ voice:
   # and extraVolumeMounts their container mounts. The chart always mounts a
   # writable emptyDir at /tmp (the rootfs is read-only), so do not add a second
   # mount there.
+  #
+  # Streaming STT is ON by default (ADR-0042, amendment 2026-11-22). To put every
+  # utterance back on batch STT — e.g. while debugging the realtime provider — set
+  # the off-switch on the pod that runs voice (here in a split deployment; under
+  # web.extraEnv when web runs `-mode all`) and let the pod restart:
+  #
+  #   extraEnv:
+  #     - name: GLYPHOXA_STT_STREAMING
+  #       value: "0"
   extraEnv: []
   extraVolumes: []
   extraVolumeMounts: []
@@ -696,6 +705,13 @@ web:
   # and extraVolumeMounts their container mounts. The chart always mounts a
   # writable emptyDir at /tmp (the rootfs is read-only), so do not add a second
   # mount there.
+  #
+  # When this pod also runs voice (`-mode all`), the streaming-STT off-switch goes
+  # here (streaming is ON by default, ADR-0042 amendment 2026-11-22):
+  #
+  #   extraEnv:
+  #     - name: GLYPHOXA_STT_STREAMING
+  #       value: "0"
   extraEnv: []
   extraVolumes: []
   extraVolumeMounts: []
