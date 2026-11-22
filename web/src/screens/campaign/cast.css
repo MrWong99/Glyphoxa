@@ -1,0 +1,435 @@
+/* Cast studio (CastPanel, AgentEditor, RosterPrep, NewNpcDialog, VoicePicker).
+ *
+ * Everything on the page is scoped under the panel's root, .gx-cast, and builds
+ * on the roster/editor/prep rules the Campaign screen already has
+ * (campaign.css: .gx-roster*, .gx-editor*, .gx-prep*). What lives in a dialog
+ * or a tooltip is portalled out of .gx-cast, so those rules hang off their own
+ * gx-cast-* root class instead.
+ *
+ * Tokens only (styles/tokens.css): no raw colours, no ad-hoc font sizes.
+ */
+
+.gx-cast {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+/* The mode switch keeps its own width instead of stretching with the column. */
+.gx-cast > .gx-seg {
+  align-self: flex-start;
+}
+
+/* ── Roster column ───────────────────────────────────────────────────────── */
+
+.gx-cast .gx-cast__roster {
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-cast .gx-cast__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* "5 NPCs · 2 need attention": the count is text, the second half a toggle. */
+.gx-cast .gx-cast__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs) var(--spacing-sm);
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* A small toggle chip (the needs-attention filter, the picker's language
+ * filter). Pressed is filled, unpressed is outlined at full strength. */
+.gx-cast-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  max-width: 100%;
+  padding: 2px var(--spacing-sm);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--body-line);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+.gx-cast-chip:hover {
+  border-color: var(--border-control-hover);
+  color: var(--text-strong);
+}
+.gx-cast-chip[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--arcane) 26%, transparent);
+  border-color: var(--arcane-hover);
+  color: var(--text-strong);
+}
+.gx-cast-chip--warning {
+  border-color: color-mix(in srgb, var(--status-warning) 55%, transparent);
+  color: var(--status-warning);
+}
+.gx-cast-chip--warning:hover {
+  border-color: var(--status-warning);
+  color: var(--status-warning);
+}
+.gx-cast-chip--warning[aria-pressed="true"] {
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning);
+  color: var(--status-warning);
+}
+
+/* Row: role and voice share the line under the name; the role gives way first. */
+.gx-cast .gx-cast__row-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+.gx-cast .gx-cast__row-sub .gx-roster__title {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.gx-cast .gx-cast__row-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  max-width: 60%;
+  overflow: hidden;
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.gx-cast .gx-cast__row-voice svg {
+  flex: 0 0 auto;
+}
+.gx-cast .gx-cast__row-warn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--status-warning);
+}
+.gx-cast .gx-roster__item[aria-current="true"] {
+  background: var(--surface-card-hover);
+}
+
+/* The marker's tooltip (portalled): a title and one missing check per line. */
+.gx-cast__row-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+.gx-cast__row-tip strong {
+  color: var(--text-strong);
+}
+
+/* ── Editor ──────────────────────────────────────────────────────────────── */
+
+.gx-cast .gx-cast__editor {
+  min-width: 0;
+}
+
+/* The sticky bar is the card's bottom edge and brings its own padding. */
+.gx-cast .gx-cast-editor {
+  padding-bottom: 0;
+}
+
+.gx-cast .gx-cast-callout__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+  margin: var(--spacing-xs) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.gx-cast .gx-cast-callout__trimmed {
+  margin: var(--spacing-xs) 0 0;
+  color: var(--text-muted);
+}
+.gx-cast .gx-cast-callout__trimmed strong {
+  color: var(--text-default);
+}
+
+/* A text link that is a button (it moves focus or navigates from a callout). */
+.gx-cast-link {
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.gx-cast-link:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-cast .gx-cast-editor__persona {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+.gx-cast .gx-cast-editor__drafting {
+  font-size: var(--body-sm);
+  color: var(--rune);
+}
+
+/* Voice field: used in the editor and (portalled) in the New NPC dialog. */
+.gx-cast-voice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+.gx-cast-voice .gx-editor__voice .gx-select-field {
+  /* Wide enough to read a voice name; the two buttons wrap under it first. */
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+/* The save bar: stuck to the bottom of the scrolling content for as long as
+ * the editor card is on screen, so Save and the "Unsaved changes" marker never
+ * scroll away under a long personality text. It spans the card's padding. */
+.gx-cast .gx-cast-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0 calc(-1 * var(--spacing-lg));
+  padding: var(--spacing-sm) var(--spacing-lg);
+  background: var(--surface-card);
+  border-top: 1px solid var(--border-default);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+.gx-cast .gx-cast-bar__status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+}
+.gx-cast .gx-cast-bar__unsaved {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--status-warning);
+}
+.gx-cast .gx-cast-bar__unsaved::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+.gx-cast .gx-cast-bar__saved {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  color: var(--status-success);
+}
+/* Delete sits at the far end, away from Save. */
+.gx-cast .gx-cast-bar__delete {
+  margin-left: auto;
+}
+
+/* ── Readiness view ──────────────────────────────────────────────────────── */
+
+.gx-cast .gx-cast-prep__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm) var(--spacing-md);
+}
+.gx-cast .gx-cast-prep__count {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+/* Ready and not-ready rows must not look alike: a sign in front of the name,
+ * and a warning edge on the rows that still need work. */
+.gx-cast .gx-prep__row {
+  align-items: center;
+  padding: var(--spacing-sm);
+  border-left: 3px solid transparent;
+}
+.gx-cast .gx-prep__row[data-ready="false"] {
+  border-left-color: var(--status-warning);
+  background: var(--status-warning-bg);
+}
+.gx-cast .gx-cast-prep__sign {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.gx-cast .gx-prep__row[data-ready="true"] .gx-cast-prep__sign {
+  color: var(--status-success);
+}
+.gx-cast .gx-prep__row[data-ready="false"] .gx-cast-prep__sign {
+  color: var(--status-warning);
+}
+.gx-cast .gx-prep__name {
+  font-weight: var(--weight-semibold);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.gx-cast .gx-prep__name:hover {
+  text-decoration-color: currentColor;
+}
+.gx-cast .gx-prep__spoke {
+  margin-left: auto;
+}
+.gx-cast .gx-cast-prep__trimmed {
+  border-color: color-mix(in srgb, var(--status-warning) 55%, transparent);
+}
+
+/* ── New NPC dialog (portalled) ──────────────────────────────────────────── */
+
+.gx-cast-new__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+/* ── Voice picker (portalled) ────────────────────────────────────────────── */
+
+.gx-cast-voices__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+/* Search, sample line and the language chip stay in reach while the list
+ * scrolls under them (the dialog body is the scroll container). */
+.gx-cast-voices__controls {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding-bottom: var(--spacing-sm);
+  background: var(--surface-overlay);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gx-cast-voices__controls .gx-field {
+  align-self: stretch;
+}
+.gx-cast-voices__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gx-cast-voices__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 2px var(--spacing-xs) 2px 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+}
+.gx-cast-voices__row[data-chosen="true"] {
+  border-color: var(--arcane-hover);
+  background: color-mix(in srgb, var(--arcane) 18%, var(--surface-card));
+}
+.gx-cast-voices__pick {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--spacing-sm);
+  min-width: 0;
+  min-height: var(--target-coarse);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.gx-cast-voices__pick:hover .gx-cast-voices__name {
+  color: var(--text-strong);
+}
+.gx-cast-voices__name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  color: var(--text-default);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-cast-voices__row[data-chosen="true"] .gx-cast-voices__name {
+  color: var(--text-strong);
+}
+.gx-cast-voices__lang {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+
+/* ── Phone ───────────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  /* The editor card's padding tightens with the page gutter, and the bar
+   * follows it. */
+  .gx-cast .gx-cast-editor {
+    padding: var(--spacing-md) var(--spacing-md) 0;
+  }
+  .gx-cast .gx-cast-bar {
+    margin: 0 calc(-1 * var(--spacing-md));
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+  /* Name on its own line, the checks under it, "last spoke" last. */
+  .gx-cast .gx-prep__name {
+    flex: 1 1 auto;
+  }
+  .gx-cast .gx-prep__checks {
+    flex-basis: 100%;
+  }
+  .gx-cast .gx-prep__spoke {
+    margin-left: 0;
+  }
+  /* The mode switch may use the full width on a narrow screen. */
+  .gx-cast > .gx-seg {
+    align-self: stretch;
+  }
+  .gx-cast > .gx-seg .gx-seg__item {
+    flex: 1 1 0;
+  }
+}

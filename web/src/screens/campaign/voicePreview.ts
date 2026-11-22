@@ -33,6 +33,8 @@ export type VoicePreview = {
   play: (voiceId: string, text?: string) => void;
   /** Stops whatever is loading or playing. */
   stop: () => void;
+  /** `stop`, and forgets the last failure (a dialog that closes starts clean next time). */
+  reset: () => void;
   /** `stop` when `voiceId` is the active sample, `play` otherwise. */
   toggle: (voiceId: string, text?: string) => void;
 };
@@ -95,6 +97,11 @@ export function useVoicePreview(): VoicePreview {
     [client, t],
   );
 
+  const reset = useCallback(() => {
+    stop();
+    setError(null);
+  }, [stop]);
+
   const toggle = useCallback(
     (voiceId: string, text = "") => {
       if (activeId.current === voiceId) stop();
@@ -112,5 +119,5 @@ export function useVoicePreview(): VoicePreview {
     [],
   );
 
-  return { activeId: state.activeId, phase: state.phase, error, play, stop, toggle };
+  return { activeId: state.activeId, phase: state.phase, error, play, stop, reset, toggle };
 }
