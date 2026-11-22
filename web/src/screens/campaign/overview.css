@@ -100,9 +100,12 @@
   gap: var(--spacing-sm);
 }
 
-/* A source that is loading behind another one's placeholder renders nothing. */
+/* A source that is loading behind another one's placeholder renders nothing,
+ * and a list with nothing to show is not a list: neither takes space nor is
+ * read out as an empty item. */
+.gx-overview .gx-overview__attn-state:empty,
 .gx-overview .gx-overview__attn-list:empty,
-.gx-overview .gx-overview__attn-state:empty {
+.gx-overview .gx-overview__attn-list:not(:has(> li:not(:empty))) {
   display: none;
 }
 

@@ -364,6 +364,33 @@ describe("Overview attention band", () => {
     expect(moves).toEqual([{ screen: "configuration", view: undefined, search: {} }]);
   });
 
+  it("does not report what was simply never set up, unless a session cannot run without it", async () => {
+    renderOverview({
+      ...prepared(),
+      health: [
+        // No key for the language model: no NPC can answer. That is a problem.
+        { component: "llm", provider: "groq", status: HealthStatus.DEGRADED, code: "missing_key" },
+        { component: "tts", provider: "elevenlabs", status: HealthStatus.HEALTHY },
+        // No image key and no Bot token: optional, or the checklist's business.
+        { component: "image", provider: "gemini", status: HealthStatus.DEGRADED, code: "missing_key" },
+        { component: "discord", provider: "discord", status: HealthStatus.DEGRADED, code: "missing_key" },
+      ],
+    });
+    const band = await screen.findByRole("region", { name: "Needs your attention" });
+    expect(await within(band).findByText("The language model needs a look in Setup")).toBeInTheDocument();
+    expect(within(band).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(band).queryByText(/Image generation|Discord/)).not.toBeInTheDocument();
+  });
+
+  it("reports an image key that exists and fails", async () => {
+    renderOverview({
+      ...prepared(),
+      health: [{ component: "image", provider: "gemini", status: HealthStatus.DEGRADED, code: "key_rejected" }],
+    });
+    const band = await screen.findByRole("region", { name: "Needs your attention" });
+    expect(await within(band).findByText("Image generation needs a look in Setup")).toBeInTheDocument();
+  });
+
   it("reports a rejected Discord bot token once", async () => {
     renderOverview({
       ...prepared(),

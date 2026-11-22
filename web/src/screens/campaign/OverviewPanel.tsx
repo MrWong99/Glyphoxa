@@ -260,6 +260,15 @@ const HEALTH_CODE: Record<string, MessageKey> = {
   check_failed: "config.healthCheckFailed",
 };
 
+// "Never set up" is not "broken". The health probe reports every slot, and a
+// slot with no key comes back degraded — which is a fault for the language
+// model and the voice service (no session can run without them), but not for
+// the two below: image generation is optional, and a Discord connection that
+// was never made is the checklist's "Link your Discord server", not an alarm
+// on every visit. For those, only a key that exists and fails is reported.
+const OPTIONAL_COMPONENTS = new Set(["image", "discord"]);
+const NOT_SET_UP_CODES = new Set(["missing_key", "plan_excludes_platform_keys"]);
+
 function AttentionBand() {
   const { t } = useI18n();
   const { openView, openAgent } = useCampaignScreen();
@@ -396,6 +405,7 @@ function AttentionBand() {
     const component = h.component || h.provider;
     // The rejected Bot token is already reported, in plainer words.
     if (discordFailed && component === "discord") continue;
+    if (OPTIONAL_COMPONENTS.has(component) && NOT_SET_UP_CODES.has(h.code)) continue;
     setupItems.push({
       key: `health-${component}-${h.provider}`,
       icon: <Settings />,
