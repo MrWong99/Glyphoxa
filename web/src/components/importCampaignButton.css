@@ -1,6 +1,16 @@
-/* Campaign Bundle import affordance (#294) — a footer button beside "New
- * campaign" that opens the native file picker, then a confirm → success/switch
- * dialog flow. Shares the switcher footer's .gx-campaign-switcher__new row look. */
+/* Campaign Bundle import (#294): the "Import bundle" button on the Campaigns
+ * page, which opens the native file picker, then a confirm → success/switch
+ * dialog flow. */
+
+/* The button and, under it, the last upload's failure. */
+.gx-import-campaign {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
 
 /* The file <input> is driven programmatically from the trigger; keep it out of
  * layout and off-screen without display:none (which some browsers refuse to
@@ -23,9 +33,9 @@
 }
 .gx-import-campaign__error {
   display: block;
-  margin-top: var(--spacing-sm);
+  max-width: 36ch;
   color: var(--status-danger);
-  font-size: 13px;
+  font-size: var(--body-sm);
 }
 
 /* The success dialog stacks the switch prompt above an optional dropped-refs
@@ -37,9 +47,9 @@
   display: block;
   margin-top: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-sm);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--status-warning);
   background: var(--status-warning-bg);
   color: var(--status-warning);
-  font-size: 13px;
+  font-size: var(--body-sm);
 }

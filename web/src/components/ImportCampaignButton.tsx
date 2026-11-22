@@ -1,15 +1,16 @@
 import { useRef, useState } from "react";
-import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Upload } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
-import { importCampaignBundle, type ImportSummary } from "@/lib/download";
+import { useScreenNav } from "@/app/screenNav";
+import { importCampaignBundle, isBundleBusy, type ImportSummary } from "@/lib/download";
 import { errorMessage } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { WorkingButton } from "@/components/WorkingButton";
+import { afterEditorsSettle, useCampaignSwitch } from "@/components/useCampaignSwitch";
 import { useI18n, type TFunc } from "@/i18n";
 
 import "./importCampaignButton.css";
@@ -25,47 +26,45 @@ function droppedRefsNote(t: TFunc, n: number): string {
     : t("components.importDroppedRefMany", { n });
 }
 
-// ImportCampaignButton — the campaign-restore affordance in the switcher's
-// manage-view footer (#294, beside CreateCampaignForm). It uploads a Campaign
-// Bundle (the export's counterpart) over the plain-net/http importer, which mints
-// a NEW campaign and does NOT auto-activate it (ADR-0053 d7). So the flow is:
-// pick a file → confirm (nothing is overwritten, but an upload is deliberate) →
-// pending upload → a success prompt that reports the imported name and offers an
-// EXPLICIT switch. Declining leaves the imported campaign in the list, unselected.
+// ImportCampaignButton — "Import bundle" on the Campaigns page (#294). It
+// uploads a Campaign Bundle (the export's counterpart) over the plain-net/http
+// importer, which mints a NEW campaign and does NOT auto-activate it (ADR-0053
+// d7). So the flow is: pick a file → confirm (nothing is overwritten, but an
+// upload is deliberate) → pending upload → a success prompt that reports the
+// imported name and offers an EXPLICIT switch. Declining leaves the imported
+// campaign in the list, unselected.
 //
 // listCampaigns is campaign-INVARIANT — the Active-Campaign sweep deliberately
-// skips it (campaignCache.ts), so a fresh import would be invisible in the picker
+// skips it (campaignCache.ts), so a fresh import would be invisible in the lists
 // until a reload unless we invalidate it explicitly. We do that the moment the
-// import succeeds, BEFORE any switch decision, so the new campaign shows up either
-// way. A "Switch" runs the normal SetActiveCampaign path, whose success then runs
-// the campaign-scoped sweep so every screen follows the new selection.
+// import succeeds, BEFORE any switch decision, so the new campaign shows up
+// either way. "Switch" is the guarded switch every other switch is
+// (useCampaignSwitch: asks before unsaved edits are lost, sweeps, says what
+// happened) and then lands on the imported campaign's Overview.
 //
-// fetch exposes no upload progress, so the pending state is a disabled/"Importing…"
-// affordance rather than a percentage bar.
-export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }) {
+// fetch exposes no upload progress, so the pending state is a busy button
+// rather than a percentage bar.
+export function ImportCampaignButton({
+  onSwitched,
+  variant = "secondary",
+}: {
+  onSwitched?: () => void;
+  variant?: "primary" | "secondary" | "ghost";
+}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const nav = useScreenNav();
   const inputRef = useRef<HTMLInputElement>(null);
 
   // pendingFile drives the confirm dialog; summary drives the success/switch
   // dialog. They never coexist — a successful import clears the file and sets the
-  // summary. error is the last upload failure, shown inline in the confirm dialog.
+  // summary. error is the last upload failure, shown under the button.
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const invalidateList = () =>
-    invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
-
-  const setActive = useMutation(CampaignService.method.setActiveCampaign, {
-    onSuccess: () => {
-      void invalidateActiveCampaignScopedQueries(queryClient);
-      setSummary(null);
-      onSwitched?.();
-    },
-    onError: (err) => toast.error(t("components.importedCouldntSwitch", { message: errorMessage(err) })),
-  });
+  const campaignSwitch = useCampaignSwitch();
 
   // Opening the native file picker; the input is reset on each open so re-picking
   // the SAME file still fires a change (browsers suppress an unchanged value).
@@ -85,34 +84,33 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
 
   // Radix AlertDialog.Action closes the dialog on click, so the confirm dialog is
   // gone by the time the upload resolves. Capture the file, then upload against
-  // that value — a failure surfaces in the standalone alert below the trigger
-  // (not the now-closed dialog), and a success opens the switch prompt.
+  // that value — a failure surfaces in the alert under the button (not the
+  // now-closed dialog), and a success opens the switch prompt.
   //
-  // Both outcomes ALSO toast (ADR-0017): between the confirm dialog closing and
-  // the success dialog opening no modal is mounted, so an Escape / outside-click
-  // can dismiss the whole switcher panel and unmount this component mid-upload —
-  // the inline alert/dialog would then report nowhere. The toast is anchored
-  // outside the panel, so feedback survives that unmount either way.
+  // Both outcomes ALSO toast (ADR-0017): an import can take a while, the GM may
+  // have left the page by the time it answers, and the inline alert/dialog would
+  // then report nowhere. The toast is anchored in the shell, so feedback
+  // survives that unmount either way.
   const runImport = async (file: File) => {
     setBusy(true);
     setError(null);
     try {
       const result = await importCampaignBundle(file);
-      // The new campaign must appear in the picker whether or not the operator
-      // switches to it — listCampaigns is sweep-invariant, so invalidate it now.
-      void invalidateList();
+      // The new campaign must appear in the lists whether or not the GM switches
+      // to it — listCampaigns is sweep-invariant, so invalidate it now.
+      void invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
       setSummary(result);
       toast.success(t("components.importedTitle", { name: result.name }));
       // The dropped-refs caveat rides its OWN warning toast, not only the success
-      // dialog: an Escape/outside-click between the confirm dialog closing and the
-      // success dialog opening can unmount this component (see runImport note
-      // above), taking the dialog's note with it. The toast is the unmount-proof
-      // channel — warning styling (richColors), since the import still succeeded.
+      // dialog, for the same unmount reason — warning styling (richColors), since
+      // the import still succeeded.
       if (result.droppedParticipantRefs > 0) {
         toast.warning(droppedRefsNote(t, result.droppedParticipantRefs));
       }
     } catch (err) {
-      const message = errorMessage(err);
+      // The pod reads one bundle at a time (import or export): that refusal is
+      // "try again in a moment", in the GM's language, not the server's.
+      const message = isBundleBusy(err) ? t("campaigns.bundleBusy") : errorMessage(err);
       setError(message);
       toast.error(t("components.couldntImportCampaign", { message }));
     } finally {
@@ -120,8 +118,24 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
     }
   };
 
+  const switchToImported = (imported: ImportSummary) => {
+    campaignSwitch.switchTo(
+      { id: imported.campaignId, name: imported.name },
+      {
+        onSwitched: ({ deferred }) => {
+          onSwitched?.();
+          // A switch deferred by a live Voice Session has not happened yet: the
+          // Overview would still be the session's campaign.
+          if (!deferred) afterEditorsSettle(() => nav.goCampaignView("overview"));
+        },
+        onError: (err) =>
+          toast.error(t("components.importedCouldntSwitch", { message: errorMessage(err) })),
+      },
+    );
+  };
+
   return (
-    <>
+    <span className="gx-import-campaign">
       {/* Driven programmatically from the visible trigger, so it's an off-screen,
           non-focusable, screen-reader-hidden element — not a stray tab stop. */}
       <input
@@ -133,21 +147,17 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         aria-hidden="true"
         onChange={onFileChosen}
       />
-      <button
-        type="button"
-        className="gx-campaign-switcher__new gx-import-campaign__trigger"
-        onClick={openPicker}
-        disabled={busy}
-      >
-        <Upload size={15} /> {busy ? t("components.importing") : t("components.importCampaign")}
-      </button>
+      {/* Busy, not disabled, while the upload runs (WorkingButton). */}
+      <WorkingButton type="button" variant={variant} iconStart={<Upload />} working={busy} onClick={openPicker}>
+        {busy ? t("components.importing") : t("components.importCampaign")}
+      </WorkingButton>
 
       {/* fetch exposes no upload progress, so a failure shows here as a persistent
           alert rather than a progress bar; it clears on the next pick/open. */}
       {error && (
-        <p className="gx-import-campaign__error" role="alert">
-          {error}
-        </p>
+        <span className="gx-import-campaign__error" role="alert">
+          {t("components.couldntImportCampaign", { message: error })}
+        </span>
       )}
 
       {/* Confirm gate — an upload is deliberate; a stray file pick shouldn't mint a
@@ -203,10 +213,15 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         }
         confirmLabel={t("components.importSwitch")}
         cancelLabel={t("components.importNotNow")}
-        confirmDisabled={setActive.isPending}
+        confirmDisabled={campaignSwitch.pending}
         destructive={false}
-        onConfirm={() => summary && setActive.mutate({ campaignId: summary.campaignId })}
+        onConfirm={() => {
+          if (summary) switchToImported(summary);
+        }}
       />
-    </>
+      {/* Outside both dialogs: the "Discard unsaved changes?" question has to
+          outlive the success prompt that closes underneath it. */}
+      {campaignSwitch.dialog}
+    </span>
   );
 }

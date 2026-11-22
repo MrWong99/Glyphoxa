@@ -1,203 +1,118 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { create } from "@bufbuild/protobuf";
-import { useQuery } from "@connectrpc/connect-query";
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
-import {
-  CampaignService,
-  ListCampaignsResponseSchema,
-  ArchiveCampaignResponseSchema,
-  UnarchiveCampaignResponseSchema,
-  DeleteCampaignResponseSchema,
-} from "@gen/glyphoxa/management/v1/management_pb";
-import { Providers } from "@/app/Providers";
-import { makeQueryClient } from "@/lib/queryClient";
+import { CampaignSchema } from "@gen/glyphoxa/management/v1/management_pb";
 import { CampaignRowActions } from "./CampaignRowActions";
+import type { CampaignLifecycle } from "./useCampaignLifecycle";
 
-// Export runs through the plain-fetch bundle helpers; mock them so the row's
-// Export flow is observable without a real network/download pipeline.
-vi.mock("@/lib/download", () => ({
-  fetchCampaignExport: vi.fn(),
-  downloadBlob: vi.fn(),
-}));
-import { fetchCampaignExport, downloadBlob } from "@/lib/download";
-const mockFetchExport = vi.mocked(fetchCampaignExport);
-const mockDownloadBlob = vi.mocked(downloadBlob);
+// The menu on its own, against a stand-in lifecycle: which actions it offers
+// for which campaign, and that each item hands the WHOLE campaign row to the
+// right action. What the actions then do is covered where they run (the
+// Campaigns page tests).
 
-beforeEach(() => {
-  mockFetchExport.mockReset();
-  mockDownloadBlob.mockReset();
-});
-
-// A minimal Connect backend recording each lifecycle call so the tests assert the
-// right RPC fired. ListCampaigns is served so the post-mutation invalidation has a
-// key to refetch (a ListProbe observes it).
-function mockBackend(calls: Record<string, number> = {}) {
-  const bump = (m: string) => {
-    calls[m] = (calls[m] ?? 0) + 1;
-  };
-  return createRouterTransport(({ service }) => {
-    service(CampaignService, {
-      listCampaigns: () => {
-        bump("listCampaigns");
-        return create(ListCampaignsResponseSchema, { campaigns: [] });
-      },
-      archiveCampaign: () => {
-        bump("archiveCampaign");
-        return create(ArchiveCampaignResponseSchema, {});
-      },
-      unarchiveCampaign: () => {
-        bump("unarchiveCampaign");
-        return create(UnarchiveCampaignResponseSchema, {});
-      },
-      deleteCampaign: () => {
-        bump("deleteCampaign");
-        return create(DeleteCampaignResponseSchema, {});
-      },
-    });
+function campaign(opts: { archived?: boolean } = {}) {
+  return create(CampaignSchema, {
+    id: "c1",
+    name: "Alpha Quest",
+    system: "D&D 5e",
+    language: "en",
+    archivedAt: opts.archived ? timestampFromDate(new Date("2026-07-09T12:00:00Z")) : undefined,
   });
 }
 
-// ListProbe observes the listCampaigns cache so a mutation's invalidation
-// (refetch) is provable from the screen's side.
-function ListProbe() {
-  const { data } = useQuery(CampaignService.method.listCampaigns, {});
-  return <div data-testid="list-probe">{data ? "loaded" : "…"}</div>;
+function lifecycle(busy: string[] = []): CampaignLifecycle {
+  return {
+    openSettings: vi.fn(),
+    exportBundle: vi.fn(),
+    duplicate: vi.fn(),
+    archive: vi.fn(),
+    unarchive: vi.fn(),
+    remove: vi.fn(),
+    busy: new Set(busy),
+    dialogs: null,
+  };
 }
 
-function renderActions(campaign: { id: string; name: string; archived: boolean }, calls?: Record<string, number>) {
-  return render(
-    <Providers transport={mockBackend(calls)} queryClient={makeQueryClient()}>
-      <CampaignRowActions campaign={campaign} />
-      <ListProbe />
-    </Providers>,
-  );
+// Radix opens a dropdown menu from the keyboard on Enter, Space or ArrowDown.
+function openMenu() {
+  const trigger = screen.getByRole("button", { name: "Actions for Alpha Quest" });
+  act(() => trigger.focus());
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  return trigger;
 }
-
-const openMenu = () => fireEvent.click(screen.getByRole("button", { name: /Campaign actions/i }));
+const items = () => screen.getAllByRole("menuitem").map((item) => item.textContent);
 
 describe("CampaignRowActions", () => {
-  it("an active row offers only Archive", () => {
-    renderActions({ id: "a", name: "Alpha Quest", archived: false });
-    openMenu();
-    expect(screen.getByRole("menuitem", { name: /^Archive$/ })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /Unarchive/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /Delete/ })).not.toBeInTheDocument();
+  it("names its trigger after the campaign, so a page of cards is not a page of identical buttons", () => {
+    render(<CampaignRowActions campaign={campaign()} lifecycle={lifecycle()} />);
+    const trigger = screen.getByRole("button", { name: "Actions for Alpha Quest" });
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
   });
 
-  it("an archived row offers Unarchive and Delete", () => {
-    renderActions({ id: "a", name: "Alpha Quest", archived: true });
+  it("offers every action on a campaign in use — Delete included, without a detour through Archive", () => {
+    render(<CampaignRowActions campaign={campaign()} lifecycle={lifecycle()} />);
     openMenu();
-    expect(screen.getByRole("menuitem", { name: /Unarchive/ })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Delete/ })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /^Archive$/ })).not.toBeInTheDocument();
+    expect(items()).toEqual(["Settings", "Export bundle…", "Duplicate…", "Archive", "Delete…"]);
+    expect(screen.getByRole("menuitem", { name: "Delete…" })).toHaveClass("gx-menu__item--danger");
   });
 
-  it("archiving an active campaign fires archiveCampaign and refreshes the list", async () => {
-    const calls: Record<string, number> = {};
-    renderActions({ id: "a", name: "Alpha Quest", archived: false }, calls);
-    await waitFor(() => expect(calls.listCampaigns).toBeGreaterThanOrEqual(1));
-    const listBefore = calls.listCampaigns;
-
+  it("marks Archive as asking first on the Active Campaign", () => {
+    render(<CampaignRowActions campaign={campaign()} lifecycle={lifecycle()} isActive />);
     openMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /^Archive$/ }));
-
-    await waitFor(() => expect(calls.archiveCampaign).toBe(1));
-    // The list refetched (invalidation) so the row moves between groups.
-    await waitFor(() => expect(calls.listCampaigns).toBeGreaterThan(listBefore));
+    expect(items()).toContain("Archive…");
+    expect(items()).not.toContain("Archive");
   });
 
-  it("unarchiving an archived campaign fires unarchiveCampaign", async () => {
-    const calls: Record<string, number> = {};
-    renderActions({ id: "a", name: "Alpha Quest", archived: true }, calls);
+  it("offers Unarchive instead of Archive on an archived campaign, and still Export and Delete", () => {
+    render(<CampaignRowActions campaign={campaign({ archived: true })} lifecycle={lifecycle()} />);
     openMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Unarchive/ }));
-    await waitFor(() => expect(calls.unarchiveCampaign).toBe(1));
+    expect(items()).toEqual(["Settings", "Export bundle…", "Duplicate…", "Unarchive", "Delete…"]);
   });
 
-  it("renders the open menu outside the row wrapper so the scrollable list can't clip it", () => {
-    // The row sits inside .gx-campaign-switcher__list (overflow-y:auto), so an
-    // in-flow absolute menu gets clipped near the bottom of the list (#338). The
-    // menu must portal out of the anchor's subtree to escape that overflow.
-    renderActions({ id: "a", name: "Alpha Quest", archived: true });
-    openMenu();
-    const menu = screen.getByRole("menu");
-    const wrapper = document.querySelector(".gx-campaign-row-actions");
-    expect(wrapper).not.toBeNull();
-    expect(wrapper?.contains(menu)).toBe(false);
+  it("hands the campaign row to the action that was chosen", () => {
+    const row = campaign();
+    const actions = lifecycle();
+    render(<CampaignRowActions campaign={row} lifecycle={actions} />);
+
+    for (const [label, action] of [
+      ["Settings", actions.openSettings],
+      ["Export bundle…", actions.exportBundle],
+      ["Duplicate…", actions.duplicate],
+      ["Archive", actions.archive],
+      ["Delete…", actions.remove],
+    ] as const) {
+      openMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: label }));
+      expect(action).toHaveBeenCalledExactlyOnceWith(row);
+      // Choosing closes the menu.
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    }
   });
 
-  it("moves focus into the menu on open and back to the trigger on close (#338)", () => {
-    // Portalled to document.body, the menu sits at the end of the tab order, so
-    // Tab from the trigger would skip it. Focus must land on the first item on
-    // open and return to the trigger on dismissal.
-    renderActions({ id: "a", name: "Alpha Quest", archived: false });
-    const trigger = screen.getByRole("button", { name: /Campaign actions/i });
-    fireEvent.click(trigger);
-    // Export now leads the menu, so it's the first enabled item focus lands on.
-    expect(screen.getByRole("menuitem", { name: /Export/ })).toHaveFocus();
+  it("holds the actions that would collide with a flow already running on the campaign", () => {
+    const actions = lifecycle(["c1"]);
+    render(<CampaignRowActions campaign={campaign()} lifecycle={actions} />);
+    openMenu();
+    for (const label of ["Duplicate…", "Archive", "Delete…"]) {
+      expect(screen.getByRole("menuitem", { name: label })).toHaveAttribute("aria-disabled", "true");
+    }
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete…" }));
+    expect(actions.remove).not.toHaveBeenCalled();
+    // Settings and Export do not touch what the flow is doing.
+    expect(screen.getByRole("menuitem", { name: "Settings" })).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByRole("menuitem", { name: "Export bundle…" })).not.toHaveAttribute("aria-disabled");
+  });
 
-    fireEvent.keyDown(document, { key: "Escape" });
+  it("is keyboard operable: opens on the first item, Escape closes and returns focus to the trigger", async () => {
+    render(<CampaignRowActions campaign={campaign()} lifecycle={lifecycle()} />);
+    const trigger = openMenu();
+    const first = screen.getByRole("menuitem", { name: "Settings" });
+    await waitFor(() => expect(first).toHaveFocus());
+
+    fireEvent.keyDown(first, { key: "Escape" });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
-  });
-
-  it("closes when the surrounding list scrolls so it can't float over unrelated UI (#338)", () => {
-    renderActions({ id: "a", name: "Alpha Quest", archived: false });
-    openMenu();
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    fireEvent.scroll(window);
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("delete requires the re-typed campaign name before it fires", async () => {
-    const calls: Record<string, number> = {};
-    renderActions({ id: "a", name: "Lost Mine", archived: true }, calls);
-    openMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Delete/ }));
-
-    // The confirm dialog opens with the delete button disabled until the exact
-    // name is typed.
-    const confirm = await screen.findByRole("button", { name: "Delete campaign" });
-    expect(confirm).toBeDisabled();
-    fireEvent.click(confirm);
-    expect(calls.deleteCampaign ?? 0).toBe(0);
-
-    fireEvent.change(screen.getByTestId("confirm-text-input"), { target: { value: "Lost Mine" } });
-    expect(confirm).toBeEnabled();
-    fireEvent.click(confirm);
-    await waitFor(() => expect(calls.deleteCampaign).toBe(1));
-  });
-
-  it("offers Export on an active row and downloads the fetched bundle", async () => {
-    mockFetchExport.mockResolvedValue({
-      blob: new Blob(["gz"]),
-      filename: "Alpha Quest.glyphoxa.json.gz",
-    });
-    renderActions({ id: "a", name: "Alpha Quest", archived: false });
-    openMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Export/ }));
-
-    await waitFor(() => expect(mockFetchExport).toHaveBeenCalledWith("a"));
-    await waitFor(() =>
-      expect(mockDownloadBlob).toHaveBeenCalledWith(expect.any(Blob), "Alpha Quest.glyphoxa.json.gz"),
-    );
-  });
-
-  it("offers Export on an archived row too (bundles are a backup)", () => {
-    renderActions({ id: "z", name: "Zombie Vault", archived: true });
-    openMenu();
-    expect(screen.getByRole("menuitem", { name: /Export/ })).toBeInTheDocument();
-  });
-
-  it("surfaces an export failure and does not download", async () => {
-    mockFetchExport.mockRejectedValue(new Error("export exploded"));
-    renderActions({ id: "a", name: "Alpha Quest", archived: false });
-    openMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Export/ }));
-
-    await waitFor(() => expect(mockFetchExport).toHaveBeenCalled());
-    expect(mockDownloadBlob).not.toHaveBeenCalled();
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 });

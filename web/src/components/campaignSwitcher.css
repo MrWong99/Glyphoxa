@@ -1,7 +1,6 @@
-/* Active-Campaign switcher (#267) — a topbar control (placement #266a) plus the
- * shared campaign-create form. Reuses the .gx-select__content popover + .gx-select__item
- * row vocabulary; adds gx-campaign-switcher* / gx-campaign-create* for the trigger,
- * the campaign list, and the inline create form.
+/* Active-Campaign quick switcher (#267) — a topbar control (placement #266a).
+ * Reuses the .gx-select__content popover + .gx-select__item row vocabulary;
+ * adds gx-campaign-switcher* for the trigger and the campaign list.
  */
 
 .gx-campaign-switcher {
@@ -25,20 +24,21 @@
     border-color var(--duration-base) var(--ease-standard);
 }
 .gx-campaign-switcher__trigger:hover {
-  background: rgba(144, 89, 255, 0.07);
+  background: color-mix(in srgb, var(--arcane) 7%, var(--surface-raised));
   border-color: var(--border-default);
-}
-.gx-campaign-switcher__trigger:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
 }
 .gx-campaign-switcher__trigger[data-firstrun] {
   border-style: dashed;
   border-color: var(--arcane);
   color: var(--color-violet-10);
 }
+/* A Voice Session is live in this campaign. */
+.gx-campaign-switcher__trigger[data-live] {
+  border-color: color-mix(in srgb, var(--status-live) 55%, transparent);
+}
 
 .gx-campaign-switcher__sigil {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -48,7 +48,20 @@
   border-radius: 7px;
   background: var(--gradient-arcane-diag);
   box-shadow: var(--glow-arcane-soft);
-  color: #fff;
+  color: var(--text-on-arcane);
+}
+/* The live marker: a dot on the sigil's corner, ringed in the trigger's own
+ * surface so it reads on the gradient. */
+.gx-campaign-switcher__live {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--status-live);
+  border: 2px solid var(--surface-raised);
+  box-shadow: var(--glow-live);
 }
 
 .gx-campaign-switcher__label {
@@ -59,14 +72,24 @@
   line-height: 1.15;
 }
 /* Composes with the shared .gx-overline eyebrow (styles/base.css); only the
- * compact trigger's size + muted color are overridden here. */
+ * compact trigger's muted color is overridden here. */
 .gx-campaign-switcher__overline {
-  font-size: 10px;
   color: var(--text-subtle);
 }
+/* "Next: {name}" takes the eyebrow's place while a switch is waiting for the
+ * live session to end. Sentence case and full strength: it is information,
+ * not a label. */
+.gx-campaign-switcher__next {
+  font-size: var(--body-2xs);
+  font-weight: var(--weight-semibold);
+  color: var(--status-live);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .gx-campaign-switcher__name {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
   color: var(--text-strong);
   white-space: nowrap;
   overflow: hidden;
@@ -83,8 +106,9 @@
   position: absolute;
   top: calc(100% + var(--spacing-xs));
   right: 0;
-  min-width: 280px;
-  max-width: 340px;
+  width: max-content;
+  min-width: min(280px, calc(100vw - 2 * var(--page-gutter)));
+  max-width: min(340px, calc(100vw - 2 * var(--page-gutter)));
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
@@ -101,18 +125,13 @@
   gap: 2px;
 }
 
-/* Row (#269) — the switch button plus its per-row lifecycle menu on one line. */
 .gx-campaign-switcher__row {
   display: flex;
   align-items: center;
-  gap: 2px;
 }
 .gx-campaign-switcher__row > .gx-campaign-switcher__item {
   flex: 1 1 auto;
   min-width: 0;
-}
-.gx-campaign-switcher__row[data-archived] .gx-campaign-switcher__item-name {
-  color: var(--text-muted);
 }
 
 .gx-campaign-switcher__item {
@@ -127,16 +146,17 @@
   cursor: pointer;
   color: var(--text-default);
 }
-.gx-campaign-switcher__item:hover:not(:disabled) {
-  background: rgba(144, 89, 255, 0.12);
+.gx-campaign-switcher__item:hover:not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--arcane) 12%, transparent);
 }
 .gx-campaign-switcher__item[data-active] {
-  background: rgba(144, 89, 255, 0.18);
+  background: color-mix(in srgb, var(--arcane) 18%, transparent);
   color: var(--text-strong);
 }
-.gx-campaign-switcher__item:disabled {
+/* A switch is being written: the rows wait, but keep the focus they have. */
+.gx-campaign-switcher__item[aria-disabled="true"]:not([data-active]) {
   opacity: 0.6;
-  cursor: default;
+  cursor: progress;
 }
 .gx-campaign-switcher__item-meta {
   display: flex;
@@ -145,13 +165,13 @@
 }
 .gx-campaign-switcher__item-name {
   font-size: var(--body-sm);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .gx-campaign-switcher__item-system {
-  font-size: 11px;
+  font-size: var(--body-2xs);
   color: var(--text-subtle);
 }
 
@@ -169,66 +189,53 @@
   padding: 0 var(--spacing-sm);
 }
 
+/* The two actions under the list: New campaign, All campaigns. */
+.gx-campaign-switcher__foot {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--spacing-xs);
+}
 .gx-campaign-switcher__new {
   display: flex;
   align-items: center;
-  gap: var(--spacing-xs);
+  gap: var(--spacing-sm);
   width: 100%;
-  padding: 8px 10px;
+  min-height: var(--control-md);
+  padding: 0 10px;
   border: none;
-  border-top: 1px solid var(--border-subtle);
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-violet-10);
   font-family: var(--font-base);
   font-size: var(--body-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.gx-campaign-switcher__new:hover {
-  background: rgba(144, 89, 255, 0.1);
-}
-
-/* Show/Hide archived toggle (#269) — a quiet footer control below "New campaign". */
-.gx-campaign-switcher__show-archived {
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  color: var(--text-subtle);
-  font-family: var(--font-base);
-  font-size: 12px;
+  font-weight: var(--weight-semibold);
   text-align: left;
   cursor: pointer;
 }
-.gx-campaign-switcher__show-archived:hover {
-  color: var(--text-muted);
-  background: rgba(144, 89, 255, 0.06);
+.gx-campaign-switcher__new:hover {
+  background: color-mix(in srgb, var(--arcane) 12%, transparent);
 }
-.gx-campaign-switcher__show-archived[aria-pressed="true"] {
-  color: var(--text-muted);
-}
-
-/* Create/edit form view (#338): a comfortably wider panel than the compact list,
- * clamped so it never overflows a narrow viewport (keeps the #88 mobile layout
- * intact). min-width:0 overrides the list panel's 280px floor for the clamp. */
-.gx-campaign-switcher__panel--form {
-  min-width: 0;
-  width: min(440px, calc(100vw - var(--spacing-lg)));
-  max-width: none;
+@media (pointer: coarse) {
+  .gx-campaign-switcher__new {
+    min-height: var(--target-coarse);
+  }
 }
 
-.gx-campaign-switcher__create {
-  /* Generous padding so the form breathes, matching other dialog interiors — the
-   * old spacing-sm (8px) hugged the fields to the panel edges (#338). */
-  padding: var(--spacing-lg);
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-}
-.gx-campaign-switcher__create-head {
-  font-family: var(--font-display);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-strong);
+@media (max-width: 640px) {
+  /* Phone: the trigger sits mid-row (the language picker is to its right), so
+   * a panel hung from its right edge runs off the left of the screen. It spans
+   * the screen under the topbar instead. `fixed` lands in the same place
+   * whether the viewport or the topbar (its backdrop-filter makes it a
+   * containing block) is the reference: both start at the top-left corner and
+   * are one screen wide. 60px is the topbar's height (styles/components.css). */
+  .gx-campaign-switcher__panel {
+    position: fixed;
+    top: calc(60px + var(--spacing-xs));
+    left: var(--page-gutter);
+    right: var(--page-gutter);
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
 }

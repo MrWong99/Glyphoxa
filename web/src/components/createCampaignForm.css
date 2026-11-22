@@ -1,6 +1,6 @@
-/* Campaign create form (#267) — shared by the CampaignSwitcher panel and the
- * Configuration first-run CTA. Plain useState form: Name + a two-up System/Language
- * row + an actions row that carries the inline create-failure cue.
+/* The two campaign forms: create (#267, the "New campaign" dialog and the
+ * first-campaign card) and settings (#268, the Settings view and the Settings
+ * dialog). Plain useState forms: Name + a two-up System/Language row.
  */
 .gx-campaign-create {
   display: flex;
@@ -29,4 +29,124 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
+}
+@media (max-width: 640px) {
+  /* Phone: two fields side by side leave neither room for its hint. */
+  .gx-campaign-create__row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Settings form (CampaignSettingsForm.tsx) ────────────────────────────── */
+.gx-campaign-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  /* What the save row is painted with: it slides over the fields, so it has
+   * to be the surface it sits on. The page sets the screen's base; a dialog
+   * its overlay surface. */
+  --gx-savebar-surface: var(--surface-base);
+}
+.gx-campaign-settings-form[data-variant="dialog"] {
+  --gx-savebar-surface: var(--surface-overlay);
+}
+
+/* A settings section: a titled group. On the page it is a card; in a dialog
+ * the dialog is the frame, so the sections are separated by a rule instead.
+ * The class is shared with the Settings view's Data and Danger zone sections
+ * (screens/campaign/campaignSettings.css adds the danger tint). */
+.gx-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-inset);
+}
+.gx-campaign-settings-form[data-variant="dialog"] .gx-settings-section {
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.gx-campaign-settings-form[data-variant="dialog"] .gx-settings-section + .gx-settings-section {
+  padding-top: var(--spacing-lg);
+  border-top: 1px solid var(--border-subtle);
+}
+.gx-settings-section__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--body-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+}
+.gx-settings-section__lede {
+  margin: 0;
+  max-width: 68ch;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* The save row. position: sticky inside the scroller (the screen's content
+ * area, or the dialog's body): it rides the bottom edge while the form is in
+ * view and settles under the last section at the form's end. */
+.gx-settings-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-md) 0;
+  background: var(--gx-savebar-surface);
+  border-top: 1px solid var(--border-subtle);
+}
+.gx-settings-savebar__status {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: var(--body-sm);
+}
+.gx-settings-savebar__state {
+  color: var(--text-muted);
+}
+/* Unsaved: a dot and the warning tone, so the state is not carried by colour
+ * alone. */
+.gx-settings-savebar__state[data-dirty] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  color: var(--status-warning);
+  font-weight: var(--weight-semibold);
+}
+.gx-settings-savebar__state[data-dirty]::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+.gx-settings-savebar__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-left: auto;
+}
+@media (max-width: 640px) {
+  .gx-settings-section {
+    padding: var(--spacing-md);
+  }
+  .gx-settings-savebar__actions {
+    flex: 1 1 100%;
+  }
+  .gx-settings-savebar__actions .gx-btn {
+    flex: 1 1 0;
+  }
 }

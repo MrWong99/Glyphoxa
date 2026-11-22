@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -25,16 +25,38 @@ import { hasUnsavedEdits } from "@/lib/navigationGuard";
 //      live-first (#222) and a running Voice Session's campaign still wins —
 //      that the switch takes effect when the session ends.
 //
+// Every flow that ends in "this campaign is now the active one" goes through
+// here: a pick in the topbar, Open on the Campaigns page, a created campaign, an
+// imported one, "Switch back". Create and import bring their own wording
+// (`announce`) and their own failure handling (`onError`), but not their own
+// SetActiveCampaign.
+//
 // The dialog is returned for the caller to render once, like useDirtyGuard's.
 
 type Target = { id: string; name: string };
 
-type SwitchOptions = {
+export type SwitchResult = {
+  campaign: Target;
+  /** A live Voice Session holds the Active Campaign: the switch is stored, not yet in effect. */
+  deferred: boolean;
+};
+
+export type SwitchOptions = {
   /**
    * Runs after the selection is written — whether it applies now or is
    * deferred by a live Voice Session (`deferred`). Close a menu, navigate.
    */
-  onSwitched?: (result: { campaign: Target; deferred: boolean }) => void;
+  onSwitched?: (result: SwitchResult) => void;
+  /**
+   * Says what happened INSTEAD of the default toast ("Now working in {name}",
+   * or the deferred notice). For a flow with a better sentence: "Created …".
+   */
+  announce?: (result: SwitchResult) => void;
+  /**
+   * Handles a refused switch INSTEAD of the default "Couldn't switch campaign"
+   * toast. For a flow that has to say more: "created it, but couldn't switch".
+   */
+  onError?: (error: unknown) => void;
 };
 
 // ── "This tab did it" flag ─────────────────────────────────────────────────
@@ -74,14 +96,112 @@ export function isLocalCampaignSwitch(campaignId: string): boolean {
   return localSwitchTarget === campaignId;
 }
 
-/** Forgets the flag. Nothing in the app calls this today; tests do. */
+// ── "This tab is about to change it, to whatever comes next" ───────────────
+// Archiving or deleting the Active Campaign changes it too, but not TO a
+// campaign this tab named: the server falls back to the next one. The tab
+// announces that here, and an observer treats any change inside the window as
+// local. A window, not a flag: the change is observed through a refetch that
+// lands some time after the write, and a flag nobody clears would swallow a
+// real change made elsewhere an hour later.
+const LOCAL_CHANGE_WINDOW_MS = 15_000;
+let localChangeUntil = 0;
+
+/** Announces that this tab is doing something that moves the Active Campaign. */
+export function noteLocalActiveCampaignChange(): void {
+  localChangeUntil = Date.now() + LOCAL_CHANGE_WINDOW_MS;
+}
+
+/** True while a change of the Active Campaign is explained by this tab's own action. */
+export function expectsLocalActiveCampaignChange(): boolean {
+  return Date.now() < localChangeUntil;
+}
+
+// ── The switch a live Voice Session is holding back ────────────────────────
+// A switch made while a session is live is stored and takes effect when the
+// session ends. Until then nothing on screen showed which campaign is waiting:
+// the toast is gone after a few seconds and the topbar still (correctly) names
+// the session's campaign. The pending target is kept here so the topbar can say
+// "Next: {name}" for as long as it is true. Module-level for the same reason as
+// the flag above: any caller of the hook may have issued the switch.
+//
+// It is this tab's knowledge only — GetActiveCampaign returns the RESOLVED
+// campaign, not the stored selection — so a reload forgets it.
+
+let pendingSwitch: Target | null = null;
+const pendingListeners = new Set<() => void>();
+
+function setPendingSwitch(next: Target | null): void {
+  if (pendingSwitch?.id === next?.id && pendingSwitch?.name === next?.name) return;
+  pendingSwitch = next;
+  for (const listener of pendingListeners) listener();
+}
+
+function subscribePendingSwitch(listener: () => void): () => void {
+  pendingListeners.add(listener);
+  return () => {
+    pendingListeners.delete(listener);
+  };
+}
+
+/** The campaign that becomes active when the live Voice Session ends, if a switch is waiting. */
+export function usePendingCampaignSwitch(): Target | null {
+  return useSyncExternalStore(
+    subscribePendingSwitch,
+    () => pendingSwitch,
+    () => null,
+  );
+}
+
+/** Forgets the waiting switch: the session ended, or the campaign became active. */
+export function clearPendingCampaignSwitch(): void {
+  setPendingSwitch(null);
+}
+
+/** Forgets everything this module remembers. Nothing in the app calls this today; tests do. */
 export function resetLocalCampaignSwitch(): void {
   localSwitchTarget = null;
+  localChangeUntil = 0;
+  setPendingSwitch(null);
+}
+
+// ── Navigating after a switch ──────────────────────────────────────────────
+// A flow that ends on the new campaign's Overview (create, import) navigates
+// AFTER the switch. If the GM had unsaved edits and chose to discard them, the
+// editor holding them is still mounted for a moment — it goes when the sweep's
+// refetch remounts the Campaign screen on the new id — and a navigation in that
+// moment would make the route guard ask "Discard unsaved changes?" a second
+// time. This runs `action` once no editor reports unsaved edits any more,
+// checking on a few successive ticks; if one still does after that (an editor
+// that is not per-campaign, on Setup), it runs anyway and the route guard asks,
+// which is then the right question.
+const SETTLE_CHECKS_MS = [0, 30, 80, 160, 320];
+
+export function afterEditorsSettle(action: () => void): void {
+  let attempt = 0;
+  const check = () => {
+    if (!hasUnsavedEdits() || attempt >= SETTLE_CHECKS_MS.length) {
+      action();
+      return;
+    }
+    setTimeout(check, SETTLE_CHECKS_MS[attempt++]);
+  };
+  check();
 }
 
 export function useCampaignSwitch(defaults: SwitchOptions = {}): {
   /** Switches to `campaign`, asking first if edits would be lost. */
   switchTo: (campaign: Target, opts?: SwitchOptions) => void;
+  /**
+   * Switches to `campaign` WITHOUT asking. For a flow that asked already
+   * (confirmDiscard) before doing the work that led here.
+   */
+  activate: (campaign: Target, opts?: SwitchOptions) => void;
+  /**
+   * Runs `action` at once when nothing is unsaved; otherwise asks the same
+   * "Discard unsaved changes?" question and runs it only on confirm. For a flow
+   * that ENDS in a switch but has work to do first (create a campaign).
+   */
+  confirmDiscard: (action: () => void) => void;
   /** True while the selection is being written. */
   pending: boolean;
   /** Render this once — it is the "Discard unsaved changes?" question. */
@@ -89,53 +209,64 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
 } {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [asking, setAsking] = useState<{ campaign: Target; opts?: SwitchOptions } | null>(null);
+  const [asking, setAsking] = useState<(() => void) | null>(null);
 
   const setActive = useMutation(CampaignService.method.setActiveCampaign);
-  const { mutate } = setActive;
+  const { mutateAsync } = setActive;
   const defaultOnSwitched = defaults.onSwitched;
+  const defaultAnnounce = defaults.announce;
+  const defaultOnError = defaults.onError;
 
-  const commit = useCallback(
+  const activate = useCallback(
     (campaign: Target, opts?: SwitchOptions) => {
-      // Marked BEFORE the write: the sweep's refetch can land before onSuccess
-      // runs, and an observer must already see this change as ours.
+      // Marked BEFORE the write: the sweep's refetch can land before the
+      // response is handled, and an observer must already see this change as
+      // ours.
       const before = localSwitchTarget;
       markLocalCampaignSwitch(campaign.id);
-      mutate(
-        { campaignId: campaign.id },
-        {
-          onSuccess: (res) => {
-            void invalidateActiveCampaignScopedQueries(queryClient);
-            // The response carries the RESOLVED Active Campaign. While a Voice
-            // Session is live that is still the session's campaign, not the
-            // one just selected — the switch is stored, and comes due when the
-            // session ends (watchVoiceSessionEnd re-runs the sweep then).
-            const resolved = res.campaign?.id;
-            const deferred = resolved !== undefined && resolved !== "" && resolved !== campaign.id;
-            if (deferred) toast.info(t("shell.switchDeferred", { name: campaign.name }));
-            else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
-            (opts?.onSwitched ?? defaultOnSwitched)?.({ campaign, deferred });
-          },
-          onError: (err) => {
-            // The switch was refused (or never confirmed), so as far as this
-            // tab knows the campaign did not become active through it: put the
-            // flag back to what it said before — unless a newer switch has
-            // claimed it meanwhile.
-            if (localSwitchTarget === campaign.id) localSwitchTarget = before;
-            toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) }));
-          },
+      // mutateAsync, not mutate with callbacks: those are dropped when the
+      // calling component unmounts mid-flight (a dialog that closes), and the
+      // sweep and the "what happened" must not depend on who is still mounted.
+      mutateAsync({ campaignId: campaign.id }).then(
+        (res) => {
+          void invalidateActiveCampaignScopedQueries(queryClient);
+          // The response carries the RESOLVED Active Campaign. While a Voice
+          // Session is live that is still the session's campaign, not the one
+          // just selected — the switch is stored, and comes due when the
+          // session ends (watchVoiceSessionEnd re-runs the sweep then).
+          const resolved = res.campaign?.id;
+          const deferred = resolved !== undefined && resolved !== "" && resolved !== campaign.id;
+          setPendingSwitch(deferred ? campaign : null);
+          const result: SwitchResult = { campaign, deferred };
+          const announce = opts?.announce ?? defaultAnnounce;
+          if (announce) announce(result);
+          else if (deferred) toast.info(t("shell.switchDeferred", { name: campaign.name }));
+          else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
+          (opts?.onSwitched ?? defaultOnSwitched)?.(result);
+        },
+        (err: unknown) => {
+          // The switch was refused (or never confirmed), so as far as this
+          // tab knows the campaign did not become active through it: put the
+          // flag back to what it said before — unless a newer switch has
+          // claimed it meanwhile.
+          if (localSwitchTarget === campaign.id) localSwitchTarget = before;
+          const onError = opts?.onError ?? defaultOnError;
+          if (onError) onError(err);
+          else toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) }));
         },
       );
     },
-    [mutate, queryClient, t, defaultOnSwitched],
+    [mutateAsync, queryClient, t, defaultOnSwitched, defaultAnnounce, defaultOnError],
   );
 
+  const confirmDiscard = useCallback((action: () => void) => {
+    if (hasUnsavedEdits()) setAsking(() => action);
+    else action();
+  }, []);
+
   const switchTo = useCallback(
-    (campaign: Target, opts?: SwitchOptions) => {
-      if (hasUnsavedEdits()) setAsking({ campaign, opts });
-      else commit(campaign, opts);
-    },
-    [commit],
+    (campaign: Target, opts?: SwitchOptions) => confirmDiscard(() => activate(campaign, opts)),
+    [confirmDiscard, activate],
   );
 
   const dialog = asking ? (
@@ -148,12 +279,12 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
       description={t("common.discardChangesDesc")}
       confirmLabel={t("common.discardChangesConfirm")}
       onConfirm={() => {
-        const { campaign, opts } = asking;
+        const action = asking;
         setAsking(null);
-        commit(campaign, opts);
+        action();
       }}
     />
   ) : null;
 
-  return { switchTo, pending: setActive.isPending, dialog };
+  return { switchTo, activate, confirmDiscard, pending: setActive.isPending, dialog };
 }

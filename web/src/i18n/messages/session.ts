@@ -95,7 +95,7 @@ export const en = {
   "session.couldntRefreshHighlights":
     "Couldn't refresh the highlights — showing the last loaded set.",
   "session.noHighlights":
-    "No highlights yet — epic moments appear here once highlight recording is turned on and everyone has consented. To turn it on, open the campaign menu in the top bar, choose Campaign settings, and enable “Highlight recording”.",
+    "No highlights yet — epic moments appear here once highlight recording is turned on and everyone has consented. To turn it on, open Settings under your campaign in the sidebar and switch on “Highlight recording”.",
   "session.candidateBadge": "Unsaved — deleted in 7 days",
   "session.promotedBadge": "Kept",
   "session.promote": "Keep",
@@ -235,7 +235,7 @@ export const de: Record<keyof typeof en, string> = {
   "session.couldntRefreshHighlights":
     "Highlights konnten nicht aktualisiert werden — der letzte geladene Stand wird angezeigt.",
   "session.noHighlights":
-    "Noch keine Highlights — epische Momente erscheinen hier, sobald die Highlight-Aufnahme eingeschaltet ist und alle zugestimmt haben. Zum Einschalten öffne das Kampagnen-Menü in der oberen Leiste, wähle Kampagnen-Einstellungen und aktiviere „Highlight-Aufnahme“.",
+    "Noch keine Highlights — epische Momente erscheinen hier, sobald die Highlight-Aufnahme eingeschaltet ist und alle zugestimmt haben. Zum Einschalten öffne in der Seitenleiste unter deiner Kampagne die Einstellungen und schalte „Highlight-Aufnahme“ ein.",
   "session.candidateBadge": "Nicht gespeichert — wird in 7 Tagen gelöscht",
   "session.promotedBadge": "Behalten",
   "session.promote": "Behalten",

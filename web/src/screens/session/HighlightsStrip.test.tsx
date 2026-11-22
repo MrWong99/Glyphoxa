@@ -220,14 +220,13 @@ describe("HighlightsStrip (#309)", () => {
     expect(document.querySelector("audio")).toBeNull();
   });
 
-  it("points the empty state at the top-bar campaign menu to arm the tape (#412)", async () => {
-    // The Highlight-recording toggle (internally the rollover tape) lives ONLY in
-    // the topbar CampaignSwitcher edit panel, not on the Campaign roster screen —
-    // so the copy names that real location honestly instead of an href to a
-    // screen that lacks the toggle.
+  it("points the empty state at the campaign's Settings view to arm the tape (#412)", async () => {
+    // The Highlight-recording toggle (internally the rollover tape) lives in the
+    // campaign's Settings view (the topbar switcher no longer carries an edit
+    // panel) — so the copy names that real location honestly instead of an
+    // href to a screen that lacks the toggle.
     renderStrip([]);
-    await screen.findByText(/campaign menu in the top bar/i);
-    expect(screen.getByText(/Campaign settings/i)).toBeInTheDocument();
+    await screen.findByText(/Settings under your campaign in the sidebar/i);
     expect(screen.getByText(/Highlight recording/i)).toBeInTheDocument();
     // No misleading link to the roster screen.
     expect(screen.queryByRole("link")).not.toBeInTheDocument();

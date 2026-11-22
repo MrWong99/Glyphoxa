@@ -1,15 +1,68 @@
-/* Campaign Settings view (CampaignSettingsPanel.tsx). A form reads best at a
- * measured width; left to the screen's full width the fields stretch across a
- * desktop monitor. */
+/* Campaign Settings view (CampaignSettingsPanel.tsx): the settings form's two
+ * sections, then Data and the Danger zone. A form reads best at a measured
+ * width; left to the screen's full width the fields stretch across a desktop
+ * monitor. The section and save-row styles themselves are the form's
+ * (components/createCampaignForm.css). */
 
 .gx-campaign-settings {
-  max-width: var(--content-md);
+  max-width: var(--page-width-narrow);
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: var(--spacing-md);
+  gap: var(--spacing-lg);
 }
 
-.gx-campaign-settings > .gx-card {
-  width: 100%;
+/* One action with what it does beside it: text left, button right; stacked on
+ * a phone. */
+.gx-campaign-settings .gx-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+}
+.gx-campaign-settings .gx-settings-row + .gx-settings-row {
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border-subtle);
+}
+.gx-campaign-settings .gx-settings-row__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-campaign-settings .gx-settings-row__title {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+.gx-campaign-settings .gx-settings-row__desc {
+  margin: 0;
+  max-width: 60ch;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+.gx-campaign-settings .gx-settings-row > .gx-btn {
+  flex: 0 0 auto;
+}
+/* Archive / Delete while a flow is already running on the campaign: still
+ * focusable, visibly waiting. */
+.gx-campaign-settings .gx-settings-row > .gx-btn[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* The danger zone is told apart by its frame and its title, not by filling
+ * the card red: the actions in it are rare, not urgent. */
+.gx-campaign-settings .gx-settings-section--danger {
+  border-color: color-mix(in srgb, var(--status-danger) 45%, transparent);
+}
+.gx-campaign-settings .gx-settings-section--danger .gx-settings-section__title {
+  color: var(--status-danger);
+}
+
+@media (max-width: 640px) {
+  .gx-campaign-settings .gx-settings-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
