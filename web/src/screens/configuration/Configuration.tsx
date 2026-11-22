@@ -3,7 +3,6 @@ import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   MessagesSquare,
-  MessageCircle,
   BrainCircuit,
   AudioLines,
   ImagePlus,
@@ -31,7 +30,9 @@ import { errorMessage, isNotFound } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type MessageKey } from "@/i18n";
 import { AddBotLink } from "./AddBotLink";
+import { ChatModelCard } from "./ChatModelCard";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
+import { llmProviderLabel } from "./llmProviders";
 
 import "./configuration.css";
 
@@ -44,37 +45,23 @@ import "./configuration.css";
 // resolves the bot tag) flips it Healthy → Degraded without blocking page load.
 
 // The BYOK secret slots the screen holds. Each renders a SecretRow;
-// Groq/ElevenLabs/Gemini save via SaveProviderConfig, the Discord bot token via
-// SaveDiscordSettings. `label` is the product name (never translated); an
-// optional `nameKey` overrides the displayed name with localized copy (the
-// chat slot, whose name is a feature, not a product). `kind` is a MessageKey
-// translated at render, so the overline speaks the user's language ("AI
-// model", never the internal "LLM").
+// Groq/Anthropic/ElevenLabs/Gemini save via SaveProviderConfig, the Discord bot
+// token via SaveDiscordSettings. `label` is the product name (never
+// translated). `kind` is a MessageKey translated at render, so the overline
+// speaks the user's language ("AI model", never the internal "LLM").
+// `component` is the credential's primary Component label (discord, llm, tts,
+// image); the two voice-LLM slots share "llm" and are told apart by provider.
 //
-// `slot` is SaveProviderConfigRequest.slot — empty means the slot IS the
-// provider (every pre-0062 slot); the planning-chat slot saves as slot "chat"
-// with provider "groq" (#592, ADR-0062). `component` is the credential's
-// primary Component label, unique per slot (discord, llm, tts, image,
-// chat_llm) — the row's credential lookup keys on it, because two slots can
-// now share one provider.
+// The Planning chat is NOT a slot: its model is a choice over these providers,
+// rendered by ChatModelCard below the rows (ADR-0062 amendment).
 type ByokSlot = {
   provider: string;
-  slot: string;
   component: string;
   label: string;
-  nameKey?: MessageKey;
-  descriptionKey?: MessageKey;
   kind: MessageKey;
   icon: ReactNode;
   /** Renders the Groq model combobox (the live catalog + free text, #227). */
   models?: boolean;
-  /**
-   * Suppresses the row's health badge. The chat slot sets it: the shared groq
-   * probe tests the VOICE-LLM credential, not the chat_llm key, so its verdict
-   * could contradict this row's actual state. A dedicated chat_llm probe is a
-   * follow-up; until then no badge beats a wrong one.
-   */
-  hideHealth?: boolean;
   /** Not needed to run a session: an unsaved key reads "Optional", not "Key needed". */
   optional?: boolean;
   /**
@@ -88,9 +75,8 @@ type ByokSlot = {
 const BYOK_SLOTS: readonly ByokSlot[] = [
   {
     provider: "groq",
-    slot: "",
     component: "llm",
-    label: "Groq",
+    label: llmProviderLabel("groq"),
     kind: "config.kindAiModel",
     icon: <BrainCircuit size={19} />,
     models: true,
@@ -98,9 +84,8 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
   },
   {
     provider: "anthropic",
-    slot: "",
     component: "llm",
-    label: "Anthropic",
+    label: llmProviderLabel("anthropic"),
     kind: "config.kindAiModel",
     icon: <BrainCircuit size={19} />,
     models: true,
@@ -108,7 +93,6 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
   },
   {
     provider: "elevenlabs",
-    slot: "",
     component: "tts",
     label: "ElevenLabs",
     kind: "config.kindVoiceSpeech",
@@ -116,46 +100,22 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
   },
   {
     provider: "gemini",
-    slot: "",
     component: "image",
     label: "Gemini",
     kind: "config.kindImages",
     icon: <ImagePlus size={19} />,
     optional: true,
   },
-  // The chat-scoped model slot (ADR-0062): a second selection on the same Groq
-  // key surface, chosen for quality over latency, so upgrading the planning
-  // chat can never re-price or slow the live voice loop.
-  {
-    provider: "groq",
-    slot: "chat",
-    component: "chat_llm",
-    label: "Groq",
-    nameKey: "chat.configSlotName",
-    descriptionKey: "chat.configSlotDesc",
-    // Its own overline: two "AI model" rows side by side read as a duplicate.
-    kind: "config.kindPlanningChat",
-    icon: <MessageCircle size={19} />,
-    models: true,
-    hideHealth: true,
-  },
 ];
 
-// Rows key their credential on `component`: since the chat slot (#592) two
-// slots share provider "groq". The voice-LLM slots (#702) are the mirror case —
-// they share component "llm" — so those also match on `provider`.
+// Rows key their credential on `component`. The voice-LLM slots (#702) share
+// component "llm", so those also match on `provider`.
 function credentialFor(
   creds: ProviderCredential[],
   component: string,
   provider?: string,
 ): ProviderCredential | undefined {
   return creds.find((c) => c.component === component && (provider === undefined || c.provider === provider));
-}
-
-// The product name of an LLM provider id, for the "in use" line. An id this
-// build has no slot for (a newer server) is shown as-is.
-function llmProviderLabel(provider: string): string {
-  return BYOK_SLOTS.find((s) => s.voiceLlm && s.provider === provider)?.label ?? provider;
 }
 
 // The health entry of one row. Entries are keyed by `component` — what the
@@ -225,6 +185,12 @@ export function Configuration() {
   const effectiveLlm = config.data?.effectiveLlm;
 
   const saveProvider = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: invalidateList });
+  // The Planning chat model choice (ADR-0062 amendment): its own mutation
+  // instances, so a refused chat save paints the chat card and never a key row.
+  // A chat save changes the chat catalog's key and the "answers with" line, so
+  // it drops the same queries a key save does.
+  const saveChatModel = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: invalidateList });
+  const resetChatModel = useMutation(ProviderService.method.deleteProviderConfig, { onSuccess: invalidateList });
   const saveDiscord = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
   // Separate mutation instance for the IDs form so its error/pending state is
   // its own — a bot-token failure paints the SecretRow, not this form (#142).
@@ -335,16 +301,10 @@ export function Configuration() {
               key={`${slot.component}/${slot.provider}`}
               icon={slot.icon}
               kind={t(slot.kind)}
-              name={slot.nameKey ? t(slot.nameKey) : slot.label}
-              description={slot.descriptionKey ? t(slot.descriptionKey) : undefined}
-              // The paste prompt names the PRODUCT whose key it wants, even when
-              // the row's display name is a feature ("Planning chat (Groq)").
+              name={slot.label}
               placeholder={t("config.pasteApiKey", { name: slot.label })}
               credential={credential}
-              // The probe result is per-provider; a hideHealth slot renders no
-              // badge at all (see ByokSlot.hideHealth), so it gets none passed.
-              health={slot.hideHealth ? undefined : healthFor(health, slot, llmInUse)}
-              hideHealth={slot.hideHealth}
+              health={healthFor(health, slot, llmInUse)}
               // A voice-LLM slot the tenant is not on needs no key: it is a
               // choice, so it reads "Optional" where the one in use reads "Key
               // needed".
@@ -355,11 +315,27 @@ export function Configuration() {
               // alone via the model-only save once a key exists.
               models={slot.models ? (modelsByProvider[slot.provider] ?? []) : undefined}
               onSave={(secret, model, activate) =>
-                saveProvider.mutateAsync({ provider: slot.provider, secret, model, slot: slot.slot, activate })
+                saveProvider.mutateAsync({ provider: slot.provider, secret, model, activate })
               }
             />
           );
         })}
+        {/* The Planning chat model: a choice over the providers above, with
+            the truthful "answers with" line. Its key field never touches the
+            voice model (ADR-0062 amendment). */}
+        <ChatModelCard
+          effective={config.data?.effectiveChatLlm}
+          voice={effectiveLlm}
+          // failureReason is set from the FIRST failed attempt, while the query
+          // is still retrying: the card says the read is failing right away
+          // rather than shimmering through the retry backoff, and the error
+          // gives way to the control the moment a retry succeeds.
+          loadError={config.data ? undefined : (config.error ?? config.failureReason ?? undefined)}
+          onSave={(provider, model, secret) =>
+            saveChatModel.mutateAsync({ slot: "chat", provider, model, secret })
+          }
+          onReset={() => resetChatModel.mutateAsync({ slot: "chat" })}
+        />
       </div>
 
       {/* Discord connection — Bot token (secret) + non-secret Guild / Voice IDs */}
@@ -715,7 +691,6 @@ function SecretRow({
   credential,
   health,
   models,
-  hideHealth = false,
   optional = false,
   voiceLlm,
   onSave,
@@ -723,18 +698,12 @@ function SecretRow({
   icon: ReactNode;
   kind: string;
   name: string;
-  /** Optional one-liner under the name (the chat slot's "voice stays untouched"). */
+  /** Optional one-liner under the name (the Bot token's "only for your own bot"). */
   description?: string;
   placeholder: string;
   credential?: ProviderCredential;
   health?: ProviderHealth;
   models?: string[];
-  /**
-   * Renders the row without ANY health badge (chat slot): the shared groq
-   * probe tests the voice-LLM credential, whose verdict can contradict this
-   * row's chat_llm key. A dedicated chat_llm probe is a follow-up.
-   */
-  hideHealth?: boolean;
   /** An unsaved key reads "Optional" rather than "Key needed". */
   optional?: boolean;
   /**
@@ -946,14 +915,12 @@ function SecretRow({
           )}
         </div>
 
-        {!hideHealth && (
-          <HealthBadge
-            saved={saved}
-            health={health}
-            optional={optional}
-            platform={Boolean(credential?.providedByPlatform)}
-          />
-        )}
+        <HealthBadge
+          saved={saved}
+          health={health}
+          optional={optional}
+          platform={Boolean(credential?.providedByPlatform)}
+        />
       </div>
     </Card>
   );

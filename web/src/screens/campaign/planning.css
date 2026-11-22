@@ -240,6 +240,55 @@
   resize: vertical;
 }
 
+/* Under the composer: which model answers (left) and the send hint (right).
+ * Wraps to two lines at phone width instead of squeezing either. */
+.gx-planning__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-xs) var(--spacing-md);
+}
+
 .gx-planning__hint {
-  align-self: flex-end;
+  margin-left: auto;
+}
+
+.gx-planning__model {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--spacing-xs) var(--spacing-sm);
+  min-width: 0;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+  /* A model id is one long token; it may break rather than widen the pane. */
+  overflow-wrap: anywhere;
+}
+
+.gx-planning__model-link {
+  color: var(--text-link);
+  text-decoration: underline;
+}
+
+.gx-planning__model-link:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-planning__model-link:focus-visible {
+  outline: 2px solid var(--arcane);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* The chat's model has no key to run on: shown above the composer, before the
+ * GM types. A warning, not an error — nothing has failed yet. */
+.gx-planning__nokey {
+  margin: 0;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid var(--status-warning);
+  border-radius: var(--radius-md);
+  background: var(--status-warning-bg);
+  color: var(--text-default);
+  font-size: var(--body-sm);
 }

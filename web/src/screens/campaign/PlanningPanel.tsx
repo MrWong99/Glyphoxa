@@ -7,13 +7,15 @@ import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { toast } from "sonner";
 import { Check, MessageSquarePlus, Pencil, SendHorizontal, Trash2, X } from "lucide-react";
 
-import { ChatService } from "@gen/glyphoxa/management/v1/management_pb";
+import { ChatService, ChatLlmKeySource, ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Markdown } from "@/components/ui/Markdown";
+import { CHAT_MODEL_ANCHOR } from "@/screens/configuration/chatModelAnchor";
+import { llmProviderLabel } from "@/screens/configuration/llmProviders";
 
 import "./planning.css";
 import { errorMessage, isAllowanceExhausted } from "@/lib/connectError";
@@ -73,6 +75,17 @@ function toolLabel(t: TFunc, toolName: string): string {
   return key ? t(key) : toolName.replace(/_/g, " ");
 }
 
+// setupChatModelHref is the Setup screen's Planning chat model card, for the
+// footer's "Change" link. The panel is router-free (it renders in tests and
+// sub-views without a router context), so this is a plain link built from the
+// tenant prefix of the current URL — every app route lives under /t/<slug>/ —
+// rather than a router navigation. It costs a page load; a navigation seam for
+// router-free screens can replace it without touching the copy.
+function setupChatModelHref(): string {
+  const tenantPrefix = /^\/t\/[^/]+/.exec(window.location.pathname)?.[0] ?? "";
+  return `${tenantPrefix}/configuration#${CHAT_MODEL_ANCHOR}`;
+}
+
 // StreamState is the whole in-flight exchange. errorKey null = still streaming;
 // set = the stream failed and the localized notice renders in-chat until the GM
 // dismisses it.
@@ -92,6 +105,13 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   const threadsQuery = useQuery(ChatService.method.listPlanningThreads, { campaignId });
   // Most-recently-touched first — the server's order, kept verbatim.
   const threads = threadsQuery.data?.threads ?? [];
+
+  // Which model answers (ADR-0062 amendment): the server's own resolution, the
+  // one the chat engine runs. A side read — while it is pending or has failed
+  // the footer simply is not there and the chat works as before, so it never
+  // retries loudly or blocks the composer.
+  const chatLlm = useQuery(ProviderService.method.listProviderConfigs, {}, { retry: false }).data
+    ?.effectiveChatLlm;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = threads.find((th) => th.id === selectedId) ?? null;
@@ -434,6 +454,14 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           )}
         </ol>
 
+        {/* No key is reachable for the chat's model: say so BEFORE the GM
+            types a message that would only be refused. */}
+        {chatLlm?.keySource === ChatLlmKeySource.NONE && (
+          <p className="gx-planning__nokey" role="status">
+            {t("chat.errNoKey")}
+          </p>
+        )}
+
         <form
           className="gx-planning__composer"
           onSubmit={(e) => {
@@ -476,7 +504,26 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
             {t("chat.send")}
           </Button>
         </form>
-        <span className="gx-field__hint gx-planning__hint">{t("chat.sendHint")}</span>
+        <div className="gx-planning__foot">
+          {chatLlm && (
+            <span className="gx-planning__model" data-testid="planning-model">
+              <span>
+                {t("chat.answeringWith", {
+                  provider: llmProviderLabel(chatLlm.provider),
+                  model: chatLlm.model,
+                })}
+              </span>
+              <a
+                className="gx-planning__model-link"
+                href={setupChatModelHref()}
+                aria-label={t("chat.changeModelAria")}
+              >
+                {t("chat.changeModel")}
+              </a>
+            </span>
+          )}
+          <span className="gx-field__hint gx-planning__hint">{t("chat.sendHint")}</span>
+        </div>
       </div>
 
       {confirmThread && (
