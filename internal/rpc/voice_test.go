@@ -30,7 +30,11 @@ import (
 // provider configs and a deployment config so the VoiceServer's key-resolution
 // is unit-tested keyless and offline.
 type fakeVoiceStore struct {
+	// configs is each Component's NEWEST row (what GetProviderConfigByComponent
+	// returns); older holds a Component's other rows — the LLM slot a Tenant
+	// saved earlier and is not currently on (#702).
 	configs map[storage.Component]storage.ProviderConfig
+	older   []storage.ProviderConfig
 	dep     *storage.DeploymentConfig
 
 	usageMu sync.Mutex
@@ -56,6 +60,14 @@ func (f *fakeVoiceStore) GetProviderConfigByComponent(_ context.Context, _ uuid.
 		return storage.ProviderConfig{}, storage.ErrNotFound
 	}
 	return cfg, nil
+}
+
+func (f *fakeVoiceStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) ([]storage.ProviderConfig, error) {
+	out := append([]storage.ProviderConfig(nil), f.older...)
+	for _, c := range f.configs {
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 func (f *fakeVoiceStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
@@ -804,6 +816,12 @@ func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, i
 	b.reads.Add(1)
 	<-b.release
 	return b.inner.GetProviderConfigByComponent(ctx, id, c)
+}
+
+func (b *blockingVoiceStore) ListProviderConfigs(ctx context.Context, id uuid.UUID) ([]storage.ProviderConfig, error) {
+	b.reads.Add(1)
+	<-b.release
+	return b.inner.ListProviderConfigs(ctx, id)
 }
 
 func (b *blockingVoiceStore) GetDeploymentConfig(ctx context.Context, id uuid.UUID) (storage.DeploymentConfig, error) {
