@@ -123,3 +123,30 @@ func TestDefaultEmptyModels_NoProviderFollowsDeploymentDefault(t *testing.T) {
 		t.Errorf("explicit model = %q, want it untouched", specs[1].model)
 	}
 }
+
+// One adapter serves the whole Roster, so an NPC's model may only come from a
+// Provider Config of THAT adapter's provider (#702 review): a row on another
+// provider — the Tenant's newest row while the primary Agent is bound
+// elsewhere, or an Agent bound to another provider's row — would hand, say, a
+// Claude model id to the Groq adapter, which fails every turn of that NPC.
+func TestResolveNPCModel_OnlyFromTheSessionProvider(t *testing.T) {
+	t.Parallel()
+	groqRow := &storage.ProviderConfig{Provider: "groq", Model: "openai/gpt-oss-20b"}
+	claudeRow := &storage.ProviderConfig{Provider: "anthropic", Model: "claude-haiku-4-5"}
+	for name, tc := range map[string]struct {
+		bound, tenant *storage.ProviderConfig
+		session, want string
+	}{
+		"bound row of the session provider wins":         {groqRow, claudeRow, "groq", "openai/gpt-oss-20b"},
+		"tenant row of the session provider is fallback": {nil, groqRow, "groq", "openai/gpt-oss-20b"},
+		"tenant row on another provider is ignored":      {nil, claudeRow, "groq", ""},
+		"bound row on another provider is ignored":       {claudeRow, groqRow, "groq", "openai/gpt-oss-20b"},
+		"neither belongs to the session":                 {claudeRow, claudeRow, "groq", ""},
+		"model-less bound row falls to the tenant row":   {&storage.ProviderConfig{Provider: "groq"}, groqRow, "groq", "openai/gpt-oss-20b"},
+		"no rows": {nil, nil, "groq", ""},
+	} {
+		if got := resolveNPCModel(tc.bound, tc.tenant, tc.session); got != tc.want {
+			t.Errorf("%s: model = %q, want %q", name, got, tc.want)
+		}
+	}
+}

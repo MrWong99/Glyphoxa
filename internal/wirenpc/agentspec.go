@@ -116,15 +116,20 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 			return err
 		}
 
-		llmCfgID, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+		// The seeded LLM row is the TENANT's row, not a binding (#702): Bart
+		// carries no llm_provider_config_id, exactly like a web-created NPC,
+		// so the seeded campaign follows the Tenant's LLM in effect — the
+		// newest 'llm' row, which the Configuration screen writes and shows.
+		// A bound row would pin the session's adapter to this one while the
+		// screen named another.
+		if _, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
 			TenantID:              tenantID,
 			Component:             storage.ComponentLLM,
 			Provider:              llmProvider,
 			Model:                 llmModel,
 			CredentialsCiphertext: placeholder,
 			CredentialsLast4:      credPlaceholderLast4,
-		})
-		if err != nil {
+		}); err != nil {
 			return err
 		}
 
@@ -159,7 +164,6 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 			Persona:               npc.persona,
 			Voice:                 voiceJSON,
 			VoiceProviderConfigID: uuid.NullUUID{UUID: ttsCfgID, Valid: true},
-			LLMProviderConfigID:   uuid.NullUUID{UUID: llmCfgID, Valid: true},
 			AddressOnly:           false, // a lone Character NPC catches unaddressed speech
 			Aliases:               npc.aliases,
 		})
@@ -234,16 +238,19 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 	// LLM provider_config (#227): web-created Agents carry no LLMProviderConfigID,
 	// but the Configuration screen writes the tenant row — without this fallback
 	// the model fix would miss the operator's own NPCs. Fetched ONCE per session
-	// start (consistent with the credential/grant hydration); no row → "" so the
-	// adapter default applies.
-	tenantLLMModel, tenantLLMProvider := "", ""
+	// start (consistent with the credential/grant hydration); no row → nil so the
+	// session provider's default applies.
+	var tenantLLM *storage.ProviderConfig
 	if cfg, err := st.GetProviderConfigByComponent(ctx, campaign.TenantID, storage.ComponentLLM); err == nil {
-		tenantLLMModel, tenantLLMProvider = cfg.Model, cfg.Provider
+		tenantLLM = &cfg
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: tenant LLM config: %w", err)
 	}
 
 	specs := make([]npcSpec, 0, len(chars))
+	// bound[i] is specs[i]'s own LLM Provider Config (nil = unbound). Models are
+	// resolved after the loop, once the session's provider is known.
+	bound := make([]*storage.ProviderConfig, 0, len(chars)+1)
 	var primary storage.LoadedAgent
 	for i, c := range chars {
 		loaded, err := st.LoadAgent(ctx, c.ID)
@@ -257,11 +264,7 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 		if err != nil {
 			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
-		// Resolve the model this NPC's engine runs (#227): the Agent's bound LLM
-		// provider_config model when it has one, else the tenant-level fallback.
-		// A model still empty here is filled with the session provider's default
-		// after the loop ([defaultEmptyModels]).
-		spec.model = resolveNPCModel(loaded.LLMConfig, tenantLLMModel)
+		bound = append(bound, loaded.LLMConfig)
 		// Hydrate this NPC's Tool Grants from its DB rows (#113): tool
 		// availability is data-driven, not compiled in. An NPC with no rows gets
 		// no grants, so its GrantSet declares no Tool to the LLM (least-privilege).
@@ -288,11 +291,12 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 	butler, err := st.GetButler(ctx, campaign.ID)
 	switch {
 	case err == nil:
-		bspec, err := butlerSpec(ctx, st, butler, tenantLLMModel)
+		bspec, butlerLLM, err := butlerSpec(ctx, st, butler)
 		if err != nil {
 			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
 		specs = append(specs, bspec)
+		bound = append(bound, butlerLLM)
 	case errors.Is(err, storage.ErrNotFound):
 		// No Butler for this Campaign — skip it (ADR-0009 makes this unreachable
 		// for trigger-created Campaigns).
@@ -300,9 +304,16 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: get butler: %w", err)
 	}
 
-	// Any spec still without a model (Butler included) gets the SESSION provider's
-	// default, named: see [defaultEmptyModels].
-	defaultEmptyModels(specs, sessionLLMProviderID(primary.LLMConfig, tenantLLMProvider), llmDefault)
+	// Resolve the model each NPC's engine runs (#227): its bound LLM
+	// provider_config model, else the tenant-level fallback — but only from a
+	// row of the SESSION's provider ([resolveNPCModel]); any spec still without
+	// a model (Butler included) gets that provider's default, named
+	// ([defaultEmptyModels]).
+	sessionProvider := sessionLLMProviderID(primary.LLMConfig, tenantLLM, llmDefault)
+	for i := range specs {
+		specs[i].model = resolveNPCModel(bound[i], tenantLLM, sessionProvider)
+	}
+	defaultEmptyModels(specs, sessionProvider, llmDefault)
 
 	return specs, primary, campaign, nil
 }
@@ -317,51 +328,60 @@ const defaultButlerPersona = `You are Glyphoxa, the session's assistant. You hel
 // voices it from (#299): role butler + Address-Only (so ambient heuristics never
 // route to it), the default persona when its column is empty, its resolved model,
 // and its hydrated Tool Grants (dice + the knowledge grants the trigger seeds). An
-// empty VoiceID is allowed — a voiceless Butler answers as text only.
-func butlerSpec(ctx context.Context, st *storage.Store, butler storage.Agent, tenantLLMModel string) (npcSpec, error) {
+// empty VoiceID is allowed — a voiceless Butler answers as text only. The
+// Butler's own LLM Provider Config (nil = unbound) is returned beside the spec:
+// the caller resolves every model once the session's provider is known.
+func butlerSpec(ctx context.Context, st *storage.Store, butler storage.Agent) (npcSpec, *storage.ProviderConfig, error) {
 	loaded, err := st.LoadAgent(ctx, butler.ID)
 	if err != nil {
-		return npcSpec{}, err
+		return npcSpec{}, nil, err
 	}
 	spec, err := npcSpecFromAgent(loaded.Agent)
 	if err != nil {
-		return npcSpec{}, err
+		return npcSpec{}, nil, err
 	}
 	spec.role = string(storage.AgentRoleButler)
 	spec.addressOnly = true
 	if strings.TrimSpace(spec.persona) == "" {
 		spec.persona = defaultButlerPersona
 	}
-	spec.model = resolveNPCModel(loaded.LLMConfig, tenantLLMModel)
 	grantRows, err := st.ListToolGrants(ctx, butler.ID)
 	if err != nil {
-		return npcSpec{}, err
+		return npcSpec{}, nil, err
 	}
 	spec.grants = grantsFromRows(grantRows)
-	return spec, nil
+	return spec, loaded.LLMConfig, nil
 }
 
 // resolveNPCModel picks the model id for one NPC's engine (#227): the Agent's own
-// bound LLM provider_config model wins when present and non-empty, otherwise the
-// tenant-level LLM model fallback. Both empty yields "", which the roster load
-// then resolves to the session provider's default ([defaultEmptyModels]).
-func resolveNPCModel(bound *storage.ProviderConfig, tenantModel string) string {
-	if bound != nil && bound.Model != "" {
-		return bound.Model
+// bound LLM provider_config model, else the tenant-level LLM model — each ONLY
+// when that row belongs to sessionProvider, the provider whose adapter serves
+// the whole Roster (#702). A row on another provider names a model of another
+// API: handing it to the session's adapter fails every turn of that NPC. No
+// usable row yields "", which the roster load then resolves to the session
+// provider's default ([defaultEmptyModels]).
+func resolveNPCModel(bound, tenant *storage.ProviderConfig, sessionProvider string) string {
+	for _, row := range []*storage.ProviderConfig{bound, tenant} {
+		if row != nil && row.Model != "" && row.Provider == sessionProvider {
+			return row.Model
+		}
 	}
-	return tenantModel
+	return ""
 }
 
 // sessionLLMProviderID names the provider whose adapter serves the whole Roster:
-// the primary Agent's bound LLM config, else the Tenant's 'llm' row, else ""
-// (no row: the deployment default, [llmbuild.DeploymentDefault]). It mirrors [effectiveComponentConfig], which
-// [resolveSessionKeys] uses to pick the key and Config.llmProviderID, so the
-// default model filled in below belongs to the adapter that will be called.
-func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider string) string {
-	if primaryBound != nil {
-		return primaryBound.Provider
+// the primary Agent's bound LLM config, else the Tenant's 'llm' row, else the
+// deployment default ([llmbuild.DeploymentDefault.Select]) — never empty. It
+// mirrors [effectiveComponentConfig], which [resolveSessionKeys] uses to pick
+// the key and Config.llmProviderID, so the models resolved against it belong to
+// the adapter that will be called.
+func sessionLLMProviderID(primaryBound, tenant *storage.ProviderConfig, d llmbuild.DeploymentDefault) string {
+	effective := primaryBound
+	if effective == nil {
+		effective = tenant
 	}
-	return tenantProvider
+	providerID, _ := d.Select(effective)
+	return providerID
 }
 
 // defaultEmptyModels resolves every model-less spec to the VOICE model d names
