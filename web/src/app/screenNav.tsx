@@ -5,10 +5,13 @@ import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "@/screens/campaign/vie
 
 // The navigation seam between screens and the router (ADR-0063 amendment).
 //
-// Screens and shell components never import @tanstack/react-router: they ask
-// useScreenNav() to go somewhere or to keep a selection in the URL, and the
-// route layer (RouterScreenNav, mounted by the tenant layout) turns that into
-// real navigations. Two things fall out of that:
+// Screens never import @tanstack/react-router: they ask useScreenNav() to go
+// somewhere or to keep a selection in the URL, and the route layer
+// (RouterScreenNav, mounted by the tenant layout) turns that into real
+// navigations. (The shell's own chrome is the exception: AppShell and the
+// not-found page render the router's Link — a real anchor the browser can open
+// in a new tab — and the command palette and the user menu, which predate this
+// seam, still call useNavigate.) Two things fall out of that:
 //
 //   - a screen test needs no router and no router mock — outside a provider
 //     the hook answers with an inert default (empty search, no-op moves), and

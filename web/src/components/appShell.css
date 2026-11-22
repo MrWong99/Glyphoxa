@@ -18,6 +18,14 @@
 .gx-shell .gx-sidebar__brand:hover {
   text-decoration: none;
 }
+/* The brand fills the sidebar's top-left corner edge to edge, so the app's
+ * usual focus ring — drawn OUTSIDE the box — falls off the viewport on two
+ * sides and under the topbar on a third. Draw this one inside instead. */
+.gx-shell .gx-sidebar__brand:focus-visible {
+  box-shadow: none;
+  outline: 2px solid var(--rune);
+  outline-offset: -2px;
+}
 
 /* ── Sidebar navigation ─────────────────────────────────────────────────── */
 /* The nav is two regions: a list that scrolls (the campaign's views, then
@@ -337,6 +345,17 @@
   .gx-shell .gx-crumbs__campaign,
   .gx-shell .gx-crumbs__sep {
     display: none;
+  }
+  /* With the campaign crumb gone the titles hold only the page's own name: a
+   * short word that reads badly cut ("Overvi…") while the switcher beside it
+   * still has a long campaign name to give. So from here down the switcher
+   * takes the squeeze first, down to its minimum width, and the title gives
+   * way only after that. The weight is this large on purpose — shrink is
+   * shared in proportion, and a fraction of a pixel taken from the title is
+   * enough to ellipsize it. Minimum widths are untouched, so nothing can
+   * overflow that did not before. */
+  .gx-shell .gx-topbar .gx-campaign-switcher {
+    flex-shrink: 100000;
   }
   .gx-shell .gx-live-pill {
     padding: 6px var(--spacing-sm);

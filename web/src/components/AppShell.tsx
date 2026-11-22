@@ -54,6 +54,17 @@ const isDrawerViewport = () =>
 // tab.
 const PROPOSALS_REFETCH_MS = 60_000;
 
+// The pending-suggestions read is ONE cache entry shared with the Suggestions
+// view and the graph overlay, and React Query runs a refetch with the options
+// of the observer that starts it — on a window refocus the first one
+// subscribed, which is the shell. So the shell must not be stricter than they
+// are: with a bare retry:false here, one failed refetch put the shared query in
+// error and the Suggestions view swapped its whole list for an error line.
+// Failures are retried like any other read; only the settled "this Tenant has
+// no campaign yet" answer (CodeNotFound) is not — backing off on that would
+// just delay the empty state.
+const proposalsRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
+
 export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
   const { t } = useI18n();
   // Derived by hand rather than via Link activeProps so the mocked-router unit
@@ -75,12 +86,17 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   // Live and attention signals, on every screen.
   const { live, startedMs } = useLiveSession();
   // The same cache entry the Suggestions view reads, so approving or dismissing
-  // one there moves this count without a second source of truth. retry:false: a
-  // count that cannot be read is simply not shown.
+  // one there moves this count without a second source of truth. A count that
+  // cannot be read is simply not shown; a count already shown survives a failed
+  // refetch (it is rendered from retained data).
   const proposalsQ = useQuery(
     CampaignService.method.listKnowledgeProposals,
     {},
-    { staleTime: PROPOSALS_REFETCH_MS, retry: false, refetchInterval: live ? PROPOSALS_REFETCH_MS : false },
+    {
+      staleTime: PROPOSALS_REFETCH_MS,
+      retry: proposalsRetry,
+      refetchInterval: live ? PROPOSALS_REFETCH_MS : false,
+    },
   );
   const pendingSuggestions = proposalsQ.data?.proposals.length ?? 0;
 
@@ -101,6 +117,15 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   useEffect(() => {
     document.title = documentTitle;
   }, [documentTitle]);
+  // Nothing else writes the tab title, so the shell hands it back when it
+  // unmounts: a lapsed session leaves by an in-app navigation to /login, and
+  // the public page must not keep a campaign's name in the tab.
+  useEffect(
+    () => () => {
+      document.title = "Glyphoxa";
+    },
+    [],
+  );
 
   // A new screen or view starts at its top. .gx-content is the scroll
   // container (the shell itself never scrolls), so without this a GM who

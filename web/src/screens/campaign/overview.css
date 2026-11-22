@@ -38,6 +38,12 @@
   background: var(--surface-card-hover);
   border-color: var(--border-strong);
 }
+/* The app's focus ring is a box-shadow set by a bare :focus-visible rule
+ * (styles/base.css), and the tile's own inset shadow above outranks it — so
+ * without this a keyboard user tabbing through the tiles saw nothing move. */
+.gx-overview .gx-overview__tile:focus-visible {
+  box-shadow: var(--shadow-inset), var(--focus-ring);
+}
 
 .gx-overview .gx-overview__icon {
   flex: 0 0 auto;

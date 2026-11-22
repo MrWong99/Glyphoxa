@@ -223,6 +223,19 @@ describe("campaign view path (ADR-0063)", () => {
     await waitFor(() => expect(router.state.location.search).toEqual({}));
   });
 
+  it("a URL carrying both ?node= and ?agent= stays on the wiki: the losing ?agent= is dropped, not followed later", async () => {
+    // ?node= wins the view. Were ?agent= left in the URL, it would resurface
+    // the moment the wiki strips ?node= — beforeLoad would then see only
+    // ?agent= and bounce the GM off the entry they just opened, onto Cast.
+    const router = renderAt("/t/acme/campaign/knowledge?node=n-bart&agent=npc-1");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
+    );
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge");
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard");
+  });
+
   it("a bare /campaign?agent= link goes straight to Cast", async () => {
     const router = renderAt("/t/acme/campaign?agent=npc-1");
     await waitFor(() => expect(router.state.location.pathname).toBe("/t/acme/campaign/cast"));

@@ -321,6 +321,18 @@ const subviewRoute = createRoute({
         replace: true,
       });
     }
+    // Both at once: ?node= decides the view, so ?agent= is dropped here, on
+    // the first pass. Left in the URL it would resurface the moment the wiki
+    // strips ?node= — this hook would then see only ?agent= and bounce the GM
+    // from the entry they just opened onto Cast.
+    if (search.node && search.agent) {
+      throw redirect({
+        to: "/t/$tenantSlug/$screen/$view",
+        params: { tenantSlug: params.tenantSlug, screen: "campaign", view: params.view },
+        search: { ...search, agent: undefined },
+        replace: true,
+      });
+    }
   },
   component: function SubviewScreen() {
     const { screen, view } = subviewRoute.useParams();

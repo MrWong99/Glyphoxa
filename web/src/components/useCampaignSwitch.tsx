@@ -44,6 +44,14 @@ type SwitchOptions = {
 // caller, and the switch can be issued from the topbar, the Campaigns page or
 // the palette). An observer comparing getActiveCampaign against this can raise
 // "changed elsewhere" only for changes it did not initiate.
+//
+// The flag is STICKY: it names the last campaign this tab asked for until the
+// tab asks for another one, and nothing clears it on a timer, on logout or when
+// the change has been observed. So it answers "did this tab ask for X?", not
+// "is this particular change to X ours?" — a later switch to that same id made
+// elsewhere still matches. An observer should consult it when the Active
+// Campaign CHANGES, and treat a match as "probably ours". A switch the server
+// refuses takes its mark back (see commit below).
 
 let localSwitchTarget: string | null = null;
 
@@ -66,7 +74,7 @@ export function isLocalCampaignSwitch(campaignId: string): boolean {
   return localSwitchTarget === campaignId;
 }
 
-/** Forgets the flag (tests; and a logout). */
+/** Forgets the flag. Nothing in the app calls this today; tests do. */
 export function resetLocalCampaignSwitch(): void {
   localSwitchTarget = null;
 }
@@ -91,6 +99,7 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
     (campaign: Target, opts?: SwitchOptions) => {
       // Marked BEFORE the write: the sweep's refetch can land before onSuccess
       // runs, and an observer must already see this change as ours.
+      const before = localSwitchTarget;
       markLocalCampaignSwitch(campaign.id);
       mutate(
         { campaignId: campaign.id },
@@ -107,8 +116,14 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
             else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
             (opts?.onSwitched ?? defaultOnSwitched)?.({ campaign, deferred });
           },
-          onError: (err) =>
-            toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) })),
+          onError: (err) => {
+            // The switch was refused (or never confirmed), so as far as this
+            // tab knows the campaign did not become active through it: put the
+            // flag back to what it said before — unless a newer switch has
+            // claimed it meanwhile.
+            if (localSwitchTarget === campaign.id) localSwitchTarget = before;
+            toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) }));
+          },
         },
       );
     },

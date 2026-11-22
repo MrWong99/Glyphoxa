@@ -195,6 +195,8 @@ describe("Campaigns", () => {
   it("shows a loading state, then the list", async () => {
     renderScreen({ campaigns: TWO, activeId: "a" });
     expect(screen.getByTestId("campaigns-loading")).toBeInTheDocument();
+    // Named for assistive tech, not just drawn.
+    expect(screen.getByRole("status", { name: "Loading…" })).toBeInTheDocument();
     await screen.findByRole("list", { name: "Your campaigns" });
     expect(screen.queryByTestId("campaigns-loading")).not.toBeInTheDocument();
   });

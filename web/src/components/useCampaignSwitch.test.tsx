@@ -203,6 +203,22 @@ describe("the 'this tab did it' flag", () => {
     expect(isLocalCampaignSwitch("a")).toBe(false);
   });
 
+  it("is taken back when the switch is refused — the campaign never became active through this tab", async () => {
+    mount({ switchError: "selection store down" });
+    await waitFor(() => expect(screen.getByTestId("working-in")).toHaveTextContent("Alpha Quest"));
+    // An earlier switch of this tab's own, which did go through.
+    markLocalCampaignSwitch("a");
+
+    fireEvent.click(screen.getByRole("button", { name: "switch to beta" }));
+    expect(isLocalCampaignSwitch("b")).toBe(true);
+    await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalled());
+
+    // A later change to Beta Tale made elsewhere must not read as ours…
+    expect(isLocalCampaignSwitch("b")).toBe(false);
+    // …and what this tab did before the failed attempt still stands.
+    expect(lastLocalCampaignSwitch()).toBe("a");
+  });
+
   it("can be set by a flow that activates a campaign without the hook", () => {
     markLocalCampaignSwitch("new-1");
     expect(isLocalCampaignSwitch("new-1")).toBe(true);

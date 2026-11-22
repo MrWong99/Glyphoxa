@@ -4,6 +4,8 @@ import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { createConnectQueryKey } from "@connectrpc/connect-query";
+import { focusManager } from "@tanstack/react-query";
 
 import {
   CampaignService,
@@ -49,6 +51,7 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
 }));
 
+import { ProposalsPanel } from "@/screens/campaign/ProposalsPanel";
 import { AppShell } from "./AppShell";
 
 const user = create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" });
@@ -63,12 +66,16 @@ const campaign = create(CampaignSchema, {
 // What the shell reads on every screen: the Active Campaign (section label,
 // breadcrumb, tab title), the Voice Session (live signals) and the pending
 // Knowledge Proposals (the Suggestions count). `live` and `pending` are mutable
-// so a test can change the server's answer under a mounted shell.
+// so a test can change the server's answer under a mounted shell;
+// `failProposalReads` makes the next N proposal reads fail the way a network
+// blip does, and `proposalReads` counts them.
 function shellBackend(opts: { live?: boolean; pending?: number; noCampaign?: boolean } = {}) {
   const state = {
     live: opts.live ?? false,
     pending: opts.pending ?? 0,
     startedAt: new Date(Date.now() - (3600 + 12 * 60 + 40) * 1000), // 01:12:40 ago
+    proposalReads: 0,
+    failProposalReads: 0,
   };
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
@@ -78,7 +85,12 @@ function shellBackend(opts: { live?: boolean; pending?: number; noCampaign?: boo
         return create(GetActiveCampaignResponseSchema, { campaign });
       },
       listKnowledgeProposals: () => {
+        state.proposalReads++;
         if (opts.noCampaign) throw new ConnectError("no campaign", Code.NotFound);
+        if (state.failProposalReads > 0) {
+          state.failProposalReads--;
+          throw new ConnectError("blip", Code.Unavailable);
+        }
         return create(ListKnowledgeProposalsResponseSchema, {
           proposals: Array.from({ length: state.pending }, (_, i) =>
             create(KnowledgeProposalSchema, { id: `p${i}` }),
@@ -107,7 +119,7 @@ function renderShell(opts: Parameters<typeof shellBackend>[0] = {}) {
       <AppShell tenantSlug="acme" user={user} />
     </Providers>,
   );
-  return { ...h, queryClient, container: view.container };
+  return { ...h, queryClient, container: view.container, unmount: view.unmount };
 }
 
 const sidebar = (container: HTMLElement) => container.querySelector(".gx-sidebar") as HTMLElement;
@@ -124,6 +136,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  // Back to "ask the document" for the one test that fakes a tab refocus.
+  focusManager.setFocused(undefined);
 });
 
 describe("AppShell chrome", () => {
@@ -396,6 +410,19 @@ describe("AppShell topbar", () => {
     expect(document.title).toBe("Cast · Glyphoxa");
   });
 
+  // Nothing else in the app writes the tab title, and a lapsed session leaves
+  // the shell by an in-app navigation to /login — which would otherwise keep
+  // "<View> · <Campaign> · Glyphoxa" on a public page.
+  it("hands the browser tab back to the product name when the shell unmounts", async () => {
+    route.view = "knowledge";
+    const { container, unmount } = renderShell();
+    await settled(container);
+    await waitFor(() => expect(document.title).toBe("World wiki · The Sunless Citadel · Glyphoxa"));
+
+    unmount();
+    expect(document.title).toBe("Glyphoxa");
+  });
+
   it("titles an unknown screen with the product name alone", async () => {
     route.screen = "nonsense";
     route.view = undefined;
@@ -491,5 +518,50 @@ describe("AppShell pending-suggestions count", () => {
       await queryClient.invalidateQueries();
     });
     expect(await screen.findByRole("link", { name: "Suggestions, 1 pending" })).toBeInTheDocument();
+  });
+
+  // The shell's read and the Suggestions view's read are ONE cache entry, and
+  // React Query runs a refetch with the options of the observer that starts it
+  // — on a window refocus that is the first one subscribed: the shell's, which
+  // mounts before any screen. With retry:false there, a single failed refetch
+  // put the query in error, and the view (which renders an error as a
+  // replacement of the list) swapped the GM's whole review queue for "Couldn't
+  // load suggestions".
+  it("does not cost the Suggestions view its list when one refetch fails", async () => {
+    const h = shellBackend({ pending: 2 });
+    const queryClient = makeQueryClient();
+    const ui = (withPanel: boolean) => (
+      <Providers transport={h.transport} queryClient={queryClient}>
+        <AppShell tenantSlug="acme" user={user} />
+        {withPanel && <ProposalsPanel />}
+      </Providers>
+    );
+    // The shell first, as in the app; the GM opens Suggestions afterwards.
+    const view = render(ui(false));
+    await screen.findByRole("link", { name: "Suggestions, 2 pending" });
+    view.rerender(ui(true));
+    const cards = () => view.container.querySelectorAll(".gx-proposal-card");
+    await waitFor(() => expect(cards()).toHaveLength(2));
+    expect(h.state.proposalReads).toBe(1);
+
+    // The GM comes back to the tab after the read has gone stale, and that
+    // one refetch hits a network blip.
+    h.state.failProposalReads = 1;
+    await queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.listKnowledgeProposals,
+        cardinality: "finite",
+      }),
+      refetchType: "none",
+    });
+    act(() => focusManager.setFocused(true));
+    await waitFor(() => expect(h.state.proposalReads).toBe(2));
+
+    // It is retried like any other read (the third read), and meanwhile the
+    // list and the count stay as they were.
+    await waitFor(() => expect(h.state.proposalReads).toBe(3), { timeout: 3000 });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(cards()).toHaveLength(2);
+    expect(screen.getByRole("link", { name: "Suggestions, 2 pending" })).toBeInTheDocument();
   });
 });

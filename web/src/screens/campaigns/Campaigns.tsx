@@ -55,7 +55,8 @@ export function Campaigns() {
       <p className="gx-providers__lede">{t("shell.campaignsLede")}</p>
 
       {listQ.isPending ? (
-        <div className="gx-campaigns__loading" aria-busy="true" aria-label={t("common.loading")}>
+        // role="status": aria-label on a role-less div is not exposed at all.
+        <div className="gx-campaigns__loading" role="status" aria-busy="true" aria-label={t("common.loading")}>
           <div className="gx-skeleton" data-testid="campaigns-loading" />
           <div className="gx-skeleton" />
         </div>

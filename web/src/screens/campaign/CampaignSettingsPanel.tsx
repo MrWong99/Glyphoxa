@@ -55,7 +55,8 @@ export function CampaignSettingsPanel() {
       );
     }
     return (
-      <div className="gx-campaign-settings" aria-busy="true" aria-label={t("common.loading")}>
+      // role="status": aria-label on a role-less div is not exposed at all.
+      <div className="gx-campaign-settings" role="status" aria-busy="true" aria-label={t("common.loading")}>
         <div className="gx-skeleton" data-testid="campaign-settings-loading" />
       </div>
     );

@@ -80,6 +80,8 @@ describe("CampaignSettingsPanel", () => {
   it("shows a skeleton, then the Active Campaign's settings", async () => {
     renderPanel();
     expect(screen.getByTestId("campaign-settings-loading")).toBeInTheDocument();
+    // Named for assistive tech, not just drawn.
+    expect(screen.getByRole("status", { name: "Loading…" })).toBeInTheDocument();
     await waitFor(() => expect(nameField().value).toBe("The Sunless Citadel"));
     expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
     expect(screen.queryByTestId("campaign-settings-loading")).not.toBeInTheDocument();
