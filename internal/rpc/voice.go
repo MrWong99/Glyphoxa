@@ -327,21 +327,55 @@ func (s *VoiceServer) ListModels(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("no model catalog for provider %q", provider))
 	}
-	tenantID, err := s.tenant(ctx)
-	if err != nil {
-		return nil, err
+	// slot "chat" is the Planning chat's catalog (ADR-0062 amendment
+	// 2026-11-22, voice_chat.go): the key of the chat key ladder, the chat
+	// default pinned first. Empty is the voice LLM slot, unchanged.
+	chat := false
+	switch req.Msg.GetSlot() {
+	case "":
+	case chatSlot:
+		chat = true
+	default:
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("no model catalog for slot %q", req.Msg.GetSlot()))
 	}
-	key, err := s.resolveLLMSlotKey(ctx, tenantID, provider)
+	tenantID, err := s.tenant(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	fallback := func() *connect.Response[managementv1.ListModelsResponse] {
+		if chat {
+			return connect.NewResponse(&managementv1.ListModelsResponse{Models: chatFallbackCatalog(provider)})
+		}
 		var models []string
 		if provider == anthropic.ProviderID {
 			models = anthropicFallbackModels
 		}
 		return connect.NewResponse(&managementv1.ListModelsResponse{Models: pinFirst(s.llmDefault.VoiceModel(provider, ""), models)})
+	}
+	shape := func(models []string) []string {
+		if chat {
+			return chatCatalog(provider, models)
+		}
+		return llmCatalog(provider, s.llmDefault, models)
+	}
+
+	var key string
+	if chat {
+		key, err = s.resolveChatSlotKey(ctx, tenantID, provider)
+		if connect.CodeOf(err) == connect.CodeFailedPrecondition {
+			// No key the Tenant may use for this provider (its plan excludes the
+			// Platform Key, or the cipher is unavailable). The chat card asks
+			// for a key in that state and still needs a model list to show:
+			// the priced fallback, without calling the provider.
+			return fallback(), nil
+		}
+	} else {
+		key, err = s.resolveLLMSlotKey(ctx, tenantID, provider)
+	}
+	if err != nil {
+		return nil, err
 	}
 	// key == "" is the platform key (the entitlement already said yes).
 	onPlatformKey := key == ""
@@ -367,7 +401,7 @@ func (s *VoiceServer) ListModels(
 			return !spend.LLMPriced(observe.Provider(provider), m)
 		})
 	}
-	return connect.NewResponse(&managementv1.ListModelsResponse{Models: llmCatalog(provider, s.llmDefault, models)}), nil
+	return connect.NewResponse(&managementv1.ListModelsResponse{Models: shape(models)}), nil
 }
 
 // llmCatalog shapes a raw provider catalog for the select: the model a voice

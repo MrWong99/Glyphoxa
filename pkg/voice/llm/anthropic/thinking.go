@@ -56,6 +56,71 @@ func DefaultThinking(model string) Thinking {
 	return Thinking{}
 }
 
+// ChatModel is the Claude model the Planning chat runs when a Tenant chooses
+// Anthropic for it and names no model (ADR-0062 amendment 2026-11-22). It is a
+// chat default only: "same as voice" keeps the voice model, and a Voice Session
+// never resolves to it.
+const ChatModel = "claude-sonnet-5-5"
+
+// adaptiveThinkingFamilies are the model-id prefixes that accept
+// {"type":"adaptive"} together with output_config.effort. A prefix covers a
+// dated snapshot and later point releases of the same line. Everything else —
+// claude-haiku-4-5 (400 on both fields), claude-opus-4-5 and older, a gateway
+// id — is left alone.
+var adaptiveThinkingFamilies = []string{
+	"claude-haiku-5",
+	"claude-sonnet-5",
+	"claude-opus-5",
+	"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+	"claude-sonnet-4-6",
+	"claude-fable-5",
+	"claude-mythos-5",
+}
+
+// ChatThinking is the thinking policy of the Planning chat (ADR-0062 amendment
+// 2026-11-22), passed to [WithThinkingFor] by llmbuild.NewChat. Prep chat
+// trades latency for quality, the opposite of a spoken turn:
+//
+//   - the adaptive-capable families → adaptive thinking at effort medium. It
+//     is sent explicitly because the API's own default differs per model
+//     (high on Sonnet 5.5, medium on Opus 5.5 and Haiku 5.5, no thinking at
+//     all on Opus 4.8), and one chat should not reason at three depths
+//     depending on the model picked.
+//   - claude-haiku-4-5 and every id this adapter does not know → nothing, the
+//     same request [DefaultThinking] sends for them.
+//
+// Thinking tokens count against max_tokens, so a caller using this policy
+// must leave room for them (planchat asks for 16000).
+func ChatThinking(model string) Thinking {
+	for _, family := range adaptiveThinkingFamilies {
+		if strings.HasPrefix(model, family) {
+			return Thinking{Mode: ThinkingAdaptive, Effort: "medium"}
+		}
+	}
+	return Thinking{}
+}
+
+// forcedToolChoiceRejected are the model-id prefixes that answer 400 to a
+// forced tool_choice ({"type":"any"} or {"type":"tool"}): `tool_choice: type
+// "tool" and "any" are not supported for this model.`
+var forcedToolChoiceRejected = []string{
+	"claude-opus-5-5",
+	"claude-sonnet-5-5",
+	"claude-fable-5-1", "claude-fable-5-2",
+	"claude-mythos-5-1", "claude-mythos-5-2",
+}
+
+// rejectsForcedToolChoice reports whether model answers 400 to a forced
+// tool_choice. [Client.Complete] sends auto to such a model instead.
+func rejectsForcedToolChoice(model string) bool {
+	for _, prefix := range forcedToolChoiceRejected {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // WithThinkingFor replaces the per-model thinking policy ([DefaultThinking]).
 // policy is called with the model a request resolves to and returns what that
 // request sends; a zero [Thinking] sends neither field. It mirrors
@@ -67,6 +132,14 @@ func WithThinkingFor(policy func(model string) Thinking) Option {
 			c.thinking = policy
 		}
 	}
+}
+
+// ThinkingFor reports what this client sends for model: the answer of its
+// thinking policy ([DefaultThinking] unless [WithThinkingFor] replaced it). It
+// lets a caller that built the client through a factory pin WHICH policy it
+// got — the voice one or the chat one — without sending a request.
+func (c *Client) ThinkingFor(model string) Thinking {
+	return c.thinking(model)
 }
 
 // wireThinking is the Messages API `thinking` object.

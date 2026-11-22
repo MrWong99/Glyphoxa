@@ -32,3 +32,30 @@ func TestLLMPrices_VoiceCandidatesArePriced(t *testing.T) {
 		}
 	}
 }
+
+// TestLLMPrices_ChatCandidatesArePriced pins the price rows of the Planning
+// chat's Anthropic models (ADR-0062 amendment 2026-11-22). Without a row a chat
+// choice could not run on the Platform Key at all (priced-only rule), and a
+// BYOK one would be metered at the flat fallback, which is BELOW Opus's real
+// output rate.
+func TestLLMPrices_ChatCandidatesArePriced(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		model   string
+		in, out float64 // USD per 1M tokens
+	}{
+		{"claude-sonnet-5-5", 2.00, 10.00},
+		{"claude-opus-5-5", 4.00, 20.00},
+		{"claude-sonnet-5", 2.00, 10.00},
+		{"claude-opus-5", 5.00, 25.00},
+	} {
+		if !LLMPriced(observe.ProviderAnthropic, tc.model) {
+			t.Errorf("%s has no price row", tc.model)
+			continue
+		}
+		usd := EstimateLLMUSD(observe.ProviderAnthropic, tc.model, 1_000_000, 1_000_000)
+		if want := tc.in + tc.out; math.Abs(usd-want) > 1e-9 {
+			t.Errorf("%s = $%.4f for 1M in + 1M out, want $%.4f", tc.model, usd, want)
+		}
+	}
+}

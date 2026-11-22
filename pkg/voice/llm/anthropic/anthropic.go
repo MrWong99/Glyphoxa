@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -61,6 +62,10 @@ type Client struct {
 
 	// log receives the adapter's few operational warnings ([WithLogger]).
 	log *slog.Logger
+
+	// forcedDowngradeWarned holds the models whose forced tool_choice downgrade
+	// was already logged (complete.go toolChoiceFor): one warning per model.
+	forcedDowngradeWarned sync.Map
 
 	// thoughts keeps the thinking blocks of recent assistant tool turns so the
 	// next tool round can replay them (passthrough.go).

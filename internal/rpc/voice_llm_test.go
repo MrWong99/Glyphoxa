@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,8 +123,14 @@ func TestListModels_AnthropicFailureFallsBackToPricedHaiku(t *testing.T) {
 func TestOfferedDefaultModelsArePriced(t *testing.T) {
 	t.Parallel()
 	for provider, models := range map[string][]string{
-		"groq":      llmCatalog("groq", llmbuild.DeploymentDefault{}, nil),
-		"anthropic": append(llmCatalog("anthropic", llmbuild.DeploymentDefault{}, nil), anthropicFallbackModels...),
+		"groq": slices.Concat(
+			llmCatalog("groq", llmbuild.DeploymentDefault{}, nil),
+			// The Planning chat's catalogs (ADR-0062 amendment 2026-11-22): the
+			// pinned chat default and the fallback list.
+			chatCatalog("groq", nil), chatFallbackCatalog("groq")),
+		"anthropic": slices.Concat(
+			llmCatalog("anthropic", llmbuild.DeploymentDefault{}, nil), anthropicFallbackModels,
+			chatCatalog("anthropic", nil), chatFallbackCatalog("anthropic"), anthropicChatFallbackModels),
 	} {
 		for _, m := range models {
 			if !spend.LLMPriced(observe.Provider(provider), m) {

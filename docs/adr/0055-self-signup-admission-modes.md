@@ -181,3 +181,5 @@ undecided and gets its own ADR; the design note scopes both shapes.
   `operator-ids` requirement for `open` mode only.
 
 *Amended by ADR-0054 (2026-11-20, #658): the "known undercount" above is closed. Off-session paid calls (recap, assist, generated maps and portraits, Highlight image and sound, voice preview, planning chat) are ledgered and checked against gate (b) through one seam, `billing.OffSession`; see the amendment in ADR-0054 for the rule and for what a background job does on an exhausted allowance.*
+
+*Note (2026-11-22, ADR-0062 amendment): a Tenant on the Platform Keys can now put its planning chat on Claude Sonnet 5.5 or Opus 5.5. The allowance gate before each exchange remains the only spend gate for chat; there is no per-exchange budget or price ceiling, so the exposure is one exchange of overshoot.*

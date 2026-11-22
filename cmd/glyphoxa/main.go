@@ -1614,6 +1614,19 @@ type sessionControl interface {
 	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
 }
 
+// newPlanningChatEngine builds the Planning chat engine the ChatService
+// serves. It is its own function so the composition-root test can hold the
+// engine and pin that it resolves a row-less Tenant to the SAME deployment
+// default the Configuration read reports (effective_chat_llm): dropping
+// planchat.WithLLMDefault here leaves every package test green while the
+// screen names Anthropic and the chat answers with Groq.
+func newPlanningChatEngine(store *storage.Store, cipher *crypto.Cipher, searchEngine *search.Engine, recapEngine *recap.Engine, offSession *billing.OffSession, metrics observe.StageRecorder, log *slog.Logger, keyEnt llmbuild.PlatformKeyEntitlement, llmDefault llmbuild.DeploymentDefault) *planchat.Engine {
+	chatKnowledge := knowledge.New(store, store.PromptKG())
+	chatRecap := knowledge.NewRecap(recapEngine, store)
+	return planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, offSession, metrics, log,
+		planchat.WithKeyEntitlement(keyEnt), planchat.WithLLMDefault(llmDefault))
+}
+
 func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession, llmDefault llmbuild.DeploymentDefault) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
@@ -1831,9 +1844,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Voice Session involved), and the ADR-0055 posture wiring: the platform-key
 	// entitlement plus the shared off-session metering seam, which — in open
 	// admission mode — checks the monthly allowance before each exchange.
-	chatKnowledge := knowledge.New(store, store.PromptKG())
-	chatRecap := knowledge.NewRecap(recapEngine, store)
-	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, offSession, metrics, log, planchat.WithKeyEntitlement(keyEnt), planchat.WithLLMDefault(llmDefault))
+	chatEngine := newPlanningChatEngine(store, cipher, searchEngine, recapEngine, offSession, metrics, log, keyEnt, llmDefault)
 	chatSrv := rpc.NewChatServer(store, log)
 	chatSrv.SetEngine(chatEngine)
 	chatPath, chatHandler := stack.Handler(chatSrv.Handler)

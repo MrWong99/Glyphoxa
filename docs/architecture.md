@@ -378,6 +378,22 @@ flagship fallback). On the Platform Key only priced models run. The Configuratio
 voice-LLM slots, Groq and Anthropic, and shows which is in effect; Gemini as a
 voice LLM is reachable as a deployment default only.
 
+The **Planning chat model** sits one step in front of that resolution
+(`llmbuild.DeploymentDefault.SelectChat`, ADR-0062 amendment 2026-11-22). It is
+a Tenant-level choice of a provider and a model, stored as the Tenant's single
+`chat_llm` Provider Config: the Butler-bound row (reserved, no writer) > the
+chat choice > the voice `llm` row ("same as voice") > the deployment default. A
+chat choice finds its key on a ladder — a key saved for the chat alone, else
+the Tenant's key in that provider's LLM slot, else the Platform Key behind the
+entitlement — and never falls back to another provider: with no key the
+exchange is refused. The chat engine, `ListProviderConfigs.effective_chat_llm`
+and the chat model catalog (`ListModels` with slot `chat`) all call that one
+function, which is what keeps the screen's "Answers with …" line true. The chat
+is built by `llmbuild.NewChat`, so on Anthropic it thinks under its own policy
+(adaptive, effort `medium`, 16000-token reply cap) while a Voice Session's
+requests stay byte-identical; an explicit Anthropic chat choice with no model
+runs `claude-sonnet-5-5`.
+
 The managed provider matrix is Groq or Anthropic (LLM) + ElevenLabs (STT + TTS)
 (ADR-0039 and its 2026-11-22 amendment).
 OpenAI TTS, named alongside ElevenLabs in
