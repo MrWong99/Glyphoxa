@@ -85,8 +85,10 @@ func TestTTSRecorder_WriteOnCleanup(t *testing.T) {
 	if !strings.Contains(got.Notes, "preserved provenance") {
 		t.Errorf("Notes lost preserved content: %q", got.Notes)
 	}
-	if !strings.Contains(got.Notes, "Re-recorded against ElevenLabs eleven_v3") {
-		t.Errorf("Notes missing provenance stamp: %q", got.Notes)
+	// The stamp names the model the sentences were actually synthesized on — the
+	// adapter default for a voice without a model_id (#702).
+	if !strings.Contains(got.Notes, "Re-recorded against ElevenLabs "+elevenlabs.DefaultModel) {
+		t.Errorf("Notes missing provenance stamp for %s: %q", elevenlabs.DefaultModel, got.Notes)
 	}
 }
 
