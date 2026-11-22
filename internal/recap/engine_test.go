@@ -124,8 +124,8 @@ func TestProviderResolutionChain(t *testing.T) {
 		if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 			t.Fatalf("Recap: %v", err)
 		}
-		if gotID != "" || gotKey != "" {
-			t.Errorf("got (%q,%q), want (\"\",\"\") the groq env default", gotID, gotKey)
+		if gotID != "groq" || gotKey != "" {
+			t.Errorf("got (%q,%q), want (groq, \"\") the groq env default", gotID, gotKey)
 		}
 	})
 }

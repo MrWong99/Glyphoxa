@@ -59,6 +59,16 @@ var llmPrices = map[llmKey]llmRate{
 	{observe.ProviderAnthropic, "claude-haiku-5-5"}:          {inputPerMTok: 0.10, outputPerMTok: 0.50},
 	{observe.ProviderAnthropic, "claude-haiku-4-5"}:          {inputPerMTok: 1.00, outputPerMTok: 5.00},
 	{observe.ProviderAnthropic, "claude-haiku-4-5-20251001"}: {inputPerMTok: 1.00, outputPerMTok: 5.00},
+	// Claude Opus 4.8 — the Anthropic adapter's own default model, which the
+	// off-session engines (recap, assist, planning chat) run when an Anthropic
+	// Provider Config names no model. $5 / $25, platform.claude.com pricing,
+	// retrieved 2026-11-22 (#702). Priced so a default nobody chose is never
+	// charged at the conservative fallback. ESTIMATE.
+	{observe.ProviderAnthropic, "claude-opus-4-8"}: {inputPerMTok: 5.00, outputPerMTok: 25.00},
+	// Gemini 2.5 Flash — the Gemini LLM adapter's default model, priced for the
+	// same reason. $0.30 / $2.50 (text input / output including thinking
+	// tokens), ai.google.dev pricing, paid tier. ESTIMATE.
+	{observe.ProviderGemini, "gemini-2.5-flash"}: {inputPerMTok: 0.30, outputPerMTok: 2.50},
 	// Gemini 2.5 Flash Image — image generation billed as tokens (#311, ADR-0004
 	// amendment). ESTIMATE captured 2026-07-11; 1 image ≈ 1290 output tokens ≈
 	// $0.039. Priced through the LLM sink because Gemini meters a generated image
@@ -172,6 +182,15 @@ const (
 func EstimateLLMUSD(provider observe.Provider, model string, inputTokens, outputTokens int) float64 {
 	usd, _ := llmCostUSD(provider, model, inputTokens, outputTokens)
 	return usd
+}
+
+// LLMPriced reports whether (provider, model) has its own row in the price map.
+// A model without one is charged at the conservative default, far above any
+// real rate, so whatever offers a model unasked — a provider default, a
+// deployment default, a fallback catalog — checks it here (#702).
+func LLMPriced(provider observe.Provider, model string) bool {
+	_, ok := llmPrices[llmKey{provider, model}]
+	return ok
 }
 
 // EstimateTTSUSD estimates the USD cost of chars submitted to a TTS synthesizer

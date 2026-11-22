@@ -197,7 +197,7 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 // multi-campaign installs, and what lets an unseeded install (whose tenant is
 // "Glyphoxa", not "Glyphoxa Demo") voice its own campaign instead of hard-failing
 // on the seed tenant lookup.
-func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UUID) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
+func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UUID, llmDefault llmbuild.DeploymentDefault) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
 	if campaignID == uuid.Nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Active Campaign bound to the Voice Session (empty campaign id); select a campaign before starting a session")
 	}
@@ -205,7 +205,7 @@ func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UU
 	if err != nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: get campaign %s: %w", campaignID, err)
 	}
-	return loadCampaignRoster(ctx, st, campaign)
+	return loadCampaignRoster(ctx, st, campaign, llmDefault)
 }
 
 // loadCampaignRoster is the shared roster hydration the loaders end in: given a
@@ -221,7 +221,7 @@ func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UU
 // credential bridge resolves the session BYOK keys (a single key set backs the
 // whole Roster; per-NPC adapter selection is a later concern). The contract below
 // (tenant-model fallback, once-per-session grant read) is unchanged.
-func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage.Campaign) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
+func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage.Campaign, llmDefault llmbuild.DeploymentDefault) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
 	chars, err := st.CharacterAgents(ctx, campaign.ID)
 	if err != nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
@@ -302,7 +302,7 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 
 	// Any spec still without a model (Butler included) gets the SESSION provider's
 	// default, named: see [defaultEmptyModels].
-	defaultEmptyModels(specs, sessionLLMProviderID(primary.LLMConfig, tenantLLMProvider))
+	defaultEmptyModels(specs, sessionLLMProviderID(primary.LLMConfig, tenantLLMProvider), llmDefault)
 
 	return specs, primary, campaign, nil
 }
@@ -354,7 +354,7 @@ func resolveNPCModel(bound *storage.ProviderConfig, tenantModel string) string {
 
 // sessionLLMProviderID names the provider whose adapter serves the whole Roster:
 // the primary Agent's bound LLM config, else the Tenant's 'llm' row, else ""
-// (the env default, Groq). It mirrors [effectiveComponentConfig], which
+// (no row: the deployment default, [llmbuild.DeploymentDefault]). It mirrors [effectiveComponentConfig], which
 // [resolveSessionKeys] uses to pick the key and Config.llmProviderID, so the
 // default model filled in below belongs to the adapter that will be called.
 func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider string) string {
@@ -364,18 +364,20 @@ func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider s
 	return tenantProvider
 }
 
-// defaultEmptyModels resolves every model-less spec to providerID's default
-// VOICE model ([llmbuild.DefaultVoiceModel]: the provider's default, except
-// that an Anthropic session gets Claude Haiku rather than the flagship, #702). The spec's model is both what the engine
+// defaultEmptyModels resolves every model-less spec to the VOICE model d names
+// for providerID ([llmbuild.DeploymentDefault.VoiceModel]: the deployment
+// default's model when providerID is — or, being empty, falls to — the
+// deployment default provider; else the provider's own default, where an
+// Anthropic session gets Claude Haiku rather than the flagship, #702). The spec's model is both what the engine
 // requests and what the spend meter prices, and the meter has no row for
 // (provider, ""): an empty model was charged at the conservative fallback, about
 // 30x the real Groq rate, so a platform-key trial tenant (no provider_config at
 // all) tripped its allowance after a few cents of real spend. Naming the default
 // here keeps the requested and the metered model identical.
-func defaultEmptyModels(specs []npcSpec, providerID string) {
+func defaultEmptyModels(specs []npcSpec, providerID string, d llmbuild.DeploymentDefault) {
 	for i := range specs {
 		if specs[i].model == "" {
-			specs[i].model = llmbuild.DefaultVoiceModel(providerID)
+			specs[i].model = d.VoiceModel(providerID, "")
 		}
 	}
 }

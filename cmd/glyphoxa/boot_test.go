@@ -1472,3 +1472,68 @@ func TestApplyVoiceEnv(t *testing.T) {
 		t.Errorf("log = %q, want a warning naming the ignored variable", buf.String())
 	}
 }
+
+// TestDeploymentLLMDefault pins the boot read of the deployment-default LLM
+// (#702): unset is the code default, a named provider is validated, and a bad
+// value stops the boot with a message naming the variable to fix.
+func TestDeploymentLLMDefault(t *testing.T) {
+	discard := slog.New(slog.DiscardHandler)
+
+	d, err := deploymentLLMDefault(envMap(nil), discard)
+	if err != nil {
+		t.Fatalf("unset envs: %v", err)
+	}
+	if p, m := d.Select(nil); p != "groq" || m != "" {
+		t.Errorf("unset envs resolve to (%q, %q), want (groq, \"\")", p, m)
+	}
+
+	d, err = deploymentLLMDefault(envMap(map[string]string{
+		"GLYPHOXA_LLM_DEFAULT_PROVIDER": "anthropic",
+		"GLYPHOXA_LLM_DEFAULT_MODEL":    "claude-haiku-4-5",
+		"ANTHROPIC_API_KEY":             "k",
+	}), discard)
+	if err != nil {
+		t.Fatalf("anthropic default: %v", err)
+	}
+	if p, m := d.Select(nil); p != "anthropic" || m != "claude-haiku-4-5" {
+		t.Errorf("resolved (%q, %q), want (anthropic, claude-haiku-4-5)", p, m)
+	}
+
+	for _, bad := range []map[string]string{
+		{"GLYPHOXA_LLM_DEFAULT_PROVIDER": "openai"},
+		{"GLYPHOXA_LLM_DEFAULT_PROVIDER": "anthropic"}, // no ANTHROPIC_API_KEY
+	} {
+		if _, err := deploymentLLMDefault(envMap(bad), discard); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_LLM_DEFAULT_PROVIDER") {
+			t.Errorf("deploymentLLMDefault(%v) = %v, want an error naming GLYPHOXA_LLM_DEFAULT_PROVIDER", bad, err)
+		}
+	}
+}
+
+// An unpriced default model is charged at the conservative fallback rate, which
+// drains a trial allowance in a handful of turns: the boot says so, loudly.
+func TestDeploymentLLMDefault_WarnsOnUnpricedModel(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	if _, err := deploymentLLMDefault(envMap(map[string]string{
+		"GLYPHOXA_LLM_DEFAULT_PROVIDER": "anthropic",
+		"GLYPHOXA_LLM_DEFAULT_MODEL":    "claude-nonexistent-9",
+		"ANTHROPIC_API_KEY":             "k",
+	}), log); err != nil {
+		t.Fatalf("an unpriced model must not stop the boot: %v", err)
+	}
+	if !strings.Contains(buf.String(), "claude-nonexistent-9") || !strings.Contains(buf.String(), "no price") {
+		t.Errorf("log = %q, want a warning naming the unpriced model", buf.String())
+	}
+
+	buf.Reset()
+	if _, err := deploymentLLMDefault(envMap(map[string]string{
+		"GLYPHOXA_LLM_DEFAULT_PROVIDER": "anthropic",
+		"GLYPHOXA_LLM_DEFAULT_MODEL":    "claude-haiku-4-5",
+		"ANTHROPIC_API_KEY":             "k",
+	}), log); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "no price") {
+		t.Errorf("priced model warned: %q", buf.String())
+	}
+}

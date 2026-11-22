@@ -130,12 +130,19 @@ type Engine struct {
 	log      *slog.Logger
 
 	keyEnt      llmbuild.PlatformKeyEntitlement // nil = everything allowed
+	llmDefault  llmbuild.DeploymentDefault      // zero = the code default (Groq)
 	newProvider ProviderFactory
 	maxRounds   int
 }
 
 // Option configures NewEngine.
 type Option func(*Engine)
+
+// WithLLMDefault sets the deployment-default LLM (#702) a Tenant with no LLM
+// Provider Config runs on. Unset is the code default (Groq, ADR-0036).
+func WithLLMDefault(d llmbuild.DeploymentDefault) Option {
+	return func(e *Engine) { e.llmDefault = d }
+}
 
 // WithKeyEntitlement wires the platform-key entitlement (ADR-0054/0055) the
 // env-fallback key resolution consults; nil grants everything (self-host).
@@ -233,10 +240,9 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	if err != nil {
 		return Result{}, err
 	}
-	providerID, model := "", ""
-	if cfg != nil {
-		providerID, model = cfg.Provider, cfg.Model
-	}
+	// No row resolves to the deployment default (#702) — never to a bare "" a
+	// later hop would read as Groq.
+	providerID, model := e.llmDefault.Select(cfg)
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return Result{}, fmt.Errorf("planchat: build provider: %w", err)

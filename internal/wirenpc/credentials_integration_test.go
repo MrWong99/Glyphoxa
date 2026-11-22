@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
@@ -220,7 +221,7 @@ func TestResolveSessionKeys_WebCreatedAgentUsesTenantKeys(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
-	_, primary, campaign, err := loadCampaignNPCs(ctx, st, campaignID)
+	_, primary, campaign, err := loadCampaignNPCs(ctx, st, campaignID, llmbuild.DeploymentDefault{})
 	if err != nil {
 		t.Fatalf("loadCampaignNPCs: %v", err)
 	}
