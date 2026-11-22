@@ -65,7 +65,7 @@ func TestDetect_LongBracketsStillCountTowardEnglishAndToolNarration(t *testing.T
 	for text, want := range map[string]Findings{
 		"[I need to look up the knowledge graph with the kg_query tool] Hallo, was darf es sein?": {UnknownTags: 1, English: 1, ToolNarration: 3},
 		"[leans heavily on the polished oak bar and sighs] Na, was darf's sein?":                  {UnknownTags: 1, English: 1},
-		"[sighs] Na, was darf's sein?":                                                            {},
+		"[sighs] Na, was darf's sein?": {},
 	} {
 		f := Detect(text, DetectOptions{NPCName: "Flo"})
 		got := Findings{UnknownTags: f.UnknownTags, English: f.English, ToolNarration: f.ToolNarration}
