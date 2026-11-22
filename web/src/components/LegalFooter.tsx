@@ -14,10 +14,19 @@ import { useI18n } from "@/i18n";
 // that mount a single screen), and a full page load into a static document is
 // no loss.
 
-export function LegalFooter({ className }: { className?: string }) {
+export function LegalFooter({
+  className,
+  as: Root = "footer",
+}: {
+  className?: string;
+  /** "div" where the footer sits INSIDE a page footer of its own (the
+   *  landing's): a second <footer> there would be a second contentinfo
+   *  landmark. The labelled <nav> inside stays either way. */
+  as?: "footer" | "div";
+}) {
   const { t } = useI18n();
   return (
-    <footer className={className ? `gx-legalfooter ${className}` : "gx-legalfooter"}>
+    <Root className={className ? `gx-legalfooter ${className}` : "gx-legalfooter"}>
       {/* Only the landmark label is localized. The link texts are the German
           legal documents' proper nouns (Impressum / Datenschutz /
           Nutzungsbedingungen) and stay verbatim in every display language. */}
@@ -26,6 +35,6 @@ export function LegalFooter({ className }: { className?: string }) {
         <a href="/privacy">Datenschutz</a>
         <a href="/terms">Nutzungsbedingungen</a>
       </nav>
-    </footer>
+    </Root>
   );
 }

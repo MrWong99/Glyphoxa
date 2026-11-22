@@ -3,7 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Glyphoxa</title>
+    <!-- The tab title before the app mounts, and what a crawler indexes. Every
+         page renames the tab once it renders (src/lib/useDocumentTitle.ts). -->
+    <title>Glyphoxa — voiced NPCs for tabletop RPGs on Discord</title>
+    <meta
+      name="description"
+      content="Glyphoxa gives the NPCs of your tabletop RPG a voice in your Discord voice channel. They answer at the table, every session is transcribed and searchable, and the GM stays in charge."
+    />
+    <meta name="theme-color" content="#1d1133" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Link previews (Discord, Slack, search results). Text only here: og:url
+         and og:image need an absolute address, which this document cannot
+         know — the same bundle ships to every deployment. The build adds them,
+         and upgrades the card to summary_large_image, when it is given
+         VITE_PUBLIC_ORIGIN (vite.config.ts, src/lib/shareMeta.ts). -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Glyphoxa" />
+    <meta property="og:title" content="Glyphoxa — voiced NPCs for tabletop RPGs on Discord" />
+    <meta
+      property="og:description"
+      content="Your NPCs join the Discord voice channel and answer in their own voice. Every session is transcribed and searchable, and the GM stays in charge."
+    />
+    <meta name="twitter:card" content="summary" />
+
     <link rel="icon" type="image/png" href="/favicon.png" />
     <!-- Arcane theme fonts are self-hosted under /fonts (src/styles/fonts.css);
          nothing is fetched from a third-party font host. Preload the two faces
@@ -12,7 +35,21 @@
     <link rel="preload" href="/fonts/zilla-slab-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- What is in the document before the app mounts: a heading, one
+           sentence and a way in — for a crawler, a link preview, and a visitor
+           whose script is slow or blocked. The first render replaces it. It
+           fades in only after a moment (.gx-static in styles/components.css),
+           so a normal load never flashes it. -->
+      <main class="gx-static">
+        <h1>Glyphoxa</h1>
+        <p>
+          Glyphoxa gives the NPCs of your tabletop RPG a voice in your Discord voice channel. They answer at the
+          table, every session is transcribed and searchable, and the GM stays in charge.
+        </p>
+        <a class="gx-btn gx-btn--primary" href="/login">Sign in with Discord</a>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

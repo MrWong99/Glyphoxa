@@ -2407,12 +2407,26 @@ button.gx-select__item:focus-visible {
 /* ===================== Pre-render block (web/index.html) =================
  * The few words inside #root before the app mounts — what a crawler, a link
  * preview and a visitor on a slow connection get. Replaced by the first
- * render.
+ * render. It is in the document from the first byte but only SHOWN after a
+ * moment: on a normal load the app mounts well inside that delay, so a signed-
+ * in GM opening a deep link never sees a flash of the public blurb.
  */
 .gx-static {
   max-width: 46ch;
   margin: 0 auto;
   padding: var(--layout-lg) var(--page-gutter);
+  opacity: 0;
+  animation: gx-static-in var(--duration-slow) var(--ease-standard) 1.2s forwards;
+}
+@keyframes gx-static-in {
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gx-static {
+    animation-timing-function: step-end;
+  }
 }
 .gx-static h1 {
   margin: 0 0 var(--spacing-md);

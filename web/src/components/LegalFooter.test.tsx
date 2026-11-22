@@ -26,6 +26,21 @@ describe("LegalFooter", () => {
     expect(screen.getByRole("navigation", { name: "Legal" })).toBeInTheDocument();
   });
 
+  it("is a contentinfo landmark by default, and a plain block inside another page footer", () => {
+    const { unmount } = render(<LegalFooter />);
+    expect(screen.getByRole("contentinfo")).toHaveClass("gx-legalfooter");
+    unmount();
+
+    render(
+      <footer>
+        <LegalFooter as="div" />
+      </footer>,
+    );
+    // One page footer, not two; the labelled link list is still there.
+    expect(screen.getAllByRole("contentinfo")).toHaveLength(1);
+    expect(screen.getByRole("navigation", { name: "Legal" })).toBeInTheDocument();
+  });
+
   it("keeps its own class when the caller adds one", () => {
     const { container } = render(<LegalFooter className="gx-legal__footer" />);
     expect(container.firstChild).toHaveClass("gx-legalfooter", "gx-legal__footer");
