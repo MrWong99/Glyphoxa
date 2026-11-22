@@ -28,6 +28,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
 	soundelevenlabs "github.com/MrWong99/Glyphoxa/pkg/voice/soundgen/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -389,6 +390,21 @@ func sttStreaming(getenv func(string) string) bool {
 // and must not stop the process either.
 func ttsTransport(getenv func(string) string) (ttseleven.Transport, error) {
 	return ttseleven.ParseTransport(getenv("GLYPHOXA_TTS_TRANSPORT"))
+}
+
+// applyVoiceEnv puts the voice loop's env knobs, shared by voice and all mode,
+// onto the session Config the process starts its Voice Sessions from:
+//   - Streaming STT (ADR-0042) is on by default; GLYPHOXA_STT_STREAMING=0 is the
+//     off-switch back to the batch STT path.
+//   - The synthesis transport (#702) is an opt-in; the default is the HTTP path,
+//     byte-for-byte. An unknown value is logged and ignored.
+func applyVoiceEnv(cfg *wirenpc.Config, getenv func(string) string, log *slog.Logger) {
+	cfg.STTStreaming = sttStreaming(getenv)
+	transport, err := ttsTransport(getenv)
+	if err != nil {
+		log.Warn("ignoring GLYPHOXA_TTS_TRANSPORT, synthesizing over HTTP", "err", err)
+	}
+	cfg.TTSTransport = transport
 }
 
 // privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published

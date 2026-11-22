@@ -48,6 +48,14 @@ func WithTransport(t Transport) Option {
 	}
 }
 
+// Transport reports the transport the client was built with.
+func (c *Client) Transport() Transport {
+	if c.ws != nil {
+		return TransportWS
+	}
+	return TransportHTTP
+}
+
 // dialogueFamily reports whether model belongs to the eleven_v3 / eleven_v4
 // families (eleven_v3, eleven_v3_conversational, eleven_v4, eleven_v4_turbo):
 // the models that render inline audio tags and the only ones the

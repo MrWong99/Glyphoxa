@@ -263,7 +263,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// transport, its dialogue sockets — and, deferred here, runs right before
 	// pump.Close(): the Conversation is stopped by then, so no sentence is being
 	// started, and a sentence still draining ends with its cancelled cycle ctx.
-	teeSynth, releaseSynth := newCycleSynth(cycleCtx, bus, cfg.keys.tts, cfg.TTSTransport, pump, log)
+	teeSynth, releaseSynth := newCycleSynth(cycleCtx, bus, cfg, pump, log)
 	defer releaseSynth()
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the

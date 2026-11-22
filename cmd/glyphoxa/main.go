@@ -147,16 +147,7 @@ func main() {
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
-	// Streaming STT (ADR-0042) is on by default in voice and all mode;
-	// GLYPHOXA_STT_STREAMING=0 is the off-switch back to the batch STT path.
-	cfg.STTStreaming = sttStreaming(os.Getenv)
-	// The synthesis transport (#702) is an env opt-in shared by voice and all
-	// mode; the default is the HTTP path, byte-for-byte.
-	if transport, err := ttsTransport(os.Getenv); err != nil {
-		log.Warn("ignoring GLYPHOXA_TTS_TRANSPORT, synthesizing over HTTP", "err", err)
-	} else {
-		cfg.TTSTransport = transport
-	}
+	applyVoiceEnv(&cfg, os.Getenv, log)
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.

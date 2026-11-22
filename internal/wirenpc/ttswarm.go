@@ -12,9 +12,8 @@ import (
 )
 
 // newCycleSynth builds one cycle's outbound synthesizer: the ElevenLabs client
-// for the resolved TTS key (#69: the decrypted BYOK key, or "" to fall back to
-// ELEVENLABS_API_KEY) on the configured transport ([Config.TTSTransport], #702),
-// wrapped in the [wire.TeeSynthesizer] that feeds sink, with the client's
+// for cfg's resolved TTS key (#69: the decrypted BYOK key, or "" to fall back to
+// ELEVENLABS_API_KEY) on cfg's transport ([Config.TTSTransport], #702), wrapped in the [wire.TeeSynthesizer] that feeds sink, with the client's
 // connection kept warm for the cycle ([wireTTSWarm], #702). Building both here
 // keeps the pre-warm on the very client the cycle synthesizes on, so the
 // synthesizer cannot be wired without it. A keyless client warms nothing.
@@ -23,8 +22,15 @@ import (
 // subscriptions and closes the client, which on the websocket transport shuts
 // its dialogue sockets (each holds one of the account's dialogue-session slots
 // while open). The caller defers it; ctx bounds every warm.
-func newCycleSynth(ctx context.Context, bus *voiceevent.Bus, ttsKey string, transport ttseleven.Transport, sink wire.PlaybackSink, log *slog.Logger) (synth *wire.TeeSynthesizer, release func()) {
-	client := newTTS(ttsKey, ttseleven.WithTransport(transport))
+//
+// It takes the Config whole and logs the transport the client it built really
+// speaks on, once per cycle: the knob has no hop to be dropped on, and an
+// operator comparing transports can see in the log which one a session ran.
+func newCycleSynth(ctx context.Context, bus *voiceevent.Bus, cfg Config, sink wire.PlaybackSink, log *slog.Logger) (synth *wire.TeeSynthesizer, release func()) {
+	client := newTTS(cfg.keys.tts, ttseleven.WithTransport(cfg.TTSTransport))
+	if log != nil {
+		log.Info("tts: synthesis transport", "transport", string(client.Transport()))
+	}
 	unwire := wireTTSWarm(ctx, bus, client, log)
 	return wire.NewTeeSynthesizer(client, sink, bus), func() {
 		unwire()

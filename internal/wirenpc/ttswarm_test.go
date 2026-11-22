@@ -1,10 +1,13 @@
 package wirenpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,7 +253,7 @@ func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
-	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", ttseleven.TransportHTTP, sink, nil)
+	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), Config{keys: providerKeys{tts: "T-tts-key"}}, sink, nil)
 	defer unwire()
 	if synth == nil {
 		t.Fatal("newCycleSynth returned no synthesizer")
@@ -325,7 +328,15 @@ func TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt(t *testing.T)
 					}
 				}()
 			})
-			synth, release := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", tc.transport, sink, nil)
+			// The constructor takes the session Config whole — the transport cannot
+			// be dropped on the way from Config to the client — and says in the log
+			// which transport the cycle speaks on, so a dead knob shows in prod.
+			var logs bytes.Buffer
+			cfg := Config{TTSTransport: tc.transport, keys: providerKeys{tts: "T-tts-key"}}
+			synth, release := newCycleSynth(ctx, voiceevent.NewBus(), cfg, sink, slog.New(slog.NewTextHandler(&logs, nil)))
+			if want := "transport=" + string(tc.transport); !strings.Contains(logs.String(), want) {
+				t.Errorf("cycle log = %q, want it to name %s", logs.String(), want)
+			}
 			// The connect warm runs on its own goroutine. Let it land first: a warm
 			// that overlaps the sentence finds the voice's only socket leased and
 			// (rightly) lines up a second one, which is not what this test counts.

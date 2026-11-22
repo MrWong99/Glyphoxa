@@ -1451,3 +1451,24 @@ func TestTTSTransport(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyVoiceEnv pins the hop from the environment onto the session Config
+// the voice loop is started with (#702): a parsed knob that never reaches the
+// Config is a knob that silently does nothing in production.
+func TestApplyVoiceEnv(t *testing.T) {
+	var cfg wirenpc.Config
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "ws", "GLYPHOXA_STT_STREAMING": "0"}), slog.New(slog.DiscardHandler))
+	if cfg.TTSTransport != ttseleven.TransportWS || cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want ws and batch STT", cfg.TTSTransport, cfg.STTStreaming)
+	}
+
+	var buf bytes.Buffer
+	cfg = wirenpc.Config{}
+	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "websocket"}), slog.New(slog.NewTextHandler(&buf, nil)))
+	if cfg.TTSTransport == ttseleven.TransportWS || !cfg.STTStreaming {
+		t.Errorf("Config = {TTSTransport: %q, STTStreaming: %v}, want HTTP synthesis and streaming STT by default", cfg.TTSTransport, cfg.STTStreaming)
+	}
+	if !strings.Contains(buf.String(), "GLYPHOXA_TTS_TRANSPORT") {
+		t.Errorf("log = %q, want a warning naming the ignored variable", buf.String())
+	}
+}
