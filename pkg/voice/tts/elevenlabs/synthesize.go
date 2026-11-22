@@ -31,8 +31,9 @@ type synthesizeBody struct {
 }
 
 // Synthesize implements [tts.Synthesizer]. Sentence text is forwarded
-// verbatim — ElevenLabs v3 inline `[bracket]` audio tags survive the round
-// trip because the API treats them as part of the prompt.
+// verbatim — ElevenLabs v3/v4 inline `[bracket]` audio tags survive the round
+// trip because the API treats them as part of the prompt. The model is the
+// voice's model_id, else [DefaultModel] (see [ModelOf]).
 //
 // Streaming model:
 //   - HTTP body is read in [streamReadBuffer]-sized windows and emitted as
