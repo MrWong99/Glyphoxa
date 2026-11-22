@@ -3,7 +3,6 @@ package llmbench
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -351,11 +350,7 @@ func (s *session) run(ctx context.Context, index int, turn Turn) TurnResult {
 		res.Fallback = res.Reply == agent.FallbackLineFor(language)
 	}
 
-	opts := DetectOptions{NPCName: npcName, FemaleSpeaker: slices.Contains(turn.Tags, TagFemalePC)}
-	if !res.Fallback {
-		res.SpokenFindings = Detect(res.Reply, opts)
-	}
-	res.RawFindings = Detect(res.Raw, opts)
+	res.detect()
 	return res
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -185,4 +186,97 @@ func TestWriteReports_OneJSONAndOneDumpPerCandidatePlusTheTable(t *testing.T) {
 			t.Errorf("%s: missing or empty (err %v)", name, err)
 		}
 	}
+}
+
+// TestRescore_RecomputesFindingsAndToolChecksFromTheStoredReplies pins the
+// re-scoring of a finished run (#702 review): the replies and tool calls are in
+// the report, so a detector or a corpus expectation that changed afterwards is
+// applied to them without a new live run. Timings, tokens and cost — the
+// measurement — are left as recorded.
+func TestRescore_RecomputesFindingsAndToolChecksFromTheStoredReplies(t *testing.T) {
+	scripts := []Script{{Name: "s", Turns: []Turn{
+		mira("Was gibt's?", TagSmallTalk).allow(toolKG),
+		brak("Wirf.", TagDiceSingle).expect(toolDice),
+	}}}
+	stale := CandidateReport{Candidate: CandidateInfo{Name: "arm"}, Turns: []TurnResult{
+		// Scored before the bracket check existed and before the lookup was allowed.
+		{Script: "s", Index: 0, Speaker: "Mira", Tags: []string{TagSmallTalk, TagFemalePC},
+			Reply: "[leans on the bar] Eintopf, mein Lieber.", Raw: "[leans on the bar] Eintopf, mein Lieber. *nickt*",
+			ToolCalls: []ToolCall{{Name: toolKG, SchemaValid: true}}, ToolsOK: false,
+			FirstSentenceMS: 200, EndMS: 300, Rounds: 2, CostUSD: 0.5},
+		// A second pass over the same script ("s#2") is scored by the same turn.
+		{Script: "s#2", Index: 1, Speaker: "Brak", Tags: []string{TagDiceSingle},
+			Reply: "Eine 17.", Raw: "Eine 17.", Expect: []string{"stale"}, ToolsOK: true,
+			FirstSentenceMS: 400, EndMS: 500, Rounds: 1},
+		// A fallback line is not the model's words: no spoken findings.
+		{Script: "s", Index: 1, Speaker: "Brak", Tags: []string{TagDiceSingle}, Fallback: true, Error: "boom",
+			Reply: "Hm... [smiles] einen Moment.", Raw: "[smiles]", ToolsOK: false,
+			SpokenFindings: Findings{English: 9}, FirstSentenceMS: -1, EndMS: 900},
+		// A turn of a script the corpus no longer has keeps its recorded check.
+		{Script: "gone", Index: 0, Reply: "Na.", Raw: "Na.", ToolsOK: true, Expect: []string{toolRecap},
+			FirstSentenceMS: 100, EndMS: 100, Rounds: 1},
+	}}
+
+	got := Rescore(stale, scripts)
+
+	first := got.Turns[0]
+	if first.SpokenFindings.UnknownTags != 1 || first.SpokenFindings.GenderSlip != 1 {
+		t.Errorf("turn 0 spoken findings = %+v, want the bracket action and the gender slip", first.SpokenFindings)
+	}
+	if first.RawFindings.StageDirections != 1 || first.RawFindings.UnknownTags != 1 {
+		t.Errorf("turn 0 raw findings = %+v, want the asterisk action and the bracket action", first.RawFindings)
+	}
+	if !first.ToolsOK || !slices.Equal(first.Allow, []string{toolKG}) {
+		t.Errorf("turn 0 ToolsOK=%v Allow=%v, want the allowed lookup accepted", first.ToolsOK, first.Allow)
+	}
+	if first.EndMS != 300 || first.CostUSD != 0.5 || first.Rounds != 2 {
+		t.Errorf("turn 0 measurement changed: %+v", first)
+	}
+	if second := got.Turns[1]; second.ToolsOK || !slices.Equal(second.Expect, []string{toolDice}) {
+		t.Errorf("turn 1 ToolsOK=%v Expect=%v, want the missing dice call failed against the corpus", second.ToolsOK, second.Expect)
+	}
+	if fb := got.Turns[2]; fb.SpokenFindings != (Findings{}) || fb.RawFindings.UnknownTags != 1 {
+		t.Errorf("fallback turn findings = %+v / %+v, want none spoken, the raw bracket counted", fb.SpokenFindings, fb.RawFindings)
+	}
+	if gone := got.Turns[3]; !gone.ToolsOK || !slices.Equal(gone.Expect, []string{toolRecap}) {
+		t.Errorf("turn of an unknown script was re-checked: %+v", gone)
+	}
+	if got.Summary.Turns != 4 || got.Summary.Spoken.UnknownTags != 1 || got.Summary.Raw.UnknownTags != 2 || got.Summary.ToolsOKPct != 50 {
+		t.Errorf("summary not recomputed: %+v", got.Summary)
+	}
+	if stale.Turns[0].ToolsOK || stale.Turns[0].SpokenFindings.UnknownTags != 0 {
+		t.Error("Rescore modified its input")
+	}
+}
+
+// TestReadReports_ReadsBackWhatWriteReportsWrote pins the loader a re-scoring
+// starts from: one report per <candidate>.json, in candidate-table order.
+func TestReadReports_ReadsBackWhatWriteReportsWrote(t *testing.T) {
+	dir := t.TempDir()
+	a, b := sampleReport(), sampleReport()
+	a.Candidate.Name, b.Candidate.Name = "zz-unlisted", Candidates()[1].Name
+	if err := WriteReports(dir, []CandidateReport{a, b}); err != nil {
+		t.Fatalf("WriteReports: %v", err)
+	}
+	got, err := ReadReports(dir)
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+	if len(got) != 2 || got[0].Candidate.Name != b.Candidate.Name || got[1].Candidate.Name != "zz-unlisted" {
+		t.Fatalf("ReadReports = %d reports %v, want the table candidate first, then the unlisted one", len(got), reportNames(got))
+	}
+	if len(got[0].Turns) != len(b.Turns) {
+		t.Errorf("turns = %d, want %d", len(got[0].Turns), len(b.Turns))
+	}
+	if _, err := ReadReports(t.TempDir()); err == nil {
+		t.Error("ReadReports of an empty directory returned no error")
+	}
+}
+
+func reportNames(reports []CandidateReport) []string {
+	out := make([]string, len(reports))
+	for i, r := range reports {
+		out[i] = r.Candidate.Name
+	}
+	return out
 }

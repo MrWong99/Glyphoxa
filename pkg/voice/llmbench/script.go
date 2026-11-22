@@ -93,6 +93,10 @@ func (t Turn) allow(tools ...string) Turn  { t.Allow = tools; return t }
 
 // Scripts is the German corpus: four tavern conversations with Flo, 34 turns.
 //
+// Two no-tool turns ask for a fact of the world (the menu and room price, the
+// weather "for sure"). The Persona says Flo looks things up instead of
+// guessing, so a knowledge lookup is allowed there — required it is not.
+//
 // Two of the must-not-call turns say "würfel"/"gewürfelt", which arms the
 // production dice gate although the player rolled for themselves. That is on
 // purpose: the armed path buffers the reply and runs the invented-roll guard,
@@ -101,7 +105,7 @@ func (t Turn) allow(tools ...string) Turn  { t.Allow = tools; return t }
 func Scripts() []Script {
 	return []Script{
 		{Name: "abend-in-der-gans", Turns: []Turn{
-			mira("Hallo Flo! Was gibt's heute zu essen, und was kostet ein Zimmer für die Nacht?", TagSmallTalk),
+			mira("Hallo Flo! Was gibt's heute zu essen, und was kostet ein Zimmer für die Nacht?", TagSmallTalk).allow(toolKG, toolSearch),
 			brak("Und für mich ein Bier, Flo. Wie läuft das Geschäft so?", TagSmallTalk),
 			mira("Flo, würfel mal einen W20 für mich, ich will wissen, ob ich heute Glück habe.", TagDiceSingle).expect(toolDice),
 			brak("Jetzt ich: Wirf zwei sechsseitige Würfel und sag mir beide Zahlen.", TagDiceMulti).expect(toolDice),
@@ -140,7 +144,7 @@ func Scripts() []Script {
 			brak("Erinnerst du dich, was ich dir beim letzten Mal versprochen habe? Schau ruhig nach, was ich damals gesagt habe.", TagTranscriptLookup).expect(toolSearch).allow(toolKG),
 			mira("Merk dir bitte: Am Markttag singe ich bei dir in der Taverne.", TagRememberAccept).expect(toolRemember),
 			brak("Gib uns eine kurze Zusammenfassung der letzten beiden Sitzungen.", TagRecap).expect(toolRecap).allow(toolSearch),
-			mira("Kannst du mir sagen, wie das Wetter morgen wird? Ich meine sicher, nicht geraten.", TagNoToolFits),
+			mira("Kannst du mir sagen, wie das Wetter morgen wird? Ich meine sicher, nicht geraten.", TagNoToolFits).allow(toolKG, toolSearch),
 			brak("Ich hab gerade mit meinen eigenen Würfeln eine Drei gewürfelt. Lach mich ruhig aus.", TagMustNotCall),
 			mira("Flo, sing mir zum Abschied zwei Zeilen von deinem Lieblingslied.", TagSmallTalk),
 			brak("Was schulde ich dir insgesamt? Drei Bier zu je drei Kupfer, ein Eintopf für fünf, und sieben Kupfer hab ich schon angezahlt.", TagReasoningBait),

@@ -2,6 +2,7 @@ package llmbench
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,38 @@ func TestTurn_ToolsOK(t *testing.T) {
 		if got := turn.ToolsOK(tc.called); got != tc.want {
 			t.Errorf("%s: ToolsOK(%v) = %v, want %v", tc.name, tc.called, got, tc.want)
 		}
+	}
+}
+
+// TestScripts_AFactQuestionMayBeLookedUp pins the scoring of the two no-tool
+// turns that ask for a fact of the world (the menu and the room price; a
+// weather forecast "for sure, not guessed"). Flo's Persona says she looks
+// things up instead of guessing, so a knowledge lookup there follows the
+// Persona and is not a tool error (#702 review); any other Tool still is.
+func TestScripts_AFactQuestionMayBeLookedUp(t *testing.T) {
+	found := 0
+	for _, s := range Scripts() {
+		for _, turn := range s.Turns {
+			if !strings.Contains(turn.Text, "Was gibt's heute zu essen") && !strings.Contains(turn.Text, "wie das Wetter morgen wird") {
+				continue
+			}
+			found++
+			if len(turn.Expect) != 0 {
+				t.Errorf("%q expects %v; no Tool is required here", turn.Text, turn.Expect)
+			}
+			for _, called := range [][]string{nil, {toolKG}, {toolSearch}, {toolKG, toolSearch}} {
+				if !turn.ToolsOK(called) {
+					t.Errorf("%q: calling %v fails the tool check, want it accepted", turn.Text, called)
+				}
+			}
+			for _, called := range [][]string{{toolDice}, {toolRemember}, {toolKG, toolRecap}} {
+				if turn.ToolsOK(called) {
+					t.Errorf("%q: calling %v passes the tool check, want it rejected", turn.Text, called)
+				}
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatalf("found %d of the 2 fact-question turns", found)
 	}
 }
