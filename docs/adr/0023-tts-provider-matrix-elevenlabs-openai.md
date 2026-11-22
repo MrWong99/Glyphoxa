@@ -36,7 +36,7 @@ community-maintained `coqui-tts` Idiap fork on PyPI, but:
 | `VoiceLister`          | ✓          | ✓ (preset list) |
 | `VoiceCloner`          | ✓          | ✗ (no public clone API) |
 | `VoiceDesigner`        | ✓          | ✗ (no design API) |
-| `DialogueSynthesizer`  | ✓ (`eleven_v3`) | ✗ (no dialogue API) |
+| `DialogueSynthesizer`  | ✓ (v3/v4 models; `eleven_v4_turbo` default since the 2026-11-22 amendment) | ✗ (no dialogue API) |
 
 OpenAI satisfying only the core `Synthesizer` + `VoiceLister` is fine — that's
 exactly the capability-interface pattern from ADR-0022 working as intended.
@@ -102,10 +102,15 @@ step. Model selection stays in one place (`elevenlabs.DefaultModel` /
 - **Connection reuse:** a barge closes the response mid-stream and with it the
   HTTP/1.1 connection, so the next reply's first sentence paid ~180 ms instead
   of ~140 ms. The adapter's pool keeps 4 idle connections per host (look-ahead
-  runs two syntheses at once) and the live wiring pre-warms with a HEAD request
-  (`Client.Warm`) on connect, on each speech start and after each barge
-  (~150 ms first audio after a barge + warm). A 45 s idle connection was still
-  reused.
+  runs two syntheses at once, and a warm can overlap them — three, where the
+  stdlib default keeps two) and the live wiring pre-warms with a HEAD request
+  (`Client.Warm`) on connect and after each barge, and on a speech start only
+  when the pool has been quiet for 20 s (no warm and no sentence streamed in
+  that window). The HEAD round trip (~130–145 ms on a reused connection) is
+  longer than the dial it saves (~55–80 ms), so an unthrottled warm per
+  utterance start could hold the idle connection the reply's first sentence
+  needs, and would send ~2000 anonymous HEADs per 3 h session. ~150 ms first
+  audio after a barge + warm. A 45 s idle connection was still reused.
 
 **Data.** Every persisted voice recorded `"model_id":"eleven_v3"` explicitly (no
 UI ever picked a model), so migration `00059` moves ElevenLabs agent voices on

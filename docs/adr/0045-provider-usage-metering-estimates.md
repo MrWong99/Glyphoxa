@@ -33,3 +33,13 @@ completes normally and its reported usage is metered like any other. The
 "otherwise nothing" branch is left for a turn cut while the provider was still
 generating: the request is cancelled, no usage chunk is sent, and none is
 invented.
+
+## Amendment: TTS capture carries the model (2026-11-22, #702)
+
+`TTSCharacters(provider, chars)` becomes `TTSCharacters(provider, model, chars)`,
+mirroring `LLMTokens`: ElevenLabs bills `eleven_v4_turbo` at about half the
+credits per character of `eleven_v3` (ADR-0023 amendment of the same date), so
+the spend meter (ADR-0046) prices TTS per (provider, model) and the Usage Ledger
+row records the model. **Prometheus still drops it** — model is never a label.
+Every `StageRecorder` and `UsageSink` implementer takes the three-argument form;
+a TTS ledger row written before this amendment has an empty model.

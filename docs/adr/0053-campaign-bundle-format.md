@@ -91,3 +91,17 @@ What changes:
 - **An inflate-ratio guard.** Past a 32 MiB floor, a gzipped bundle may not decode to more than 20× the compressed bytes read so far. Honest bundles sit far below it (base64 images ~1.3×, indented prose 5–10×); a bomb is refused after ~32 MiB of inflating instead of after 256 MiB. Hitting it, or the decoded cap, is a 413.
 - **One bundle in flight per process, either direction.** The import slot gate drops from 2 to 1 and `ServeExport` takes the same slot: an export also builds the whole Bundle in memory (images base64-encoded) before marshalling it, and the pod has room for one of those, not two. A busy slot is 503 with `Retry-After`. Streaming the export encoder section by section was considered and left out: `json.Encoder` still marshals each value into one buffer, so it would trade a large diff for a modest saving; the gate is the bound.
 - **Bad content is the client's fault.** A failure caused by the bundle's own values — an invalid voice, a planning role outside the vocabulary, a storage validation sentinel, or Postgres refusing a value (SQLSTATE class 22 or 23) — now carries `ErrInvalidBundle` and answers 400 instead of 500. The database's own message is not surfaced, since it names schema objects; the importer's context naming the bundle entry is. An images-included bundle on a composition with no blob store is now the 400 the code always intended, rather than a 500 from `WriteMapImage`.
+
+## Amendment: import moves legacy `eleven_v3` voices onto the default model (2026-11-22, #702)
+
+Import no longer stores every voice verbatim. An ElevenLabs voice whose settings
+pin `"model_id":"eleven_v3"` is rewritten to `eleven_v4_turbo` on import
+(`upgradeLegacyVoiceModel` in `internal/bundle/import.go`), the same move
+migration `00059` applies to stored voices: before #702 every saved voice
+recorded `eleven_v3` explicitly although no UI ever let a GM pick a model, so a
+bundle exported before the switch would otherwise re-import the slower, costlier
+model. Voices on any other model or provider, and voices not in the canonical
+shape, are imported byte-identical. **Revisit when a model picker exists**: a
+deliberate `eleven_v3` pin exported from such a UI would be silently remapped,
+so the rewrite must then be gated (for example on the bundle's export date or a
+format bump).
