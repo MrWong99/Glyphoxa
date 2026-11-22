@@ -16,8 +16,12 @@ import { useEffect, useRef, type RefObject } from "react";
 // that role (the map form, the graph's review card and relation picker), and
 // while one of them was merely on screen every popover in the app — the
 // campaign switcher, each combobox — ignored outside clicks and Escape.
+//
+// For the same reason it must not match the Popover primitive (ui/Popover.tsx):
+// a Radix Popover's panel is ALSO role="dialog" with data-state="open", and it
+// is not modal. That panel carries data-gx-popover, which excludes it here.
 const MODAL_LAYER =
-  '[role="alertdialog"], [role="dialog"][aria-modal="true"], [role="dialog"][data-state="open"]';
+  '[role="alertdialog"], [role="dialog"][aria-modal="true"], [role="dialog"][data-state="open"]:not([data-gx-popover])';
 
 function modalLayerOpen(): boolean {
   return document.querySelector(MODAL_LAYER) !== null;
@@ -30,9 +34,11 @@ function modalLayerOpen(): boolean {
 // the mousedown on a menu item as "outside", closes the panel, and unmounts the
 // portalled menu before mouseup — so the item's click never fires. Same trap
 // modalLayerOpen guards for dialogs (#269), generalized to menus: any popover
-// defers to an open menu, whichever anchor it belongs to.
+// defers to an open menu, whichever anchor it belongs to. The Menu primitive
+// (a Radix DropdownMenu, also role="menu") and the Popover primitive's panel
+// are portalled the same way and get the same deference.
 function pointerInPortalledMenu(target: Node): boolean {
-  return target instanceof Element && target.closest('[role="menu"]') !== null;
+  return target instanceof Element && target.closest('[role="menu"], [data-gx-popover]') !== null;
 }
 
 // usePopoverDismiss closes a lightweight (non-Radix) popover the way a native
