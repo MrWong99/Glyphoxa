@@ -59,6 +59,11 @@ type Summary struct {
 	SchemaValidPct float64 `json:"schema_valid_pct"`
 	ToolErrors     int     `json:"tool_errors"`
 	Rounds         int     `json:"rounds"`
+	// PreToolTurns counts turns in which the model wrote prose in the same
+	// round as a tool call — text that is spoken before the Tool has run.
+	PreToolTurns int `json:"pre_tool_turns"`
+	// Silent counts turns that failed with no error and nothing to speak.
+	Silent int `json:"silent"`
 
 	Spoken    Findings       `json:"spoken_findings"`
 	Raw       Findings       `json:"raw_findings"`
@@ -132,6 +137,12 @@ func Summarize(turns []TurnResult) Summary {
 			}
 		}
 		s.ToolErrors += t.ToolErrors
+		if t.PreToolText != "" {
+			s.PreToolTurns++
+		}
+		if t.Reply == "" && t.Error == "" {
+			s.Silent++
+		}
 		s.Rounds += t.Rounds
 		s.Spoken.Add(t.SpokenFindings)
 		s.Raw.Add(t.RawFindings)
@@ -170,14 +181,14 @@ func leak(spoken, raw int) string { return fmt.Sprintf("%d (%d)", spoken, raw) }
 // are milliseconds from the start of the turn. Findings are "spoken (raw)".
 func MarkdownTable(reports []CandidateReport) string {
 	var b strings.Builder
-	b.WriteString("| candidate | turns | errors | first delta p50 / p95 | first sentence p50 / p95 | end p50 / p95 | tools OK | tool turns OK | schema-valid calls | tool markup | stage directions | markdown | English | tool narration | gender slips | $ / 100 turns |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| candidate | turns | errors | first delta p50 / p95 | first sentence p50 / p95 | end p50 / p95 | tools OK | tool turns OK | schema-valid calls | prose before tool | silent | tool markup | stage directions | markdown | English | tool narration | gender slips | $ / 100 turns |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range reports {
 		s := r.Summary
-		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s | %s | %.0f%% | %.0f%% | %.0f%% (%d) | %s | %s | %s | %s | %s | %s | $%.3f |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s | %s | %.0f%% | %.0f%% | %.0f%% (%d) | %d | %d | %s | %s | %s | %s | %s | %s | $%.3f |\n",
 			r.Candidate.Name, s.Turns, s.Errors,
 			pair(s.FirstDelta), pair(s.FirstSentence), pair(s.End),
-			s.ToolsOKPct, s.ToolTurnsOKPct, s.SchemaValidPct, s.ToolCalls,
+			s.ToolsOKPct, s.ToolTurnsOKPct, s.SchemaValidPct, s.ToolCalls, s.PreToolTurns, s.Silent,
 			leak(s.Spoken.ToolMarkup, s.Raw.ToolMarkup),
 			leak(s.Spoken.StageDirections, s.Raw.StageDirections),
 			leak(s.Spoken.Markdown, s.Raw.Markdown),
@@ -241,6 +252,9 @@ func ReplyDump(r CandidateReport) string {
 				want = strings.Join(t.Expect, ", ")
 			}
 			notes = append(notes, "TOOL CHECK FAILED: expected "+want)
+		}
+		if t.PreToolText != "" {
+			notes = append(notes, "prose before the tool call: "+t.PreToolText)
 		}
 		if f := flags(t.SpokenFindings); len(f) > 0 {
 			notes = append(notes, "spoken: "+strings.Join(f, ", "))

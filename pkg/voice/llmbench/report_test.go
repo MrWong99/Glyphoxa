@@ -34,8 +34,10 @@ func sampleTurns() []TurnResult {
 		{Script: "s", Index: 1, Speaker: "Brak", User: "Wirf", Reply: "Eine 17.", Tags: []string{TagDiceSingle},
 			FirstDeltaMS: 300, FirstSentenceMS: 400, EndMS: 500, Rounds: 2, ToolsOK: true,
 			ToolCalls: []ToolCall{{Name: "dice", SchemaValid: true}}, Expect: []string{"dice"},
-			InputTokens: 2000, OutputTokens: 100, CostUSD: 0.002,
+			InputTokens: 2000, OutputTokens: 100, CostUSD: 0.002, PreToolText: "Ich würfle jetzt.",
 			RawFindings: Findings{StageDirections: 1}},
+		{Script: "s", Index: 4, Speaker: "Mira", User: "Danke", Reply: "", Raw: "*nickt*", Tags: []string{TagSmallTalk},
+			FirstDeltaMS: 100, FirstSentenceMS: -1, EndMS: 300, Rounds: 1, ToolsOK: true},
 		{Script: "s", Index: 2, Speaker: "Mira", User: "Merk dir", Reply: "Mach ich, mein Lieber.", Tags: []string{TagRememberAccept},
 			FirstDeltaMS: -1, FirstSentenceMS: 600, EndMS: 700, Rounds: 1, ToolsOK: false,
 			ToolCalls: []ToolCall{{Name: "kg_query", SchemaValid: false, SchemaError: "x"}}, Expect: []string{"remember_knowledge"},
@@ -49,21 +51,21 @@ func sampleTurns() []TurnResult {
 func TestSummarize(t *testing.T) {
 	s := Summarize(sampleTurns())
 
-	if s.Turns != 4 || s.Errors != 1 {
-		t.Errorf("Turns/Errors = %d/%d, want 4/1", s.Turns, s.Errors)
+	if s.Turns != 5 || s.Errors != 1 {
+		t.Errorf("Turns/Errors = %d/%d, want 5/1", s.Turns, s.Errors)
 	}
 	// Timings skip the turns where the event never happened (-1).
-	if s.FirstDelta.N != 2 || s.FirstDelta.P50 != 100 || s.FirstDelta.P95 != 300 {
-		t.Errorf("FirstDelta = %+v, want n=2 p50=100 p95=300", s.FirstDelta)
+	if s.FirstDelta.N != 3 || s.FirstDelta.P50 != 100 || s.FirstDelta.P95 != 300 {
+		t.Errorf("FirstDelta = %+v, want n=3 p50=100 p95=300", s.FirstDelta)
 	}
 	if s.FirstSentence.N != 3 || s.FirstSentence.P50 != 400 {
 		t.Errorf("FirstSentence = %+v, want n=3 p50=400", s.FirstSentence)
 	}
-	if s.End.N != 4 || s.End.P95 != 900 {
-		t.Errorf("End = %+v, want n=4 p95=900", s.End)
+	if s.End.N != 5 || s.End.P95 != 900 {
+		t.Errorf("End = %+v, want n=5 p95=900", s.End)
 	}
-	if s.ToolsOKPct != 75 {
-		t.Errorf("ToolsOKPct = %v, want 75 (3 of 4 turns)", s.ToolsOKPct)
+	if s.ToolsOKPct != 80 || s.ToolTurnsOKPct != 50 {
+		t.Errorf("ToolsOKPct/ToolTurnsOKPct = %v/%v, want 80 (4 of 5 turns) / 50 (1 of 2 tool turns)", s.ToolsOKPct, s.ToolTurnsOKPct)
 	}
 	if s.ToolCalls != 2 || s.SchemaValidPct != 50 {
 		t.Errorf("ToolCalls/SchemaValidPct = %d/%v, want 2/50", s.ToolCalls, s.SchemaValidPct)
@@ -74,10 +76,13 @@ func TestSummarize(t *testing.T) {
 	if s.Malformed["text_leak"] != 2 {
 		t.Errorf("Malformed = %v, want text_leak 2", s.Malformed)
 	}
-	if want := 0.006 / 4 * 100; s.CostPer100TurnsUSD < want*0.999 || s.CostPer100TurnsUSD > want*1.001 {
+	if want := 0.006 / 5 * 100; s.CostPer100TurnsUSD < want*0.999 || s.CostPer100TurnsUSD > want*1.001 {
 		t.Errorf("CostPer100TurnsUSD = %v, want %v", s.CostPer100TurnsUSD, want)
 	}
-	if s.InputTokens != 4000 || s.OutputTokens != 300 || s.Rounds != 4 {
+	if s.PreToolTurns != 1 || s.Silent != 1 {
+		t.Errorf("PreToolTurns/Silent = %d/%d, want 1/1", s.PreToolTurns, s.Silent)
+	}
+	if s.InputTokens != 4000 || s.OutputTokens != 300 || s.Rounds != 5 {
 		t.Errorf("tokens/rounds = %d/%d/%d", s.InputTokens, s.OutputTokens, s.Rounds)
 	}
 }
@@ -96,12 +101,12 @@ func TestMarkdownTable_OneRowPerCandidate(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("table has %d lines, want header + rule + 1 row:\n%s", len(lines), md)
 	}
-	for _, want := range []string{"first sentence p50 / p95", "tools OK", "$ / 100 turns"} {
+	for _, want := range []string{"first sentence p50 / p95", "tools OK", "prose before tool", "silent", "$ / 100 turns"} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("header lacks %q: %s", want, lines[0])
 		}
 	}
-	for _, want := range []string{"fake-arm", "100 / 300", "400 / 600", "75%", "50%", "$0.150"} {
+	for _, want := range []string{"fake-arm", "100 / 300", "400 / 600", "80%", "50%", "$0.120"} {
 		if !strings.Contains(lines[2], want) {
 			t.Errorf("row lacks %q: %s", want, lines[2])
 		}
@@ -113,7 +118,7 @@ func TestMarkdownTable_OneRowPerCandidate(t *testing.T) {
 
 func TestReplyDump_ListsEveryReplyWithItsFlags(t *testing.T) {
 	dump := ReplyDump(sampleReport())
-	for _, want := range []string{"fake-arm", "Mira: Hallo", "Na, meine Liebe.", "gender_slip", "FALLBACK", "kg_query", "expected remember_knowledge"} {
+	for _, want := range []string{"fake-arm", "Mira: Hallo", "Na, meine Liebe.", "gender_slip", "FALLBACK", "kg_query", "expected remember_knowledge", "prose before the tool call: Ich würfle jetzt.", "(nothing spoken)"} {
 		if !strings.Contains(dump, want) {
 			t.Errorf("dump lacks %q:\n%s", want, dump)
 		}
@@ -130,7 +135,7 @@ func TestWriteReports_OneJSONAndOneDumpPerCandidatePlusTheTable(t *testing.T) {
 		t.Fatalf("read json: %v", err)
 	}
 	var back CandidateReport
-	if err := json.Unmarshal(raw, &back); err != nil || len(back.Turns) != 4 || back.Summary.Turns != 4 {
+	if err := json.Unmarshal(raw, &back); err != nil || len(back.Turns) != 5 || back.Summary.Turns != 5 {
 		t.Errorf("json report does not round-trip: err=%v turns=%d", err, len(back.Turns))
 	}
 	for _, name := range []string{"fake-arm.replies.md", "comparison.md"} {

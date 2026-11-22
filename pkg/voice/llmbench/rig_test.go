@@ -21,6 +21,8 @@ type fakeLLM struct {
 	requests []llm.Request
 	// reply overrides the plain-text answer when set.
 	reply string
+	// preamble, when set, is streamed as text in front of a remember call.
+	preamble string
 }
 
 func (f *fakeLLM) Complete(_ context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
@@ -55,11 +57,14 @@ func (f *fakeLLM) Complete(_ context.Context, req llm.Request) (<-chan llm.Strea
 			{Type: llm.EventDone, StopReason: "tool_use"},
 		}
 	case strings.Contains(user, "merk dir") && hasTool("remember_knowledge"):
-		events = []llm.StreamEvent{
+		if f.preamble != "" {
+			events = append(events, llm.StreamEvent{Type: llm.EventText, Text: f.preamble})
+		}
+		events = append(events, []llm.StreamEvent{
 			{Type: llm.EventToolCall, ToolCall: llm.ToolCall{ID: "call_2", Name: "remember_knowledge", Input: json.RawMessage(`{"kind":"fact","fact":"Mira schuldet zwei Silber."}`)}},
 			{Type: llm.EventUsage, Usage: llm.Usage{InputTokens: 1000, OutputTokens: 20}},
 			{Type: llm.EventDone, StopReason: "tool_use"},
-		}
+		}...)
 	default:
 		reply := f.reply
 		if reply == "" {
@@ -273,4 +278,26 @@ type orderLLM struct {
 func (o orderLLM) Complete(ctx context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
 	o.onCall()
 	return o.Provider.Complete(ctx, req)
+}
+
+// TestRunner_RecordsProseSpokenBeforeAToolCall pins the mechanical detector
+// for the thinking-disabled failure of #702: text a model streams in the same
+// round as a tool call is spoken before the tool even runs. It is recorded
+// verbatim, whatever it says — no wording heuristic can catch every "let me
+// look that up".
+func TestRunner_RecordsProseSpokenBeforeAToolCall(t *testing.T) {
+	f := &fakeLLM{preamble: "Ich muss das jetzt aufschreiben. "}
+	turn := runOne(t, f, mira("Flo, merk dir bitte: Ich schulde dir zwei Silber.", TagRememberAccept).expect(toolRemember))[0]
+
+	if turn.PreToolText != "Ich muss das jetzt aufschreiben." {
+		t.Errorf("PreToolText = %q, want the prose of the tool-calling round", turn.PreToolText)
+	}
+	if !strings.HasPrefix(turn.Reply, "Ich muss das jetzt aufschreiben.") {
+		t.Errorf("Reply = %q: on the streaming path the pre-tool prose IS spoken", turn.Reply)
+	}
+
+	clean := runOne(t, &fakeLLM{}, mira("Flo, merk dir bitte: Ich schulde dir zwei Silber.", TagRememberAccept).expect(toolRemember))[0]
+	if clean.PreToolText != "" {
+		t.Errorf("PreToolText = %q for a round that only called the tool", clean.PreToolText)
+	}
 }

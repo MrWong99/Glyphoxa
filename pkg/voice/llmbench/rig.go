@@ -75,6 +75,12 @@ type TurnResult struct {
 	FirstSentenceMS float64 `json:"first_sentence_ms"`
 	EndMS           float64 `json:"end_ms"`
 
+	// PreToolText is the prose the model wrote in rounds that also called a
+	// Tool. On the streaming path it is spoken before the Tool has run — the
+	// channel through which a model narrates or reasons aloud ("let me look
+	// that up", "I need to roll two dice").
+	PreToolText string `json:"pre_tool_text,omitempty"`
+
 	// Rounds is the number of provider completions the turn took.
 	Rounds    int        `json:"rounds"`
 	ToolCalls []ToolCall `json:"tool_calls"`
@@ -114,6 +120,7 @@ type capture struct {
 	toolErrors int
 	in, out    int
 	malformed  map[string]int
+	preTool    []string // prose of the rounds that also called a Tool
 }
 
 // tap wraps the candidate's provider and records each completion of the turn
@@ -163,6 +170,15 @@ func (t *tap) Complete(ctx context.Context, req llm.Request) (<-chan llm.StreamE
 	out := make(chan llm.StreamEvent)
 	go func() {
 		defer close(out)
+		var roundText strings.Builder
+		roundCalled := false
+		defer func() {
+			if text := strings.TrimSpace(roundText.String()); roundCalled && text != "" {
+				c.mu.Lock()
+				c.preTool = append(c.preTool, text)
+				c.mu.Unlock()
+			}
+		}()
 		for ev := range in {
 			c.mu.Lock()
 			switch ev.Type {
@@ -171,7 +187,9 @@ func (t *tap) Complete(ctx context.Context, req llm.Request) (<-chan llm.StreamE
 					c.firstDelta = time.Now()
 				}
 				c.raw.WriteString(ev.Text)
+				roundText.WriteString(ev.Text)
 			case llm.EventToolCall:
+				roundCalled = true
 				c.calls = append(c.calls, ev.ToolCall)
 			case llm.EventUsage:
 				c.in += ev.Usage.InputTokens
@@ -302,6 +320,7 @@ func (s *session) run(ctx context.Context, index int, turn Turn) TurnResult {
 		res.FirstSentenceMS = ms(firstSentence.Sub(c.start))
 	}
 	res.Rounds = c.rounds
+	res.PreToolText = strings.Join(c.preTool, " ")
 	res.ToolErrors = c.toolErrors
 	res.InputTokens, res.OutputTokens = c.in, c.out
 	res.CostUSD = spend.EstimateLLMUSD(s.cand.Provider, s.cand.Model, c.in, c.out)
