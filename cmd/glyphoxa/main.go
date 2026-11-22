@@ -150,6 +150,13 @@ func main() {
 	// Streaming STT (ADR-0042, issue #180) is an env opt-in shared by voice and
 	// all mode; default OFF keeps the batch STT path byte-for-byte.
 	cfg.STTStreaming = sttStreaming(os.Getenv)
+	// The synthesis transport (#702) is an env opt-in shared by voice and all
+	// mode; the default is the HTTP path, byte-for-byte.
+	if transport, err := ttsTransport(os.Getenv); err != nil {
+		log.Warn("ignoring GLYPHOXA_TTS_TRANSPORT, synthesizing over HTTP", "err", err)
+	} else {
+		cfg.TTSTransport = transport
+	}
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.

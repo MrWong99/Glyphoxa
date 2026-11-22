@@ -30,6 +30,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/soundgen"
 	soundelevenlabs "github.com/MrWong99/Glyphoxa/pkg/voice/soundgen/elevenlabs"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // webEnvVars are the environment variables a web/all-Mode Web Instance must have
@@ -377,6 +378,16 @@ func sttStreaming(getenv func(string) string) bool {
 		return false
 	}
 	return true
+}
+
+// ttsTransport reads GLYPHOXA_TTS_TRANSPORT (#702): how the ElevenLabs adapter
+// synthesizes. Blank or "http" is the per-sentence HTTP stream (the default);
+// "ws" opts sentences of the v3/v4 model families into pooled Text-to-Dialogue
+// websockets, for comparison against HTTP. Any other value keeps HTTP and comes
+// back as an error for the caller to log — a typo must not switch the transport,
+// and must not stop the process either.
+func ttsTransport(getenv func(string) string) (ttseleven.Transport, error) {
+	return ttseleven.ParseTransport(getenv("GLYPHOXA_TTS_TRANSPORT"))
 }
 
 // privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published

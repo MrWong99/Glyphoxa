@@ -26,6 +26,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // fakeOAuthStore is an in-memory auth.OAuthStore recording what seedDevSession
@@ -1422,6 +1423,29 @@ func TestVoiceMediaStallWindow(t *testing.T) {
 	} {
 		if got := voiceMediaStallWindow(envMap(map[string]string{"GLYPHOXA_VOICE_MEDIA_STALL_WINDOW": c.val})); got != c.want {
 			t.Errorf("voiceMediaStallWindow(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
+// TestTTSTransport pins the GLYPHOXA_TTS_TRANSPORT parse (#702): unset or "http"
+// keeps the HTTP synthesis path, "ws" opts into the pooled Text-to-Dialogue
+// websocket, and a typo keeps HTTP while reporting itself.
+func TestTTSTransport(t *testing.T) {
+	cases := []struct {
+		val     string
+		want    ttseleven.Transport
+		wantErr bool
+	}{
+		{"", ttseleven.TransportHTTP, false},
+		{"http", ttseleven.TransportHTTP, false},
+		{" WS ", ttseleven.TransportWS, false},
+		{"ws", ttseleven.TransportWS, false},
+		{"websocket", ttseleven.TransportHTTP, true},
+	}
+	for _, c := range cases {
+		got, err := ttsTransport(envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": c.val}))
+		if got != c.want || (err != nil) != c.wantErr {
+			t.Errorf("ttsTransport(%q) = %q, %v; want %q, error=%v", c.val, got, err, c.want, c.wantErr)
 		}
 	}
 }

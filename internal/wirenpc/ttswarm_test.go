@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -247,7 +250,7 @@ func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
-	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", sink, nil)
+	synth, unwire := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", ttseleven.TransportHTTP, sink, nil)
 	defer unwire()
 	if synth == nil {
 		t.Fatal("newCycleSynth returned no synthesizer")
@@ -256,5 +259,88 @@ func TestNewCycleSynth_WarmsTheClientItBuilds(t *testing.T) {
 	case <-heads:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the cycle's TTS client was never warmed on connect")
+	}
+}
+
+// TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt pins the #702
+// transport wiring end to end: the transport the composition root parsed from
+// GLYPHOXA_TTS_TRANSPORT reaches the cycle's client (a v4 Turbo sentence rides a
+// Text-to-Dialogue websocket with "ws", a POST with the default), and the
+// release func the cycle defers closes the client, so a reconnect cycle cannot
+// leave a dialogue socket — one of the account's dialogue-session slots — open.
+func TestNewCycleSynth_TransportReachesTheClientAndReleaseClosesIt(t *testing.T) {
+	for _, tc := range []struct {
+		transport   ttseleven.Transport
+		wantSockets int64
+		wantPosts   int64
+	}{
+		{ttseleven.TransportHTTP, 0, 1},
+		{ttseleven.TransportWS, 1, 0},
+	} {
+		t.Run(string(tc.transport), func(t *testing.T) {
+			var sockets, open, posts atomic.Int64
+			up := websocket.Upgrader{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !websocket.IsWebSocketUpgrade(r) {
+					if r.Method == http.MethodPost {
+						posts.Add(1)
+						_, _ = w.Write(make([]byte, 64))
+					}
+					return
+				}
+				conn, err := up.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				sockets.Add(1)
+				open.Add(1)
+				defer open.Add(-1)
+				for n := 0; ; n++ {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+					if n == 0 {
+						continue // the voices registration
+					}
+					_ = conn.WriteJSON(map[string]any{"audio": "AAAAAA=="})
+					_ = conn.WriteJSON(map[string]any{"is_final_audio_for_turn": true})
+				}
+			}))
+			defer srv.Close()
+			orig := newTTS
+			t.Cleanup(func() { newTTS = orig })
+			newTTS = func(apiKey string, opts ...ttseleven.Option) *ttseleven.Client {
+				return orig(apiKey, append(opts, ttseleven.WithBaseURL(srv.URL))...)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+				go func() {
+					for range chunks {
+					}
+				}()
+			})
+			synth, release := newCycleSynth(ctx, voiceevent.NewBus(), "T-tts-key", tc.transport, sink, nil)
+			ch, err := synth.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "Willkommen.", Voice: ttseleven.DefaultVoice("v", "de")})
+			if err != nil {
+				release()
+				t.Fatalf("Synthesize: %v", err)
+			}
+			for range ch {
+			}
+			if sockets.Load() != tc.wantSockets || posts.Load() != tc.wantPosts {
+				t.Errorf("sockets = %d, POSTs = %d; want %d and %d", sockets.Load(), posts.Load(), tc.wantSockets, tc.wantPosts)
+			}
+			release()
+			deadline := time.Now().Add(2 * time.Second)
+			for open.Load() != 0 {
+				if time.Now().After(deadline) {
+					t.Fatalf("%d dialogue socket(s) still open after the cycle released its synthesizer", open.Load())
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		})
 	}
 }
