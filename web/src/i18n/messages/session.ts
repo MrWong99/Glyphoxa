@@ -3,15 +3,20 @@
 // (compile-checked via Record<keyof typeof en, string>).
 
 export const en = {
-  // --- Header + session control card ---------------------------------------
+  // --- Header + session control bar ----------------------------------------
   "session.title": "Voice session",
   "session.statusLive": "Live",
   "session.statusIdle": "Idle",
   "session.statusFailed": "Failed",
   "session.connecting": "Connecting…",
-  "session.connected": "Connected",
   "session.startSession": "Start session",
+  "session.starting": "Starting…",
   "session.stopSession": "Stop session",
+  "session.stopping": "Stopping…",
+  "session.stopConfirmTitle": "Stop the session?",
+  "session.stopConfirmDesc":
+    "It has been running for {duration}. The Bot leaves the voice channel and the transcript is closed.",
+  "session.stopConfirmKeep": "Keep playing",
   "session.voiceChannel": "Voice channel",
   "session.voiceChannelPlaceholder": "Voice channel…",
   "session.setAsDefault": "Set as default",
@@ -25,28 +30,104 @@ export const en = {
   "session.couldntStop": "Couldn't stop the session: {message}",
   "session.couldntSaveDefaultChannel": "Couldn't save the default channel: {message}",
   "session.couldntSetMute": "Couldn't change the mute: {message}",
-  "session.connectionFailedReason": "Voice connection failed: {reason}",
   "session.connectionFailed": "Voice connection failed.",
+  "session.connectionFailedNoReason": "The server gave no reason. Start the session again.",
+
+  // --- Pre-flight (idle control card) --------------------------------------
+  "session.preflightLabel": "Before you start",
+  "session.preflightToneOk": "ready",
+  "session.preflightToneWarn": "needs attention",
+  "session.preflightToneBlock": "blocks the start",
+  "session.preflightToneInfo": "for your information",
+  "session.preflightTonePending": "checking",
+  "session.preflightOpenSetup": "Open Setup",
+  "session.preflightOpenCast": "Open Cast",
+  "session.openCampaignSettings": "Campaign settings",
+  "session.preflightDiscord": "Discord",
+  "session.preflightDiscordChecking": "Checking the Discord server…",
+  "session.preflightDiscordUnknown": "This server can't list voice channels. The session joins the default channel.",
+  "session.preflightDiscordPick": "Pick the voice channel to join.",
+  "session.preflightDiscordOk": "Server linked. The Bot joins “{channel}”.",
+  "session.preflightProviders": "AI services",
+  "session.preflightProvidersChecking": "Checking speech, voices and the language model…",
+  "session.preflightProvidersUnknown": "Couldn't check the services right now. You can still start.",
+  "session.preflightProvidersOk": "Speech, voices and the language model answer.",
+  "session.preflightProviderOf": "{component} ({provider})",
+  "session.preflightComponentLlm": "Language model",
+  "session.preflightComponentTts": "Voices",
+  "session.preflightComponentDiscord": "Discord Bot",
+  "session.preflightCast": "Cast",
+  "session.preflightCastChecking": "Loading the cast…",
+  "session.preflightCastUnknown": "Couldn't load the cast.",
+  "session.preflightCastNone": "No NPCs yet — only the Butler will answer.",
+  "session.preflightCastOk": "{n} NPCs, each with its own voice.",
+  "session.preflightCastOkOne": "1 NPC, with its own voice.",
+  "session.preflightCastVoiceless":
+    "{n} of {total} NPCs have no voice picked and will speak with the default voice: {names}.",
+  "session.preflightCastVoicelessOne": "{name} has no voice picked and will speak with the default voice.",
+  "session.preflightHighlights": "Highlights",
+  "session.preflightHighlightsChecking": "Loading the campaign…",
+  "session.preflightHighlightsOn": "Highlight recording is on. Epic moments are kept as clips.",
+  "session.preflightHighlightsOff": "Highlight recording is off. No clips will be kept tonight.",
 
   // --- Spending limits (spend caps, #130) ----------------------------------
   "session.spendCapHard": "Hard spending limit reached — the session is ending.",
   "session.spendCapSoft":
     "Soft spending limit reached — no new AI replies will start (replies in progress will finish).",
   "session.spendEstimate": "Estimated spend {usd}.",
+  "session.spendInline": "Estimated spend {usd}",
+
+  // --- Why a session failed or ended by itself (#695) ----------------------
+  "session.reasonInvalidBotToken":
+    "Discord rejected the Bot token. Paste a current token under Setup, then start again.",
+  "session.reasonDisallowedIntents":
+    "Discord refused the Bot's permissions (gateway intents). Check the Bot's intents in the Discord Developer Portal, then start again.",
+  "session.reasonBotNotAuthorized":
+    "The Bot is not allowed to do that on the linked Discord server. Invite it again from Setup, then start again.",
+  "session.reasonGatewayRejected":
+    "Discord refused the connection. Wait a minute and start again; if it keeps happening, check the Bot under Setup.",
+  "session.reasonVoiceJoinTimeout":
+    "The Bot couldn't join the voice channel. Check that it may see, connect to and speak in that channel, then start again.",
+  "session.reasonOrphaned":
+    "The session was cut off when the server restarted. The transcript up to that point is kept.",
+  "session.reasonSpendCapHard": "It ended because the estimated spend reached your hard spending limit.",
+  "session.reasonAllowanceExhausted": "It ended because this month's allowance of your plan is used up.",
+  "session.reasonIdleNoAudio": "It ended by itself because nobody spoke for a while.",
+  "session.reasonResourceCeiling":
+    "It ended because the voice server ran out of headroom. Start it again to continue.",
+  "session.reasonReconnectChurn":
+    "It ended because the connection to Discord kept dropping. Check Discord's status, then start again.",
+  "session.reasonMediaPathDead":
+    "It ended because no audio arrived although people were speaking. Start it again; if it repeats, move the Bot to another voice channel.",
+  "session.endedToast": "Session ended.",
+  "session.endedAutoToast": "The session ended. {reason}",
+  "session.endedFailedToast": "The session failed. {reason}",
 
   // --- Last-session summary + recap ----------------------------------------
   "session.lastSummary": "Last session ended {when} · {duration} · {n} lines transcribed.",
   "session.lastSummaryOne": "Last session ended {when} · {duration} · 1 line transcribed.",
   "session.durationHm": "{h}h {m}m",
   "session.recap": "Recap",
+  "session.generateRecap": "Generate recap",
+  "session.recapRegenerate": "Regenerate",
   "session.generatingRecap": "Generating recap…",
   "session.recapLabel": "Recap · session of {stamp}",
   "session.couldntGenerateRecap": "Couldn't generate the recap: {message}",
-  "session.recapHint": "Writes a summary with AI — this can take up to a minute.",
+  "session.recapHint": "Writes a summary with AI — this can take up to two minutes.",
+  "session.recapKeptNote":
+    "Written at {time}. Recaps are not saved — this one stays until you close or reload this tab, so copy it to keep it.",
+  "session.recapCopied": "Recap copied.",
+  "session.copy": "Copy",
+  "session.copyFailed": "Couldn't copy — your browser blocked the clipboard.",
 
-  // --- Transcript card + past-session picker -------------------------------
+  // --- Tabs + transcript ---------------------------------------------------
+  "session.tabsLabel": "Session view",
+  "session.tabTranscript": "Transcript",
+  "session.tabHighlights": "Highlights",
+  "session.tabBoard": "Board",
   "session.liveTranscript": "Live transcript",
   "session.sessionTranscript": "Session transcript",
+  "session.transcriptLoadFailedTitle": "Couldn't load the transcript",
   "session.transcriptLoadFailedPastToast":
     "Couldn't load that session's transcript. It may be unavailable — try again.",
   "session.transcriptLoadFailedPastInline":
@@ -56,33 +137,88 @@ export const en = {
   "session.listening": "Listening… transcript lines will appear here.",
   "session.noTranscriptLines": "This session has no transcript lines.",
   "session.startToCapture": "Start a session to capture the table's voice transcript.",
-  "session.pickerLabel": "Sessions",
-  "session.pickerLive": "live",
+  "session.jumpToLatest": "Jump to latest",
+  "session.jumpToLatestOne": "Jump to latest · 1 new line",
+  "session.jumpToLatestNew": "Jump to latest · {n} new lines",
+  "session.transcriptCopied": "Transcript copied.",
+  "session.downloadMarkdown": "Download .md",
+  "session.exportTitle": "{campaign} — session of {date}",
+  "session.exportTitleNoCampaign": "Session of {date}",
+  // The relay's own labels (internal/transcript/relay.go), localized on the
+  // client (#695): the unnamed human lane, the Agent pills and the typing line.
+  "session.speakerUnknown": "Player / GM",
+  "session.tagNpc": "NPC",
+  "session.tagButler": "Butler",
+  "session.typingListening": "Listening to the table…",
+  "session.typingSpeaking": "{name} is speaking…",
+
+  // --- Session history -----------------------------------------------------
+  "session.history": "History",
+  "session.historyLabel": "Past sessions",
+  "session.historyMinor": "{n} short or empty sessions",
+  "session.historyMinorOne": "1 short or empty session",
+  "session.historyAutoEnded": "Ended by itself",
   "session.pickerLines": "{n} lines",
   "session.pickerLinesOne": "1 line",
-  "session.backToCurrent": "Back to current session",
+  "session.viewingPast": "Viewing the session of {date}, {time}.",
+  "session.viewingPastUnknown": "Viewing an earlier session.",
+  "session.backToLive": "Back to live",
+  "session.backToLatest": "Back to latest",
 
   // --- Transcript search -----------------------------------------------------
   "session.searchTranscript": "Search the transcript",
-  "session.searchPlaceholder": "Search the transcript — speakers and text",
+  "session.searchPlaceholder": "Search every session — speakers and text",
+  "session.clearSearch": "Clear search",
   "session.couldntSearch": "Couldn't search the transcript: {message}",
   "session.noLinesMatch": "No lines match “{query}”.",
+  "session.searchCount": "{n} matching lines",
+  "session.searchCountOne": "1 matching line",
+  "session.searchCountSessions": "{n} matching lines in {sessions} sessions",
+  "session.searchGroup": "Session of {date}, {time}",
+  "session.searchGroupUndated": "Earlier session",
+  "session.searchGroupHere": "on screen",
 
   // --- Section titles --------------------------------------------------------
   "session.highlightsTitle": "Highlights",
   "session.boardTitle": "Tonight's board",
+
+  // --- Prep board (read-only) -----------------------------------------------
+  "session.boardLoadFailed": "Couldn't load the boards",
+  "session.boardNoneTitle": "No boards yet",
+  "session.boardNoneDesc":
+    "A board is your shortlist of wiki entries for one session, in the order you expect to need them. Make one in the World wiki; it shows up here to read during play.",
+  "session.boardOpenWiki": "Open the World wiki",
+  "session.boardPick": "Board",
+  "session.boardEntries": "{n} entries",
+  "session.boardEntriesOne": "1 entry",
+  "session.boardEmptyTitle": "This board is empty",
+  "session.boardEmptyDesc": "Add entries to it from the World wiki.",
+  "session.boardEntryDeleted": "Deleted entry",
+  "session.boardEntryUnavailable": "Entry couldn't be loaded",
+  "session.boardEntryNoText": "This entry has no text yet.",
+  "session.boardGmOnly": "GM only",
+  "session.boardOpenInWiki": "Open in wiki",
 
   // --- Voice control panel ---------------------------------------------------
   "session.voiceControl": "Voice control",
   "session.npcVoices": "NPC voices",
   "session.voicingCount": "{voicing} of {total} voices on",
   "session.voicingCountOne": "{voicing} of {total} voices on",
+  "session.voicesShow": "Show the NPC voices",
+  "session.voicesHide": "Hide the NPC voices",
   "session.muteAll": "Mute all",
   "session.unmuteAll": "Unmute all",
   "session.butlerState": "Butler · answers only the GM, when called by name",
   "session.stateMuted": "Muted",
   "session.stateVoiceOn": "Voice on",
-  "session.stateIdle": "Ready",
+  "session.stateSpeaking": "Speaking",
+  "session.stateChecking": "Checking…",
+  "session.stateVoiceSet": "Voice set",
+  "session.stateNoVoice": "No voice picked — uses the default",
+  "session.stateNoEntry": "No wiki entry linked",
+  "session.stateNoFacts": "Knows nothing about the world yet",
+  "session.stateReadyFacts": "Ready · {n} facts in reach",
+  "session.stateReadyFactsOne": "Ready · 1 fact in reach",
   "session.muteAgent": "Mute {name}",
   "session.unmuteAgent": "Unmute {name}",
   "session.rosterLoadFailed": "Couldn't load the NPC list: {message}",
@@ -94,9 +230,18 @@ export const en = {
   "session.couldntLoadHighlights": "Couldn't load the highlights: {message}",
   "session.couldntRefreshHighlights":
     "Couldn't refresh the highlights — showing the last loaded set.",
-  "session.noHighlights":
-    "No highlights yet — epic moments appear here once highlight recording is turned on and everyone has consented. To turn it on, open the campaign menu in the top bar, choose Campaign settings, and enable “Highlight recording”.",
-  "session.candidateBadge": "Unsaved — deleted in 7 days",
+  "session.highlightsOffTitle": "Highlight recording is off",
+  "session.highlightsOffDesc":
+    "Epic moments are only kept as clips while highlight recording is on for this campaign and everyone at the table has consented. Turn it on in the campaign's settings.",
+  "session.highlightsNoneTitle": "No highlights yet",
+  "session.highlightsNoneDesc":
+    "Highlight recording is on, but nothing in this session was epic enough to keep.",
+  "session.highlightsNoneLiveDesc":
+    "Highlight recording is on. A moment appears here as soon as one is epic enough to keep.",
+  "session.highlightCaptured": "New highlight captured.",
+  "session.highlightShow": "Show",
+  "session.candidateBadge": "Unsaved — deleted 7 days after the session",
+  "session.candidateBadgeUntil": "Unsaved — deleted on {date}",
   "session.promotedBadge": "Kept",
   "session.promote": "Keep",
   "session.clipLabel": "Clip: {excerpt}",
@@ -151,6 +296,14 @@ export const en = {
   "session.couldntReassignCharacter": "Couldn't reassign the Character: {message}",
   "session.couldntBind": "Couldn't link: {message}",
   "session.couldntReassign": "Couldn't reassign: {message}",
+  "session.unlinkedTitle": "{n} people in voice are not linked to a Character",
+  "session.unlinkedTitleOne": "1 person in voice is not linked to a Character",
+  "session.unlinkedDesc":
+    "Until they are linked, their lines are transcribed as “Player / GM” and the NPCs can't call them by name.",
+  "session.unlinkedLink": "Link",
+  "session.unlinkedLinkAria": "Link {name} to a Character",
+  "session.unlinkedNotPlayer": "Not a player",
+  "session.unlinkedNotPlayerAria": "{name} is not a player — don't ask again",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -159,9 +312,14 @@ export const de: Record<keyof typeof en, string> = {
   "session.statusIdle": "Inaktiv",
   "session.statusFailed": "Fehlgeschlagen",
   "session.connecting": "Verbinde…",
-  "session.connected": "Verbunden",
   "session.startSession": "Session starten",
+  "session.starting": "Wird gestartet…",
   "session.stopSession": "Session beenden",
+  "session.stopping": "Wird beendet…",
+  "session.stopConfirmTitle": "Session beenden?",
+  "session.stopConfirmDesc":
+    "Sie läuft seit {duration}. Der Bot verlässt den Sprachkanal und die Mitschrift wird abgeschlossen.",
+  "session.stopConfirmKeep": "Weiterspielen",
   "session.voiceChannel": "Sprachkanal",
   "session.voiceChannelPlaceholder": "Sprachkanal…",
   "session.setAsDefault": "Als Standard festlegen",
@@ -172,25 +330,105 @@ export const de: Record<keyof typeof en, string> = {
   "session.couldntStop": "Session konnte nicht beendet werden: {message}",
   "session.couldntSaveDefaultChannel": "Standardkanal konnte nicht gespeichert werden: {message}",
   "session.couldntSetMute": "Stummschalten fehlgeschlagen: {message}",
-  "session.connectionFailedReason": "Sprachverbindung fehlgeschlagen: {reason}",
   "session.connectionFailed": "Sprachverbindung fehlgeschlagen.",
+  "session.connectionFailedNoReason": "Der Server hat keinen Grund genannt. Starte die Session noch einmal.",
+
+  "session.preflightLabel": "Vor dem Start",
+  "session.preflightToneOk": "bereit",
+  "session.preflightToneWarn": "braucht Aufmerksamkeit",
+  "session.preflightToneBlock": "verhindert den Start",
+  "session.preflightToneInfo": "zur Information",
+  "session.preflightTonePending": "wird geprüft",
+  "session.preflightOpenSetup": "Einrichtung öffnen",
+  "session.preflightOpenCast": "Besetzung öffnen",
+  "session.openCampaignSettings": "Kampagnen-Einstellungen",
+  "session.preflightDiscord": "Discord",
+  "session.preflightDiscordChecking": "Discord-Server wird geprüft…",
+  "session.preflightDiscordUnknown":
+    "Dieser Server kann keine Sprachkanäle auflisten. Die Session tritt dem Standardkanal bei.",
+  "session.preflightDiscordPick": "Wähle den Sprachkanal, dem der Bot beitreten soll.",
+  "session.preflightDiscordOk": "Server verknüpft. Der Bot tritt „{channel}“ bei.",
+  "session.preflightProviders": "KI-Dienste",
+  "session.preflightProvidersChecking": "Spracherkennung, Stimmen und Sprachmodell werden geprüft…",
+  "session.preflightProvidersUnknown":
+    "Die Dienste konnten gerade nicht geprüft werden. Du kannst trotzdem starten.",
+  "session.preflightProvidersOk": "Spracherkennung, Stimmen und Sprachmodell antworten.",
+  "session.preflightProviderOf": "{component} ({provider})",
+  "session.preflightComponentLlm": "Sprachmodell",
+  "session.preflightComponentTts": "Stimmen",
+  "session.preflightComponentDiscord": "Discord-Bot",
+  "session.preflightCast": "Besetzung",
+  "session.preflightCastChecking": "Besetzung wird geladen…",
+  "session.preflightCastUnknown": "Die Besetzung konnte nicht geladen werden.",
+  "session.preflightCastNone": "Noch keine NPCs — nur der Butler wird antworten.",
+  "session.preflightCastOk": "{n} NPCs, jeder mit eigener Stimme.",
+  "session.preflightCastOkOne": "1 NPC, mit eigener Stimme.",
+  "session.preflightCastVoiceless":
+    "{n} von {total} NPCs haben keine Stimme gewählt und sprechen mit der Standardstimme: {names}.",
+  "session.preflightCastVoicelessOne":
+    "{name} hat keine Stimme gewählt und spricht mit der Standardstimme.",
+  "session.preflightHighlights": "Highlights",
+  "session.preflightHighlightsChecking": "Kampagne wird geladen…",
+  "session.preflightHighlightsOn":
+    "Die Highlight-Aufnahme ist an. Epische Momente werden als Clips behalten.",
+  "session.preflightHighlightsOff": "Die Highlight-Aufnahme ist aus. Heute werden keine Clips behalten.",
 
   "session.spendCapHard": "Hartes Ausgabenlimit erreicht — die Session wird beendet.",
   "session.spendCapSoft":
     "Weiches Ausgabenlimit erreicht — es starten keine neuen KI-Antworten (laufende Antworten werden noch beendet).",
   "session.spendEstimate": "Geschätzte Ausgaben {usd}.",
+  "session.spendInline": "Geschätzte Ausgaben {usd}",
+
+  "session.reasonInvalidBotToken":
+    "Discord hat den Bot-Token abgelehnt. Füge unter Einrichtung einen aktuellen Token ein und starte dann erneut.",
+  "session.reasonDisallowedIntents":
+    "Discord hat die Berechtigungen des Bots (Gateway Intents) abgelehnt. Prüfe die Intents des Bots im Discord Developer Portal und starte dann erneut.",
+  "session.reasonBotNotAuthorized":
+    "Der Bot darf das auf dem verknüpften Discord-Server nicht. Lade ihn über die Einrichtung erneut ein und starte dann noch einmal.",
+  "session.reasonGatewayRejected":
+    "Discord hat die Verbindung abgelehnt. Warte eine Minute und starte erneut; passiert es wieder, prüfe den Bot unter Einrichtung.",
+  "session.reasonVoiceJoinTimeout":
+    "Der Bot konnte dem Sprachkanal nicht beitreten. Prüfe, ob er den Kanal sehen, sich verbinden und dort sprechen darf, und starte dann erneut.",
+  "session.reasonOrphaned":
+    "Die Session wurde beim Neustart des Servers abgeschnitten. Die Mitschrift bis dahin bleibt erhalten.",
+  "session.reasonSpendCapHard":
+    "Sie wurde beendet, weil die geschätzten Ausgaben dein hartes Ausgabenlimit erreicht haben.",
+  "session.reasonAllowanceExhausted":
+    "Sie wurde beendet, weil das Monatskontingent deines Tarifs aufgebraucht ist.",
+  "session.reasonIdleNoAudio": "Sie hat sich selbst beendet, weil eine Weile niemand gesprochen hat.",
+  "session.reasonResourceCeiling":
+    "Sie wurde beendet, weil dem Sprachserver die Reserven ausgingen. Starte sie neu, um weiterzuspielen.",
+  "session.reasonReconnectChurn":
+    "Sie wurde beendet, weil die Verbindung zu Discord immer wieder abbrach. Prüfe den Discord-Status und starte dann erneut.",
+  "session.reasonMediaPathDead":
+    "Sie wurde beendet, weil kein Ton ankam, obwohl gesprochen wurde. Starte sie neu; passiert es wieder, verschiebe den Bot in einen anderen Sprachkanal.",
+  "session.endedToast": "Session beendet.",
+  "session.endedAutoToast": "Die Session wurde beendet. {reason}",
+  "session.endedFailedToast": "Die Session ist fehlgeschlagen. {reason}",
 
   "session.lastSummary": "Letzte Session endete {when} · {duration} · {n} Zeilen mitgeschrieben.",
   "session.lastSummaryOne": "Letzte Session endete {when} · {duration} · 1 Zeile mitgeschrieben.",
   "session.durationHm": "{h} Std. {m} Min.",
   "session.recap": "Recap",
+  "session.generateRecap": "Recap erstellen",
+  "session.recapRegenerate": "Neu erstellen",
   "session.generatingRecap": "Recap wird erstellt…",
   "session.recapLabel": "Recap · Session vom {stamp}",
   "session.couldntGenerateRecap": "Recap konnte nicht erstellt werden: {message}",
-  "session.recapHint": "Schreibt eine Zusammenfassung mit KI — das kann bis zu einer Minute dauern.",
+  "session.recapHint": "Schreibt eine Zusammenfassung mit KI — das kann bis zu zwei Minuten dauern.",
+  "session.recapKeptNote":
+    "Geschrieben um {time}. Recaps werden nicht gespeichert — dieser bleibt, bis du den Tab schließt oder neu lädst. Kopiere ihn, um ihn zu behalten.",
+  "session.recapCopied": "Recap kopiert.",
+  "session.copy": "Kopieren",
+  "session.copyFailed": "Kopieren fehlgeschlagen — dein Browser hat die Zwischenablage blockiert.",
 
+  "session.tabsLabel": "Ansicht der Session",
+  "session.tabTranscript": "Mitschrift",
+  "session.tabHighlights": "Highlights",
+  "session.tabBoard": "Board",
   "session.liveTranscript": "Live-Mitschrift",
   "session.sessionTranscript": "Mitschrift der Session",
+  "session.transcriptLoadFailedTitle": "Die Mitschrift konnte nicht geladen werden",
   "session.transcriptLoadFailedPastToast":
     "Die Mitschrift dieser Session konnte nicht geladen werden. Sie ist eventuell nicht verfügbar — versuch es noch einmal.",
   "session.transcriptLoadFailedPastInline":
@@ -200,30 +438,81 @@ export const de: Record<keyof typeof en, string> = {
   "session.listening": "Zuhören läuft… Zeilen der Mitschrift erscheinen hier.",
   "session.noTranscriptLines": "Diese Session hat keine Mitschrift-Zeilen.",
   "session.startToCapture": "Starte eine Session, um eine Mitschrift eurer Runde aufzuzeichnen.",
-  "session.pickerLabel": "Sessions",
-  "session.pickerLive": "live",
+  "session.jumpToLatest": "Zum Ende springen",
+  "session.jumpToLatestOne": "Zum Ende springen · 1 neue Zeile",
+  "session.jumpToLatestNew": "Zum Ende springen · {n} neue Zeilen",
+  "session.transcriptCopied": "Mitschrift kopiert.",
+  "session.downloadMarkdown": ".md herunterladen",
+  "session.exportTitle": "{campaign} — Session vom {date}",
+  "session.exportTitleNoCampaign": "Session vom {date}",
+  "session.speakerUnknown": "Spieler / GM",
+  "session.tagNpc": "NPC",
+  "session.tagButler": "Butler",
+  "session.typingListening": "Hört der Runde zu…",
+  "session.typingSpeaking": "{name} spricht…",
+
+  "session.history": "Verlauf",
+  "session.historyLabel": "Frühere Sessions",
+  "session.historyMinor": "{n} kurze oder leere Sessions",
+  "session.historyMinorOne": "1 kurze oder leere Session",
+  "session.historyAutoEnded": "Selbst beendet",
   "session.pickerLines": "{n} Zeilen",
   "session.pickerLinesOne": "1 Zeile",
-  "session.backToCurrent": "Zurück zur aktuellen Session",
+  "session.viewingPast": "Du siehst die Session vom {date}, {time}.",
+  "session.viewingPastUnknown": "Du siehst eine frühere Session.",
+  "session.backToLive": "Zurück zur Live-Session",
+  "session.backToLatest": "Zurück zur letzten Session",
 
   "session.searchTranscript": "Mitschrift durchsuchen",
-  "session.searchPlaceholder": "Mitschrift durchsuchen — Sprecher und Text",
+  "session.searchPlaceholder": "Alle Sessions durchsuchen — Sprecher und Text",
+  "session.clearSearch": "Suche leeren",
   "session.couldntSearch": "Mitschrift konnte nicht durchsucht werden: {message}",
   "session.noLinesMatch": "Keine Zeilen passen zu „{query}“.",
+  "session.searchCount": "{n} passende Zeilen",
+  "session.searchCountOne": "1 passende Zeile",
+  "session.searchCountSessions": "{n} passende Zeilen in {sessions} Sessions",
+  "session.searchGroup": "Session vom {date}, {time}",
+  "session.searchGroupUndated": "Frühere Session",
+  "session.searchGroupHere": "wird angezeigt",
 
   "session.highlightsTitle": "Highlights",
   "session.boardTitle": "Heutiges Board",
+
+  "session.boardLoadFailed": "Die Boards konnten nicht geladen werden",
+  "session.boardNoneTitle": "Noch keine Boards",
+  "session.boardNoneDesc":
+    "Ein Board ist deine Auswahl an Wiki-Einträgen für eine Session, in der Reihenfolge, in der du sie brauchst. Lege eins im Welt-Wiki an; hier liest du es während des Spiels.",
+  "session.boardOpenWiki": "Welt-Wiki öffnen",
+  "session.boardPick": "Board",
+  "session.boardEntries": "{n} Einträge",
+  "session.boardEntriesOne": "1 Eintrag",
+  "session.boardEmptyTitle": "Dieses Board ist leer",
+  "session.boardEmptyDesc": "Füge ihm im Welt-Wiki Einträge hinzu.",
+  "session.boardEntryDeleted": "Gelöschter Eintrag",
+  "session.boardEntryUnavailable": "Eintrag konnte nicht geladen werden",
+  "session.boardEntryNoText": "Dieser Eintrag hat noch keinen Text.",
+  "session.boardGmOnly": "Nur GM",
+  "session.boardOpenInWiki": "Im Wiki öffnen",
 
   "session.voiceControl": "Stimmen-Steuerung",
   "session.npcVoices": "NPC-Stimmen",
   "session.voicingCount": "{voicing} von {total} Stimmen an",
   "session.voicingCountOne": "{voicing} von {total} Stimmen an",
+  "session.voicesShow": "NPC-Stimmen anzeigen",
+  "session.voicesHide": "NPC-Stimmen ausblenden",
   "session.muteAll": "Alle stummschalten",
   "session.unmuteAll": "Alle laut stellen",
   "session.butlerState": "Butler · reagiert nur auf den GM, wenn er beim Namen gerufen wird",
   "session.stateMuted": "Stumm",
   "session.stateVoiceOn": "Stimme an",
-  "session.stateIdle": "Bereit",
+  "session.stateSpeaking": "Spricht",
+  "session.stateChecking": "Wird geprüft…",
+  "session.stateVoiceSet": "Stimme gewählt",
+  "session.stateNoVoice": "Keine Stimme gewählt — nutzt die Standardstimme",
+  "session.stateNoEntry": "Kein Wiki-Eintrag verknüpft",
+  "session.stateNoFacts": "Weiß noch nichts über die Welt",
+  "session.stateReadyFacts": "Bereit · {n} Fakten in Reichweite",
+  "session.stateReadyFactsOne": "Bereit · 1 Fakt in Reichweite",
   "session.muteAgent": "{name} stummschalten",
   "session.unmuteAgent": "{name} laut stellen",
   "session.rosterLoadFailed": "Die NPC-Liste konnte nicht geladen werden: {message}",
@@ -234,9 +523,18 @@ export const de: Record<keyof typeof en, string> = {
   "session.couldntLoadHighlights": "Highlights konnten nicht geladen werden: {message}",
   "session.couldntRefreshHighlights":
     "Highlights konnten nicht aktualisiert werden — der letzte geladene Stand wird angezeigt.",
-  "session.noHighlights":
-    "Noch keine Highlights — epische Momente erscheinen hier, sobald die Highlight-Aufnahme eingeschaltet ist und alle zugestimmt haben. Zum Einschalten öffne das Kampagnen-Menü in der oberen Leiste, wähle Kampagnen-Einstellungen und aktiviere „Highlight-Aufnahme“.",
-  "session.candidateBadge": "Nicht gespeichert — wird in 7 Tagen gelöscht",
+  "session.highlightsOffTitle": "Die Highlight-Aufnahme ist aus",
+  "session.highlightsOffDesc":
+    "Epische Momente werden nur als Clips behalten, solange die Highlight-Aufnahme für diese Kampagne eingeschaltet ist und alle am Tisch zugestimmt haben. Schalte sie in den Kampagnen-Einstellungen ein.",
+  "session.highlightsNoneTitle": "Noch keine Highlights",
+  "session.highlightsNoneDesc":
+    "Die Highlight-Aufnahme ist an, aber in dieser Session war nichts episch genug, um es zu behalten.",
+  "session.highlightsNoneLiveDesc":
+    "Die Highlight-Aufnahme ist an. Ein Moment erscheint hier, sobald einer episch genug ist, um ihn zu behalten.",
+  "session.highlightCaptured": "Neues Highlight aufgenommen.",
+  "session.highlightShow": "Anzeigen",
+  "session.candidateBadge": "Nicht gespeichert — wird 7 Tage nach der Session gelöscht",
+  "session.candidateBadgeUntil": "Nicht gespeichert — wird am {date} gelöscht",
   "session.promotedBadge": "Behalten",
   "session.promote": "Behalten",
   "session.clipLabel": "Clip: {excerpt}",
@@ -288,4 +586,12 @@ export const de: Record<keyof typeof en, string> = {
   "session.couldntReassignCharacter": "Charakter konnte nicht neu zugeordnet werden: {message}",
   "session.couldntBind": "Verknüpfen fehlgeschlagen: {message}",
   "session.couldntReassign": "Neu zuordnen fehlgeschlagen: {message}",
+  "session.unlinkedTitle": "{n} Personen im Sprachkanal sind mit keinem Charakter verknüpft",
+  "session.unlinkedTitleOne": "1 Person im Sprachkanal ist mit keinem Charakter verknüpft",
+  "session.unlinkedDesc":
+    "Bis sie verknüpft sind, erscheinen ihre Zeilen als „Spieler / GM“ und die NPCs können sie nicht beim Namen nennen.",
+  "session.unlinkedLink": "Verknüpfen",
+  "session.unlinkedLinkAria": "{name} mit einem Charakter verknüpfen",
+  "session.unlinkedNotPlayer": "Kein Spieler",
+  "session.unlinkedNotPlayerAria": "{name} ist kein Spieler — nicht mehr fragen",
 };

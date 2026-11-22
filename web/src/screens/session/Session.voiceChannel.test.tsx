@@ -21,9 +21,11 @@ import {
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
-import { Session } from "./Session";
+import { Screen } from "./testScreen";
 
-vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), warning: vi.fn(), dismiss: vi.fn() }),
+}));
 
 // W2: the voice-channel pick used to be plain component state, so every page
 // load fell back to the Tenant default (or silently to the first channel). The
@@ -84,7 +86,7 @@ function mount(opts: Parameters<typeof transportFor>[0] = {}) {
   const h = transportFor(opts);
   render(
     <Providers transport={h.transport} queryClient={makeQueryClient()}>
-      <Session />
+      <Screen />
     </Providers>,
   );
   return h;
@@ -99,7 +101,15 @@ async function pick(name: string) {
   await waitFor(() => expect(trigger()).toHaveTextContent(name));
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  // A started session whose Bot is in the channel, so the badge reads "Live".
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({ lines: [], status: "live", connection: "connected", typing: { active: false, label: "" } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+});
 afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
