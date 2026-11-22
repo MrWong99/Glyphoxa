@@ -10,6 +10,7 @@
 package anthropic
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -58,6 +59,9 @@ type Client struct {
 	// unless [WithPromptCachingFor] replaced it).
 	caching func(model string) bool
 
+	// log receives the adapter's few operational warnings ([WithLogger]).
+	log *slog.Logger
+
 	// thoughts keeps the thinking blocks of recent assistant tool turns so the
 	// next tool round can replay them (passthrough.go).
 	thoughts *thinkingStore
@@ -86,6 +90,17 @@ func defaultHTTPClient() *http.Client {
 	}
 }
 
+// WithLogger sets where the adapter logs its operational warnings — today one:
+// a replayed thinking block the API refused (see [Client.Complete]). The
+// default is [slog.Default]; a nil logger is ignored.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) {
+		if l != nil {
+			c.log = l
+		}
+	}
+}
+
 // WithModel sets the default model used when [llm.Request.Model] is empty.
 func WithModel(m string) Option { return func(c *Client) { c.model = m } }
 
@@ -107,6 +122,7 @@ func New(apiKey string, opts ...Option) *Client {
 		thinking: DefaultThinking,
 		caching:  DefaultPromptCaching,
 		thoughts: newThinkingStore(),
+		log:      slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)

@@ -1,8 +1,11 @@
 package anthropic_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -257,5 +260,167 @@ func TestComplete_Unrelated400_NotRetried(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
 		t.Fatalf("err = %v, want the 400 surfaced", err)
+	}
+}
+
+// thinkingThenTwoCalls is round 1 of a turn with parallel tool calls: one
+// thinking block, then two tool_use blocks.
+func thinkingThenTwoCalls() []string {
+	return []string{
+		sse(`{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10}}}`),
+		sse(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"sig"}}`),
+		sse(`{"type":"content_block_stop","index":0}`),
+		sse(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_a","name":"dice","input":{}}}`),
+		sse(`{"type":"content_block_stop","index":1}`),
+		sse(`{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_b","name":"dice","input":{}}}`),
+		sse(`{"type":"content_block_stop","index":2}`),
+		sse(`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":40}}`),
+		sse(`{"type":"message_stop"}`),
+	}
+}
+
+const thinking400 = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid signature in thinking block."}}`
+
+// TestComplete_ThinkingReplayRejected_IsNotReplayedAgain pins what the adapter
+// remembers after the API refused a replayed thinking block: nothing of that
+// assistant turn. The blocks are stored under every tool_use id of the turn, so
+// forgetting only the id they were found under left a parallel-call turn to be
+// replayed through its sibling id on the next round — one more refused request
+// and retry per round, on the turn a player is waiting on (#702 review).
+func TestComplete_ThinkingReplayRejected_IsNotReplayedAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		round1 []string
+		ids    []string
+	}{
+		{"one tool call", thinkingThenDice(), []string{"toolu_1"}},
+		{"parallel tool calls", thinkingThenTwoCalls(), []string{"toolu_a", "toolu_b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newScriptedServer(t,
+				scriptedReply{events: tc.round1},
+				scriptedReply{status: http.StatusBadRequest, body: thinking400},
+				scriptedReply{events: endTurn()}, // the retry of round 2
+				scriptedReply{events: endTurn()}, // round 3: must go through first time
+			)
+			c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+			user := llm.Message{Role: llm.RoleUser, Text: "Würfel."}
+
+			ch, err := c.Complete(context.Background(), llm.Request{Model: "claude-haiku-5-5", Messages: []llm.Message{user}})
+			if err != nil {
+				t.Fatalf("round 1: %v", err)
+			}
+			collect(t, ch)
+
+			var calls []llm.ToolCall
+			var results []llm.ToolResult
+			for _, id := range tc.ids {
+				calls = append(calls, llm.ToolCall{ID: id, Name: "dice", Input: json.RawMessage(`{}`)})
+				results = append(results, llm.ToolResult{CallID: id, Content: "17"})
+			}
+			history := []llm.Message{user, {Role: llm.RoleAssistant, ToolCalls: calls}, {Role: llm.RoleTool, ToolResults: results}}
+			for round := 2; round <= 3; round++ {
+				ch, err := c.Complete(context.Background(), llm.Request{Model: "claude-haiku-5-5", Messages: history})
+				if err != nil {
+					t.Fatalf("round %d: %v", round, err)
+				}
+				collect(t, ch)
+			}
+
+			if content := assistantContent(t, srv.request(t, 1)); !strings.Contains(string(content[0]), `"type":"thinking"`) {
+				t.Fatalf("round 2 did not replay the thinking block: %s", content)
+			}
+			for _, block := range assistantContent(t, srv.request(t, 3)) {
+				if strings.Contains(string(block), `"type":"thinking"`) {
+					t.Errorf("round 3 replayed a thinking block the API had refused: %s", block)
+				}
+			}
+		})
+	}
+}
+
+// TestComplete_ThinkingReplayRejected_IsLogged pins that the strip-and-retry is
+// visible: it costs a refused request and makes the model think again, and
+// nothing above the adapter can see it happen (#702 review).
+func TestComplete_ThinkingReplayRejected_IsLogged(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	srv := newScriptedServer(t,
+		scriptedReply{events: thinkingThenDice()},
+		scriptedReply{status: http.StatusBadRequest, body: thinking400},
+		scriptedReply{events: endTurn()},
+	)
+	toolRound(t, anthropic.New("k", anthropic.WithBaseURL(srv.URL), anthropic.WithLogger(log)))
+
+	out := logged.String()
+	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "thinking") || !strings.Contains(out, "claude-haiku-5-5") {
+		t.Errorf("log = %q, want one warning naming the refused thinking replay and the model", out)
+	}
+
+	// A tool round the API accepts logs nothing.
+	logged.Reset()
+	srv = newScriptedServer(t, scriptedReply{events: thinkingThenDice()}, scriptedReply{events: endTurn()})
+	toolRound(t, anthropic.New("k", anthropic.WithBaseURL(srv.URL), anthropic.WithLogger(log)))
+	if logged.Len() != 0 {
+		t.Errorf("an accepted replay logged %q", logged.String())
+	}
+}
+
+// TestComplete_ThinkingStore_IsBounded pins the bound on what the adapter
+// remembers: the thinking of the most recent 256 tool calls. One client serves
+// a whole Voice Session, so without the bound it would grow with every tool
+// call of the session.
+func TestComplete_ThinkingStore_IsBounded(t *testing.T) {
+	const turns = 257
+	var mu sync.Mutex
+	n := 0
+	var last []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := readBody(r)
+		mu.Lock()
+		n++
+		id, replay := n, n > turns
+		last = body
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		events := endTurn()
+		if !replay {
+			events = thinkingThenDice()
+		}
+		for _, ev := range events {
+			_, _ = w.Write([]byte(strings.ReplaceAll(ev, "toolu_1", fmt.Sprintf("toolu_%d", id))))
+		}
+	}))
+	defer srv.Close()
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	user := llm.Message{Role: llm.RoleUser, Text: "Würfel."}
+
+	for i := 0; i < turns; i++ {
+		ch, err := c.Complete(context.Background(), llm.Request{Model: "claude-haiku-5-5", Messages: []llm.Message{user}})
+		if err != nil {
+			t.Fatalf("turn %d: %v", i+1, err)
+		}
+		collect(t, ch)
+	}
+
+	replayed := func(id string) bool {
+		ch, err := c.Complete(context.Background(), llm.Request{Model: "claude-haiku-5-5", Messages: []llm.Message{
+			user,
+			{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id, Name: "dice", Input: json.RawMessage(`{}`)}}},
+			{Role: llm.RoleTool, ToolResults: []llm.ToolResult{{CallID: id, Content: "17"}}},
+		}})
+		if err != nil {
+			t.Fatalf("replay %s: %v", id, err)
+		}
+		collect(t, ch)
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Contains(string(assistantContent(t, last)[0]), `"type":"thinking"`)
+	}
+	if replayed("toolu_1") {
+		t.Error("the oldest of 257 tool calls still had its thinking stored; the store is not bounded at 256")
+	}
+	if !replayed("toolu_2") || !replayed("toolu_257") {
+		t.Error("a tool call within the most recent 256 lost its thinking")
 	}
 }

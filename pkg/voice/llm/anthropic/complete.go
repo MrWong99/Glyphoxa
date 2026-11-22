@@ -161,6 +161,10 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 		if !strings.Contains(herr.Error(), "thinking") {
 			return nil, herr
 		}
+		// Not silent: every occurrence is a refused request plus a round in which
+		// the model thinks again, and nothing above the adapter can see it.
+		c.log.Warn("anthropic: the API refused a replayed thinking block; retrying the request without it",
+			"model", model, "tool_use_ids", len(replayed), "err", herr)
 		c.thoughts.forget(replayed)
 		_, body.Messages, _ = toWireMessages(req.Messages, nil)
 		if resp, err = c.post(ctx, body); err != nil {
@@ -228,7 +232,7 @@ func setAuth(h http.Header, key string) {
 //
 // thoughts, when non-nil, supplies the thinking blocks to put back in front of
 // an assistant turn's tool calls (see passthrough.go); replayed lists the
-// tool_use ids whose blocks went into this request.
+// tool_use ids of every assistant turn whose blocks went into this request.
 func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (systemParts []string, out []wireMessage, replayed []string) {
 	for _, m := range msgs {
 		switch m.Role {
@@ -238,9 +242,12 @@ func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (systemParts []
 			}
 		case llm.RoleAssistant:
 			blocks := assistantBlocks(m)
-			if thinking, id := storedThinking(m, thoughts); len(thinking) > 0 {
+			if thinking := storedThinking(m, thoughts); len(thinking) > 0 {
 				blocks = append(thinking, blocks...)
-				replayed = append(replayed, id)
+				// Every id of the turn: the blocks are stored under each of them.
+				for _, tc := range m.ToolCalls {
+					replayed = append(replayed, tc.ID)
+				}
 			}
 			out = append(out, wireMessage{Role: "assistant", Content: blocks})
 		case llm.RoleTool:
@@ -253,10 +260,10 @@ func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (systemParts []
 }
 
 // storedThinking returns the thinking blocks remembered for the assistant turn
-// m — looked up by its tool_use ids, the first one that has any — and the id
-// they were found under. A turn without tool calls, or one the store never saw
-// (another provider's history, a model that did not think), has none.
-func storedThinking(m llm.Message, thoughts *thinkingStore) ([]contentBlock, string) {
+// m — looked up by its tool_use ids, the first one that has any. A turn without
+// tool calls, or one the store never saw (another provider's history, a model
+// that did not think), has none.
+func storedThinking(m llm.Message, thoughts *thinkingStore) []contentBlock {
 	for _, tc := range m.ToolCalls {
 		raws := thoughts.get(tc.ID)
 		if len(raws) == 0 {
@@ -266,9 +273,9 @@ func storedThinking(m llm.Message, thoughts *thinkingStore) ([]contentBlock, str
 		for i, raw := range raws {
 			blocks[i] = contentBlock{raw: raw}
 		}
-		return blocks, tc.ID
+		return blocks
 	}
-	return nil, ""
+	return nil
 }
 
 // assistantBlocks renders an assistant [llm.Message] as Anthropic content
