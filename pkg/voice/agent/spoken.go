@@ -13,13 +13,22 @@ import (
 // deterministic [scrubSpoken] in the delivery path is the guarantee; this only
 // makes the mistake rarer.
 //
+// Its last sentence is the exception to that division of labour (#702): a
+// narrated action ("*wipes her hands on her apron*", which both Claude Haiku
+// models wrote under a plain persona prompt) has no deterministic backstop.
+// [scrubSpoken] drops the asterisks and keeps the words, because it cannot tell
+// an action from an emphasized word and never removes words — so for stage
+// directions the prompt is the only guard.
+//
 // It is rendered only for an Agent whose every reply is spoken: a voiced
 // Persona without a [Config.TextSink]. A Butler that may answer in channel text
 // (#299) is not told that everything it writes is read aloud, because that is
 // not true of it (see [selfPrefixRule]).
 const spokenOutputRule = "Everything you write is spoken aloud by a voice, never shown on a screen. " +
 	"Write the way people talk: plain sentences, no markdown, no asterisks, no headings, " +
-	"no bullet or numbered lists, no emojis, no code."
+	"no bullet or numbered lists, no emojis, no code. " +
+	"Say only the words your character says out loud: no stage directions, no described " +
+	"actions or gestures, and never talk about yourself in the third person."
 
 // spokenOutputMarkupExemption is appended to [spokenOutputRule] when the Voice
 // has an audio-markup instruction (ADR-0022), so the "no markup" rule does not

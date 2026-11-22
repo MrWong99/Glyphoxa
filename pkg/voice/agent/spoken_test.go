@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -124,5 +125,23 @@ func TestCommitSpoken_AnchorTrimmedAway_DropsTheLateCommit(t *testing.T) {
 	hist := r.HistorySnapshot()
 	if len(hist) != 2 || hist[1].Role != llm.RoleAssistant || hist[1].Text != "answer to C" {
 		t.Fatalf("history = %+v, want [question C, answer to C]", hist)
+	}
+}
+
+// TestSpokenOutputRule_ForbidsStageDirections pins the prompt line against
+// narrated actions (#702): under a plain persona prompt both Claude Haiku
+// models opened replies with an asterisk-wrapped action ("*wischt sich die
+// Hände an der Schürze ab*"). The scrub removes the asterisks but keeps the
+// words — it cannot tell an action from an emphasized word — so the voice
+// would read the stage direction aloud. Only the prompt can keep it out.
+func TestSpokenOutputRule_ForbidsStageDirections(t *testing.T) {
+	for _, phrase := range []string{"stage directions", "third person"} {
+		if !strings.Contains(spokenOutputRule, phrase) {
+			t.Errorf("the spoken-output rule does not mention %q:\n%s", phrase, spokenOutputRule)
+		}
+	}
+	// The scrub alone would let the action through as spoken words.
+	if got := scrubSpoken("*wischt sich die Hände ab* Was darf's sein?"); got != "wischt sich die Hände ab Was darf's sein?" {
+		t.Errorf("scrubSpoken = %q; the premise of the prompt rule (the words survive the scrub) no longer holds", got)
 	}
 }
