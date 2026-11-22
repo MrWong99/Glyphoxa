@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,12 @@ type Client struct {
 	apiKey  string
 	baseURL string
 	http    *http.Client
+
+	// terms and language are the batch path's recognition hints, fixed at
+	// construction (see [WithTerms], [WithLanguage]). The realtime path takes its
+	// hints per session from [stt.StreamConfig] instead.
+	terms    []string
+	language string
 }
 
 // Option mutates a [Client] during construction.
@@ -55,6 +62,26 @@ func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
 // overall Timeout; the per-call end-to-end bound is the request context's
 // deadline (the orchestrator STT stage's per-request timeout).
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
+
+// WithTerms biases every batch [Client.Transcribe] towards terms — the names at
+// the table — by sending them as Scribe keyterms (#701). The list is sanitised
+// and capped by [Keyterms]; list the terms by priority. Empty sends none, which
+// is also what keeps the keyterm surcharge off the request.
+//
+// It is a construction-time option, not a per-call argument, because the caller
+// builds one Client per Voice Session and the list is fixed for that session. A
+// realtime session takes the same list through [stt.StreamConfig.Terms].
+func WithTerms(terms []string) Option {
+	return func(c *Client) { c.terms = Keyterms(terms) }
+}
+
+// WithLanguage pins every batch [Client.Transcribe] to one language
+// (language_code) instead of letting Scribe detect it. Empty keeps
+// auto-detection, the default: a table may mix languages. A realtime session
+// takes the same hint through [stt.StreamConfig.Language].
+func WithLanguage(code string) Option {
+	return func(c *Client) { c.language = strings.TrimSpace(code) }
+}
 
 // defaultHTTPClient bounds the connection-establishment and response-header
 // phases so a black-holed scribe endpoint fails in seconds instead of hanging

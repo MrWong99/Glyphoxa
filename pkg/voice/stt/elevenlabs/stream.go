@@ -123,6 +123,10 @@ var (
 		"session_time_limit_exceeded": true,
 		"transcriber_error":           true,
 		"commit_throttled":            true,
+		// invalid_request answers a configuration the provider refuses — measured
+		// 2026-11-22 with a 51st keyterm: it arrives INSTEAD of session_started and
+		// the session never starts (ADR-0042 amendment, #701).
+		"invalid_request": true,
 	}
 )
 
@@ -154,7 +158,7 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 			Err: fmt.Errorf("elevenlabs.OpenStream: missing API key (set %s or pass it to New)", APIKeyEnv)}
 	}
 
-	u, err := streamURL(c.baseURL, cfg.Language)
+	u, err := streamURL(c.baseURL, cfg.Language, Keyterms(cfg.Terms))
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs.OpenStream: %w", err)
 	}
@@ -183,7 +187,11 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 
 // streamURL derives the realtime websocket URL from a batch base URL, mapping
 // https->wss and http->ws so WithBaseURL(httptest.URL) works verbatim.
-func streamURL(baseURL, language string) (string, error) {
+//
+// keyterms must already be sanitised by [Keyterms]: the endpoint refuses the
+// session (invalid_request) past its list limits. The configuration is fixed for
+// the connection — a different list needs a redial.
+func streamURL(baseURL, language string, keyterms []string) (string, error) {
 	pu, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil {
 		return "", fmt.Errorf("parse base URL %q: %w", baseURL, err)
@@ -203,6 +211,9 @@ func streamURL(baseURL, language string) (string, error) {
 	q.Set("commit_strategy", "manual")
 	if language != "" {
 		q.Set("language_code", language)
+	}
+	for _, term := range keyterms {
+		q.Add("keyterms", term)
 	}
 	pu.RawQuery = q.Encode()
 	return pu.String(), nil

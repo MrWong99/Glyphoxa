@@ -53,7 +53,8 @@ func (c *Client) Transcribe(ctx context.Context, frames []audio.Frame) (stt.Tran
 	// Turn off the server-side work we never consume — we read only Transcript.Text,
 	// so both of these shrink the scribe POST's latency (the dominant fixed cost
 	// inside response_latency) without changing the text we act on. diarize defaults
-	// off and language stays auto-detected, since the user may speak EN or DE.
+	// off; language stays auto-detected unless [WithLanguage] pins it, since the
+	// user may speak EN or DE.
 	//
 	// timestamps_granularity=none skips word/character forced-alignment, a
 	// non-trivial server cost the orchestrator has no use for (it carries no
@@ -65,6 +66,20 @@ func (c *Client) Transcribe(ctx context.Context, frames []audio.Frame) (stt.Tran
 	// keeping the transcript to the spoken words the LLM and address matcher want.
 	if err := mw.WriteField("tag_audio_events", "false"); err != nil {
 		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write tag_audio_events: %w", err)
+	}
+	// Recognition hints (#701). Keyterms bias the transcript towards the names at
+	// the table; one repeated field per term, already sanitised by [WithTerms].
+	// language_code is sent only when the caller opted in — the default stays
+	// auto-detect.
+	for _, term := range c.terms {
+		if err := mw.WriteField("keyterms", term); err != nil {
+			return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write keyterms: %w", err)
+		}
+	}
+	if c.language != "" {
+		if err := mw.WriteField("language_code", c.language); err != nil {
+			return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write language_code: %w", err)
+		}
 	}
 	filePart, err := mw.CreateFormFile("file", "utterance.pcm")
 	if err != nil {
