@@ -341,7 +341,9 @@ export function MapView({
           setPlacing((current) => (current?.id === node.id ? null : current));
           if (opts.focus) focusNode.current = node.id;
           setAnnouncement(t("maps.pinPlaced", { name: node.name }));
-          void settled();
+          // Normally the refetched view replaces the provisional pin (the
+          // effect above); if that refetch fails, it must not linger as a ghost.
+          void settled().finally(() => setProvisional((p) => (p?.node.id === node.id ? null : p)));
         },
         onError: (e) => {
           setProvisional(null);
@@ -626,6 +628,11 @@ export function MapView({
               style={{ width: `${zoom * 100}%`, aspectRatio: `${map.widthPx} / ${map.heightPx}` }}
               role="application"
               aria-label={t("campaign.mapSurfaceAria", { name: map.name })}
+              // Every new press starts clean: a touch drag is followed by no
+              // click at all, and its suppression must not eat the next tap.
+              onPointerDownCapture={() => {
+                suppressClick.current = false;
+              }}
               onPointerMove={(ev) => {
                 if (!drag || ev.pointerId !== drag.pointerId) return;
                 const far =
@@ -658,6 +665,13 @@ export function MapView({
                 if (drag && !drag.captured) setDrag(null);
               }}
               onClick={(ev) => {
+                // The click that follows a drag does not always land on the pin
+                // (some browsers send it to the common ancestor of where the
+                // press and the release were): it is never a placement.
+                if (suppressClick.current) {
+                  suppressClick.current = false;
+                  return;
+                }
                 if (!placing) return;
                 // A click on a pin is that pin's, not a placement under it.
                 if (ev.target instanceof Element && ev.target.closest(".gx-maps__pin, .gx-maps__noimage-action")) return;

@@ -707,6 +707,34 @@ describe("MapsPanel placing from the tray", () => {
     await waitFor(() => expect(dot).toHaveFocus());
   });
 
+  it("a tap places after a touch drag, and the click that follows a drag never places", async () => {
+    const w = world({ nodes: [LINE, INN] });
+    mount(w);
+    const surface = await theSurface();
+    fireEvent.click(await screen.findByRole("button", { name: "The Rusty Anchor", pressed: false }));
+
+    // Drag the existing pin while an entry is armed. Some browsers send the
+    // click that follows to the surface rather than the pin: not a placement.
+    fireEvent.pointerDown(theDot(), { pointerId: 1, clientX: 250, clientY: 150 });
+    fireEvent.pointerMove(surface, { pointerId: 1, clientX: 600, clientY: 300 });
+    fireEvent.pointerUp(surface, { pointerId: 1, clientX: 600, clientY: 300 });
+    fireEvent.click(surface, { clientX: 600, clientY: 300 });
+    await waitFor(() => expect(w.calls.updatePin).toHaveBeenCalledTimes(1));
+    expect(w.calls.createPin).not.toHaveBeenCalled();
+
+    // A finger drag is followed by no click at all; the next tap must still place.
+    fireEvent.pointerDown(theDot(), { pointerId: 2, pointerType: "touch", clientX: 600, clientY: 300 });
+    fireEvent.pointerMove(surface, { pointerId: 2, pointerType: "touch", clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(surface, { pointerId: 2, pointerType: "touch", clientX: 100, clientY: 100 });
+    await waitFor(() => expect(w.calls.updatePin).toHaveBeenCalledTimes(2));
+
+    fireEvent.pointerDown(surface, { pointerId: 3, pointerType: "touch", clientX: 800, clientY: 450 });
+    fireEvent.pointerUp(surface, { pointerId: 3, pointerType: "touch", clientX: 800, clientY: 450 });
+    fireEvent.click(surface, { clientX: 800, clientY: 450 });
+    await waitFor(() => expect(w.calls.createPin).toHaveBeenCalledTimes(1));
+    expect(w.calls.createPin.mock.calls[0][0]).toMatchObject({ nodeId: "n-inn", x: 0.8, y: 0.75 });
+  });
+
   it("Escape disarms the entry", async () => {
     mount(world({ pins: [], nodes: [INN] }));
     const surface = await theSurface();
