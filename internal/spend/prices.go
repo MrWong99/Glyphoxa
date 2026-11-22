@@ -101,9 +101,15 @@ var ttsModelPricePer1kChars = map[ttsModelKey]float64{
 
 // sttPricePerHour are the known per-audio-hour STT rates (USD). ESTIMATES.
 var sttPricePerHour = map[observe.Provider]float64{
-	// ElevenLabs Scribe speech-to-text — published pricing, captured 2026-07-07:
-	// ~$0.40 / audio-hour. ESTIMATE.
-	observe.ProviderElevenLabs: 0.40,
+	// ElevenLabs Scribe v2 — API pricing captured 2026-11-22, per audio-hour:
+	// batch scribe_v2 $0.20 (+$0.05 with keyterms), scribe_v2_realtime $0.22
+	// (+$0.08 with keyterms). The usage capture point carries neither the
+	// transport nor whether keyterms were sent, so this is the UPPER BOUND of what
+	// the binary sends: realtime with keyterms, the default since #701/#702. A
+	// batch or keyterm-less utterance is over-estimated by at most $0.10/h, which
+	// keeps the meter conservative. Replaces the stale $0.40 (2026-07-07).
+	// ESTIMATE.
+	observe.ProviderElevenLabs: 0.30,
 }
 
 // soundKey identifies a sound-generation price row (#312, ADR-0004 amendment):

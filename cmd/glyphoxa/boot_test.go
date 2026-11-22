@@ -1429,6 +1429,24 @@ func TestVoiceMediaStallWindow(t *testing.T) {
 	}
 }
 
+// TestSTTKeyterms: biasing the recognizer towards the names at the table is the
+// default (#701). GLYPHOXA_STT_KEYTERMS is the off-switch, parsed like
+// GLYPHOXA_STT_STREAMING: only an explicit falsy value turns it off.
+func TestSTTKeyterms(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", true}, {"   ", true}, {"1", true}, {"true", true}, {"yes", true}, {"banana", true},
+		{"0", false}, {"false", false}, {"False", false}, {"OFF", false}, {" no ", false},
+	}
+	for _, c := range cases {
+		if got := sttKeyterms(envMap(map[string]string{"GLYPHOXA_STT_KEYTERMS": c.val})); got != c.want {
+			t.Errorf("sttKeyterms(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
 // TestTTSTransport pins the GLYPHOXA_TTS_TRANSPORT parse (#702): unset or "http"
 // keeps the HTTP synthesis path, "ws" opts into the pooled Text-to-Dialogue
 // websocket, and a typo keeps HTTP while reporting itself.
@@ -1452,9 +1470,29 @@ func TestTTSTransport(t *testing.T) {
 	}
 }
 
+// TestSTTLanguageHint: pinning the recognizer to the Campaign Language is OPT-IN
+// (#701) — a table may mix languages, so only an explicit truthy value
+// ("1"/"true"/"yes"/"on", any case, trimmed) turns it on.
+func TestSTTLanguageHint(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"   ", false}, {"0", false}, {"false", false}, {"off", false}, {"banana", false},
+		{"1", true}, {"true", true}, {"TRUE", true}, {" yes ", true}, {"on", true},
+	}
+	for _, c := range cases {
+		if got := sttLanguageHint(envMap(map[string]string{"GLYPHOXA_STT_LANGUAGE_HINT": c.val})); got != c.want {
+			t.Errorf("sttLanguageHint(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
 // TestApplyVoiceEnv pins the hop from the environment onto the session Config
-// the voice loop is started with (#702): a parsed knob that never reaches the
-// Config is a knob that silently does nothing in production.
+// the voice loop is started with (#701, #702): the parsed value has to LAND on
+// the wirenpc.Config every Voice Session is copied from. A parser nobody assigns
+// leaves the Config's zero value in charge — streaming and keyterms off in
+// production, with every parser test green.
 func TestApplyVoiceEnv(t *testing.T) {
 	var cfg wirenpc.Config
 	applyVoiceEnv(&cfg, envMap(map[string]string{"GLYPHOXA_TTS_TRANSPORT": "ws", "GLYPHOXA_STT_STREAMING": "0"}), slog.New(slog.DiscardHandler))
@@ -1470,5 +1508,26 @@ func TestApplyVoiceEnv(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "GLYPHOXA_TTS_TRANSPORT") {
 		t.Errorf("log = %q, want a warning naming the ignored variable", buf.String())
+	}
+
+	// The three STT switches (#701): an unset environment is streaming on,
+	// keyterms on, language hint off ...
+	var defaults wirenpc.Config
+	applyVoiceEnv(&defaults, envMap(nil), slog.New(slog.DiscardHandler))
+	if !defaults.STTStreaming || !defaults.STTKeyterms || defaults.STTLanguageHint {
+		t.Errorf("unset env: streaming=%v keyterms=%v languageHint=%v, want on, on, off",
+			defaults.STTStreaming, defaults.STTKeyterms, defaults.STTLanguageHint)
+	}
+
+	// ... and each one flips when its variable says so.
+	flipped := wirenpc.Config{STTStreaming: true, STTKeyterms: true}
+	applyVoiceEnv(&flipped, envMap(map[string]string{
+		"GLYPHOXA_STT_STREAMING":     "0",
+		"GLYPHOXA_STT_KEYTERMS":      "0",
+		"GLYPHOXA_STT_LANGUAGE_HINT": "1",
+	}), slog.New(slog.DiscardHandler))
+	if flipped.STTStreaming || flipped.STTKeyterms || !flipped.STTLanguageHint {
+		t.Errorf("all three set: streaming=%v keyterms=%v languageHint=%v, want off, off, on",
+			flipped.STTStreaming, flipped.STTKeyterms, flipped.STTLanguageHint)
 	}
 }

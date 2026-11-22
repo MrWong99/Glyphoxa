@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -86,6 +87,9 @@ const (
 	msgPartialTranscript = "partial_transcript"
 	msgCommitted         = "committed_transcript"
 	msgInsufficientAudio = "insufficient_audio_activity"
+	// msgInvalidRequest answers a session configuration the provider refuses; it
+	// arrives INSTEAD of session_started (see fatalErrorCodes, keytermsRefused).
+	msgInvalidRequest = "invalid_request"
 )
 
 // Provider error-frame classification. A frame's message_type decides how it is
@@ -123,6 +127,11 @@ var (
 		"session_time_limit_exceeded": true,
 		"transcriber_error":           true,
 		"commit_throttled":            true,
+		// invalid_request answers a configuration the provider refuses — measured
+		// 2026-11-22 with a 51st keyterm: it arrives INSTEAD of session_started and
+		// the session never starts (ADR-0042 amendment, #701). A session that
+		// carried keyterms never gets here for it: see stream.keytermsRefused.
+		msgInvalidRequest: true,
 	}
 )
 
@@ -154,7 +163,8 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 			Err: fmt.Errorf("elevenlabs.OpenStream: missing API key (set %s or pass it to New)", APIKeyEnv)}
 	}
 
-	u, err := streamURL(c.baseURL, cfg.Language)
+	keyterms := c.liveKeyterms(Keyterms(cfg.Terms))
+	u, err := streamURL(c.baseURL, cfg.Language, keyterms)
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs.OpenStream: %w", err)
 	}
@@ -170,6 +180,8 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 	s := &stream{
 		conn:      conn,
 		cfg:       cfg,
+		client:    c,
+		keyterms:  len(keyterms),
 		writeCh:   make(chan wsWrite, writeQueueLen),
 		stopCh:    make(chan struct{}),
 		threshold: supportedSampleRate * minChunkMs / 1000 * 2, // bytes of s16le
@@ -183,7 +195,11 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings s
 
 // streamURL derives the realtime websocket URL from a batch base URL, mapping
 // https->wss and http->ws so WithBaseURL(httptest.URL) works verbatim.
-func streamURL(baseURL, language string) (string, error) {
+//
+// keyterms must already be sanitised by [Keyterms]: the endpoint refuses the
+// session (invalid_request) past its list limits. The configuration is fixed for
+// the connection — a different list needs a redial.
+func streamURL(baseURL, language string, keyterms []string) (string, error) {
 	pu, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil {
 		return "", fmt.Errorf("parse base URL %q: %w", baseURL, err)
@@ -203,6 +219,9 @@ func streamURL(baseURL, language string) (string, error) {
 	q.Set("commit_strategy", "manual")
 	if language != "" {
 		q.Set("language_code", language)
+	}
+	for _, term := range keyterms {
+		q.Add("keyterms", term)
 	}
 	pu.RawQuery = q.Encode()
 	return pu.String(), nil
@@ -253,8 +272,13 @@ func (w wsWrite) marshal(sampleRate int) ([]byte, error) {
 // stream is a live realtime session. One write pump owns every websocket write
 // (gorilla's single-writer rule); one read pump routes server frames.
 type stream struct {
-	conn      *websocket.Conn
-	cfg       stt.StreamConfig
+	conn *websocket.Conn
+	cfg  stt.StreamConfig
+	// client is the adapter that dialled this session and keyterms how many
+	// keyterms the dial carried: a session refused over them tells the client to
+	// stop sending any ([stream.keytermsRefused]).
+	client    *Client
+	keyterms  int
 	writeCh   chan wsWrite
 	stopCh    chan struct{}
 	threshold int // aggregation flush threshold in bytes
@@ -475,6 +499,7 @@ func (s *stream) readPump() {
 		return s.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	started := false // session_started seen: the provider accepted the configuration
 	for {
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
@@ -494,7 +519,9 @@ func (s *stream) readPump() {
 
 		switch msg.MessageType {
 		case msgSessionStarted:
-			// nothing to do; the session is live once the read pump runs.
+			// The session is live once the read pump runs; this only records that
+			// the provider accepted its configuration.
+			started = true
 		case msgPartialTranscript:
 			if s.cfg.OnPartial != nil {
 				s.cfg.OnPartial(msg.Text)
@@ -510,11 +537,32 @@ func (s *stream) readPump() {
 			// a commit pending (with none, it is a no-op).
 			s.resolveEmpty()
 		default:
+			if msg.MessageType == msgInvalidRequest && !started && s.keyterms > 0 {
+				s.keytermsRefused(msg.Error)
+				return
+			}
 			if s.routeErrorFrame(msg.MessageType, msg.Error) {
 				return // fatal: session dead, stop reading
 			}
 		}
 	}
+}
+
+// keytermsRefused ends a session the provider refused to start while it carried
+// keyterms (invalid_request where session_started should be — measured
+// 2026-11-22 with a 51st keyterm and with a 1001st character). The keyterms are
+// the only tenant-supplied part of the configuration, so the adapter fails open:
+// the client sends no keyterms from now on, on either transport, and this session
+// dies with [stt.CodeTermsRefused], which the stream manager redials on its
+// ordinary schedule instead of parking at the backoff cap. The provider's detail
+// may quote a term, so it stays out of the error (it is logged at debug).
+func (s *stream) keytermsRefused(detail string) {
+	s.client.refuseKeyterms("realtime", s.keyterms, detail)
+	s.shutdown(&stt.StreamError{
+		Code:  stt.CodeTermsRefused,
+		Fatal: true,
+		Err:   errors.New("provider refused the session's keyterm list; sessions are opened without keyterms from now on"),
+	})
 }
 
 // routeErrorFrame classifies a non-normal server frame and acts on it. It
