@@ -94,8 +94,9 @@
 }
 .gx-shell .gx-nav__subitem {
   position: relative;
+  /* The .gx-nav__item measure, so a view's row and Session's row line up. */
   gap: 12px;
-  padding: var(--spacing-sm) 12px;
+  padding: 9px 12px;
   font-size: var(--body-sm);
   transition:
     background var(--duration-base) var(--ease-standard),
@@ -107,7 +108,7 @@
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  height: 18px;
+  height: 20px;
   width: 3px;
   border-radius: var(--radius-pill);
   background: var(--gradient-arcane);
@@ -225,6 +226,43 @@
   white-space: nowrap;
 }
 
+/* ── Topbar: a bar that gives way instead of overflowing ────────────────── */
+/* The bar holds more than it used to (a two-part breadcrumb, sometimes a live
+ * pill) beside the switcher and the language picker, and none of the older
+ * rules let anything shrink — past a certain campaign-name length the whole
+ * page scrolled sideways. Two things may give way now, and share the squeeze:
+ * the titles and the campaign switcher. Everything else keeps its size. */
+.gx-shell .gx-topbar__titles {
+  /* Sized by its content (was a zero-basis spacer) so it can be squeezed; still
+   * grows to push the controls to the right edge. */
+  flex: 1 1 auto;
+  overflow: hidden;
+  /* Room inside the clip for the breadcrumb link's focus ring. */
+  padding: var(--spacing-xs);
+  margin: calc(var(--spacing-xs) * -1);
+}
+.gx-shell .gx-topbar__title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The base rule's 1.1 is tighter than the display face's own height; once
+   * the box clips, that would shave the descenders off "Campaigns". */
+  line-height: var(--body-line-tight);
+}
+.gx-shell .gx-topbar .gx-campaign-switcher {
+  flex: 0 1 auto;
+  /* Never narrower than its sigil and chevron: it stays a recognisable,
+   * hittable control even when the name has no room. */
+  min-width: 5.25rem;
+}
+.gx-shell .gx-topbar .gx-campaign-switcher__trigger {
+  max-width: min(280px, 100%);
+}
+.gx-shell .gx-topbar .gx-campaign-switcher__name {
+  display: block;
+}
+
 /* ── Topbar breadcrumb: "<Campaign> / <View>" ───────────────────────────── */
 .gx-shell .gx-crumbs {
   min-width: 0;
@@ -238,11 +276,11 @@
   gap: var(--spacing-sm);
   min-width: 0;
 }
-/* When the bar is tight the campaign's name gives way (it ellipsizes); the
- * page's own name never does. The clipping sits on the name itself, not on the
- * list item around it, so the link's focus ring is not cut off. */
+/* When the bar is tight the campaign's name gives way long before the page's
+ * own name does (the shrink weights). The clipping sits on the name itself,
+ * not on the list item around it, so the link's focus ring is not cut off. */
 .gx-shell .gx-crumbs__campaign {
-  flex: 0 1 auto;
+  flex: 0 1000 auto;
   min-width: 0;
   display: flex;
 }
@@ -263,28 +301,24 @@
   text-decoration: underline;
 }
 .gx-shell .gx-crumbs__page {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
 }
 .gx-shell .gx-crumbs__sep {
+  flex: 0 0 auto;
   color: var(--text-muted);
 }
 
-/* ── Narrow viewports ───────────────────────────────────────────────────── */
-/* Below the phone-landscape breakpoint the bar has no room for two names: the
- * campaign crumb goes (the switcher beside it still names the campaign) and
- * the live pill keeps its dot, "Live" and the clock. The words after the clock
- * are clipped rather than removed, so the link's accessible name is intact. */
-@media (max-width: 640px) {
-  .gx-shell .gx-crumbs__campaign,
-  .gx-shell .gx-crumbs__sep {
-    display: none;
-  }
-  .gx-shell .gx-live-pill {
-    padding: 6px var(--spacing-sm);
-  }
+/* ── Width steps ────────────────────────────────────────────────────────── */
+/* The live pill and the breadcrumb shed their least important part first.
+ * Anything shed from the pill is CLIPPED, not removed, so the link keeps its
+ * full accessible name ("Live 01:12:40 · Open session") at every width. */
+
+/* Below a full laptop width: the pill drops its words, keeps the clock. */
+@media (max-width: 1279px) {
   .gx-shell .gx-live-pill__more {
     position: absolute;
     width: 1px;
@@ -296,9 +330,17 @@
   }
 }
 
-/* Phone width: the switcher beside the pill needs the room more than the pill
- * needs its clock (the Session item in the drawer still shows it). */
-@media (max-width: 480px) {
+/* Below the wide breakpoint: the campaign crumb goes — the switcher beside it
+ * names the campaign — and the pill drops its clock (the Session item in the
+ * sidebar still shows it). */
+@media (max-width: 1100px) {
+  .gx-shell .gx-crumbs__campaign,
+  .gx-shell .gx-crumbs__sep {
+    display: none;
+  }
+  .gx-shell .gx-live-pill {
+    padding: 6px var(--spacing-sm);
+  }
   .gx-shell .gx-live-pill__time {
     position: absolute;
     width: 1px;
@@ -307,6 +349,60 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+}
+
+/* Below the phone-landscape breakpoint the bar tightens its own spacing
+ * (the ≤480px rules in styles/components.css tighten it further). */
+@media (max-width: 640px) {
+  .gx-shell .gx-topbar {
+    padding: 0 var(--spacing-md);
+    gap: var(--spacing-sm);
+  }
+  .gx-shell .gx-topbar__divider {
+    display: none;
+  }
+}
+
+/* Phone width: the older rules hide the titles but keep them as the spacer
+ * that pushes the controls right. A hidden spacer must not claim room. And the
+ * pill is down to its pulsing dot, so the switcher beside it keeps enough
+ * width to show at least the start of the campaign's name. */
+@media (max-width: 480px) {
+  .gx-shell .gx-topbar {
+    padding: 0 12px;
+  }
+  .gx-shell .gx-topbar__titles {
+    flex-basis: 0;
+    padding: 0;
+    margin: 0;
+  }
+  .gx-shell .gx-topbar .gx-campaign-switcher {
+    min-width: 0;
+  }
+  .gx-shell .gx-live-pill {
+    justify-content: center;
+    width: var(--layout-sm);
+    height: var(--layout-sm);
+    padding: 0;
+    gap: 0;
+  }
+  .gx-shell .gx-live-pill__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* Narrower than any current phone: there is no room left to give. The Session
+ * item in the drawer still carries the live marker. */
+@media (max-width: 359px) {
+  .gx-shell .gx-live-pill {
+    display: none;
   }
 }
 

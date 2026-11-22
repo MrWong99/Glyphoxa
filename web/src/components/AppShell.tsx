@@ -197,7 +197,7 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
                       aria-label={count > 0 ? t("shell.suggestionsPending", { label, count }) : undefined}
                       onClick={closeDrawerOnMobile}
                     >
-                      <Icon size={16} aria-hidden="true" />
+                      <Icon size={18} aria-hidden="true" />
                       <span className="gx-nav__label">{label}</span>
                       {count > 0 && (
                         <span className="gx-nav__count" aria-hidden="true">
@@ -368,15 +368,22 @@ function NavLiveMarker({ startedMs }: { startedMs: number | null }) {
 }
 
 // LivePill is the topbar's "Live 01:12:40 · Open session" link to the Session
-// screen. On a narrow topbar the words after the clock are hidden VISUALLY only
-// (see appShell.css), so the link keeps its full accessible name.
+// screen. As the bar narrows it sheds its parts from the right — the words,
+// then the clock, then "Live", down to the pulsing dot — but only VISUALLY
+// (see the width steps in appShell.css): the link keeps its full accessible
+// name at every width, and the title gives a pointer user the same on hover.
 function LivePill({ tenantSlug, startedMs }: { tenantSlug: string; startedMs: number | null }) {
   const { t } = useI18n();
   const elapsed = useElapsedSeconds(startedMs);
   return (
-    <Link className="gx-live-pill" to="/t/$tenantSlug/$screen" params={{ tenantSlug, screen: "session" }}>
+    <Link
+      className="gx-live-pill"
+      to="/t/$tenantSlug/$screen"
+      params={{ tenantSlug, screen: "session" }}
+      title={`${t("shell.live")} · ${t("shell.openSession")}`}
+    >
       <span className="gx-live-dot" aria-hidden="true" />
-      <span>{t("shell.live")}</span>
+      <span className="gx-live-pill__label">{t("shell.live")}</span>
       {startedMs != null && <span className="gx-live-pill__time">{formatElapsed(elapsed)}</span>}
       <span className="gx-live-pill__more">
         <span aria-hidden="true">·</span> {t("shell.openSession")}
