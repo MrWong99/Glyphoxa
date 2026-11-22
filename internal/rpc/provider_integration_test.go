@@ -279,3 +279,127 @@ func TestProviderService_LLMSlotChoice_Integration(t *testing.T) {
 		t.Errorf("GetProviderConfigByComponent(llm) = %+v, %v; want the anthropic row", row, err)
 	}
 }
+
+// TestProviderService_ChatChoice_Integration drives the Planning chat model
+// choice (ADR-0062 amendment 2026-11-22) against real Postgres, where the
+// facts the unit fake only mimics actually live: the single chat row across
+// provider switches, a model-only save that leaves the sealed chat key
+// byte-identical, and a delete that is idempotent and touches nothing else.
+func TestProviderService_ChatChoice_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, pool, tenantID := seedTenant(t, dsn)
+	cipher, err := crypto.New(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("crypto.New: %v", err)
+	}
+	ctx := context.Background()
+
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			return next(auth.WithUser(auth.WithTenant(ctx, tenantID), storage.User{ID: uuid.New(), DiscordUserID: testSaverDiscordID}), req)
+		}
+	})
+	srvImpl := rpc.NewProviderServer(store, cipher, nil)
+	srvImpl.SetEnvLookupForTest(func(k string) string {
+		return map[string]string{"GROQ_API_KEY": "gsk-platform", "ANTHROPIC_API_KEY": "sk-ant-platform"}[k]
+	})
+	mux := http.NewServeMux()
+	mux.Handle(srvImpl.Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	chat := func() *managementv1.EffectiveChatLlm {
+		t.Helper()
+		resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		return resp.Msg.GetEffectiveChatLlm()
+	}
+	saveChat := func(provider, model, secret string) {
+		t.Helper()
+		if _, err := client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+			Slot: "chat", Provider: provider, Model: model, Secret: secret,
+		})); err != nil {
+			t.Fatalf("save chat (%s, %q): %v", provider, model, err)
+		}
+	}
+	type chatRow struct {
+		provider, model, last4 string
+		ciphertext             []byte
+	}
+	chatRows := func() []chatRow {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT provider, model, credentials_last4, credentials_ciphertext
+			FROM provider_config WHERE tenant_id=$1 AND component='chat_llm' ORDER BY provider`, tenantID)
+		if err != nil {
+			t.Fatalf("query chat rows: %v", err)
+		}
+		defer rows.Close()
+		var out []chatRow
+		for rows.Next() {
+			var r chatRow
+			if err := rows.Scan(&r.provider, &r.model, &r.last4, &r.ciphertext); err != nil {
+				t.Fatalf("scan chat row: %v", err)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+
+	// No rows: the chat runs the deployment default (Groq here), on the platform key.
+	if eff := chat(); eff.GetProvider() != "groq" || eff.GetSource() != managementv1.ChatLlmSource_CHAT_LLM_SOURCE_PLATFORM_DEFAULT {
+		t.Fatalf("no rows: effective_chat_llm = %+v", eff)
+	}
+
+	// A keyless choice of Anthropic: one keyless row, the chat default model.
+	saveChat("anthropic", "", "")
+	if rows := chatRows(); len(rows) != 1 || rows[0].provider != "anthropic" || rows[0].last4 != "env" || len(rows[0].ciphertext) != 0 {
+		t.Fatalf("after choosing anthropic: rows = %+v, want one keyless anthropic row", rows)
+	}
+	if eff := chat(); eff.GetProvider() != "anthropic" || eff.GetModel() != "claude-sonnet-5-5" ||
+		eff.GetKeySource() != managementv1.ChatLlmKeySource_CHAT_LLM_KEY_SOURCE_PLATFORM {
+		t.Errorf("after choosing anthropic: effective_chat_llm = %+v", eff)
+	}
+
+	// A chat-only key, then a model-only save: the sealed key must not change.
+	saveChat("anthropic", "", "sk-ant-chat-only-4321")
+	keyed := chatRows()
+	if len(keyed) != 1 || keyed[0].last4 != "4321" || strings.Contains(string(keyed[0].ciphertext), "sk-ant-chat-only") {
+		t.Fatalf("after saving a chat key: rows = %+v, want one sealed row ••4321", keyed)
+	}
+	saveChat("anthropic", "claude-opus-5-5", "")
+	after := chatRows()
+	if len(after) != 1 || after[0].model != "claude-opus-5-5" || after[0].last4 != "4321" || string(after[0].ciphertext) != string(keyed[0].ciphertext) {
+		t.Errorf("model-only save changed the key: %+v -> %+v", keyed, after)
+	}
+
+	// Switching provider leaves exactly one row.
+	saveChat("groq", "", "")
+	if rows := chatRows(); len(rows) != 1 || rows[0].provider != "groq" {
+		t.Errorf("after switching to groq: rows = %+v, want exactly one groq row", rows)
+	}
+
+	// The voice LLM never moved: no llm row was written by any of the above.
+	var llmRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM provider_config WHERE tenant_id=$1 AND component='llm'`, tenantID).Scan(&llmRows); err != nil {
+		t.Fatalf("count llm rows: %v", err)
+	}
+	if llmRows != 0 {
+		t.Errorf("chat saves wrote %d llm row(s)", llmRows)
+	}
+
+	// Delete returns to "same as voice" and is idempotent.
+	for range 2 {
+		if _, err := client.DeleteProviderConfig(ctx, connect.NewRequest(&managementv1.DeleteProviderConfigRequest{Slot: "chat"})); err != nil {
+			t.Fatalf("DeleteProviderConfig: %v", err)
+		}
+	}
+	if rows := chatRows(); len(rows) != 0 {
+		t.Errorf("chat rows after delete: %+v", rows)
+	}
+	if eff := chat(); eff.GetSource() != managementv1.ChatLlmSource_CHAT_LLM_SOURCE_PLATFORM_DEFAULT {
+		t.Errorf("after delete: effective_chat_llm = %+v, want the platform default again", eff)
+	}
+}

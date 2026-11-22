@@ -42,8 +42,9 @@ var inviteCodePattern = regexp.MustCompile(`^[A-Za-z0-9-]{2,64}$`)
 // envPlaceholderLast4 is the credentials_last4 the seed writes for a
 // provider_config whose real key lives in ENV/the keyring, not the DB (ADR-0039;
 // matches wirenpc's credPlaceholderLast4). A slot still holding it has no real
-// saved key, so the Configuration screen renders it as "Key needed".
-const envPlaceholderLast4 = "env"
+// saved key, so the Configuration screen renders it as "Key needed". It is
+// [storage.KeylessLast4] under its local name, not a second spelling.
+const envPlaceholderLast4 = storage.KeylessLast4
 
 // providerStore is the narrow Configuration surface ProviderServer needs;
 // *storage.Store satisfies it. Handlers depend on this interface (not the
@@ -52,6 +53,10 @@ type providerStore interface {
 	ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]storage.ProviderConfig, error)
 	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
 	UpsertProviderConfigs(ctx context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error)
+	// SaveChatLLMChoice / DeleteChatLLMConfig write the Tenant's single
+	// Planning chat model choice (ADR-0062 amendment 2026-11-22).
+	SaveChatLLMChoice(ctx context.Context, c storage.ChatLLMChoice) (storage.ProviderConfig, error)
+	DeleteChatLLMConfig(ctx context.Context, tenantID uuid.UUID) error
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error)
 	SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error)
@@ -69,11 +74,10 @@ type providerStore interface {
 // byokSlot is one Bring-Your-Own-Key provider the Configuration screen saves. A
 // provider can back several Components — ElevenLabs powers STT + TTS from one
 // key (ADR-0004) — so saving it upserts every listed Component; the first is the
-// display Component on the wire. slot is the wire id the save names: empty
-// means the slot IS the provider (every pre-0062 slot); the planning-chat slot
-// (#592) names itself "chat" so the same provider can back two slots.
+// display Component on the wire. A save names a slot by its provider. The
+// Planning chat is NOT a slot: it is a choice over the LLM providers with its
+// own handler (provider_chat.go, ADR-0062 amendment 2026-11-22).
 type byokSlot struct {
-	slot       string
 	provider   string
 	components []storage.Component
 	// envKey is the deployment env var the provider adapter falls back to when
@@ -98,24 +102,11 @@ var byokSlots = []byokSlot{
 	// BYOK slot + health check, even though Gemini already appears in the LLM
 	// matrix — the image key is managed on its own Configuration row.
 	{provider: "gemini", components: []storage.Component{storage.ComponentImage}, envKey: gemini.APIKeyEnv},
-	// The Butler planning chat's LLM (#592, ADR-0062): a distinct slot + row
-	// (component chat_llm) so chat can run a quality-over-latency model while
-	// the voice loop keeps its ADR-0036 selection — the gemini-image precedent
-	// of the same provider on its own Configuration row.
-	{slot: "chat", provider: "groq", components: []storage.Component{storage.ComponentChatLLM}, envKey: groq.APIKeyEnv},
 }
 
-// wireID is the id a save names this slot by: slot when set, else provider.
-func (s byokSlot) wireID() string {
-	if s.slot != "" {
-		return s.slot
-	}
-	return s.provider
-}
-
-func slotFor(wireID string) (byokSlot, bool) {
+func slotFor(provider string) (byokSlot, bool) {
 	for _, s := range byokSlots {
-		if s.wireID() == wireID {
+		if s.provider == provider {
 			return s, true
 		}
 	}
@@ -302,9 +293,7 @@ func (s *ProviderServer) ListProviderConfigs(
 		return nil, internalErr(s.log, "ListProviderConfigs: list provider_config failed", err)
 	}
 	// Index by Component: each slot is represented by its FIRST component's row
-	// (ElevenLabs' stt/tts rows share one key, so either represents the slot),
-	// and keying by component — not provider — keeps the two groq-backed slots
-	// (llm vs chat_llm, #592) from shadowing each other.
+	// (ElevenLabs' stt/tts rows share one key, so either represents the slot).
 	byComponent := latestByComponent(configs)
 	// The LLM in effect (#702): the Tenant's most recently saved LLM row — the
 	// same row a Voice Session start reads — else the deployment default.
@@ -344,6 +333,7 @@ func (s *ProviderServer) ListProviderConfigs(
 		IntegrationState:     integrationState,
 		IntegrationDetail:    integrationDetail,
 		EffectiveLlm:         effective,
+		EffectiveChatLlm:     s.effectiveChatLLM(configs, platform),
 	}), nil
 }
 
@@ -436,17 +426,20 @@ func (s *ProviderServer) SaveProviderConfig(
 		return nil, err
 	}
 
-	// The slot id is the explicit slot field when set (#592: the "chat" slot
-	// shares provider "groq" with the llm slot), else the provider itself —
-	// every pre-0062 client sends only the provider.
-	slotID := req.Msg.GetSlot()
-	if slotID == "" {
-		slotID = req.Msg.GetProvider()
+	// The Planning chat is a choice, not a key slot: its own handler, its own
+	// single row, and it never touches the voice LLM (ADR-0062 amendment).
+	switch req.Msg.GetSlot() {
+	case "":
+	case chatSlot:
+		return s.saveChatModel(ctx, tenantID, req.Msg.GetProvider(), req.Msg.GetModel(), req.Msg.GetSecret())
+	default:
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("unknown slot %q", req.Msg.GetSlot()))
 	}
-	slot, ok := slotFor(slotID)
+	slot, ok := slotFor(req.Msg.GetProvider())
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("unknown provider %q", slotID))
+			fmt.Errorf("unknown provider %q", req.Msg.GetProvider()))
 	}
 	secret := req.Msg.GetSecret()
 	if secret == "" {

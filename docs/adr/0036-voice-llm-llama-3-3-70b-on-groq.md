@@ -184,3 +184,31 @@ less, and that was not measured.
   is not built here; `gemini` is selectable as a default like the other two.
 - Whether the Haiku naturalness lead survives judges from another model family
   is open, as is Haiku 4.5's cached cost on production-length prompts.
+
+## Amendment (2026-11-22 — the planning chat has its own model default and thinking policy)
+
+ADR-0062 (amendment of the same date) makes the Planning chat model a Tenant
+choice. What that changes here:
+
+- **"One model default per config" still holds** for `llm` rows and for a chat
+  that follows voice. An explicit chat choice that names no model has a default
+  of its own (`llmbuild.DefaultChatModel`: `claude-sonnet-5-5` on Anthropic,
+  the voice default on Groq), and the Configuration screen names it.
+- **The thinking policy is per surface.** Voice keeps `DefaultThinking`
+  (adaptive at effort `low` on Claude Haiku 5.5, nothing else sent, requests
+  byte-identical to before). The chat is built with `ChatThinking`: adaptive at
+  effort `medium` on every model family that accepts both fields.
+- **Price rows added**, platform.claude.com/docs/en/about-claude/pricing,
+  retrieved 2026-11-22: `claude-sonnet-5-5` $2 / $10, `claude-opus-5-5`
+  $4 / $20, `claude-sonnet-5` $2 / $10, `claude-opus-5` $5 / $25 per MTok.
+  Estimates, as every row.
+- **A forced `tool_choice` is sent as `auto` to models that reject it.**
+  Claude Sonnet 5.5, Opus 5.5, Fable 5.1/5.2 and Mythos 5.1/5.2 answer 400 to
+  `any` and `tool`; the adapter downgrades and warns once per model.
+- **Consequence for voice (#712 item 7, now wider):** pricing Sonnet 5.5 and
+  Opus 5.5 also makes them selectable as the *voice* model on the Platform
+  Key, since the voice catalog uses the same priced-only rule. They run there
+  at the API's own default effort with no voice tuning, and the forced dice
+  re-roll becomes a likely tool call instead of a guaranteed one. Whether the
+  voice catalog on the Platform Key needs a suitability filter is decided in
+  #712.

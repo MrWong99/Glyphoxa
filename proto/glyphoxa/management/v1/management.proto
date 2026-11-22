@@ -1912,6 +1912,12 @@ service ProviderService {
   // ElevenLabs) and returns only its masked metadata. Replacing an existing key
   // updates its last4 + updated_at. State-changing: auth + CSRF guard it.
   rpc SaveProviderConfig(SaveProviderConfigRequest) returns (SaveProviderConfigResponse);
+  // DeleteProviderConfig removes a stored choice. v1 accepts only slot "chat":
+  // it removes the Tenant's Planning chat model choice (and a chat-only key
+  // stored with it), returning the chat to "same as voice" (ADR-0062 amendment
+  // 2026-11-22). Idempotent: deleting when nothing is stored succeeds. Any
+  // other slot is InvalidArgument. State-changing: auth + CSRF guard it.
+  rpc DeleteProviderConfig(DeleteProviderConfigRequest) returns (DeleteProviderConfigResponse);
   // SaveDiscordSettings stores the Discord deployment integration: the Bot token
   // (a write-only secret, sealed at rest) and the non-secret Guild / Voice
   // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
@@ -2034,6 +2040,78 @@ message EffectiveLlm {
   bool platform_default = 3;
 }
 
+// ChatLlmSource says which rung of the Planning chat ladder decides the model
+// (ADR-0062 amendment 2026-11-22).
+enum ChatLlmSource {
+  // CHAT_LLM_SOURCE_UNSPECIFIED is never sent by a current server.
+  CHAT_LLM_SOURCE_UNSPECIFIED = 0;
+  // CHAT_LLM_SOURCE_CHOICE: the Tenant chose a chat provider (and maybe a model).
+  CHAT_LLM_SOURCE_CHOICE = 1;
+  // CHAT_LLM_SOURCE_VOICE: no chat choice; the chat runs the Tenant's voice LLM.
+  CHAT_LLM_SOURCE_VOICE = 2;
+  // CHAT_LLM_SOURCE_PLATFORM_DEFAULT: the Tenant has neither a chat choice nor
+  // a voice LLM of its own; the chat runs the deployment default.
+  CHAT_LLM_SOURCE_PLATFORM_DEFAULT = 3;
+}
+
+// ChatLlmKeySource says whose key the Planning chat runs on.
+enum ChatLlmKeySource {
+  // CHAT_LLM_KEY_SOURCE_UNSPECIFIED is never sent by a current server.
+  CHAT_LLM_KEY_SOURCE_UNSPECIFIED = 0;
+  // CHAT_LLM_KEY_SOURCE_CHAT_KEY: a key saved for the chat alone.
+  CHAT_LLM_KEY_SOURCE_CHAT_KEY = 1;
+  // CHAT_LLM_KEY_SOURCE_PROVIDER_KEY: the Tenant's own key for that provider,
+  // the one saved in its voice LLM slot.
+  CHAT_LLM_KEY_SOURCE_PROVIDER_KEY = 2;
+  // CHAT_LLM_KEY_SOURCE_PLATFORM: the deployment's Platform Key, which this
+  // Tenant is entitled to and the deployment has.
+  CHAT_LLM_KEY_SOURCE_PLATFORM = 3;
+  // CHAT_LLM_KEY_SOURCE_NONE: no key is reachable. The Tenant saved none and
+  // the Platform Key is missing or outside its plan; an exchange would be
+  // refused until a key is saved.
+  CHAT_LLM_KEY_SOURCE_NONE = 4;
+}
+
+// ChatProviderOption describes one provider the Planning chat can be put on,
+// so the screen can label every option truthfully before it is chosen.
+message ChatProviderOption {
+  // provider is the LLM provider id ("groq", "anthropic").
+  string provider = 1;
+  // available is true when choosing this provider needs no key to be pasted
+  // (key_source is not NONE).
+  bool available = 2;
+  // key_source is the key the chat would run on if this provider were chosen.
+  ChatLlmKeySource key_source = 3;
+  // default_model is the model a choice of this provider runs when it names
+  // none (never empty).
+  string default_model = 4;
+}
+
+// EffectiveChatLlm names the LLM the Planning chat answers with for the Tenant
+// (ADR-0062 amendment 2026-11-22). It is computed by the same resolution the
+// chat engine runs, so the screen cannot name a model the engine does not use.
+// It is Tenant-scoped: a Butler bound to its own chat config (reserved, nothing
+// writes that binding) is not reflected.
+message EffectiveChatLlm {
+  // provider is the LLM provider id in effect ("groq", "anthropic", "gemini").
+  string provider = 1;
+  // model is the concrete model id an exchange requests (never empty).
+  string model = 2;
+  // stored_model is the model the Tenant's chat choice names, empty when the
+  // choice leaves it to the provider's chat default or when source is not
+  // CHOICE.
+  string stored_model = 3;
+  // key_last4 is the last 4 characters of the Tenant's own key the chat runs
+  // on (key_source CHAT_KEY or PROVIDER_KEY); empty otherwise.
+  string key_last4 = 4;
+  // source is the rung that decides provider and model.
+  ChatLlmSource source = 5;
+  // key_source is whose key an exchange runs on; NONE means it would be refused.
+  ChatLlmKeySource key_source = 6;
+  // providers lists every provider the chat can be put on, in display order.
+  repeated ChatProviderOption providers = 7;
+}
+
 // ListProviderConfigsRequest is the (empty) request; the tenant is resolved
 // server-side from the session.
 message ListProviderConfigsRequest {}
@@ -2041,7 +2119,9 @@ message ListProviderConfigsRequest {}
 // ListProviderConfigsResponse carries the three write-only credentials plus the
 // non-secret Discord IDs the screen edits.
 message ListProviderConfigsResponse {
-  // credentials are the Discord bot token, Groq, and ElevenLabs slots.
+  // credentials are the Discord bot token and the provider key slots (Groq,
+  // Anthropic, ElevenLabs, Gemini). The Planning chat is NOT among them: it is
+  // a choice, not a key slot, and is reported in effective_chat_llm.
   repeated ProviderCredential credentials = 1;
   // guild_id is the Discord server the Bot serves (non-secret; may be empty).
   string guild_id = 2;
@@ -2063,12 +2143,17 @@ message ListProviderConfigsResponse {
   // effective_llm is the voice LLM in effect for the Tenant: its own row, or
   // the deployment default (#702).
   EffectiveLlm effective_llm = 7;
+  // effective_chat_llm is the LLM the Planning chat answers with for the
+  // Tenant, with the key it runs on and the providers it can be switched to.
+  EffectiveChatLlm effective_chat_llm = 8;
 }
 
-// SaveProviderConfigRequest seals one BYOK provider key.
+// SaveProviderConfigRequest seals one BYOK provider key, or — with slot "chat"
+// — stores the Tenant's Planning chat model choice.
 message SaveProviderConfigRequest {
   // provider is the BYOK slot to save: "groq", "anthropic", "elevenlabs" or
-  // "gemini".
+  // "gemini". With slot "chat" it is the provider the Planning chat is put on:
+  // "groq" or "anthropic", anything else is InvalidArgument.
   string provider = 1;
   // secret is the plaintext API key to seal. Write-only: never returned. An
   // EMPTY secret with existing stored rows is a model-only update (#227): the
@@ -2080,19 +2165,38 @@ message SaveProviderConfigRequest {
   // model is the selected model id (optional; free-text — it need not appear
   // in the ListModels catalog, #227).
   string model = 3;
-  // slot names the BYOK slot when it differs from the provider (#592): the
-  // planning-chat LLM slot saves as slot "chat" with provider "groq", so the
-  // same provider can back two slots. Empty means the slot IS the provider
-  // (every pre-0062 slot).
+  // slot names what is saved when it is not the provider's key slot. Empty
+  // means the slot IS the provider. "chat" stores the Planning chat model
+  // choice (ADR-0062 amendment 2026-11-22) as the Tenant's single chat row,
+  // replacing a choice on another provider:
+  //   - with a secret: the key is stored for the chat alone and never touches
+  //     the voice LLM;
+  //   - without a secret, when the chat is already on this provider: only the
+  //     model changes, a stored chat-only key is kept;
+  //   - without a secret otherwise: allowed when a key is reachable (the
+  //     Tenant's own key for that provider, or the Platform Key within its
+  //     plan), else InvalidArgument asking for a key.
+  // A choice that would run on the Platform Key may only name a priced model
+  // (or none, which is the provider's chat default).
   string slot = 4;
   // activate makes this LLM slot the one in effect for the Tenant (#702): the
   // Tenant's most recently saved LLM row decides its provider, so activating
   // re-saves the slot's row (key and model untouched unless given). A slot the
   // platform provides and the Tenant never saved a key for gets a keyless row
   // that keeps riding the platform key. Saving a secret always activates; this
-  // flag is for switching WITHOUT re-entering one. Ignored on non-LLM slots.
+  // flag is for switching WITHOUT re-entering one. Ignored on non-LLM slots
+  // and on slot "chat" (a chat choice never changes the voice LLM).
   bool activate = 5;
 }
+
+// DeleteProviderConfigRequest names the stored choice to remove.
+message DeleteProviderConfigRequest {
+  // slot is what to remove. Only "chat" is accepted in v1.
+  string slot = 1;
+}
+
+// DeleteProviderConfigResponse is empty: the caller re-reads the Configuration.
+message DeleteProviderConfigResponse {}
 
 // SaveProviderConfigResponse returns the saved key's masked metadata.
 message SaveProviderConfigResponse {
@@ -2829,6 +2933,12 @@ message PreviewVoiceResponse {
 message ListModelsRequest {
   // provider is the LLM provider slot: "groq" or "anthropic".
   string provider = 1;
+  // slot selects whose catalog this is. Empty is the voice LLM slot. "chat" is
+  // the Planning chat (ADR-0062 amendment 2026-11-22): the list is fetched
+  // with the key a chat choice of this provider would run on, the provider's
+  // chat default is first, and on the Platform Key only priced models are
+  // listed. Any other value is InvalidArgument.
+  string slot = 2;
 }
 
 // ListModelsResponse carries the live model catalog (#227).

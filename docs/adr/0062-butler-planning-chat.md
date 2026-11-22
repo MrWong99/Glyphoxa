@@ -32,7 +32,9 @@ The Butler planning chat (#592, third slice of E9) needed ADR-level answers befo
   the same `omitempty`/range-accept compatibility discipline as v2) and are
   deleted by the campaign deletion sweep from day one. No orphaned prep
   conversations, no export blind spot discovered at restore time.
-- **Model selection: a separate chat-scoped slot.** The voice Butler stays on
+- **Model selection: a separate chat-scoped slot** *(reshaped by the amendment
+  of 2026-11-22 below: a Tenant choice between providers, not one more Provider
+  Config entry)*. The voice Butler stays on
   the latency-optimized ADR-0036 default; the Agent's provider config grows a
   second, chat-scoped provider/model selection whose default is chosen for
   quality over latency. The existing Provider Config component/UI is reused —
@@ -99,3 +101,84 @@ The Butler planning chat (#592, third slice of E9) needed ADR-level answers befo
   v2 compatibility discipline.
 - **#591 / #271** — the campaign search API is the tool belt's dependency;
   the recap generator is reused as a chat tool.
+
+## Amendment: the chat model is a tenant choice between providers (2026-11-22)
+
+This replaces the "one more Provider Config entry" reading of the *Model
+selection* bullet above. That bullet was built as a second Groq key slot, and
+the slot turned out wrong in four ways: the Configuration screen described it
+from the Groq key while the engine actually answered with whatever voice ran
+(in production: "Planning chat (Groq) / openai/gpt-oss-120b / Included" over a
+chat running Claude Haiku); a Tenant on the Platform Keys could not pick a chat
+model at all (a model with no stored key was refused); a BYOK Tenant had to
+paste the same Groq key a second time; and nothing led back to "same as voice".
+
+### What this decides
+
+- **The Planning chat model is one Tenant-level choice: a provider and a
+  model.** It is stored as the Tenant's single `chat_llm` Provider Config. No
+  row means "same as voice". It is a choice, not a credential slot: it leaves
+  the credential list of the Configuration read and gets its own save, delete
+  and read (ADR-0039 amendment of the same date).
+- **Resolution order**, one pure function (`llmbuild.DeploymentDefault.SelectChat`)
+  shared by the chat engine, the Configuration read and the chat model catalog,
+  so the screen cannot name a model the engine does not run:
+  1. the Butler-bound row (`agents.chat_llm_provider_config_id`) — reserved,
+     nothing writes it;
+  2. the Tenant's chat choice;
+  3. the Tenant's voice `llm` row — "same as voice", the model and key a Voice
+     Session runs;
+  4. the deployment default (ADR-0036).
+- **Key ladder of a chat choice:** a key saved for the chat alone, else the
+  Tenant's own key in that provider's LLM slot, else the Platform Key behind
+  the entitlement (ADR-0054/0055). **There is no fallback to another
+  provider.** With no key on any rung the exchange is refused
+  (`ErrNoPlatformKeyEntitlement`, the existing in-chat "no key" notice) and the
+  screen says the chat needs a key. A chat-only key is stored on the chat row
+  and never becomes the Tenant's voice LLM.
+- **Providers offered:** Groq and Anthropic. Gemini is reachable for chat only
+  through "same as voice" or the deployment default.
+- **Defaults and tuning.** A chat choice that names no model runs the
+  provider's *chat* default: `claude-sonnet-5-5` on Anthropic, the voice
+  default on Groq. On Anthropic the chat thinks under its own policy —
+  adaptive thinking at effort `medium` on every model family that accepts it,
+  nothing on `claude-haiku-4-5` — and a reply is capped at 16000 tokens,
+  because thinking tokens count against `max_tokens`; other providers keep
+  4096. Quality over latency: this is prep, not a spoken turn. The prompt-cache
+  gate and the thinking display are unchanged.
+- **Priced models only on the Platform Key** (ADR-0036 rule): a chat choice
+  that would run on the Platform Key may store no model or a priced one. The
+  engine checks the same rule again on every exchange, because a keyless
+  choice borrows the Tenant's key in that provider's LLM slot dynamically: if
+  that key is gone, an unpriced model is refused rather than metered at the
+  flat fallback rate. The ADR-0055 allowance gate before each exchange stays
+  the only spend gate.
+- **The recap tool keeps the voice LLM.** A recap requested inside a chat
+  exchange runs through the shared recap engine on the Tenant's voice model;
+  it is metered into the same exchange.
+
+### Considered and rejected
+
+- **A model picker per thread or per Campaign.** Per thread needs
+  `planning_thread` columns and a Campaign Bundle format bump (ADR-0053). Per
+  Campaign cannot be expressed by pointing the Butler binding at shared rows,
+  because the model lives on the row. The Butler rung stays reserved for it.
+- **A second chat slot per provider with newest-wins**, the voice pattern: it
+  reproduces "saving a key switches the model" and "no way back" (#712 items 1
+  and 2) and doubles key pasting.
+- **A deployment-level chat default env.** A follow-up if an operator wants
+  every Tenant's chat on one model by default.
+
+### Consequences
+
+- No migration. At most one `chat_llm` row per Tenant is kept by the single
+  writer (it removes the other providers' rows in the same transaction), not
+  by a database constraint: two concurrent saves can leave two rows, readers
+  take the newest and the next save removes the other.
+- A model-only save never re-writes a stored key (the credential columns are
+  not part of that update), which closes the #712 item 3 shape for chat.
+- A Tenant that put its chat on a Platform-Key provider and later moves to a
+  BYOK plan gets the "no key" refusal in chat and on the screen. It does not
+  fall back to its voice provider. This is deliberate and visible.
+- `effective_chat_llm` is Tenant-scoped and ignores the Butler rung. Whoever
+  gives that rung a writer must make the read Campaign-scoped.

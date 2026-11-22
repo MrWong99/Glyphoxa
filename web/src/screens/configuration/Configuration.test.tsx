@@ -283,9 +283,9 @@ describe("Configuration", () => {
     // Two Key-needed badges (groq, elevenlabs) — a session needs both. Gemini
     // (images), the Bot token (only for a BYOK Bot, ADR-0057) and the
     // voice-LLM slot that is not in use (Anthropic, #702) read
-    // "Optional". The planning-chat slot (#592/ADR-0062) renders NO health
-    // badge: the shared groq probe tests the voice-LLM credential, not the
-    // chat_llm key, and a dedicated chat_llm probe is a follow-up.
+    // "Optional". The Planning chat is not a key row at all (ADR-0062
+    // amendment): its card carries no badge, it says what answers and on which
+    // key (Configuration.chat.test.tsx).
     expect(await screen.findAllByText(/key needed/i)).toHaveLength(2);
     expect(screen.getAllByText(/^optional$/i)).toHaveLength(3);
     const geminiRow = screen.getByLabelText("Gemini key").closest(".gx-provider-row") as HTMLElement;

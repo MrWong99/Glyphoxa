@@ -207,3 +207,101 @@
   color: var(--text-subtle);
   margin: 0;
 }
+
+/* Planning chat model card (ADR-0062 amendment): a choice, not a key row, so it
+ * stacks — header, the "answers with" status, the provider + model controls, an
+ * optional key field, the actions — instead of squeezing into one provider row.
+ * Everything wraps, so it holds at phone width without a breakpoint of its own. */
+.gx-chat-model {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+}
+
+.gx-chat-model__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+}
+
+.gx-chat-model__meta {
+  min-width: 0;
+}
+
+.gx-chat-model__status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-chat-model__status p {
+  margin: 0;
+}
+
+/* The one line that says what answers: body weight, strong ink. */
+.gx-chat-model__answers {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  /* A model id is one long unbreakable token; let it wrap inside the card. */
+  overflow-wrap: anywhere;
+}
+
+.gx-chat-model__note {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* "Needs a key": the chat cannot answer. A warning, not an error — nothing
+ * failed, something is missing. */
+.gx-chat-model__warning {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-warning);
+}
+
+.gx-chat-model__error {
+  margin: 0;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-danger);
+}
+
+.gx-chat-model__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+/* Provider and model share the row and split it; each drops to a full line of
+ * its own once the card is too narrow for both. */
+.gx-chat-model__controls .gx-select-field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.gx-chat-model__key {
+  max-width: 28rem;
+}
+
+.gx-chat-model__key .gx-field {
+  margin: 0;
+}
+
+.gx-chat-model__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-sm) var(--spacing-md);
+}
+
+/* Save is aria-disabled rather than disabled, so it keeps keyboard focus when
+ * a save starts and when nothing is left to save. It looks and behaves like
+ * .gx-btn:disabled: dimmed, inert to the pointer, no press nudge. */
+.gx-chat-model__actions .gx-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  pointer-events: none;
+  transform: none;
+}

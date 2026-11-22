@@ -94,3 +94,23 @@ slots, each its own `provider_config` row `(tenant, llm, provider)`.
   Platform Key the list is cut down to priced models. A hardcoded list is only
   ever the fallback when the listing fails or there is no key to list with, and
   only of models the price table knows.
+
+## Amendment: the planning chat is a choice over the LLM matrix, not a second key slot (2026-11-22)
+
+ADR-0062 (amendment of the same date) is the record; what changes here:
+
+- **The planning-chat entry is a choice (Groq or Anthropic), not a credential
+  slot.** A Tenant has at most one `chat_llm` Provider Config, kept by the
+  single writer; no row means the chat follows the voice LLM.
+- **Keys are reused, not pasted twice.** A chat row that stores no key of its
+  own (`credentials_last4 = "env"`) runs on the Tenant's key in that
+  provider's LLM slot when there is one, else on the Platform Key within the
+  Tenant's plan. A key for the chat alone stays possible and is stored on the
+  chat row only; saving it never changes the voice LLM.
+- **`DeleteProviderConfig`** (slot `chat` only, for now) is the "back to same
+  as voice" action and removes a chat-only key with the row. It is the natural
+  home of a key-delete for the other slots later. A chat row holding an
+  unpriced model whose borrowed key disappears does not run on the Platform
+  Key: the engine checks the rule again on every exchange.
+- **Priced models only on the Platform Key** applies to the chat choice too,
+  when the choice is saved and again when the chat runs.

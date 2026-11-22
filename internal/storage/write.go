@@ -183,6 +183,97 @@ func (s *Store) UpsertProviderConfigs(ctx context.Context, configs []NewProvider
 	return out, nil
 }
 
+// SaveChatLLMChoice stores the Tenant's Planning chat model choice as its ONE
+// chat_llm Provider Config (ADR-0062 amendment 2026-11-22) and returns the row.
+// In one transaction it removes the Tenant's chat_llm rows on any OTHER
+// provider, then writes the row for c.Provider in one of three ways:
+//
+//   - with a key (c.Ciphertext set): model and credential are stored, replacing
+//     whatever the row held;
+//   - without a key: the row is created keyless ([KeylessLast4]) or, when it
+//     exists, only its model changes. The credential columns are NOT in the
+//     UPDATE, so a model-only save can never overwrite a saved key, whatever a
+//     concurrent save did in between (the #712 item 3 shape);
+//   - c.KeepKey: an UPDATE of the model restricted to a row that holds a saved
+//     key. No such row is [ErrNotFound] and the whole save, including the
+//     removal of the other providers' rows, is rolled back.
+//
+// No migration backs the single-row invariant: two concurrent saves on
+// different providers can still leave two rows, readers take the newest
+// ([Store.GetProviderConfigByComponent]) and the next save removes the other.
+func (s *Store) SaveChatLLMChoice(ctx context.Context, c ChatLLMChoice) (ProviderConfig, error) {
+	var out ProviderConfig
+	err := s.InTx(ctx, func(tx *Store) error {
+		if _, err := tx.db.Exec(ctx,
+			`DELETE FROM provider_config
+			  WHERE tenant_id = $1 AND component = $2 AND provider <> $3`,
+			c.TenantID, ComponentChatLLM, c.Provider); err != nil {
+			return fmt.Errorf("storage: save chat llm choice: drop other providers: %w", err)
+		}
+
+		var row pgx.Row
+		switch {
+		case len(c.Ciphertext) > 0:
+			row = tx.db.QueryRow(ctx,
+				`INSERT INTO provider_config
+				   (tenant_id, component, provider, model, credentials_ciphertext, credentials_last4)
+				 VALUES ($1, $2, $3, $4, $5, $6)
+				 ON CONFLICT (tenant_id, component, provider) DO UPDATE
+				   SET model = EXCLUDED.model,
+				       credentials_ciphertext = EXCLUDED.credentials_ciphertext,
+				       credentials_last4 = EXCLUDED.credentials_last4,
+				       updated_at = now()
+				 RETURNING `+providerConfigColumns,
+				c.TenantID, ComponentChatLLM, c.Provider, c.Model, c.Ciphertext, c.Last4)
+		case c.KeepKey:
+			row = tx.db.QueryRow(ctx,
+				`UPDATE provider_config
+				    SET model = $4, updated_at = now()
+				  WHERE tenant_id = $1 AND component = $2 AND provider = $3
+				    AND credentials_last4 NOT IN ('', $5)
+				 RETURNING `+providerConfigColumns,
+				c.TenantID, ComponentChatLLM, c.Provider, c.Model, KeylessLast4)
+		default:
+			row = tx.db.QueryRow(ctx,
+				`INSERT INTO provider_config
+				   (tenant_id, component, provider, model, credentials_ciphertext, credentials_last4)
+				 VALUES ($1, $2, $3, $4, ''::bytea, $5)
+				 ON CONFLICT (tenant_id, component, provider) DO UPDATE
+				   SET model = EXCLUDED.model,
+				       updated_at = now()
+				 RETURNING `+providerConfigColumns,
+				c.TenantID, ComponentChatLLM, c.Provider, c.Model, KeylessLast4)
+		}
+		pc, err := scanProviderConfig(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("storage: save chat llm choice (%s): %w", c.Provider, err)
+		}
+		out = pc
+		return nil
+	})
+	if err != nil {
+		return ProviderConfig{}, err
+	}
+	return out, nil
+}
+
+// DeleteChatLLMConfig removes the Tenant's Planning chat model choice — every
+// chat_llm row it has, and with it a chat-only key — returning it to "same as
+// voice". Idempotent: deleting nothing is not an error. A Butler bound to a
+// removed row is unbound by the foreign key (ON DELETE SET NULL). No other
+// Component's rows are touched.
+func (s *Store) DeleteChatLLMConfig(ctx context.Context, tenantID uuid.UUID) error {
+	if _, err := s.db.Exec(ctx,
+		`DELETE FROM provider_config WHERE tenant_id = $1 AND component = $2`,
+		tenantID, ComponentChatLLM); err != nil {
+		return fmt.Errorf("storage: delete chat llm config for tenant %s: %w", tenantID, err)
+	}
+	return nil
+}
+
 // NewAgent is the input to CreateAgent. Voice is the opaque JSONB blob the voice
 // domain serializes its tts.Voice into; storage keeps it vendor-neutral.
 // SpeakerColor is NOT an input — it is server-assigned on Character insert.

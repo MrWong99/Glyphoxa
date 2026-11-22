@@ -66,6 +66,21 @@ var llmPrices = map[llmKey]llmRate{
 	// rate. $5 / $25, platform.claude.com pricing, retrieved 2026-11-22 (#702).
 	// ESTIMATE.
 	{observe.ProviderAnthropic, "claude-opus-4-8"}: {inputPerMTok: 5.00, outputPerMTok: 25.00},
+	// Claude Sonnet 5.5 / Opus 5.5 — the Planning chat's quality models (ADR-0062
+	// amendment 2026-11-22): Sonnet 5.5 is the chat default on Anthropic
+	// (llmbuild.DefaultChatModel), Opus 5.5 the step up. Priced so a chat choice
+	// on the PLATFORM key is metered at its real rate and passes the priced-only
+	// rule. $2 / $10 and $4 / $20, platform.claude.com/docs/en/about-claude/pricing,
+	// retrieved 2026-11-22. Cache reads have no rate here (see Haiku above).
+	// Thinking tokens are billed as output. ESTIMATES.
+	{observe.ProviderAnthropic, "claude-sonnet-5-5"}: {inputPerMTok: 2.00, outputPerMTok: 10.00},
+	{observe.ProviderAnthropic, "claude-opus-5-5"}:   {inputPerMTok: 4.00, outputPerMTok: 20.00},
+	// Claude Sonnet 5 / Opus 5 — the previous generation, still served. Priced
+	// for attribution: a Tenant that names one is metered at its real rate
+	// instead of the flat fallback. $2 / $10 and $5 / $25, same page, same day.
+	// ESTIMATES.
+	{observe.ProviderAnthropic, "claude-sonnet-5"}: {inputPerMTok: 2.00, outputPerMTok: 10.00},
+	{observe.ProviderAnthropic, "claude-opus-5"}:   {inputPerMTok: 5.00, outputPerMTok: 25.00},
 	// Gemini 2.5 Flash — the Gemini LLM adapter's default model, priced for the
 	// same reason. $0.30 / $2.50 (text input / output including thinking
 	// tokens), the paid-tier figure as recalled — UNVERIFIED against

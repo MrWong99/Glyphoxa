@@ -79,6 +79,8 @@ Its metering posture:
 The live-session meter, caps, gate, and `SpendCapReached` mechanics are
 unchanged.
 
+*Note (2026-11-22, ADR-0062 amendment): planning-chat exchanges on Claude Sonnet 5.5 / Opus 5.5 (and Sonnet 5 / Opus 5) are metered by their own price rows, keyed on the provider and model the chat actually resolved to.*
+
 ## Relationship to other ADRs
 
 ADR-0004 (amendment is the spec this implements), ADR-0045 (usage capture points), ADR-0043 (close seam + end_reason prefixes), ADR-0032 (no session labels), ADR-0020/0014/0039 (event + SSE + screen surface).

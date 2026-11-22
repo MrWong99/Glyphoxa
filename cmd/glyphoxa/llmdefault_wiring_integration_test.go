@@ -19,6 +19,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/search"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -84,7 +85,87 @@ func TestManagementMounts_DeploymentDefaultReachesTheRPCs(t *testing.T) {
 	if got := models.Msg.GetModels(); len(got) == 0 || got[0] != "claude-haiku-4-5" {
 		t.Errorf("anthropic catalog = %v, want the deployment default model pinned first", got)
 	}
+
+	// The Planning chat read (ADR-0062 amendment 2026-11-22): a row-less
+	// Tenant's chat answers with the deployment default too. The engine half of
+	// this pair is TestPlanningChatEngine_RowlessTenantRunsTheDeploymentDefault.
+	chat := list.Msg.GetEffectiveChatLlm()
+	if chat.GetProvider() != "anthropic" || chat.GetModel() != "claude-haiku-4-5" ||
+		chat.GetSource() != managementv1.ChatLlmSource_CHAT_LLM_SOURCE_PLATFORM_DEFAULT {
+		t.Errorf("effective_chat_llm = %+v, want the deployment default anthropic / claude-haiku-4-5", chat)
+	}
+	// No ANTHROPIC_API_KEY in this process: the read must say no key is
+	// reachable instead of naming a model as if an exchange would work.
+	if chat.GetKeySource() != managementv1.ChatLlmKeySource_CHAT_LLM_KEY_SOURCE_NONE {
+		t.Errorf("effective_chat_llm.key_source = %v with no platform key in the process, want NONE", chat.GetKeySource())
+	}
 }
+
+// TestPlanningChatEngine_RowlessTenantRunsTheDeploymentDefault pins the chat
+// half of the composition root (#712 item 4, for chat): the engine the
+// ChatService serves — built by newPlanningChatEngine, the function
+// managementMounts calls — resolves a row-less Tenant to the deployment
+// default, the provider and model effective_chat_llm names for it (asserted on
+// the real mount table above). It is checked twice: on the engine's own
+// resolution, and through a whole exchange, which with no key in the process
+// stops at the Anthropic adapter's missing-key error before any network.
+// Dropping planchat.WithLLMDefault makes both Groq's.
+func TestPlanningChatEngine_RowlessTenantRunsTheDeploymentDefault(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GROQ_API_KEY", "")
+	store := bootMigratedStore(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	d := wiringDefault(t)
+
+	tenantID, err := store.CreateTenant(ctx, "Wiring Co")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campaignID, err := store.CreateCampaign(ctx, storage.NewCampaign{TenantID: tenantID, Name: "Wiring", System: "dnd5e", Language: "en"})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	campaign, err := store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetCampaign: %v", err)
+	}
+	butler, err := store.GetButler(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetButler: %v", err)
+	}
+	thread, err := store.CreatePlanningThread(ctx, campaignID, "")
+	if err != nil {
+		t.Fatalf("CreatePlanningThread: %v", err)
+	}
+
+	eng := newPlanningChatEngine(store, nil, search.New(store, log), nil,
+		newOffSessionMetering(auth.AdmissionAllowlist, store, log), observe.NewPrometheusRecorder(), log, nil, d)
+
+	sel, err := eng.ResolveChatLLM(ctx, tenantID, butler)
+	if err != nil {
+		t.Fatalf("ResolveChatLLM: %v", err)
+	}
+	wantProvider, wantModel := d.Select(nil)
+	if sel.Provider != wantProvider || sel.Model != wantModel || sel.Source != llmbuild.ChatSourceDefault {
+		t.Errorf("the chat engine resolves %s/%s (%s), want the deployment default %s/%s",
+			sel.Provider, sel.Model, sel.Source, wantProvider, wantModel)
+	}
+
+	_, err = eng.Exchange(ctx, tenantID, campaign, thread.ID, "Plan the next session.", discardChatEvents{})
+	if err == nil {
+		t.Fatal("Exchange succeeded with no LLM key in the process")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "anthropic") || strings.Contains(msg, "groq") {
+		t.Errorf("Exchange err = %v, want the Anthropic adapter's missing-key refusal (the deployment default)", err)
+	}
+}
+
+// discardChatEvents drops an exchange's stream.
+type discardChatEvents struct{}
+
+func (discardChatEvents) Text(string) error { return nil }
+func (discardChatEvents) Tool(string, bool) {}
 
 // TestBuildVoiceDeps_RecapRunsTheDeploymentDefault pins the other half of the
 // composition root: the recap Engine buildVoiceDeps constructs — the one the
