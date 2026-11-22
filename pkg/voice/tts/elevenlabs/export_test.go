@@ -49,3 +49,12 @@ func WithWSWarmFor(d time.Duration) Option {
 		}
 	}
 }
+
+// WaitWSBackground returns once the websocket pool's goroutines are done. Only
+// meaningful while no socket is open (a socket's goroutines run until it
+// closes): then what is left are background pre-dials.
+func WaitWSBackground(c *Client) {
+	if c.ws != nil {
+		c.ws.wg.Wait()
+	}
+}

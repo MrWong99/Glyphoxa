@@ -743,6 +743,12 @@ func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, s
 			p.fallbacks.Add(1)
 			return nil, errWSNoRoom
 		}
+		if attempt > 0 {
+			// Counted once the sentence is on the fresh socket: one that could
+			// not get one (a cap hold, a full pool) went over HTTP and is a
+			// fallback, not a redial.
+			p.redials.Add(1)
+		}
 		var first wsFrame
 		err = conn.say(sentence)
 		if err == nil {
@@ -768,7 +774,6 @@ func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, s
 			return nil, errWSNoRoom
 		}
 		if reused && attempt == 0 {
-			p.redials.Add(1)
 			continue
 		}
 		var se *StreamError
