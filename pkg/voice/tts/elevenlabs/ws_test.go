@@ -250,6 +250,15 @@ func collect(t *testing.T, ch <-chan tts.AudioChunk) (pcm []byte, chunks int, te
 	}
 }
 
+// drain reads a synthesis to its close and fails the test on a terminal error:
+// for sentences whose audio the test does not look at.
+func drain(t *testing.T, ch <-chan tts.AudioChunk) {
+	t.Helper()
+	if _, _, terminal := collect(t, ch); terminal != nil {
+		t.Errorf("sentence ended in a terminal error: %v", terminal)
+	}
+}
+
 func say(t *testing.T, c *elevenlabs.Client, ctx context.Context, voice tts.Voice, sentence string) <-chan tts.AudioChunk {
 	t.Helper()
 	ch, err := c.Synthesize(ctx, tts.SynthesizeRequest{Sentence: sentence, Voice: voice})
@@ -383,7 +392,7 @@ func TestWS_LookAheadPairUsesTwoSocketsAndKeepsAudioApart(t *testing.T) {
 	}
 
 	// The pair is reused, not grown.
-	collect(t, say(t, c, context.Background(), voice, "Satz k plus zwei."))
+	drain(t, say(t, c, context.Background(), voice, "Satz k plus zwei."))
 	if n := srv.upgrades.Load(); n != 2 {
 		t.Errorf("sockets dialled = %d after a third sentence, want still 2", n)
 	}
@@ -503,7 +512,7 @@ func TestWS_DeadPooledSocketIsRedialledTransparently(t *testing.T) {
 			})
 			c := wsClient(t, srv)
 			voice := wsVoice("voice-1")
-			collect(t, say(t, c, context.Background(), voice, "Erster Satz."))
+			drain(t, say(t, c, context.Background(), voice, "Erster Satz."))
 
 			pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Zweiter Satz."))
 			if terminal != nil || !bytes.Equal(pcm, sentencePCM("Zweiter Satz. ")) {
@@ -588,7 +597,7 @@ func TestWS_RefusedHandshakeIsATypedHTTPError(t *testing.T) {
 func TestWS_KeepAliveIsSentWhileIdle(t *testing.T) {
 	srv := newTTDServer(t, echoScript)
 	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, time.Minute, 0, 0, 0))
-	collect(t, say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz."))
+	drain(t, say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz."))
 	eventually(t, "keep_alive messages on the idle socket", func() bool { return srv.keepAlive.Load() >= 3 })
 	if n := srv.open.Load(); n != 1 {
 		t.Errorf("open sockets = %d, want the idle one kept", n)
@@ -602,7 +611,7 @@ func TestWS_IdleSocketIsClosedAfterTTL(t *testing.T) {
 	srv := newTTDServer(t, echoScript)
 	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 60*time.Millisecond, 0, 0, 0))
 	voice := wsVoice("voice-1")
-	collect(t, say(t, c, context.Background(), voice, "Ein Satz."))
+	drain(t, say(t, c, context.Background(), voice, "Ein Satz."))
 	eventually(t, "the idle socket to be closed", func() bool { return srv.open.Load() == 0 && c.WSStats().Open == 0 })
 
 	pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Noch ein Satz."))
@@ -627,8 +636,8 @@ func TestWS_PerVoiceCapSendsTheThirdOverlapOverHTTP(t *testing.T) {
 	if terminal != nil || !bytes.Equal(third, httpPCM) {
 		t.Errorf("third overlapping sentence: audio %q, terminal %v; want the HTTP path's audio", third, terminal)
 	}
-	collect(t, a)
-	collect(t, b)
+	drain(t, a)
+	drain(t, b)
 	if st := c.WSStats(); srv.upgrades.Load() != 2 || st.Fallbacks != 1 {
 		t.Errorf("sockets = %d, stats = %+v; want 2 sockets and 1 fallback", srv.upgrades.Load(), st)
 	}
@@ -641,8 +650,8 @@ func TestWS_TotalCapEvictsAnIdleSocketElseFallsBack(t *testing.T) {
 	srv := newTTDServer(t, echoScript)
 	c := wsClient(t, srv, elevenlabs.WithWSTuning(0, 0, 0, 0, 2))
 	ctx := context.Background()
-	collect(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
-	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
+	drain(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
+	drain(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
 
 	pcm, _, _ := collect(t, say(t, c, ctx, wsVoice("voice-c"), "C."))
 	if !bytes.Equal(pcm, sentencePCM("C. ")) {
@@ -653,7 +662,7 @@ func TestWS_TotalCapEvictsAnIdleSocketElseFallsBack(t *testing.T) {
 		t.Errorf("stats = %+v, want 2 open after 3 dials", st)
 	}
 	// voice-a was the longest idle: it is the one that went.
-	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B again."))
+	drain(t, say(t, c, ctx, wsVoice("voice-b"), "B again."))
 	if st := c.WSStats(); st.Dials != 3 {
 		t.Errorf("voice-b had to dial (stats %+v): the wrong socket was evicted", st)
 	}
@@ -665,8 +674,8 @@ func TestWS_TotalCapEvictsAnIdleSocketElseFallsBack(t *testing.T) {
 	if !bytes.Equal(pcm, httpPCM) {
 		t.Errorf("voice-a audio = %q with the pool full, want the HTTP path's audio", pcm)
 	}
-	collect(t, b)
-	collect(t, cc)
+	drain(t, b)
+	drain(t, cc)
 }
 
 // TestWS_WarmPreDialsKnownVoices: a dialogue socket is bound to one voice, so
@@ -687,7 +696,7 @@ func TestWS_WarmPreDialsKnownVoices(t *testing.T) {
 	}
 
 	voice := wsVoice("voice-1")
-	collect(t, say(t, c, ctx, voice, "Ein Satz."))
+	drain(t, say(t, c, ctx, voice, "Ein Satz."))
 	eventually(t, "the idle socket to expire", func() bool { return srv.open.Load() == 0 })
 
 	if err := c.Warm(ctx); err != nil {
@@ -697,7 +706,7 @@ func TestWS_WarmPreDialsKnownVoices(t *testing.T) {
 	if n := srv.heads.Load(); n != 1 {
 		t.Errorf("HEADs = %d, want still 1 (a websocket-only client warms sockets)", n)
 	}
-	collect(t, say(t, c, ctx, voice, "Die Antwort."))
+	drain(t, say(t, c, ctx, voice, "Die Antwort."))
 	if st := c.WSStats(); st.Dials != 2 || st.Reuses != 1 {
 		t.Errorf("stats = %+v, want the reply on the pre-dialled socket", st)
 	}
@@ -710,7 +719,7 @@ func TestWS_WarmKeepsAnIdleSocketPastItsTTL(t *testing.T) {
 	srv := newTTDServer(t, echoScript)
 	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 120*time.Millisecond, 0, 0, 0))
 	ctx := context.Background()
-	collect(t, say(t, c, ctx, wsVoice("voice-1"), "Ein Satz."))
+	drain(t, say(t, c, ctx, wsVoice("voice-1"), "Ein Satz."))
 	for i := 0; i < 6; i++ { // 240 ms of warms, twice the TTL
 		time.Sleep(40 * time.Millisecond)
 		if err := c.Warm(ctx); err != nil {
@@ -744,8 +753,8 @@ func TestWS_CloseTearsEverythingDown(t *testing.T) {
 	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL), elevenlabs.WithTransport(elevenlabs.TransportWS),
 		elevenlabs.WithWSTuning(5*time.Millisecond, time.Minute, 0, 0, 0))
 	ctx := context.Background()
-	collect(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
-	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
+	drain(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
+	drain(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
 	hanging := say(t, c, ctx, wsVoice("voice-a"), "hängt") // leases voice-a's socket and never finishes
 	if n := srv.open.Load(); n != 2 {
 		t.Fatalf("open sockets = %d, want 2 before Close", n)
@@ -852,7 +861,7 @@ func TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence(t *testing.T) {
 	})
 	c := wsClient(t, srv)
 	voice := wsVoice("voice-1")
-	collect(t, say(t, c, context.Background(), voice, "Erster Satz."))
+	drain(t, say(t, c, context.Background(), voice, "Erster Satz."))
 	for _, sentence := range []string{"Zweiter Satz.", "Dritter Satz."} {
 		ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: sentence, Voice: voice})
 		if err != nil {
