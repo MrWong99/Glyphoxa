@@ -114,7 +114,7 @@ func BuildConversation(cfg RigConfig) (*orchestrator.Conversation, error) {
 }
 
 // benchVoice mirrors wirenpc's npcVoice() (the prod NPC voice: ElevenLabs
-// "George" public preset, eleven_v3 defaults, pcm_48000) without importing the
+// "George" public preset, ttseleven.DefaultSettings, pcm_48000) without importing the
 // pipeline's sole-owned internal/wirenpc. The live tier NEEDS it — a real
 // ElevenLabs Synthesize rejects an empty VoiceID, so a voiceless Persona makes
 // every live turn die silently with no audio (the exact 0-sample failure the
@@ -122,7 +122,7 @@ func BuildConversation(cfg RigConfig) (*orchestrator.Conversation, error) {
 // VoiceID but the voice still shapes the system prompt via AudioMarkupPrompt,
 // so both tiers set it for prompt parity with prod.
 func benchVoice() tts.Voice {
-	settings := ttseleven.DefaultV3Settings()
+	settings := ttseleven.DefaultSettings()
 	settings.OutputFormat = "pcm_48000"
 	raw, err := json.Marshal(settings)
 	if err != nil {

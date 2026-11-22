@@ -11,7 +11,7 @@ import (
 )
 
 // ListVoices implements [tts.VoiceLister]. Returned voices have Settings
-// pre-populated with [DefaultV3Settings] so each one is immediately usable
+// pre-populated with [DefaultSettings] so each one is immediately usable
 // in [Client.Synthesize] without further configuration, per ADR-0022.
 //
 // All ElevenLabs labels (category, gender, accent, description, …) are
@@ -52,7 +52,7 @@ func (c *Client) ListVoices(ctx context.Context) ([]tts.Voice, error) {
 		return nil, fmt.Errorf("elevenlabs.ListVoices: decode body: %w", err)
 	}
 
-	defaults, err := json.Marshal(DefaultV3Settings())
+	defaults, err := json.Marshal(DefaultSettings())
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs.ListVoices: marshal defaults: %w", err)
 	}

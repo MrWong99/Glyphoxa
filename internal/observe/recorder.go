@@ -302,8 +302,10 @@ type StageRecorder interface {
 	// TTS synthesizer (#127, ADR-0045): ElevenLabs bills submitted characters, so a
 	// sentence is counted on an accepted Synthesize even if a later barge cuts its
 	// audio. (glyphoxa_voice_tts_characters_total{provider}) — WIRED by the TTS
-	// stage after a successful Synthesize start.
-	TTSCharacters(provider Provider, chars int)
+	// stage after a successful Synthesize start. model is the synthesis model id
+	// (e.g. eleven_v4_turbo) the spend meter and Usage Ledger price on (#702); like
+	// LLMTokens' model, the Prometheus adapter DROPS it (ADR-0032).
+	TTSCharacters(provider Provider, model string, chars int)
 	// MalformedToolGen counts one malformed tool generation by provider and the
 	// detection path that caught it (#398/#399/#410): a provider tool_use_failed the
 	// agenttool bridge retried ([MalformedStreamError]), a pseudo-XML text leak, or a
@@ -394,7 +396,7 @@ func (Discard) ProviderError(Stage, Provider)               {}
 func (Discard) TurnOutcome(TurnOutcome, TurnReason)         {}
 func (Discard) LLMTokens(Provider, string, int, int)        {}
 func (Discard) MalformedToolGen(Provider, MalformedPath)    {}
-func (Discard) TTSCharacters(Provider, int)                 {}
+func (Discard) TTSCharacters(Provider, string, int)         {}
 func (Discard) STTAudioSeconds(Provider, time.Duration)     {}
 func (Discard) STTFinal(Provider, STTTransport, STTFinalReason) {
 }

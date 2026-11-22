@@ -28,7 +28,7 @@ func TestApplyVoiceSelection_RoundTripsThroughPipelineReader(t *testing.T) {
 
 // TestApplyVoiceSelection_FirstSaveFillsDefaults: a first save (nil existing)
 // fills the documented ElevenLabs defaults — provider, the campaign language, and
-// the eleven_v3 / pcm_48000 Settings — not a bare voice id.
+// the eleven_v4_turbo / pcm_48000 Settings — not a bare voice id.
 func TestApplyVoiceSelection_FirstSaveFillsDefaults(t *testing.T) {
 	t.Parallel()
 	v, err := storage.VoiceFromJSON(applyVoiceSelection(nil, "v123", "de"))
@@ -48,8 +48,8 @@ func TestApplyVoiceSelection_FirstSaveFillsDefaults(t *testing.T) {
 	if s.OutputFormat != ttseleven.DefaultVoiceOutputFormat {
 		t.Errorf("output_format = %q, want %q", s.OutputFormat, ttseleven.DefaultVoiceOutputFormat)
 	}
-	if s.ModelID != ttseleven.ModelV3 {
-		t.Errorf("model_id = %q, want %q", s.ModelID, ttseleven.ModelV3)
+	if s.ModelID != ttseleven.ModelV4Turbo {
+		t.Errorf("model_id = %q, want %q", s.ModelID, ttseleven.ModelV4Turbo)
 	}
 }
 

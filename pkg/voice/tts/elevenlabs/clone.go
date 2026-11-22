@@ -112,7 +112,7 @@ func (c *Client) CloneVoice(ctx context.Context, req tts.CloneRequest) (tts.Voic
 		respBody.Name = req.Name
 	}
 
-	defaults, err := json.Marshal(DefaultV3Settings())
+	defaults, err := json.Marshal(DefaultSettings())
 	if err != nil {
 		return tts.Voice{}, fmt.Errorf("elevenlabs.CloneVoice: marshal defaults: %w", err)
 	}

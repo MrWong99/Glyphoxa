@@ -75,7 +75,7 @@ func TestOffSession_UsageReachesLedgerBaseAndEstimate(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 	call.Recorder().LLMTokens(observe.ProviderGroq, "llama-3.3-70b-versatile", 1000, 500)
-	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, 120)
+	call.Recorder().TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 120)
 	if err := call.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

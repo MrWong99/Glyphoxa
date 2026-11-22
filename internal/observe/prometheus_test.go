@@ -320,7 +320,7 @@ func TestUsageMeters_TokensCharactersAudioSeconds(t *testing.T) {
 	rec := NewPrometheusRecorder()
 
 	rec.LLMTokens(ProviderGroq, "llama-3.3-70b-versatile", 100, 50)
-	rec.TTSCharacters(ProviderElevenLabs, 42)
+	rec.TTSCharacters(ProviderElevenLabs, "eleven_v4_turbo", 42)
 	rec.STTAudioSeconds(ProviderElevenLabs, 3200*time.Millisecond)
 
 	out := scrape(t, rec)

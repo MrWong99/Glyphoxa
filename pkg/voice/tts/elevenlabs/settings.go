@@ -9,10 +9,69 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
-// ModelV3 is the canonical ElevenLabs v3 model identifier. v3 is the model
-// family that introduced inline bracketed audio tags ("[whispers]",
-// "[laughs]", "[pause]", …); see [Client.AudioMarkupPrompt].
-const ModelV3 = "eleven_v3"
+// ElevenLabs model identifiers the adapter knows by name.
+const (
+	// ModelV3 is the ElevenLabs v3 model. v3 introduced the inline bracketed
+	// audio tags ("[whispers]", "[laughs]", "[pause]", …); see
+	// [Client.AudioMarkupPrompt]. It was the adapter default until #702: its
+	// first audio lands ~600 ms after the request over HTTP /stream.
+	ModelV3 = "eleven_v3"
+
+	// ModelV4Turbo is the ElevenLabs v4 Turbo model: the same audio-tag
+	// vocabulary as v3, ~135 ms first audio over the same HTTP /stream path,
+	// at half v3's credit cost (measured 2026-11-22, ADR-0023 amendment). It
+	// silently strips SSML <break/> and rejects optimize_streaming_latency.
+	ModelV4Turbo = "eleven_v4_turbo"
+
+	// DefaultModel is the model a Voice without a model_id synthesizes on, and
+	// the one every freshly persisted default voice records ([DefaultSettings]).
+	// This constant and [ModelOf] are the ONE place the adapter picks a model.
+	DefaultModel = ModelV4Turbo
+)
+
+// ModelOf reports the model a synthesis of voice runs on: the voice's own
+// Settings.model_id, or [DefaultModel] when it names none (or its Settings do
+// not decode). Usage metering prices TTS characters by this id (ADR-0046), so it
+// must agree with what [Client.Synthesize] sends — both resolve through here.
+func ModelOf(voice tts.Voice) string {
+	s, err := mergeSettings(voice.Settings, nil)
+	if err != nil {
+		return DefaultModel
+	}
+	return s.model()
+}
+
+// UpgradeLegacyModel rewrites a voice's Settings pinned to [ModelV3] — the
+// pre-#702 default every persisted voice recorded explicitly — onto
+// [DefaultModel], keeping every other key of the blob. It reports whether it
+// changed anything; Settings on any other model (or not an object) come back
+// as given. Migration 00059 does the same to stored voices; this is the
+// in-process twin for voices arriving from outside the database (an old
+// Campaign Bundle).
+func UpgradeLegacyModel(settings json.RawMessage) (json.RawMessage, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &m); err != nil || m == nil {
+		return settings, false
+	}
+	var model string
+	if err := json.Unmarshal(m["model_id"], &model); err != nil || model != ModelV3 {
+		return settings, false
+	}
+	m["model_id"] = json.RawMessage(strconv.Quote(DefaultModel))
+	out, err := json.Marshal(m)
+	if err != nil {
+		return settings, false
+	}
+	return out, true
+}
+
+// model is the effective model id of s: its ModelID, else [DefaultModel].
+func (s Settings) model() string {
+	if s.ModelID == "" {
+		return DefaultModel
+	}
+	return s.ModelID
+}
 
 // DefaultOutputFormat is the streaming PCM format the adapter requests when a
 // Voice does not specify one. 24 kHz mono int16 PCM is ElevenLabs's highest
@@ -58,17 +117,17 @@ type Settings struct {
 	SuggestedAudioTags              []string                         `json:"suggested_audio_tags,omitempty"`
 }
 
-// DefaultV3Settings returns the baseline eleven_v3 settings used as the
+// DefaultSettings returns the baseline [DefaultModel] settings used as the
 // pre-populated [tts.Voice.Settings] for voices returned by [Client.ListVoices]
 // (and as the implicit defaults when a Voice arrives with an empty Settings
 // blob). Tuned for conversational delivery: moderate stability/similarity,
 // speaker-boost on, 24 kHz PCM.
-func DefaultV3Settings() Settings {
+func DefaultSettings() Settings {
 	stability := 0.5
 	similarity := 0.75
 	boost := true
 	return Settings{
-		ModelID:      ModelV3,
+		ModelID:      DefaultModel,
 		OutputFormat: DefaultOutputFormat,
 		VoiceSettings: &VoiceSettings{
 			Stability:       &stability,
@@ -87,7 +146,7 @@ const DefaultVoiceOutputFormat = "pcm_48000"
 
 // DefaultVoice builds the canonical [tts.Voice] for a freshly-selected ElevenLabs
 // voice id: the ProviderID + VoiceID + Language identity plus the documented
-// eleven_v3 defaults (conversational stability/similarity/speaker-boost) at
+// [DefaultSettings] (conversational stability/similarity/speaker-boost) at
 // [DefaultVoiceOutputFormat]. It is the ONE place the first-save default is
 // defined — the Campaign RPC's first UI save and [wirenpc.npcVoice] (the seed
 // source) both delegate here, so the persisted shape can't drift between them
@@ -95,11 +154,11 @@ const DefaultVoiceOutputFormat = "pcm_48000"
 // set it after. Settings stays opaque to the core tts package (ADR-0022); this
 // is the elevenlabs-package home for its typed default.
 func DefaultVoice(voiceID, language string) tts.Voice {
-	settings := DefaultV3Settings()
+	settings := DefaultSettings()
 	settings.OutputFormat = DefaultVoiceOutputFormat
 	raw, err := json.Marshal(settings)
 	if err != nil {
-		// DefaultV3Settings is a fixed, marshalable struct; a failure here is a
+		// DefaultSettings is a fixed, marshalable struct; a failure here is a
 		// programming error, not a runtime condition.
 		panic(fmt.Sprintf("elevenlabs.DefaultVoice: marshal settings: %v", err))
 	}

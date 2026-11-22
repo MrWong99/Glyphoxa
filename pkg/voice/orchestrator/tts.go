@@ -31,6 +31,10 @@ type TTS struct {
 	// the mirror of [STT]'s stt_request wiring.
 	rec      observe.StageRecorder
 	provider observe.Provider
+	// modelOf resolves the synthesis model of a voice for usage metering (#702):
+	// the spend meter and the Usage Ledger price TTS characters per model. Nil
+	// meters under "" (the provider rate); [WithTTSModel] sets it.
+	modelOf func(tts.Voice) string
 
 	// retry bounds transient-failure retries around the Synthesize START call
 	// (#124, ADR-0044): a single 429/5xx or net.Error is retried with backoff,
@@ -57,6 +61,16 @@ func WithTTSMetrics(rec observe.StageRecorder, provider observe.Provider) TTSOpt
 		}
 		s.provider = provider
 	}
+}
+
+// WithTTSModel sets how the stage resolves the synthesis model of the voice it
+// dispatches, so each metered sentence carries the model it was synthesized on
+// (#702): the provider adapter owns that resolution (e.g. elevenlabs.ModelOf —
+// the voice's model_id or the adapter default), the core tts package keeps
+// Voice.Settings opaque (ADR-0022). Unset, sentences meter under "" and are
+// priced at the provider rate.
+func WithTTSModel(modelOf func(tts.Voice) string) TTSOption {
+	return func(s *TTS) { s.modelOf = modelOf }
 }
 
 // WithTTSRetry sets the [retry.Policy] wrapping the Synthesize start call (#124):
@@ -152,7 +166,7 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	// submitted characters as utf8 runes (ElevenLabs bills submitted characters, not
 	// bytes). Counted here, before the drain, so a later barge cutting the audio still
 	// bills what was submitted. An atomic counter add; it never blocks or fails the turn.
-	s.rec.TTSCharacters(s.provider, utf8.RuneCountInString(sentence))
+	s.rec.TTSCharacters(s.provider, s.model(voice), utf8.RuneCountInString(sentence))
 	// Drain to close, capturing a terminal Err chunk (#436): an adapter that fails
 	// MID-STREAM emits one final chunk with Err set before closing, so an abnormal
 	// termination is distinguishable from clean completion at this seam.
@@ -189,6 +203,14 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	s.rec.TTSTotal(s.provider, time.Since(start))
 	s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeOK)
 	return nil
+}
+
+// model is the synthesis model voice is metered under ("" when unresolved).
+func (s *TTS) model(voice tts.Voice) string {
+	if s.modelOf == nil {
+		return ""
+	}
+	return s.modelOf(voice)
 }
 
 // publishFailed announces the sentence Dispatch is failing as

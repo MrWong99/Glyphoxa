@@ -14,8 +14,9 @@ import (
 // price surface is deferred until someone needs to edit prices without a deploy.
 //
 // Keyed by (component, provider, model) where the model actually distinguishes a
-// price (LLM); TTS and STT are keyed by provider alone because their usage capture
-// points (ADR-0045) carry no model. An unknown key falls back to a deliberately
+// price (LLM; TTS since #702, whose capture point now carries the synthesis
+// model); STT is keyed by provider alone because its usage capture point
+// (ADR-0045) carries no model. An unknown key falls back to a deliberately
 // CONSERVATIVE (high) default so a missing entry over-estimates — a cap trips
 // early rather than letting an unpriced provider run unbounded — plus a warn-once.
 
@@ -53,12 +54,37 @@ var llmPrices = map[llmKey]llmRate{
 	{observe.ProviderGemini, "gemini-2.5-flash-image"}: {inputPerMTok: 0.30, outputPerMTok: 30.00},
 }
 
-// ttsPricePer1kChars are the known per-1000-character TTS rates (USD). ElevenLabs
-// bills submitted characters. ESTIMATES.
+// ttsPricePer1kChars are the known per-1000-character TTS rates (USD) by
+// provider: the rate for a model with no row of its own in [ttsModelPricePer1kChars].
+// ElevenLabs bills submitted characters. ESTIMATES.
 var ttsPricePer1kChars = map[observe.Provider]float64{
 	// ElevenLabs standard multilingual voices — plan-dependent credit cost mapped
-	// to USD, captured 2026-07-07: ~$0.30 / 1000 characters. ESTIMATE.
+	// to USD, captured 2026-07-07: ~$0.30 / 1000 characters. ESTIMATE. This is the
+	// full-credit tier (eleven_v3, eleven_v4, eleven_multilingual_v2: ~0.44
+	// credits/char on the character-cost header, 2026-11-22).
 	observe.ProviderElevenLabs: 0.30,
+}
+
+// ttsModelKey identifies a model-specific TTS price row (#702), the (provider,
+// model) shape of [soundKey]: one ElevenLabs key spans models billed at
+// different credit rates per character.
+type ttsModelKey struct {
+	provider observe.Provider
+	model    string
+}
+
+// ttsModelPricePer1kChars are the TTS models priced OFF their provider's rate.
+// ESTIMATES, scaled from the provider rate by the vendor's own per-character
+// credit ratio.
+var ttsModelPricePer1kChars = map[ttsModelKey]float64{
+	// ElevenLabs half-credit tier: the character-cost response header showed
+	// ~0.22 credits/char for eleven_v4_turbo and eleven_flash_v2_5 against ~0.44
+	// for eleven_v3 (73 chars = 16 vs 32 credits, captured 2026-11-22), so these
+	// bill half the provider rate. eleven_turbo_v2_5 sits in the same published
+	// half-credit tier as flash. ESTIMATE (plan-dependent).
+	{observe.ProviderElevenLabs, "eleven_v4_turbo"}:   0.15,
+	{observe.ProviderElevenLabs, "eleven_flash_v2_5"}: 0.15,
+	{observe.ProviderElevenLabs, "eleven_turbo_v2_5"}: 0.15,
 }
 
 // sttPricePerHour are the known per-audio-hour STT rates (USD). ESTIMATES.
@@ -137,9 +163,10 @@ func EstimateLLMUSD(provider observe.Provider, model string, inputTokens, output
 }
 
 // EstimateTTSUSD estimates the USD cost of chars submitted to a TTS synthesizer
-// (exported for the Usage Ledger, ADR-0054).
-func EstimateTTSUSD(provider observe.Provider, chars int) float64 {
-	usd, _ := ttsCostUSD(provider, chars)
+// running model (exported for the Usage Ledger, ADR-0054). A model with no row of
+// its own is priced at its provider's rate.
+func EstimateTTSUSD(provider observe.Provider, model string, chars int) float64 {
+	usd, _ := ttsCostUSD(provider, model, chars)
 	return usd
 }
 
@@ -196,9 +223,15 @@ func llmCostUSD(provider observe.Provider, model string, inputTokens, outputToke
 	return usd, ok
 }
 
-// ttsCostUSD estimates the USD cost of chars submitted to a TTS synthesizer.
-func ttsCostUSD(provider observe.Provider, chars int) (usd float64, known bool) {
-	p, ok := ttsPricePer1kChars[provider]
+// ttsCostUSD estimates the USD cost of chars submitted to a TTS synthesizer
+// running model: the (provider, model) row when one exists, else the provider
+// rate, else the conservative default. known is false only for an unpriced
+// PROVIDER (an unlisted model of a priced provider is the provider rate by design).
+func ttsCostUSD(provider observe.Provider, model string, chars int) (usd float64, known bool) {
+	p, ok := ttsModelPricePer1kChars[ttsModelKey{provider, model}]
+	if !ok {
+		p, ok = ttsPricePer1kChars[provider]
+	}
 	if !ok {
 		p = defaultTTSPer1kChars
 	}
