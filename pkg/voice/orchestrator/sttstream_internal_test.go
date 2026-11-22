@@ -22,8 +22,9 @@ type fakeStream struct {
 	sent      []audio.Frame
 	commits   int
 	closed    bool
-	sendErr   error             // returned by Send once set
-	result    *stt.CommitResult // resolves each Commit; nil leaves the commit pending
+	sendErr   error                 // returned by Send once set
+	result    *stt.CommitResult     // resolves each Commit; nil leaves the commit pending
+	pending   chan stt.CommitResult // the last Commit's channel, for a test to resolve
 	onPartial func(string)
 }
 
@@ -45,6 +46,7 @@ func (f *fakeStream) Commit() (<-chan stt.CommitResult, error) {
 	if f.result != nil {
 		ch <- *f.result
 	}
+	f.pending = ch
 	return ch, nil
 }
 

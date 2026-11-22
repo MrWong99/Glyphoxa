@@ -107,7 +107,9 @@ func idleClose() error {
 }
 
 // bindLifecycle binds m on a fresh bus with clock installed and returns once the
-// eager first dial is up.
+// eager first dial is up — installed, not just opened: the install stamps the
+// session's start on the clock, so a test that advanced the clock before it
+// would see a session younger than it meant.
 func bindLifecycle(t *testing.T, m *StreamManager, d *dialScript, clock *lifeClock) {
 	t.Helper()
 	m.now = clock.now
@@ -116,6 +118,9 @@ func bindLifecycle(t *testing.T, m *StreamManager, d *dialScript, clock *lifeClo
 	t.Cleanup(stop)
 	if i := d.awaitDial(t); i != 0 {
 		t.Fatalf("first dial opened session %d, want 0", i)
+	}
+	if !m.WaitStreamUp(2 * time.Second) {
+		t.Fatal("the first session was never installed")
 	}
 }
 
@@ -737,5 +742,79 @@ func TestStreamManager_HealthyDeath_ForgivesAGrownBackoff(t *testing.T) {
 	m.mu.Unlock()
 	if b != time.Second {
 		t.Errorf("backoff = %v after a healthy death, want the 1s initial", b)
+	}
+}
+
+// TestStreamManager_DeathThatFailsACommit_BacksOffWhicheverPathSeesItFirst
+// (#703 review): with the real adapter a commit that resolves with an error
+// comes from the session's death, and the same death fires OnClosed. Two paths
+// observe it — sessionClosed (an ENDED session, forgiven after a healthy
+// lifetime) and awaitCommit (a RETIRED session, never forgiven) — and the first
+// one decides. A session that keeps dying on its commit after a long life must
+// back off however the race falls, or it is redialled instantly forever.
+func TestStreamManager_DeathThatFailsACommit_BacksOffWhicheverPathSeesItFirst(t *testing.T) {
+	death := func() error {
+		return &stt.StreamError{Code: "commit_throttled", Fatal: true, Err: errors.New("session closed: uncommitted audio")}
+	}
+	// Each order runs the death's two effects — OnClosed (kill) and the
+	// pending commit failing (fail) — and the worker's awaitCommit (await).
+	orders := map[string]func(kill, fail, await func()){
+		"death observed first":  func(kill, fail, await func()) { kill(); fail(); await() },
+		"commit observed first": func(kill, fail, await func()) { fail(); await(); kill() },
+		"concurrently": func(kill, fail, await func()) {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); kill() }()
+			go func() { defer wg.Done(); fail() }()
+			await()
+			wg.Wait()
+		},
+	}
+	for name, order := range orders {
+		t.Run(name, func(t *testing.T) {
+			d := newDialScript()
+			clock := newLifeClock()
+			m := NewStreamManager(d, WithStreamBackoff(time.Second, 30*time.Second), WithCommitTimeout(2*time.Second))
+			bindLifecycle(t, m, d, clock)
+
+			for i := range 4 {
+				if !m.WaitStreamUp(2 * time.Second) {
+					t.Fatalf("session %d never installed", i)
+				}
+				s := d.session(i)
+				s.mu.Lock()
+				s.result = nil // the commit stays pending until the death resolves it
+				s.mu.Unlock()
+				clock.advance(15 * time.Second) // well past the healthy lifetime
+				m.beginUtterance(clock.now())
+				m.send(streamFrame(t, 1))
+				c, ok := m.endUtterance()
+				if !ok {
+					t.Fatalf("turn %d did not stream", i)
+				}
+				s.mu.Lock()
+				pending := s.pending
+				s.mu.Unlock()
+				order(
+					func() { d.kill(i, death()) },
+					func() { pending <- stt.CommitResult{Err: death()} },
+					func() {
+						if _, ok := m.awaitCommit(c); ok {
+							t.Errorf("turn %d: awaitCommit ok=true on a failed commit", i)
+						}
+					})
+				d.awaitDial(t)
+			}
+			want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+			got := clock.slept()
+			if len(got) != len(want) {
+				t.Fatalf("sleeps = %v, want %v (a session that died failing its commit is not forgiven)", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("sleep[%d] = %v, want %v", i, got[i], want[i])
+				}
+			}
+		})
 	}
 }
