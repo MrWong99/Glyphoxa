@@ -34,7 +34,10 @@ export function SidebarUser({ user }: { user: User }) {
 
   return (
     <div className="gx-sidebar__user">
-      <Avatar name={user.name} src={user.avatar || null} size="sm" status="live" />
+      {/* No presence dot: the green "live" dot here was hardcoded and read as
+          "a session is live". The real live signal is on the Session nav item
+          and in the topbar (useLiveSession). */}
+      <Avatar name={user.name} src={user.avatar || null} size="sm" />
       <div className="gx-sidebar__user-meta">
         <div className="gx-sidebar__user-name">{user.name}</div>
         <div className="gx-sidebar__user-role">{user.role}</div>

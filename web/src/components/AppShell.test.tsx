@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
-import type { MouseEventHandler, ReactNode } from "react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
 import {
   CampaignService,
@@ -12,35 +13,39 @@ import {
   ListCampaignsResponseSchema,
   GetActiveCampaignResponseSchema,
   GetSessionResponseSchema,
+  KnowledgeProposalSchema,
+  ListKnowledgeProposalsResponseSchema,
+  VoiceSessionSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 
 // The shell is driven by TanStack Router; mock the bits AppShell + SidebarUser
 // touch so it renders without a live router (mirrors AuthGate.test.tsx). The
-// Link mock keeps onClick (the mobile drawer-close) and data-active/aria-current
-// (the sub-navigation highlight) observable; useParams answers as if the route
-// were /t/acme/campaign/cast so the Campaign sub-navigation renders (ADR-0063).
+// Link mock resolves `to` + `params` into a real href and passes the anchor
+// attributes through, so a test can read where a link goes, its active state
+// and its accessible name. useParams answers from `route`, which a test sets
+// to put the shell on a given screen.
+const { route } = vi.hoisted(() => ({
+  route: { screen: "campaign" as string | undefined, view: "cast" as string | undefined },
+}));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
+    to,
+    params,
     children,
-    className,
-    onClick,
-    "data-active": dataActive,
-    "aria-current": ariaCurrent,
+    ...rest
   }: {
+    to: string;
+    params?: Record<string, string>;
     children: ReactNode;
-    className?: string;
-    onClick?: MouseEventHandler<HTMLAnchorElement>;
-    "data-active"?: string;
-    "aria-current"?: "page";
-  }) => (
-    <a className={className} onClick={onClick} data-active={dataActive} aria-current={ariaCurrent}>
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a href={to.replace(/\$(\w+)/g, (_, name: string) => params?.[name] ?? "")} {...rest}>
       {children}
     </a>
   ),
-  Outlet: () => null,
-  useParams: () => ({ screen: "campaign", view: "cast" }),
+  Outlet: () => <div data-testid="outlet" />,
+  useParams: () => ({ ...route }),
   useNavigate: () => vi.fn(),
 }));
 
@@ -48,44 +53,83 @@ import { AppShell } from "./AppShell";
 
 const user = create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" });
 
-// The topbar now hosts the CampaignSwitcher, which reads ListCampaigns /
-// GetActiveCampaign / GetSession — implement them so those queries resolve
-// cleanly instead of erroring/retrying under the shell test.
 const campaign = create(CampaignSchema, {
   id: "c1",
   name: "The Sunless Citadel",
   system: "dnd5e",
   language: "en",
 });
-function shellTransport() {
-  return createRouterTransport(({ service }) => {
+
+// What the shell reads on every screen: the Active Campaign (section label,
+// breadcrumb, tab title), the Voice Session (live signals) and the pending
+// Knowledge Proposals (the Suggestions count). `live` and `pending` are mutable
+// so a test can change the server's answer under a mounted shell.
+function shellBackend(opts: { live?: boolean; pending?: number; noCampaign?: boolean } = {}) {
+  const state = {
+    live: opts.live ?? false,
+    pending: opts.pending ?? 0,
+    startedAt: new Date(Date.now() - (3600 + 12 * 60 + 40) * 1000), // 01:12:40 ago
+  };
+  const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
-      listCampaigns: () => create(ListCampaignsResponseSchema, { campaigns: [campaign] }),
-      getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign }),
+      listCampaigns: () => create(ListCampaignsResponseSchema, { campaigns: opts.noCampaign ? [] : [campaign] }),
+      getActiveCampaign: () => {
+        if (opts.noCampaign) throw new ConnectError("no campaign", Code.NotFound);
+        return create(GetActiveCampaignResponseSchema, { campaign });
+      },
+      listKnowledgeProposals: () => {
+        if (opts.noCampaign) throw new ConnectError("no campaign", Code.NotFound);
+        return create(ListKnowledgeProposalsResponseSchema, {
+          proposals: Array.from({ length: state.pending }, (_, i) =>
+            create(KnowledgeProposalSchema, { id: `p${i}` }),
+          ),
+        });
+      },
     });
     service(SessionService, {
-      getSession: () => create(GetSessionResponseSchema, { active: false }),
+      getSession: () =>
+        create(GetSessionResponseSchema, {
+          active: state.live,
+          session: state.live
+            ? create(VoiceSessionSchema, { id: "s1", startedAt: timestampFromDate(state.startedAt) })
+            : undefined,
+        }),
     });
   });
+  return { transport, state };
 }
 
-function renderShell() {
-  return render(
-    <Providers transport={shellTransport()} queryClient={makeQueryClient()}>
+function renderShell(opts: Parameters<typeof shellBackend>[0] = {}) {
+  const h = shellBackend(opts);
+  const queryClient = makeQueryClient();
+  const view = render(
+    <Providers transport={h.transport} queryClient={queryClient}>
       <AppShell tenantSlug="acme" user={user} />
     </Providers>,
   );
+  return { ...h, queryClient, container: view.container };
 }
 
-describe("AppShell", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
+const sidebar = (container: HTMLElement) => container.querySelector(".gx-sidebar") as HTMLElement;
+const topbar = (container: HTMLElement) => container.querySelector(".gx-topbar") as HTMLElement;
+// Scoped to the sidebar: the topbar switcher also shows the campaign's name.
+const settled = (container: HTMLElement) =>
+  within(sidebar(container)).findByText("The Sunless Citadel");
 
+beforeEach(() => {
+  route.screen = "campaign";
+  route.view = "cast";
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("AppShell chrome", () => {
   it("toggles the sidebar collapsed state from the topbar control", async () => {
     const { container } = renderShell();
-    // Let the switcher's initial reads settle so the topbar is stable first.
-    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
+    await settled(container);
     const shell = container.querySelector(".gx-shell") as HTMLElement;
     const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
 
@@ -93,12 +137,10 @@ describe("AppShell", () => {
     expect(shell).not.toHaveAttribute("data-collapsed", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
 
-    // Clicking collapses it.
     fireEvent.click(toggle);
     expect(shell).toHaveAttribute("data-collapsed", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
-    // Clicking again restores it.
     fireEvent.click(toggle);
     expect(shell).not.toHaveAttribute("data-collapsed", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -119,47 +161,335 @@ describe("AppShell", () => {
     expect(container.querySelector(".gx-shell")).toHaveAttribute("data-collapsed", "true");
 
     expect(await screen.findByText("Select campaign")).toBeInTheDocument();
-  });
-
-  it("renders the Campaign sub-navigation with the active sub-view highlighted (ADR-0063)", async () => {
-    const { container } = renderShell();
-    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
-
-    // The mocked route is /t/acme/campaign/cast, so the sub-items render under
-    // the Campaign nav item — one per sub-view, tab labels reused.
-    const sub = screen.getByRole("group", { name: /campaign view/i });
-    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning"]) {
-      expect(within(sub).getByText(label)).toBeInTheDocument();
-    }
-    // The :view path param drives the highlight: cast is active, the rest not.
-    expect(within(sub).getByText("Cast").closest("a")).toHaveAttribute("data-active", "true");
-    expect(within(sub).getByText("Maps").closest("a")).not.toHaveAttribute("data-active");
-
-    // The parent Campaign item stays highlighted too (it links to the CURRENT
-    // sub-view while one is open, so a habit-click can't stomp it back to cast).
-    // Scoped to the sidebar nav — the topbar title also reads "Campaign", and
-    // the legal footer is a second navigation landmark.
-    const nav = container.querySelector(".gx-nav") as HTMLElement;
-    expect(within(nav).getByText("Campaign").closest("a")).toHaveAttribute("data-active", "true");
+    // Every destination is still there to click; no count, no live marker.
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(nav).getAllByRole("link")).toHaveLength(11);
+    expect(screen.queryByTestId("nav-live")).not.toBeInTheDocument();
+    expect(container.querySelector(".gx-nav__count")).not.toBeInTheDocument();
   });
 
   it("closes the mobile drawer when a nav item is tapped", async () => {
     // Narrow viewport: matchMedia matches the drawer breakpoint, so the shell
     // boots collapsed (drawer shut) and a nav tap must re-collapse it.
-    vi.stubGlobal(
-      "matchMedia",
-      vi.fn().mockReturnValue({ matches: true } as MediaQueryList),
-    );
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true } as MediaQueryList));
     const { container } = renderShell();
-    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
+    await settled(container);
     const shell = container.querySelector(".gx-shell") as HTMLElement;
     expect(shell).toHaveAttribute("data-collapsed", "true");
 
-    // Open the drawer, then tap a sub-navigation item: it navigates (mocked)
-    // AND shuts the drawer so it doesn't keep covering the screen.
-    fireEvent.click(screen.getByRole("button", { name: /toggle sidebar/i }));
+    // Open the drawer, then tap a campaign view: it navigates (mocked) AND
+    // shuts the drawer so it doesn't keep covering the screen.
+    const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
+    fireEvent.click(toggle);
     expect(shell).not.toHaveAttribute("data-collapsed", "true");
-    fireEvent.click(screen.getByText("Maps"));
+    fireEvent.click(screen.getByRole("link", { name: "Maps" }));
     expect(shell).toHaveAttribute("data-collapsed", "true");
+
+    // Same for the pinned items and the brand.
+    for (const name of ["Setup", /campaign overview/i]) {
+      fireEvent.click(toggle);
+      expect(shell).not.toHaveAttribute("data-collapsed", "true");
+      fireEvent.click(screen.getByRole("link", { name }));
+      expect(shell).toHaveAttribute("data-collapsed", "true");
+    }
+  });
+
+  it("links the brand to the tenant index — the way home", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    expect(screen.getByRole("link", { name: /glyphoxa — campaign overview/i })).toHaveAttribute("href", "/t/acme");
+  });
+
+  it("shows no presence dot on the signed-in user (it used to be a hardcoded 'live')", async () => {
+    const { container } = renderShell({ live: false });
+    await settled(container);
+    expect(container.querySelector(".gx-sidebar__user .gx-avatar__status")).not.toBeInTheDocument();
+  });
+
+  it("scrolls the content back to the top when the screen or the view changes", async () => {
+    const h = shellBackend();
+    const queryClient = makeQueryClient();
+    // A fresh element per render: the mocked useParams is re-read only when
+    // the shell actually re-renders.
+    const tree = () => (
+      <Providers transport={h.transport} queryClient={queryClient}>
+        <AppShell tenantSlug="acme" user={user} />
+      </Providers>
+    );
+    const { container, rerender } = render(tree());
+    await settled(container);
+    const content = container.querySelector(".gx-content") as HTMLElement;
+
+    content.scrollTop = 480;
+    route.view = "knowledge";
+    rerender(tree());
+    expect(content.scrollTop).toBe(0);
+
+    content.scrollTop = 480;
+    route.screen = "session";
+    route.view = undefined;
+    rerender(tree());
+    expect(content.scrollTop).toBe(0);
+
+    // Re-rendering on the SAME page (a poll landing, a clock tick) leaves the
+    // GM's scroll position alone.
+    content.scrollTop = 480;
+    rerender(tree());
+    expect(content.scrollTop).toBe(480);
+  });
+});
+
+describe("AppShell sidebar (ADR-0063 amendment)", () => {
+  const VIEWS: [string, string][] = [
+    ["Overview", "/t/acme/campaign/overview"],
+    ["Cast", "/t/acme/campaign/cast"],
+    ["World wiki", "/t/acme/campaign/knowledge"],
+    ["Maps", "/t/acme/campaign/maps"],
+    ["Players", "/t/acme/campaign/players"],
+    ["Suggestions", "/t/acme/campaign/proposals"],
+    ["Planning", "/t/acme/campaign/planning"],
+    ["Settings", "/t/acme/campaign/settings"],
+  ];
+
+  it("labels the campaign section with the Active Campaign and lists its eight views", async () => {
+    const { container } = renderShell();
+    await settled(container);
+
+    // One group, named by its heading: "Campaign" + the campaign's name.
+    const section = screen.getByRole("group", { name: /campaign.*the sunless citadel/i });
+    const links = within(section).getAllByRole("link");
+    expect(links.map((a) => [a.textContent, a.getAttribute("href")])).toEqual(VIEWS);
+
+    // The :view path param drives the highlight: Cast is the current page.
+    const cast = within(section).getByRole("link", { name: "Cast" });
+    expect(cast).toHaveAttribute("data-active", "true");
+    expect(cast).toHaveAttribute("aria-current", "page");
+    const maps = within(section).getByRole("link", { name: "Maps" });
+    expect(maps).not.toHaveAttribute("data-active");
+    expect(maps).not.toHaveAttribute("aria-current");
+  });
+
+  it.each([
+    ["session", "Session"],
+    ["configuration", "Setup"],
+    ["campaigns", "Campaigns"],
+  ])("still shows every campaign view from the %s screen — World wiki is one click away", async (screenName, label) => {
+    route.screen = screenName;
+    route.view = undefined;
+    const { container } = renderShell();
+    await settled(container);
+
+    const section = screen.getByRole("group", { name: /campaign.*the sunless citadel/i });
+    expect(within(section).getAllByRole("link").map((a) => a.textContent)).toEqual(VIEWS.map(([l]) => l));
+    // A direct link to the wiki — not to Cast first, not through a parent item.
+    expect(within(section).getByRole("link", { name: "World wiki" })).toHaveAttribute(
+      "href",
+      "/t/acme/campaign/knowledge",
+    );
+    // None of the campaign's views is the current page; this screen's item is.
+    for (const a of within(section).getAllByRole("link")) expect(a).not.toHaveAttribute("aria-current");
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(nav).getByRole("link", { name: label })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("puts Session after the campaign's views and pins Campaigns and Setup at the bottom", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+
+    const main = nav.querySelector(".gx-nav__main") as HTMLElement;
+    const foot = nav.querySelector(".gx-nav__foot") as HTMLElement;
+    // The scrolling list: the eight views, then Session.
+    expect(within(main).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual([
+      ...VIEWS.map(([, href]) => href),
+      "/t/acme/session",
+    ]);
+    // The pinned foot: the two Tenant-wide destinations.
+    expect(within(foot).getAllByRole("link").map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+      ["Campaigns", "/t/acme/campaigns"],
+      ["Setup", "/t/acme/configuration"],
+    ]);
+  });
+
+  it("says so in the section label when no campaign exists yet", async () => {
+    const { container } = renderShell({ noCampaign: true });
+    expect(await within(sidebar(container)).findByText("No campaign yet")).toBeInTheDocument();
+    // The views are still listed: each leads to the create-first-campaign card.
+    const section = screen.getByRole("group", { name: /campaign.*no campaign yet/i });
+    expect(within(section).getAllByRole("link")).toHaveLength(8);
+  });
+
+  it("is localized", async () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      const { container } = renderShell();
+      await settled(container);
+      const nav = screen.getByRole("navigation", { name: "Hauptnavigation" });
+      for (const label of ["Übersicht", "Besetzung", "Welt-Wiki", "Einstellungen", "Spielrunde", "Kampagnen", "Einrichtung"]) {
+        expect(within(nav).getByRole("link", { name: label })).toBeInTheDocument();
+      }
+    } finally {
+      localStorage.removeItem("gx-lang");
+    }
+  });
+});
+
+describe("AppShell topbar", () => {
+  it("shows '<Campaign> / <View>' on a campaign view and names the browser tab '<View> · <Campaign> · Glyphoxa'", async () => {
+    route.view = "knowledge";
+    const { container } = renderShell();
+    await settled(container);
+
+    const crumbs = screen.getByRole("navigation", { name: "You are here" });
+    const items = within(crumbs).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    // The campaign crumb leads to its Overview…
+    expect(within(items[0]).getByRole("link", { name: "The Sunless Citadel" })).toHaveAttribute(
+      "href",
+      "/t/acme/campaign/overview",
+    );
+    // …and the view is the current page.
+    expect(items[1]).toHaveAttribute("aria-current", "page");
+    expect(items[1]).toHaveTextContent("World wiki");
+
+    expect(document.title).toBe("World wiki · The Sunless Citadel · Glyphoxa");
+  });
+
+  it("does not link the campaign crumb to the page it is already on", async () => {
+    route.view = "overview";
+    const { container } = renderShell();
+    await settled(container);
+    const crumbs = screen.getByRole("navigation", { name: "You are here" });
+    expect(within(crumbs).queryByRole("link")).not.toBeInTheDocument();
+    expect(crumbs).toHaveTextContent("The Sunless Citadel");
+    expect(document.title).toBe("Overview · The Sunless Citadel · Glyphoxa");
+  });
+
+  it("names the campaign on the Session screen too — a session is one campaign's", async () => {
+    route.screen = "session";
+    route.view = undefined;
+    const { container } = renderShell();
+    await settled(container);
+    expect(screen.getByRole("navigation", { name: "You are here" })).toHaveTextContent(
+      /The Sunless Citadel.*Session/,
+    );
+    expect(document.title).toBe("Session · The Sunless Citadel · Glyphoxa");
+  });
+
+  it.each([
+    ["configuration", "Setup"],
+    ["campaigns", "Campaigns"],
+  ])("gives the Tenant-wide %s screen a plain title, without a campaign", async (screenName, title) => {
+    route.screen = screenName;
+    route.view = undefined;
+    const { container } = renderShell();
+    await settled(container);
+    expect(screen.queryByRole("navigation", { name: "You are here" })).not.toBeInTheDocument();
+    expect(topbar(container).querySelector(".gx-topbar__title")).toHaveTextContent(title);
+    expect(document.title).toBe(`${title} · Glyphoxa`);
+  });
+
+  it("falls back to the bare view name until the campaign is known", async () => {
+    renderShell({ noCampaign: true });
+    await screen.findByText("No campaign yet");
+    expect(screen.queryByRole("navigation", { name: "You are here" })).not.toBeInTheDocument();
+    expect(document.title).toBe("Cast · Glyphoxa");
+  });
+
+  it("titles an unknown screen with the product name alone", async () => {
+    route.screen = "nonsense";
+    route.view = undefined;
+    const { container } = renderShell();
+    await settled(container);
+    expect(document.title).toBe("Glyphoxa");
+  });
+});
+
+describe("AppShell live-session signals", () => {
+  it("marks the Session item live with the elapsed time, and offers a topbar pill to the Session screen from the wiki", async () => {
+    route.view = "knowledge";
+    const { container } = renderShell({ live: true });
+    await settled(container);
+
+    // Sidebar: the Session item carries the marker — "Live" for screen readers,
+    // the running clock for everyone.
+    const session = await screen.findByRole("link", { name: /^Session\s*Live\s*01:12:4\d$/ });
+    expect(session).toHaveAttribute("href", "/t/acme/session");
+    expect(within(session).getByTestId("nav-live")).toBeInTheDocument();
+
+    // Topbar: "Live 01:12:40 · Open session", linking to the Session screen.
+    const pill = within(topbar(container)).getByRole("link", { name: /Live\s*01:12:4\d.*Open session/ });
+    expect(pill).toHaveAttribute("href", "/t/acme/session");
+  });
+
+  it("drops the topbar pill on the Session screen itself (the screen's own controls are right there)", async () => {
+    route.screen = "session";
+    route.view = undefined;
+    const { container } = renderShell({ live: true });
+    await settled(container);
+    expect(await screen.findByTestId("nav-live")).toBeInTheDocument();
+    expect(within(topbar(container)).queryByRole("link", { name: /open session/i })).not.toBeInTheDocument();
+  });
+
+  it("shows neither marker nor pill while no session is live", async () => {
+    const { container } = renderShell({ live: false });
+    await settled(container);
+    expect(screen.queryByTestId("nav-live")).not.toBeInTheDocument();
+    expect(within(topbar(container)).queryByRole("link", { name: /open session/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Session" })).toBeInTheDocument();
+  });
+
+  it("clears the signals when the session ends", async () => {
+    const { container, state, queryClient } = renderShell({ live: true });
+    await settled(container);
+    expect(await screen.findByTestId("nav-live")).toBeInTheDocument();
+
+    state.live = false;
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    await waitFor(() => expect(screen.queryByTestId("nav-live")).not.toBeInTheDocument());
+    expect(within(topbar(container)).queryByRole("link", { name: /open session/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("AppShell pending-suggestions count", () => {
+  it("shows the count on Suggestions and carries it in the link's accessible name", async () => {
+    const { container } = renderShell({ pending: 3 });
+    await settled(container);
+    const link = await screen.findByRole("link", { name: "Suggestions, 3 pending" });
+    expect(link).toHaveAttribute("href", "/t/acme/campaign/proposals");
+    // The pill is the visual twin of the name — hidden from assistive tech so
+    // the count is not read twice.
+    const pill = link.querySelector(".gx-nav__count") as HTMLElement;
+    expect(pill).toHaveTextContent("3");
+    expect(pill).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("shows no pill for an empty queue", async () => {
+    const { container } = renderShell({ pending: 0 });
+    await settled(container);
+    expect(screen.getByRole("link", { name: "Suggestions" })).toBeInTheDocument();
+    expect(container.querySelector(".gx-nav__count")).not.toBeInTheDocument();
+  });
+
+  it("caps a long queue at 99+ without lying in the accessible name", async () => {
+    const { container } = renderShell({ pending: 140 });
+    await settled(container);
+    const link = await screen.findByRole("link", { name: "Suggestions, 140 pending" });
+    expect(link.querySelector(".gx-nav__count")).toHaveTextContent("99+");
+  });
+
+  it("follows the queue when a suggestion is reviewed elsewhere in the app", async () => {
+    const { container, state, queryClient } = renderShell({ pending: 2 });
+    await settled(container);
+    await screen.findByRole("link", { name: "Suggestions, 2 pending" });
+
+    // The Suggestions view invalidates this same read after an approve/dismiss.
+    state.pending = 1;
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    expect(await screen.findByRole("link", { name: "Suggestions, 1 pending" })).toBeInTheDocument();
   });
 });

@@ -1,0 +1,321 @@
+/* App shell — what the shell has grown beyond the handoff port in
+ * styles/components.css (which is not edited here): the campaign-first sidebar
+ * (ADR-0063 amendment), the topbar breadcrumb, and the live-session and
+ * pending-suggestions signals.
+ *
+ * Every selector is prefixed with .gx-shell. That is deliberate, not noise:
+ * this file is imported by AppShell.tsx and therefore lands in the bundle
+ * BEFORE styles/components.css (main.tsx imports the router ahead of the
+ * global stylesheets), so on equal specificity the older .gx-nav* rules would
+ * win. The prefix makes these rules win by specificity instead of by order.
+ */
+
+/* ── Brand: now a link home ─────────────────────────────────────────────── */
+.gx-shell .gx-sidebar__brand {
+  color: inherit;
+  text-decoration: none;
+}
+.gx-shell .gx-sidebar__brand:hover {
+  text-decoration: none;
+}
+
+/* ── Sidebar navigation ─────────────────────────────────────────────────── */
+/* The nav is two regions: a list that scrolls (the campaign's views, then
+ * Session) and a foot that does not (Campaigns, Setup), so the Tenant-wide
+ * destinations stay reachable on a short viewport instead of scrolling away. */
+.gx-shell .gx-nav {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.gx-shell .gx-nav__main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.gx-shell .gx-nav__foot {
+  flex: 0 0 auto;
+  padding: var(--spacing-sm) 12px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* The campaign section: a heading (overline + the Active Campaign's name) and
+ * the campaign's views under it. */
+.gx-shell .gx-nav__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-shell .gx-nav__section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--spacing-xs) 12px var(--spacing-sm);
+  min-width: 0;
+}
+.gx-shell .gx-nav__section-name {
+  font-family: var(--font-display);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gx-shell .gx-nav__section-name--none {
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+.gx-shell .gx-nav__section-head .gx-skeleton {
+  display: block;
+  height: var(--body-md);
+  width: 14ch;
+}
+
+/* The views are first-class destinations now, not a sub-menu hanging off a
+ * parent item: no indent, no guide line, and the same measure as the items
+ * around them. */
+.gx-shell .gx-nav__sub {
+  margin: 0;
+  padding-left: 0;
+}
+.gx-shell .gx-nav__sub::before {
+  display: none;
+}
+.gx-shell .gx-nav__subitem {
+  position: relative;
+  gap: 12px;
+  padding: var(--spacing-sm) 12px;
+  font-size: var(--body-sm);
+  transition:
+    background var(--duration-base) var(--ease-standard),
+    color var(--duration-base) var(--ease-standard);
+}
+.gx-shell .gx-nav__subitem[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 18px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--gradient-arcane);
+}
+.gx-shell .gx-nav__item > svg,
+.gx-shell .gx-nav__subitem > svg {
+  flex: 0 0 auto;
+}
+
+/* The label takes the row; a marker or a count sits after it. */
+.gx-shell .gx-nav__label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gx-shell .gx-nav__rule {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: var(--spacing-sm) var(--spacing-xs);
+  background: var(--border-subtle);
+}
+
+/* Pending-suggestions count. --arcane-active (violet-60), not --arcane: white
+ * on violet-50 falls short of AA at this size. */
+.gx-shell .gx-nav__count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--arcane-active);
+  color: var(--text-on-arcane);
+  font-size: var(--body-2xs);
+  font-weight: var(--weight-bold);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Live-session signals ───────────────────────────────────────────────── */
+.gx-shell .gx-live-dot {
+  position: relative;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--status-live);
+}
+.gx-shell .gx-live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-pill);
+  background: var(--status-live);
+  /* The ping the "live" Badge already uses (styles/components.css). */
+  animation: gx-badge-ping 1.4s var(--ease-out) infinite;
+}
+
+.gx-shell .gx-nav__live {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--status-live);
+}
+.gx-shell .gx-nav__live-time,
+.gx-shell .gx-live-pill__time {
+  font-family: var(--font-mono);
+  font-size: var(--mono-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.gx-shell .gx-live-pill {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--status-live) 45%, transparent);
+  background: var(--status-live-bg);
+  color: var(--status-live);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background var(--duration-base) var(--ease-standard);
+}
+.gx-shell .gx-live-pill:hover {
+  background: color-mix(in srgb, var(--status-live) 20%, transparent);
+  text-decoration: none;
+}
+.gx-shell .gx-live-pill__more {
+  color: var(--text-default);
+}
+
+/* Present for assistive tech, absent from the layout. */
+.gx-shell .gx-shell__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Topbar breadcrumb: "<Campaign> / <View>" ───────────────────────────── */
+.gx-shell .gx-crumbs {
+  min-width: 0;
+}
+.gx-shell .gx-crumbs ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+/* When the bar is tight the campaign's name gives way (it ellipsizes); the
+ * page's own name never does. The clipping sits on the name itself, not on the
+ * list item around it, so the link's focus ring is not cut off. */
+.gx-shell .gx-crumbs__campaign {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+}
+.gx-shell .gx-crumbs__campaign > * {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--body-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--body-line-tight);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+.gx-shell .gx-crumbs__campaign > a:hover {
+  color: var(--text-default);
+  text-decoration: underline;
+}
+.gx-shell .gx-crumbs__page {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.gx-shell .gx-crumbs__sep {
+  color: var(--text-muted);
+}
+
+/* ── Narrow viewports ───────────────────────────────────────────────────── */
+/* Below the phone-landscape breakpoint the bar has no room for two names: the
+ * campaign crumb goes (the switcher beside it still names the campaign) and
+ * the live pill keeps its dot, "Live" and the clock. The words after the clock
+ * are clipped rather than removed, so the link's accessible name is intact. */
+@media (max-width: 640px) {
+  .gx-shell .gx-crumbs__campaign,
+  .gx-shell .gx-crumbs__sep {
+    display: none;
+  }
+  .gx-shell .gx-live-pill {
+    padding: 6px var(--spacing-sm);
+  }
+  .gx-shell .gx-live-pill__more {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* Phone width: the switcher beside the pill needs the room more than the pill
+ * needs its clock (the Session item in the drawer still shows it). */
+@media (max-width: 480px) {
+  .gx-shell .gx-live-pill__time {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gx-shell .gx-live-dot::after {
+    animation: none;
+  }
+  .gx-shell .gx-nav__subitem,
+  .gx-shell .gx-live-pill {
+    transition: none;
+  }
+}
