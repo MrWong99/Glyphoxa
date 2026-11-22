@@ -236,4 +236,30 @@ describe("Configuration voice-LLM choice (#702)", () => {
     expect(saves[0]).toMatchObject({ provider: "anthropic", secret: "sk-ant-api-secret-9999", slot: "" });
     expect(await screen.findByLabelText("Anthropic saved")).toBeInTheDocument();
   });
+
+  // A key saved into the slot NOT in use becomes the tenant's newest LLM row,
+  // i.e. its voice model: the row says so before the save, never silently.
+  it("says that saving a key into the idle slot switches the voice model", async () => {
+    renderScreen(backend({ slots: { groq: { last4: "1111" } }, newest: "groq" }));
+    const anthropic = await row("Anthropic key");
+    await screen.findByTestId("llm-in-use");
+    expect(within(anthropic).getByText(/saving a key makes Anthropic your voice model/i)).toBeInTheDocument();
+    // The slot in use carries no such note.
+    const groq = (await screen.findByLabelText("Groq saved")).closest(".gx-provider-row") as HTMLElement;
+    expect(within(groq).queryByText(/your voice model/i)).not.toBeInTheDocument();
+  });
+
+  // The combobox's passive first entry is a display default, not a choice: a
+  // key save stores no model, so the row keeps following the default.
+  it("does not store the passive catalog default as the model when a key is saved", async () => {
+    const saves: SaveProviderConfigRequest[] = [];
+    renderScreen(backend({ saves }));
+    const input = await screen.findByLabelText("Anthropic key");
+    const anthropic = await row("Anthropic key");
+    await within(within(anthropic).getByLabelText("Anthropic model")).findByText("claude-haiku-5-5");
+    fireEvent.change(input, { target: { value: "sk-ant-api-secret-9999" } });
+    fireEvent.click(within(anthropic).getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves[0].model).toBe("");
+  });
 });

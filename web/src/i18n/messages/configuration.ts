@@ -45,6 +45,7 @@ export const en = {
   "config.llmInUsePlatform": "Voice model in use: {provider} / {model} (platform default)",
   "config.llmInUseOwn": "Voice model in use: {provider} / {model} (your choice)",
   "config.useForVoice": "Use for voice",
+  "config.keySwitchesVoice": "Saving a key makes {name} your voice model.",
   "config.badgeInUse": "In use",
 
   // Health badges (#70) — short and friendly, never internal status words.
@@ -159,6 +160,7 @@ export const de: Record<keyof typeof en, string> = {
   "config.llmInUsePlatform": "Sprachmodell in Verwendung: {provider} / {model} (Plattform-Standard)",
   "config.llmInUseOwn": "Sprachmodell in Verwendung: {provider} / {model} (deine Auswahl)",
   "config.useForVoice": "Für Sprache verwenden",
+  "config.keySwitchesVoice": "Mit dem Speichern eines Schlüssels wird {name} dein Sprachmodell.",
   "config.badgeInUse": "In Verwendung",
 
   "config.badgeKeyNeeded": "Schlüssel fehlt",

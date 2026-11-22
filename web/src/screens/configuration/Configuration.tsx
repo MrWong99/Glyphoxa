@@ -802,7 +802,10 @@ function SecretRow({
     setBusy(true);
     setSaveError(null);
     try {
-      await onSave(value, selectedModel);
+      // Only an actively picked or already stored model rides along: the
+      // combobox's passive first entry is a display default, and storing it
+      // would pin the row to today's default (#702).
+      await onSave(value, models ? (model ?? (credential?.model || "")) : undefined);
       setValue("");
       setEditing(false);
     } catch (err) {
@@ -916,6 +919,11 @@ function SecretRow({
                 </Button>
               )}
             </div>
+          )}
+          {/* A key saved into the voice-LLM slot NOT in use makes it the newest
+              LLM row, i.e. the voice model: say so before the save (#702). */}
+          {voiceLlm && !voiceLlm.inEffect && !masked && (
+            <span className="gx-secret__hint">{t("config.keySwitchesVoice", { name })}</span>
           )}
           {/* Inline failure cue, mirroring the agent editor's save status (#94). */}
           {saveError && (
