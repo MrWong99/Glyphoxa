@@ -41,6 +41,30 @@ func ModelOf(voice tts.Voice) string {
 	return s.model()
 }
 
+// UpgradeLegacyModel rewrites a voice's Settings pinned to [ModelV3] — the
+// pre-#702 default every persisted voice recorded explicitly — onto
+// [DefaultModel], keeping every other key of the blob. It reports whether it
+// changed anything; Settings on any other model (or not an object) come back
+// as given. Migration 00059 does the same to stored voices; this is the
+// in-process twin for voices arriving from outside the database (an old
+// Campaign Bundle).
+func UpgradeLegacyModel(settings json.RawMessage) (json.RawMessage, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &m); err != nil || m == nil {
+		return settings, false
+	}
+	var model string
+	if err := json.Unmarshal(m["model_id"], &model); err != nil || model != ModelV3 {
+		return settings, false
+	}
+	m["model_id"] = json.RawMessage(strconv.Quote(DefaultModel))
+	out, err := json.Marshal(m)
+	if err != nil {
+		return settings, false
+	}
+	return out, true
+}
+
 // model is the effective model id of s: its ModelID, else [DefaultModel].
 func (s Settings) model() string {
 	if s.ModelID == "" {

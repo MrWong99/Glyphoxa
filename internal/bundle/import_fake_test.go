@@ -700,3 +700,69 @@ func TestImportFake_HistorylessBundleZeroCounts(t *testing.T) {
 		t.Errorf("history rows landed from a history-less bundle")
 	}
 }
+
+// TestImportFake_LegacyV3VoicesMoveToTheDefaultModel (#702): a bundle exported
+// before eleven_v4_turbo became the default carries "model_id":"eleven_v3" on
+// every ElevenLabs voice (the old default, never a GM choice — no UI picks a
+// model). Import moves those to eleven_v4_turbo exactly as migration 00059 moved
+// the stored voices, so an old bundle does not reintroduce the slow model; every
+// other Settings key is kept, and a voice on another model or provider lands
+// byte-identical.
+func TestImportFake_LegacyV3VoicesMoveToTheDefaultModel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFakeStore()
+
+	const v3 = `{"ProviderID":"elevenlabs","VoiceID":"gesa-voice","Name":"Gesa","Language":"de",` +
+		`"Settings":{"model_id":"eleven_v3","output_format":"pcm_48000","suggested_audio_tags":["whispers"],` +
+		`"voice_settings":{"stability":0.5,"similarity_boost":0.75,"use_speaker_boost":true}}}`
+	const flash = `{"ProviderID":"elevenlabs","VoiceID":"bart-voice","Settings":{"model_id":"eleven_flash_v2_5"}}`
+	b := remapBundle(t)
+	b.Campaign.Agents[0].Voice = json.RawMessage(`{"ProviderID":"elevenlabs","VoiceID":"dom-voice","Settings":{"model_id":"eleven_v3"}}`)
+	b.Campaign.Agents[1].Voice = json.RawMessage(v3)
+	b.Campaign.Agents[2].Voice = json.RawMessage(flash)
+
+	res, err := bundle.Import(ctx, f, uuid.New(), b)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	settingsOf := func(raw json.RawMessage) map[string]any {
+		t.Helper()
+		v, err := storage.VoiceFromJSON(raw)
+		if err != nil {
+			t.Fatalf("VoiceFromJSON(%s): %v", raw, err)
+		}
+		var s map[string]any
+		if err := json.Unmarshal(v.Settings, &s); err != nil {
+			t.Fatalf("Settings %s: %v", v.Settings, err)
+		}
+		return s
+	}
+	gesa := agentNamed(t, f, res.CampaignID, "Gesa")
+	s := settingsOf(gesa.Voice)
+	if s["model_id"] != "eleven_v4_turbo" {
+		t.Errorf("Gesa model_id = %v, want eleven_v4_turbo", s["model_id"])
+	}
+	if s["output_format"] != "pcm_48000" {
+		t.Errorf("Gesa output_format = %v, want pcm_48000 kept", s["output_format"])
+	}
+	if tags, _ := s["suggested_audio_tags"].([]any); len(tags) != 1 || tags[0] != "whispers" {
+		t.Errorf("Gesa suggested_audio_tags = %v, want [whispers] kept", s["suggested_audio_tags"])
+	}
+	if vs, _ := s["voice_settings"].(map[string]any); vs["similarity_boost"] != 0.75 {
+		t.Errorf("Gesa voice_settings = %v, want the bundle's values kept", s["voice_settings"])
+	}
+	if v, _ := storage.VoiceFromJSON(gesa.Voice); v.VoiceID != "gesa-voice" || v.Name != "Gesa" || v.Language != "de" {
+		t.Errorf("Gesa voice identity = %+v, want gesa-voice/Gesa/de", v)
+	}
+
+	butler := agentNamed(t, f, res.CampaignID, "Majordomus")
+	if s := settingsOf(butler.Voice); s["model_id"] != "eleven_v4_turbo" {
+		t.Errorf("Butler model_id = %v, want eleven_v4_turbo", s["model_id"])
+	}
+
+	if bart := agentNamed(t, f, res.CampaignID, "Bart"); string(bart.Voice) != flash {
+		t.Errorf("flash voice = %s, want it byte-identical %s", bart.Voice, flash)
+	}
+}
