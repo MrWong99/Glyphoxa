@@ -56,7 +56,9 @@ female player character.
 
 Every turn states which Tools a correct reply must call (`Expect`) and which it
 may call (`Allow`); anything else — including any call on a no-tool turn — fails
-the turn's tool check.
+the turn's tool check. Two no-tool turns ask for a fact of the world (the menu
+and room price; the weather "for sure, not guessed"): the Persona tells Flo to
+look things up rather than guess, so a knowledge lookup is allowed there.
 
 ## Running it
 
@@ -81,6 +83,20 @@ Candidates are interleaved at turn granularity (turn 1 for every candidate,
 then turn 2, …) and the order rotates, so all candidates are measured over the
 same stretch of time. A full run of all five arms is 170 turns and takes about
 five minutes.
+
+### Re-scoring a finished run
+
+The reports keep every reply and every tool call, so a detector or a corpus
+expectation that changed after a run can be applied to it without calling a
+provider:
+
+```sh
+GX_LLMBENCH_RESCORE=/tmp/llmbench GX_LLMBENCH_OUT=/tmp/llmbench-rescored \
+  go test -tags bench -run '^TestLLMBench_Rescore$' -count=1 -v ./pkg/voice/llmbench/
+```
+
+Detector findings, `Expect`/`Allow` and the tool checks are recomputed
+(`Rescore`); timings, rounds, tokens, cost and guard signals stay as measured.
 
 The live test is a measurement, not a gate: it fails only when the run itself
 is broken (a missing credential, a candidate whose every turn errored). It is
@@ -134,6 +150,12 @@ p50 / p95:
     chat-template control token).
   - *stage directions* — asterisk- or parenthesis-wrapped actions, or the NPC
     narrated in the third person.
+  - *unknown [tags]* — square-bracket spans outside the audio-tag vocabulary
+    the TTS prompt offers (`elevenlabs.AudioTags`): an invented delivery tag
+    (`[softly]`) or a stage direction in tag clothing (`[leans on the bar]`).
+    The TTS prompt itself warns that such a bracket may be read aloud. This is
+    where a model's stage directions go once the prompt forbids asterisks.
+    Closing tags (`[/pause]`) are counted under *tool markup*.
   - *markdown*, *English* (sentences that read as English), *tool narration*
     (talk of tools, parameters, databases), *gender slips* (a masculine form of
     address to Mira).
