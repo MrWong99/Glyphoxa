@@ -492,6 +492,19 @@ textarea.gx-input {
   background: rgba(144, 89, 255, 0.18);
   color: var(--text-strong);
 }
+/* A Radix Select popup is as wide as its longest option (Radix puts
+ * min-width: max-content on the popper wrapper), so one long label — a
+ * provider with a model id in it — ran past the edge of a phone screen and
+ * was cut off. Cap the popup at the room the viewport leaves and let the
+ * label wrap inside it. The variable only exists inside a Radix Select and
+ * the selector only matches its listbox, so the other popovers that borrow
+ * these classes (Combobox, campaign switcher, row actions) are unaffected. */
+.gx-select__content[role="listbox"] {
+  max-width: var(--radix-select-content-available-width);
+}
+.gx-select__content[role="listbox"] .gx-select__item {
+  overflow-wrap: anywhere;
+}
 
 /* ===================== Combobox (components/ui/Combobox.tsx) =============
  * A filterable, height-bounded picker (cmdk) for large/growing option lists —

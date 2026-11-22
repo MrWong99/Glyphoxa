@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { MessageCircle } from "lucide-react";
 
@@ -69,6 +69,28 @@ export function ChatModelCard({
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Keyboard focus. Three of the card's own actions take away the control that
+  // has focus: "use a separate key" and Cancel replace each other, and a save
+  // from the key field removes that field. Left alone, focus falls to <body>
+  // and a keyboard or screen-reader user is back at the top of Setup. Each
+  // action therefore names where focus goes once its render is on screen.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const saveRef = useRef<HTMLButtonElement>(null);
+  const separateKeyRef = useRef<HTMLButtonElement>(null);
+  const focusAfterRender = useRef<"key" | "separateKey" | "save" | null>(null);
+  useEffect(() => {
+    const target = focusAfterRender.current;
+    if (target === null) return;
+    focusAfterRender.current = null;
+    if (target === "key") {
+      rootRef.current?.querySelector<HTMLInputElement>(".gx-chat-model__key input")?.focus();
+    } else if (target === "separateKey") {
+      separateKeyRef.current?.focus();
+    } else {
+      saveRef.current?.focus();
+    }
+  });
+
   // Arriving through the Planning panel's "Change" link (Setup#planning-chat):
   // the screen is a lazily loaded chunk, so the browser's own jump to the
   // fragment ran before this card existed. Bring it into view once it does.
@@ -123,13 +145,26 @@ export function ChatModelCard({
     setSaveError(null);
   }
 
+  // Save is unavailable rather than disabled (aria-disabled below): this guard
+  // is what makes an activation in that state do nothing.
+  const cannotSave = busy || !dirty || blocked;
+
   async function handleSave() {
-    if (busy || !dirty || blocked) return;
+    if (cannotSave) return;
+    const root = rootRef.current;
+    const startedInCard = root?.contains(document.activeElement) ?? false;
     setBusy(true);
     setSaveError(null);
     try {
       if (provider === "") await onReset();
       else await onSave(provider, modelToSend, showKeyField ? secret : "");
+      // A save from the key field is about to remove that field. Hand focus to
+      // Save, unless the GM has moved on to another part of the page meanwhile.
+      // (A refused save leaves focus where it is: the key is still there to fix.)
+      const active = document.activeElement;
+      if (startedInCard && (active === null || active === document.body || root?.contains(active))) {
+        focusAfterRender.current = "save";
+      }
       // The refetched read now carries the saved state: drop the pending edit.
       setChoice(undefined);
       setModel(undefined);
@@ -189,16 +224,18 @@ export function ChatModelCard({
 
   return (
     <Card id={CHAT_MODEL_ANCHOR}>
-      <div className="gx-chat-model">
+      <div className="gx-chat-model" ref={rootRef}>
         {header}
 
-        {/* What answers right now, from the server — never the pending edit. */}
-        <div className="gx-chat-model__status" data-testid="chat-model-status">
+        {/* What answers right now, from the server — never the pending edit.
+            A status region (polite, read as a whole): after a save the new
+            "Answers with …" line is announced, not only repainted. */}
+        <div className="gx-chat-model__status" role="status" data-testid="chat-model-status">
           <p className="gx-chat-model__answers">
             {t("chat.configAnswersWith", { provider: providerLabel, model: effective.model })}
           </p>
           {effective.keySource === ChatLlmKeySource.NONE ? (
-            <p className="gx-chat-model__warning" role="status">
+            <p className="gx-chat-model__warning">
               {t("chat.configKeyNone", { provider: providerLabel })}
             </p>
           ) : (
@@ -262,7 +299,17 @@ export function ChatModelCard({
 
         <div className="gx-chat-model__actions">
           {provider !== "" && !needsKey && !separateKey && (
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setSeparateKey(true)}>
+            <Button
+              ref={separateKeyRef}
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                // The field this reveals is where the GM goes next.
+                focusAfterRender.current = "key";
+                setSeparateKey(true);
+              }}
+            >
               {t("chat.configSeparateKey")}
             </Button>
           )}
@@ -272,6 +319,8 @@ export function ChatModelCard({
               size="sm"
               disabled={busy}
               onClick={() => {
+                // Back to the button this one replaced.
+                focusAfterRender.current = "separateKey";
                 setSeparateKey(false);
                 setSecret("");
               }}
@@ -279,9 +328,13 @@ export function ChatModelCard({
               {t("common.cancel")}
             </Button>
           )}
-          {dirty && dropsChatKey && <span className="gx-chat-model__note">{t("chat.configResetDropsKey")}</span>}
+          {/* Removing a stored key cannot be undone: a warning, not a muted aside. */}
+          {dirty && dropsChatKey && <span className="gx-chat-model__warning">{t("chat.configResetDropsKey")}</span>}
           {dirty && !dropsChatKey && <span className="gx-chat-model__note">{t("chat.configUnsaved")}</span>}
-          <Button variant="primary" size="sm" disabled={busy || !dirty || blocked} onClick={handleSave}>
+          {/* aria-disabled, never disabled: a natively disabled button cannot
+              hold focus, and Save turns unavailable the moment a save starts
+              and stays so once it has succeeded. */}
+          <Button ref={saveRef} variant="primary" size="sm" aria-disabled={cannotSave} onClick={handleSave}>
             {t("chat.configSave")}
           </Button>
         </div>

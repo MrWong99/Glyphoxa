@@ -87,7 +87,7 @@ describe("PlanningPanel model footer", () => {
     const footer = await screen.findByTestId("planning-model");
     expect(footer).toHaveTextContent("Answering with Anthropic · claude-sonnet-5-5");
     // No warning when a key is reachable.
-    expect(screen.queryByText(/no ai model key is set up/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/has no ai model key yet/i)).not.toBeInTheDocument();
   });
 
   it("links to the Setup screen's planning chat card of the current table", async () => {
@@ -126,7 +126,10 @@ describe("PlanningPanel model footer", () => {
   it("warns before sending when the chat's model has no key to run on", async () => {
     renderPanel({ provider: "anthropic", model: "claude-sonnet-5-5", keySource: ChatLlmKeySource.NONE });
     const warning = await screen.findByRole("status");
-    expect(warning).toHaveTextContent(/no ai model key is set up for the planning chat/i);
+    expect(warning).toHaveTextContent("The planning chat has no AI model key yet. Add one in Setup.");
+    // A standing notice, shown before anything was sent: it must not read like
+    // the reply to a failed attempt.
+    expect(warning).not.toHaveTextContent(/try again/i);
     // The footer still names the model, and the way to fix it is right there.
     expect(screen.getByTestId("planning-model")).toHaveTextContent("Answering with Anthropic · claude-sonnet-5-5");
     expect(screen.getByRole("link", { name: "Change the planning chat model in Setup" })).toBeInTheDocument();

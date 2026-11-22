@@ -458,7 +458,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
             types a message that would only be refused. */}
         {chatLlm?.keySource === ChatLlmKeySource.NONE && (
           <p className="gx-planning__nokey" role="status">
-            {t("chat.errNoKey")}
+            {t("chat.noKeyNotice")}
           </p>
         )}
 

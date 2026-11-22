@@ -51,6 +51,10 @@ export const en = {
   "chat.answeringWith": "Answering with {provider} · {model}",
   "chat.changeModel": "Change",
   "chat.changeModelAria": "Change the planning chat model in Setup",
+  // The standing notice above the composer when the chat's model has no key.
+  // Shown BEFORE anything is sent, so it is not the after-a-failure wording of
+  // chat.errNoKey ("…then try again").
+  "chat.noKeyNotice": "The planning chat has no AI model key yet. Add one in Setup.",
 
   // ── Exchange errors (mapped from the Connect error code) ─────────────────
   "chat.errAllowance":
@@ -78,7 +82,7 @@ export const en = {
   "chat.configChainDefault":
     "You haven't picked a chat model or a voice model, so the chat uses the platform default.",
   "chat.configSeparateKey": "Use a separate key for the chat",
-  "chat.configPasteKey": "Paste a {provider} API key",
+  "chat.configPasteKey": "Paste your {provider} API key",
   "chat.configKeyAria": "{provider} key for the planning chat",
   "chat.configKeyHint": "Saved for the planning chat only. Your voice model stays as it is.",
   "chat.configResetDropsKey": "Saving this also removes the key saved for the chat.",
@@ -133,6 +137,7 @@ export const de: Record<keyof typeof en, string> = {
   "chat.answeringWith": "Antwortet mit {provider} · {model}",
   "chat.changeModel": "Ändern",
   "chat.changeModelAria": "Modell für den Planungs-Chat in der Einrichtung ändern",
+  "chat.noKeyNotice": "Der Planungs-Chat hat noch keinen KI-Modell-Schlüssel. Füge in der Einrichtung einen hinzu.",
 
   // ── Exchange errors ──────────────────────────────────────────────────────
   "chat.errAllowance":
@@ -162,7 +167,7 @@ export const de: Record<keyof typeof en, string> = {
   "chat.configChainDefault":
     "Du hast weder ein Chat-Modell noch ein Sprachmodell gewählt, deshalb nutzt der Chat den Plattform-Standard.",
   "chat.configSeparateKey": "Eigenen Schlüssel für den Chat verwenden",
-  "chat.configPasteKey": "{provider}-API-Schlüssel einfügen",
+  "chat.configPasteKey": "Füge deinen {provider}-API-Schlüssel ein",
   "chat.configKeyAria": "{provider}-Schlüssel für den Planungs-Chat",
   "chat.configKeyHint": "Wird nur für den Planungs-Chat gespeichert. Dein Sprachmodell bleibt, wie es ist.",
   "chat.configResetDropsKey": "Beim Speichern wird auch der für den Chat gespeicherte Schlüssel entfernt.",

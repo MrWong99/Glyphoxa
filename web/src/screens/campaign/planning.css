@@ -274,12 +274,8 @@
 .gx-planning__model-link:hover {
   color: var(--text-link-hover);
 }
-
-.gx-planning__model-link:focus-visible {
-  outline: 2px solid var(--arcane);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
+/* No :focus-visible rule of its own: the global ring (base.css) already draws
+ * one, and a second outline on top of it gave this link two rings. */
 
 /* The chat's model has no key to run on: shown above the composer, before the
  * GM types. A warning, not an error — nothing has failed yet. */

@@ -296,3 +296,12 @@
   justify-content: flex-end;
   gap: var(--spacing-sm) var(--spacing-md);
 }
+
+/* Save is aria-disabled rather than disabled, so it keeps keyboard focus when
+ * a save starts and when nothing is left to save. It looks and behaves like
+ * .gx-btn:disabled: dimmed, inert to the pointer, no press nudge. */
+.gx-chat-model__actions .gx-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  pointer-events: none;
+  transform: none;
+}
