@@ -52,6 +52,9 @@ function cred(component: string, provider: string, last4?: string, model = "", p
     model,
     // Mirrors the server: a saved own key is never "provided by the platform".
     providedByPlatform: platform && !last4,
+    // Mirrors the server's code default (#702): with no deployment default and
+    // no Anthropic row, Groq is the voice LLM in use.
+    inEffect: component === "llm" && provider === "groq",
   });
 }
 
@@ -71,7 +74,7 @@ function mockBackend(
     saved?: Partial<Record<"groq" | "elevenlabs" | "discord" | "gemini", string>>;
     // platform marks the slots the deployment provides for this tenant (W9:
     // trial/central-token tenants) — the server's provided_by_platform.
-    platform?: Partial<Record<"groq" | "elevenlabs" | "discord" | "gemini", boolean>>;
+    platform?: Partial<Record<"groq" | "anthropic" | "elevenlabs" | "discord" | "gemini", boolean>>;
     health?: ProviderHealth[];
     // discordSaves captures every SaveDiscordSettings request so tests can pin
     // the wire shape (#142: a token-only save must omit the ID fields).
@@ -152,6 +155,8 @@ function mockBackend(
           credentials: [
             cred("discord", "discord", state.discord, "", opts.platform?.discord),
             cred("llm", "groq", state.groq, state.groqModel, opts.platform?.groq),
+            // The second voice-LLM slot (#702): never saved here, not in use.
+            cred("llm", "anthropic", undefined, "", opts.platform?.anthropic),
             cred("tts", "elevenlabs", state.elevenlabs, "", opts.platform?.elevenlabs),
             cred("image", "gemini", state.gemini, "", opts.platform?.gemini),
           ],
@@ -276,12 +281,13 @@ describe("Configuration", () => {
   it("shows Key needed for each required unsaved credential and Optional for the rest", async () => {
     renderScreen();
     // Two Key-needed badges (groq, elevenlabs) — a session needs both. Gemini
-    // (images) and the Bot token (only for a BYOK Bot, ADR-0057) read
+    // (images), the Bot token (only for a BYOK Bot, ADR-0057) and the
+    // voice-LLM slot that is not in use (Anthropic, #702) read
     // "Optional". The planning-chat slot (#592/ADR-0062) renders NO health
     // badge: the shared groq probe tests the voice-LLM credential, not the
     // chat_llm key, and a dedicated chat_llm probe is a follow-up.
     expect(await screen.findAllByText(/key needed/i)).toHaveLength(2);
-    expect(screen.getAllByText(/^optional$/i)).toHaveLength(2);
+    expect(screen.getAllByText(/^optional$/i)).toHaveLength(3);
     const geminiRow = screen.getByLabelText("Gemini key").closest(".gx-provider-row") as HTMLElement;
     expect(within(geminiRow).getByText(/^optional$/i)).toBeInTheDocument();
     const botRow = screen.getByLabelText("Bot token key").closest(".gx-provider-row") as HTMLElement;
@@ -292,9 +298,11 @@ describe("Configuration", () => {
 
   it("shows Included, not Key needed, for slots the platform provides (W9)", async () => {
     renderScreen(
-      mockBackend({ platform: { groq: true, elevenlabs: true, gemini: true, discord: true } }),
+      mockBackend({
+        platform: { groq: true, anthropic: true, elevenlabs: true, gemini: true, discord: true },
+      }),
     );
-    expect(await screen.findAllByText(/^included$/i)).toHaveLength(4);
+    expect(await screen.findAllByText(/^included$/i)).toHaveLength(5);
     expect(screen.queryByText(/key needed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^optional$/i)).not.toBeInTheDocument();
     // The own-key override stays offered: the paste field + Save are still there.
@@ -345,7 +353,9 @@ describe("Configuration", () => {
   it("gives the planning-chat model row its own overline", async () => {
     renderScreen();
     expect(await screen.findByText("Planning chat model")).toBeInTheDocument();
-    expect(screen.getAllByText("AI model")).toHaveLength(1);
+    // "AI model" is the overline of the two voice-LLM slots (Groq, Anthropic,
+    // #702); the chat row must not make it three.
+    expect(screen.getAllByText("AI model")).toHaveLength(2);
   });
 
   it("surfaces a failed Discord integration to the tenant (#489)", async () => {
