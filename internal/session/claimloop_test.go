@@ -877,6 +877,18 @@ func TestClaimLoop_DrainHeartbeatSupersededStopsBeating(t *testing.T) {
 	}
 }
 
+// reapExpiry and reapHold scale the live-reaper drain tests (#505, #509): the
+// fake reaps rows whose heartbeat is staler than Expiry on the wall clock, and
+// the drain beats every 2ms. Expiry is the margin a starved beat goroutine has
+// before a reap tick sees its row stale, so it is sized for an overloaded CI
+// host, not for the beat interval (#708 stress run: at 20ms, 8 parallel race
+// runs reaped a healthy drain 'dead'). The hold still spans several Expiry
+// windows, which is what the tests are about.
+const (
+	reapExpiry = 150 * time.Millisecond
+	reapHold   = 4 * reapExpiry
+)
+
 // TestClaimLoop_ReaperNeverKillsCleanDrain covers #505 AC1+AC2 against the REAL
 // reaper semantics (the fake reaps rows with heartbeats staler than Expiry): a
 // clean wind-down that is SLOWER than Expiry (gate held >> Expiry) but keeps
@@ -891,10 +903,10 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 	runner := newBlockingRunner()
 	mgr := newManager(t, mstore, runner.run, true)
 	istore := newFakeIntentStore()
-	// Scaled intervals: drain beats every 2ms, Expiry 20ms, gate held ~100ms —
-	// several Expiry windows pass while the wind-down is in-flight.
+	// Scaled intervals: drain beats every 2ms, Expiry reapExpiry, gate held for
+	// reapHold — several Expiry windows pass while the wind-down is in-flight.
 	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
-		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: 20 * time.Millisecond})
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: reapExpiry})
 
 	tenantID := uuid.New()
 	intent := istore.add(tenantID, uuid.New())
@@ -921,9 +933,9 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 		}
 	}()
 
-	// Hold the drain open for ~5x Expiry: the intent must stay live throughout —
-	// never 'dead' (AC1), never terminal while Close is in-flight (AC2).
-	deadline := time.Now().Add(100 * time.Millisecond)
+	// Hold the drain open for several Expiry windows: the intent must stay live
+	// throughout — never 'dead' (AC1), never terminal while Close is in-flight (AC2).
+	deadline := time.Now().Add(reapHold)
 	for time.Now().Before(deadline) {
 		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentLive {
 			t.Fatalf("intent status = %q mid-drain under a live reaper, want live", got)
@@ -932,7 +944,7 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 	}
 
 	close(closeGate)
-	waitFor(t, 2*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
+	waitFor(t, 10*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
 	close(reapStop)
 	<-reapDone
 	loop.DrainForTest()
@@ -1013,7 +1025,7 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	mgr := newManager(t, mstore, runner.run, true)
 	istore := &markLiveFailStore{fakeIntentStore: newFakeIntentStore(), err: errors.New("db blip")}
 	loop := session.NewClaimLoop(istore, mgr, "worker-test", slog.New(slog.DiscardHandler),
-		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: 20 * time.Millisecond})
+		session.ClaimLoopConfig{Poll: time.Millisecond, Heartbeat: 2 * time.Millisecond, Expiry: reapExpiry})
 
 	tenantID := uuid.New()
 	intent := istore.add(tenantID, uuid.New())
@@ -1030,8 +1042,8 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	before := istore.heartbeatCount()
 	waitFor(t, time.Second, func() bool { return istore.heartbeatCount() > before+2 })
 
-	// Keep reap ticks running while the wind-down is held open for ~5x Expiry:
-	// the row must stay 'claimed' throughout — never reaped 'dead'.
+	// Keep reap ticks running while the wind-down is held open for several Expiry
+	// windows: the row must stay 'claimed' throughout — never reaped 'dead'.
 	reapStop := make(chan struct{})
 	reapDone := make(chan struct{})
 	go func() {
@@ -1046,7 +1058,7 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 			}
 		}
 	}()
-	deadline := time.Now().Add(100 * time.Millisecond)
+	deadline := time.Now().Add(reapHold)
 	for time.Now().Before(deadline) {
 		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentClaimed {
 			t.Fatalf("intent status = %q mid-stop under a live reaper, want claimed", got)
@@ -1058,7 +1070,7 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	close(closeGate)
 	select {
 	case <-tickDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("tick did not return after the finalizer released")
 	}
 	close(reapStop)

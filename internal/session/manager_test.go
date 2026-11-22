@@ -1009,9 +1009,12 @@ func TestLoopExitClearsActive(t *testing.T) {
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New(), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	// Wait for the self-exiting loop to End the session and clear active.
-	deadline := time.Now().Add(2 * time.Second)
-	for mgr.AnyLive() {
+	// Wait for the self-exiting loop to End the session and clear active. The
+	// active slot is released last, after the terminal row (#708 stress run:
+	// waiting on AnyLive, which flips at the start of the end window, read the
+	// row before it landed under CPU load).
+	deadline := time.Now().Add(10 * time.Second)
+	for mgr.AnyActive() {
 		if time.Now().After(deadline) {
 			t.Fatal("active session not cleared after the loop exited")
 		}
@@ -1022,13 +1025,16 @@ func TestLoopExitClearsActive(t *testing.T) {
 	}
 }
 
-// waitIdle polls AnyLive until the Manager reports no active session — the loop
-// exited and the terminal row landed. Fails the test if it stays active.
+// waitIdle polls until the Manager holds no active session — the loop exited,
+// the terminal row landed and the slot is free. Fails the test if it stays
+// active. It waits on AnyActive, not AnyLive: AnyLive flips when the end window
+// opens, before the terminal row is written (#708 stress run). The budget is
+// generous for an overloaded CI host; a session that never ends still fails.
 func waitIdle(t *testing.T, mgr *session.Manager) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if !mgr.AnyLive() {
+		if !mgr.AnyActive() {
 			return
 		}
 		if time.Now().After(deadline) {
