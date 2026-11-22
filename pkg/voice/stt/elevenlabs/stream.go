@@ -545,7 +545,8 @@ func (s *stream) routeErrorFrame(code, detail string) (fatal bool) {
 
 // resolveCommitted resolves the front pending commit with text, prepending any
 // carried-over auto-commit text. With no pending commit the text is an
-// unsolicited 90s auto-commit and is carried onto the next commit.
+// unsolicited provider auto-commit (after about 36 s of accumulated audio, per
+// the provider's docs) and is carried onto the next commit.
 func (s *stream) resolveCommitted(text string) {
 	s.mu.Lock()
 	if len(s.pending) == 0 {

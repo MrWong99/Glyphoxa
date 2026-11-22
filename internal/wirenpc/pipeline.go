@@ -476,9 +476,12 @@ func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics 
 		orchestrator.WithStreamDialOnDemand())
 }
 
-// defaultStreamMaxLanes caps concurrent per-lane streaming-STT sockets (ADR-0050):
-// concurrent connections equal concurrent speakers, not channel size. Sized for a
-// typical active table; past it a lane transcribes pure batch.
+// defaultStreamMaxLanes caps the per-lane streaming-STT sockets of one Voice
+// Session (ADR-0050, amended 2026-11-22). A lane holds its connection for as long
+// as it lives — kept alive across silence, released when the lane is reaped — so
+// live connections equal the Speaker Lanes alive, not the concurrent speakers and
+// not the channel size. Sized for a typical active table; past it a lane
+// transcribes pure batch.
 const defaultStreamMaxLanes = 4
 
 // streamMaxLanes reads the per-lane streaming concurrency cap from
