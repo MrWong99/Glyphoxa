@@ -501,8 +501,12 @@ type wsConn struct {
 	leased atomic.Bool
 	// leases counts the sentences this socket was handed to. A frame is stamped
 	// with it on arrival, so one read under an earlier lease (audio after that
-	// sentence's final marker) is recognised and never passed off as the next
-	// sentence's.
+	// sentence's final marker) is recognised instead of being passed off as the
+	// next sentence's. The guard is best effort: the protocol carries no sentence
+	// id, so a stray frame that arrives in the instant between its read
+	// returning and the stamp, with a new lease taken in between, is
+	// indistinguishable from that lease's audio. The real API was never seen to
+	// send audio after a final marker.
 	leases atomic.Uint64
 
 	// Guarded by pool.mu.
@@ -578,6 +582,11 @@ func (c *wsConn) readLoop() {
 			c.shutdown(fmt.Errorf("dialogue socket read: %w", err))
 			return
 		}
+		// Stamp and lease state are taken straight after the read, before any
+		// decoding, to keep the window in which a new lease can slip in between
+		// (see wsConn.leases) as short as it can be.
+		f := wsFrame{lease: c.leases.Load()}
+		leased := c.leased.Load()
 		var m struct {
 			Audio   string `json:"audio"`
 			Final   bool   `json:"is_final_audio_for_turn"`
@@ -589,7 +598,6 @@ func (c *wsConn) readLoop() {
 			c.shutdown(fmt.Errorf("dialogue socket: undecodable frame: %w", err))
 			return
 		}
-		f := wsFrame{lease: c.leases.Load()}
 		switch {
 		case m.Error != "":
 			c.shutdown(&StreamError{Code: m.Code, Kind: m.Error, Message: m.Message})
@@ -606,7 +614,7 @@ func (c *wsConn) readLoop() {
 		default:
 			continue // unknown keys are tolerated
 		}
-		if !c.leased.Load() {
+		if !leased {
 			// Audio with no sentence outstanding: the socket's state is not what
 			// the pool believes, so it must not serve another sentence.
 			c.shutdown(errWSStray)

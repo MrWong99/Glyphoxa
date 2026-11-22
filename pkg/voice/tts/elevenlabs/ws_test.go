@@ -841,12 +841,13 @@ func TestParseTransport(t *testing.T) {
 	}
 }
 
-// TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence: the pool's safety rests
-// on a socket being clean between sentences. Should a server ever send audio
-// after a sentence's final marker, that frame must not be handed to the next
-// sentence as its own — the socket is dropped (and the sentence redialled)
-// instead, whichever side of the lease hand-back the frame lands on.
-func TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence(t *testing.T) {
+// TestWS_StrayFrameOnAnIdleSocketDropsIt: the pool's safety rests on a socket
+// being clean between sentences. Should a server send audio after a sentence's
+// final marker, once the sentence handed its socket back, that socket's state is
+// not what the pool believes: it is closed, and the next sentence dials a fresh
+// one and gets only its own audio.
+func TestWS_StrayFrameOnAnIdleSocketDropsIt(t *testing.T) {
+	stray := make(chan struct{})
 	srv := newTTDServer(t, func(c *ttdConn) {
 		if c.n > 1 {
 			echoScript(c)
@@ -856,19 +857,21 @@ func TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence(t *testing.T) {
 		m, _ := c.sentence()
 		c.audio(sentencePCM(m.Inputs[0].Text))
 		c.final()
+		<-stray // the test saw the sentence end: the socket is back in the pool
 		c.audio([]byte("STRAY!"))
-		echoScript(c) // swallows the next message as a "registration", then echoes
+		echoScript(c) // would answer a sentence wrongly sent on this socket
 	})
 	c := wsClient(t, srv)
 	voice := wsVoice("voice-1")
 	drain(t, say(t, c, context.Background(), voice, "Erster Satz."))
-	for _, sentence := range []string{"Zweiter Satz.", "Dritter Satz."} {
-		ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: sentence, Voice: voice})
-		if err != nil {
-			t.Fatalf("Synthesize(%q): %v", sentence, err)
-		}
-		if pcm, _, terminal := collect(t, ch); terminal != nil || !bytes.Equal(pcm, sentencePCM(sentence+" ")) {
-			t.Fatalf("%q: audio %q, terminal %v; want only its own audio", sentence, pcm, terminal)
-		}
+	close(stray)
+	eventually(t, "the socket that got a stray frame to be closed", func() bool { return c.WSStats().Open == 0 && srv.open.Load() == 0 })
+
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Zweiter Satz."))
+	if terminal != nil || !bytes.Equal(pcm, sentencePCM("Zweiter Satz. ")) {
+		t.Errorf("next sentence: audio %q, terminal %v; want only its own audio", pcm, terminal)
+	}
+	if st := c.WSStats(); st.Dials != 2 || st.Redials != 0 {
+		t.Errorf("stats = %+v, want a plain second dial", st)
 	}
 }
