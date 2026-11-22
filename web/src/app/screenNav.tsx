@@ -10,8 +10,9 @@ import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "@/screens/campaign/vie
 // (RouterScreenNav, mounted by the tenant layout) turns that into real
 // navigations. (The shell's own chrome is the exception: AppShell and the
 // not-found page render the router's Link — a real anchor the browser can open
-// in a new tab — and the command palette and the user menu, which predate this
-// seam, still call useNavigate.) Two things fall out of that:
+// in a new tab — and the account menu calls useNavigate to leave for /login,
+// which is not a screen. The command palette moves through this seam.) Two
+// things fall out of that:
 //
 //   - a screen test needs no router and no router mock — outside a provider
 //     the hook answers with an inert default (empty search, no-op moves), and

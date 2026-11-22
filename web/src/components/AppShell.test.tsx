@@ -5,7 +5,8 @@ import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { createConnectQueryKey } from "@connectrpc/connect-query";
-import { focusManager } from "@tanstack/react-query";
+import { focusManager, onlineManager } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   CampaignService,
@@ -122,6 +123,44 @@ function renderShell(opts: Parameters<typeof shellBackend>[0] = {}) {
   return { ...h, queryClient, container: view.container, unmount: view.unmount };
 }
 
+// A viewport the test controls: which of the app's breakpoints (lib/breakpoints)
+// currently match, and a way to cross one under a mounted shell — the change
+// event a real resize fires. jsdom has no matchMedia at all, so a test that
+// does not call this renders the desktop layout.
+type Viewport = { drawer?: boolean; stack?: boolean; phone?: boolean };
+function stubViewport(initial: Viewport) {
+  const state: Viewport = { ...initial };
+  const listeners = new Map<keyof Viewport, Set<(event: { matches: boolean }) => void>>();
+  const nameOf = (query: string): keyof Viewport =>
+    query.includes("880px") ? "drawer" : query.includes("1100px") ? "stack" : "phone";
+  vi.stubGlobal("matchMedia", (query: string) => {
+    const name = nameOf(query);
+    return {
+      get matches() {
+        return Boolean(state[name]);
+      },
+      addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        if (!listeners.has(name)) listeners.set(name, new Set());
+        listeners.get(name)!.add(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        listeners.get(name)?.delete(listener);
+      },
+    };
+  });
+  return {
+    resize(next: Viewport) {
+      act(() => {
+        for (const name of Object.keys(next) as (keyof Viewport)[]) {
+          if (state[name] === next[name]) continue;
+          state[name] = next[name];
+          for (const listener of listeners.get(name) ?? []) listener({ matches: Boolean(next[name]) });
+        }
+      });
+    },
+  };
+}
+
 const sidebar = (container: HTMLElement) => container.querySelector(".gx-sidebar") as HTMLElement;
 const topbar = (container: HTMLElement) => container.querySelector(".gx-topbar") as HTMLElement;
 // Scoped to the sidebar: the topbar switcher also shows the campaign's name.
@@ -131,9 +170,11 @@ const settled = (container: HTMLElement) =>
 beforeEach(() => {
   route.screen = "campaign";
   route.view = "cast";
+  localStorage.clear();
 });
 
 afterEach(() => {
+  localStorage.clear();
   vi.unstubAllGlobals();
   vi.useRealTimers();
   // Back to "ask the document" for the one test that fakes a tab refocus.
@@ -185,7 +226,7 @@ describe("AppShell chrome", () => {
   it("closes the mobile drawer when a nav item is tapped", async () => {
     // Narrow viewport: matchMedia matches the drawer breakpoint, so the shell
     // boots collapsed (drawer shut) and a nav tap must re-collapse it.
-    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true } as MediaQueryList));
+    stubViewport({ drawer: true });
     const { container } = renderShell();
     await settled(container);
     const shell = container.querySelector(".gx-shell") as HTMLElement;
@@ -206,6 +247,36 @@ describe("AppShell chrome", () => {
       fireEvent.click(screen.getByRole("link", { name }));
       expect(shell).toHaveAttribute("data-collapsed", "true");
     }
+  });
+
+  it("remembers the desktop sidebar's hidden state across reloads", async () => {
+    const first = renderShell();
+    await settled(first.container);
+    fireEvent.click(screen.getByRole("button", { name: /toggle sidebar/i }));
+    expect(first.container.querySelector(".gx-shell")).toHaveAttribute("data-collapsed", "true");
+    first.unmount();
+
+    // A reload: the GM hid the sidebar for focus, and it stays hidden.
+    const second = renderShell();
+    expect(second.container.querySelector(".gx-shell")).toHaveAttribute("data-collapsed", "true");
+    const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    // Shown again, and that is remembered too.
+    fireEvent.click(toggle);
+    second.unmount();
+    const third = renderShell();
+    expect(third.container.querySelector(".gx-shell")).not.toHaveAttribute("data-collapsed");
+  });
+
+  it("names what the toggle controls", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
+    expect(toggle.getAttribute("aria-controls")).toBe(sidebar(container).id);
+    // A tooltip (hover AND keyboard focus) names it; no title attribute to
+    // double it up.
+    expect(toggle).not.toHaveAttribute("title");
   });
 
   it("links the brand to the tenant index — the way home", async () => {
@@ -250,6 +321,273 @@ describe("AppShell chrome", () => {
     content.scrollTop = 480;
     rerender(tree());
     expect(content.scrollTop).toBe(480);
+  });
+});
+
+describe("AppShell mobile drawer", () => {
+  const shellOf = (container: HTMLElement) => container.querySelector(".gx-shell") as HTMLElement;
+  const mainOf = (container: HTMLElement) => container.querySelector(".gx-main") as HTMLElement;
+  const toggleButton = () => screen.getByRole("button", { name: /toggle sidebar/i });
+
+  async function openDrawer() {
+    stubViewport({ drawer: true });
+    const h = renderShell();
+    await settled(h.container);
+    const toggle = toggleButton();
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(shellOf(h.container)).toHaveAttribute("data-drawer-open", "true");
+    return h;
+  }
+
+  it("starts shut on a phone, leaving the page usable", async () => {
+    stubViewport({ drawer: true });
+    const { container } = renderShell();
+    await settled(container);
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+    expect(shellOf(container)).not.toHaveAttribute("data-drawer-open");
+    expect(mainOf(container)).not.toHaveAttribute("inert");
+    expect(toggleButton()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("moves focus into the drawer when it opens and makes the page behind it inert", async () => {
+    const { container } = await openDrawer();
+    // Focus is on the first thing in the drawer — not left on the toggle,
+    // which is now behind the scrim.
+    expect(screen.getByRole("link", { name: /glyphoxa — campaign overview/i })).toHaveFocus();
+    // Covered by the scrim, so out of the tab order and out of a screen
+    // reader's reach.
+    expect(mainOf(container)).toHaveAttribute("inert");
+    expect(toggleButton()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("closes on Escape and returns focus to the toggle", async () => {
+    const { container } = await openDrawer();
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+    expect(mainOf(container)).not.toHaveAttribute("inert");
+    expect(toggleButton()).toHaveFocus();
+  });
+
+  it("closes on a tap on the scrim and returns focus to the toggle", async () => {
+    const { container } = await openDrawer();
+    fireEvent.click(container.querySelector(".gx-shell__scrim") as HTMLElement);
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+    expect(toggleButton()).toHaveFocus();
+  });
+
+  it("keeps Tab inside the open drawer, in both directions", async () => {
+    const { container } = await openDrawer();
+    const first = screen.getByRole("link", { name: /glyphoxa — campaign overview/i });
+    const last = within(sidebar(container)).getByRole("button", { name: "Account: Sora Vance" });
+
+    // Forward off the last control wraps to the first…
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(first).toHaveFocus();
+    // …and backward off the first wraps to the last.
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+
+    // In between, Tab is the browser's: nothing is intercepted.
+    const cast = screen.getByRole("link", { name: "Cast" });
+    cast.focus();
+    expect(fireEvent.keyDown(cast, { key: "Tab" })).toBe(true);
+    expect(cast).toHaveFocus();
+  });
+
+  it("leaves an Escape alone that something on top of the drawer already took", async () => {
+    const { container } = await openDrawer();
+    // The account menu, opened from the drawer: its Escape closes the menu,
+    // not the drawer under it.
+    const account = within(sidebar(container)).getByRole("button", { name: "Account: Sora Vance" });
+    act(() => account.focus());
+    fireEvent.keyDown(account, { key: "Enter" });
+    const menu = await screen.findByRole("menu");
+    const item = within(menu).getByRole("menuitemradio", { name: "English" });
+    await waitFor(() => expect(item).toHaveFocus());
+
+    fireEvent.keyDown(item, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(shellOf(container)).toHaveAttribute("data-drawer-open", "true");
+
+    // The next Escape is the drawer's.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+  });
+
+  it("does not trap or steal anything on a desktop viewport", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const toggle = toggleButton();
+    toggle.focus();
+    // Hiding and showing the desktop sidebar leaves focus on the toggle and
+    // the page fully reachable; Escape does nothing.
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(toggle).toHaveFocus();
+    expect(mainOf(container)).not.toHaveAttribute("inert");
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(shellOf(container)).not.toHaveAttribute("data-collapsed");
+  });
+
+  // Seen in a real browser: narrow the window to phone width and widen it
+  // again, and the sidebar stayed gone until someone found the toggle — the
+  // drawer's "shut" had become the desktop sidebar's state.
+  it("applies each layout's own default when the viewport crosses the drawer breakpoint", async () => {
+    const viewport = stubViewport({ drawer: false });
+    const { container } = renderShell();
+    await settled(container);
+    expect(shellOf(container)).not.toHaveAttribute("data-collapsed");
+
+    // Down to a phone: the drawer starts shut.
+    viewport.resize({ drawer: true });
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+    // Opened there…
+    fireEvent.click(toggleButton());
+    expect(shellOf(container)).toHaveAttribute("data-drawer-open", "true");
+
+    // …and back up to a desktop: the sidebar is shown, nothing is inert, and
+    // no drawer state lingers.
+    viewport.resize({ drawer: false });
+    expect(shellOf(container)).not.toHaveAttribute("data-collapsed");
+    expect(shellOf(container)).not.toHaveAttribute("data-drawer-open");
+    expect(mainOf(container)).not.toHaveAttribute("inert");
+
+    // Shut on the phone, then back up: shown again, not stuck hidden.
+    viewport.resize({ drawer: true });
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+    viewport.resize({ drawer: false });
+    expect(shellOf(container)).not.toHaveAttribute("data-collapsed");
+  });
+
+  it("goes back to a desktop sidebar the GM had hidden, and never saves the drawer's state as that choice", async () => {
+    const viewport = stubViewport({ drawer: false });
+    const { container } = renderShell();
+    await settled(container);
+    fireEvent.click(toggleButton()); // hide the desktop sidebar: remembered
+    expect(localStorage.getItem("gx-sidebar-collapsed")).toBe("1");
+
+    viewport.resize({ drawer: true });
+    fireEvent.click(toggleButton()); // open the drawer: NOT a desktop choice
+    expect(localStorage.getItem("gx-sidebar-collapsed")).toBe("1");
+
+    viewport.resize({ drawer: false });
+    expect(shellOf(container)).toHaveAttribute("data-collapsed", "true");
+  });
+});
+
+describe("AppShell chrome around the screen", () => {
+  it("offers the palette as a visible search button that names its shortcut, and opens it", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const search = within(topbar(container)).getByRole("button", { name: /search or jump to/i });
+    // The chord is on a key cap inside the button (Ctrl+K off a Mac).
+    expect(search).toHaveTextContent("Ctrl+K");
+    expect(search).toHaveAttribute("aria-keyshortcuts", "Control+K");
+
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+    fireEvent.click(search);
+    expect(screen.getByRole("dialog", { name: "Search and jump" })).toBeInTheDocument();
+  });
+
+  it("opens the palette on Ctrl+K from anywhere in the shell", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+  });
+
+  it("keeps the display language out of the topbar — it lives in the account menu", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    expect(within(topbar(container)).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(topbar(container).querySelector(".gx-topbar__lang")).not.toBeInTheDocument();
+
+    const account = within(sidebar(container)).getByRole("button", { name: "Account: Sora Vance" });
+    act(() => account.focus());
+    fireEvent.keyDown(account, { key: "Enter" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["English", "Deutsch"]);
+    expect(within(menu).getByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+  });
+
+  it("mounts the connection bar between the topbar and the screen, silent while all is well", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const main = container.querySelector(".gx-main") as HTMLElement;
+    const children = [...main.children].map((el) => el.className.split(" ")[0]);
+    expect(children).toEqual(["gx-topbar", "gx-connection", "gx-content"]);
+    expect(main.querySelector(".gx-connection")).toBeEmptyDOMElement();
+  });
+
+  it("says 'You are offline' on every screen when the browser loses its network", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    act(() => onlineManager.setOnline(false));
+    try {
+      expect(container.querySelector(".gx-connection")).toHaveTextContent(/you are offline/i);
+    } finally {
+      act(() => onlineManager.setOnline(true));
+    }
+    expect(container.querySelector(".gx-connection")).toBeEmptyDOMElement();
+  });
+
+  it("keeps the legal documents on every screen (#518), inside the scrolling area after the screen", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const content = container.querySelector(".gx-content") as HTMLElement;
+    // After the screen, in the same scroll container: it scrolls with the
+    // page instead of sitting on top of its last lines.
+    expect([...content.children].map((el) => el.getAttribute("data-testid") ?? el.className)).toEqual([
+      "outlet",
+      "gx-legalfooter",
+    ]);
+    const legal = within(content).getByRole("navigation", { name: "Legal" });
+    expect(within(legal).getByRole("link", { name: "Impressum" })).toHaveAttribute("href", "/imprint");
+    expect(within(legal).getByRole("link", { name: "Datenschutz" })).toHaveAttribute("href", "/privacy");
+    expect(within(legal).getByRole("link", { name: "Nutzungsbedingungen" })).toHaveAttribute("href", "/terms");
+  });
+
+  it("shows toasts bottom-right on a desktop", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    act(() => {
+      toast("Saved");
+    });
+    const toaster = await waitFor(() => {
+      const el = document.querySelector("[data-sonner-toaster]");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(toaster).toHaveAttribute("data-y-position", "bottom");
+    expect(toaster).toHaveAttribute("data-x-position", "right");
+    expect(document.querySelector("[data-sonner-toast] [data-close-button]")).toBeNull();
+    act(() => {
+      toast.dismiss();
+    });
+  });
+
+  it("shows toasts top-center with a close button on a phone", async () => {
+    stubViewport({ drawer: true, stack: true });
+    const { container } = renderShell();
+    await settled(container);
+    act(() => {
+      toast("Saved");
+    });
+    const toaster = await waitFor(() => {
+      const el = document.querySelector("[data-sonner-toaster]");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(toaster).toHaveAttribute("data-y-position", "top");
+    expect(toaster).toHaveAttribute("data-x-position", "center");
+    // No hover on a touch screen: the GM needs a way to put a toast away.
+    expect(await screen.findByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    act(() => {
+      toast.dismiss();
+    });
   });
 });
 
