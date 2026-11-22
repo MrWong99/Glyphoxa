@@ -10,11 +10,15 @@ import {
 
 import * as auth from "./messages/auth";
 import * as campaign from "./messages/campaign";
+import * as campaigns from "./messages/campaigns";
+import * as cast from "./messages/cast";
 import * as chat from "./messages/chat";
 import * as common from "./messages/common";
 import * as components from "./messages/components";
 import * as configuration from "./messages/configuration";
+import * as home from "./messages/home";
 import * as knowledge from "./messages/knowledge";
+import * as maps from "./messages/maps";
 import * as palette from "./messages/palette";
 import * as session from "./messages/session";
 import * as shell from "./messages/shell";
@@ -32,6 +36,10 @@ export const en = {
   ...components.en,
   ...configuration.en,
   ...campaign.en,
+  ...campaigns.en,
+  ...home.en,
+  ...cast.en,
+  ...maps.en,
   ...chat.en,
   ...knowledge.en,
   ...palette.en,

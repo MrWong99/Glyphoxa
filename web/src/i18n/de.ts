@@ -18,11 +18,15 @@
 // catalog key-for-key against English.
 import { de as auth } from "./messages/auth?de";
 import { de as campaign } from "./messages/campaign?de";
+import { de as campaigns } from "./messages/campaigns?de";
+import { de as cast } from "./messages/cast?de";
 import { de as chat } from "./messages/chat?de";
 import { de as common } from "./messages/common?de";
 import { de as components } from "./messages/components?de";
 import { de as configuration } from "./messages/configuration?de";
+import { de as home } from "./messages/home?de";
 import { de as knowledge } from "./messages/knowledge?de";
+import { de as maps } from "./messages/maps?de";
 import { de as palette } from "./messages/palette?de";
 import { de as session } from "./messages/session?de";
 import { de as shell } from "./messages/shell?de";
@@ -33,6 +37,10 @@ export const de: Record<string, string> = {
   ...components,
   ...configuration,
   ...campaign,
+  ...campaigns,
+  ...home,
+  ...cast,
+  ...maps,
   ...chat,
   ...knowledge,
   ...palette,
