@@ -815,6 +815,87 @@ func TestStreamManager_DeathThatFailsACommit_BacksOffWhicheverPathSeesItFirst(t 
 					t.Errorf("sleep[%d] = %v, want %v", i, got[i], want[i])
 				}
 			}
+			if n := inflightBooks(m); n != 0 {
+				t.Errorf("commits still counted in flight for %d dead session(s), want 0", n)
+			}
 		})
+	}
+}
+
+// inflightBooks is how many sessions the manager still counts a commit in flight
+// for. Every resolved, failed or abandoned commit must leave it — a count that
+// outlives its commit makes every later death of that session look like one that
+// failed a commit, and a healthy session's ordinary death would then sleep the
+// backoff (#702).
+func inflightBooks(m *StreamManager) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.inflight)
+}
+
+// TestStreamManager_AnsweredCommitThenHealthyDeath_IsForgiven (#709 review): a
+// session that answered its commit is no longer "dying with a commit in flight".
+// Its later ordinary death after a healthy lifetime is redialed at once, exactly
+// like the death of a session that never committed.
+func TestStreamManager_AnsweredCommitThenHealthyDeath_IsForgiven(t *testing.T) {
+	d := newDialScript()
+	clock := newLifeClock()
+	m := NewStreamManager(d, WithStreamBackoff(time.Second, 30*time.Second), WithCommitTimeout(2*time.Second))
+	bindLifecycle(t, m, d, clock)
+
+	m.beginUtterance(clock.now())
+	m.send(streamFrame(t, 1))
+	c, ok := m.endUtterance()
+	if !ok {
+		t.Fatal("the utterance did not stream")
+	}
+	if _, ok := m.awaitCommit(c); !ok {
+		t.Fatal("the commit failed")
+	}
+	clock.advance(15 * time.Second)
+	d.kill(0, idleClose())
+	d.awaitDial(t)
+
+	if got := clock.slept(); len(got) != 0 {
+		t.Errorf("sleeps = %v, want none (a healthy session that answered its commit is forgiven)", got)
+	}
+	if n := inflightBooks(m); n != 0 {
+		t.Errorf("commits still counted in flight for %d session(s), want 0", n)
+	}
+}
+
+// TestStreamManager_CommitRefusedOnTheSpot_LeavesNoCommitInFlight (#709 review):
+// a Commit call that fails synchronously issued no commit. When the failure does
+// not cost the session (non-fatal, nothing streamed to strand) the session lives
+// on, and its later ordinary death after a healthy lifetime is still forgiven.
+func TestStreamManager_CommitRefusedOnTheSpot_LeavesNoCommitInFlight(t *testing.T) {
+	d := newDialScript()
+	clock := newLifeClock()
+	m := NewStreamManager(d, WithStreamBackoff(time.Second, 30*time.Second), WithCommitTimeout(2*time.Second))
+	bindLifecycle(t, m, d, clock)
+
+	s := d.session(0)
+	s.mu.Lock()
+	s.commitErr = &stt.StreamError{Code: "input_error", Fatal: false, Err: errors.New("nothing to commit")}
+	s.mu.Unlock()
+	m.beginUtterance(clock.now()) // no pre-roll, no voiced frame: nothing streamed
+	if _, ok := m.endUtterance(); ok {
+		t.Fatal("endUtterance ok=true on a refused commit")
+	}
+	m.mu.Lock()
+	kept := m.stream == stt.Stream(s)
+	m.mu.Unlock()
+	if !kept {
+		t.Fatal("a non-fatal refusal with nothing streamed dropped the session")
+	}
+
+	clock.advance(15 * time.Second)
+	d.kill(0, idleClose())
+	d.awaitDial(t)
+	if got := clock.slept(); len(got) != 0 {
+		t.Errorf("sleeps = %v, want none (the refused commit was never in flight)", got)
+	}
+	if n := inflightBooks(m); n != 0 {
+		t.Errorf("commits still counted in flight for %d session(s), want 0", n)
 	}
 }

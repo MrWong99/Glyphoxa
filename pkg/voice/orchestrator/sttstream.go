@@ -72,8 +72,9 @@ type StreamManager struct {
 	// backoff is the current re-establish delay. It grows on a failed dial and on
 	// the death of a session younger than [streamHealthyLifetime], jumps to the cap
 	// on an auth-class failure, and resets to the initial when a session proves
-	// healthy: a commit resolves, or it lived at least that long before it ended.
-	// A session retired over a failed or unanswered commit grows it at any age.
+	// healthy: a commit resolves, or it lived at least that long before it ended
+	// with no commit in flight. A session retired over a failed or unanswered
+	// commit — or one that ended with a commit in flight — grows it at any age.
 	backoff time.Duration
 	// upSince is when the current session was installed (zero when a test installs
 	// one directly, which reads as "long ago").
@@ -83,6 +84,10 @@ type StreamManager struct {
 	// real adapter resolves a commit with an error only on the session's death,
 	// and the same death fires OnClosed, so sessionClosed and awaitCommit race to
 	// observe it. Whichever wins, such a death is not forgiven (see dropSession).
+	// A count leaves on a resolved commit (awaitCommit), a synchronous Commit
+	// refusal (endUtterance), or the session's drop, which clears it under the
+	// same lock as its verdict; a failed or unanswered commit leaves through the
+	// retire's drop, so there is no window between verdict and decrement.
 	inflight map[stt.Stream]int
 	// redialNow is set when a healthy session is dropped: the maintainer redials it
 	// without sleeping the backoff first. Consumed by the maintainer.
@@ -123,9 +128,11 @@ const streamSampleRate = 16000
 
 // streamHealthyLifetime is how long a session must have been up for its death to
 // count as an ordinary end of a healthy session rather than a flap. A healthy
-// session is redialed at once and forgives the backoff; a younger one is redialed
-// after the (growing) backoff, so a provider that accepts the dial and then
-// drops the session straight away is not redialed in a tight loop. It sits below
+// session is redialed at once and forgives the backoff — unless it ended with a
+// commit in flight, which is treated like a retire ([StreamManager.dropSession]);
+// a younger one is redialed after the (growing) backoff, so a provider that
+// accepts the dial and then drops the session straight away is not redialed in
+// a tight loop. It sits below
 // the provider's 15 s idle window on purpose: an idle close — should the keepalive
 // ever fail to prevent one — must not ratchet the backoff (#702).
 const streamHealthyLifetime = 10 * time.Second
@@ -295,7 +302,8 @@ func (m *StreamManager) bind(ctx context.Context, bus *voiceevent.Bus) func() {
 //     an ordinary network drop land here;
 //   - the death of a younger session sleeps the growing backoff like a failed
 //     dial, and so does a session of any age that the manager retired over a
-//     commit that failed or was never answered ([StreamManager.dropSession]).
+//     commit that failed or was never answered, or that ended with a commit in
+//     flight ([StreamManager.dropSession]).
 func (m *StreamManager) maintain(ctx context.Context) {
 	if m.onDemand {
 		// Nothing to keep alive until the lane speaks: beginUtterance pokes.
@@ -470,6 +478,16 @@ func (m *StreamManager) sessionClosed(h *dialHandle, cause error) {
 //     and a provider that accepts the handshake but answers no commit would
 //     otherwise cost every turn the full commit timeout for the whole incident
 //     (#702). Only a resolved commit forgives ([StreamManager.resetBackoff]).
+//
+// "In flight" means not yet taken by awaitCommit, so it over-counts by design: a
+// commit the provider already answered "ok" but that the lane worker has not yet
+// read (the worker serves all lanes, so it may be busy on another lane's batch
+// transcription) still counts. A healthy session that dies in that window sleeps
+// one backoff instead of redialing at once; the awaitCommit that then reads the
+// "ok" resets the backoff, so the cost is one bounded delay, never a ratchet.
+// Telling "answered ok" from "failed by this death" would mean reading the
+// result here, and the real adapter can resolve the failure before or after it
+// reports the close, so a peek cannot decide it either.
 //
 // It reports whether s was the live session. Safe from any goroutine.
 func (m *StreamManager) dropSession(s stt.Stream, cause error, ended bool) bool {
@@ -706,9 +724,10 @@ func (m *StreamManager) awaitCommit(c *streamCommit) (stt.Transcript, bool) {
 	case res := <-c.ch:
 		m.metrics.STTRequest(m.provider, m.now().Sub(c.sentAt))
 		if res.Err != nil {
-			// Retired BEFORE the commit leaves inflight: a death notice landing
-			// in between would otherwise find no commit in flight and forgive.
-			defer m.commitDone(c.session)
+			// No commitDone here: the retire's drop clears the session's count
+			// under the same lock that decides its verdict, so no death notice
+			// can land between the two and find nothing in flight. If the death
+			// was observed first, that drop already cleared it.
 			// Provider health (#125): a resolved-but-failed commit is a stt-stage error.
 			m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeError)
 			m.metrics.ProviderError(observe.StageSTT, m.provider)
@@ -723,7 +742,7 @@ func (m *StreamManager) awaitCommit(c *streamCommit) (stt.Transcript, bool) {
 		m.resetBackoff()
 		return res.Transcript, true
 	case <-timer.C:
-		defer m.commitDone(c.session) // after the retire, as above
+		// No commitDone: the retire clears the count, as above.
 		// Record the span on timeout too: a stalled provider is exactly what this
 		// series exists to surface, and the batch adapter records its call on failure
 		// as well (batch parity). The provider-call counter mirrors it with a

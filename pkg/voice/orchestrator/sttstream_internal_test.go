@@ -23,6 +23,7 @@ type fakeStream struct {
 	commits   int
 	closed    bool
 	sendErr   error                 // returned by Send once set
+	commitErr error                 // returned by Commit once set (the synchronous failure)
 	result    *stt.CommitResult     // resolves each Commit; nil leaves the commit pending
 	pending   chan stt.CommitResult // the last Commit's channel, for a test to resolve
 	onPartial func(string)
@@ -42,6 +43,9 @@ func (f *fakeStream) Commit() (<-chan stt.CommitResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.commits++
+	if f.commitErr != nil {
+		return nil, f.commitErr
+	}
 	ch := make(chan stt.CommitResult, 1)
 	if f.result != nil {
 		ch <- *f.result
