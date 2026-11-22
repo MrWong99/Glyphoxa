@@ -193,8 +193,10 @@ func WithSpeakerLanes(f LaneVADFactory) Option {
 
 // WithLaneStreamingSTT wires a per-Speaker-Lane streaming-STT transport (ADR-0042 ×
 // ADR-0050): f builds a [StreamManager] for a lane at its creation, capped at
-// maxLanes concurrent lane streams — past the cap a lane transcribes pure batch, so
-// concurrent sockets track concurrent speakers, not channel size. It complements
+// maxLanes concurrent lane streams — past the cap a lane transcribes pure batch.
+// A lane's manager holds its session for the lane's lifetime (it is released when
+// the lane is reaped), so concurrent sockets track the lanes alive — neither the
+// concurrent speakers nor the channel size. It complements
 // [WithStreamingSTT] (which wires the default lane's stream); a nil f leaves the
 // non-default lanes batch-only.
 func WithLaneStreamingSTT(f func(speakerID string) *StreamManager, maxLanes int) Option {

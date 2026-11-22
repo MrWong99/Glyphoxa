@@ -597,7 +597,7 @@ func TestSpeculator_SkipsUnchangedNorm(t *testing.T) {
 	}
 
 	// Same normalized text (different case/punct) → unchanged → skip.
-	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight.", UtteranceID: "u1"})
 	waitSpeculated(t, r)
 	if emb.callCount() != 1 {
 		t.Errorf("an unchanged-norm partial re-embedded; calls = %d, want 1", emb.callCount())
@@ -615,14 +615,14 @@ func TestSpeculator_RateLimitDefersNotDrops(t *testing.T) {
 	r := newSeamRecaller(t, emb, &fakeRetriever{}, sess,
 		newFakeMetrics(), bus, Config{}, newFakeClock())
 
-	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight.", UtteranceID: "u1"})
 	waitSpeculated(t, r)
 	if emb.callCount() != 1 {
 		t.Fatalf("first embed = %d, want 1", emb.callCount())
 	}
 
 	// New text within the window (clock not advanced): deferred, not dropped.
-	bus.Publish(voiceevent.STTPartial{Text: "do you recall the golden crown", UtteranceID: "u1"})
+	bus.Publish(voiceevent.STTPartial{Text: "do you recall the golden crown.", UtteranceID: "u1"})
 	waitSpeculated(t, r)
 	if emb.callCount() != 2 {
 		t.Errorf("a rate-limited candidate was dropped; calls = %d, want 2 (deferred then embedded)", emb.callCount())
@@ -642,11 +642,11 @@ func TestMailbox_LatestWins(t *testing.T) {
 	r.onPartial(voiceevent.STTPartial{Text: "two"})
 	r.onPartial(voiceevent.STTPartial{Text: "three"})
 
-	got, _, ok := r.takePending()
+	got, _, _, ok := r.takePending()
 	if !ok || got != "three" {
 		t.Errorf("takePending = (%q, %v), want (three, true) — latest wins", got, ok)
 	}
-	if _, _, ok := r.takePending(); ok {
+	if _, _, _, ok := r.takePending(); ok {
 		t.Error("mailbox not empty after a drain")
 	}
 }
@@ -685,7 +685,7 @@ func TestRecall_SpeculationScopedToPartialSession(t *testing.T) {
 	t.Cleanup(r.Close)
 
 	// Session A speculates on its partial (prefetch scoped to campaign A).
-	busA.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	busA.Publish(voiceevent.STTPartial{Text: "do you remember the knight.", UtteranceID: "u1"})
 	waitSpeculated(t, r)
 	if emb.callCount() != 1 || ret.campN() != 1 {
 		t.Fatalf("speculation embed=%d campN=%d, want 1/1", emb.callCount(), ret.campN())
