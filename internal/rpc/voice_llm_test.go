@@ -1,8 +1,10 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -100,6 +102,7 @@ func TestListModels_GroqUsesItsOwnSlotKey(t *testing.T) {
 func TestListModels_AnthropicFailureFallsBackToPricedHaiku(t *testing.T) {
 	t.Parallel()
 	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.lookupEnv = platformKeysSet
 	srv.listAnthropicModels = func(context.Context, string) ([]string, error) {
 		return nil, errors.New("anthropic unreachable")
 	}
@@ -134,6 +137,7 @@ func TestListModels_PinsDeploymentDefaultModel(t *testing.T) {
 	t.Parallel()
 	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
 	srv.SetLLMDefault(voiceHaikuDefault(t))
+	srv.lookupEnv = platformKeysSet
 	srv.listAnthropicModels = func(context.Context, string) ([]string, error) {
 		return []string{"claude-haiku-5-5", "claude-haiku-4-5"}, nil
 	}
@@ -231,5 +235,71 @@ func TestGetProviderHealth_DefaultProviderMissingKey(t *testing.T) {
 	entries := llmHealth(t, srv)
 	if h := entries["anthropic"]; h == nil || h.GetCode() != "missing_key" {
 		t.Errorf("anthropic health = %+v, want degraded missing_key", h)
+	}
+}
+
+// On the PLATFORM key the catalog offers only models the price table knows
+// (#702 review): what the screen lists is what SaveProviderConfig accepts for a
+// keyless row, and every one of them is metered at its real rate.
+func TestListModels_PlatformKeyOffersOnlyPricedModels(t *testing.T) {
+	t.Parallel()
+	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.lookupEnv = func(k string) string { return map[string]string{"ANTHROPIC_API_KEY": "sk-ant-platform"}[k] }
+	srv.listAnthropicModels = func(context.Context, string) ([]string, error) {
+		return []string{"claude-opus-4-1", "claude-haiku-4-5-20991231", "claude-haiku-4-5", "claude-haiku-5-5", "claude-opus-4-8"}, nil
+	}
+	resp, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "anthropic"}))
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []string{"claude-haiku-5-5", "claude-haiku-4-5", "claude-opus-4-8"}
+	if got := resp.Msg.GetModels(); !reflect.DeepEqual(got, want) {
+		t.Errorf("models = %v, want only the priced ids %v", got, want)
+	}
+}
+
+// A Tenant's OWN key lists the provider's whole catalog, priced or not.
+func TestListModels_OwnKeyOffersTheWholeCatalog(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	store := &fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "anthropic", "sk-ant-secret"),
+	}}
+	srv := NewVoiceServer(store, cipher, nil)
+	srv.listAnthropicModels = func(context.Context, string) ([]string, error) {
+		return []string{"claude-opus-4-1", "claude-haiku-5-5"}, nil
+	}
+	resp, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "anthropic"}))
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []string{"claude-haiku-5-5", "claude-opus-4-1"}
+	if got := resp.Msg.GetModels(); !reflect.DeepEqual(got, want) {
+		t.Errorf("models = %v, want %v", got, want)
+	}
+}
+
+// No key anywhere — no row, no platform key (a Groq-only deployment viewing
+// its Anthropic slot) — is not a catalog OUTAGE: the provider is not called,
+// nothing is logged, and the select gets the priced fallback.
+func TestListModels_NoKeyAnywhereIsQuiet(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	srv := NewVoiceServer(&fakeVoiceStore{}, nil, slog.New(slog.NewTextHandler(&logged, nil)))
+	srv.lookupEnv = func(string) string { return "" }
+	srv.listAnthropicModels = func(context.Context, string) ([]string, error) {
+		t.Error("the provider was called with no key to send")
+		return nil, errors.New("missing API key")
+	}
+	resp, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "anthropic"}))
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []string{"claude-haiku-5-5", "claude-haiku-4-5"}
+	if got := resp.Msg.GetModels(); !reflect.DeepEqual(got, want) {
+		t.Errorf("models = %v, want the fallback %v", got, want)
+	}
+	if logged.Len() != 0 {
+		t.Errorf("a missing key was logged as a catalog failure: %s", logged.String())
 	}
 }

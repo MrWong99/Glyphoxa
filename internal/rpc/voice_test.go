@@ -139,13 +139,21 @@ func savedConfig(t *testing.T, cipher *crypto.Cipher, comp storage.Component, pr
 	}
 }
 
+// platformKeysSet is a lookupEnv for a deployment that has every Platform Key.
+func platformKeysSet(string) string { return "platform-key" }
+
 func tenantCtx() context.Context {
 	return auth.WithTenant(context.Background(), uuid.New())
 }
 
 func TestListModels_GroqLiveCatalog(t *testing.T) {
 	t.Parallel()
-	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	// The Tenant's OWN key: the whole live catalog is offered (the platform
+	// key's is cut down to priced models, #702).
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(&fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "groq", "sk-groq-secret"),
+	}}, cipher, nil)
 	// A live Groq /models catalog: unsorted, containing the default in the middle
 	// plus a duplicate. The handler pins the default first, sorts the rest
 	// ascending, and dedupes — and the deprecated hardcoded entries are gone.
@@ -193,6 +201,7 @@ func TestListModels_GroqLiveCatalog(t *testing.T) {
 func TestListModels_GroqCatalogFailureStaysUsable(t *testing.T) {
 	t.Parallel()
 	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.lookupEnv = platformKeysSet
 	srv.listModels = func(_ context.Context, _ string) ([]string, error) {
 		return nil, errors.New("groq unreachable")
 	}

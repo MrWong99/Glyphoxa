@@ -24,6 +24,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
@@ -302,7 +303,10 @@ var anthropicFallbackModels = []string{anthropic.HaikuVoiceModel, "claude-haiku-
 // /v1/models, fetched with the key of THAT provider's slot — the Tenant's
 // decrypted BYOK key, else the platform key behind the entitlement (the
 // ListVoices / health-check posture, ADR-0039). The model a voice Agent gets by
-// default is pinned first; the rest are sorted and deduped. A failed fetch
+// default is pinned first; the rest are sorted and deduped. On the PLATFORM key
+// the list is cut down to the models the price table knows — the only ones a
+// keyless row may run (#702 review) — while a Tenant's own key lists the whole
+// catalog. A failed fetch
 // degrades gracefully — the screen stays usable — by returning the pinned
 // default (plus, for Anthropic, the priced Haiku ids) and NO rpc error, since
 // the combobox accepts free-text entry regardless. An unknown provider is a
@@ -331,17 +335,36 @@ func (s *VoiceServer) ListModels(
 		return nil, err
 	}
 
+	fallback := func() *connect.Response[managementv1.ListModelsResponse] {
+		var models []string
+		if provider == anthropic.ProviderID {
+			models = anthropicFallbackModels
+		}
+		return connect.NewResponse(&managementv1.ListModelsResponse{Models: pinFirst(s.llmDefault.VoiceModel(provider, ""), models)})
+	}
+	// key == "" is the platform key (the entitlement already said yes).
+	onPlatformKey := key == ""
+	if envKey, _ := llmbuild.PlatformKeyEnv(provider); onPlatformKey && s.lookupEnv(envKey) == "" {
+		// No key anywhere — a slot the Tenant never filled on a deployment
+		// without that provider's key. Not a catalog outage: do not call the
+		// provider (it can only answer "missing API key") and do not log.
+		return fallback(), nil
+	}
+
 	models, err := list(ctx, key)
 	if err != nil {
 		// Never fail the RPC: a broken catalog must not break the Configuration
 		// screen (free-text entry still saves and runs, ADR-0039). Fall back to the
 		// pinned default so the select still renders.
 		s.log.Warn("ListModels: live catalog failed", "provider", provider, "err", err)
-		models = nil
-		if provider == anthropic.ProviderID {
-			models = anthropicFallbackModels
-		}
-		return connect.NewResponse(&managementv1.ListModelsResponse{Models: pinFirst(s.llmDefault.VoiceModel(provider, ""), models)}), nil
+		return fallback(), nil
+	}
+	if onPlatformKey {
+		// Only what a keyless row may store ([platformModelPriced]): a model
+		// the price table knows, so it is metered at what it costs.
+		models = slices.DeleteFunc(slices.Clone(models), func(m string) bool {
+			return !spend.LLMPriced(observe.Provider(provider), m)
+		})
 	}
 	return connect.NewResponse(&managementv1.ListModelsResponse{Models: llmCatalog(provider, s.llmDefault, models)}), nil
 }

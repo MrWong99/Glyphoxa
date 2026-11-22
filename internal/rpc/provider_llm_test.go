@@ -263,3 +263,63 @@ func TestProviderSave_ActivateBustsHealthCache(t *testing.T) {
 		t.Errorf("a model-only save busted the health cache (%d extra)", busted-before-1)
 	}
 }
+
+// On the PLATFORM key a Tenant may only choose a model the price table knows
+// (#702 review): an unpriced id is metered at a flat fallback that is BELOW the
+// real rate of an Opus-class model and far ABOVE a Haiku snapshot's, so either
+// the platform or the Tenant's allowance pays for the gap. Nothing is written.
+func TestProviderSave_PlatformSlotRefusesUnpricedModel(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{"GROQ_API_KEY": "gsk", "ANTHROPIC_API_KEY": "sk-ant"}
+
+	t.Run("activate a never-saved slot", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client := llmServer(t, store, llmbuild.DeploymentDefault{}, env, &fakeKeyGate{allowed: true})
+		_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+			Provider: "anthropic", Activate: true, Model: "claude-opus-4-1",
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("err = %v, want CodeInvalidArgument", err)
+		}
+		if len(store.configs) != 0 {
+			t.Errorf("a refused activate wrote rows: %v", store.configs)
+		}
+	})
+
+	t.Run("model change on a keyless row", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client := llmServer(t, store, llmbuild.DeploymentDefault{}, env, &fakeKeyGate{allowed: true})
+		save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Activate: true, Model: "claude-haiku-4-5"})
+		_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+			Provider: "anthropic", Model: "claude-haiku-4-5-20991231",
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("err = %v, want CodeInvalidArgument", err)
+		}
+		if got := store.configs["llm|anthropic"].Model; got != "claude-haiku-4-5" {
+			t.Errorf("stored model = %q, want the priced one kept", got)
+		}
+	})
+
+	t.Run("a priced model and the default are accepted", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client := llmServer(t, store, llmbuild.DeploymentDefault{}, env, &fakeKeyGate{allowed: true})
+		save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Activate: true})
+		save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Model: "claude-haiku-5-5"})
+	})
+}
+
+// A Tenant's OWN key keeps free-text model entry: its spend is its own bill.
+func TestProviderSave_OwnKeyKeepsFreeTextModel(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client := llmServer(t, store, llmbuild.DeploymentDefault{}, nil, nil)
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Secret: "sk-ant-mine-1234", Model: "claude-opus-4-1"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Model: "some-future-model"})
+	if got := store.configs["llm|anthropic"].Model; got != "some-future-model" {
+		t.Errorf("stored model = %q, want the free-text one", got)
+	}
+}

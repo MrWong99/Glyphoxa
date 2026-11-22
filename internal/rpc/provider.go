@@ -23,6 +23,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
@@ -534,6 +536,12 @@ func (s *ProviderServer) saveModelOnly(
 		return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 			Credential: providerCredential(string(slot.components[0]), slot.provider, existing[0]),
 		}), nil
+	}
+	if slot.isLLM() && !isSaved(existing[0].CredentialsLast4) {
+		// A keyless row rides the platform key: priced models only.
+		if err := platformModelPriced(slot, model); err != nil {
+			return nil, err
+		}
 	}
 	if model == "" {
 		// Activating (#702) keeps the stored model: the re-upsert below then
@@ -1123,6 +1131,9 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 	if s.lookupEnv(slot.envKey) == "" || !s.platformKeyGate(ctx, tenantID)(slot.components[0]) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
 	}
+	if err := platformModelPriced(slot, model); err != nil {
+		return nil, err
+	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, []storage.NewProviderConfig{{
 		TenantID:  tenantID,
 		Component: slot.components[0],
@@ -1141,6 +1152,25 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),
 	}), nil
+}
+
+// platformModelPriced refuses a model the price table has no row for on a slot
+// that rides the PLATFORM key (#702 review). The spend meter prices an unknown
+// (provider, model) at one flat fallback, and the plan allowance is gated on
+// that estimate: for an Opus-class id the fallback is BELOW the real rate (the
+// platform pays the difference, past the allowance), for a cheap snapshot id it
+// is dozens of times ABOVE it (the Tenant's allowance is gone in a few turns).
+// Only an exactly priced model is metered at what it costs, so only those run
+// on a key the platform pays for. The empty model is the default
+// ([llmbuild.DeploymentDefault.Select]) and always allowed; a Tenant's own key
+// keeps free-text entry — its spend is its own bill.
+func platformModelPriced(slot byokSlot, model string) error {
+	if model == "" || spend.LLMPriced(observe.Provider(slot.provider), model) {
+		return nil
+	}
+	return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
+		"model %q has no price on record and cannot run on the platform key: choose a listed model, or save your own %s key to use it",
+		model, slot.provider))
 }
 
 // discordCredential maps the deployment Bot token onto its write-only wire view.

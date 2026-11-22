@@ -59,15 +59,18 @@ var llmPrices = map[llmKey]llmRate{
 	{observe.ProviderAnthropic, "claude-haiku-5-5"}:          {inputPerMTok: 0.10, outputPerMTok: 0.50},
 	{observe.ProviderAnthropic, "claude-haiku-4-5"}:          {inputPerMTok: 1.00, outputPerMTok: 5.00},
 	{observe.ProviderAnthropic, "claude-haiku-4-5-20251001"}: {inputPerMTok: 1.00, outputPerMTok: 5.00},
-	// Claude Opus 4.8 — the Anthropic adapter's own default model, which the
-	// off-session engines (recap, assist, planning chat) run when an Anthropic
-	// Provider Config names no model. $5 / $25, platform.claude.com pricing,
-	// retrieved 2026-11-22 (#702). Priced so a default nobody chose is never
-	// charged at the conservative fallback. ESTIMATE.
+	// Claude Opus 4.8 — the Anthropic adapter's own fallback model. No engine
+	// runs it unasked (a model-less Anthropic config resolves to Claude Haiku,
+	// llmbuild.DefaultVoiceModel); it is priced so a Tenant that NAMES it is
+	// metered at its real rate, which is above the unpriced fallback's output
+	// rate. $5 / $25, platform.claude.com pricing, retrieved 2026-11-22 (#702).
+	// ESTIMATE.
 	{observe.ProviderAnthropic, "claude-opus-4-8"}: {inputPerMTok: 5.00, outputPerMTok: 25.00},
 	// Gemini 2.5 Flash — the Gemini LLM adapter's default model, priced for the
 	// same reason. $0.30 / $2.50 (text input / output including thinking
-	// tokens), ai.google.dev pricing, paid tier. ESTIMATE.
+	// tokens), the paid-tier figure as recalled — UNVERIFIED against
+	// ai.google.dev at the time of writing (#702). ESTIMATE; re-check before
+	// making Gemini a deployment default.
 	{observe.ProviderGemini, "gemini-2.5-flash"}: {inputPerMTok: 0.30, outputPerMTok: 2.50},
 	// Gemini 2.5 Flash Image — image generation billed as tokens (#311, ADR-0004
 	// amendment). ESTIMATE captured 2026-07-11; 1 image ≈ 1290 output tokens ≈
@@ -191,9 +194,12 @@ func EstimateLLMUSD(provider observe.Provider, model string, inputTokens, output
 }
 
 // LLMPriced reports whether (provider, model) has its own row in the price map.
-// A model without one is charged at the conservative default, far above any
-// real rate, so whatever offers a model unasked — a provider default, a
-// deployment default, a fallback catalog — checks it here (#702).
+// A model without one is charged at one flat default ($5 / $15 per MTok): far
+// above a small model's real rate, but BELOW a frontier model's (Claude Opus
+// output is $25). It over-meters the one and under-meters the other, so:
+// whatever offers a model unasked — a provider default, a deployment default,
+// a fallback catalog — checks it here, and a model that would run on the
+// PLATFORM key must be priced or is refused (#702).
 func LLMPriced(provider observe.Provider, model string) bool {
 	_, ok := llmPrices[llmKey{provider, model}]
 	return ok
