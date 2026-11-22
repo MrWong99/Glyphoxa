@@ -162,3 +162,66 @@ describe("Login", () => {
     expect(screen.queryByText(/creates your own table/i)).not.toBeInTheDocument();
   });
 });
+
+describe("Login: a way back and a reason", () => {
+  it("names the browser tab, and hands it back on the way out", async () => {
+    document.title = "Glyphoxa";
+    const { unmount } = render(
+      <Providers transport={backend().transport} queryClient={makeQueryClient()}>
+        <Login />
+      </Providers>,
+    );
+    expect(document.title).toBe("Sign in · Glyphoxa");
+    unmount();
+    expect(document.title).toBe("Glyphoxa");
+  });
+
+  it("leads back to the start page from the wordmark and from 'What is Glyphoxa?'", async () => {
+    await renderLogin(<Login />);
+    // The wordmark is still the page's one heading, and now inside a link home.
+    const home = screen.getByRole("link", { name: "Glyphoxa — start page" });
+    expect(home).toHaveAttribute("href", "/");
+    expect(within(home).getByRole("heading", { level: 1, name: "Glyphoxa" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "What is Glyphoxa?" })).toHaveAttribute("href", "/");
+  });
+
+  it("says why the Discord button is not available, read with the button itself", async () => {
+    await renderLogin(<Login />, backend({ mode: AdmissionMode.OPEN }));
+    await screen.findByText(/creates your own table/i);
+
+    const blocked = screen.getByRole("button", { name: /continue with discord/i });
+    expect(blocked).toBeDisabled();
+    expect(blocked).toHaveAccessibleDescription("Tick the box above to continue.");
+
+    // Ticked: the start is a link again, and the reason is gone.
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("link", { name: /continue with discord/i })).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByText("Tick the box above to continue.")).not.toBeInTheDocument();
+  });
+
+  it("says the button is waiting on the server while the admission probe is in flight", () => {
+    // A probe that never answers: the start stays disabled (a fast click must
+    // not slip past an open-mode acknowledgment), and it says why.
+    const transport = createRouterTransport(({ service }) => {
+      service(AuthService, { getAdmissionMode: () => new Promise(() => {}) });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Login />
+      </Providers>,
+    );
+    const blocked = screen.getByRole("button", { name: /continue with discord/i });
+    expect(blocked).toBeDisabled();
+    expect(blocked).toHaveAccessibleDescription("Checking how sign-in works on this server…");
+  });
+
+  it("needs no reason when the start is open in allowlist mode", async () => {
+    await renderLogin(<Login />, backend({ mode: AdmissionMode.ALLOWLIST }));
+    expect(screen.getByRole("link", { name: /continue with discord/i })).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("keeps the language picker on the page", async () => {
+    await renderLogin(<Login />);
+    expect(screen.getByRole("combobox", { name: "Display language" })).toBeInTheDocument();
+  });
+});

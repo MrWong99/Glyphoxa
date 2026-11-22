@@ -15,13 +15,112 @@
   line-height: 1.65;
 }
 
+/* The top row: the brand (back to the start page) and the display language. */
+.gx-legal__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-md);
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
 .gx-legal__brand {
   display: inline-flex;
   gap: 8px;
   align-items: center;
-  margin-bottom: 20px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
   text-decoration: none;
+}
+
+.gx-legal__lang {
+  flex: 0 0 auto;
+}
+
+/* The three documents, the open one marked like an active tab. */
+.gx-legal__docs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin: 0 0 var(--spacing-lg);
+  padding-bottom: var(--spacing-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.gx-legal__docs a {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  text-decoration: none;
+}
+
+.gx-legal__docs a:hover {
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--arcane) 10%, transparent);
+}
+
+.gx-legal__docs a[aria-current="page"] {
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--arcane) 18%, transparent);
+  font-weight: var(--weight-semibold);
+}
+
+/* "The German text is the authoritative version" — one quiet line. */
+.gx-legal__notice {
+  margin: 0 0 var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+/* "Inhalt": the document's sections as in-page links. */
+.gx-legal__toc {
+  margin: 0 0 var(--spacing-xl);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.gx-legal__toc-title {
+  margin: 0 0 var(--spacing-sm);
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+}
+
+.gx-legal__toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gx-legal__toc li {
+  margin: 0;
+}
+
+.gx-legal__toc a {
+  display: inline-block;
+  padding: 2px 0;
+  color: var(--text-link);
+  font-size: var(--body-sm);
+}
+
+.gx-legal__toc a:hover {
+  color: var(--text-link-hover);
+}
+
+@media (pointer: coarse) {
+  .gx-legal__toc a,
+  .gx-legal__docs a {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--target-coarse);
+  }
 }
 
 .gx-legal__sigil {

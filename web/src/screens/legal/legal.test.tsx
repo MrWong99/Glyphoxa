@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, afterEach } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { RouterProvider, createRouter, createMemoryHistory } from "@tanstack/react-router";
 import { createRouterTransport } from "@connectrpc/connect";
 
@@ -35,7 +35,12 @@ function renderAt(path: string) {
       <RouterProvider router={router} />
     </Providers>,
   );
+  return router;
 }
+
+afterEach(() => {
+  localStorage.clear();
+});
 
 describe("legal routes", () => {
   it("serves the Impressum unauthenticated at /imprint", async () => {
@@ -117,8 +122,9 @@ describe("legal routes", () => {
   it("links the other documents from every legal page", async () => {
     renderAt("/terms");
     await screen.findByRole("heading", { name: "Nutzungsbedingungen", level: 1 });
-    expect(screen.getByRole("link", { name: "Impressum" })).toHaveAttribute("href", "/imprint");
-    expect(screen.getByRole("link", { name: "Datenschutz" })).toHaveAttribute("href", "/privacy");
+    const footer = screen.getByRole("navigation", { name: "Legal" });
+    expect(within(footer).getByRole("link", { name: "Impressum" })).toHaveAttribute("href", "/imprint");
+    expect(within(footer).getByRole("link", { name: "Datenschutz" })).toHaveAttribute("href", "/privacy");
   });
 
   it("renders the filled operator identity without the TODO banner", async () => {
@@ -131,5 +137,103 @@ describe("legal routes", () => {
     // holds the fork-safe completeness check an operator runs before deploying.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByText(/Lukas Schmidt/)).toBeInTheDocument();
+  });
+});
+
+describe("legal page chrome", () => {
+  it("leads back to the start page from the brand", async () => {
+    renderAt("/privacy");
+    await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+    // The start page (the landing), not /login: a visitor reading the
+    // Datenschutzerklärung before deciding has not signed in to anything.
+    expect(screen.getByRole("link", { name: "Glyphoxa — start page" })).toHaveAttribute("href", "/");
+  });
+
+  it("cross-links the three documents at the top, marking the one that is open", async () => {
+    renderAt("/datenschutz");
+    await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+    const docs = screen.getByRole("navigation", { name: "Legal documents" });
+    const links = within(docs).getAllByRole("link");
+    expect(links.map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+      ["Impressum", "/imprint"],
+      ["Datenschutzerklärung", "/privacy"],
+      ["Nutzungsbedingungen", "/terms"],
+    ]);
+    // The alias still marks the document it serves.
+    expect(within(docs).getByRole("link", { name: "Datenschutzerklärung" })).toHaveAttribute("aria-current", "page");
+    expect(within(docs).getByRole("link", { name: "Impressum" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("lists the document's sections under 'Inhalt', each link leading to its section", async () => {
+    renderAt("/terms");
+    await screen.findByRole("heading", { name: "Nutzungsbedingungen", level: 1 });
+    const toc = screen.getByRole("navigation", { name: "Inhalt" });
+    const links = within(toc).getAllByRole("link");
+    const sections = screen.getAllByRole("heading", { level: 2 });
+    // One entry per section, in order, named like the section.
+    expect(links.map((a) => a.textContent)).toEqual(sections.map((h) => h.textContent));
+    for (const link of links) {
+      const id = (link.getAttribute("href") ?? "").replace(/^#/, "");
+      const target = document.getElementById(id);
+      expect(target, `#${id}`).not.toBeNull();
+      expect(within(target as HTMLElement).getByRole("heading", { level: 2 })).toHaveTextContent(
+        link.textContent ?? "",
+      );
+    }
+  });
+
+  it("gives the sections stable, readable ids", async () => {
+    // A deep link into a document (#speicherdauer, sent to a player who asked)
+    // must keep working: the id comes from the heading's words, without its
+    // number, so renumbering a section does not break a link to it.
+    renderAt("/privacy");
+    await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+    expect(document.getElementById("speicherdauer")).toHaveTextContent(/^7\. Speicherdauer/);
+    expect(document.getElementById("aenderungen-dieser-erklaerung")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "7. Speicherdauer" })).toHaveAttribute("href", "#speicherdauer");
+  });
+
+  it("finds sections the operator's identity decides on, too", async () => {
+    renderAt("/imprint");
+    await screen.findByRole("heading", { name: "Impressum", level: 1 });
+    const toc = screen.getByRole("navigation", { name: "Inhalt" });
+    expect(within(toc).getByRole("link", { name: "Streitbeilegung" })).toHaveAttribute("href", "#streitbeilegung");
+    expect(within(toc).getAllByRole("link")).toHaveLength(screen.getAllByRole("heading", { level: 2 }).length);
+  });
+
+  it("says once, in the display language, that the German text is the one that counts", async () => {
+    renderAt("/terms");
+    await screen.findByRole("heading", { name: "Nutzungsbedingungen", level: 1 });
+    expect(screen.getByText(/German text is the authoritative version/)).toBeInTheDocument();
+    // The document itself is marked as German for a screen reader's voice.
+    expect(screen.getByRole("heading", { level: 1 })).toHaveAttribute("lang", "de");
+  });
+
+  it("does not repeat it to a visitor who reads German anyway", async () => {
+    localStorage.setItem("gx-lang", "de");
+    renderAt("/terms");
+    await screen.findByRole("heading", { name: "Nutzungsbedingungen", level: 1 });
+    expect(screen.queryByText(/authoritative/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/maßgeblich/)).not.toBeInTheDocument();
+  });
+
+  it("carries the language picker, so the chrome can be read before any session", async () => {
+    renderAt("/imprint");
+    await screen.findByRole("heading", { name: "Impressum", level: 1 });
+    expect(screen.getByRole("combobox", { name: "Display language" })).toBeInTheDocument();
+  });
+
+  it("names the tab after the document, so /, /login and /privacy are three different tabs", async () => {
+    const router = renderAt("/privacy");
+    await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+    const titles = [document.title];
+    await router.navigate({ to: "/login" });
+    await waitFor(() => expect(document.title).not.toBe(titles[0]));
+    titles.push(document.title);
+    await router.navigate({ to: "/" });
+    await waitFor(() => expect(document.title).not.toBe(titles[1]));
+    titles.push(document.title);
+    expect(titles[0]).toBe("Datenschutzerklärung · Glyphoxa");
+    expect(new Set(titles).size).toBe(3);
   });
 });
