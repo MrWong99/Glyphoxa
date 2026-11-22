@@ -137,8 +137,8 @@ func hardcodedNPC() npcSpec {
 		agentID: "bart",
 		name:    "Bart",
 		persona: BartPersona,
-		// npcVoice() carries pcm_48000 plus the conversational eleven_v3 defaults
-		// (DefaultV3Settings: stability/similarity/speaker-boost). It is both the
+		// npcVoice() carries pcm_48000 plus the conversational default-model settings
+		// (ttseleven.DefaultSettings: eleven_v4_turbo, stability/similarity/speaker-boost). It is both the
 		// seed source for the DB row and the #14 live-voice value, so the outbound
 		// codec path is encode-only (Discord Opus is 48 kHz — no resampler).
 		voice:   npcVoice(),
@@ -473,7 +473,7 @@ func npcNames(npcs []npcSpec) []string {
 // the `-hardcoded` escape path.
 //
 // Settings overrides the ElevenLabs output format to pcm_48000 (keeping the rest
-// of the conversational eleven_v3 defaults). Discord's Opus encoder runs at
+// of the conversational ttseleven.DefaultSettings). Discord's Opus encoder runs at
 // 48 kHz, so emitting 48 kHz PCM makes the outbound codec path encode-only — no
 // resampling on the live demo, which removes a resampler quality/artefact risk.
 // The codec still resamples arbitrary AudioChunk.SampleRate for tests and other

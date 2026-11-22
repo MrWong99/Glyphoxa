@@ -59,9 +59,7 @@ func (c *Client) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs.Synthesize: %w", err)
 	}
-	if settings.ModelID == "" {
-		settings.ModelID = ModelV3
-	}
+	settings.ModelID = settings.model()
 	if settings.OutputFormat == "" {
 		settings.OutputFormat = DefaultOutputFormat
 	}

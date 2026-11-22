@@ -26,7 +26,7 @@ type dialogueBody struct {
 }
 
 // SynthesizeDialogue implements [tts.DialogueSynthesizer]. ElevenLabs's
-// eleven_v3 dialogue mode weaves multi-voice scripts with conversational
+// text-to-dialogue mode (v3/v4 models; [DefaultModel] unless overridden) weaves multi-voice scripts with conversational
 // pacing in a single render — per ADR-0022 this is off the hot path
 // (recap/cutscene use) and is not committed to Transcripts.
 //
@@ -52,9 +52,7 @@ func (c *Client) SynthesizeDialogue(ctx context.Context, req tts.DialogueRequest
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs.SynthesizeDialogue: %w", err)
 	}
-	if settings.ModelID == "" {
-		settings.ModelID = ModelV3
-	}
+	settings.ModelID = settings.model()
 	if settings.OutputFormat == "" {
 		settings.OutputFormat = DefaultOutputFormat
 	}

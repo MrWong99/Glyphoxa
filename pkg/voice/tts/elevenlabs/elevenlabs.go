@@ -1,6 +1,8 @@
 // Package elevenlabs implements the v2 TTS provider surface against the
-// ElevenLabs HTTP API, targeting the eleven_v3 model and its inline
-// bracketed audio-tag vocabulary.
+// ElevenLabs HTTP API. Voices synthesize on [DefaultModel] (eleven_v4_turbo,
+// #702) unless their Settings name another model; the v3/v4 families share an
+// inline bracketed audio-tag vocabulary the agent prompt teaches
+// ([Client.AudioMarkupPrompt]).
 //
 // Per ADR-0023 the [Client] satisfies the full v1.0 capability matrix:
 // [tts.Synthesizer] (plus the required AudioMarkupPrompt), [tts.VoiceLister],

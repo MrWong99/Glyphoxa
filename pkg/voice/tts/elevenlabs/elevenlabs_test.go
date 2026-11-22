@@ -114,7 +114,7 @@ func TestAudioMarkupPrompt_NonEmpty_DescribesV3Tags(t *testing.T) {
 }
 
 func TestAudioMarkupPrompt_SuggestedTags_AppendedAsPreference(t *testing.T) {
-	settings := elevenlabs.DefaultV3Settings()
+	settings := elevenlabs.DefaultSettings()
 	settings.SuggestedAudioTags = []string{"confident", "curious"}
 	raw, err := json.Marshal(settings)
 	if err != nil {
@@ -307,7 +307,10 @@ func TestSynthesize_MissingVoiceID_FailsBeforeNetwork(t *testing.T) {
 	}
 }
 
-func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
+// TestSynthesize_BodyCarriesSentenceAndDefaultModel pins the #702 default: a
+// Voice with no model_id synthesizes on eleven_v4_turbo (~135 ms first audio over
+// this same HTTP /stream path, against ~600 ms for eleven_v3, at half the credits).
+func TestSynthesize_BodyCarriesSentenceAndDefaultModel(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		gotBody []byte
@@ -344,8 +347,14 @@ func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
 	if parsed["text"] != sentence {
 		t.Errorf("body.text = %v, want %q (v3 brackets must pass through verbatim)", parsed["text"], sentence)
 	}
-	if parsed["model_id"] != elevenlabs.ModelV3 {
-		t.Errorf("body.model_id = %v, want %q", parsed["model_id"], elevenlabs.ModelV3)
+	if parsed["model_id"] != "eleven_v4_turbo" {
+		t.Errorf("body.model_id = %v, want %q", parsed["model_id"], "eleven_v4_turbo")
+	}
+	if _, ok := parsed["optimize_streaming_latency"]; ok {
+		t.Error("body carries optimize_streaming_latency; eleven_v4_turbo rejects it with 400")
+	}
+	if strings.Contains(gotURL, "optimize_streaming_latency") {
+		t.Errorf("request URL = %q carries optimize_streaming_latency; eleven_v4_turbo rejects it with 400", gotURL)
 	}
 	if !strings.Contains(gotURL, "/v1/text-to-speech/voice-xyz/stream") {
 		t.Errorf("request URL = %q, missing /v1/text-to-speech/{voice_id}/stream", gotURL)
@@ -355,8 +364,33 @@ func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
 	}
 }
 
-func TestDefaultV3Settings_RoundTripsThroughJSON(t *testing.T) {
-	in := elevenlabs.DefaultV3Settings()
+// TestModelOf_ResolvesTheModelSynthesizeSends pins the one model-selection seam
+// metering prices on: a voice's explicit model_id wins, and a voice naming none
+// (or carrying undecodable Settings) resolves to the adapter default.
+func TestModelOf_ResolvesTheModelSynthesizeSends(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     string
+	}{
+		{"no settings", "", elevenlabs.ModelV4Turbo},
+		{"settings without model", `{"output_format":"pcm_48000"}`, elevenlabs.ModelV4Turbo},
+		{"explicit v3", `{"model_id":"eleven_v3"}`, elevenlabs.ModelV3},
+		{"explicit flash", `{"model_id":"eleven_flash_v2_5"}`, "eleven_flash_v2_5"},
+		{"undecodable", `{"model_id":`, elevenlabs.ModelV4Turbo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v", Settings: json.RawMessage(tc.settings)}
+			if got := elevenlabs.ModelOf(v); got != tc.want {
+				t.Errorf("ModelOf(%s) = %q, want %q", tc.settings, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultSettings_RoundTripsThroughJSON(t *testing.T) {
+	in := elevenlabs.DefaultSettings()
 	raw, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -365,8 +399,8 @@ func TestDefaultV3Settings_RoundTripsThroughJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.ModelID != elevenlabs.ModelV3 {
-		t.Errorf("ModelID = %q, want %q", out.ModelID, elevenlabs.ModelV3)
+	if out.ModelID != elevenlabs.ModelV4Turbo {
+		t.Errorf("ModelID = %q, want %q", out.ModelID, elevenlabs.ModelV4Turbo)
 	}
 	if out.OutputFormat != elevenlabs.DefaultOutputFormat {
 		t.Errorf("OutputFormat = %q, want %q", out.OutputFormat, elevenlabs.DefaultOutputFormat)
