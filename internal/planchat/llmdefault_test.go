@@ -12,14 +12,17 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
-// modelSpy records the model of each request it is asked to complete.
+// modelSpy records the model and the reply cap of each request it is asked to
+// complete.
 type modelSpy struct {
 	scriptedProvider
-	models []string
+	models    []string
+	maxTokens []int
 }
 
 func (p *modelSpy) Complete(ctx context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
 	p.models = append(p.models, req.Model)
+	p.maxTokens = append(p.maxTokens, req.MaxTokens)
 	return p.scriptedProvider.Complete(ctx, req)
 }
 

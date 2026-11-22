@@ -105,6 +105,34 @@ type ProviderConfig struct {
 	UpdatedAt             time.Time
 }
 
+// KeylessLast4 is the credentials_last4 of a Provider Config that stores NO key
+// of its own: the key resolution reads it as "use another key" (llmbuild
+// spells the same value EnvPlaceholderLast4; storage cannot import it). A
+// keyless chat choice ([Store.SaveChatLLMChoice]) carries it.
+const KeylessLast4 = "env"
+
+// ChatLLMChoice is the input to [Store.SaveChatLLMChoice]: the Tenant's
+// Planning chat model choice (ADR-0062 amendment 2026-11-22), stored as its
+// single chat_llm Provider Config.
+type ChatLLMChoice struct {
+	TenantID uuid.UUID
+	// Provider is the chosen LLM provider. Any chat_llm row of the Tenant on
+	// another provider is removed in the same transaction.
+	Provider string
+	// Model is the chosen model; "" means the provider's chat default.
+	Model string
+	// Ciphertext and Last4 are a chat-only key to store on the row. An empty
+	// Ciphertext stores no key: an existing row keeps the credential it has, a
+	// new row is created keyless ([KeylessLast4]).
+	Ciphertext []byte
+	Last4      string
+	// KeepKey makes a key-less save an UPDATE of a row that holds a saved key:
+	// when the row is missing or keyless the save fails with [ErrNotFound] and
+	// writes nothing. Set when the caller validated the model against that
+	// row's own key. Ignored when Ciphertext is set.
+	KeepKey bool
+}
+
 // DeploymentConfig is the single-operator Discord integration the Configuration
 // screen edits (#68): the deployment Bot token — a write-only secret, sealed at
 // rest like a Provider Config — plus the non-secret Guild / Voice channel IDs.

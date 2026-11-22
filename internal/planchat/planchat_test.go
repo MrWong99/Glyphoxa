@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/billing"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
@@ -26,6 +27,8 @@ type fakeStore struct {
 	grants   []storage.ToolGrant
 	configs  map[uuid.UUID]storage.ProviderConfig
 	tenant   map[storage.Component]storage.ProviderConfig
+	rows     []storage.ProviderConfig // extra tenant rows (a second row of one Component)
+	listErr  error                    // fails ListProviderConfigs
 	thread   storage.PlanningThread
 	messages []storage.PlanningMessage
 	usage    []storage.UsageRow
@@ -78,12 +81,19 @@ func (f *fakeStore) GetProviderConfig(_ context.Context, id uuid.UUID) (storage.
 	return cfg, nil
 }
 
-func (f *fakeStore) GetProviderConfigByComponent(_ context.Context, _ uuid.UUID, component storage.Component) (storage.ProviderConfig, error) {
-	cfg, ok := f.tenant[component]
-	if !ok {
-		return storage.ProviderConfig{}, storage.ErrNotFound
+// ListProviderConfigs returns the tenant map as rows, each stamped with the
+// Component it is keyed under (a test that only sets Provider/Model need not
+// repeat it), plus any extra rows a test appended to f.rows.
+func (f *fakeStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) ([]storage.ProviderConfig, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
 	}
-	return cfg, nil
+	out := make([]storage.ProviderConfig, 0, len(f.tenant)+len(f.rows))
+	for component, cfg := range f.tenant {
+		cfg.Component = component
+		out = append(out, cfg)
+	}
+	return append(out, f.rows...), nil
 }
 
 func (f *fakeStore) GetPlanningThread(_ context.Context, campaignID, id uuid.UUID) (storage.PlanningThread, error) {
@@ -436,39 +446,59 @@ func TestExchange_UnknownThreadIsNotFound(t *testing.T) {
 	}
 }
 
-func TestResolveChatLLMConfig_Ladder(t *testing.T) {
+// The engine loads the rows and hands them to llmbuild's SelectChat, which owns
+// the ladder (its table tests are there). Pinned here: each rung is reachable
+// through the engine's two store reads, including the Butler-bound one.
+func TestResolveChatLLM_Ladder(t *testing.T) {
 	campaignID := uuid.New()
 	tenantID := uuid.New()
 	st := newFakeStore(campaignID)
 	eng, _, _ := newTestEngine(t, st, &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("x")}})
+	ctx := context.Background()
 
-	// Rung 4: nothing configured → nil config, chat_llm label.
-	cfg, component, err := eng.resolveChatLLMConfig(context.Background(), tenantID, st.butler)
-	if err != nil || cfg != nil || component != storage.ComponentChatLLM {
-		t.Fatalf("empty ladder = (%v, %s, %v)", cfg, component, err)
+	// Rung 3: nothing configured → the deployment default on the platform key.
+	sel, err := eng.ResolveChatLLM(ctx, tenantID, st.butler)
+	if err != nil || sel.Source != llmbuild.ChatSourceDefault || sel.KeyConfig != nil || sel.KeyComponent != storage.ComponentChatLLM {
+		t.Fatalf("empty ladder = (%+v, %v)", sel, err)
+	}
+	if sel.Provider != "groq" || sel.Model == "" {
+		t.Fatalf("empty ladder resolved %s/%q, want groq and its default model", sel.Provider, sel.Model)
 	}
 
-	// Rung 3: tenant 'llm' config.
+	// Rung 2: the tenant 'llm' config — same as voice.
 	st.tenant[storage.ComponentLLM] = storage.ProviderConfig{Provider: "groq", Model: "voice-model"}
-	cfg, component, err = eng.resolveChatLLMConfig(context.Background(), tenantID, st.butler)
-	if err != nil || cfg == nil || cfg.Model != "voice-model" || component != storage.ComponentLLM {
-		t.Fatalf("llm rung = (%+v, %s, %v)", cfg, component, err)
+	sel, err = eng.ResolveChatLLM(ctx, tenantID, st.butler)
+	if err != nil || sel.Source != llmbuild.ChatSourceVoice || sel.Model != "voice-model" || sel.KeyComponent != storage.ComponentLLM {
+		t.Fatalf("llm rung = (%+v, %v)", sel, err)
 	}
 
-	// Rung 2: tenant 'chat_llm' outranks it.
-	st.tenant[storage.ComponentChatLLM] = storage.ProviderConfig{Provider: "groq", Model: "chat-model"}
-	cfg, _, err = eng.resolveChatLLMConfig(context.Background(), tenantID, st.butler)
-	if err != nil || cfg == nil || cfg.Model != "chat-model" {
-		t.Fatalf("chat_llm rung = (%+v, %v)", cfg, err)
+	// Rung 1: the tenant chat choice outranks it.
+	st.tenant[storage.ComponentChatLLM] = storage.ProviderConfig{Provider: "groq", Model: "chat-model", CredentialsLast4: "env"}
+	sel, err = eng.ResolveChatLLM(ctx, tenantID, st.butler)
+	if err != nil || sel.Source != llmbuild.ChatSourceChoice || sel.Model != "chat-model" {
+		t.Fatalf("chat choice rung = (%+v, %v)", sel, err)
 	}
 
-	// Rung 1: the Butler's own chat slot outranks everything.
+	// Rung 0: the Butler's own chat slot outranks everything.
 	id := uuid.New()
-	st.configs[id] = storage.ProviderConfig{ID: id, Provider: "anthropic", Model: "butler-model"}
+	st.configs[id] = storage.ProviderConfig{ID: id, Component: storage.ComponentChatLLM, Provider: "anthropic", Model: "butler-model"}
 	st.butler.ChatLLMProviderConfigID = uuid.NullUUID{UUID: id, Valid: true}
-	cfg, _, err = eng.resolveChatLLMConfig(context.Background(), tenantID, st.butler)
-	if err != nil || cfg == nil || cfg.Model != "butler-model" {
-		t.Fatalf("butler rung = (%+v, %v)", cfg, err)
+	sel, err = eng.ResolveChatLLM(ctx, tenantID, st.butler)
+	if err != nil || sel.Source != llmbuild.ChatSourceButler || sel.Provider != "anthropic" || sel.Model != "butler-model" {
+		t.Fatalf("butler rung = (%+v, %v)", sel, err)
+	}
+
+	// A binding to a row that is gone (the SET NULL race) falls through.
+	delete(st.configs, id)
+	sel, err = eng.ResolveChatLLM(ctx, tenantID, st.butler)
+	if err != nil || sel.Source != llmbuild.ChatSourceChoice {
+		t.Fatalf("dangling butler binding = (%+v, %v), want the tenant chat choice", sel, err)
+	}
+
+	// A failed read is an error, never a silent default.
+	st.listErr = errors.New("db down")
+	if _, err = eng.ResolveChatLLM(ctx, tenantID, st.butler); err == nil {
+		t.Fatal("a failed provider-config read resolved to a model")
 	}
 }
 

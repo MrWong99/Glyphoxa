@@ -16,10 +16,18 @@
 //     in-chat refusal, never a silent drop. BYOK tenants are metered
 //     identically but their plan carries no included allowance, so the same
 //     check passes them through (ADR-0055 scoping).
-//   - Model: the chat-scoped slot — the Butler's chat_llm_provider_config_id,
-//     else the tenant 'chat_llm' Provider Config, else the tenant 'llm'
-//     config, else the Groq env default (ADR-0036) — so upgrading chat never
-//     touches the voice loop's selection.
+//   - Model: one resolution, [llmbuild.DeploymentDefault.SelectChat] (ADR-0062
+//     amendment 2026-11-22) — the Butler's chat_llm_provider_config_id
+//     (reserved, no writer), else the Tenant's chat choice (its single
+//     'chat_llm' Provider Config: a provider and a model, keyed by the chat
+//     row's own key, else the Tenant's key in that provider's LLM slot, else
+//     the Platform Key behind the entitlement, never another provider), else
+//     "same as voice" (the Tenant's 'llm' config), else the deployment default
+//     (ADR-0036). Choosing a chat model never touches the voice loop's
+//     selection, and the Configuration screen reads the same function.
+//   - Tuning: the provider is built by [llmbuild.NewChat], so Anthropic thinks
+//     under the chat policy (adaptive, effort medium) with a 16000-token reply
+//     cap; every other provider keeps 4096.
 //   - Prompt: a stable prefix (Persona + chat-tool instructions) + thread
 //     history; no roster, no volatile tail (see prompt.go).
 //   - Tools: the chat belt (tools.go) hydrated from the Butler's CHAT-surface
@@ -49,12 +57,19 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 )
 
 const (
 	// chatMaxTokens bounds one reply. Prep chat wants room for prose (a recap
 	// relay, a set of hooks) — four times the voice default, still bounded.
 	chatMaxTokens = 4096
+	// chatMaxTokensAnthropic bounds one reply on Anthropic. Thinking tokens
+	// count against max_tokens there and the chat policy turns thinking on
+	// ([anthropic.ChatThinking]), so 4096 could be spent on reasoning and cut
+	// the visible reply short. 16000 is the non-streaming-safe default the API
+	// guidance names; the request streams, so no HTTP timeout is in play.
+	chatMaxTokensAnthropic = 16000
 	// exchangeTimeout bounds one whole exchange (all tool rounds; a recap tool
 	// call alone may take up to its own 45s child budget).
 	exchangeTimeout = 180 * time.Second
@@ -82,7 +97,7 @@ type Store interface {
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	ListToolGrantsFor(ctx context.Context, agentID uuid.UUID, surface storage.GrantSurface) ([]storage.ToolGrant, error)
 	GetProviderConfig(ctx context.Context, id uuid.UUID) (storage.ProviderConfig, error)
-	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
+	ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]storage.ProviderConfig, error)
 	GetPlanningThread(ctx context.Context, campaignID, id uuid.UUID) (storage.PlanningThread, error)
 	ListPlanningMessages(ctx context.Context, campaignID, threadID uuid.UUID) ([]storage.PlanningMessage, error)
 	AppendPlanningMessage(ctx context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error)
@@ -98,7 +113,7 @@ type Searcher interface {
 }
 
 // ProviderFactory builds the LLM provider for a resolved (providerID, key) —
-// the cassette/test seam, defaulting to [llmbuild.New] (the recap pattern).
+// the cassette/test seam, defaulting to [llmbuild.NewChat] (the chat tuning).
 type ProviderFactory func(providerID, apiKey string) (llm.Provider, error)
 
 // Events receives one exchange's stream: prose deltas as they arrive and one
@@ -180,7 +195,7 @@ func NewEngine(store Store, cipher *crypto.Cipher, searcher Searcher, writer too
 		metering:    metering,
 		metrics:     metrics,
 		log:         log,
-		newProvider: llmbuild.New,
+		newProvider: llmbuild.NewChat,
 	}
 	for _, o := range opts {
 		o(e)
@@ -232,24 +247,28 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		return Result{}, fmt.Errorf("planchat: load chat grants: %w", err)
 	}
 
-	cfg, component, err := e.resolveChatLLMConfig(ctx, tenantID, butler)
+	// One resolution for the provider, the model and the key (SelectChat): the
+	// same function names them on the Configuration screen. A chat choice with
+	// no reachable key stops HERE with ErrNoPlatformKeyEntitlement — before the
+	// user message is persisted or a provider is built — and never runs on
+	// another provider instead.
+	sel, err := e.ResolveChatLLM(ctx, tenantID, butler)
 	if err != nil {
 		return Result{}, err
 	}
-	key, err := llmbuild.ResolveKeyGated(ctx, e.keyEnt, tenantID, e.cipher, cfg, component)
+	key, err := llmbuild.ResolveKeyGated(ctx, e.keyEnt, tenantID, e.cipher, sel.KeyConfig, sel.KeyComponent)
 	if err != nil {
 		return Result{}, err
 	}
-	// No row resolves to the deployment default (#702) — never to a bare "" a
-	// later hop would read as Groq.
-	providerID, model := e.llmDefault.Select(cfg)
+	providerID, model := sel.Provider, sel.Model
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return Result{}, fmt.Errorf("planchat: build provider: %w", err)
 	}
-	// Select never returns an empty model, so the adapter's usage metering is
-	// priced on the real model id (#272 review) — the one the voice session and
-	// the Configuration screen name for this config (#702 review).
+	// SelectChat never returns an empty provider or model: no row resolves to
+	// the deployment default (#702), never to a bare "" a later hop would read
+	// as Groq, and the adapter's usage metering is priced on the real model id
+	// (#272 review).
 
 	history, err := e.store.ListPlanningMessages(ctx, campaign.ID, threadID)
 	if err != nil {
@@ -277,7 +296,7 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	}
 	grants := tool.NewGrantSet(registry, storage.GrantsFromRows(grantRows)...)
 
-	adapter := agenttool.NewToolProvider(provider, model, chatMaxTokens,
+	adapter := agenttool.NewToolProvider(provider, model, chatMaxTokensFor(providerID),
 		agenttool.WithMetrics(rec, llmcall.ProviderLabel(providerID)))
 	loop := tool.NewLoop(adapter, grants)
 	if e.maxRounds > 0 {
@@ -311,6 +330,10 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		"tenant_id", tenantID,
 		"campaign_id", campaign.ID,
 		"thread_id", threadID,
+		"provider", providerID,
+		"model", model,
+		"llm_source", string(sel.Source),
+		"key_source", string(sel.KeySource),
 		"estimated_usd", call.EstimatedUSD(),
 		"flushed", flushErr == nil,
 		"ok", runErr == nil,
@@ -335,33 +358,37 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 // retryable failure, never persisted as an empty assistant turn.
 var errEmptyAnswer = errors.New("the model returned an empty reply")
 
-// resolveChatLLMConfig walks the ADR-0062 chat ladder: the Butler's chat slot →
-// the tenant 'chat_llm' Provider Config → the tenant 'llm' config → nil (the
-// Groq env default, ADR-0036). The returned component labels key-resolution
-// errors and the entitlement check with the slot that actually resolved.
-func (e *Engine) resolveChatLLMConfig(ctx context.Context, tenantID uuid.UUID, butler storage.Agent) (*storage.ProviderConfig, storage.Component, error) {
+// chatMaxTokensFor is the reply cap of one completion on providerID.
+func chatMaxTokensFor(providerID string) int {
+	if providerID == anthropic.ProviderID {
+		return chatMaxTokensAnthropic
+	}
+	return chatMaxTokens
+}
+
+// ResolveChatLLM names the LLM an exchange for this Butler's Campaign would
+// run: it loads the Butler-bound row (if any) and the Tenant's Provider
+// Configs and hands both to [llmbuild.DeploymentDefault.SelectChat], which
+// owns the ladder. It resolves no key and builds nothing. Exported so the
+// composition root can pin that the engine and the Configuration read agree.
+func (e *Engine) ResolveChatLLM(ctx context.Context, tenantID uuid.UUID, butler storage.Agent) (llmbuild.ChatLLM, error) {
+	var bound *storage.ProviderConfig
 	if butler.ChatLLMProviderConfigID.Valid {
 		pc, err := e.store.GetProviderConfig(ctx, butler.ChatLLMProviderConfigID.UUID)
-		if err != nil && !errors.Is(err, storage.ErrNotFound) {
-			return nil, "", fmt.Errorf("planchat: load butler chat provider config: %w", err)
-		}
-		if err == nil {
-			return &pc, pc.Component, nil
-		}
-		// Config row gone (SET NULL race): fall through the ladder.
-	}
-	for _, component := range []storage.Component{storage.ComponentChatLLM, storage.ComponentLLM} {
-		pc, err := e.store.GetProviderConfigByComponent(ctx, tenantID, component)
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
-			continue
+			// Config row gone (SET NULL race): fall through the ladder.
 		case err != nil:
-			return nil, "", fmt.Errorf("planchat: load tenant %s provider config: %w", component, err)
+			return llmbuild.ChatLLM{}, fmt.Errorf("planchat: load butler chat provider config: %w", err)
 		default:
-			return &pc, component, nil
+			bound = &pc
 		}
 	}
-	return nil, storage.ComponentChatLLM, nil // env default (Groq, ADR-0036)
+	configs, err := e.store.ListProviderConfigs(ctx, tenantID)
+	if err != nil {
+		return llmbuild.ChatLLM{}, fmt.Errorf("planchat: load tenant provider configs: %w", err)
+	}
+	return e.llmDefault.SelectChat(bound, configs), nil
 }
 
 // autoTitle derives an unnamed thread's title from its first user message.
