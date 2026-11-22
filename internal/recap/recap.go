@@ -105,6 +105,7 @@ type Engine struct {
 	log         *slog.Logger
 	newProvider ProviderFactory
 	keyEnt      llmbuild.PlatformKeyEntitlement
+	llmDefault  llmbuild.DeploymentDefault
 }
 
 // Option customises an [Engine].
@@ -125,6 +126,12 @@ func WithProviderFactory(f func(providerID, apiKey string) (llm.Provider, error)
 // where the ADR-0039 hybrid policy stands.
 func WithKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) Option {
 	return func(e *Engine) { e.keyEnt = ent }
+}
+
+// WithLLMDefault sets the deployment-default LLM (#702) a Tenant with no LLM
+// Provider Config runs on. Unset is the code default (Groq, ADR-0036).
+func WithLLMDefault(d llmbuild.DeploymentDefault) Option {
+	return func(e *Engine) { e.llmDefault = d }
 }
 
 // NewEngine builds a recap Engine. cipher decrypts a BYOK LLM key (nil is fine for
@@ -206,10 +213,9 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, err
 	}
-	providerID, model := "", ""
-	if cfg != nil {
-		providerID, model = cfg.Provider, cfg.Model
-	}
+	// No row resolves to the deployment default (#702) — never to a bare "" a
+	// later hop would read as Groq.
+	providerID, model := e.llmDefault.Select(cfg)
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)

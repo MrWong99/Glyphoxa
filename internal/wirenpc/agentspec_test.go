@@ -28,6 +28,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -772,7 +773,7 @@ func TestLoadSeededNPCs_NoLLMConfigYieldsProviderDefaultModel(t *testing.T) {
 func TestDefaultEmptyModels_FollowsSessionProvider(t *testing.T) {
 	t.Parallel()
 	specs := []npcSpec{{name: "a"}, {name: "b", model: "explicit"}}
-	defaultEmptyModels(specs, anthropic.ProviderID)
+	defaultEmptyModels(specs, anthropic.ProviderID, llmbuild.DeploymentDefault{})
 	// The VOICE default, not the adapter's flagship fallback (#702).
 	if specs[0].model != anthropic.HaikuVoiceModel {
 		t.Errorf("empty model = %q, want %q", specs[0].model, anthropic.HaikuVoiceModel)
@@ -876,7 +877,7 @@ func TestLoadCampaignNPCs_ScopesToBoundCampaign(t *testing.T) {
 		t.Fatalf("CreateAgent (Yara): %v", err)
 	}
 
-	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campX)
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campX, llmbuild.DeploymentDefault{})
 	if err != nil {
 		t.Fatalf("loadCampaignNPCs(X): %v", err)
 	}
@@ -928,7 +929,7 @@ func TestLoadCampaignNPCs_FreshDBNoSeed(t *testing.T) {
 		t.Fatalf("CreateAgent (Wren): %v", err)
 	}
 
-	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campID)
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campID, llmbuild.DeploymentDefault{})
 	if err != nil {
 		t.Fatalf("loadCampaignNPCs on a fresh unseeded DB errored (must not): %v", err)
 	}
@@ -954,5 +955,5 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 	if err != nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 	}
-	return loadCampaignRoster(ctx, st, campaign)
+	return loadCampaignRoster(ctx, st, campaign, llmbuild.DeploymentDefault{})
 }

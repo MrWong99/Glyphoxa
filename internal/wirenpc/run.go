@@ -54,7 +54,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	st := storage.New(pool)
-	npcs, primary, campaign, err := loadCampaignNPCs(ctx, st, cfg.CampaignID)
+	npcs, primary, campaign, err := loadCampaignNPCs(ctx, st, cfg.CampaignID, cfg.LLMDefault)
 	if err != nil {
 		return err
 	}
@@ -78,10 +78,11 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 
 	cfg.npcs = npcs
 	cfg.keys = keys
-	// The EFFECTIVE LLM config (Agent-bound, else the tenant's 'llm' row) —
-	// the same config the key above was resolved against, so the adapter
-	// selection, round spans and spend pricing follow the key's provider.
-	cfg.llmProviderID = llmProviderID(llmCfg)
+	// The EFFECTIVE LLM config (Agent-bound, else the tenant's 'llm' row, else
+	// none: the deployment default) — the same config the key above was
+	// resolved against, so the adapter selection, round spans and spend pricing
+	// follow the key's provider.
+	cfg = cfg.withSessionLLM(llmCfg)
 	cfg.language = campaign.Language
 	// Session-Highlights tuning (#632 follow-up): read once per session start,
 	// same cadence as language — a mid-session edit applies on the next session.
@@ -194,6 +195,12 @@ func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
 func Run(ctx context.Context, cfg Config) error {
 	if len(cfg.npcs) == 0 {
 		cfg.npcs = []npcSpec{hardcodedNPC()}
+	}
+	// The env-only path arrives with no resolved LLM; RunFromDB arrives resolved
+	// (a no-op here). Either way every cycle below sees a concrete provider and
+	// model, never the "" that used to mean "whatever the adapter defaults to".
+	if cfg.llmProviderID == "" {
+		cfg = cfg.withSessionLLM(nil)
 	}
 
 	log := cfg.Logger

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -59,15 +60,19 @@ var (
 	newAddressDetector = orchestrator.NewAddressDetector
 )
 
-// llmProviderID reports the provider id of an LLM Provider Config for [newLLM]
-// dispatch (#272). A nil config — the env-only [Run] path, or a DB Agent with no
-// bound LLM config — yields "", which [llmbuild.New] resolves to the Groq default
-// (ADR-0036), keeping the pre-#272 hardwired-groq behaviour byte-identical.
-func llmProviderID(cfg *storage.ProviderConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	return cfg.Provider
+// withSessionLLM pins the session to ONE concrete LLM (#272, #702): the provider
+// of llmCfg — the effective LLM Provider Config, i.e. the primary Agent's bound
+// config, else the Tenant's 'llm' row — or, with no config at all (nil: a
+// row-less Tenant, or the env-only [Run] path), the deployment default
+// ([Config.LLMDefault]; Groq when the deployment names none, ADR-0036). Every
+// model-less NPC then gets the voice model that provider runs, so the adapter
+// built, the model requested, the span label and the price row all name the
+// same thing. The roster slice is copied: the caller's specs are untouched.
+func (cfg Config) withSessionLLM(llmCfg *storage.ProviderConfig) Config {
+	cfg.llmProviderID, _ = cfg.LLMDefault.Select(llmCfg)
+	cfg.npcs = slices.Clone(cfg.npcs)
+	defaultEmptyModels(cfg.npcs, cfg.llmProviderID, cfg.LLMDefault)
+	return cfg
 }
 
 // llmProviderLabel maps an LLM provider id to its bounded [observe.Provider] metric
