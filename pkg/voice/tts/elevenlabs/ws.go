@@ -231,6 +231,7 @@ func (p *wsPool) acquire(ctx context.Context, key wsKey, fresh bool) (c *wsConn,
 	if l := p.idle[key]; !fresh && len(l) > 0 {
 		c = l[len(l)-1]
 		p.idle[key] = l[:len(l)-1]
+		c.leases.Add(1)
 		c.leased.Store(true)
 		p.mu.Unlock()
 		p.reuses.Add(1)
@@ -480,6 +481,7 @@ func (c *Client) dialDialogue(ctx context.Context, key wsKey) (*websocket.Conn, 
 type wsFrame struct {
 	pcm   []byte
 	final bool
+	lease uint64 // the socket's lease count when the frame was read
 }
 
 // wsConn is one dialogue socket. Its read loop hands frames to whoever holds the
@@ -497,6 +499,11 @@ type wsConn struct {
 	dead   error // why the socket went away; readable once done is closed
 
 	leased atomic.Bool
+	// leases counts the sentences this socket was handed to. A frame is stamped
+	// with it on arrival, so one read under an earlier lease (audio after that
+	// sentence's final marker) is recognised and never passed off as the next
+	// sentence's.
+	leases atomic.Uint64
 
 	// Guarded by pool.mu.
 	idleSince time.Time
@@ -550,6 +557,9 @@ func (c *wsConn) say(sentence string) error {
 func (c *wsConn) next(ctx context.Context, timeout <-chan time.Time) (wsFrame, error) {
 	select {
 	case f := <-c.frames:
+		if f.lease != c.leases.Load() {
+			return wsFrame{}, errWSStray
+		}
 		return f, nil
 	case <-c.done:
 		return wsFrame{}, c.dead
@@ -579,7 +589,7 @@ func (c *wsConn) readLoop() {
 			c.shutdown(fmt.Errorf("dialogue socket: undecodable frame: %w", err))
 			return
 		}
-		var f wsFrame
+		f := wsFrame{lease: c.leases.Load()}
 		switch {
 		case m.Error != "":
 			c.shutdown(&StreamError{Code: m.Code, Kind: m.Error, Message: m.Message})

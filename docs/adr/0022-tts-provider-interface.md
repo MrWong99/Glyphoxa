@@ -111,3 +111,38 @@ say about markup, even if the answer is "use plain prose only."
   capability.
 - Streaming-vs-synchronous markup gotchas (Google Chirp 3 HD rejects SSML
   in streaming) — provider implementation concern, not interface.
+
+## Amendment: a provider may change transport behind `Synthesize` (2026-11-22, #702)
+
+The ElevenLabs adapter gained an opt-in WebSocket transport (ADR-0023 amendment
+of the same date). It is deliberately **not** the `StreamingSynthesizer`
+capability the per-turn-streaming option above left room for: the interface is
+unchanged and every rule of the core contract holds on the socket exactly as on
+HTTP, so the tee, the playback pump, retry, metering and the ADR-0012 commit
+boundary cannot tell the transports apart.
+
+- **One call is one sentence.** The sentence is written with a flush; the
+  channel closes when the socket's end-of-sentence marker was read.
+- **A start failure is the returned error.** `Synthesize` returns once the
+  sentence has started — its first frame arrived — as the HTTP path returns at
+  the response headers. A refused handshake is the same typed HTTP error; a
+  socket dead before any audio or a first frame that does not arrive within 5 s
+  is a retryable transport error; an error frame before any audio is a
+  non-retryable start error. A *pooled* socket found dead before any audio is
+  replaced by one fresh dial without the caller seeing anything. There is never
+  a terminal `Err` chunk on a stream that carried no audio.
+- **A mid-stream failure is a terminal `AudioChunk{Err}`** then the close.
+- **A ctx cancel closes early with no `Err` chunk**, and closes the socket: the
+  protocol has no cancel, and a socket with unread audio is never reused.
+- **Concurrent calls stay independent.** Two calls for one voice (the look-ahead
+  pair) each hold their own socket for the length of their read; nothing is
+  buffered in the adapter, so playback still back-pressures the provider.
+- **"Accepted" for metering** means what it means on HTTP: `Synthesize`
+  returned a channel. On the socket that is a sentence written to a live socket
+  that answered with a first frame. A sentence written to a socket that then
+  died without audio is a start error and is not metered, as an HTTP 5xx is not.
+
+What the transport adds is state the stateless HTTP client did not have: the
+client now owns sockets and has a `Close()`, which the live wiring calls at the
+end of each connect cycle. A provider that pools connections must offer one.
+

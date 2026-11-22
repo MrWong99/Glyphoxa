@@ -120,5 +120,84 @@ explicitly on any other model is left alone.
 
 **Later, optional:** a pooled Text-to-Dialogue WebSocket per live NPC voice
 (~35 ms more, at the cost of a dialogue-concurrency slot per open socket, a 20 s
-keep-alive and a redial per barge); HTTP/2 (measured equal warm first audio and
+keep-alive and a redial per barge — since built as an opt-in, see the next
+amendment); HTTP/2 (measured equal warm first audio and
 keeps the connection across a barge).
+
+## Amendment: optional WebSocket transport for the v3/v4 families; HTTP stays the default (2026-11-22, #702)
+
+The "later, optional" pooled Text-to-Dialogue WebSocket is built, as an
+**opt-in** so it can be compared in the live pipeline against the HTTP path:
+`GLYPHOXA_TTS_TRANSPORT=ws` (default `http`, whose requests are byte-identical to
+before). The interface consequences are in the ADR-0022 amendment of the same
+date.
+
+**Scope rules.**
+
+- Only voices on the `eleven_v3*` / `eleven_v4*` model families use the socket.
+  The dialogue socket refuses every other model (handshake 403) and the plain
+  TTS socket refuses v3/v4 (handshake 400), so a voice on flash / multilingual
+  v2 / turbo v2.5 silently stays on HTTP.
+- A socket is bound at its handshake and first message to one voice, model,
+  output format, language, seed and voice settings; the client pools sockets by
+  exactly that. At most **2 sockets per voice** (the look-ahead pair: sentence
+  k+1 synthesizes while k is still being read, and a socket is strictly
+  sequential) and **8 per client** (one client per connect cycle of a Voice
+  Session). Past the per-voice cap, or at the total cap with no idle socket to
+  close, the sentence goes over HTTP rather than waiting.
+- An open socket holds one **dialogue-session slot** of the plan behind the key
+  (Creator 35, Pro 70) for its whole life, so sockets are short-lived: closed
+  after 60 s idle, kept alive with `keep_alive` every 10 s (the server's limit is
+  a fixed 20 s; sent during a sentence too, since playback back-pressure can
+  stretch one read past it), and all closed when the cycle ends.
+- There is no cancel message. A barge closes the cut sentence's socket (its
+  unread audio must never reach the next sentence) and a replacement is dialled
+  in the background.
+- `Warm` cannot pre-dial for a voice that has not spoken yet (the socket is
+  per voice), so a session's first sentence dials. Afterwards a warm lines up, or
+  keeps alive, an idle socket for the two most recently used voices.
+- Metering is unchanged: submitted characters are counted client-side on an
+  accepted start, priced by model. The socket reports no character cost at all
+  (HTTP returns a `character-cost` header), so there is nothing to cross-check
+  against.
+
+**Measured** (2026-11-22, real API from the dev workstation, `eleven_v4_turbo`,
+`pcm_48000`, ten German NPC lines of 70–80 characters, through the real client;
+first audio chunk in ms):
+
+| | n | median | min | p90 | max |
+|---|---|---|---|---|---|
+| HTTP, warm connection | 10 | 143 | 123 | 147 | 161 |
+| WS, warm socket | 10 | 99 | 94 | 102 | 103 |
+| WS, fresh dial per sentence | 10 | 203 | 174 | 211 | 245 |
+| look-ahead pair over HTTP: sentence k | 5 | 134 | 126 | 219 | 219 |
+| look-ahead pair over HTTP: sentence k+1 | 5 | 134 | 128 | 162 | 162 |
+| look-ahead pair over WS: sentence k | 5 | 99 | 98 | 108 | 108 |
+| look-ahead pair over WS: sentence k+1 | 5 | 104 | 98 | 108 | 108 |
+| HTTP: first sentence 600 ms after a barge | 5 | 160 | 134 | 211 | 211 |
+| WS: first sentence 600 ms after a barge | 5 | 106 | 91 | 313 | 313 |
+
+A 24 s sentence read at playback pace over the socket completed without error.
+
+**Decision: HTTP stays the default.** A warm socket is ~45 ms earlier per
+sentence and tighter (p90 102 vs 147 ms), and that holds for the look-ahead pair
+and after a barge. It is not enough to pay for what it brings:
+
+- 45 ms is under a twentieth of a turn's response latency (STT final + LLM first
+  sentence + TTS), below what a table hears.
+- A socket that has to dial is 60 ms *slower* than HTTP, and the first sentence
+  of every session, every voice idle for a minute and every voice past the pool
+  caps dials or falls back.
+- It holds plan-capped dialogue-session slots: two per speaking voice for up to
+  a minute. On the shared platform key that is a fleet-wide ceiling HTTP does
+  not have (HTTP counts only requests in flight).
+- It is a stateful pool with its own failure modes (dead pooled sockets, the
+  20 s server timeout, redial per barge) where HTTP is one stateless request.
+
+The switch is worth revisiting only if the in-pipeline numbers
+(`glyphoxa_voice_tts_ttfb_seconds`, compared across deploy windows — it has no
+transport label) show the gain surviving on the production network path **and**
+the dialogue-session cap of the platform key's plan fits the fleet's speaking
+voices, or if a WS-only model (`eleven_v3_conversational`) becomes the wanted
+voice. Until then `ws` is a comparison arm, not a recommendation.
+

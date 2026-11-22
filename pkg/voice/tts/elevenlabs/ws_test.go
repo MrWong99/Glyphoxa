@@ -833,3 +833,35 @@ func TestParseTransport(t *testing.T) {
 		t.Errorf("ParseTransport(websocket) = %q, %v; want http and an error", got, err)
 	}
 }
+
+// TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence: the pool's safety rests
+// on a socket being clean between sentences. Should a server ever send audio
+// after a sentence's final marker, that frame must not be handed to the next
+// sentence as its own — the socket is dropped (and the sentence redialled)
+// instead, whichever side of the lease hand-back the frame lands on.
+func TestWS_StrayFrameAfterFinalNeverReachesTheNextSentence(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		if c.n > 1 {
+			echoScript(c)
+			return
+		}
+		c.read()
+		m, _ := c.sentence()
+		c.audio(sentencePCM(m.Inputs[0].Text))
+		c.final()
+		c.audio([]byte("STRAY!"))
+		echoScript(c) // swallows the next message as a "registration", then echoes
+	})
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+	collect(t, say(t, c, context.Background(), voice, "Erster Satz."))
+	for _, sentence := range []string{"Zweiter Satz.", "Dritter Satz."} {
+		ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: sentence, Voice: voice})
+		if err != nil {
+			t.Fatalf("Synthesize(%q): %v", sentence, err)
+		}
+		if pcm, _, terminal := collect(t, ch); terminal != nil || !bytes.Equal(pcm, sentencePCM(sentence+" ")) {
+			t.Fatalf("%q: audio %q, terminal %v; want only its own audio", sentence, pcm, terminal)
+		}
+	}
+}
