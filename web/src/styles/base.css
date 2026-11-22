@@ -48,6 +48,25 @@ h6 {
   text-wrap: pretty;
 }
 
+/* Heading scale for the app screens. Without it h1 to h4 rendered at the
+ * browser's own sizes (an h1 at 2em) and every screen picked a size by hand.
+ * Scoped to the shell's content area and the Page primitive, so the landing,
+ * login and legal pages keep their own headings; wrapped in :where() so it
+ * adds no specificity and any class a screen puts on a heading still wins. */
+:where(.gx-content, .gx-page) h1 {
+  font-size: var(--display-sm);
+}
+:where(.gx-content, .gx-page) h2 {
+  font-size: var(--display-xs);
+}
+:where(.gx-content, .gx-page) :is(h3, h4) {
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  letter-spacing: normal;
+}
+
 p {
   margin: 0 0 var(--spacing-md);
   text-wrap: pretty;
@@ -72,14 +91,17 @@ pre {
 }
 
 ::selection {
-  background: rgba(144, 89, 255, 0.4);
-  color: #fff;
+  background: color-mix(in srgb, var(--arcane) 40%, transparent);
+  color: var(--color-white);
 }
 
+/* Keyboard focus: an outline, on every focusable element. It was a box-shadow
+ * plus a forced border-radius, which a selected row's own box-shadow replaced
+ * (focus vanished on exactly the item you were on), which reshaped whatever
+ * was focused, and which a forced-colors theme drops altogether. */
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+  outline: var(--focus-outline-width) solid var(--focus-outline-color);
+  outline-offset: var(--focus-outline-offset);
 }
 
 /* Custom scrollbar — arcane stone */
@@ -122,9 +144,54 @@ pre {
   color: transparent;
 }
 
+/* Selected row. One recipe for "this is the item the detail pane shows":
+ * a strong border, an accent bar set into the leading edge and the hover fill.
+ * Put .gx-selectable on the row (a button, a link or a list item) and set
+ * data-active="true" on the selected one. Focus stays visible on a selected
+ * row because focus is an outline and this only uses border and box-shadow. */
+.gx-selectable {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  transition: border-color var(--duration-base) var(--ease-standard),
+    background-color var(--duration-base) var(--ease-standard),
+    box-shadow var(--duration-base) var(--ease-standard);
+}
+.gx-selectable:hover {
+  border-color: var(--border-default);
+  background: var(--surface-card-hover);
+}
+.gx-selectable[data-active="true"] {
+  border-color: var(--border-strong);
+  background: var(--surface-card-hover);
+  box-shadow: inset 3px 0 0 var(--arcane);
+}
+
+/* Spinner: the one busy indicator (Button loading, the boot placeholder).
+ * Sized in em so it follows the text it sits beside; set font-size or
+ * --gx-spinner-size on it for a fixed box. The ring is currentColor, so it
+ * takes the colour of the label next to it. */
+.gx-spinner {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: var(--gx-spinner-size, 1em);
+  height: var(--gx-spinner-size, 1em);
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: currentColor;
+  animation: gx-spin 0.9s linear infinite;
+}
+@keyframes gx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Boot placeholder — AuthGate / RootEntry / CreateTenant render this bare div
  * while the session resolves. A themed surface with a small spinner instead of
- * a flash of unstyled blank (the class previously had no definition at all). */
+ * a flash of unstyled blank (the class previously had no definition at all).
+ * The pseudo-element repeats the .gx-spinner recipe (a pseudo-element cannot
+ * carry a class) in the brand colour. */
 .gx-auth-boot {
   min-height: 100vh;
   display: grid;
@@ -138,12 +205,20 @@ pre {
   border-radius: 50%;
   border: 2px solid var(--border-default);
   border-top-color: var(--arcane);
-  animation: gx-boot-spin 0.9s linear infinite;
+  animation: gx-spin 0.9s linear infinite;
 }
-@keyframes gx-boot-spin {
-  to {
-    transform: rotate(360deg);
-  }
+
+/* Text for screen readers only. */
+.gx-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
