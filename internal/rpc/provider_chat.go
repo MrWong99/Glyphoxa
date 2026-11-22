@@ -108,11 +108,8 @@ func (s *ProviderServer) saveChatModel(
 	if err != nil {
 		return nil, internalErr(s.log, "SaveProviderConfig: save chat choice failed", err)
 	}
-	// The chat health entry is about this choice: a cached verdict for the
-	// previous provider or key must not outlive it.
-	if s.invalidateHealth != nil {
-		s.invalidateHealth(tenantID)
-	}
+	// The provider-health cache is NOT busted: GetProviderHealth has no chat
+	// entry (its LLM entry is the voice LLM, which a chat save never changes).
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 		Credential: providerCredential(chatComponentLabel, provider, saved),
 	}), nil
@@ -167,9 +164,6 @@ func (s *ProviderServer) DeleteProviderConfig(
 	}
 	if err := s.store.DeleteChatLLMConfig(ctx, tenantID); err != nil {
 		return nil, internalErr(s.log, "DeleteProviderConfig: delete chat choice failed", err)
-	}
-	if s.invalidateHealth != nil {
-		s.invalidateHealth(tenantID)
 	}
 	return connect.NewResponse(&managementv1.DeleteProviderConfigResponse{}), nil
 }

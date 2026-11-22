@@ -526,9 +526,10 @@ func TestProviderSaveChat_LegacyClientGroqWithSecretStillWorks(t *testing.T) {
 	}
 }
 
-// A chat save or delete busts the provider-health cache: the chat health entry
-// is about the choice, so a verdict for the previous one must not linger.
-func TestProviderSaveChat_BustsHealthCache(t *testing.T) {
+// A chat save or delete leaves the provider-health cache alone: the health
+// read has no chat entry, and its LLM entry is the voice LLM, which a chat
+// choice never changes. Busting it would re-probe every vendor for nothing.
+func TestProviderSaveChat_KeepsHealthCache(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	srv := rpc.NewProviderServer(store, testCipher(t), nil)
@@ -537,18 +538,12 @@ func TestProviderSaveChat_BustsHealthCache(t *testing.T) {
 	srv.SetHealthInvalidator(func(uuid.UUID) { busts++ })
 	client, _ := clientForServer(t, srv)
 
-	mustSaveChat(t, client, "anthropic", "", "")
-	if busts != 1 {
-		t.Errorf("health busts after a chat save = %d, want 1", busts)
-	}
+	mustSaveChat(t, client, "anthropic", "", "sk-ant-chat-only-4321")
 	if err := deleteChat(client, "chat"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if busts != 2 {
-		t.Errorf("health busts after a chat delete = %d, want 2", busts)
-	}
-	if err := saveChat(client, "gemini", "", ""); err == nil || busts != 2 {
-		t.Errorf("a refused save busted the cache (busts=%d, err=%v)", busts, err)
+	if busts != 0 {
+		t.Errorf("health busts after a chat save and delete = %d, want 0", busts)
 	}
 }
 
