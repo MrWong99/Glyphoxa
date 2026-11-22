@@ -131,3 +131,27 @@ amendment 2026-11-22). Three things on the management surface follow.
   Tenant the health of a provider its sessions never call. The 2026-07-06
   amendment's live catalog likewise becomes per-provider: `ListModels` serves
   Groq and Anthropic, each with its own slot's key.
+
+## Amendment: the planning chat model on the management surface (2026-11-22)
+
+ADR-0062 (amendment of the same date) makes the Planning chat model a Tenant
+choice. On this surface:
+
+- **`ListProviderConfigs` returns `effective_chat_llm`:** the provider and the
+  concrete model the chat answers with, which rung decided it (the chat
+  choice, the voice LLM, or the deployment default), whose key it runs on
+  (a chat-only key, the Tenant's key for that provider, the Platform Key, or
+  none), and for every provider the chat can be put on the key it would run
+  on. It is computed by the same `SelectChat` the chat engine runs.
+- **The `chat_llm` entry is gone from `credentials`.** One source of truth; a
+  script that read that entry must read `effective_chat_llm` instead. The web
+  console ships inside the binary, so server and screen change together.
+- **`SaveProviderConfig` with slot `chat`** stores the choice (provider `groq`
+  or `anthropic`, an optional model, an optional chat-only key);
+  **`DeleteProviderConfig`** with slot `chat` removes it.
+- **`ListModels` takes a slot.** `chat` lists with the key of the chat key
+  ladder, pins the provider's chat default first, and on the Platform Key
+  lists priced models only.
+- **`GetProviderHealth` has no chat entry.** Its one LLM entry is the voice
+  LLM. A health probe of the chat choice is a follow-up; until then the card
+  states which key the chat runs on, which a probe would not change.

@@ -203,9 +203,37 @@ With your own key it accepts a typed model id that is not in the catalog. On
 the platform's key (the row reads **Included**) only models with a known price
 are listed and accepted, so what you are metered matches what the model costs.
 Leave the model alone and the row runs the default (`openai/gpt-oss-120b` on
-Groq, `claude-haiku-5-5` on Anthropic) for voice, recaps, drafts and the
-planning chat alike. Change the model on an already-saved key and a **Save
-model** button appears; it re-seals the existing key untouched.
+Groq, `claude-haiku-5-5` on Anthropic) for voice, recaps and drafts — and for
+the planning chat too, unless you give the chat a model of its own (below).
+Change the model on an already-saved key and a **Save model** button appears;
+it re-seals the existing key untouched.
+
+#### Planning chat model
+
+Below the key rows, the **Planning chat** card decides which model answers the
+Butler's planning chat. It is a choice, not another key:
+
+- **Same as voice** (the default) — the chat uses whatever your voice model
+  is. Nothing to set up.
+- **Groq** or **Anthropic** — the chat gets its own provider and model while
+  voice stays exactly as it is. Each option says what it would run on: *your
+  key* (you already saved a key for that provider above — it is reused, you do
+  not paste it again), *included* (your plan covers it) or *needs a key*.
+
+The line **Answers with …** always states what is in effect right now, and on
+which key. Pick a provider, optionally a model, and **Save chat model**. Leave
+the model alone and the chat runs that provider's chat default
+(`claude-sonnet-5-5` on Anthropic); `claude-opus-5-5` is the step up. On an
+included key only models with a known price are offered.
+
+A key field appears only when the chosen provider has no key yet, or behind
+**Use a separate key for the chat**. A key entered there is used for the
+planning chat only and never changes your voice model. Going back to **Same as
+voice** removes that key again — the card says so before you save.
+
+The planning chat itself shows the same answer under its message box
+(*Answering with Anthropic · claude-sonnet-5-5*), with a **Change** link back
+to this card.
 
 ### 3b. Health badges
 
