@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // Findings counts what the detectors found in one text. Each field is a count
@@ -15,8 +16,15 @@ type Findings struct {
 	// JSON object naming a Tool, and chat-template control tokens.
 	ToolMarkup int `json:"tool_markup"`
 	// StageDirections: narrated actions — asterisk- or parenthesis-wrapped, or
-	// the NPC described in the third person.
+	// the NPC described in the third person. A bracketed action is counted
+	// under UnknownTags.
 	StageDirections int `json:"stage_directions"`
+	// UnknownTags: square-bracket spans outside the audio-tag vocabulary the
+	// TTS prompt offers ([ttseleven.AudioTags]) — an invented delivery tag
+	// ("[softly]") or a stage direction in tag clothing ("[leans on the bar]").
+	// The prompt itself warns that such a bracket may be read aloud. Closing
+	// tags ("[/pause]") are counted under ToolMarkup, not here.
+	UnknownTags int `json:"unknown_tags"`
 	// Markdown: formatting a voice cannot speak (bold, bullets, headings, code).
 	Markdown int `json:"markdown"`
 	// English: sentences that read as English inside a German reply.
@@ -32,6 +40,7 @@ type Findings struct {
 func (f *Findings) Add(o Findings) {
 	f.ToolMarkup += o.ToolMarkup
 	f.StageDirections += o.StageDirections
+	f.UnknownTags += o.UnknownTags
 	f.Markdown += o.Markdown
 	f.English += o.English
 	f.ToolNarration += o.ToolNarration
@@ -40,7 +49,7 @@ func (f *Findings) Add(o Findings) {
 
 // Total is the sum of all findings.
 func (f Findings) Total() int {
-	return f.ToolMarkup + f.StageDirections + f.Markdown + f.English + f.ToolNarration + f.GenderSlip
+	return f.ToolMarkup + f.StageDirections + f.UnknownTags + f.Markdown + f.English + f.ToolNarration + f.GenderSlip
 }
 
 // DetectOptions is the per-turn context the detectors need.
@@ -74,6 +83,32 @@ var (
 	narrationRE = regexp.MustCompile(`(?i)\b(tools?|werkzeuge?|funktion(en)?|function|parameter|json|kg_query|transcript_search|remember_knowledge|datenbank|wissensgraph|knowledge graph|api|transkript|suchfunktion|count|sides)\b`)
 	genderRE    = regexp.MustCompile(`(?i)\bmein\s+(lieber|guter|bester|freund|herr|junge)\b|\b(junger mann|bursche|kumpel)\b`)
 )
+
+// knownAudioTags is the vocabulary the production TTS prompt lists, lower-case.
+var knownAudioTags = wordList(ttseleven.AudioTags())
+
+func wordList(words []string) map[string]bool {
+	m := map[string]bool{}
+	for _, w := range words {
+		m[strings.ToLower(w)] = true
+	}
+	return m
+}
+
+// unknownTags counts the bracketed spans of text that are not a tag of the TTS
+// vocabulary. Case and padding are forgiven; a closing tag is not counted (it
+// is a control token, see controlTokenRE).
+func unknownTags(text string) int {
+	n := 0
+	for _, m := range audioTagRE.FindAllString(text, -1) {
+		tag := strings.ToLower(strings.TrimSpace(m[1 : len(m)-1]))
+		if strings.HasPrefix(tag, "/") || knownAudioTags[tag] {
+			continue
+		}
+		n++
+	}
+	return n
+}
 
 // thirdPersonVerbs are the action verbs a model uses when it narrates the NPC
 // instead of speaking as her ("Flo lacht …", "Flo wirft …").
@@ -118,6 +153,8 @@ func Detect(text string, opts DetectOptions) Findings {
 		third := regexp.MustCompile(`\b` + regexp.QuoteMeta(opts.NPCName) + `\s+(` + thirdPersonVerbs + `)\b`)
 		f.StageDirections += len(third.FindAllString(text, -1))
 	}
+
+	f.UnknownTags = unknownTags(text)
 
 	// English leakage, per sentence, ignoring the bracketed audio tags (their
 	// vocabulary is English by design).

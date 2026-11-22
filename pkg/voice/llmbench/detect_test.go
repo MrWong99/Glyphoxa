@@ -54,6 +54,36 @@ func TestDetect_StageDirections(t *testing.T) {
 	}
 }
 
+// TestDetect_UnknownTags pins the bracket check (#702 review): the TTS prompt
+// offers a fixed tag vocabulary and warns that any other bracket may be read
+// aloud. The models moved their stage directions into brackets — these are
+// replies from the bench's own passes — and a detector that waved every
+// "[...]" through as an audio tag reported none of them.
+func TestDetect_UnknownTags(t *testing.T) {
+	for text, want := range map[string]int{
+		"[leans on the bar] Na, was darf's sein?":                1,
+		"[nods approvingly] Gut gemacht. [scratches head] Hm.":   2,
+		"[smiles] Schön, dass ihr da seid. [softly] Setzt euch.": 2,
+		"[shrugs in voice] Keine Ahnung.":                        1,
+		"[schmunzelt] Das wüsstest du wohl gern.":                1,
+		"[singing, drawn out] Oh du schöne Gans.":                1,
+		"[thoughtful] Lass mich überlegen.":                      1,
+		"[chuckles] Eine Siebzehn! [long pause] Nicht schlecht.": 0,
+		"[Pause] Na gut. [ clears throat ] Also.":                0, // case and padding are not a new tag
+		"[cheerfully] Hallo![/cheerfully]":                       0, // a closing tag is counted as tool markup
+		"Der Preis steht an der Tafel, zwei Silber [pro Nacht].": 1,
+		"Kein einziger Tag hier, nur Worte.":                     0,
+	} {
+		if f := Detect(text, DetectOptions{NPCName: "Flo"}); f.UnknownTags != want {
+			t.Errorf("Detect(%q).UnknownTags = %d, want %d", text, f.UnknownTags, want)
+		}
+	}
+	// The closing tag is still a finding, in its own column.
+	if f := Detect("[cheerfully] Hallo![/cheerfully]", DetectOptions{}); f.ToolMarkup != 1 {
+		t.Errorf("closing tag: ToolMarkup = %d, want 1", f.ToolMarkup)
+	}
+}
+
 func TestDetect_Markdown(t *testing.T) {
 	for _, text := range []string{
 		"Das ist **wichtig**, hör zu.",
@@ -115,11 +145,11 @@ func TestDetect_GenderSlipOnlyForAFemaleSpeaker(t *testing.T) {
 
 func TestFindings_AddAndTotal(t *testing.T) {
 	a := Findings{ToolMarkup: 1, English: 2}
-	a.Add(Findings{ToolMarkup: 1, Markdown: 3, GenderSlip: 1})
-	if want := (Findings{ToolMarkup: 2, English: 2, Markdown: 3, GenderSlip: 1}); a != want {
+	a.Add(Findings{ToolMarkup: 1, Markdown: 3, GenderSlip: 1, UnknownTags: 2})
+	if want := (Findings{ToolMarkup: 2, English: 2, Markdown: 3, GenderSlip: 1, UnknownTags: 2}); a != want {
 		t.Errorf("Add = %+v, want %+v", a, want)
 	}
-	if a.Total() != 8 {
-		t.Errorf("Total = %d, want 8", a.Total())
+	if a.Total() != 10 {
+		t.Errorf("Total = %d, want 10", a.Total())
 	}
 }

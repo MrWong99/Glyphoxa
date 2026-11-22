@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -485,5 +486,30 @@ func TestSynthesize_ContextCancel_NoTerminalErrChunk(t *testing.T) {
 	}
 	if sawErrChunk {
 		t.Error("a barge-cancelled stream emitted a terminal Err chunk; a caller cut is not a provider failure")
+	}
+}
+
+// TestAudioTags_AreExactlyTheVocabularyThePromptLists pins [elevenlabs.AudioTags]
+// to the instruction the model is given: every listed tag is in the prompt, and
+// the prompt names no bracket tag outside the list. Anything else a model puts
+// in square brackets is out of vocabulary and may be read aloud (#702).
+func TestAudioTags_AreExactlyTheVocabularyThePromptLists(t *testing.T) {
+	prompt := elevenlabs.New("k").AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"})
+	tags := elevenlabs.AudioTags()
+	if len(tags) == 0 {
+		t.Fatal("AudioTags is empty")
+	}
+	for _, tag := range tags {
+		if !strings.Contains(prompt, "["+tag+"]") {
+			t.Errorf("tag %q is in AudioTags but not in the prompt", tag)
+		}
+	}
+	if got := strings.Count(prompt, "["); got != len(tags) {
+		t.Errorf("the prompt names %d bracket tags, AudioTags has %d", got, len(tags))
+	}
+	for _, want := range []string{"laughs", "long pause", "clears throat"} {
+		if !slices.Contains(tags, want) {
+			t.Errorf("AudioTags misses %q", want)
+		}
 	}
 }

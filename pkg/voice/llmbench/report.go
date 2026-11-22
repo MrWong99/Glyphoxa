@@ -227,15 +227,16 @@ func MarkdownTable(reports []CandidateReport) string {
 			rounds, s.CostPer100TurnsUSD)
 	}
 
-	b.WriteString("\n| candidate | tools OK | tool turns OK | schema-valid calls | prose before tool | silent | guard signals | tool markup | stage directions | markdown | English | tool narration | gender slips |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("\n| candidate | tools OK | tool turns OK | schema-valid calls | prose before tool | silent | guard signals | tool markup | stage directions | unknown [tags] | markdown | English | tool narration | gender slips |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range reports {
 		s := r.Summary
-		fmt.Fprintf(&b, "| %s | %.0f%% | %.0f%% | %.0f%% (%d) | %d | %d | %s | %s | %s | %s | %s | %s | %s |\n",
+		fmt.Fprintf(&b, "| %s | %.0f%% | %.0f%% | %.0f%% (%d) | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s |\n",
 			r.Candidate.Name,
 			s.ToolsOKPct, s.ToolTurnsOKPct, s.SchemaValidPct, s.ToolCalls, s.PreToolTurns, s.Silent, signals(s.Malformed),
 			leak(s.Spoken.ToolMarkup, s.Raw.ToolMarkup),
 			leak(s.Spoken.StageDirections, s.Raw.StageDirections),
+			leak(s.Spoken.UnknownTags, s.Raw.UnknownTags),
 			leak(s.Spoken.Markdown, s.Raw.Markdown),
 			leak(s.Spoken.English, s.Raw.English),
 			leak(s.Spoken.ToolNarration, s.Raw.ToolNarration),
@@ -254,6 +255,7 @@ func flags(f Findings) []string {
 	}
 	add("tool_markup", f.ToolMarkup)
 	add("stage_directions", f.StageDirections)
+	add("unknown_tags", f.UnknownTags)
 	add("markdown", f.Markdown)
 	add("english", f.English)
 	add("tool_narration", f.ToolNarration)
