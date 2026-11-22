@@ -14,10 +14,12 @@
 package elevenlabs
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +50,13 @@ type Client struct {
 	// hints per session from [stt.StreamConfig] instead.
 	terms    []string
 	language string
+
+	// keytermsRefused latches once the provider has refused a keyterm list this
+	// client sent, on either transport. From then on the client sends none: it
+	// fails open rather than lose every utterance to a list that will be refused
+	// again (see [Client.refuseKeyterms]).
+	keytermsRefused atomic.Bool
+	log             *slog.Logger
 }
 
 // Option mutates a [Client] during construction.
@@ -81,6 +90,40 @@ func WithTerms(terms []string) Option {
 // takes the same hint through [stt.StreamConfig.Language].
 func WithLanguage(code string) Option {
 	return func(c *Client) { c.language = strings.TrimSpace(code) }
+}
+
+// WithLogger sets where the client reports the one thing it decides on its own:
+// that the provider refused its keyterm list and it carries on without one. A nil
+// log keeps the default ([slog.Default]).
+func WithLogger(log *slog.Logger) Option {
+	return func(c *Client) {
+		if log != nil {
+			c.log = log
+		}
+	}
+}
+
+// refuseKeyterms records that the provider refused a list of n keyterms on
+// transport ("batch" or "realtime") and stops this client sending keyterms on
+// BOTH transports for the rest of its life — one Voice Session connection cycle.
+// It warns once; the provider's detail text may quote a term (a player's name),
+// so it is logged at debug only.
+func (c *Client) refuseKeyterms(transport string, n int, detail string) {
+	if !c.keytermsRefused.CompareAndSwap(false, true) {
+		return
+	}
+	c.log.Warn("stt keyterms: the provider refused the keyterm list; continuing WITHOUT keyterms, so names may be misheard again",
+		"transport", transport, "terms", n)
+	c.log.Debug("stt keyterms: refusal detail", "transport", transport, "detail", detail)
+}
+
+// liveKeyterms narrows terms — already sanitised — to what may still be sent:
+// nothing once the provider has refused a list.
+func (c *Client) liveKeyterms(terms []string) []string {
+	if c.keytermsRefused.Load() {
+		return nil
+	}
+	return terms
 }
 
 // defaultHTTPClient bounds the connection-establishment and response-header
@@ -122,6 +165,7 @@ func New(apiKey string, opts ...Option) *Client {
 		apiKey:  apiKey,
 		baseURL: DefaultBaseURL,
 		http:    defaultHTTPClient(),
+		log:     slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)

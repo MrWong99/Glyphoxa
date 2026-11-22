@@ -1,6 +1,9 @@
 package elevenlabs
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Keyterm limits (#701, ADR-0042 amendment 2026-11-22). The realtime endpoint
 // enforces the list limits HARD: a 51st term, or more than 1000 characters in
@@ -28,7 +31,8 @@ const keytermForbidden = `<>{}[]\`
 // caller that lists its terms by priority keeps the important ones:
 //
 //  1. each term loses the forbidden characters and surrounding or repeated
-//     whitespace, and is dropped if nothing is left;
+//     whitespace, and is dropped if no letter or digit is left (punctuation or
+//     invisible characters alone are nothing a recognizer can hear);
 //  2. each term is cut to [MaxKeytermWords] words and [MaxKeytermChars]
 //     characters;
 //  3. a term equal to an earlier one, ignoring case, is dropped;
@@ -71,6 +75,9 @@ func sanitizeKeyterm(raw string) string {
 	term := strings.Join(words, " ")
 	if runes := []rune(term); len(runes) > MaxKeytermChars {
 		term = strings.TrimSpace(string(runes[:MaxKeytermChars]))
+	}
+	if !strings.ContainsFunc(term, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
+		return ""
 	}
 	return term
 }

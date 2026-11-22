@@ -35,6 +35,10 @@ func TestKeyterms_Sanitises(t *testing.T) {
 		{"a cut never leaves a trailing space", []string{strings.Repeat("a", 49) + " bcd"}, []string{strings.Repeat("a", 49)}},
 		{"de-duplicates case-insensitively, first spelling wins", []string{"Flo", "flo", "FLO", "Bart", "Flo "}, []string{"Flo", "Bart"}},
 		{"de-duplicates after sanitising", []string{"Flo", "<Flo>"}, []string{"Flo"}},
+		// A term the recognizer cannot hear — punctuation only, or nothing but
+		// invisible characters — biases nothing and is the likeliest thing for the
+		// provider to refuse.
+		{"drops a term with no letter or digit", []string{"???", "-", "​", "…", "Flo", "R2-D2", "42"}, []string{"Flo", "R2-D2", "42"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -88,6 +92,41 @@ func TestKeyterms_CapsTheListAtOneThousandCharacters(t *testing.T) {
 	if total > elevenlabs.MaxKeytermsChars {
 		t.Errorf("sent %d bytes of keyterms, limit %d", total, elevenlabs.MaxKeytermsChars)
 	}
+}
+
+// TestKeyterms_TotalCapBoundary pins the 1000-character budget AT its edge. The
+// realtime endpoint was measured on both sides of it (2026-11-22): a list of
+// exactly 1000 characters starts a session, 1001 is answered with
+// invalid_request.
+func TestKeyterms_TotalCapBoundary(t *testing.T) {
+	distinct := func(n, size int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("%02d%s", i, strings.Repeat("x", size-2))
+		}
+		return out
+	}
+
+	t.Run("exactly 1000 is sent whole", func(t *testing.T) {
+		in := distinct(20, 50)
+		if got := elevenlabs.Keyterms(in); !reflect.DeepEqual(got, in) {
+			t.Errorf("20 terms of 50 (1000) must all be kept, got %d", len(got))
+		}
+	})
+	t.Run("the 1001st character is not", func(t *testing.T) {
+		in := append(distinct(25, 40), "z")
+		if got := elevenlabs.Keyterms(in); !reflect.DeepEqual(got, in[:25]) {
+			t.Errorf("want the 25 terms that make 1000, got %d: %q", len(got), got[len(got)-1])
+		}
+	})
+	t.Run("the list ends at the first term that does not fit", func(t *testing.T) {
+		// 960 + 50 overflows; the 2-byte term after it would fit, but the list is
+		// a priority order and is cut, not searched for something smaller.
+		in := append(distinct(24, 40), strings.Repeat("y", 50), "ab")
+		if got := elevenlabs.Keyterms(in); !reflect.DeepEqual(got, in[:24]) {
+			t.Errorf("want the first 24 terms, got %d: %q", len(got), got[len(got)-1])
+		}
+	})
 }
 
 // batchForm runs one Transcribe against a recording server and returns the

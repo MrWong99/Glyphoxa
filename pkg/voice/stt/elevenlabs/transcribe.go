@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -37,11 +38,44 @@ const FileFormatPCMS16LE16 = "pcm_s16le_16"
 // Returns a non-nil error when the call cannot be started (missing key) or
 // when the response is non-2xx; on success returns the response's `text`
 // field verbatim.
+//
+// Keyterms fail open (#701). A 400/422 answer to a request that carried keyterms
+// is retried once, at once, WITHOUT them: if that succeeds the list was the
+// reason, the utterance is transcribed unbiased instead of lost, and the client
+// sends no keyterms again ([Client.refuseKeyterms]). If the retry is refused too
+// the list was not the reason; that error is returned and the list is kept.
 func (c *Client) Transcribe(ctx context.Context, frames []audio.Frame) (stt.Transcript, error) {
 	if c.apiKey == "" {
 		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: missing API key (set %s or pass it to New)", APIKeyEnv)
 	}
 
+	terms := c.liveKeyterms(c.terms)
+	tr, err := c.post(ctx, frames, terms)
+	if err == nil || len(terms) == 0 || !isRequestRefusal(err) {
+		return tr, err
+	}
+	tr, retryErr := c.post(ctx, frames, nil)
+	if retryErr != nil {
+		return stt.Transcript{}, retryErr
+	}
+	c.refuseKeyterms("batch", len(terms), err.Error())
+	return tr, nil
+}
+
+// isRequestRefusal reports whether err is the provider rejecting the request's
+// parameters (HTTP 400 or 422) — the answer to a keyterm it does not accept —
+// rather than a failure of auth, quota, rate or the service.
+func isRequestRefusal(err error) bool {
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	return he.StatusCode == http.StatusBadRequest || he.StatusCode == http.StatusUnprocessableEntity
+}
+
+// post sends one transcription request carrying keyterms (already sanitised;
+// none sends the pre-#701 request).
+func (c *Client) post(ctx context.Context, frames []audio.Frame, keyterms []string) (stt.Transcript, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	if err := mw.WriteField("model_id", Model); err != nil {
@@ -71,7 +105,7 @@ func (c *Client) Transcribe(ctx context.Context, frames []audio.Frame) (stt.Tran
 	// the table; one repeated field per term, already sanitised by [WithTerms].
 	// language_code is sent only when the caller opted in — the default stays
 	// auto-detect.
-	for _, term := range c.terms {
+	for _, term := range keyterms {
 		if err := mw.WriteField("keyterms", term); err != nil {
 			return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write keyterms: %w", err)
 		}
