@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,6 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/goleak"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -43,6 +49,8 @@ type ttdServer struct {
 	upgrades  atomic.Int64 // websocket handshakes accepted
 	open      atomic.Int64 // websocket connections currently open
 	httpPosts atomic.Int64 // HTTP /stream syntheses served
+	heads     atomic.Int64 // HTTP HEAD warms served
+	keepAlive atomic.Int64 // keep_alive messages read, all sockets
 
 	mu         sync.Mutex
 	dials      []ttdDial
@@ -68,6 +76,9 @@ func newTTDServer(t *testing.T, script func(c *ttdConn)) *ttdServer {
 				s.mu.Unlock()
 				s.httpPosts.Add(1)
 				_, _ = w.Write(httpPCM)
+			}
+			if r.Method == http.MethodHead {
+				s.heads.Add(1)
 			}
 			return
 		}
@@ -100,9 +111,8 @@ func (s *ttdServer) dial(i int) ttdDial {
 // ttdConn is the server side of one dialogue socket.
 type ttdConn struct {
 	*websocket.Conn
-	srv        *ttdServer
-	n          int64 // 1-based ordinal of this connection
-	keepAlives atomic.Int64
+	srv *ttdServer
+	n   int64 // 1-based ordinal of this connection
 }
 
 // ttdMsg is a decoded client message.
@@ -141,7 +151,7 @@ func (c *ttdConn) sentence() (ttdMsg, bool) {
 			return ttdMsg{}, false
 		}
 		if m.KeepAlive {
-			c.keepAlives.Add(1)
+			c.srv.keepAlive.Add(1)
 			continue
 		}
 		return m, true
@@ -327,5 +337,499 @@ func TestWS_SentenceStreamsAudioAndClosesOnFinal(t *testing.T) {
 	// flush the server buffers ~40 chars and a short line never renders.
 	if in.Text != "Willkommen, Reisender. " || in.VoiceID != "voice-1" || !in.NewTurn || !s.sentence.Flush {
 		t.Errorf("sentence message = %s", s.sentence.raw)
+	}
+}
+
+// TestWS_SequentialSentencesReuseOneSocket: a finished sentence returns its
+// socket to the pool, so the next sentence of the same voice rides it warm
+// (~100 ms first audio) instead of dialling (~210 ms).
+func TestWS_SequentialSentencesReuseOneSocket(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+	for _, sentence := range []string{"Erster Satz.", "Zweiter Satz.", "Dritter Satz."} {
+		pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, sentence))
+		if terminal != nil || !bytes.Equal(pcm, sentencePCM(sentence+" ")) {
+			t.Errorf("%q: audio %q, terminal %v", sentence, pcm, terminal)
+		}
+	}
+	if n := srv.upgrades.Load(); n != 1 {
+		t.Errorf("sockets dialled = %d, want 1 for three sequential sentences", n)
+	}
+	if st := c.WSStats(); st.Dials != 1 || st.Reuses != 2 || st.Open != 1 {
+		t.Errorf("stats = %+v, want 1 dial, 2 reuses, 1 open", st)
+	}
+}
+
+// TestWS_LookAheadPairUsesTwoSocketsAndKeepsAudioApart: the pipelined
+// look-ahead (#626) starts sentence k+1 while k is still being read under
+// playback back-pressure. A dialogue socket is strictly sequential, so the pair
+// needs two, and each call must get its own sentence's audio only.
+func TestWS_LookAheadPairUsesTwoSocketsAndKeepsAudioApart(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+
+	chK := say(t, c, context.Background(), voice, "Satz k, noch nicht gelesen.")
+	chNext := say(t, c, context.Background(), voice, "Satz k plus eins.") // k is unread: its socket is busy
+	if n := srv.upgrades.Load(); n != 2 {
+		t.Fatalf("sockets dialled = %d, want 2 for an overlapping pair", n)
+	}
+	pcmNext, _, errNext := collect(t, chNext)
+	pcmK, _, errK := collect(t, chK)
+	if errK != nil || errNext != nil {
+		t.Fatalf("terminal errors: %v / %v", errK, errNext)
+	}
+	if !bytes.Equal(pcmK, sentencePCM("Satz k, noch nicht gelesen. ")) || !bytes.Equal(pcmNext, sentencePCM("Satz k plus eins. ")) {
+		t.Errorf("audio crossed between the pair: k=%q next=%q", pcmK, pcmNext)
+	}
+
+	// The pair is reused, not grown.
+	collect(t, say(t, c, context.Background(), voice, "Satz k plus zwei."))
+	if n := srv.upgrades.Load(); n != 2 {
+		t.Errorf("sockets dialled = %d after a third sentence, want still 2", n)
+	}
+}
+
+// TestWS_CancelMidAudioClosesSocketSilentlyAndPreDials: a barge is a ctx cancel.
+// The protocol has no cancel message, so the sentence's socket is closed at once
+// (its unread audio must never reach the next sentence), the chunk channel closes
+// with NO terminal Err chunk (the cut was the caller's), and a replacement is
+// dialled in the background for the reply that follows.
+func TestWS_CancelMidAudioClosesSocketSilentlyAndPreDials(t *testing.T) {
+	cut := make(chan struct{})
+	srv := newTTDServer(t, func(c *ttdConn) {
+		if c.n > 1 {
+			echoScript(c)
+			return
+		}
+		c.read()
+		c.sentence()
+		c.audio([]byte{1, 2, 3, 4})
+		c.read() // more audio would follow; the client goes away instead
+		close(cut)
+	})
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := say(t, c, ctx, voice, "Ein langer Satz, der unterbrochen wird.")
+	if first := <-ch; first.Err != nil || len(first.PCM) != 4 {
+		t.Fatalf("first chunk = %+v", first)
+	}
+	cancel()
+	if pcm, _, terminal := collect(t, ch); terminal != nil || len(pcm) != 0 {
+		t.Errorf("after cancel: %d more bytes, terminal %v; want a silent close", len(pcm), terminal)
+	}
+	select {
+	case <-cut:
+	case <-time.After(wsRecvWait):
+		t.Fatal("the cut sentence's socket was not closed")
+	}
+
+	eventually(t, "the replacement socket", func() bool { return srv.upgrades.Load() == 2 && c.WSStats().Open == 1 })
+	next := "Die Antwort nach der Unterbrechung."
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, next))
+	if terminal != nil || !bytes.Equal(pcm, sentencePCM(next+" ")) {
+		t.Errorf("next sentence: audio %q, terminal %v", pcm, terminal)
+	}
+	if n := srv.upgrades.Load(); n != 2 {
+		t.Errorf("sockets dialled = %d, want 2 (the next sentence rides the pre-dialled one)", n)
+	}
+}
+
+// TestWS_ErrorFrameMidSentenceIsTerminalErrChunk: an error frame after audio
+// already flowed is a mid-stream failure (#436): a terminal chunk carrying the
+// error, then the close, and the socket is gone.
+func TestWS_ErrorFrameMidSentenceIsTerminalErrChunk(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		c.sentence()
+		c.audio([]byte{1, 2})
+		c.fail("generation_failed", "boom")
+	})
+	c := wsClient(t, srv)
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz."))
+	var se *elevenlabs.StreamError
+	if !errors.As(terminal, &se) || se.Kind != "generation_failed" || se.Code != 1008 {
+		t.Fatalf("terminal error = %v, want the generation_failed stream error", terminal)
+	}
+	if !bytes.Equal(pcm, []byte{1, 2}) {
+		t.Errorf("audio before the failure = %v, want [1 2]", pcm)
+	}
+	eventually(t, "the failed socket to leave the pool", func() bool { return c.WSStats().Open == 0 })
+}
+
+// TestWS_ErrorFrameBeforeAudioIsAStartError: a sentence the server refuses
+// before any audio (an unsupported language, say) is a start failure like an
+// HTTP 4xx: a returned error, no channel, and not retryable.
+func TestWS_ErrorFrameBeforeAudioIsAStartError(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		c.sentence()
+		c.fail("unsupported_language", "Model 'eleven_v4_turbo' does not support language 'xx'.")
+	})
+	c := wsClient(t, srv)
+	ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")})
+	var se *elevenlabs.StreamError
+	if ch != nil || !errors.As(err, &se) || se.Kind != "unsupported_language" {
+		t.Fatalf("Synthesize = (%v, %v), want the unsupported_language start error", ch, err)
+	}
+	if retry.Retryable(err) {
+		t.Error("a refused sentence must not be retried")
+	}
+}
+
+// TestWS_DeadPooledSocketIsRedialledTransparently: a pooled socket can die
+// between sentences without the client having noticed yet (the server's 20 s
+// inactivity close racing a keep-alive, a NAT drop). The sentence that finds it
+// dead — the socket closes, or answers with an error frame, before any audio —
+// moves to a fresh dial once and the caller sees nothing.
+func TestWS_DeadPooledSocketIsRedialledTransparently(t *testing.T) {
+	for name, die := range map[string]func(c *ttdConn){
+		"closed":      func(c *ttdConn) { _ = c.Close() },
+		"error frame": func(c *ttdConn) { c.fail("input_timeout_exceeded", "No message received within 20s.") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTTDServer(t, func(c *ttdConn) {
+				if c.n > 1 {
+					echoScript(c)
+					return
+				}
+				c.read()
+				m, _ := c.sentence()
+				c.audio(sentencePCM(m.Inputs[0].Text))
+				c.final()
+				c.sentence() // the second sentence arrives on a socket that is about to die
+				die(c)
+			})
+			c := wsClient(t, srv)
+			voice := wsVoice("voice-1")
+			collect(t, say(t, c, context.Background(), voice, "Erster Satz."))
+
+			pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Zweiter Satz."))
+			if terminal != nil || !bytes.Equal(pcm, sentencePCM("Zweiter Satz. ")) {
+				t.Errorf("second sentence: audio %q, terminal %v", pcm, terminal)
+			}
+			if st := c.WSStats(); st.Redials != 1 || st.Dials != 2 {
+				t.Errorf("stats = %+v, want 1 redial over 2 dials", st)
+			}
+		})
+	}
+}
+
+// TestWS_FirstAudioDeadlineIsARetryableStartError: a socket that accepts the
+// sentence and then says nothing must not hold the reply goroutine. The wait
+// for the first frame is bounded like the HTTP path's ResponseHeaderTimeout, and
+// running out is a start error the dispatch layer's retry policy retries.
+func TestWS_FirstAudioDeadlineIsARetryableStartError(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		for {
+			if _, ok := c.sentence(); !ok {
+				return
+			}
+		}
+	})
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(0, 0, 40*time.Millisecond, 0, 0))
+	start := time.Now()
+	ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")})
+	if ch != nil || err == nil {
+		t.Fatalf("Synthesize = (%v, %v), want a start error", ch, err)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("waited %v for the first frame, want the 40 ms deadline", waited)
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() || !retry.Retryable(err) {
+		t.Errorf("error %v: want a retryable timeout", err)
+	}
+	eventually(t, "the silent socket to be closed", func() bool { return srv.open.Load() == 0 })
+}
+
+// TestWS_FreshSocketDyingBeforeAudioIsARetryableStartError: with no pooled
+// socket to blame, a connection lost before the first frame is surfaced as a
+// retryable start error — never a terminal Err chunk on an empty stream.
+func TestWS_FreshSocketDyingBeforeAudioIsARetryableStartError(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		c.sentence()
+	})
+	c := wsClient(t, srv)
+	ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")})
+	if ch != nil || !retry.Retryable(err) {
+		t.Fatalf("Synthesize = (%v, %v), want a retryable start error", ch, err)
+	}
+}
+
+// TestWS_RefusedHandshakeIsATypedHTTPError: the handshake is where the API
+// rejects a key, a model or a full dialogue-session pool; the status must reach
+// the retry policy as it does on HTTP.
+func TestWS_RefusedHandshakeIsATypedHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"detail":{"code":"too_many_concurrent_requests"}}`, http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL), elevenlabs.WithTransport(elevenlabs.TransportWS))
+	defer c.Close()
+	_, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")})
+	if err == nil || !retry.Retryable(err) {
+		t.Fatalf("error = %v, want a retryable HTTP 429", err)
+	}
+	if st := c.WSStats(); st.Open != 0 {
+		t.Errorf("open sockets = %d after a refused handshake, want 0", st.Open)
+	}
+	// The slot the failed dial reserved is free again.
+	if _, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")}); err == nil || errors.Is(err, context.Canceled) {
+		t.Errorf("second attempt = %v, want the same handshake error (not an HTTP fallback)", err)
+	}
+}
+
+// TestWS_KeepAliveIsSentWhileIdle: the server closes a socket after 20 s without
+// a client message, so a pooled socket is sent keep_alive on a timer.
+func TestWS_KeepAliveIsSentWhileIdle(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, time.Minute, 0, 0, 0))
+	collect(t, say(t, c, context.Background(), wsVoice("voice-1"), "Ein Satz."))
+	eventually(t, "keep_alive messages on the idle socket", func() bool { return srv.keepAlive.Load() >= 3 })
+	if n := srv.open.Load(); n != 1 {
+		t.Errorf("open sockets = %d, want the idle one kept", n)
+	}
+}
+
+// TestWS_IdleSocketIsClosedAfterTTL: every open socket holds one of the
+// account's dialogue-session slots, so a table that fell silent must give them
+// back; the next sentence dials again.
+func TestWS_IdleSocketIsClosedAfterTTL(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 60*time.Millisecond, 0, 0, 0))
+	voice := wsVoice("voice-1")
+	collect(t, say(t, c, context.Background(), voice, "Ein Satz."))
+	eventually(t, "the idle socket to be closed", func() bool { return srv.open.Load() == 0 && c.WSStats().Open == 0 })
+
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Noch ein Satz."))
+	if terminal != nil || !bytes.Equal(pcm, sentencePCM("Noch ein Satz. ")) {
+		t.Errorf("after the TTL: audio %q, terminal %v", pcm, terminal)
+	}
+	if st := c.WSStats(); st.Dials != 2 || st.Redials != 0 {
+		t.Errorf("stats = %+v, want a plain second dial", st)
+	}
+}
+
+// TestWS_PerVoiceCapSendsTheThirdOverlapOverHTTP: a voice holds at most two
+// sockets (the look-ahead pair). A third overlapping sentence — a preview, a
+// stray overlap — does not open a third dialogue session; it goes over HTTP.
+func TestWS_PerVoiceCapSendsTheThirdOverlapOverHTTP(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+	a := say(t, c, context.Background(), voice, "Eins.")
+	b := say(t, c, context.Background(), voice, "Zwei.")
+	third, _, terminal := collect(t, say(t, c, context.Background(), voice, "Drei."))
+	if terminal != nil || !bytes.Equal(third, httpPCM) {
+		t.Errorf("third overlapping sentence: audio %q, terminal %v; want the HTTP path's audio", third, terminal)
+	}
+	collect(t, a)
+	collect(t, b)
+	if st := c.WSStats(); srv.upgrades.Load() != 2 || st.Fallbacks != 1 {
+		t.Errorf("sockets = %d, stats = %+v; want 2 sockets and 1 fallback", srv.upgrades.Load(), st)
+	}
+}
+
+// TestWS_TotalCapEvictsAnIdleSocketElseFallsBack: across voices the client
+// holds at most its total cap. A new voice takes the place of the longest-idle
+// socket; with every socket busy the sentence goes over HTTP.
+func TestWS_TotalCapEvictsAnIdleSocketElseFallsBack(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(0, 0, 0, 0, 2))
+	ctx := context.Background()
+	collect(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
+	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
+
+	pcm, _, _ := collect(t, say(t, c, ctx, wsVoice("voice-c"), "C."))
+	if !bytes.Equal(pcm, sentencePCM("C. ")) {
+		t.Errorf("voice-c audio = %q, want it served over a socket", pcm)
+	}
+	eventually(t, "the evicted socket to close", func() bool { return srv.open.Load() == 2 })
+	if st := c.WSStats(); st.Open != 2 || st.Dials != 3 {
+		t.Errorf("stats = %+v, want 2 open after 3 dials", st)
+	}
+	// voice-a was the longest idle: it is the one that went.
+	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B again."))
+	if st := c.WSStats(); st.Dials != 3 {
+		t.Errorf("voice-b had to dial (stats %+v): the wrong socket was evicted", st)
+	}
+
+	// Both slots busy: no eviction possible, HTTP serves the newcomer.
+	b := say(t, c, ctx, wsVoice("voice-b"), "B busy.")
+	cc := say(t, c, ctx, wsVoice("voice-c"), "C busy.")
+	pcm, _, _ = collect(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
+	if !bytes.Equal(pcm, httpPCM) {
+		t.Errorf("voice-a audio = %q with the pool full, want the HTTP path's audio", pcm)
+	}
+	collect(t, b)
+	collect(t, cc)
+}
+
+// TestWS_WarmPreDialsKnownVoices: a dialogue socket is bound to one voice, so
+// Warm cannot open one before a voice has spoken — it warms the HTTP pool then,
+// as on the HTTP transport. Once a voice is known, Warm lines up an idle socket
+// for it (and sends no HEAD), so the reply to the utterance that just started
+// begins on a warm socket.
+func TestWS_WarmPreDialsKnownVoices(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 50*time.Millisecond, 0, 0, 0))
+	ctx := context.Background()
+
+	if err := c.Warm(ctx); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if srv.upgrades.Load() != 0 || srv.heads.Load() != 1 {
+		t.Fatalf("Warm with no known voice: %d sockets, %d HEADs; want 0 and 1", srv.upgrades.Load(), srv.heads.Load())
+	}
+
+	voice := wsVoice("voice-1")
+	collect(t, say(t, c, ctx, voice, "Ein Satz."))
+	eventually(t, "the idle socket to expire", func() bool { return srv.open.Load() == 0 })
+
+	if err := c.Warm(ctx); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	eventually(t, "the pre-dialled socket", func() bool { return srv.upgrades.Load() == 2 && c.WSStats().Open == 1 })
+	if n := srv.heads.Load(); n != 1 {
+		t.Errorf("HEADs = %d, want still 1 (a websocket-only client warms sockets)", n)
+	}
+	collect(t, say(t, c, ctx, voice, "Die Antwort."))
+	if st := c.WSStats(); st.Dials != 2 || st.Reuses != 1 {
+		t.Errorf("stats = %+v, want the reply on the pre-dialled socket", st)
+	}
+}
+
+// TestWS_WarmKeepsAnIdleSocketPastItsTTL: a speech start means a reply is
+// coming, so Warm restarts the idle clock of the sockets it would otherwise have
+// to dial again a moment later.
+func TestWS_WarmKeepsAnIdleSocketPastItsTTL(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 120*time.Millisecond, 0, 0, 0))
+	ctx := context.Background()
+	collect(t, say(t, c, ctx, wsVoice("voice-1"), "Ein Satz."))
+	for i := 0; i < 6; i++ { // 240 ms of warms, twice the TTL
+		time.Sleep(40 * time.Millisecond)
+		if err := c.Warm(ctx); err != nil {
+			t.Fatalf("Warm: %v", err)
+		}
+	}
+	if st := c.WSStats(); st.Open != 1 || st.Dials != 1 {
+		t.Errorf("stats = %+v, want the one socket still open", st)
+	}
+}
+
+// TestWS_CloseTearsEverythingDown: Close shuts idle and leased sockets alike and
+// leaves no goroutine behind; a sentence still streaming ends in a terminal Err
+// chunk, and the server sees every connection go.
+func TestWS_CloseTearsEverythingDown(t *testing.T) {
+	baseline := goleak.IgnoreCurrent()
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		for {
+			m, ok := c.sentence()
+			if !ok {
+				return
+			}
+			c.audio(sentencePCM(m.Inputs[0].Text))
+			if m.Inputs[0].Text == "hängt " {
+				continue // no final: this sentence is still streaming at Close
+			}
+			c.final()
+		}
+	})
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL), elevenlabs.WithTransport(elevenlabs.TransportWS),
+		elevenlabs.WithWSTuning(5*time.Millisecond, time.Minute, 0, 0, 0))
+	ctx := context.Background()
+	collect(t, say(t, c, ctx, wsVoice("voice-a"), "A."))
+	collect(t, say(t, c, ctx, wsVoice("voice-b"), "B."))
+	hanging := say(t, c, ctx, wsVoice("voice-a"), "hängt") // leases voice-a's socket and never finishes
+	if n := srv.open.Load(); n != 2 {
+		t.Fatalf("open sockets = %d, want 2 before Close", n)
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, _, terminal := collect(t, hanging); terminal == nil {
+		t.Error("the sentence cut by Close ended without a terminal error")
+	}
+	eventually(t, "the server to see every socket closed", func() bool { return srv.open.Load() == 0 })
+	if st := c.WSStats(); st.Open != 0 {
+		t.Errorf("open sockets = %d after Close, want 0", st.Open)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+
+	// A closed client leases no socket; a late sentence is served over HTTP.
+	pcm, _, _ := collect(t, say(t, c, ctx, wsVoice("voice-a"), "Zu spät."))
+	if !bytes.Equal(pcm, httpPCM) || srv.upgrades.Load() != 2 {
+		t.Errorf("after Close: audio %q over %d sockets, want the HTTP path and no new socket", pcm, srv.upgrades.Load())
+	}
+	_ = c.Close()
+	srv.Close()
+	goleak.VerifyNone(t, baseline)
+}
+
+// TestTransport_HTTPIsTheDefaultAndItsRequestIsUnchanged pins the default: with
+// no option, with TransportHTTP, and with TransportWS on a model the dialogue
+// socket does not take, a sentence is the same POST /stream it always was —
+// same URL, byte-identical body — and no socket is ever dialled.
+func TestTransport_HTTPIsTheDefaultAndItsRequestIsUnchanged(t *testing.T) {
+	const (
+		wantURL  = "/v1/text-to-speech/voice-1/stream?output_format=pcm_48000"
+		wantBody = `{"text":"Ein Satz.","model_id":"%s","voice_settings":{"stability":0.5,"similarity_boost":0.75,"use_speaker_boost":true}}`
+	)
+	flash := func(s *elevenlabs.Settings) { s.ModelID = "eleven_flash_v2_5" }
+	for name, tc := range map[string]struct {
+		opts  []elevenlabs.Option
+		voice func(t *testing.T) tts.Voice
+		model string
+	}{
+		"no option":      {nil, func(*testing.T) tts.Voice { return wsVoice("voice-1") }, elevenlabs.ModelV4Turbo},
+		"http":           {[]elevenlabs.Option{elevenlabs.WithTransport(elevenlabs.TransportHTTP)}, func(*testing.T) tts.Voice { return wsVoice("voice-1") }, elevenlabs.ModelV4Turbo},
+		"ws, flash v2.5": {[]elevenlabs.Option{elevenlabs.WithTransport(elevenlabs.TransportWS)}, func(t *testing.T) tts.Voice { return wsVoiceWith(t, "voice-1", flash) }, "eleven_flash_v2_5"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTTDServer(t, echoScript)
+			c := elevenlabs.New("k", append([]elevenlabs.Option{elevenlabs.WithBaseURL(srv.URL)}, tc.opts...)...)
+			defer c.Close()
+			pcm, _, terminal := collect(t, say(t, c, context.Background(), tc.voice(t), "Ein Satz."))
+			if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+				t.Fatalf("audio %q, terminal %v; want the HTTP path", pcm, terminal)
+			}
+			if n := srv.upgrades.Load(); n != 0 {
+				t.Errorf("sockets dialled = %d, want 0", n)
+			}
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			if len(srv.httpURLs) != 1 || srv.httpURLs[0] != wantURL {
+				t.Errorf("request URLs = %v, want [%s]", srv.httpURLs, wantURL)
+			}
+			if want := []byte(fmt.Sprintf(wantBody, tc.model)); len(srv.httpBodies) != 1 || !bytes.Equal(srv.httpBodies[0], want) {
+				t.Errorf("request body = %s\nwant         %s", srv.httpBodies, want)
+			}
+		})
+	}
+}
+
+func TestParseTransport(t *testing.T) {
+	for in, want := range map[string]elevenlabs.Transport{
+		"": elevenlabs.TransportHTTP, "http": elevenlabs.TransportHTTP, " HTTP ": elevenlabs.TransportHTTP,
+		"ws": elevenlabs.TransportWS, "WS": elevenlabs.TransportWS,
+	} {
+		if got, err := elevenlabs.ParseTransport(in); err != nil || got != want {
+			t.Errorf("ParseTransport(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	// A typo must never switch the transport.
+	if got, err := elevenlabs.ParseTransport("websocket"); err == nil || got != elevenlabs.TransportHTTP {
+		t.Errorf("ParseTransport(websocket) = %q, %v; want http and an error", got, err)
 	}
 }
