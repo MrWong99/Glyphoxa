@@ -137,3 +137,41 @@ Two changes to what the cacheable prefix is made of.
   rule, the prompt only makes the mistake rarer; the guarantee is the
   deterministic markdown scrub in the delivery path (`agent.scrubSpoken`), which
   leaves bracketed audio tags (ADR-0022) alone.
+
+## Amendment: the anthropic adapter caches the stable prefix for the voice model (2026-11-22, #702)
+
+Section 1 says of Anthropic that caching "is explicit (`cache_control`, not
+wired)". For `claude-haiku-5-5` it is now wired
+(`pkg/voice/llm/anthropic/caching.go`); every other Anthropic model keeps the
+plain system string and no breakpoint.
+
+- **Where the breakpoint sits.** The adapter still lifts every system message
+  out of the conversation, but for the voice model it sends the `system` field
+  as blocks: the FIRST system message — the stable system prompt of this ADR —
+  as one block carrying `cache_control: {type: ephemeral}` (the 5-minute cache),
+  and every later system message, i.e. the volatile tail, joined into a second
+  block without one. The cached prefix is therefore the tool declarations plus
+  the stable system prompt; the tail and the history are never part of it, so
+  the tail's per-turn changes cannot invalidate it. Tool declarations are
+  rendered in a stable order (`GrantSet.Declarations` sorts), which the prefix
+  depends on.
+- **What it buys.** A read is billed at a tenth of the input rate, a write at
+  1.25x. Any second request within five minutes — the next tool round, the next
+  turn — pays for the write. A request that is not followed by another within
+  five minutes costs up to a quarter more on its prefix than it did uncached.
+- **Metering.** The API reports cached tokens outside `input_tokens`. The
+  adapter reports them as input-rate equivalents — a read in full, a write at
+  1.25x — so the Usage Ledger's estimate (ADR-0054) stays an upper bound of the
+  bill on every request. Pricing a read at its real rate needs a cache-aware
+  spend table and is not done.
+- **Known interaction: dice hardening forks the prefix.** On a dice-armed turn
+  `agenttool.withDiceHardening` appends its instruction to the text of the first
+  system message — the cached block. Such a turn therefore misses the cache and
+  writes a second entry (the hardened prefix), which later dice turns within
+  five minutes read. Correct, but it costs one extra write per dice burst;
+  moving the instruction into a system message of its own would put it in the
+  uncached block. Not done here: it also changes the request every other
+  provider sends, and the cassettes with it.
+- **The other half of "nothing regresses there".** With the system messages
+  folded into one field, the tail still reaches an Anthropic model ahead of the
+  history rather than after it, as before.

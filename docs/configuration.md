@@ -404,7 +404,7 @@ CPU-starved pod cannot meet, degrading recall to no-memory on timeout.
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
 | `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |
-| `ANTHROPIC_API_KEY` | if Anthropic used | LLM provider key. |
+| `ANTHROPIC_API_KEY` | if Anthropic used | LLM provider key. An OAuth access token of the `ant` CLI (`sk-ant-oat…`) is also accepted and sent as a bearer; it expires within hours, so it suits a developer machine or a bench run, not a deployment. A voice session on Anthropic with no model configured runs `claude-haiku-5-5`. |
 
 ## See also
 

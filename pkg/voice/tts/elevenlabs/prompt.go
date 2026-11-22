@@ -7,6 +7,29 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
+// audioTagVocabulary is the eleven_v3 tag vocabulary the prompt teaches, by
+// category, in prompt order.
+var audioTagVocabulary = []struct {
+	name string
+	tags []string
+}{
+	{"emotion", []string{"cheerfully", "sad", "angry", "excited", "curious", "nervous", "confident", "whispers", "shouting"}},
+	{"non-verbal", []string{"laughs", "chuckles", "sighs", "gasps", "clears throat", "coughs", "hesitates"}},
+	{"pacing", []string{"pause", "long pause", "slow", "fast", "drawn out", "stuttering"}},
+}
+
+// AudioTags returns the audio-tag vocabulary [Client.AudioMarkupPrompt] lists,
+// without the brackets. A bracketed span outside it is not a tag the model was
+// offered: an invented one, or a stage direction in tag clothing, and the
+// engine may read it aloud. A Voice's SuggestedAudioTags are not included.
+func AudioTags() []string {
+	var out []string
+	for _, cat := range audioTagVocabulary {
+		out = append(out, cat.tags...)
+	}
+	return out
+}
+
 // plainProsePrompt is the markup instruction for a voice on a model with no
 // audio-tag support (flash, multilingual v2, turbo v2.5): those models read
 // brackets aloud, so the LLM must not emit any. Non-empty per ADR-0022 ("use
@@ -42,9 +65,16 @@ func (c *Client) AudioMarkupPrompt(voice tts.Voice) string {
 	b.WriteString("For a pause write [pause] or [long pause]; never use SSML break elements, which are ignored. ")
 	b.WriteString("Do not invent tags outside the listed vocabulary — unrecognised brackets may be read aloud verbatim. ")
 	b.WriteString("Supported tag vocabulary by category: ")
-	b.WriteString("emotion ([cheerfully], [sad], [angry], [excited], [curious], [nervous], [confident], [whispers], [shouting]); ")
-	b.WriteString("non-verbal ([laughs], [chuckles], [sighs], [gasps], [clears throat], [coughs], [hesitates]); ")
-	b.WriteString("pacing ([pause], [long pause], [slow], [fast], [drawn out], [stuttering]).")
+	for i, cat := range audioTagVocabulary {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(cat.name)
+		b.WriteString(" ([")
+		b.WriteString(strings.Join(cat.tags, "], ["))
+		b.WriteString("])")
+	}
+	b.WriteString(".")
 
 	if len(voice.Settings) > 0 {
 		var s Settings
