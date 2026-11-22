@@ -77,6 +77,13 @@ type ByokSlot = {
   hideHealth?: boolean;
   /** Not needed to run a session: an unsaved key reads "Optional", not "Key needed". */
   optional?: boolean;
+  /**
+   * A voice-LLM slot (#702): one of the providers a tenant chooses BETWEEN for
+   * its Voice Sessions. Exactly one is in use at a time — the tenant's newest
+   * LLM row, else the platform default — and only that one is health-probed
+   * and required; the others are a choice the tenant has not made.
+   */
+  voiceLlm?: boolean;
 };
 const BYOK_SLOTS: readonly ByokSlot[] = [
   {
@@ -87,6 +94,17 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
     kind: "config.kindAiModel",
     icon: <BrainCircuit size={19} />,
     models: true,
+    voiceLlm: true,
+  },
+  {
+    provider: "anthropic",
+    slot: "",
+    component: "llm",
+    label: "Anthropic",
+    kind: "config.kindAiModel",
+    icon: <BrainCircuit size={19} />,
+    models: true,
+    voiceLlm: true,
   },
   {
     provider: "elevenlabs",
@@ -123,11 +141,21 @@ const BYOK_SLOTS: readonly ByokSlot[] = [
   },
 ];
 
-// Rows key their credential on `component`, not `provider`: since the chat
-// slot (#592) two slots share provider "groq", but every slot's primary
-// component is unique.
-function credentialFor(creds: ProviderCredential[], component: string): ProviderCredential | undefined {
-  return creds.find((c) => c.component === component);
+// Rows key their credential on `component`: since the chat slot (#592) two
+// slots share provider "groq". The voice-LLM slots (#702) are the mirror case —
+// they share component "llm" — so those also match on `provider`.
+function credentialFor(
+  creds: ProviderCredential[],
+  component: string,
+  provider?: string,
+): ProviderCredential | undefined {
+  return creds.find((c) => c.component === component && (provider === undefined || c.provider === provider));
+}
+
+// The product name of an LLM provider id, for the "in use" line. An id this
+// build has no slot for (a newer server) is shown as-is.
+function llmProviderLabel(provider: string): string {
+  return BYOK_SLOTS.find((s) => s.voiceLlm && s.provider === provider)?.label ?? provider;
 }
 
 function healthFor(health: ProviderHealth[], provider: string): ProviderHealth | undefined {
@@ -174,7 +202,14 @@ export function Configuration() {
   // degrades to just the default on a failed fetch, and the combobox accepts
   // free text either way, so this query can never wedge the screen.
   const groqModels = useQuery(VoiceService.method.listModels, { provider: "groq" });
-  const models = groqModels.data?.models ?? [];
+  // The Anthropic slot's own catalog (#702), fetched with that slot's key.
+  const anthropicModels = useQuery(VoiceService.method.listModels, { provider: "anthropic" });
+  const modelsByProvider: Record<string, string[]> = {
+    groq: groqModels.data?.models ?? [],
+    anthropic: anthropicModels.data?.models ?? [],
+  };
+  // The voice LLM in use (#702): the tenant's own row, or the platform default.
+  const effectiveLlm = config.data?.effectiveLlm;
 
   const saveProvider = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: invalidateList });
   const saveDiscord = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
@@ -265,32 +300,53 @@ export function Configuration() {
 
       {/* AI service keys — write-only BYOK (ADR-0004) */}
       <h2 className="gx-section-title">{t("config.aiServiceKeysTitle")}</h2>
+      {/* Which LLM a Voice Session started now would run (#702) — the answer
+          the two AI-model rows below cannot give on their own. */}
+      {effectiveLlm && (
+        <p className="gx-providers__llm-in-use" data-testid="llm-in-use">
+          {t(effectiveLlm.platformDefault ? "config.llmInUsePlatform" : "config.llmInUseOwn", {
+            provider: llmProviderLabel(effectiveLlm.provider),
+            model: effectiveLlm.model,
+          })}
+        </p>
+      )}
       <div className="gx-providers__list">
-        {BYOK_SLOTS.map((slot) => (
-          <SecretRow
-            key={slot.component}
-            icon={slot.icon}
-            kind={t(slot.kind)}
-            name={slot.nameKey ? t(slot.nameKey) : slot.label}
-            description={slot.descriptionKey ? t(slot.descriptionKey) : undefined}
-            // The paste prompt names the PRODUCT whose key it wants, even when
-            // the row's display name is a feature ("Planning chat (Groq)").
-            placeholder={t("config.pasteApiKey", { name: slot.label })}
-            credential={credentialFor(creds, slot.component)}
-            // The probe result is per-provider; a hideHealth slot renders no
-            // badge at all (see ByokSlot.hideHealth), so it gets none passed.
-            health={slot.hideHealth ? undefined : healthFor(health, slot.provider)}
-            hideHealth={slot.hideHealth}
-            optional={slot.optional}
-            // Groq-backed rows list the live model catalog with free-text entry
-            // (#227); the chosen model rides along when the key is saved, or
-            // alone via the model-only save once a key exists.
-            models={slot.models ? models : undefined}
-            onSave={(secret, model) =>
-              saveProvider.mutateAsync({ provider: slot.provider, secret, model, slot: slot.slot })
-            }
-          />
-        ))}
+        {BYOK_SLOTS.map((slot) => {
+          const credential = credentialFor(creds, slot.component, slot.voiceLlm ? slot.provider : undefined);
+          // Until the list answers, assume the code default (Groq) is the
+          // voice LLM in use, so the common case paints its final badges at
+          // once instead of flipping when the read lands.
+          const llmInUse = effectiveLlm ? effectiveLlm.provider === slot.provider : slot.provider === "groq";
+          return (
+            <SecretRow
+              key={`${slot.component}/${slot.provider}`}
+              icon={slot.icon}
+              kind={t(slot.kind)}
+              name={slot.nameKey ? t(slot.nameKey) : slot.label}
+              description={slot.descriptionKey ? t(slot.descriptionKey) : undefined}
+              // The paste prompt names the PRODUCT whose key it wants, even when
+              // the row's display name is a feature ("Planning chat (Groq)").
+              placeholder={t("config.pasteApiKey", { name: slot.label })}
+              credential={credential}
+              // The probe result is per-provider; a hideHealth slot renders no
+              // badge at all (see ByokSlot.hideHealth), so it gets none passed.
+              health={slot.hideHealth ? undefined : healthFor(health, slot.provider)}
+              hideHealth={slot.hideHealth}
+              // A voice-LLM slot the tenant is not on needs no key: it is a
+              // choice, so it reads "Optional" where the one in use reads "Key
+              // needed".
+              optional={slot.optional || (slot.voiceLlm && !llmInUse)}
+              voiceLlm={slot.voiceLlm ? { inEffect: Boolean(credential?.inEffect) } : undefined}
+              // Groq-backed rows list the live model catalog with free-text entry
+              // (#227); the chosen model rides along when the key is saved, or
+              // alone via the model-only save once a key exists.
+              models={slot.models ? (modelsByProvider[slot.provider] ?? []) : undefined}
+              onSave={(secret, model, activate) =>
+                saveProvider.mutateAsync({ provider: slot.provider, secret, model, slot: slot.slot, activate })
+              }
+            />
+          );
+        })}
       </div>
 
       {/* Discord connection — Bot token (secret) + non-secret Guild / Voice IDs */}
@@ -648,6 +704,7 @@ function SecretRow({
   models,
   hideHealth = false,
   optional = false,
+  voiceLlm,
   onSave,
 }: {
   icon: ReactNode;
@@ -667,7 +724,17 @@ function SecretRow({
   hideHealth?: boolean;
   /** An unsaved key reads "Optional" rather than "Key needed". */
   optional?: boolean;
-  onSave: (secret: string, model?: string) => Promise<unknown>;
+  /**
+   * Set on a voice-LLM slot (#702): whether this is the LLM in use. The row
+   * then says so, and a slot that is NOT in use but has a key to run on — the
+   * tenant's saved one, or the platform's — offers "Use for voice".
+   */
+  voiceLlm?: { inEffect: boolean };
+  /**
+   * activate (voice-LLM slots only) makes the slot the LLM in use without a
+   * new key: the server keeps the stored key, or rides the platform's.
+   */
+  onSave: (secret: string, model?: string, activate?: boolean) => Promise<unknown>;
 }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
@@ -684,8 +751,32 @@ function SecretRow({
   // "Save model" appears only when a saved key exists AND the operator actively
   // picked something different from the stored model (#227) — never for the
   // passive catalog-default display, which stores nothing.
+  // A voice-LLM slot the platform provides has a model to choose too, with no
+  // key of the tenant's own behind it.
+  const platform = Boolean(credential?.providedByPlatform);
+  const canRun = saved || (Boolean(voiceLlm) && platform);
+  // "Use for voice" (#702): this slot could run the tenant's sessions and does
+  // not. It carries the picked model along, so it replaces "Save model" here.
+  const canUse = Boolean(voiceLlm) && !voiceLlm?.inEffect && canRun;
   const modelDirty =
-    saved && model !== undefined && model !== (credential?.model || undefined);
+    canRun && !canUse && model !== undefined && model !== (credential?.model || undefined);
+
+  // Switch the voice LLM to this slot (#702): no secret on the wire, the
+  // stored (or platform) key stays; an actively picked or stored model rides
+  // along, the passive catalog default does not.
+  async function handleUse() {
+    if (busy) return;
+    setBusy(true);
+    setSaveError(null);
+    try {
+      await onSave("", model ?? (credential?.model || ""), true);
+      setModel(undefined);
+    } catch (err) {
+      setSaveError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   // Model-only save (#227): empty secret tells the server to keep the sealed
   // key verbatim and update just the model.
@@ -694,7 +785,10 @@ function SecretRow({
     setBusy(true);
     setSaveError(null);
     try {
-      await onSave("", selectedModel);
+      // A platform-provided voice-LLM slot has no row to update until the
+      // tenant makes a choice: activate creates it (and is a no-op otherwise).
+      if (voiceLlm && !saved) await onSave("", selectedModel, true);
+      else await onSave("", selectedModel);
       setModel(undefined); // the refreshed credential now carries it
     } catch (err) {
       setSaveError(errorMessage(err));
@@ -726,7 +820,14 @@ function SecretRow({
         <span className="gx-provider-row__icon">{icon}</span>
         <div className="gx-provider-row__meta">
           <div className="gx-overline">{kind}</div>
-          <div className="gx-provider-row__name">{name}</div>
+          <div className="gx-provider-row__name">
+            {name}
+            {voiceLlm?.inEffect && (
+              <Badge variant="info" size="sm">
+                {t("config.badgeInUse")}
+              </Badge>
+            )}
+          </div>
           {description && <div className="gx-provider-row__desc">{description}</div>}
           {health?.botTag && (
             <div className="gx-provider-row__tag">
@@ -752,6 +853,11 @@ function SecretRow({
             {modelDirty && (
               <Button variant="secondary" size="sm" disabled={busy} onClick={handleSaveModel}>
                 {t("config.saveModel")}
+              </Button>
+            )}
+            {canUse && (
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handleUse}>
+                {t("config.useForVoice")}
               </Button>
             )}
           </div>

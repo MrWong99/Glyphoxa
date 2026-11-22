@@ -42,6 +42,7 @@ function backend() {
       everSaved: last4 !== "",
       showMasked: last4 !== "",
       last4,
+      inEffect: component === "llm" && provider === "groq",
     });
   const transport = createRouterTransport(({ service }) => {
     service(VoiceService, {
@@ -126,13 +127,14 @@ describe("Configuration saves refresh the reads a key changes (W8)", () => {
   it("re-probes health and re-reads the model and voice catalogs after a provider key save", async () => {
     const { calls } = mount();
     const input = await screen.findByLabelText("Groq key");
-    await waitFor(() => expect(calls).toMatchObject({ health: 1, models: 1, voices: 1 }));
+    // Two model catalogs: one per voice-LLM slot (Groq, Anthropic; #702).
+    await waitFor(() => expect(calls).toMatchObject({ health: 1, models: 2, voices: 1 }));
 
     fireEvent.change(input, { target: { value: "test-groq-secret-eeee" } });
     const row = input.closest(".gx-provider-row") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(calls).toMatchObject({ health: 2, models: 2, voices: 2 }));
+    await waitFor(() => expect(calls).toMatchObject({ health: 2, models: 4, voices: 2 }));
     // The row now shows the LIVE verdict for the new key, not key-presence.
     expect(await within(row).findByText("the key was rejected")).toBeInTheDocument();
   });

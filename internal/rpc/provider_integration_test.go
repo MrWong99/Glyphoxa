@@ -203,3 +203,79 @@ func TestProviderService_Integration(t *testing.T) {
 		t.Errorf("discord slot not saved: %+v", d)
 	}
 }
+
+// TestProviderService_LLMSlotChoice_Integration drives the #702 slot choice
+// against real Postgres, where the two facts the unit fake can only assume
+// actually live: the "newest LLM row wins" ordering (updated_at) and the
+// keyless row an activate stores (an EMPTY, non-NULL ciphertext).
+func TestProviderService_LLMSlotChoice_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, pool, tenantID := seedTenant(t, dsn)
+	cipher, err := crypto.New(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("crypto.New: %v", err)
+	}
+	ctx := context.Background()
+
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			return next(auth.WithUser(auth.WithTenant(ctx, tenantID), storage.User{ID: uuid.New(), DiscordUserID: testSaverDiscordID}), req)
+		}
+	})
+	srvImpl := rpc.NewProviderServer(store, cipher, nil)
+	srvImpl.SetEnvLookupForTest(func(k string) string {
+		return map[string]string{"GROQ_API_KEY": "gsk-platform", "ANTHROPIC_API_KEY": "sk-ant-platform"}[k]
+	})
+	mux := http.NewServeMux()
+	mux.Handle(srvImpl.Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	effective := func() *managementv1.EffectiveLlm {
+		t.Helper()
+		resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		return resp.Msg.GetEffectiveLlm()
+	}
+	saveSlot := func(req *managementv1.SaveProviderConfigRequest) {
+		t.Helper()
+		if _, err := client.SaveProviderConfig(ctx, connect.NewRequest(req)); err != nil {
+			t.Fatalf("Save(%s): %v", req.GetProvider(), err)
+		}
+	}
+
+	if eff := effective(); eff.GetProvider() != "groq" || !eff.GetPlatformDefault() {
+		t.Fatalf("no rows: effective_llm = %+v, want the groq platform default", eff)
+	}
+
+	// A keyless choice of the platform-provided Anthropic slot.
+	saveSlot(&managementv1.SaveProviderConfigRequest{Provider: "anthropic", Activate: true, Model: "claude-haiku-4-5"})
+	if eff := effective(); eff.GetProvider() != "anthropic" || eff.GetModel() != "claude-haiku-4-5" || eff.GetPlatformDefault() {
+		t.Errorf("after activating anthropic: effective_llm = %+v", eff)
+	}
+	var last4 string
+	if err := pool.QueryRow(ctx, `SELECT credentials_last4 FROM provider_config WHERE tenant_id=$1 AND component='llm' AND provider='anthropic'`, tenantID).Scan(&last4); err != nil {
+		t.Fatalf("read anthropic row: %v", err)
+	}
+	if last4 != "env" {
+		t.Errorf("keyless row last4 = %q, want env", last4)
+	}
+
+	// A real Groq key takes over; activating Anthropic again takes it back.
+	saveSlot(&managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-tenant-secret-1111"})
+	if eff := effective(); eff.GetProvider() != "groq" {
+		t.Errorf("after saving a groq key: effective_llm = %+v, want groq", eff)
+	}
+	saveSlot(&managementv1.SaveProviderConfigRequest{Provider: "anthropic", Activate: true})
+	if eff := effective(); eff.GetProvider() != "anthropic" || eff.GetModel() != "claude-haiku-4-5" {
+		t.Errorf("after re-activating anthropic: effective_llm = %+v, want anthropic / claude-haiku-4-5 (model kept)", eff)
+	}
+	// The session-start read agrees with the screen.
+	row, err := store.GetProviderConfigByComponent(ctx, tenantID, storage.ComponentLLM)
+	if err != nil || row.Provider != "anthropic" {
+		t.Errorf("GetProviderConfigByComponent(llm) = %+v, %v; want the anthropic row", row, err)
+	}
+}
