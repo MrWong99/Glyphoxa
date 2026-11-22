@@ -88,3 +88,19 @@ func DefaultModel(providerID string) string {
 		return groq.DefaultModel
 	}
 }
+
+// DefaultVoiceModel names the model a VOICE Agent runs when providerID's
+// Provider Config carries no explicit model (#702). It differs from
+// [DefaultModel] for Anthropic only: the adapter's own fallback there is the
+// flagship model, which the off-session callers (recap, assist — they send an
+// empty model and let the adapter fill it) rely on, but which is far too slow
+// and costly for a spoken turn. A Voice Session gets Claude Haiku instead, the
+// model the adapter's thinking policy and the price table are set up for. Like
+// [DefaultModel], the result is BOTH what the engine requests and what the
+// spend meter prices.
+func DefaultVoiceModel(providerID string) string {
+	if providerID == anthropic.ProviderID {
+		return anthropic.HaikuVoiceModel
+	}
+	return DefaultModel(providerID)
+}

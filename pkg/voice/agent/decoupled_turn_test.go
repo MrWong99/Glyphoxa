@@ -404,16 +404,7 @@ func TestReplyStream_MarkdownNeverReachesTheVoice(t *testing.T) {
 // STABLE system prompt (ADR-0059's cacheable prefix), ahead of the audio-markup
 // instruction it exempts, and only for an Agent whose every reply is spoken.
 func TestSystemPrompt_SpokenOutputRule(t *testing.T) {
-	sysFor := func(cfg agent.Config) string {
-		prov := &fakeProvider{reply: "Aye."}
-		cfg.Provider = prov
-		cfg.Persona.AgentID, cfg.Persona.Markdown = "bart", "You are Bart."
-		if cfg.Synthesizer == nil {
-			cfg.Synthesizer = stubSynth{}
-		}
-		agent.NewReplier(cfg).Reply()(t.Context(), routed("bart", "Hail."))
-		return prov.lastRequest(t).Messages[0].Text
-	}
+	sysFor := func(cfg agent.Config) string { return systemPromptFor(t, cfg) }
 
 	voiced := sysFor(agent.Config{Persona: agent.Persona{Voice: testVoice()}})
 	iRule, iMarkup := strings.Index(voiced, agent.SpokenOutputRuleWithMarkup), strings.Index(voiced, sentinelMarkup)
@@ -569,5 +560,69 @@ func TestReply_HistoryTrim_BlocksStartingOnUserMessage(t *testing.T) {
 	}
 	if moves == 0 {
 		t.Error("window never moved: the history is not bounded at all")
+	}
+}
+
+// systemPromptFor returns the stable system prompt a Replier built from cfg
+// sends (Persona "You are Bart."; the sentinel-markup synthesizer unless cfg
+// names one).
+func systemPromptFor(t *testing.T, cfg agent.Config) string {
+	t.Helper()
+	prov := &fakeProvider{reply: "Aye."}
+	cfg.Provider = prov
+	cfg.Persona.AgentID, cfg.Persona.Markdown = "bart", "You are Bart."
+	if cfg.Synthesizer == nil {
+		cfg.Synthesizer = stubSynth{}
+	}
+	agent.NewReplier(cfg).Reply()(t.Context(), routed("bart", "Hail."))
+	return prov.lastRequest(t).Messages[0].Text
+}
+
+// TestSystemPrompt_StageDirectionRule pins how the prompt forbids narrated
+// actions (#702) — the one spoken-output mistake with no deterministic
+// backstop — and the two ways the first wording of it went wrong in review:
+//
+//   - The audio-tag exemption has to qualify the no-MARKUP sentence. Appended
+//     after "no described actions or gestures" it read as a licence for
+//     bracketed gestures, and the bench recorded exactly those
+//     ("[leans on the bar]"), which a TTS engine may read aloud. With an
+//     audio-markup instruction the rule also says in so many words that a
+//     bracket is never an action.
+//   - It must not forbid the third person. That sentence sits after the
+//     Persona, and a GM-written speech pattern ("Grik always speaks of himself
+//     in the third person") is the Persona's to decide.
+func TestSystemPrompt_StageDirectionRule(t *testing.T) {
+	const (
+		noMarkupSentence = "no emojis, no code."
+		exemption        = "Any audio tags the voice instructions below allow are the one exception."
+		noActions        = "no stage directions"
+	)
+	voiced := systemPromptFor(t, agent.Config{Persona: agent.Persona{Voice: testVoice()}})
+	iFormat, iExempt, iActions := strings.Index(voiced, noMarkupSentence), strings.Index(voiced, exemption), strings.Index(voiced, noActions)
+	if iFormat < 0 || iExempt < 0 || iActions < 0 {
+		t.Fatalf("voiced prompt lacks the no-markup sentence, the audio-tag exemption or the stage-direction rule:\n%s", voiced)
+	}
+	if iExempt != iFormat+len(noMarkupSentence)+1 {
+		t.Errorf("the audio-tag exemption does not directly follow the no-markup sentence:\n%s", voiced)
+	}
+	if iActions < iExempt {
+		t.Errorf("the stage-direction rule comes before the audio-tag exemption, which then reads as exempting actions:\n%s", voiced)
+	}
+	if rest := voiced[iActions:strings.Index(voiced, sentinelMarkup)]; !strings.Contains(rest, "square brackets") {
+		t.Errorf("with audio markup the rule does not say a bracket is never an action:\n%s", rest)
+	}
+
+	bare := systemPromptFor(t, agent.Config{Persona: agent.Persona{Voice: testVoice()}, Synthesizer: chunkSynth{}})
+	if !strings.Contains(bare, noActions) {
+		t.Errorf("markup-less prompt lacks the stage-direction rule:\n%s", bare)
+	}
+	if strings.Contains(bare, "audio tag") || strings.Contains(bare, "square brackets") {
+		t.Errorf("markup-less prompt talks about audio tags it never introduces:\n%s", bare)
+	}
+
+	for _, prompt := range []string{voiced, bare} {
+		if strings.Contains(prompt, "third person") {
+			t.Errorf("the rule forbids the third person, overriding a Persona's speech pattern:\n%s", prompt)
+		}
 	}
 }

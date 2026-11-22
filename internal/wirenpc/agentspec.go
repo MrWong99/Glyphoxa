@@ -365,7 +365,8 @@ func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider s
 }
 
 // defaultEmptyModels resolves every model-less spec to providerID's default
-// model ([llmbuild.DefaultModel]). The spec's model is both what the engine
+// VOICE model ([llmbuild.DefaultVoiceModel]: the provider's default, except
+// that an Anthropic session gets Claude Haiku rather than the flagship, #702). The spec's model is both what the engine
 // requests and what the spend meter prices, and the meter has no row for
 // (provider, ""): an empty model was charged at the conservative fallback, about
 // 30x the real Groq rate, so a platform-key trial tenant (no provider_config at
@@ -374,7 +375,7 @@ func sessionLLMProviderID(primaryBound *storage.ProviderConfig, tenantProvider s
 func defaultEmptyModels(specs []npcSpec, providerID string) {
 	for i := range specs {
 		if specs[i].model == "" {
-			specs[i].model = llmbuild.DefaultModel(providerID)
+			specs[i].model = llmbuild.DefaultVoiceModel(providerID)
 		}
 	}
 }

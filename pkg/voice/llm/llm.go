@@ -235,10 +235,13 @@ type Usage struct {
 // consumer can act on the KIND of failure without string-matching the message.
 // It is an ADDITIVE, bounded enum: the zero value [ErrClassNone] is the default
 // unclassified failure, so an event that never sets it — every pre-#398 error and
-// every cassette — reads as before. Only the OpenAI-compat adapter sets a
-// non-zero class today ([ErrClassToolSyntax]); the agenttool bridge maps it to a
-// typed [github.com/MrWong99/Glyphoxa/pkg/voice/providererr.ToolSyntaxError] to
-// drive the retry / tool-less-fallback policy (#398).
+// every cassette — reads as before. Two adapters set a non-zero class today: the
+// OpenAI-compat one sets [ErrClassToolSyntax], which the agenttool bridge maps
+// to a typed [github.com/MrWong99/Glyphoxa/pkg/voice/providererr.ToolSyntaxError]
+// to drive the retry / tool-less-fallback policy (#398); the anthropic one sets
+// [ErrClassRefusal], mapped to a
+// [github.com/MrWong99/Glyphoxa/pkg/voice/providererr.RefusalError] that the
+// Agent loop acts on by taking the refused turn out of its history (#702).
 type ErrClass string
 
 const (
@@ -250,6 +253,14 @@ const (
 	// malformed pseudo-XML instead of a native tool call. It is the one class the
 	// #398 retry path acts on.
 	ErrClassToolSyntax ErrClass = "tool_syntax"
+
+	// ErrClassRefusal marks a provider-side decline: the request completed (HTTP
+	// 200) but a safety classifier refused to answer it, so there is no reply
+	// text (Anthropic stop_reason "refusal", #702). It is terminal and never
+	// retried — the same prompt is declined again — and it is an error rather
+	// than an empty completion so a consumer cannot mistake it for an Agent that
+	// chose to say nothing.
+	ErrClassRefusal ErrClass = "refusal"
 )
 
 // StreamEvent is one item in a [Provider] completion stream. The active fields

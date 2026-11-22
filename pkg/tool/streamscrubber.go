@@ -3,7 +3,9 @@ package tool
 import "strings"
 
 // streamScrubber suppresses pseudo-XML tool-call syntax from a token stream on
-// the way to TTS (issue #410). It is the streaming counterpart of
+// the way to TTS (issue #410), and the leak elements of other model families
+// (#702, leaktags.go: Claude's tool-call block, tool_use / tool_call wrappers,
+// reasoning blocks). It is the streaming counterpart of
 // [ExtractPseudoCalls]: as deltas arrive it forwards prose to out but withholds
 // any tail that is still a prefix of [pseudoMarker]; once the full marker
 // appears it swallows through the matching [pseudoClose] and then RESUMES
@@ -25,8 +27,13 @@ type streamScrubber struct {
 	// input in that span is dropped.
 	swallowing bool
 
+	// closers are, while swallowing, the closing tags that end the swallow: the
+	// one [pseudoClose] for a pseudo-call, or the element's own closers for a
+	// leak element (see leaktags.go).
+	closers []string
+
 	// closeHeld is, while swallowing, the trailing run that is still a prefix of
-	// pseudoClose (so the closer can be detected across delta boundaries).
+	// a closer (so the closer can be detected across delta boundaries).
 	closeHeld string
 }
 
@@ -38,15 +45,20 @@ func (sc *streamScrubber) Write(delta string) error {
 		if sc.swallowing {
 			s = sc.closeHeld + s
 			sc.closeHeld = ""
-			k := strings.Index(s, pseudoClose)
+			k, n := indexFirst(s, sc.closers)
 			if k < 0 {
 				// Closer not seen yet: keep only the tail that could still begin
-				// it, drop the rest.
-				sc.closeHeld = tailPrefixOf(s, pseudoClose)
+				// one, drop the rest.
+				sc.closeHeld = ""
+				for _, closer := range sc.closers {
+					if t := tailPrefixOf(s, closer); len(t) > len(sc.closeHeld) {
+						sc.closeHeld = t
+					}
+				}
 				return nil
 			}
 			// Drop through the closer and resume forwarding the remainder.
-			s = s[k+len(pseudoClose):]
+			s = s[k+n:]
 			sc.swallowing = false
 			continue
 		}
@@ -86,14 +98,23 @@ func (sc *streamScrubber) writeProse(s string) (done bool, rest string, err erro
 		// ended the swallow early (#423; the batch scrub drops every orphan too)?
 		n := commonPrefixLen(s, pseudoMarker)
 		c := commonPrefixLen(s, pseudoClose)
+		// …or one of the other families' leak elements (#702, leaktags.go)?
+		leakName, leakOpen := matchLeakOpener(s)
+		leakCloseLen, leakClose := matchLeakCloser(s)
 		switch {
 		case n == len(pseudoMarker):
-			sc.swallowing = true
+			sc.swallowing, sc.closers = true, []string{pseudoClose}
 			return false, s[len(pseudoMarker):], nil
 		case c == len(pseudoClose):
 			s = s[len(pseudoClose):] // orphan closer: drop it, keep scanning
-		case n == len(s) || c == len(s):
-			// Proper prefix of a marker (≤ 10 bytes) — hold pending more input.
+		case leakOpen == elementFull:
+			sc.swallowing, sc.closers = true, leakClosers(leakName)
+			return false, s[1:], nil
+		case leakClose == elementFull:
+			s = s[leakCloseLen:] // orphan leak closer: drop it, keep scanning
+		case n == len(s) || c == len(s) || leakOpen == elementPartial || leakClose == elementPartial:
+			// Proper prefix of a marker (a few dozen bytes at most) — hold
+			// pending more input.
 			sc.held = s
 			return true, "", nil
 		default:

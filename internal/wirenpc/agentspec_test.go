@@ -773,8 +773,9 @@ func TestDefaultEmptyModels_FollowsSessionProvider(t *testing.T) {
 	t.Parallel()
 	specs := []npcSpec{{name: "a"}, {name: "b", model: "explicit"}}
 	defaultEmptyModels(specs, anthropic.ProviderID)
-	if specs[0].model != anthropic.DefaultModel {
-		t.Errorf("empty model = %q, want %q", specs[0].model, anthropic.DefaultModel)
+	// The VOICE default, not the adapter's flagship fallback (#702).
+	if specs[0].model != anthropic.HaikuVoiceModel {
+		t.Errorf("empty model = %q, want %q", specs[0].model, anthropic.HaikuVoiceModel)
 	}
 	if specs[1].model != "explicit" {
 		t.Errorf("explicit model = %q, want it untouched", specs[1].model)

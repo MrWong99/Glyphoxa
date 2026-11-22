@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -569,5 +571,41 @@ func TestSynthesize_ContextCancel_NoTerminalErrChunk(t *testing.T) {
 	}
 	if sawErrChunk {
 		t.Error("a barge-cancelled stream emitted a terminal Err chunk; a caller cut is not a provider failure")
+	}
+}
+
+// TestAudioTags_AreExactlyTheVocabularyThePromptLists pins [elevenlabs.AudioTags]
+// to the instruction the model is given: every listed tag is in the prompt, and
+// the prompt names no bracket tag outside the list. Anything else a model puts
+// in square brackets is out of vocabulary and may be read aloud (#702).
+func TestAudioTags_AreExactlyTheVocabularyThePromptLists(t *testing.T) {
+	prompt := elevenlabs.New("k").AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"})
+	tags := elevenlabs.AudioTags()
+	if len(tags) == 0 {
+		t.Fatal("AudioTags is empty")
+	}
+	for _, tag := range tags {
+		if !strings.Contains(prompt, "["+tag+"]") {
+			t.Errorf("tag %q is in AudioTags but not in the prompt", tag)
+		}
+	}
+	// Every bracketed span in the prompt must be a listed tag (the pause advice
+	// names [pause] and [long pause] a second time, so count distinct spans).
+	named := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\[([^\]]+)\]`).FindAllStringSubmatch(prompt, -1) {
+		named[m[1]] = true
+	}
+	for tag := range named {
+		if !slices.Contains(tags, tag) {
+			t.Errorf("the prompt names [%s], which AudioTags does not list", tag)
+		}
+	}
+	if len(named) != len(tags) {
+		t.Errorf("the prompt names %d distinct bracket tags, AudioTags has %d", len(named), len(tags))
+	}
+	for _, want := range []string{"laughs", "long pause", "clears throat"} {
+		if !slices.Contains(tags, want) {
+			t.Errorf("AudioTags misses %q", want)
+		}
 	}
 }

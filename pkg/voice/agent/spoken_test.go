@@ -126,3 +126,16 @@ func TestCommitSpoken_AnchorTrimmedAway_DropsTheLateCommit(t *testing.T) {
 		t.Fatalf("history = %+v, want [question C, answer to C]", hist)
 	}
 }
+
+// TestScrubSpoken_KeepsTheWordsOfANarratedAction pins the premise of the
+// prompt's stage-direction rule (#702): under a plain persona prompt both Claude
+// Haiku models opened replies with an asterisk-wrapped action ("*wischt sich
+// die Hände an der Schürze ab*"). The scrub removes the asterisks but keeps the
+// words — it cannot tell an action from an emphasized word — so the voice would
+// read the stage direction aloud. Only the prompt can keep it out (see
+// TestSystemPrompt_StageDirectionRule).
+func TestScrubSpoken_KeepsTheWordsOfANarratedAction(t *testing.T) {
+	if got := scrubSpoken("*wischt sich die Hände ab* Was darf's sein?"); got != "wischt sich die Hände ab Was darf's sein?" {
+		t.Errorf("scrubSpoken = %q; the premise of the prompt rule (the words survive the scrub) no longer holds", got)
+	}
+}
