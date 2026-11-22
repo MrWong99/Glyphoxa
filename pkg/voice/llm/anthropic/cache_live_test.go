@@ -34,13 +34,11 @@ type usageSpy struct {
 func (s *usageSpy) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	target, _ := url.Parse(anthropic.DefaultBaseURL)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	director := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		director(r)
-		r.Host = target.Host
-		r.Header.Del("Accept-Encoding") // keep the SSE body readable
-	}
+	proxy := &httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		r.SetURL(target)
+		r.Out.Host = target.Host
+		r.Out.Header.Del("Accept-Encoding") // keep the SSE body readable
+	}}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
