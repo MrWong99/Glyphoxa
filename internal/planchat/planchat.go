@@ -52,6 +52,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/search"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -90,6 +91,17 @@ const (
 // off-session surface refuses with the same error, and two distinct sentinels
 // would compare unequal under errors.Is and silently kill one mapper's branch.
 var ErrAllowanceExhausted = billing.ErrAllowanceExhausted
+
+// ErrUnpricedOnPlatformKey is returned when the Tenant's chat choice names a
+// model without a price row and would run on the Platform Key. The save path
+// refuses that combination (ProviderServer.saveChatModel), but a keyless
+// choice borrows the Tenant's key in that provider's LLM slot dynamically: if
+// that key is no longer there when the chat runs, the same free-text model
+// lands on the Platform Key, where it would be metered at the flat fallback
+// rate instead of its real one. The exchange is refused before anything spends
+// or persists; saving the choice again (a listed model, or a key of its own)
+// clears it.
+var ErrUnpricedOnPlatformKey = errors.New("planchat: the chat model has no price on record and cannot run on the platform key")
 
 // Store is the narrow storage surface the engine needs; *storage.Store
 // satisfies it.
@@ -261,6 +273,16 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		return Result{}, err
 	}
 	providerID, model := sel.Provider, sel.Model
+	// The Platform Key runs priced models only. The save path enforces that for
+	// a chat choice; this is the same rule at call time, because the key rung a
+	// keyless choice resolves to can change after the save
+	// ([ErrUnpricedOnPlatformKey]). Only the chat choice is checked: "same as
+	// voice" and the deployment default are the voice model, governed by the
+	// voice slot's own rule.
+	if sel.Source == llmbuild.ChatSourceChoice && sel.KeySource == llmbuild.ChatKeyPlatform &&
+		!spend.LLMPriced(observe.Provider(providerID), model) {
+		return Result{}, fmt.Errorf("planchat: model %q on %s: %w", model, providerID, ErrUnpricedOnPlatformKey)
+	}
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return Result{}, fmt.Errorf("planchat: build provider: %w", err)

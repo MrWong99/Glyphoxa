@@ -42,8 +42,9 @@ var inviteCodePattern = regexp.MustCompile(`^[A-Za-z0-9-]{2,64}$`)
 // envPlaceholderLast4 is the credentials_last4 the seed writes for a
 // provider_config whose real key lives in ENV/the keyring, not the DB (ADR-0039;
 // matches wirenpc's credPlaceholderLast4). A slot still holding it has no real
-// saved key, so the Configuration screen renders it as "Key needed".
-const envPlaceholderLast4 = "env"
+// saved key, so the Configuration screen renders it as "Key needed". It is
+// [storage.KeylessLast4] under its local name, not a second spelling.
+const envPlaceholderLast4 = storage.KeylessLast4
 
 // providerStore is the narrow Configuration surface ProviderServer needs;
 // *storage.Store satisfies it. Handlers depend on this interface (not the

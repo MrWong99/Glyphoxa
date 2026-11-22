@@ -148,7 +148,11 @@ paste the same Groq key a second time; and nothing led back to "same as voice".
   gate and the thinking display are unchanged.
 - **Priced models only on the Platform Key** (ADR-0036 rule): a chat choice
   that would run on the Platform Key may store no model or a priced one. The
-  ADR-0055 allowance gate before each exchange stays the only spend gate.
+  engine checks the same rule again on every exchange, because a keyless
+  choice borrows the Tenant's key in that provider's LLM slot dynamically: if
+  that key is gone, an unpriced model is refused rather than metered at the
+  flat fallback rate. The ADR-0055 allowance gate before each exchange stays
+  the only spend gate.
 - **The recap tool keeps the voice LLM.** A recap requested inside a chat
   exchange runs through the shared recap engine on the Tenant's voice model;
   it is metered into the same exchange.

@@ -24,7 +24,9 @@ import (
 // EnvPlaceholderLast4 marks a provider_config whose real key lives OUTSIDE the DB
 // (the keyring / an *_API_KEY env var), not in credentials_ciphertext. It matches
 // the seed placeholder wirenpc writes; [ResolveKey] reads it as "-> env fallback".
-const EnvPlaceholderLast4 = "env"
+// One value, one definition: it IS [storage.KeylessLast4], which the chat
+// choice writer stores, so the writer and this reader cannot drift apart.
+const EnvPlaceholderLast4 = storage.KeylessLast4
 
 // ResolveKey resolves ONE component's API key under the hybrid BYOK policy
 // (ADR-0039), moved verbatim from wirenpc's resolveKey (issue #69):

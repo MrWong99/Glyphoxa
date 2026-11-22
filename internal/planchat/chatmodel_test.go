@@ -179,6 +179,51 @@ func TestExchange_ChatChoiceOnPlatformKeyIsEntitlementGated(t *testing.T) {
 	}
 }
 
+// The priced-only rule of the Platform Key is checked again at call time, not
+// only when the choice is saved. A keyless chat choice may hold a free-text
+// model that was accepted against the Tenant's own key in that provider's LLM
+// slot; if that key is gone by the time the chat runs (a stale voice write can
+// turn the row keyless), the choice resolves to the Platform Key, where an
+// unpriced model would be metered at the flat fallback rate. The exchange is
+// refused before anything spends or persists.
+func TestExchange_UnpricedChatChoiceOnThePlatformKeyIsRefused(t *testing.T) {
+	st := newFakeStore(uuid.New())
+	st.tenant[storage.ComponentChatLLM] = storage.ProviderConfig{Provider: "anthropic", Model: "claude-not-priced-9", CredentialsLast4: "env"}
+	// The voice slot of the same provider no longer holds a key of its own.
+	st.tenant[storage.ComponentLLM] = storage.ProviderConfig{Provider: "anthropic", CredentialsLast4: "env"}
+	spy := oneReply()
+	eng, built := chatEngine(st, nil, spy)
+
+	err := exchange(t, eng, st)
+	if !errors.Is(err, ErrUnpricedOnPlatformKey) {
+		t.Fatalf("err = %v, want ErrUnpricedOnPlatformKey", err)
+	}
+	if built.calls != 0 || spy.calls != 0 {
+		t.Errorf("a provider was built (%d) or called (%d) for a refused exchange", built.calls, spy.calls)
+	}
+	if len(st.messages) != 0 {
+		t.Errorf("refused exchange persisted %d messages", len(st.messages))
+	}
+}
+
+// The same free-text model on the Tenant's OWN key is the Tenant's business:
+// the call-time check only guards the Platform Key.
+func TestExchange_UnpricedChatChoiceOnTheTenantsOwnKeyRuns(t *testing.T) {
+	cipher := testCipher(t)
+	st := newFakeStore(uuid.New())
+	st.tenant[storage.ComponentChatLLM] = storage.ProviderConfig{Provider: "anthropic", Model: "claude-not-priced-9", CredentialsLast4: "env"}
+	st.tenant[storage.ComponentLLM] = sealed(t, cipher, "anthropic", "", "test-anthropic-own-key-5151")
+	spy := oneReply()
+	eng, built := chatEngine(st, cipher, spy)
+
+	if err := exchange(t, eng, st); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if built.key != "test-anthropic-own-key-5151" || spy.models[0] != "claude-not-priced-9" {
+		t.Errorf("built with key %q, model %q; want the Tenant's own key and the free-text model", built.key, spy.models[0])
+	}
+}
+
 // No chat row: the chat follows voice — its provider, its model, its key — and
 // keeps the 4096-token cap off Anthropic.
 func TestExchange_NoChatRowFollowsVoice(t *testing.T) {

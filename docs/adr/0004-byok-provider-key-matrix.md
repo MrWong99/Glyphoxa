@@ -109,7 +109,8 @@ ADR-0062 (amendment of the same date) is the record; what changes here:
   chat row only; saving it never changes the voice LLM.
 - **`DeleteProviderConfig`** (slot `chat` only, for now) is the "back to same
   as voice" action and removes a chat-only key with the row. It is the natural
-  home of a key-delete for the other slots later; whoever adds that must
-  re-check a chat row holding an unpriced model, which would otherwise land on
-  the Platform Key.
-- **Priced models only on the Platform Key** applies to the chat choice too.
+  home of a key-delete for the other slots later. A chat row holding an
+  unpriced model whose borrowed key disappears does not run on the Platform
+  Key: the engine checks the rule again on every exchange.
+- **Priced models only on the Platform Key** applies to the chat choice too,
+  when the choice is saved and again when the chat runs.

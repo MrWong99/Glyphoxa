@@ -106,9 +106,10 @@ type ProviderConfig struct {
 }
 
 // KeylessLast4 is the credentials_last4 of a Provider Config that stores NO key
-// of its own: the key resolution reads it as "use another key" (llmbuild
-// spells the same value EnvPlaceholderLast4; storage cannot import it). A
-// keyless chat choice ([Store.SaveChatLLMChoice]) carries it.
+// of its own: the key resolution reads it as "use another key". This is the
+// one definition; llmbuild.EnvPlaceholderLast4 and the rpc package's name for
+// it are aliases of it (storage cannot import either). A keyless chat choice
+// ([Store.SaveChatLLMChoice]) carries it.
 const KeylessLast4 = "env"
 
 // ChatLLMChoice is the input to [Store.SaveChatLLMChoice]: the Tenant's
