@@ -218,6 +218,20 @@ type Config struct {
 	// the binary turns it ON unless GLYPHOXA_STT_STREAMING says otherwise
 	// (cmd/glyphoxa sttStreaming, default on since #702).
 	STTStreaming bool
+	// STTKeyterms biases the recognizer towards the names at the table (#701,
+	// ADR-0042 amendment 2026-11-22): the Cast NPCs' names and aliases, the
+	// Butler's and the player characters' are sent as keyterms on BOTH STT
+	// transports, so "Flo" stops arriving as "So" or "Flow". The list is built
+	// once per Voice Session ([sessionSTTTerms]); a roster edit applies on the next
+	// session. The zero value is OFF — the pre-#701 requests, which is what tests
+	// and rigs that build a Config get — while the binary turns it ON unless
+	// GLYPHOXA_STT_KEYTERMS says otherwise (cmd/glyphoxa sttKeyterms).
+	STTKeyterms bool
+	// STTLanguageHint pins the recognizer to the Campaign Language (language_code
+	// on both transports) instead of letting it detect the language per utterance.
+	// OFF by default and in the binary (GLYPHOXA_STT_LANGUAGE_HINT opts in): a
+	// table that mixes languages needs auto-detection.
+	STTLanguageHint bool
 	// Bus, when non-nil, is the process-wide voiceevent.Bus the orchestrator
 	// publishes onto INSTEAD of a fresh per-cycle bus (issue #73, ADR-0014).
 	// The web tier injects ONE bus so the SSE transcript relay can subscribe
@@ -266,6 +280,14 @@ type Config struct {
 	// mid-session appears on the next session (re)start, exactly the roster's
 	// refresh cadence. Empty (the env-only Run path) renders no section.
 	playerCharacters []string
+	// playerCharacterTerms are those characters' names AND aliases
+	// ([playerCharacterTerms]) — the player half of the STT keyterm list (#701).
+	// Loaded with playerCharacters, on the same once-per-session cadence.
+	playerCharacterTerms []string
+	// sttHints are this Voice Session's recognition hints, resolved once by [Run]
+	// from the fields above ([resolveSTTHints]) so every reconnect cycle of the
+	// session sends the same list on both STT transports.
+	sttHints sttHints
 
 	// Memory is the NPC memory recaller injected into every NPC's Agent loop
 	// (#122, ADR-0011/0042): it fills the Hot Context memory slot each turn. The

@@ -102,6 +102,9 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	for _, c := range chars {
 		cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
 	}
+	// Their names and aliases are also names said at the table: the player half
+	// of the STT keyterm list (#701).
+	cfg.playerCharacterTerms = playerCharacterTerms(chars)
 
 	// Rollover tape (#306, ADR-0051): armed ONLY when the Campaign opted in
 	// (tape_armed). Seed it with the individually-consenting Speakers; agent speech
@@ -123,6 +126,28 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	return Run(ctx, cfg)
+}
+
+// sessionConfig resolves what a Voice Session fixes ONCE at its start and every
+// reconnect cycle then shares: the env-only path's hardcoded NPC when no roster
+// was loaded, and the recognition hints both STT transports send (#701). The
+// keyterm count is logged here, once; the terms themselves — the players' names —
+// only at debug level.
+func sessionConfig(cfg Config, log *slog.Logger) Config {
+	if len(cfg.npcs) == 0 {
+		cfg.npcs = []npcSpec{hardcodedNPC()}
+	}
+	var dropped int
+	cfg.sttHints, dropped = resolveSTTHints(cfg)
+	if cfg.STTKeyterms {
+		log.Info("stt keyterms: recognizer biased towards the names at the table",
+			"terms", len(cfg.sttHints.terms), "dropped", dropped)
+		log.Debug("stt keyterms list", "terms", cfg.sttHints.terms)
+	}
+	if cfg.sttHints.language != "" {
+		log.Info("stt language hint: recognizer pinned to the campaign language", "language", cfg.sttHints.language)
+	}
+	return cfg
 }
 
 // logVoiceGaps emits an ERROR for every loaded NPC whose Voice has an empty
@@ -192,14 +217,11 @@ func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
 // runnable and the wiring complete without the native dependency. Build with
 // -tags "opus dave" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
-	if len(cfg.npcs) == 0 {
-		cfg.npcs = []npcSpec{hardcodedNPC()}
-	}
-
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	cfg = sessionConfig(cfg, log)
 
 	// Config validation is fatal: a bad guild/channel ID can never succeed, so
 	// retrying would crashloop slowly. Parse before the reconnect loop so only
