@@ -51,6 +51,13 @@ type StreamManager struct {
 	// [WithStreamSpeakerID].
 	speakerID string
 
+	// terms and language are the recognition hints every session this manager
+	// dials is opened with ([stt.StreamConfig.Terms], [stt.StreamConfig.Language]).
+	// Fixed at construction ([WithStreamTerms], [WithStreamLanguage]) because a
+	// provider fixes them per connection; empty sends none.
+	terms    []string
+	language string
+
 	// sleep/now are the deterministic-test seams, copied from wirenpc.reconnectPolicy:
 	// sleep blocks for d or until ctx is cancelled; now stamps the commit-latency
 	// span and partial timestamps. Production uses real time.
@@ -132,6 +139,9 @@ var authClassCodes = map[string]bool{
 	"auth_error":       true,
 	"unaccepted_terms": true,
 	"quota_exceeded":   true,
+	// A refused session configuration (#701: a keyterm list past the provider's
+	// limits) is refused again by every redial.
+	"invalid_request": true,
 }
 
 // StreamManagerOption configures a [StreamManager] at construction.
@@ -205,6 +215,21 @@ func WithStreamDialOnDemand() StreamManagerOption {
 // "" (the single-lane MVP path).
 func WithStreamSpeakerID(id string) StreamManagerOption {
 	return func(m *StreamManager) { m.speakerID = id }
+}
+
+// WithStreamTerms sets the words every session this manager dials should expect —
+// the names at the table, by priority ([stt.StreamConfig.Terms], #701). The
+// batch recognizer the manager falls back to must be given the same list where it
+// is built, or a fallback utterance is transcribed without it.
+func WithStreamTerms(terms []string) StreamManagerOption {
+	return func(m *StreamManager) { m.terms = terms }
+}
+
+// WithStreamLanguage pins every session this manager dials to one language
+// ([stt.StreamConfig.Language]). Empty — the default — lets the provider detect
+// it, which is what a mixed-language table needs.
+func WithStreamLanguage(code string) StreamManagerOption {
+	return func(m *StreamManager) { m.language = code }
 }
 
 // NewStreamManager wires rec as the streaming recognizer. rec must be non-nil;
@@ -393,6 +418,8 @@ func (m *StreamManager) dial(ctx context.Context) *stt.StreamError {
 	h := &dialHandle{}
 	s, err := m.rec.OpenStream(ctx, stt.StreamConfig{
 		SampleRate: streamSampleRate,
+		Language:   m.language,
+		Terms:      m.terms,
 		OnPartial:  m.onPartial,
 		OnClosed:   func(cause error) { m.sessionClosed(h, cause) },
 	})
