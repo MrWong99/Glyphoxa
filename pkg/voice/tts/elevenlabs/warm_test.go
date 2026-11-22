@@ -102,13 +102,13 @@ func TestSynthesize_LookaheadPair_StaysWarm(t *testing.T) {
 		}
 		wg.Wait()
 	}
-	pair()
-	first := conns.Load()
-	for range 3 {
+	// A pair that happens not to overlap needs one connection, one that does
+	// needs two; with both kept idle no round ever dials a third.
+	for range 4 {
 		pair()
 	}
-	if got := conns.Load(); got != first {
-		t.Errorf("connections grew from %d to %d across look-ahead pairs; idle connections are being dropped", first, got)
+	if got := conns.Load(); got > 2 {
+		t.Errorf("%d connections dialled across look-ahead pairs, want at most 2; idle connections are being dropped", got)
 	}
 }
 
