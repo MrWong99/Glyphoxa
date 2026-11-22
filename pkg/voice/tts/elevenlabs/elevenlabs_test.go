@@ -95,21 +95,71 @@ func TestNew_ExplicitKeyWinsOverEnv(t *testing.T) {
 	}
 }
 
-func TestAudioMarkupPrompt_NonEmpty_DescribesV3Tags(t *testing.T) {
-	c := elevenlabs.New("k")
-	got := c.AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"})
-	if got == "" {
-		t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022")
-	}
-	// Spot-check that the prompt actually teaches v3 conventions rather
-	// than a generic "be expressive" line.
-	for _, must := range []string{"eleven_v3", "square brackets", "[whispers]", "[pause]", "[laughs]"} {
-		if !strings.Contains(got, must) {
-			t.Errorf("AudioMarkupPrompt missing required hint %q\nfull prompt: %s", must, got)
+// voiceOnModel is an ElevenLabs voice whose Settings name model ("" = none).
+func voiceOnModel(t *testing.T, model string) tts.Voice {
+	t.Helper()
+	v := tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"}
+	if model != "" {
+		raw, err := json.Marshal(elevenlabs.Settings{ModelID: model})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
+		v.Settings = raw
 	}
-	if strings.Contains(got, "SSML") && !strings.Contains(got, "NOT SSML") {
-		t.Errorf("AudioMarkupPrompt should disclaim SSML, not encourage it; got %q", got)
+	return v
+}
+
+// TestAudioMarkupPrompt_TagModels_TeachTheTagVocabulary: the v3/v4 families
+// (the default eleven_v4_turbo included) get the bracketed audio-tag vocabulary,
+// worded without naming one model, and pauses are taught as tags — never SSML
+// <break>, which eleven_v4_turbo silently strips (#702, measured).
+func TestAudioMarkupPrompt_TagModels_TeachTheTagVocabulary(t *testing.T) {
+	c := elevenlabs.New("k")
+	for _, model := range []string{"", elevenlabs.ModelV4Turbo, elevenlabs.ModelV3, "eleven_v4"} {
+		t.Run("model="+model, func(t *testing.T) {
+			got := c.AudioMarkupPrompt(voiceOnModel(t, model))
+			if got == "" {
+				t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022")
+			}
+			for _, must := range []string{"square brackets", "[whispers]", "[pause]", "[laughs]", "NOT SSML"} {
+				if !strings.Contains(got, must) {
+					t.Errorf("AudioMarkupPrompt missing required hint %q\nfull prompt: %s", must, got)
+				}
+			}
+			for _, banned := range []string{"eleven_v3", "eleven_v4", "<break"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("AudioMarkupPrompt contains %q; the tag wording must be model-neutral and never teach SSML breaks\nfull prompt: %s", banned, got)
+				}
+			}
+		})
+	}
+}
+
+// TestAudioMarkupPrompt_NonTagModels_PlainProse: a voice pinned to a model with
+// no audio-tag support (flash, multilingual v2, turbo v2.5) must not be taught
+// tags — they would be read aloud — and its per-voice tag preferences are moot.
+func TestAudioMarkupPrompt_NonTagModels_PlainProse(t *testing.T) {
+	c := elevenlabs.New("k")
+	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_turbo_v2_5"} {
+		t.Run(model, func(t *testing.T) {
+			s := elevenlabs.Settings{ModelID: model, SuggestedAudioTags: []string{"confident"}}
+			raw, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := c.AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v", Settings: raw})
+			if got == "" {
+				t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022 (\"use plain prose only\")")
+			}
+			if !strings.Contains(got, "plain") {
+				t.Errorf("non-tag model prompt should ask for plain prose; got %q", got)
+			}
+			for _, banned := range []string{"[whispers]", "[pause]", "[laughs]", "[confident]", "<break"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("non-tag model prompt teaches %q; tags are read aloud on %s\nfull prompt: %s", banned, model, got)
+				}
+			}
+		})
 	}
 }
 

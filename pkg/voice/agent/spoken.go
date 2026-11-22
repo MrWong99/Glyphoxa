@@ -23,8 +23,10 @@ const spokenOutputRule = "Everything you write is spoken aloud by a voice, never
 
 // spokenOutputMarkupExemption is appended to [spokenOutputRule] when the Voice
 // has an audio-markup instruction (ADR-0022), so the "no markup" rule does not
-// read as forbidding the bracketed audio tags the next block asks for.
-const spokenOutputMarkupExemption = " The audio tags described below are the one exception."
+// read as forbidding the bracketed audio tags the next block asks for. It is
+// worded conditionally because the block may instead say "plain prose only" (a
+// voice on an ElevenLabs model without tag support, #702).
+const spokenOutputMarkupExemption = " Any audio tags the voice instructions below allow are the one exception."
 
 // scrubSpoken removes markdown formatting from one sentence on its way to TTS
 // (O12): emphasis markers, heading and bullet markers at a line start,
@@ -37,7 +39,7 @@ const spokenOutputMarkupExemption = " The audio tags described below are the one
 // a marker is dropped only where markdown would treat it as formatting:
 //
 //   - Square brackets are never touched: "[cheerfully]" is an intentional
-//     ElevenLabs v3 audio tag (ADR-0022).
+//     ElevenLabs v3/v4 audio tag (ADR-0022).
 //   - A "*" or "_" run is emphasis only where it OPENS on a word (after a
 //     space or at the start: "**Wichtig", "*lacht") or CLOSES one — and a closer
 //     counts only if an opener came before it on the line, or if it follows
