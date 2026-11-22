@@ -20,7 +20,6 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
-
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
@@ -32,9 +31,8 @@ import (
 // t.Fatal*; they do I/O only and every assertion runs on the test goroutine.
 
 const (
-	ttdPath     = "/v1/text-to-dialogue/stream-input"
-	wsRecvWait  = 2 * time.Second
-	wsQuietWait = 150 * time.Millisecond
+	ttdPath    = "/v1/text-to-dialogue/stream-input"
+	wsRecvWait = 2 * time.Second
 )
 
 // ttdDial is what one websocket handshake carried.
