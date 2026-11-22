@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -47,11 +48,13 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	keys := providerKeys{llm: "L-llm-key", stt: "S-stt-key", tts: "T-tts-key"}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, cleanup, err := buildConversation(conversationDeps{
-		bus:   voiceevent.NewBus(),
-		log:   log,
-		npcs:  []npcSpec{hardcodedNPC()},
-		synth: ttseleven.New(""),
-		keys:  keys,
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           log,
+		npcs:          []npcSpec{hardcodedNPC()},
+		synth:         ttseleven.New(""),
+		keys:          keys,
 	})
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
