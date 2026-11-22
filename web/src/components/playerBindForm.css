@@ -1,0 +1,158 @@
+/* PlayerBindForm — the shared Character bind form (Players view and the Session
+ * screen's in-flight bind affordance).
+ *
+ * The form's layout is stated here in full, under its own root, and imported by
+ * the component itself. Its rules used to live only in the Campaign screen's
+ * stylesheet, which the Session screen's chunk does not load — so the form the
+ * Session screen opens looked right only if the GM had visited the Campaign
+ * screen first. Every selector carries the root (.gx-playerform) so these rules
+ * also outrank the older single-class copies in campaign.css, whichever of the
+ * two sheets the browser happens to load last.
+ */
+
+.gx-playerform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-playerform .gx-playerform__aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-xs);
+}
+.gx-playerform .gx-playerform__alias-remove {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--spacing-xs);
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gx-playerform .gx-playerform__alias-add,
+.gx-playerform .gx-playerform__bind {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+.gx-playerform .gx-playerform__alias-add > .gx-field,
+.gx-playerform .gx-playerform__bind > .gx-field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+/* The voice-channel picker: opens in place under its button. */
+.gx-playerform .gx-playerform__picker-anchor {
+  position: relative;
+}
+.gx-playerform .gx-playerform__picker {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  top: calc(100% + var(--spacing-xs));
+  right: 0;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 2 * var(--spacing-md)));
+  max-height: 280px;
+  margin: 0;
+  padding: var(--spacing-xs);
+  overflow-y: auto;
+  list-style: none;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.gx-playerform .gx-playerform__picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  text-align: left;
+  cursor: pointer;
+}
+.gx-playerform .gx-playerform__picker-item:hover:not(:disabled) {
+  background: var(--surface-card-hover);
+}
+.gx-playerform .gx-playerform__picker-item[aria-current="true"] {
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+}
+/* A member who already has a Character: listed, named, not pickable. */
+.gx-playerform .gx-playerform__picker-item:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+}
+.gx-playerform .gx-playerform__picker-item:disabled .gx-avatar {
+  opacity: 0.55;
+}
+.gx-playerform .gx-playerform__picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-playerform .gx-playerform__picker-taken {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+
+/* "Where do I find a Discord user ID?" — folded, because it is needed once. */
+.gx-playerform .gx-playerform__help {
+  font-size: var(--body-xs);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+}
+.gx-playerform .gx-playerform__help > summary {
+  width: fit-content;
+  border-radius: var(--radius-xs);
+  color: var(--text-link);
+  cursor: pointer;
+}
+.gx-playerform .gx-playerform__help > summary:hover {
+  color: var(--text-link-hover);
+}
+.gx-playerform .gx-playerform__help > ol {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin: var(--spacing-xs) 0 0;
+  padding-left: var(--spacing-lg);
+  color: var(--text-default);
+}
+
+.gx-playerform .gx-playerform__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.gx-playerform .gx-playerform__error {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-danger);
+}
+
+@media (pointer: coarse) {
+  .gx-playerform .gx-playerform__picker-item {
+    min-height: var(--target-coarse);
+  }
+}

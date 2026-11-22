@@ -58,7 +58,7 @@ export const en = {
 
   // ── Maps: pins ───────────────────────────────────────────────────────────
   "maps.pinGestureHint":
-    "Click a pin for its details. Drag it to move it, or focus it and use the arrow keys (Shift for bigger steps), then press Enter. Hold Ctrl and scroll to zoom.",
+    "Click a pin for its details. Drag it to move it, or focus it and use the arrow keys (Shift for bigger steps), then press Enter. Hold Ctrl (⌘ on a Mac) and scroll to zoom.",
   "maps.pinCardAria": "Pin: {name}",
   "maps.pinNoBody": "This entry has no description yet.",
   "maps.pinLabelLabel": "Label on this map",
@@ -87,6 +87,59 @@ export const en = {
   "maps.suggestNeedsEntry":
     "Link the Location entry this map depicts and “Suggest placements” can propose what belongs here.",
   "maps.suggestLinkEntry": "Open Map settings",
+
+  // ── Players ──────────────────────────────────────────────────────────────
+  "players.loading": "Loading players…",
+  "players.loadErrorTitle": "Couldn't load your players",
+  "players.emptyTitle": "No players yet",
+  "players.emptyDesc":
+    "Add each player's character and link it to their Discord account. The transcript then names who is speaking, and your NPCs know who they are talking to.",
+  "players.inVoice": "in voice",
+  "players.notInVoice": "not in voice",
+  "players.maskedUser": "Discord user {tail}",
+  "players.unlinkedTitle": "In voice, not yet linked",
+  "players.unlinkedHint":
+    "They are in the voice channel but have no character, so the transcript can't name them.",
+  "players.createCharacter": "Create character",
+  "players.createCharacterFor": "Create character for {name}",
+  "players.newPlayerFor": "A character for {name}",
+  "players.badgeLinkedTip": "This player has signed in to Glyphoxa with their Discord account.",
+  "players.badgeDiscordIdTip":
+    "Known only by their Discord user ID. Their Discord name shows here while they are in the voice channel.",
+  "players.memberTaken": "plays {name}",
+  "players.idTaken": "This Discord user already plays {name}. One Discord user can have one character per campaign.",
+  "players.bindHintNoVoice":
+    "Paste the player's Discord user ID. Once they are in the voice channel you can pick them from a list instead.",
+  "players.idHelpSummary": "Where do I find a Discord user ID?",
+  "players.idHelpStep1": "In Discord, open User Settings, go to Advanced and turn on Developer Mode.",
+  "players.idHelpStep2": "Right-click the player (on a phone, press and hold) and choose Copy User ID.",
+  "players.idHelpStep3": "Paste it here. It is a long number, like 123456789012345678.",
+
+  // ── Prep boards ──────────────────────────────────────────────────────────
+  "boards.loading": "Loading boards…",
+  "boards.loadErrorTitle": "Couldn't load the boards",
+  "boards.emptyTitle": "No boards yet",
+  "boards.boardEmpty": "Nothing on this board yet. Add entries below.",
+  "boards.actionsAria": "Actions for board {name}",
+  "boards.rename": "Rename",
+  "boards.renameTitle": "Click to rename",
+  "boards.renameAria": "New name for board {name}",
+  "boards.renameSave": "Save name",
+  "boards.renameCancel": "Cancel renaming",
+  "boards.duplicate": "Duplicate",
+  "boards.duplicated": "Duplicated “{name}”",
+  "boards.copyName": "{name} (copy)",
+  "boards.moveUpAria": "Move {name} up",
+  "boards.moveDownAria": "Move {name} down",
+  "boards.reorderHint": "Alt + ↑ / ↓ moves an entry.",
+  "boards.addEntry": "Add entry…",
+  "boards.addEntryAria": "Add an entry to {name}",
+  "boards.addEntrySearch": "Search entries…",
+  "boards.addEntryAllOn": "Every entry is already on this board.",
+  "boards.addEntryNoEntries": "No wiki entries yet",
+  "boards.newBoard": "New board",
+  "boards.nodeEmptyHint":
+    "A board is a shortlist for one session. Name one and this entry goes on it. Your NPCs never see boards.",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -133,7 +186,7 @@ export const de: Record<keyof typeof en, string> = {
   "maps.zoomReadoutAria": "Zoom {pct} %",
 
   "maps.pinGestureHint":
-    "Klicke einen Pin an, um seine Details zu sehen. Zieh ihn, um ihn zu verschieben — oder fokussiere ihn, nutze die Pfeiltasten (Umschalt für größere Schritte) und drück Enter. Mit Strg und Mausrad zoomst du.",
+    "Klicke einen Pin an, um seine Details zu sehen. Zieh ihn, um ihn zu verschieben — oder fokussiere ihn, nutze die Pfeiltasten (Umschalt für größere Schritte) und drück Enter. Mit Strg (⌘ am Mac) und Mausrad zoomst du.",
   "maps.pinCardAria": "Pin: {name}",
   "maps.pinNoBody": "Dieser Eintrag hat noch keine Beschreibung.",
   "maps.pinLabelLabel": "Beschriftung auf dieser Karte",
@@ -163,4 +216,58 @@ export const de: Record<keyof typeof en, string> = {
   "maps.suggestNeedsEntry":
     "Verknüpfe den Ort-Eintrag, den diese Karte zeigt — dann kann „Platzierungen vorschlagen“ vorschlagen, was hierher gehört.",
   "maps.suggestLinkEntry": "Karteneinstellungen öffnen",
+
+  "players.loading": "Spieler werden geladen…",
+  "players.loadErrorTitle": "Deine Spieler konnten nicht geladen werden",
+  "players.emptyTitle": "Noch keine Spieler",
+  "players.emptyDesc":
+    "Lege für jeden Spieler den Charakter an und verknüpfe ihn mit dem Discord-Konto. Dann zeigt die Mitschrift, wer spricht, und deine NPCs wissen, mit wem sie reden.",
+  "players.inVoice": "im Sprachkanal",
+  "players.notInVoice": "nicht im Sprachkanal",
+  "players.maskedUser": "Discord-Nutzer {tail}",
+  "players.unlinkedTitle": "Im Sprachkanal, noch nicht verknüpft",
+  "players.unlinkedHint":
+    "Sie sind im Sprachkanal, haben aber keinen Charakter — die Mitschrift kann sie deshalb nicht benennen.",
+  "players.createCharacter": "Charakter erstellen",
+  "players.createCharacterFor": "Charakter erstellen für {name}",
+  "players.newPlayerFor": "Ein Charakter für {name}",
+  "players.badgeLinkedTip": "Dieser Spieler hat sich mit seinem Discord-Konto bei Glyphoxa angemeldet.",
+  "players.badgeDiscordIdTip":
+    "Nur über die Discord-Nutzer-ID bekannt. Der Discord-Name erscheint hier, solange der Spieler im Sprachkanal ist.",
+  "players.memberTaken": "spielt {name}",
+  "players.idTaken":
+    "Dieser Discord-Nutzer spielt bereits {name}. Ein Discord-Nutzer kann pro Kampagne einen Charakter haben.",
+  "players.bindHintNoVoice":
+    "Füge die Discord-Nutzer-ID des Spielers ein. Sobald er im Sprachkanal ist, kannst du ihn stattdessen aus einer Liste wählen.",
+  "players.idHelpSummary": "Wo finde ich eine Discord-Nutzer-ID?",
+  "players.idHelpStep1":
+    "Öffne in Discord die Benutzereinstellungen, geh zu „Erweitert“ und schalte den Entwicklermodus ein.",
+  "players.idHelpStep2":
+    "Klicke mit der rechten Maustaste auf den Spieler (am Handy: gedrückt halten) und wähle „Nutzer-ID kopieren“.",
+  "players.idHelpStep3": "Füge sie hier ein. Es ist eine lange Zahl, etwa 123456789012345678.",
+
+  "boards.loading": "Boards werden geladen…",
+  "boards.loadErrorTitle": "Die Boards konnten nicht geladen werden",
+  "boards.emptyTitle": "Noch keine Boards",
+  "boards.boardEmpty": "Noch nichts auf diesem Board. Füge unten Einträge hinzu.",
+  "boards.actionsAria": "Aktionen für Board {name}",
+  "boards.rename": "Umbenennen",
+  "boards.renameTitle": "Zum Umbenennen klicken",
+  "boards.renameAria": "Neuer Name für Board {name}",
+  "boards.renameSave": "Namen speichern",
+  "boards.renameCancel": "Umbenennen abbrechen",
+  "boards.duplicate": "Duplizieren",
+  "boards.duplicated": "„{name}“ dupliziert",
+  "boards.copyName": "{name} (Kopie)",
+  "boards.moveUpAria": "{name} nach oben verschieben",
+  "boards.moveDownAria": "{name} nach unten verschieben",
+  "boards.reorderHint": "Alt + ↑ / ↓ verschiebt einen Eintrag.",
+  "boards.addEntry": "Eintrag hinzufügen…",
+  "boards.addEntryAria": "Eintrag zu {name} hinzufügen",
+  "boards.addEntrySearch": "Einträge suchen…",
+  "boards.addEntryAllOn": "Alle Einträge sind schon auf diesem Board.",
+  "boards.addEntryNoEntries": "Noch keine Wiki-Einträge",
+  "boards.newBoard": "Neues Board",
+  "boards.nodeEmptyHint":
+    "Ein Board ist eine Merkliste für eine Session. Gib einem einen Namen, und dieser Eintrag kommt darauf. Deine NPCs sehen Boards nie.",
 };

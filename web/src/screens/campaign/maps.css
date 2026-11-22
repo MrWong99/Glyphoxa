@@ -30,6 +30,11 @@
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: thin;
+  /* A scroll container clips what pokes out of it, the focus outline of the
+   * first and last segment included: give it room, and take the room back so
+   * the strip still lines up with the map below. */
+  padding: var(--spacing-xs);
+  margin: calc(-1 * var(--spacing-xs));
 }
 .gx-maps .gx-maps__strip .gx-seg {
   max-width: none;
@@ -414,9 +419,8 @@
   list-style: none;
 }
 @media (min-width: 1100px) {
+  /* Beside the map: as tall as the map's frame may get, scrolling inside. */
   .gx-maps .gx-maps__tray {
-    position: sticky;
-    top: var(--spacing-md);
     max-height: clamp(320px, 65vh, 820px);
   }
   .gx-maps .gx-maps__tray-list {
