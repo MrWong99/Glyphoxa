@@ -48,3 +48,18 @@ type ToolSyntaxError struct {
 // log or a substring check on the underlying error text sees exactly what the
 // vendor returned.
 func (e *ToolSyntaxError) Error() string { return e.Msg }
+
+// RefusalError is a provider-side decline: the request completed, but a safety
+// classifier refused to answer it, so there is no reply (Anthropic stop_reason
+// "refusal", #702). Like [ToolSyntaxError] it is a DISTINCT type that the
+// generic retry predicates do not match — the same prompt is declined again —
+// so a caller can tell "the provider declined this turn" from a transport fault
+// with errors.As instead of reading the message. Msg is the adapter's text,
+// naming the refusal category when the provider gave one.
+type RefusalError struct {
+	Op  string
+	Msg string
+}
+
+// Error returns Msg verbatim.
+func (e *RefusalError) Error() string { return e.Msg }

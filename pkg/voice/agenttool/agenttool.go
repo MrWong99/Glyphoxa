@@ -490,10 +490,16 @@ func (a providerAdapter) attempt(ctx context.Context, messages []tool.Message, t
 			done = true
 		case llm.EventError:
 			// A tool_use_failed is surfaced as a typed ToolSyntaxError so complete can
-			// retry/fallback; any other class stays a plain error (propagates).
-			if ev.ErrClass == llm.ErrClassToolSyntax {
+			// retry/fallback; an unclassified failure stays a plain error (propagates).
+			switch ev.ErrClass {
+			case llm.ErrClassToolSyntax:
 				streamErr = &providererr.ToolSyntaxError{Op: "agenttool.complete", Msg: ev.Err}
-			} else {
+			case llm.ErrClassRefusal:
+				// A provider decline (#702): typed so the caller can tell it from a
+				// transport fault. It takes no retry path — the tool-syntax policy
+				// keys on its own type, and the same prompt is declined again.
+				streamErr = &providererr.RefusalError{Op: "agenttool.complete", Msg: ev.Err}
+			default:
 				streamErr = errors.New(ev.Err)
 			}
 		}

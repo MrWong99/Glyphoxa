@@ -454,7 +454,7 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		case "message_start":
 			// Stash the prompt-token count; message_delta later carries output_tokens.
 			if ev.Message != nil && ev.Message.Usage != nil {
-				inputTokens = ev.Message.Usage.InputTokens
+				inputTokens = ev.Message.Usage.promptTokens()
 			}
 		case "content_block_start":
 			switch ev.ContentBlock.Type {
@@ -529,6 +529,16 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 					return
 				}
 			}
+			if ev.Delta.StopReason == stopReasonRefusal {
+				// A safety-classifier decline: HTTP 200, no text. It ends the stream
+				// as a classified error, not as a reply that happens to be empty.
+				msg := "anthropic: the model refused the request (stop_reason refusal"
+				if c := ev.Delta.StopDetails.Category; c != "" {
+					msg += ", category " + c
+				}
+				send(llm.StreamEvent{Type: llm.EventError, Err: msg + ")", ErrClass: llm.ErrClassRefusal})
+				return
+			}
 			if ev.Delta.StopReason != "" {
 				if !send(llm.StreamEvent{Type: llm.EventDone, StopReason: ev.Delta.StopReason}) {
 					return
@@ -569,6 +579,10 @@ type sseEvent struct {
 		StopReason  string `json:"stop_reason"`
 		Thinking    string `json:"thinking"`
 		Signature   string `json:"signature"`
+		// StopDetails is set with stop_reason "refusal": which classifier declined.
+		StopDetails struct {
+			Category string `json:"category"`
+		} `json:"stop_details"`
 	} `json:"delta"`
 	// Message carries the prompt-token usage on message_start; Usage carries the
 	// output-token usage on message_delta (#127). Both are pointers so an absent
@@ -580,9 +594,27 @@ type sseEvent struct {
 	Usage *usageWire `json:"usage"`
 }
 
+// stopReasonRefusal is the stop_reason of a safety-classifier decline.
+const stopReasonRefusal = "refusal"
+
 // usageWire is the Anthropic usage object as it appears on message_start
-// (input_tokens) and message_delta (output_tokens).
+// (the prompt-side counts) and message_delta (output_tokens).
 type usageWire struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+
+	// With prompt caching the API reports cached prompt tokens HERE and not in
+	// input_tokens: the tokens written to the cache and the tokens read from it.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// promptTokens is every prompt token the request was billed for: the uncached
+// ones plus those written to and read from the prompt cache. The adapter sets
+// no cache_control itself, but a gateway (WithBaseURL) or a later change may,
+// and input_tokens alone then under-counts the prompt about 35-fold (#702).
+// Summing prices a cache read at the full input rate — the spend table has one
+// rate per direction — which over-estimates, the safe side for a spend cap.
+func (u *usageWire) promptTokens() int {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }

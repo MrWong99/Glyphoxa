@@ -250,6 +250,14 @@ const (
 	// malformed pseudo-XML instead of a native tool call. It is the one class the
 	// #398 retry path acts on.
 	ErrClassToolSyntax ErrClass = "tool_syntax"
+
+	// ErrClassRefusal marks a provider-side decline: the request completed (HTTP
+	// 200) but a safety classifier refused to answer it, so there is no reply
+	// text (Anthropic stop_reason "refusal", #702). It is terminal and never
+	// retried — the same prompt is declined again — and it is an error rather
+	// than an empty completion so a consumer cannot mistake it for an Agent that
+	// chose to say nothing.
+	ErrClassRefusal ErrClass = "refusal"
 )
 
 // StreamEvent is one item in a [Provider] completion stream. The active fields
