@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,13 @@ type Client struct {
 	apiKey  string
 	baseURL string
 	http    *http.Client
+
+	// ws is the dialogue-socket pool of the opt-in websocket transport
+	// ([WithTransport]); nil on the default HTTP transport.
+	ws *wsPool
+	// httpSynth records that a sentence went over HTTP, so [Client.Warm] on a
+	// websocket client knows the HTTP pool is still worth warming.
+	httpSynth atomic.Bool
 }
 
 // Option mutates a [Client] during construction.
@@ -126,6 +134,13 @@ const warmTimeout = 5 * time.Second
 // synthesize, and cassette tiers must never touch the network.
 func (c *Client) Warm(ctx context.Context) error {
 	if c.apiKey == "" {
+		return nil
+	}
+	// Websocket transport: a dialogue socket is bound to one voice, so there is
+	// nothing to pre-dial until a voice has spoken. From then on Warm lines up
+	// (or keeps alive) an idle socket for the most recently used voices, in the
+	// background, and skips the HEAD unless some sentence went over HTTP.
+	if c.ws != nil && c.ws.warm() && !c.httpSynth.Load() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, warmTimeout)
