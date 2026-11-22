@@ -38,7 +38,7 @@ func TestKeyterms_Sanitises(t *testing.T) {
 		// A term the recognizer cannot hear — punctuation only, or nothing but
 		// invisible characters — biases nothing and is the likeliest thing for the
 		// provider to refuse.
-		{"drops a term with no letter or digit", []string{"???", "-", "​", "…", "Flo", "R2-D2", "42"}, []string{"Flo", "R2-D2", "42"}},
+		{"drops a term with no letter or digit", []string{"???", "-", "\u200b", "…", "Flo", "R2-D2", "42"}, []string{"Flo", "R2-D2", "42"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
