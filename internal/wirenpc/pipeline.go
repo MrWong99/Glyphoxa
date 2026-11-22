@@ -303,11 +303,7 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	sttStage := orchestrator.NewSTT(bus, recognizer,
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),
 		orchestrator.WithSTTRetry(retryPolicy))
-	// tts_total + tts-stage provider health (#125): ElevenLabs is the wired TTS
-	// provider (ADR-0039), so the spans are labelled elevenlabs.
-	ttsStage := orchestrator.NewTTS(bus, d.synth,
-		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs),
-		orchestrator.WithTTSRetry(retryPolicy))
+	ttsStage := orchestrator.NewTTS(bus, d.synth, ttsStageOptions(stageMetrics, retryPolicy)...)
 	streamMgr := buildStreamManager(recognizer, d.sttStreaming, stageMetrics, log)
 	// Per-lane streaming STT (ADR-0042 × ADR-0050): each Speaker Lane opens its own
 	// stream (stamping its SpeakerID on partials) under a concurrency cap, so
@@ -557,5 +553,19 @@ func cycleConversationDeps(bus *voiceevent.Bus, log *slog.Logger, cfg Config, sy
 		// there while the current one plays, so that sentence's TTS startup burns
 		// during playback instead of opening an audible gap (#626).
 		lookahead: pump,
+	}
+}
+
+// ttsStageOptions are the live TTS stage's options. tts_total + tts-stage
+// provider health (#125): ElevenLabs is the wired TTS provider (ADR-0039), so the
+// spans are labelled elevenlabs. Usage metering stamps each sentence with the
+// model the adapter synthesizes it on (#702, ttseleven.ModelOf — the voice's
+// model_id or the adapter default), so the spend meter and the Usage Ledger
+// price eleven_v4_turbo at its half-credit rate.
+func ttsStageOptions(rec observe.StageRecorder, retryPolicy retry.Policy) []orchestrator.TTSOption {
+	return []orchestrator.TTSOption{
+		orchestrator.WithTTSMetrics(rec, observe.ProviderElevenLabs),
+		orchestrator.WithTTSModel(ttseleven.ModelOf),
+		orchestrator.WithTTSRetry(retryPolicy),
 	}
 }

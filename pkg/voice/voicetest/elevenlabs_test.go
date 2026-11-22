@@ -26,7 +26,7 @@ func TestLiveElevenLabsVoice_DefaultsToGeorgePreset(t *testing.T) {
 		t.Fatalf("VoiceID = %q, want %q (public preset)", v.VoiceID, georgePreset)
 	}
 	if len(v.Settings) == 0 {
-		t.Fatalf("Settings is empty; want pre-populated DefaultV3Settings payload")
+		t.Fatalf("Settings is empty; want pre-populated DefaultSettings payload")
 	}
 	if !json.Valid(v.Settings) {
 		t.Fatalf("Settings is not valid JSON: %q", string(v.Settings))
@@ -60,7 +60,7 @@ func TestLiveElevenLabsVoice_SettingsCarriesDefaultV3Payload(t *testing.T) {
 	if err := json.Unmarshal(v.Settings, &got); err != nil {
 		t.Fatalf("decode Settings: %v", err)
 	}
-	want := elevenlabs.DefaultV3Settings()
+	want := elevenlabs.DefaultSettings()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Settings round-trip mismatch:\n got: %#v\nwant: %#v", got, want)
 	}

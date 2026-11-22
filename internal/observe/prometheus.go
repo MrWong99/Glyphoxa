@@ -610,8 +610,11 @@ func (r *PrometheusRecorder) LLMTokens(p Provider, _ string, inputTokens, output
 	r.llmTokens.WithLabelValues(string(p), "output").Add(float64(outputTokens))
 }
 
-// TTSCharacters records characters submitted to a TTS synthesizer (#127).
-func (r *PrometheusRecorder) TTSCharacters(p Provider, chars int) {
+// TTSCharacters records characters submitted to a TTS synthesizer (#127). The
+// model argument is DROPPED here, as in [PrometheusRecorder.LLMTokens]: it exists
+// for the per-model spend meter and Usage Ledger (#702); model is never a
+// Prometheus label (ADR-0032).
+func (r *PrometheusRecorder) TTSCharacters(p Provider, _ string, chars int) {
 	r.ttsCharacters.WithLabelValues(string(p)).Add(float64(chars))
 }
 

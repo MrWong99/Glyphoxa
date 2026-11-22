@@ -24,7 +24,7 @@ const defaultLiveElevenLabsVoiceID = "JBFqnCBsd6RMkjVDRZzb"
 // against the ElevenLabs API under `-tags=record`. The VoiceID resolves from
 // [LiveElevenLabsVoiceIDEnv] when set, otherwise [defaultLiveElevenLabsVoiceID].
 //
-// Settings is pre-populated with [elevenlabs.DefaultV3Settings] so the
+// Settings is pre-populated with [elevenlabs.DefaultSettings] so the
 // JSON-round-trip path is exercised in record mode (and not just in unit
 // tests). In default replay mode VoiceID is unobserved (TTS cassettes pin
 // sentences only per ADR-0021), so the helper is safe to use unconditionally.
@@ -36,7 +36,7 @@ func LiveElevenLabsVoice() tts.Voice {
 	if id == "" {
 		id = defaultLiveElevenLabsVoiceID
 	}
-	settings, _ := json.Marshal(elevenlabs.DefaultV3Settings())
+	settings, _ := json.Marshal(elevenlabs.DefaultSettings())
 	return tts.Voice{
 		ProviderID: elevenlabs.ProviderID,
 		VoiceID:    id,

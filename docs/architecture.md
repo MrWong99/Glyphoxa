@@ -214,6 +214,22 @@ An addressed Agent assembles **Hot Context** (recent Transcript + retrieved
 Transcript Chunks + KG facts + Persona), calls its LLM, and streams TTS
 sentence-at-a-time (`pkg/voice/agent/sentence.go`).
 
+Each sentence is one HTTP `POST /v1/text-to-speech/{voice}/stream` on the voice's
+model — `eleven_v4_turbo` by default (ADR-0023 amendment 2026-11-22). The live
+wiring pre-warms the connection on connect and barge, and on a speech start
+after 20 s without pool activity (`internal/wirenpc/ttswarm.go`), so a reply's
+first sentence does not dial.
+Provider first audio, measured 2026-11-22 from the dev box (German lines):
+
+| TTS path | First audio |
+|---|---|
+| `eleven_v4_turbo`, warm connection (default) | ~140 ms |
+| `eleven_v4_turbo`, cold connection (TCP+TLS) | ~185–230 ms |
+| `eleven_v3`, warm connection (pre-#702 default) | ~550–680 ms |
+
+That is the `glyphoxa_voice_tts_ttfb_seconds` stage of `response_latency`; STT
+(~1.5 s batch, §2.1) and the LLM's first sentence dominate the rest.
+
 A sentence counts as **delivered** when its last Opus frame is forwarded to
 Discord. At turn end — natural or barged — the Transcript utterance commits **only
 delivered sentences**. Zero delivered ⇒ the utterance is not logged at all. This

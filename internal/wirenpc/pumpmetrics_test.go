@@ -11,7 +11,7 @@ import (
 type nopUsageSink struct{}
 
 func (nopUsageSink) LLMTokens(observe.Provider, string, int, int)    {}
-func (nopUsageSink) TTSCharacters(observe.Provider, int)             {}
+func (nopUsageSink) TTSCharacters(observe.Provider, string, int)     {}
 func (nopUsageSink) STTAudioSeconds(observe.Provider, time.Duration) {}
 
 // TestPumpRecorderOptions_OnlyWhenRecording pins the #606 wiring: the pump gets a

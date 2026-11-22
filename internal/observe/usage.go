@@ -13,7 +13,7 @@ import "time"
 // StageRecorder value satisfies UsageSink for the fan-out.
 type UsageSink interface {
 	LLMTokens(provider Provider, model string, inputTokens, outputTokens int)
-	TTSCharacters(provider Provider, chars int)
+	TTSCharacters(provider Provider, model string, chars int)
 	STTAudioSeconds(provider Provider, d time.Duration)
 }
 
@@ -41,9 +41,9 @@ func (t teeRecorder) LLMTokens(provider Provider, model string, inputTokens, out
 	t.sink.LLMTokens(provider, model, inputTokens, outputTokens)
 }
 
-func (t teeRecorder) TTSCharacters(provider Provider, chars int) {
-	t.StageRecorder.TTSCharacters(provider, chars)
-	t.sink.TTSCharacters(provider, chars)
+func (t teeRecorder) TTSCharacters(provider Provider, model string, chars int) {
+	t.StageRecorder.TTSCharacters(provider, model, chars)
+	t.sink.TTSCharacters(provider, model, chars)
 }
 
 func (t teeRecorder) STTAudioSeconds(provider Provider, d time.Duration) {

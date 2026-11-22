@@ -23,7 +23,7 @@ func TestBargeConfirmWindow_NonZero(t *testing.T) {
 // the outbound codec path stays encode-only (Discord's Opus encoder runs at
 // 48 kHz; matching the TTS rate avoids a resampler on the live demo). It also
 // guards that the Settings blob round-trips as valid ElevenLabs Settings and
-// keeps the conversational eleven_v3 model — a regression to the 24 kHz default
+// keeps the low-latency eleven_v4_turbo default model (#702) — a regression to the 24 kHz default
 // (or a malformed blob) would silently re-introduce the resampler / break
 // synthesis.
 func TestNPCVoice_Emits48kPCM(t *testing.T) {
@@ -38,8 +38,8 @@ func TestNPCVoice_Emits48kPCM(t *testing.T) {
 	if s.OutputFormat != "pcm_48000" {
 		t.Errorf("output_format = %q, want pcm_48000 (encode-only outbound path)", s.OutputFormat)
 	}
-	if s.ModelID != ttseleven.ModelV3 {
-		t.Errorf("model_id = %q, want the conversational %q default to be preserved", s.ModelID, ttseleven.ModelV3)
+	if s.ModelID != ttseleven.ModelV4Turbo {
+		t.Errorf("model_id = %q, want the %q default (#702)", s.ModelID, ttseleven.ModelV4Turbo)
 	}
 }
 

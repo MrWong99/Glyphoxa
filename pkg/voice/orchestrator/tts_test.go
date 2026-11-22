@@ -242,6 +242,33 @@ func TestTTS_Dispatch_MetersSubmittedCharacters(t *testing.T) {
 		}
 	})
 
+	t.Run("meters under the voice's synthesis model", func(t *testing.T) {
+		// #702: the spend meter and Usage Ledger price TTS per model, so the stage
+		// stamps each metered sentence with the model WithTTSModel resolves for the
+		// voice it synthesized.
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		var resolvedFor tts.Voice
+		stage := orchestrator.NewTTS(h.Bus, closedChanSynth{},
+			orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs),
+			orchestrator.WithTTSModel(func(v tts.Voice) string {
+				resolvedFor = v
+				return "eleven_v4_turbo"
+			}))
+
+		voice := voicetest.LiveElevenLabsVoice()
+		if err := stage.Dispatch(context.Background(), "Hällo.", voice); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		want := ttsCharsRec{provider: observe.ProviderElevenLabs, model: "eleven_v4_turbo", chars: 6}
+		if got := spy.characters(); len(got) != 1 || got[0] != want {
+			t.Errorf("tts_characters = %v, want one %+v", got, want)
+		}
+		if resolvedFor.VoiceID != voice.VoiceID {
+			t.Errorf("model resolved for voice %q, want the dispatched voice %q", resolvedFor.VoiceID, voice.VoiceID)
+		}
+	})
+
 	t.Run("start error meters nothing", func(t *testing.T) {
 		h := voicetest.New(t)
 		spy := &metricsSpy{}

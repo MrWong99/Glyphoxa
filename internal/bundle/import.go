@@ -3,6 +3,7 @@ package bundle
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // ImportResult reports what an [Import] persisted. AgentIDs maps each bundle
@@ -725,6 +727,34 @@ func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b 
 	return nil
 }
 
+// upgradeLegacyVoiceModel moves an ElevenLabs voice pinned to eleven_v3 onto the
+// adapter's current default model (#702), exactly as migration 00059 moved the
+// stored voices: a bundle exported before the switch carries the old default on
+// every voice (no UI ever picked a model), and importing it verbatim would bring
+// the ~4x slower first audio back. Only Settings.model_id changes; any other
+// voice — another model, another provider, {} — is returned byte-identical. raw
+// has already passed [storage.VoiceFromJSON].
+func upgradeLegacyVoiceModel(raw json.RawMessage) json.RawMessage {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return raw
+	}
+	var provider string
+	if err := json.Unmarshal(envelope["ProviderID"], &provider); err != nil || provider != ttseleven.ProviderID {
+		return raw
+	}
+	settings, changed := ttseleven.UpgradeLegacyModel(envelope["Settings"])
+	if !changed {
+		return raw
+	}
+	envelope["Settings"] = settings
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
 // coerceTerminalStatus maps an imported Voice Session status to a terminal one: a
 // 'failed' row keeps its status (a distinct terminal state, ADR-0053 §6 verbatim
 // spirit), anything else — including a stale 'running' from a crashed source —
@@ -750,13 +780,14 @@ func mergeButler(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *A
 	if _, err := storage.VoiceFromJSON(a.Voice); err != nil {
 		return fmt.Errorf("%w: butler voice: %w", ErrInvalidBundle, err)
 	}
+	voice := upgradeLegacyVoiceModel(a.Voice)
 	if _, err := tx.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:                    butler.ID,
 		CampaignID:            campaignID,
 		Name:                  a.Name,
 		Title:                 a.Title,
 		Persona:               a.Persona,
-		Voice:                 a.Voice,
+		Voice:                 voice,
 		VoiceProviderConfigID: uuid.NullUUID{},
 		LLMProviderConfigID:   uuid.NullUUID{},
 		AddressOnly:           a.AddressOnly,
@@ -794,13 +825,14 @@ func createCharacterAgent(ctx context.Context, tx ImportStore, campaignID uuid.U
 	if _, err := storage.VoiceFromJSON(a.Voice); err != nil {
 		return fmt.Errorf("%w: agent %q voice: %w", ErrInvalidBundle, a.Name, err)
 	}
+	voice := upgradeLegacyVoiceModel(a.Voice)
 	agentID, err := tx.CreateAgent(ctx, storage.NewAgent{
 		CampaignID:            campaignID,
 		Role:                  storage.AgentRoleCharacter,
 		Name:                  a.Name,
 		Title:                 a.Title,
 		Persona:               a.Persona,
-		Voice:                 a.Voice,
+		Voice:                 voice,
 		VoiceProviderConfigID: uuid.NullUUID{},
 		LLMProviderConfigID:   uuid.NullUUID{},
 		AddressOnly:           a.AddressOnly,

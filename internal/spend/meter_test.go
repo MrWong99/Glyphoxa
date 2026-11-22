@@ -97,7 +97,7 @@ func TestMeterUnknownModelWarnsOnce(t *testing.T) {
 // capture points both fold into the same accumulator.
 func TestMeterTTSAndSTTAccumulate(t *testing.T) {
 	m := NewMeter(Caps{}, nil, nil, nil)
-	m.TTSCharacters(observe.ProviderElevenLabs, 1000)
+	m.TTSCharacters(observe.ProviderElevenLabs, "eleven_v3", 1000)
 	m.STTAudioSeconds(observe.ProviderElevenLabs, time.Hour)
 	want := ttsPricePer1kChars[observe.ProviderElevenLabs] + sttPricePerHour[observe.ProviderElevenLabs]
 	approx(t, m.Status().EstimatedUSD, want)

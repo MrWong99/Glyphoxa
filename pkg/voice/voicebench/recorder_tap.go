@@ -133,7 +133,7 @@ func (t *recorderTap) TurnOutcome(observe.TurnOutcome, observe.TurnReason) {}
 // Usage meters (#127) are a spend signal, not a latency one; the bench does not
 // harvest them, so they are no-ops here (the tap records only latency stages).
 func (t *recorderTap) LLMTokens(observe.Provider, string, int, int)    {}
-func (t *recorderTap) TTSCharacters(observe.Provider, int)             {}
+func (t *recorderTap) TTSCharacters(observe.Provider, string, int)     {}
 func (t *recorderTap) STTAudioSeconds(observe.Provider, time.Duration) {}
 
 // MalformedToolGen (#398) is a provider-flake counter, not a latency stage, so the
