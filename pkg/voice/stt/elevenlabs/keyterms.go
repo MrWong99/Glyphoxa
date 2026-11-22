@@ -11,6 +11,13 @@ import (
 // and the session never starts. The batch endpoint documents looser list limits
 // (1000 terms) but bills a 20 s minimum per request past 100 terms, so one cap
 // serves both paths.
+//
+// Measured at the boundary 2026-11-22 (ADR-0042): realtime counts the total in
+// characters and accepts exactly 1000; batch enforces the per-term limits with an
+// HTTP 400 (50 characters; 4 spaces, i.e. 5 whitespace-separated words) and has
+// no total. Nothing that passes [Keyterms] was refused by either. Should the
+// provider refuse a list all the same, the client stops sending keyterms rather
+// than fail ([Client.refuseKeyterms]).
 const (
 	// MaxKeyterms is the most terms either path sends.
 	MaxKeyterms = 50

@@ -105,8 +105,10 @@ func commonWordsFor(lang string) map[string]struct{} {
 // spelling that routes as an exact name. A multi-word term is never an everyday
 // word, and a language without a list has none.
 //
-// The list was built for the fuzzy tiers, which is the limit of this view: words
-// below the fuzzy rune floor are not on it (see the note above).
+// The list was built for the fuzzy tiers, which is the limit of this view: it is
+// incomplete below the fuzzy rune floor (see the note above). English lists no
+// word that short and German only a dozen function words ("mal", "weg", "von"),
+// so most short names that are themselves words are NOT reported.
 func IsCommonWord(lang, term string) bool {
 	tokens := tokenize(term)
 	if len(tokens) != 1 {
