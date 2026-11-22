@@ -15,7 +15,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -277,8 +276,6 @@ func newSession(cand Candidate, script string, turnTimeout time.Duration) *sessi
 	s.reply = replier.ReplyStream()
 	return s
 }
-
-var _ tts.Synthesizer = (*ttseleven.Client)(nil)
 
 // run plays one turn and returns its record.
 func (s *session) run(ctx context.Context, index int, turn Turn) TurnResult {
