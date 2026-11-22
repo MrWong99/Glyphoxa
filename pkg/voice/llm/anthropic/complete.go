@@ -142,7 +142,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if err != nil {
 		return nil, fmt.Errorf("anthropic.Complete: build request: %w", err)
 	}
-	httpReq.Header.Set("x-api-key", c.apiKey)
+	setAuth(httpReq.Header, c.apiKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "text/event-stream")
@@ -159,6 +159,24 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	ch := make(chan llm.StreamEvent)
 	go streamEvents(ctx, resp.Body, ch)
 	return ch, nil
+}
+
+// oauthTokenPrefix marks an Anthropic OAuth access token (the `ant` CLI login),
+// as opposed to an API key ("sk-ant-api…").
+const oauthTokenPrefix = "sk-ant-oat"
+
+// setAuth sets the credential header for key. An API key travels as x-api-key;
+// an OAuth access token is only accepted as "Authorization: Bearer" (sent as
+// x-api-key the API answers 401 "invalid x-api-key"). No beta header is needed
+// for the token on anthropic-version 2023-06-01 (verified live, #702). Such a
+// token expires within hours and only the CLI refreshes it, so it suits a bench
+// run or a developer machine, not a deployment's static key.
+func setAuth(h http.Header, key string) {
+	if strings.HasPrefix(key, oauthTokenPrefix) {
+		h.Set("Authorization", "Bearer "+key)
+		return
+	}
+	h.Set("x-api-key", key)
 }
 
 // toWireMessages splits the [llm] conversation into the Anthropic system string
