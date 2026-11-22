@@ -328,40 +328,88 @@ func TestMediaWatchdogCounterResetRestartsTheGrace(t *testing.T) {
 
 func TestMediaWatchdogRunLifecycle(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancelCause(context.Background())
+	// The cycle the watchdog ends. run is handed a DIFFERENT context, one that
+	// outlives the verdict: run returning below is then run's own "fired, nothing
+	// left to watch" exit, not the cancellation it has just caused.
+	cycle, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+
 	ticks := make(chan time.Time)
 	var mu sync.Mutex
-	ml := gxvoice.MediaLiveness{Packets: 1, Echoes: 5}
 	now := watchBase
+	reads := 0                        // clock reads the watchdog has made
+	readSig := make(chan struct{}, 1) // wakes awaitReads; one token is enough
 	w := newMediaWatchdog(func() (gxvoice.MediaLiveness, bool) {
-		mu.Lock()
-		defer mu.Unlock()
-		return ml, true
+		return gxvoice.MediaLiveness{Packets: 1, Echoes: 5}, true
 	}, cancel, nil, nil, slog.New(slog.DiscardHandler), "g1", 45*time.Second)
-	w.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	w.now = func() time.Time {
+		mu.Lock()
+		at := now
+		reads++
+		mu.Unlock()
+		select {
+		case readSig <- struct{}{}:
+		default:
+		}
+		return at
+	}
 	w.ticks = ticks
 
 	done := make(chan struct{})
-	go func() { w.run(ctx); close(done) }()
+	go func() { w.run(runCtx); close(done) }()
+
+	// awaitReads blocks until the watchdog has read the clock n times. The clock
+	// may only move once the watchdog has taken the reading it is owed: run reads
+	// it on its own goroutine AFTER receiving a tick, so a test that advanced the
+	// clock for the next tick straight after delivering this one could hand this
+	// tick's check the next tick's time — and the stall would never be observed.
+	awaitReads := func(n int) {
+		t.Helper()
+		timeout := time.After(5 * time.Second)
+		for {
+			mu.Lock()
+			got := reads
+			mu.Unlock()
+			if got >= n {
+				return
+			}
+			select {
+			case <-readSig:
+			case <-timeout:
+				t.Fatalf("the watchdog read the clock %d times, want %d", got, n)
+			}
+		}
+	}
+	// tick advances the clock, delivers one tick and waits for the watchdog to
+	// read the clock for it.
+	tick := func(d time.Duration) {
+		t.Helper()
+		mu.Lock()
+		now = now.Add(d)
+		at, before := now, reads
+		mu.Unlock()
+		select {
+		case ticks <- at:
+		case <-time.After(5 * time.Second):
+			t.Fatal("run did not take the tick")
+		}
+		awaitReads(before + 1)
+	}
 
 	// Healthy tick, then everything freezes past the window: run must fire on
 	// its injected ticks and exit after firing (it fires at most once).
-	tick := func(d time.Duration) {
-		mu.Lock()
-		now = now.Add(d)
-		mu.Unlock()
-		ticks <- now
-	}
-	tick(10 * time.Second)
-	tick(50 * time.Second)
+	awaitReads(1)          // run's start stamp is base, not a later reading
+	tick(10 * time.Second) // base+10s: counters seen moving, the stall clock starts
+	tick(50 * time.Second) // base+60s: 50s with nothing inbound >= the 45s window
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not exit after firing")
 	}
-	if cause := context.Cause(ctx); !errors.Is(cause, errMediaStall) {
+	if cause := context.Cause(cycle); !errors.Is(cause, errMediaStall) {
 		t.Fatalf("cause = %v, want errMediaStall", cause)
 	}
 }

@@ -100,9 +100,9 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	if err != nil {
 		return fmt.Errorf("wirenpc: load player characters: %w", err)
 	}
-	for _, c := range chars {
-		cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
-	}
+	// One assignment feeds both consumers: [sessionConfig] derives the prompt's
+	// name list AND the player half of the STT keyterm list (#701) from it.
+	cfg.players = chars
 
 	// Rollover tape (#306, ADR-0051): armed ONLY when the Campaign opted in
 	// (tape_armed). Seed it with the individually-consenting Speakers; agent speech
@@ -124,6 +124,41 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	return Run(ctx, cfg)
+}
+
+// serveCycle is the connect-and-serve seam (like newSTT/newDiscordClient): [Run]
+// calls it once per reconnect cycle with the session's resolved Config. A test
+// swaps it to see the Config a real Run/RunFromDB hands its cycles without
+// dialling Discord. Production always uses [connectAndServe].
+var serveCycle = connectAndServe
+
+// sessionConfig resolves what a Voice Session fixes ONCE at its start and every
+// reconnect cycle then shares: the env-only path's hardcoded NPC when no roster
+// was loaded, the player-character names the prompt lists (from the loaded
+// characters), and the recognition hints both STT transports send (#701). The
+// keyterm count is logged here, once; the terms themselves — the players' names —
+// only at debug level.
+func sessionConfig(cfg Config, log *slog.Logger) Config {
+	if len(cfg.npcs) == 0 {
+		cfg.npcs = []npcSpec{hardcodedNPC()}
+	}
+	if len(cfg.players) > 0 {
+		cfg.playerCharacters = make([]string, 0, len(cfg.players))
+		for _, c := range cfg.players {
+			cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
+		}
+	}
+	var dropped int
+	cfg.sttHints, dropped = resolveSTTHints(cfg)
+	if cfg.STTKeyterms {
+		log.Info("stt keyterms: recognizer biased towards the names at the table",
+			"terms", len(cfg.sttHints.terms), "dropped", dropped)
+		log.Debug("stt keyterms list", "terms", cfg.sttHints.terms)
+	}
+	if cfg.sttHints.language != "" {
+		log.Info("stt language hint: recognizer pinned to the campaign language", "language", cfg.sttHints.language)
+	}
+	return cfg
 }
 
 // logVoiceGaps emits an ERROR for every loaded NPC whose Voice has an empty
@@ -193,19 +228,17 @@ func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
 // runnable and the wiring complete without the native dependency. Build with
 // -tags "opus dave" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
-	if len(cfg.npcs) == 0 {
-		cfg.npcs = []npcSpec{hardcodedNPC()}
-	}
-	// The env-only path arrives with no resolved LLM; RunFromDB arrives resolved
-	// (a no-op here). Either way every cycle below sees a concrete provider and
-	// model, never the "" that used to mean "whatever the adapter defaults to".
-	if cfg.llmProviderID == "" {
-		cfg = cfg.withSessionLLM(nil)
-	}
-
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	cfg = sessionConfig(cfg, log)
+	// The env-only path arrives with no resolved LLM; RunFromDB arrives resolved
+	// (a no-op here). Either way every cycle below sees a concrete provider and
+	// model, never the "" that used to mean "whatever the adapter defaults to".
+	// Resolved after sessionConfig so the hardcoded NPC it adds is covered too.
+	if cfg.llmProviderID == "" {
+		cfg = cfg.withSessionLLM(nil)
 	}
 
 	// Config validation is fatal: a bad guild/channel ID can never succeed, so
@@ -236,7 +269,7 @@ func Run(ctx context.Context, cfg Config) error {
 	var disclosed sessionOnce
 	runErr := runWithReconnect(ctx, log, defaultReconnectPolicy(),
 		countCycles(cfg.ConnectCycle, func(ctx context.Context, connected func()) error {
-			return connectAndServe(ctx, cfg, guild, channel, log, connected, &disclosed)
+			return serveCycle(ctx, cfg, guild, channel, log, connected, &disclosed)
 		}))
 	// A non-nil return is a FATAL, terminal failure (a classified *FatalError):
 	// publish the terminal connection.state{failed} with its readable reason so the

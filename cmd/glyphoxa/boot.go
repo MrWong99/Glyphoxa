@@ -382,6 +382,34 @@ func sttStreaming(getenv func(string) string) bool {
 	return true
 }
 
+// sttKeyterms reports whether the recognizer is biased towards the names at the
+// table (#701, ADR-0042 amendment 2026-11-22): the Voice Session's Cast, Butler
+// and player-character names are sent to the STT provider as keyterms on both
+// transports. ON by default; GLYPHOXA_STT_KEYTERMS is the off-switch, parsed like
+// GLYPHOXA_STT_STREAMING — only an explicit falsy spelling turns it off. Off
+// sends the pre-#701 requests and drops the provider's keyterm surcharge.
+func sttKeyterms(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_KEYTERMS"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// sttLanguageHint reports whether the recognizer is pinned to the Campaign
+// Language (language_code on both STT transports) instead of detecting the
+// language per utterance. OFF by default — a table may mix languages — and only
+// an explicit truthy GLYPHOXA_STT_LANGUAGE_HINT ("1"/"true"/"yes"/"on", any case,
+// trimmed) turns it on: a typo must not silently stop a bilingual table being
+// understood.
+func sttLanguageHint(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_LANGUAGE_HINT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // ttsTransport reads GLYPHOXA_TTS_TRANSPORT (#702): how the ElevenLabs adapter
 // synthesizes. Blank or "http" is the per-sentence HTTP stream (the default);
 // "ws" opts sentences of the v3/v4 model families into pooled Text-to-Dialogue
@@ -395,11 +423,17 @@ func ttsTransport(getenv func(string) string) (ttseleven.Transport, error) {
 // applyVoiceEnv puts the voice loop's env knobs, shared by voice and all mode,
 // onto the session Config the process starts its Voice Sessions from:
 //   - Streaming STT (ADR-0042) is on by default; GLYPHOXA_STT_STREAMING=0 is the
-//     off-switch back to the batch STT path.
+//     off-switch back to the batch STT path ([sttStreaming]).
+//   - STT keyterms (#701) are on by default; GLYPHOXA_STT_KEYTERMS=0 stops
+//     sending the names at the table to the recognizer ([sttKeyterms]).
+//   - GLYPHOXA_STT_LANGUAGE_HINT=1 opts into pinning the recognizer to the
+//     Campaign Language ([sttLanguageHint]).
 //   - The synthesis transport (#702) is an opt-in; the default is the HTTP path,
 //     byte-for-byte. An unknown value is logged and ignored.
 func applyVoiceEnv(cfg *wirenpc.Config, getenv func(string) string, log *slog.Logger) {
 	cfg.STTStreaming = sttStreaming(getenv)
+	cfg.STTKeyterms = sttKeyterms(getenv)
+	cfg.STTLanguageHint = sttLanguageHint(getenv)
 	transport, err := ttsTransport(getenv)
 	if err != nil {
 		log.Warn("ignoring GLYPHOXA_TTS_TRANSPORT, synthesizing over HTTP", "err", err)

@@ -149,6 +149,10 @@ type conversationDeps struct {
 	// sttStreaming selects the streaming-STT transport (ADR-0042); false is the
 	// byte-for-byte batch path. See [Config.STTStreaming].
 	sttStreaming bool
+	// sttHints are the Voice Session's recognition hints (#701): the names at the
+	// table as keyterms, and optionally the Campaign Language. buildSTT hands them
+	// to both STT transports. The zero value sends none. See [Config.STTKeyterms].
+	sttHints sttHints
 
 	// memory / facts / directives fill the per-turn Hot Context slots on every
 	// NPC's Agent loop (#122/#126/ADR-0059); nil disables the slot (the prompt
@@ -301,20 +305,9 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	// per-stage deadlines stay the hard bound the loop never extends.
 	retryPolicy := retry.Policy{Log: log}
 
-	// One recognizer instance backs both the batch stage and — when streaming is
-	// enabled and the adapter supports it — the stream manager (the ElevenLabs
-	// Client is both a batch stt.Recognizer and a stt.StreamingRecognizer, ADR-0042).
-	var recognizer stt.Recognizer = newSTT(d.keys.stt)
-	sttStage := orchestrator.NewSTT(bus, recognizer,
-		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),
-		orchestrator.WithSTTRetry(retryPolicy))
+	sttWiring := buildSTT(d, stageMetrics, retryPolicy)
+	sttStage, streamMgr, laneStreamFactory := sttWiring.stage, sttWiring.stream, sttWiring.laneStreams
 	ttsStage := orchestrator.NewTTS(bus, d.synth, ttsStageOptions(stageMetrics, retryPolicy)...)
-	streamMgr := buildStreamManager(recognizer, d.sttStreaming, stageMetrics, log)
-	// Per-lane streaming STT (ADR-0042 × ADR-0050): each Speaker Lane opens its own
-	// stream (stamping its SpeakerID on partials) under a concurrency cap, so
-	// concurrent sockets track concurrent speakers, not channel size. Nil unless
-	// streaming is on AND the adapter streams — the byte-for-byte batch default.
-	laneStreamFactory := buildLaneStreamFactory(recognizer, d.sttStreaming, stageMetrics, log)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
 	// NPC carries its own grants (spec.grants — from its tool_agent_grant rows on
@@ -417,6 +410,42 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	return conv, roster, cleanup, nil
 }
 
+// sttWiring is the STT half of one cycle's pipeline: the batch stage, the default
+// lane's stream manager and the per-Speaker-Lane manager factory. The last two
+// are nil on the batch-only path.
+type sttWiring struct {
+	stage       *orchestrator.STT
+	stream      *orchestrator.StreamManager
+	laneStreams func(speakerID string) *orchestrator.StreamManager
+}
+
+// buildSTT assembles the STT half of the pipeline. ONE recognizer instance backs
+// both the batch stage and — when streaming is enabled and the adapter supports
+// it — the stream managers (the ElevenLabs Client is both a batch stt.Recognizer
+// and a stt.StreamingRecognizer, ADR-0042).
+//
+// It is a named function because the session's recognition hints (d.sttHints,
+// #701) cross here THREE times — into the batch client at construction and into
+// both stream-manager builders — and dropping any one has no other observable
+// consequence: everything still transcribes, the names are just misheard again on
+// that transport.
+func buildSTT(d conversationDeps, stageMetrics observe.StageRecorder, retryPolicy retry.Policy) sttWiring {
+	// The client gets the session's logger for the one thing it decides alone: to
+	// carry on without keyterms after the provider refused the list (fail open).
+	var recognizer stt.Recognizer = newSTT(d.keys.stt, append(d.sttHints.clientOptions(), stteleven.WithLogger(d.log))...)
+	return sttWiring{
+		stage: orchestrator.NewSTT(d.bus, recognizer,
+			orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),
+			orchestrator.WithSTTRetry(retryPolicy)),
+		stream: buildStreamManager(recognizer, d.sttStreaming, stageMetrics, d.log, d.sttHints.streamOptions()...),
+		// Per-lane streaming STT (ADR-0042 × ADR-0050): each Speaker Lane opens its
+		// own stream (stamping its SpeakerID on partials) under a concurrency cap, so
+		// concurrent sockets track concurrent speakers, not channel size. Nil unless
+		// streaming is on AND the adapter streams — the byte-for-byte batch default.
+		laneStreams: buildLaneStreamFactory(recognizer, d.sttStreaming, stageMetrics, d.log, d.sttHints.streamOptions()...),
+	}
+}
+
 // engineFactory builds the per-NPC engine constructor buildConversation hands the
 // Roster: one shared Groq provider + Registry, one engine per NPC differing only
 // by GrantSet and model. It is a named function (not an inline closure) so the
@@ -454,8 +483,10 @@ func engineFactory(provider llm.Provider, reg *tool.Registry, language string, s
 // keeping it a small pure function lets the gating be unit-tested without standing
 // up the whole Silero VAD pipeline. The provider label is elevenlabs (the only
 // streaming STT adapter in the MVP matrix, ADR-0039). log receives the manager's
-// dial-failure / reconnect / session-ended lines.
-func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) *orchestrator.StreamManager {
+// dial-failure / reconnect / session-ended lines. hints are the session's
+// recognition hints as manager options ([sttHints.streamOptions]); every session
+// the manager dials is opened with them.
+func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger, hints ...orchestrator.StreamManagerOption) *orchestrator.StreamManager {
 	if !streaming {
 		return nil
 	}
@@ -468,14 +499,15 @@ func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics 
 		}
 		return nil
 	}
-	return orchestrator.NewStreamManager(sr,
+	return orchestrator.NewStreamManager(sr, append([]orchestrator.StreamManagerOption{
 		orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs),
 		orchestrator.WithStreamLogger(log),
 		// This is the DEFAULT (unattributed) lane. Inbound Discord frames are
 		// speaker-stamped, so real speech lands on the per-speaker lanes and this
 		// lane normally never speaks: dial it on its first speech rather than hold
 		// a kept-alive realtime connection open for the whole Voice Session (#702).
-		orchestrator.WithStreamDialOnDemand())
+		orchestrator.WithStreamDialOnDemand(),
+	}, hints...)...)
 }
 
 // defaultStreamMaxLanes caps the per-lane streaming-STT sockets of one Voice
@@ -508,7 +540,7 @@ func streamMaxLanes() int {
 // batch default). It is the lane analogue of [buildStreamManager]: each lane's
 // manager stamps its SpeakerID on partials (ADR-0050). The provider label is
 // elevenlabs (the only streaming STT adapter in the MVP matrix, ADR-0039).
-func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) func(speakerID string) *orchestrator.StreamManager {
+func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger, hints ...orchestrator.StreamManagerOption) func(speakerID string) *orchestrator.StreamManager {
 	if !streaming {
 		return nil
 	}
@@ -517,10 +549,11 @@ func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetr
 		return nil
 	}
 	return func(speakerID string) *orchestrator.StreamManager {
-		return orchestrator.NewStreamManager(sr,
+		return orchestrator.NewStreamManager(sr, append([]orchestrator.StreamManagerOption{
 			orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs),
 			orchestrator.WithStreamLogger(log),
-			orchestrator.WithStreamSpeakerID(speakerID))
+			orchestrator.WithStreamSpeakerID(speakerID),
+		}, hints...)...)
 	}
 }
 
@@ -554,6 +587,7 @@ func cycleConversationDeps(bus *voiceevent.Bus, log *slog.Logger, cfg Config, sy
 		keys:             cfg.keys,
 		llmProviderID:    cfg.llmProviderID,
 		sttStreaming:     cfg.STTStreaming,
+		sttHints:         cfg.sttHints,
 		memory:           cfg.Memory,
 		facts:            cfg.Facts,
 		directives:       cfg.Directives,
