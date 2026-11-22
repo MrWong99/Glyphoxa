@@ -46,17 +46,23 @@ func newSlotEmbedder(slots int) *slotEmbedder {
 }
 
 func (s *slotEmbedder) Embed(ctx context.Context, texts []string) (vecs [][]float32, err error) {
+	// The call is recorded BEFORE its slot is freed: a test that sees the next
+	// call enter the slot may read this one's outcome at once.
+	held := false
 	defer func() {
 		s.mu.Lock()
 		s.finished = append(s.finished, slotCall{text: texts[0], err: err})
 		s.mu.Unlock()
+		if held {
+			<-s.slots
+		}
 	}()
 	select {
 	case s.slots <- struct{}{}:
+		held = true
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	defer func() { <-s.slots }()
 	s.entered <- texts[0]
 	select {
 	case <-s.release:
