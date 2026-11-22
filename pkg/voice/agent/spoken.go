@@ -26,8 +26,10 @@ const spokenOutputRule = "Everything you write is spoken aloud by a voice, never
 // Voice has an audio-markup instruction (ADR-0022), so the "no markup" rule
 // does not read as forbidding the bracketed audio tags the next block asks for.
 // It qualifies the markup sentence and nothing else: placed behind
-// [stageDirectionRule] it read as exempting actions too.
-const spokenOutputMarkupExemption = " The audio tags described below are the one exception."
+// [stageDirectionRule] it read as exempting actions too. It is worded
+// conditionally because the block may instead say "plain prose only" (a voice
+// on an ElevenLabs model without tag support, #702).
+const spokenOutputMarkupExemption = " Any audio tags the voice instructions below allow are the one exception."
 
 // stageDirectionRule forbids narrated actions (#702). It is the exception to
 // the prompt/scrub division of labour described on [spokenOutputRule]: an
@@ -71,7 +73,7 @@ func spokenOutputParagraph(audioMarkup bool) string {
 // a marker is dropped only where markdown would treat it as formatting:
 //
 //   - Square brackets are never touched: "[cheerfully]" is an intentional
-//     ElevenLabs v3 audio tag (ADR-0022).
+//     ElevenLabs v3/v4 audio tag (ADR-0022).
 //   - A "*" or "_" run is emphasis only where it OPENS on a word (after a
 //     space or at the start: "**Wichtig", "*lacht") or CLOSES one — and a closer
 //     counts only if an opener came before it on the line, or if it follows

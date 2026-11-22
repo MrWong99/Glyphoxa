@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -96,26 +97,76 @@ func TestNew_ExplicitKeyWinsOverEnv(t *testing.T) {
 	}
 }
 
-func TestAudioMarkupPrompt_NonEmpty_DescribesV3Tags(t *testing.T) {
-	c := elevenlabs.New("k")
-	got := c.AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"})
-	if got == "" {
-		t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022")
-	}
-	// Spot-check that the prompt actually teaches v3 conventions rather
-	// than a generic "be expressive" line.
-	for _, must := range []string{"eleven_v3", "square brackets", "[whispers]", "[pause]", "[laughs]"} {
-		if !strings.Contains(got, must) {
-			t.Errorf("AudioMarkupPrompt missing required hint %q\nfull prompt: %s", must, got)
+// voiceOnModel is an ElevenLabs voice whose Settings name model ("" = none).
+func voiceOnModel(t *testing.T, model string) tts.Voice {
+	t.Helper()
+	v := tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"}
+	if model != "" {
+		raw, err := json.Marshal(elevenlabs.Settings{ModelID: model})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
+		v.Settings = raw
 	}
-	if strings.Contains(got, "SSML") && !strings.Contains(got, "NOT SSML") {
-		t.Errorf("AudioMarkupPrompt should disclaim SSML, not encourage it; got %q", got)
+	return v
+}
+
+// TestAudioMarkupPrompt_TagModels_TeachTheTagVocabulary: the v3/v4 families
+// (the default eleven_v4_turbo included) get the bracketed audio-tag vocabulary,
+// worded without naming one model, and pauses are taught as tags — never SSML
+// <break>, which eleven_v4_turbo silently strips (#702, measured).
+func TestAudioMarkupPrompt_TagModels_TeachTheTagVocabulary(t *testing.T) {
+	c := elevenlabs.New("k")
+	for _, model := range []string{"", elevenlabs.ModelV4Turbo, elevenlabs.ModelV3, "eleven_v4"} {
+		t.Run("model="+model, func(t *testing.T) {
+			got := c.AudioMarkupPrompt(voiceOnModel(t, model))
+			if got == "" {
+				t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022")
+			}
+			for _, must := range []string{"square brackets", "[whispers]", "[pause]", "[laughs]", "NOT SSML"} {
+				if !strings.Contains(got, must) {
+					t.Errorf("AudioMarkupPrompt missing required hint %q\nfull prompt: %s", must, got)
+				}
+			}
+			for _, banned := range []string{"eleven_v3", "eleven_v4", "<break"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("AudioMarkupPrompt contains %q; the tag wording must be model-neutral and never teach SSML breaks\nfull prompt: %s", banned, got)
+				}
+			}
+		})
+	}
+}
+
+// TestAudioMarkupPrompt_NonTagModels_PlainProse: a voice pinned to a model with
+// no audio-tag support (flash, multilingual v2, turbo v2.5) must not be taught
+// tags — they would be read aloud — and its per-voice tag preferences are moot.
+func TestAudioMarkupPrompt_NonTagModels_PlainProse(t *testing.T) {
+	c := elevenlabs.New("k")
+	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_turbo_v2_5"} {
+		t.Run(model, func(t *testing.T) {
+			s := elevenlabs.Settings{ModelID: model, SuggestedAudioTags: []string{"confident"}}
+			raw, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := c.AudioMarkupPrompt(tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v", Settings: raw})
+			if got == "" {
+				t.Fatal("AudioMarkupPrompt returned empty string; contract requires non-empty per ADR-0022 (\"use plain prose only\")")
+			}
+			if !strings.Contains(got, "plain") {
+				t.Errorf("non-tag model prompt should ask for plain prose; got %q", got)
+			}
+			for _, banned := range []string{"[whispers]", "[pause]", "[laughs]", "[confident]", "<break"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("non-tag model prompt teaches %q; tags are read aloud on %s\nfull prompt: %s", banned, model, got)
+				}
+			}
+		})
 	}
 }
 
 func TestAudioMarkupPrompt_SuggestedTags_AppendedAsPreference(t *testing.T) {
-	settings := elevenlabs.DefaultV3Settings()
+	settings := elevenlabs.DefaultSettings()
 	settings.SuggestedAudioTags = []string{"confident", "curious"}
 	raw, err := json.Marshal(settings)
 	if err != nil {
@@ -308,7 +359,10 @@ func TestSynthesize_MissingVoiceID_FailsBeforeNetwork(t *testing.T) {
 	}
 }
 
-func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
+// TestSynthesize_BodyCarriesSentenceAndDefaultModel pins the #702 default: a
+// Voice with no model_id synthesizes on eleven_v4_turbo (~135 ms first audio over
+// this same HTTP /stream path, against ~600 ms for eleven_v3, at half the credits).
+func TestSynthesize_BodyCarriesSentenceAndDefaultModel(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		gotBody []byte
@@ -345,8 +399,14 @@ func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
 	if parsed["text"] != sentence {
 		t.Errorf("body.text = %v, want %q (v3 brackets must pass through verbatim)", parsed["text"], sentence)
 	}
-	if parsed["model_id"] != elevenlabs.ModelV3 {
-		t.Errorf("body.model_id = %v, want %q", parsed["model_id"], elevenlabs.ModelV3)
+	if parsed["model_id"] != "eleven_v4_turbo" {
+		t.Errorf("body.model_id = %v, want %q", parsed["model_id"], "eleven_v4_turbo")
+	}
+	if _, ok := parsed["optimize_streaming_latency"]; ok {
+		t.Error("body carries optimize_streaming_latency; eleven_v4_turbo rejects it with 400")
+	}
+	if strings.Contains(gotURL, "optimize_streaming_latency") {
+		t.Errorf("request URL = %q carries optimize_streaming_latency; eleven_v4_turbo rejects it with 400", gotURL)
 	}
 	if !strings.Contains(gotURL, "/v1/text-to-speech/voice-xyz/stream") {
 		t.Errorf("request URL = %q, missing /v1/text-to-speech/{voice_id}/stream", gotURL)
@@ -356,8 +416,33 @@ func TestSynthesize_BodyCarriesSentenceAndModelV3(t *testing.T) {
 	}
 }
 
-func TestDefaultV3Settings_RoundTripsThroughJSON(t *testing.T) {
-	in := elevenlabs.DefaultV3Settings()
+// TestModelOf_ResolvesTheModelSynthesizeSends pins the one model-selection seam
+// metering prices on: a voice's explicit model_id wins, and a voice naming none
+// (or carrying undecodable Settings) resolves to the adapter default.
+func TestModelOf_ResolvesTheModelSynthesizeSends(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     string
+	}{
+		{"no settings", "", elevenlabs.ModelV4Turbo},
+		{"settings without model", `{"output_format":"pcm_48000"}`, elevenlabs.ModelV4Turbo},
+		{"explicit v3", `{"model_id":"eleven_v3"}`, elevenlabs.ModelV3},
+		{"explicit flash", `{"model_id":"eleven_flash_v2_5"}`, "eleven_flash_v2_5"},
+		{"undecodable", `{"model_id":`, elevenlabs.ModelV4Turbo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v", Settings: json.RawMessage(tc.settings)}
+			if got := elevenlabs.ModelOf(v); got != tc.want {
+				t.Errorf("ModelOf(%s) = %q, want %q", tc.settings, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultSettings_RoundTripsThroughJSON(t *testing.T) {
+	in := elevenlabs.DefaultSettings()
 	raw, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -366,8 +451,8 @@ func TestDefaultV3Settings_RoundTripsThroughJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.ModelID != elevenlabs.ModelV3 {
-		t.Errorf("ModelID = %q, want %q", out.ModelID, elevenlabs.ModelV3)
+	if out.ModelID != elevenlabs.ModelV4Turbo {
+		t.Errorf("ModelID = %q, want %q", out.ModelID, elevenlabs.ModelV4Turbo)
 	}
 	if out.OutputFormat != elevenlabs.DefaultOutputFormat {
 		t.Errorf("OutputFormat = %q, want %q", out.OutputFormat, elevenlabs.DefaultOutputFormat)
@@ -504,8 +589,19 @@ func TestAudioTags_AreExactlyTheVocabularyThePromptLists(t *testing.T) {
 			t.Errorf("tag %q is in AudioTags but not in the prompt", tag)
 		}
 	}
-	if got := strings.Count(prompt, "["); got != len(tags) {
-		t.Errorf("the prompt names %d bracket tags, AudioTags has %d", got, len(tags))
+	// Every bracketed span in the prompt must be a listed tag (the pause advice
+	// names [pause] and [long pause] a second time, so count distinct spans).
+	named := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\[([^\]]+)\]`).FindAllStringSubmatch(prompt, -1) {
+		named[m[1]] = true
+	}
+	for tag := range named {
+		if !slices.Contains(tags, tag) {
+			t.Errorf("the prompt names [%s], which AudioTags does not list", tag)
+		}
+	}
+	if len(named) != len(tags) {
+		t.Errorf("the prompt names %d distinct bracket tags, AudioTags has %d", len(named), len(tags))
 	}
 	for _, want := range []string{"laughs", "long pause", "clears throat"} {
 		if !slices.Contains(tags, want) {

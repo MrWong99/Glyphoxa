@@ -594,7 +594,7 @@ func systemPromptFor(t *testing.T, cfg agent.Config) string {
 func TestSystemPrompt_StageDirectionRule(t *testing.T) {
 	const (
 		noMarkupSentence = "no emojis, no code."
-		exemption        = "The audio tags described below are the one exception."
+		exemption        = "Any audio tags the voice instructions below allow are the one exception."
 		noActions        = "no stage directions"
 	)
 	voiced := systemPromptFor(t, agent.Config{Persona: agent.Persona{Voice: testVoice()}})

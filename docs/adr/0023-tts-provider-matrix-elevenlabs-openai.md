@@ -36,7 +36,7 @@ community-maintained `coqui-tts` Idiap fork on PyPI, but:
 | `VoiceLister`          | ✓          | ✓ (preset list) |
 | `VoiceCloner`          | ✓          | ✗ (no public clone API) |
 | `VoiceDesigner`        | ✓          | ✗ (no design API) |
-| `DialogueSynthesizer`  | ✓ (`eleven_v3`) | ✗ (no dialogue API) |
+| `DialogueSynthesizer`  | ✓ (v3/v4 models; `eleven_v4_turbo` default since the 2026-11-22 amendment) | ✗ (no dialogue API) |
 
 OpenAI satisfying only the core `Synthesizer` + `VoiceLister` is fine — that's
 exactly the capability-interface pattern from ADR-0022 working as intended.
@@ -65,3 +65,60 @@ provider supporting them.
 - **Replace Coqui with self-hosted Piper** — Piper is light and local but
   CPU-only quality is a regression vs Coqui XTTS. Defer until self-hosted
   is a product priority.
+
+## Amendment: ElevenLabs default model is `eleven_v4_turbo`, over HTTP (2026-11-22, #702)
+
+**Decision.** The ElevenLabs adapter's default model moves from `eleven_v3` to
+**`eleven_v4_turbo`**, on the existing HTTP
+`POST /v1/text-to-speech/{voice}/stream` path. A WebSocket transport is **not**
+required for the win; a warm Text-to-Dialogue WebSocket is an optional later
+step. Model selection stays in one place (`elevenlabs.DefaultModel` /
+`elevenlabs.ModelOf`), so a transport switch keys off the same seam.
+
+**Measurements** (live API from the dev box, voice "George", German NPC lines,
+2026-11-22; first audio = request sent → first PCM chunk):
+
+| Path | Model | First audio |
+|---|---|---|
+| HTTP `/stream`, warm connection | `eleven_v4_turbo` | median 138 ms (127–141, n=5); probe 133–142 ms (n=16) |
+| HTTP `/stream`, cold (TCP+TLS included) | `eleven_v4_turbo` | 184–230 ms |
+| HTTP `/stream`, warm connection | `eleven_v3` | median 553 ms (490–797, n=5); probe 575–677 ms |
+| HTTP `/stream` | `eleven_v4` (non-turbo) | ~640 ms — unsuitable for live voice |
+| Text-to-Dialogue WS, warm socket | `eleven_v4_turbo` | ~102–104 ms |
+| Text-to-Dialogue WS, dialled per turn | `eleven_v4_turbo` | ~210 ms — slower than warm HTTP |
+
+- **Cost:** the `character-cost` header shows ~0.22 credits/char for
+  `eleven_v4_turbo` (and flash) against ~0.44 for `eleven_v3`, `eleven_v4` and
+  `eleven_multilingual_v2`. The ADR-0046 price map prices TTS per
+  (provider, model) since this amendment, and the Usage Ledger records the model.
+- **Markup:** v4 Turbo renders the v3 bracketed audio-tag vocabulary
+  (`[laughs]`, `[whispers]`, `[pause]` verified), but silently strips SSML
+  `<break/>` (even with `enable_ssml_parsing`). The tag prompt is therefore
+  gated by model family (v3/v4 get tags; flash / multilingual v2 / turbo v2.5
+  get "plain prose only") and teaches pauses as `[pause]` tags, never SSML.
+- **Incompatibilities:** `optimize_streaming_latency` is rejected (HTTP 400) on
+  v4 Turbo; v3/v4 models are rejected on the plain TTS WebSocket
+  (`/stream-input`), only Text-to-Dialogue WS accepts them.
+- **Connection reuse:** a barge closes the response mid-stream and with it the
+  HTTP/1.1 connection, so the next reply's first sentence paid ~180 ms instead
+  of ~140 ms. The adapter's pool keeps 4 idle connections per host (look-ahead
+  runs two syntheses at once, and a warm can overlap them — three, where the
+  stdlib default keeps two) and the live wiring pre-warms with a HEAD request
+  (`Client.Warm`) on connect and after each barge, and on a speech start only
+  when the pool has been quiet for 20 s (no warm and no sentence streamed in
+  that window). The HEAD round trip (~130–145 ms on a reused connection) is
+  longer than the dial it saves (~55–80 ms), so an unthrottled warm per
+  utterance start could hold the idle connection the reply's first sentence
+  needs, and would send ~2000 anonymous HEADs per 3 h session. ~150 ms first
+  audio after a barge + warm. A 45 s idle connection was still reused.
+
+**Data.** Every persisted voice recorded `"model_id":"eleven_v3"` explicitly (no
+UI ever picked a model), so migration `00059` moves ElevenLabs agent voices on
+`eleven_v3` to `eleven_v4_turbo` (Down reverses it), and Campaign Bundle import
+applies the same move to voices of bundles exported before the switch. A voice
+explicitly on any other model is left alone.
+
+**Later, optional:** a pooled Text-to-Dialogue WebSocket per live NPC voice
+(~35 ms more, at the cost of a dialogue-concurrency slot per open socket, a 20 s
+keep-alive and a redial per barge); HTTP/2 (measured equal warm first audio and
+keeps the connection across a barge).

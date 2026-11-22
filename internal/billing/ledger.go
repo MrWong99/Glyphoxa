@@ -72,11 +72,12 @@ func (l *Ledger) LLMTokens(provider observe.Provider, model string, inputTokens,
 }
 
 // TTSCharacters accumulates one synthesis's characters (implements
-// [observe.UsageSink]).
-func (l *Ledger) TTSCharacters(provider observe.Provider, chars int) {
-	l.accumulate(storage.ComponentTTS, provider, "", func(r *storage.UsageRow) {
+// [observe.UsageSink]) under the synthesis model (#702), the LLM-row shape: the
+// model is both the attribution discriminator and what the estimate prices on.
+func (l *Ledger) TTSCharacters(provider observe.Provider, model string, chars int) {
+	l.accumulate(storage.ComponentTTS, provider, model, func(r *storage.UsageRow) {
 		r.TTSCharacters += int64(chars)
-		r.EstimatedUSD += spend.EstimateTTSUSD(provider, chars)
+		r.EstimatedUSD += spend.EstimateTTSUSD(provider, model, chars)
 	})
 }
 

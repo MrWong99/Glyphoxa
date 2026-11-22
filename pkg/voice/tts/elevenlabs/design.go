@@ -160,7 +160,7 @@ func (c *Client) SaveDesignedVoice(ctx context.Context, req tts.SaveDesignedVoic
 		respBody.Name = req.Name
 	}
 
-	defaults, err := json.Marshal(DefaultV3Settings())
+	defaults, err := json.Marshal(DefaultSettings())
 	if err != nil {
 		return tts.Voice{}, fmt.Errorf("elevenlabs.SaveDesignedVoice: marshal defaults: %w", err)
 	}

@@ -135,7 +135,7 @@ func TestRunner_DrivesTheProductionPrompt(t *testing.T) {
 		t.Errorf("request model = %q, want the candidate's", req.Model)
 	}
 	sys := req.Messages[0].Text
-	for _, want := range []string{"Du bist Flo", "Mira, Brak", "spoken aloud by a voice", "eleven_v3"} {
+	for _, want := range []string{"Du bist Flo", "Mira, Brak", "spoken aloud by a voice", "inline audio tags"} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt lacks %q:\n%s", want, sys)
 		}

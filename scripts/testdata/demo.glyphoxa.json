@@ -28,7 +28,7 @@
           "Name": "Bart",
           "Language": "en",
           "Settings": {
-            "model_id": "eleven_v3",
+            "model_id": "eleven_v4_turbo",
             "output_format": "pcm_48000",
             "voice_settings": {
               "stability": 0.5,

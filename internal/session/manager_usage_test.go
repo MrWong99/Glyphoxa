@@ -57,7 +57,7 @@ func (r *meteringRunner) run(ctx context.Context, cfg wirenpc.Config) error {
 	for {
 		select {
 		case n := <-r.meter:
-			cfg.StageMetrics.TTSCharacters(observe.ProviderElevenLabs, n)
+			cfg.StageMetrics.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", n)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -218,7 +218,7 @@ func (r *recapMeteringRunner) run(ctx context.Context, _ wirenpc.Config) error {
 	if m, ok := recap.MeteringFrom(ctx); ok && m.Rec != nil {
 		r.found = true
 		r.gated = m.Gate != nil
-		m.Rec.TTSCharacters(observe.ProviderElevenLabs, 55)
+		m.Rec.TTSCharacters(observe.ProviderElevenLabs, "eleven_v4_turbo", 55)
 	}
 	close(r.started)
 	<-ctx.Done()

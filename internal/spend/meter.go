@@ -111,9 +111,9 @@ func (m *Meter) LLMTokens(provider observe.Provider, model string, inputTokens, 
 }
 
 // TTSCharacters folds one synthesis's estimated character cost into the
-// accumulator (implements [observe.UsageSink]).
-func (m *Meter) TTSCharacters(provider observe.Provider, chars int) {
-	usd, known := ttsCostUSD(provider, chars)
+// accumulator at the synthesis model's rate (implements [observe.UsageSink]).
+func (m *Meter) TTSCharacters(provider observe.Provider, model string, chars int) {
+	usd, known := ttsCostUSD(provider, model, chars)
 	if !known {
 		m.warnUnknown("tts", string(provider), "")
 	}

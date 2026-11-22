@@ -15,7 +15,7 @@ import (
 )
 
 // LoadTTS in -tags=record builds returns a [TTSRecorder] that proxies every
-// Synthesize call to a live ElevenLabs eleven_v3 client, captures the
+// Synthesize call to a live ElevenLabs client, captures the
 // dispatched sentence, and rewrites tests/voice-cassettes/<name>.yaml at
 // test cleanup with the captured ordered list. The ELEVENLABS_API_KEY
 // environment variable supplies credentials.
@@ -23,7 +23,7 @@ import (
 // Per ADR-0021's TTS cassette policy only the dispatched sentences are
 // persisted; rendered audio is drained and discarded. Any existing cassette's
 // Notes field and leading header comments are preserved (with an idempotent
-// dated "Re-recorded against ElevenLabs eleven_v3 on <date>" provenance line
+// dated "Re-recorded against ElevenLabs <model> on <date>" provenance line
 // appended) so reviewer-facing context survives the refresh.
 func LoadTTS(t *testing.T, name string) tts.Synthesizer {
 	t.Helper()
@@ -53,6 +53,7 @@ type TTSRecorder struct {
 	client    *elevenlabs.Client
 	existing  TTSCassette
 	sentences []string
+	model     string // model of the last recorded sentence (elevenlabs.ModelOf)
 }
 
 // Synthesize implements [tts.Synthesizer]. Forwards to the live client,
@@ -68,13 +69,14 @@ func (r *TTSRecorder) Synthesize(ctx context.Context, req tts.SynthesizeRequest)
 	for range in {
 	}
 	r.sentences = append(r.sentences, req.Sentence)
+	r.model = elevenlabs.ModelOf(req.Voice)
 	out := make(chan tts.AudioChunk)
 	close(out)
 	return out, nil
 }
 
 // AudioMarkupPrompt implements [tts.Synthesizer]; delegates to the live
-// client so the LLM sees the same v3 tag vocabulary in record mode as in
+// client so the LLM sees the same tag vocabulary in record mode as in
 // production.
 func (r *TTSRecorder) AudioMarkupPrompt(voice tts.Voice) string {
 	return r.client.AudioMarkupPrompt(voice)
@@ -92,7 +94,7 @@ func (r *TTSRecorder) write() error {
 	}
 	out := TTSCassette{
 		Sentences: r.sentences,
-		Notes:     appendProvenance(r.existing.Notes, "ElevenLabs", "eleven_v3"),
+		Notes:     appendProvenance(r.existing.Notes, "ElevenLabs", r.model),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

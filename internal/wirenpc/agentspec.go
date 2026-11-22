@@ -16,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
@@ -39,9 +40,13 @@ const (
 	llmProvider = groq.ProviderID
 	llmModel    = groq.DefaultModel
 
-	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record.
-	ttsModel = "eleven_multilingual_v2"
-	sttModel = "scribe_v1"
+	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record,
+	// referencing the adapters' own identifiers for the same no-drift reason (#702:
+	// they had drifted to eleven_multilingual_v2 / scribe_v1 while the adapters ran
+	// eleven_v3 / scribe_v2). The per-voice Settings.model_id, not this row, is
+	// what synthesis reads; ttsModel is the default a voice without one gets.
+	ttsModel = ttseleven.DefaultModel
+	sttModel = stteleven.Model
 
 	// credPlaceholderLast4 marks a provider_config whose real key is NOT in the
 	// DB: the self-host voice binary reads it from the OS keyring (#10). The
