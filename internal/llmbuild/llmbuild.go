@@ -53,9 +53,11 @@ func ResolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component st
 }
 
 // New builds an [llm.Provider] for providerID with apiKey, keyed off
-// provider_config.provider (ADR-0004). An empty id defaults to Groq (the
-// deployment LLM, ADR-0036); an unrecognised id is a CLEAR error naming it, never
-// a silent hardwired adapter. An empty apiKey lets the adapter fall back to its
+// provider_config.provider (ADR-0004). An empty id is the CODE default, Groq
+// (ADR-0036) — but callers resolving for a Tenant never pass one: "no row" is
+// turned into a provider by [DeploymentDefault.Select], which is where the
+// deployment's own default applies (#702). An unrecognised id is a CLEAR error
+// naming it, never a silent hardwired adapter. An empty apiKey lets the adapter fall back to its
 // own *_API_KEY env var at request time (the hybrid policy, ADR-0039).
 func New(providerID, apiKey string) (llm.Provider, error) {
 	switch providerID {
@@ -72,7 +74,8 @@ func New(providerID, apiKey string) (llm.Provider, error) {
 
 // DefaultModel names the model providerID's adapter requests when a Provider
 // Config carries no explicit model, mirroring [New]'s provider set ("" and any
-// unrecognised id resolve to Groq, the deployment LLM per ADR-0036). Callers
+// unrecognised id resolve to Groq, the code default per ADR-0036; the
+// deployment's own default model is [DeploymentDefault]'s to add, #702). Callers
 // resolve an empty model through it BEFORE building a request, so the model that
 // is requested and the model the spend meter prices are one and the same: an
 // empty model id misses the price map and is charged at the conservative
