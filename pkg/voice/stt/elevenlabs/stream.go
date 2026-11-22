@@ -55,8 +55,19 @@ const (
 	// instead of blocking the audio pump.
 	writeQueueLen = 64
 
-	// defaultPingInterval is how often the write pump sends a keepalive ping.
+	// defaultPingInterval is how often the write pump sends a websocket ping. The
+	// ping is DEAD-PEER DETECTION only (its pong refreshes the read deadline): the
+	// provider does not count it as client activity, see defaultIdleKeepalive.
 	defaultPingInterval = 20 * time.Second
+
+	// defaultIdleKeepalive is how long the write pump lets the socket sit without a
+	// client TEXT message before it sends an empty input_audio_chunk. The provider
+	// closes a realtime session 15 s after the last client message (close 1000, no
+	// frame; not configurable), and neither websocket pings nor
+	// keepalive_interval_ms move that clock — measured live 2026-11-22, ADR-0042
+	// amendment. An empty chunk (no audio, commit false) does, bills nothing, and
+	// adds nothing to the next commit. 5 s leaves two retries inside the window.
+	defaultIdleKeepalive = 5 * time.Second
 
 	// writeWait bounds a single websocket write (frame or control).
 	writeWait = 10 * time.Second
@@ -80,20 +91,21 @@ const (
 // Provider error-frame classification. A frame's message_type decides how it is
 // routed (see routeErrorFrame):
 //
-//   - commitScopedErrorCodes pertain to a specific commit and resolve the oldest
-//     in-flight commit with the error; the session stays usable.
 //   - droppableErrorCodes are recoverable but NOT tied to a commit (a rejected
 //     chunk or a transient throttle), so they are logged and dropped rather than
 //     misattributed to whichever commit happens to be pending.
-//   - fatalErrorCodes kill the session.
+//   - fatalErrorCodes kill the session; every pending commit resolves with the
+//     frame's code.
+//
+// There is no "commit failed, session lives" class. commit_throttled was modelled
+// that way until it was measured (2026-11-22, ADR-0042 amendment): the frame reads
+// "Session closed: only 0.00s of uncommitted audio. You need at least 0.3s…" and
+// the provider closes the socket right after it.
 //
 // An unrecognized message_type carrying an error payload is treated as fatal
 // (safe default); one with no error payload is an unknown benign frame (e.g. a
 // future language_detection frame) and is ignored like a malformed frame.
 var (
-	commitScopedErrorCodes = map[string]bool{
-		"commit_throttled": true,
-	}
 	droppableErrorCodes = map[string]bool{
 		// rate_limited is treated as not-commit-scoped: the provider docs do not
 		// tie it to a specific commit, so dropping it avoids misattribution.
@@ -110,6 +122,7 @@ var (
 		"resource_exhausted":          true,
 		"session_time_limit_exceeded": true,
 		"transcriber_error":           true,
+		"commit_throttled":            true,
 	}
 )
 
@@ -118,12 +131,19 @@ var (
 // declared, key drawn from the same ElevenLabs Provider Config as the batch
 // adapter.
 func (c *Client) OpenStream(ctx context.Context, cfg stt.StreamConfig) (stt.Stream, error) {
-	return c.openStream(ctx, cfg, defaultPingInterval)
+	return c.openStream(ctx, cfg, streamTimings{ping: defaultPingInterval, idleKeepalive: defaultIdleKeepalive})
 }
 
-// openStream is OpenStream with the keepalive interval injected, so internal
-// tests can shorten it without exporting a knob.
-func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, pingInterval time.Duration) (stt.Stream, error) {
+// streamTimings are the write pump's two clocks: the websocket ping interval and
+// the idle window after which it sends an empty chunk to keep the session open.
+type streamTimings struct {
+	ping          time.Duration
+	idleKeepalive time.Duration
+}
+
+// openStream is OpenStream with the pump timings injected, so internal tests can
+// shorten them without exporting a knob.
+func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, timings streamTimings) (stt.Stream, error) {
 	if cfg.SampleRate != supportedSampleRate {
 		return nil, fmt.Errorf("elevenlabs.OpenStream: unsupported sample rate %d (only %d supported)", cfg.SampleRate, supportedSampleRate)
 	}
@@ -153,7 +173,7 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, pingInter
 	}
 	s.wg.Add(3)
 	go s.readPump()
-	go s.writePump(pingInterval)
+	go s.writePump(timings)
 	go s.ctxWatch(ctx)
 	return s, nil
 }
@@ -375,7 +395,11 @@ func (s *stream) shutdown(cause *stt.StreamError) {
 	})
 }
 
-// ctxWatch mirrors context cancellation onto session teardown (cancel == Close).
+// ctxWatch mirrors context cancellation onto session teardown (cancel == Close),
+// then reports the session's end to the owner. It is the one goroutine that
+// outlives every death path (shutdown closes stopCh exactly once), so calling
+// [stt.StreamConfig.OnClosed] from here gives the exactly-once guarantee and keeps
+// the callback off the caller's own goroutine (Send can trigger a shutdown).
 func (s *stream) ctxWatch(ctx context.Context) {
 	defer s.wg.Done()
 	select {
@@ -383,27 +407,49 @@ func (s *stream) ctxWatch(ctx context.Context) {
 		s.shutdown(&stt.StreamError{Code: stt.CodeTransport, Fatal: true, Err: ctx.Err()})
 	case <-s.stopCh:
 	}
+	if s.cfg.OnClosed != nil {
+		s.cfg.OnClosed(s.deadErr.Load())
+	}
 }
 
-// writePump owns every websocket write: audio chunks, commit sentinels, and
-// keepalive pings.
-func (s *stream) writePump(pingInterval time.Duration) {
+// writePump owns every websocket write: audio chunks, commit sentinels, the idle
+// keepalive chunk, and pings.
+//
+// The idle timer restarts on every text write, so it only fires after
+// timings.idleKeepalive of client silence; it then writes one empty chunk
+// (wsWrite{}: no audio, commit false), which the provider counts as activity.
+func (s *stream) writePump(timings streamTimings) {
 	defer s.wg.Done()
-	ping := time.NewTicker(pingInterval)
+	ping := time.NewTicker(timings.ping)
 	defer ping.Stop()
+	idle := time.NewTimer(timings.idleKeepalive)
+	defer idle.Stop()
+
+	writeText := func(w wsWrite) bool {
+		data, err := w.marshal(s.cfg.SampleRate)
+		if err != nil {
+			s.shutdown(transportErr(err))
+			return false
+		}
+		_ = s.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			s.shutdown(transportErr(err))
+			return false
+		}
+		idle.Reset(timings.idleKeepalive)
+		return true
+	}
+
 	for {
 		select {
 		case <-s.stopCh:
 			return
 		case w := <-s.writeCh:
-			data, err := w.marshal(s.cfg.SampleRate)
-			if err != nil {
-				s.shutdown(transportErr(err))
+			if !writeText(w) {
 				return
 			}
-			_ = s.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				s.shutdown(transportErr(err))
+		case <-idle.C:
+			if !writeText(wsWrite{}) {
 				return
 			}
 		case <-ping.C:
@@ -466,18 +512,11 @@ func (s *stream) readPump() {
 // routeErrorFrame classifies a non-normal server frame and acts on it. It
 // returns true when the frame killed the session, so the read pump stops.
 //
-// Only commit-scoped errors consume a pending commit; chunk-scoped and other
-// recoverable errors are logged and dropped so they cannot be misattributed to
-// whichever commit happens to be in flight. Fatal errors tear the session down.
+// Chunk-scoped and other recoverable errors are logged and dropped so they cannot
+// be misattributed to whichever commit happens to be in flight. Fatal errors tear
+// the session down, which resolves the pending commits with the frame's code.
 func (s *stream) routeErrorFrame(code, detail string) (fatal bool) {
 	switch {
-	case commitScopedErrorCodes[code]:
-		s.resolveFront(stt.CommitResult{Err: &stt.StreamError{
-			Code:  code,
-			Fatal: false,
-			Err:   fmt.Errorf("provider error %q: %s", code, detail),
-		}})
-		return false
 	case droppableErrorCodes[code]:
 		slog.Default().Debug("stt stream: dropping recoverable provider error frame",
 			"code", code, "detail", detail)
@@ -533,19 +572,6 @@ func (s *stream) resolveEmpty() {
 	s.autoText = ""
 	s.mu.Unlock()
 	ch <- stt.CommitResult{Transcript: stt.Transcript{Text: full}}
-}
-
-// resolveFront resolves the front pending commit with res (a recoverable error).
-func (s *stream) resolveFront(res stt.CommitResult) {
-	s.mu.Lock()
-	if len(s.pending) == 0 {
-		s.mu.Unlock()
-		return
-	}
-	ch := s.pending[0]
-	s.pending = s.pending[1:]
-	s.mu.Unlock()
-	ch <- res
 }
 
 // drainPending resolves every still-pending commit with the death cause and

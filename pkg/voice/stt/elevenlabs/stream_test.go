@@ -561,45 +561,92 @@ func TestErrorFrame_AuthError_ResolvesFatalAndKillsSession(t *testing.T) {
 	}
 }
 
-func TestErrorFrame_CommitThrottled_RecoverableSessionSurvives(t *testing.T) {
+// TestErrorFrame_CommitThrottled_IsFatal pins the provider's real behaviour
+// (measured live 2026-11-22, ADR-0042 amendment): commit_throttled reads "Session
+// closed: only 0.00s of uncommitted audio…" and is followed by the server closing
+// the socket. The adapter used to call it recoverable, so the dead session was
+// only discovered by the next utterance.
+func TestErrorFrame_CommitThrottled_IsFatal(t *testing.T) {
 	ss := newScriptedServer(t, func(conn *websocket.Conn) {
 		if !readUntilCommit(conn, nil) {
 			return
 		}
-		_ = conn.WriteJSON(errorMsg("commit_throttled", "slow down"))
-		if !readUntilCommit(conn, nil) {
-			return
-		}
-		_ = conn.WriteJSON(committedMsg("recovered"))
-		echoUntilClose(conn)
+		_ = conn.WriteJSON(errorMsg("commit_throttled", "Session closed: only 0.00s of uncommitted audio."))
+		// then the provider closes (the deferred conn.Close in the harness)
 	})
 	defer ss.Close()
 
-	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	closed := make(chan error, 2)
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000, OnClosed: func(err error) { closed <- err }})
 	defer s.Close()
 
 	c1, err := s.Commit()
 	if err != nil {
-		t.Fatalf("Commit 1: %v", err)
+		t.Fatalf("Commit: %v", err)
 	}
 	se := asStreamError(t, recvCommit(t, c1).Err)
-	if se.Code != "commit_throttled" {
-		t.Errorf("code = %q, want commit_throttled", se.Code)
+	if se.Code != "commit_throttled" || !se.Fatal {
+		t.Errorf("commit error = %v, want a FATAL commit_throttled", se)
 	}
-	if se.Fatal {
-		t.Error("commit_throttled should be recoverable (Fatal=false)")
+	select {
+	case err := <-closed:
+		if se := asStreamError(t, err); se.Code != "commit_throttled" {
+			t.Errorf("OnClosed cause = %v, want commit_throttled", se)
+		}
+	case <-time.After(recvTimeout):
+		t.Fatal("OnClosed was not called after a commit_throttled")
 	}
+	if err := s.Send(rampFrame(t, 0)); err == nil || !asStreamError(t, err).Fatal {
+		t.Errorf("Send after commit_throttled = %v, want a fatal error", err)
+	}
+}
 
-	// Session still usable: a fresh commit resolves normally.
-	if err := s.Send(rampFrame(t, 0)); err != nil {
-		t.Fatalf("Send after throttle: %v", err)
+// TestOnClosed_FiresOnceWhenTheServerCloses: the provider closing the socket (its
+// 15 s idle rule sends a bare close 1000) must reach the caller at once, not on
+// the next Send — that is what lets the manager redial before the next utterance.
+func TestOnClosed_FiresOnceWhenTheServerCloses(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	})
+	defer ss.Close()
+
+	closed := make(chan error, 4)
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000, OnClosed: func(err error) { closed <- err }})
+
+	select {
+	case err := <-closed:
+		if se := asStreamError(t, err); se.Code != stt.CodeTransport || !se.Fatal {
+			t.Errorf("OnClosed cause = %v, want a fatal transport error", se)
+		}
+	case <-time.After(recvTimeout):
+		t.Fatal("OnClosed was not called when the server closed the socket")
 	}
-	c2, err := s.Commit()
-	if err != nil {
-		t.Fatalf("Commit 2: %v", err)
+	_ = s.Close()
+	select {
+	case err := <-closed:
+		t.Fatalf("OnClosed called a second time (%v); it fires exactly once", err)
+	case <-time.After(50 * time.Millisecond):
 	}
-	if got := recvCommit(t, c2).Transcript.Text; got != "recovered" {
-		t.Errorf("recovered commit = %q, want recovered", got)
+}
+
+// TestOnClosed_FiresWhenTheOwnerCloses: one rule, no exceptions — the callback
+// reports the end of the session whoever ended it, and has run by the time Close
+// returns.
+func TestOnClosed_FiresWhenTheOwnerCloses(t *testing.T) {
+	ss := newScriptedServer(t, echoUntilClose)
+	defer ss.Close()
+
+	closed := make(chan error, 1)
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000, OnClosed: func(err error) { closed <- err }})
+	_ = s.Close()
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Error("OnClosed cause is nil")
+		}
+	default:
+		t.Fatal("OnClosed had not run when Close returned")
 	}
 }
 
@@ -1006,7 +1053,8 @@ func TestTwoPending_InterleavedCommitScopedError_FIFO(t *testing.T) {
 	if got := recvCommit(t, c1).Transcript.Text; got != "one" {
 		t.Errorf("commit 1 = %q, want one", got)
 	}
-	// The interleaved commit-scoped error consumes the SECOND pending, FIFO.
+	// The commit_throttled lands after "one" resolved, so it fails the SECOND
+	// pending commit (and, being fatal, the session with it).
 	if se := asStreamError(t, recvCommit(t, c2).Err); se.Code != "commit_throttled" {
 		t.Errorf("commit 2 error code = %q, want commit_throttled", se.Code)
 	}

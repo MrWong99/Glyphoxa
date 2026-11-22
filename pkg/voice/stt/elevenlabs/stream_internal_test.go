@@ -2,6 +2,7 @@ package elevenlabs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -45,7 +46,8 @@ func TestWritePump_SendsKeepalivePing(t *testing.T) {
 	defer srv.Close()
 
 	c := New("k", WithBaseURL(srv.URL))
-	s, err := c.openStream(context.Background(), stt.StreamConfig{SampleRate: 16000}, 30*time.Millisecond)
+	s, err := c.openStream(context.Background(), stt.StreamConfig{SampleRate: 16000},
+		streamTimings{ping: 30 * time.Millisecond, idleKeepalive: time.Hour})
 	if err != nil {
 		t.Fatalf("openStream: %v", err)
 	}
@@ -192,4 +194,118 @@ func TestCommit_WriteQueueFull_RestoresRemainder(t *testing.T) {
 	if string(s.agg) != string(remainder) {
 		t.Errorf("aggregation buffer = %v, want the restored remainder %v (utterance tail must not be lost)", s.agg, remainder)
 	}
+}
+
+// idleClosingServer mimics the provider's idle rule (verified live, ADR-0042
+// amendment 2026-11-22): the socket is closed once no client TEXT message arrived
+// for idle — websocket pings do not count. Every text frame it reads is relayed on
+// got. A commit is answered with a committed_transcript.
+func idleClosingServer(t *testing.T, idle time.Duration, got chan<- []byte) *httptest.Server {
+	t.Helper()
+	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			// The default ping handler answers pings but does not move this deadline.
+			_ = conn.SetReadDeadline(time.Now().Add(idle))
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			got <- data
+			var m struct {
+				Commit bool `json:"commit"`
+			}
+			if json.Unmarshal(data, &m) == nil && m.Commit {
+				_ = conn.WriteJSON(map[string]any{"message_type": msgCommitted, "text": "still here"})
+			}
+		}
+	}))
+}
+
+// TestWritePump_IdleKeepalive_KeepsTheSessionOpen: with nothing to send, the write
+// pump must send an EMPTY input_audio_chunk (no audio, commit false) before the
+// provider's idle window runs out, so the session a speaker left alone for a while
+// is still there when they talk again. Pings alone do not do it.
+func TestWritePump_IdleKeepalive_KeepsTheSessionOpen(t *testing.T) {
+	got := make(chan []byte, 256)
+	srv := idleClosingServer(t, 150*time.Millisecond, got)
+	defer srv.Close()
+
+	c := New("k", WithBaseURL(srv.URL))
+	s, err := c.openStream(context.Background(), stt.StreamConfig{SampleRate: 16000},
+		streamTimings{ping: 20 * time.Millisecond, idleKeepalive: 40 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	defer s.Close()
+
+	time.Sleep(500 * time.Millisecond) // more than three idle windows
+
+	ch, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit after an idle stretch: %v (the session died)", err)
+	}
+	select {
+	case res := <-ch:
+		if res.Err != nil || res.Transcript.Text != "still here" {
+			t.Fatalf("commit = %+v, want the committed text", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("commit did not resolve")
+	}
+
+	// Every frame before the commit was a keepalive: empty audio, commit false.
+	keepalives := 0
+	for len(got) > 0 {
+		var m struct {
+			MessageType string `json:"message_type"`
+			Audio       string `json:"audio_base_64"`
+			Commit      bool   `json:"commit"`
+			SampleRate  int    `json:"sample_rate"`
+		}
+		if err := json.Unmarshal(<-got, &m); err != nil {
+			t.Fatalf("bad frame: %v", err)
+		}
+		if m.Commit {
+			continue
+		}
+		keepalives++
+		if m.MessageType != msgInputAudioChunk || m.Audio != "" || m.SampleRate != 16000 {
+			t.Errorf("keepalive frame = %+v, want an empty input_audio_chunk", m)
+		}
+	}
+	if keepalives < 3 {
+		t.Errorf("keepalive frames = %d, want at least 3 over 500ms at a 40ms interval", keepalives)
+	}
+}
+
+// TestWritePump_PingsAloneDoNotKeepTheSessionOpen is the control for the test
+// above: with the idle keepalive effectively off, the same server closes the
+// session, pings or not.
+func TestWritePump_PingsAloneDoNotKeepTheSessionOpen(t *testing.T) {
+	got := make(chan []byte, 256)
+	srv := idleClosingServer(t, 150*time.Millisecond, got)
+	defer srv.Close()
+
+	c := New("k", WithBaseURL(srv.URL))
+	s, err := c.openStream(context.Background(), stt.StreamConfig{SampleRate: 16000},
+		streamTimings{ping: 20 * time.Millisecond, idleKeepalive: time.Hour})
+	if err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	defer s.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := s.Commit(); err != nil {
+			return // dead, as the provider would have it
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	t.Fatal("the session survived an idle stretch on pings alone; the fake server is not modelling the idle rule")
 }
