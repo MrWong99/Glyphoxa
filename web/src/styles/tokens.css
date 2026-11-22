@@ -2,7 +2,11 @@
  * web/design-handoff/2026-06-24/tokens/{colors,typography,spacing,effects}.css.
  * Plain CSS so the next Claude Design iteration reads them back. The arcane
  * Mozilla-Protocol theme: a raw Protocol palette tier + the SEMANTIC tier you
- * build with. Token names + values match the handoff exactly.
+ * build with. Token names + values match the handoff, with the additions and
+ * the one changed value the 2026-11 amendment to ADR-0017 records:
+ * --text-subtle (contrast), --arcane-fill*, --border-control*, the page,
+ * control-size, layer and focus-outline tokens, and the breakpoint block at
+ * the end of the file.
  */
 
 :root {
@@ -109,6 +113,12 @@
   --arcane-hover: var(--color-violet-40);
   --arcane-active: var(--color-violet-60);
   --arcane-ink: var(--color-violet-90);
+  /* Solid fills that carry white text. --arcane (violet-50) is the brand
+   * accent for borders, glows and icons, but white on it is only 4.15:1; the
+   * fill pair is one and two steps darker (5.73:1 and 8.02:1), so a primary
+   * button label meets WCAG AA at rest and on hover. */
+  --arcane-fill: var(--color-violet-60);
+  --arcane-fill-hover: var(--color-violet-70);
   --rune: var(--color-blue-20);
   /* Soft = a tint, not a solid: full-strength blue as a background fill
    * glares against the dark violet surfaces (highlighted transcript lines,
@@ -132,12 +142,25 @@
   --border-default: rgba(144, 89, 255, 0.24);
   --border-strong: rgba(144, 89, 255, 0.42);
   --border-rune: rgba(0, 221, 255, 0.45);
+  /* The boundary of a form control (input, select, switch track). WCAG 1.4.11
+   * asks 3:1 between a control's edge and what surrounds it, and the three
+   * alpha borders above reach 1.4:1 at best. Solid, because an alpha value
+   * means a different contrast on every surface: this is violet-20 at 56% over
+   * --surface-card, which gives 3.4:1 on --surface-card, 3.1:1 on
+   * --surface-overlay (dialogs) and 3.8:1 against the control's own
+   * --surface-inset fill. Hover is the same mix at 75% (5.0:1 on card).
+   * tokens.test.ts recomputes both. */
+  --border-control: #8262ab;
+  --border-control-hover: #a17cd0;
 
   /* Text */
   --text-strong: var(--color-white);
   --text-default: var(--color-light-gray-20);
   --text-muted: var(--color-light-gray-70);
-  --text-subtle: var(--color-marketing-gray-60);
+  /* light-gray-80: 5.2:1 on --surface-card and 4.8:1 on --surface-overlay.
+   * It was marketing-gray-60, which is 3.6 to 4.4:1 on the app's surfaces and
+   * so below AA for the small hint text it is used for. */
+  --text-subtle: var(--color-light-gray-80);
   --text-on-arcane: var(--color-white);
   --text-link: var(--color-blue-10);
   --text-link-hover: var(--color-blue-05);
@@ -227,6 +250,42 @@
   --radius-lg: 16px;
   --radius-pill: 999px;
 
+  /* Page container (components/ui/Page.tsx and the three screen roots).
+   * --page-gutter is the space between the content column and the viewport
+   * edge; it steps down with the breakpoints at the end of this file. */
+  --page-gutter: 32px;
+  --page-width-narrow: 820px;
+  --page-width-wide: var(--content-xl);
+
+  /* Control sizes. 28 and 36px are the two icon-button boxes; on a touch
+   * screen (pointer: coarse) every small control grows to --target-coarse. */
+  --control-sm: 28px;
+  --control-md: 36px;
+  --target-coarse: 40px;
+
+  /* ===== LAYERS ======================================================
+   * One ladder instead of literals. Before it, the select dropdown and the
+   * phone sidebar drawer both sat on 60, so a dropdown inside a dialog (90/91)
+   * opened underneath it. PORTALLED floating surfaces, which a modal can
+   * contain (the Radix select list, popover, menu, tooltip), are above the
+   * modal pair; toasts stay on top (sonner sets its own, far higher, z-index).
+   *
+   * --z-dropdown is for a panel that is NOT portalled: it opens in place, under
+   * its trigger, in whatever stacking context the trigger is in (the Combobox
+   * list, the campaign switcher panel). On the page it must stay BELOW the
+   * modal pair, so a dialog opened while it is up dims it like everything
+   * else; inside a dialog it is already inside that dialog's own stacking
+   * context, where any value puts it on top.
+   */
+  --z-sticky: 20;
+  --z-scrim: 55;
+  --z-drawer: 60;
+  --z-dropdown: 70;
+  --z-overlay: 90;
+  --z-modal: 91;
+  --z-popover: 100;
+  --z-tooltip: 110;
+
   /* ===== EFFECTS ===================================================== */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(9, 32, 77, 0.3);
   --shadow-md: 0 8px 16px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(9, 32, 77, 0.35);
@@ -247,6 +306,13 @@
   --wash-arcane: radial-gradient(120% 80% at 50% -10%, rgba(144, 89, 255, 0.18), transparent 60%),
     radial-gradient(90% 60% at 85% 0%, rgba(0, 221, 255, 0.1), transparent 55%);
 
+  /* Keyboard focus is an OUTLINE (base.css :focus-visible): an outline is not
+   * part of the box, so a selected row's own box-shadow or a forced-colors
+   * theme cannot remove it. --focus-ring is the older box-shadow recipe, kept
+   * for the co-located screen styles that still reference it. */
+  --focus-outline-width: 2px;
+  --focus-outline-color: var(--rune);
+  --focus-outline-offset: 2px;
   --focus-ring: 0 0 0 2px var(--surface-base), 0 0 0 4px var(--rune);
 
   --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
@@ -258,4 +324,26 @@
   --rune-grid: linear-gradient(rgba(144, 89, 255, 0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(144, 89, 255, 0.05) 1px, transparent 1px);
   --rune-grid-size: 32px 32px;
+}
+
+/* ===== BREAKPOINTS =====================================================
+ * Three, all max-width, mirrored in web/src/lib/breakpoints.ts (a custom
+ * property cannot be used inside a media query, so the numbers are repeated
+ * where they are used; breakpoints.test.ts keeps the styles this layer owns on
+ * these three):
+ *
+ *   1100px  two-column editors (list + detail) stack into one column
+ *    880px  the sidebar becomes an off-canvas drawer; sheets dock to the
+ *           bottom instead of the right edge
+ *    640px  phone: tightest gutters, stacked header actions
+ */
+@media (max-width: 880px) {
+  :root {
+    --page-gutter: 24px;
+  }
+}
+@media (max-width: 640px) {
+  :root {
+    --page-gutter: 16px;
+  }
 }
