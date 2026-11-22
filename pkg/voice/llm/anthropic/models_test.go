@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 )
 
 // ListModels walks GET /v1/models to the last page and returns every id in the

@@ -333,10 +333,11 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	// runnable NPC. The Groq client and the Registry are shared across every NPC
 	// — only the GrantSet differs per NPC — so N NPCs reuse one client rather than
 	// each opening their own.
-	// Dispatch the LLM adapter off the Agent's Provider Config provider id (#272):
-	// an empty id (env-only path, or a nil LLM config) resolves to the Groq default
-	// (ADR-0036), so the seed's groq config stays byte-identical and the keyless
-	// cassette gate holds. A saved non-Groq provider now gets its own adapter.
+	// Dispatch the LLM adapter off the session's resolved provider id (#272, #702):
+	// the Agent's or Tenant's Provider Config, else the deployment default
+	// ([Config.withSessionLLM]) — Groq when the deployment names none (ADR-0036),
+	// so the seed's groq config and the keyless cassette gate are unchanged. The
+	// bare "" a unit test may hand in here is still the code default.
 	provider, err := newLLM(d.llmProviderID, d.keys.llm)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wirenpc: build LLM provider: %w", err)
