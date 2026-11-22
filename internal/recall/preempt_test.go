@@ -215,12 +215,13 @@ func TestFinal_OfAnotherCampaign_NeitherJoinsNorCancelsASpeculation(t *testing.T
 				t.Errorf("campaign A's speculation finished=%v err=%v, want it to complete untouched", done, err)
 			}
 			// ...and A's turn still gets its prefetch.
+			hitsBefore := m.count(observe.RecallHit)
 			memA := r.Recall(ts.ctxA(), uuid.NewString(), partialA)
 			if len(memA.World) != 1 || !strings.Contains(memA.World[0], "a-world") {
 				t.Errorf("campaign A's recall got world %q, want its own chunk", memA.World)
 			}
-			if m.count(observe.RecallHit) != 1 {
-				t.Errorf("hits = %d, want 1 (campaign A's speculation survived B's final)", m.count(observe.RecallHit))
+			if got := m.count(observe.RecallHit) - hitsBefore; got != 1 {
+				t.Errorf("campaign A's recall: hits = %d, want 1 (its speculation survived B's final)", got)
 			}
 		})
 	}
