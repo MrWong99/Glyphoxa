@@ -109,6 +109,14 @@ pre {
   outline: var(--focus-outline-width) solid var(--focus-outline-color);
   outline-offset: var(--focus-outline-offset);
 }
+/* A focusable SVG group (a node, a proposed node or a fact mark in the
+ * knowledge graph) marks focus on its own shape, with a ring around its
+ * circle. The outline above would add a second one: a rectangle around the
+ * whole group, label included. A new focusable <g> has to bring its own mark
+ * the same way. */
+svg g:focus-visible {
+  outline: none;
+}
 
 /* Custom scrollbar — arcane stone */
 ::-webkit-scrollbar {
@@ -185,9 +193,12 @@ pre {
   border-radius: 50%;
   border: 2px solid color-mix(in srgb, currentColor 28%, transparent);
   border-top-color: currentColor;
-  animation: gx-spin 0.9s linear infinite;
+  animation: gx-spinner-turn 0.9s linear infinite;
 }
-@keyframes gx-spin {
+/* Named apart from the Session screen's own gx-spin keyframes: keyframe names
+ * are global and the last one loaded wins, so two rules sharing a name would
+ * silently change each other. */
+@keyframes gx-spinner-turn {
   to {
     transform: rotate(360deg);
   }
@@ -211,7 +222,7 @@ pre {
   border-radius: 50%;
   border: 2px solid var(--border-default);
   border-top-color: var(--arcane);
-  animation: gx-spin 0.9s linear infinite;
+  animation: gx-spinner-turn 0.9s linear infinite;
 }
 
 /* Text for screen readers only. */

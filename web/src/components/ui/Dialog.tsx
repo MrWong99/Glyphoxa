@@ -1,9 +1,10 @@
-import type { ReactElement, ReactNode } from "react";
+import { useCallback, useRef, type ReactElement, type ReactNode } from "react";
 import * as RDialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 
 import { useI18n } from "@/i18n";
 import { IconButton } from "./IconButton";
+import { popoverOpenWithin } from "./usePopoverDismiss";
 import { useRestoreFocus } from "./useRestoreFocus";
 
 // Dialog — a modal layer on a Radix Dialog (ADR-0017), for anything that is
@@ -80,7 +81,15 @@ export function Dialog({
   className = "",
 }: DialogProps) {
   const { t } = useI18n();
-  const restoreFocus = useRestoreFocus();
+  const { ref: noteOpener, onCloseAutoFocus } = useRestoreFocus();
+  const content = useRef<HTMLDivElement | null>(null);
+  const setContent = useCallback(
+    (node: HTMLDivElement | null) => {
+      content.current = node;
+      noteOpener(node);
+    },
+    [noteOpener],
+  );
   const cls = ["gx-dialog", `gx-dialog--${variant}`, className].filter(Boolean).join(" ");
 
   return (
@@ -95,7 +104,13 @@ export function Dialog({
           // Radix warns when a dialog has no description unless this is set
           // explicitly; with a description it wires the id itself.
           {...(description ? {} : { "aria-describedby": undefined })}
-          {...restoreFocus}
+          ref={setContent}
+          onCloseAutoFocus={onCloseAutoFocus}
+          // A picker open inside the dialog (a Combobox) takes this Escape for
+          // itself; the dialog closes on the next one.
+          onEscapeKeyDown={(event) => {
+            if (popoverOpenWithin(content.current)) event.preventDefault();
+          }}
           onInteractOutside={(event) => {
             if (inToast(event.target)) event.preventDefault();
           }}

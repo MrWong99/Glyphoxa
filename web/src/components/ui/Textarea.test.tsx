@@ -140,6 +140,47 @@ describe("Textarea", () => {
       expect(field.style.height).toBe("42px");
     });
 
+    // To measure, the box is collapsed to one row for an instant. In a browser
+    // that shortens the page, and a scroll container near its end has its
+    // scrollTop clamped by the layout that measuring forces; nothing puts it
+    // back. jsdom has no layout, so the clamp is played here by hand: reading
+    // scrollHeight while the box is collapsed scrolls the container to the top.
+    it("keeps the scroll position of the containers around it while it measures", () => {
+      mockLayout();
+      render(
+        <div data-testid="scroller">
+          <div data-testid="inner">
+            <Textarea aria-label="Message" autoGrow defaultValue={"one\ntwo"} />
+          </div>
+        </div>,
+      );
+      const scroller = screen.getByTestId("scroller");
+      const inner = screen.getByTestId("inner");
+      const field = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+      scroller.scrollTop = 1588;
+      inner.scrollTop = 40;
+      document.documentElement.scrollTop = 300;
+
+      vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(function (
+        this: HTMLTextAreaElement,
+      ) {
+        if (this.style.height === "auto") {
+          scroller.scrollTop = 0;
+          inner.scrollTop = 0;
+          document.documentElement.scrollTop = 0;
+        }
+        return this.value.split("\n").length * 20;
+      });
+
+      field.value = "one\ntwo\nthree";
+      fireEvent.input(field);
+      expect(field.style.height).toBe("62px");
+      expect(scroller.scrollTop).toBe(1588);
+      expect(inner.scrollTop).toBe(40);
+      expect(document.documentElement.scrollTop).toBe(300);
+      document.documentElement.scrollTop = 0;
+    });
+
     it("leaves the height alone when the element is not laid out", () => {
       // No layout mock: scrollHeight is 0, as in a hidden tab.
       render(<Textarea aria-label="Message" autoGrow defaultValue="one" />);

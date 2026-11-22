@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactElement, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactElement, type ReactNode } from "react";
 import * as RTooltip from "@radix-ui/react-tooltip";
 
 // Tooltip — a Radix Tooltip (ADR-0017) on the .gx-tooltip surface. It opens on
@@ -55,14 +55,31 @@ export function Tooltip({
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
-  /** Render the child bare (e.g. while its own menu is open). */
+  /**
+   * Keep the tooltip shut (e.g. while the trigger's own menu is open, or while
+   * it is disabled). The trigger stays the same mounted element, so toggling
+   * this never costs it its focus.
+   */
   disabled?: boolean;
 }) {
   const insideProvider = useContext(InsideProvider);
-  if (disabled || !content) return children;
+  // Always driven controlled, so `disabled` can hold it shut without swapping
+  // the tree around the trigger: returning the bare child while disabled would
+  // put a different element type at this position, and React would replace
+  // the trigger's DOM node (dropping focus to <body>) on every toggle.
+  const [ownOpen, setOwnOpen] = useState(defaultOpen ?? false);
+  if (disabled && ownOpen) setOwnOpen(false);
+  if (!content) return children;
 
   const tooltip = (
-    <RTooltip.Root open={open} defaultOpen={defaultOpen} onOpenChange={onOpenChange}>
+    <RTooltip.Root
+      open={!disabled && (open ?? ownOpen)}
+      onOpenChange={(next) => {
+        if (disabled) return;
+        setOwnOpen(next);
+        onOpenChange?.(next);
+      }}
+    >
       <RTooltip.Trigger asChild>{children}</RTooltip.Trigger>
       <RTooltip.Portal>
         <RTooltip.Content className="gx-tooltip" side={side} align={align} sideOffset={6} collisionPadding={8}>

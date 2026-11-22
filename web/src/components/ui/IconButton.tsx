@@ -68,11 +68,16 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     </button>
   );
 
-  // A disabled button fires no pointer or focus events, so a tooltip on it
-  // could never open; skip the wrapper rather than mount a dead one.
-  if (!tooltip || disabled || loading) return button;
+  if (!tooltip) return button;
+  // The tooltip is held shut, not unmounted, while the button is disabled or
+  // loading: the button must stay the same DOM node when `loading` starts, or
+  // the click that started it would throw keyboard focus to <body>. It is
+  // also held shut while the button's own menu, popover or dialog is open
+  // (aria-expanded, set by the Radix trigger), where it would sit on top of
+  // what the button just opened.
+  const expanded = props["aria-expanded"] === true || props["aria-expanded"] === "true";
   return (
-    <Tooltip content={label} side={tooltipSide}>
+    <Tooltip content={label} side={tooltipSide} disabled={Boolean(disabled) || loading || expanded}>
       {button}
     </Tooltip>
   );

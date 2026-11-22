@@ -1,5 +1,7 @@
-import type { ReactElement, ReactNode } from "react";
+import { useRef, type ReactElement, type ReactNode } from "react";
 import * as RPopover from "@radix-ui/react-popover";
+
+import { popoverOpenWithin } from "./usePopoverDismiss";
 
 // Popover — a small non-modal panel anchored to its trigger, on a Radix
 // Popover (ADR-0017): a filter panel, a quick form, a detail card. Radix
@@ -45,6 +47,7 @@ export function Popover({
   align = "start",
   className = "",
 }: PopoverProps) {
+  const content = useRef<HTMLDivElement | null>(null);
   return (
     <RPopover.Root open={open} defaultOpen={defaultOpen} onOpenChange={onOpenChange}>
       <RPopover.Trigger asChild>{trigger}</RPopover.Trigger>
@@ -57,6 +60,12 @@ export function Popover({
           align={align}
           sideOffset={6}
           collisionPadding={8}
+          ref={content}
+          // A picker open inside the panel (a Combobox) takes this Escape for
+          // itself; the panel closes on the next one.
+          onEscapeKeyDown={(event) => {
+            if (popoverOpenWithin(content.current)) event.preventDefault();
+          }}
         >
           {children}
         </RPopover.Content>

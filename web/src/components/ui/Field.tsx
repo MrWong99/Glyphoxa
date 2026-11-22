@@ -14,9 +14,10 @@ import { useI18n } from "@/i18n";
 //     {(control) => <VoicePicker {...control} value={voice} onChange={setVoice} />}
 //   </Field>
 //
-// For a control made of several elements (a group of buttons, a chip list)
-// pass group: the frame becomes a role=group named by the label, and the
-// control props carry no id.
+// For a control made of several elements with no single one to label (a
+// SegmentedControl, a set of checkboxes) pass group: the frame becomes a
+// role=group named by the label, and the control props carry no id. A
+// ChipInput is NOT a group: its text field is the one labelable element.
 //
 // An error replaces the hint (one line under the control, like Input) and is
 // what a screen reader hears as the control's description.

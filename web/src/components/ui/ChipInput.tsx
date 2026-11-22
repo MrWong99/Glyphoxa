@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { ClipboardEvent, KeyboardEvent, ReactNode } from "react";
 import { X } from "lucide-react";
 
@@ -19,6 +19,10 @@ import { useI18n } from "@/i18n";
 // It is controlled: `values` in, `onChange` with the next list out. Values are
 // trimmed, an empty or already-present value is dropped, and `max` caps the
 // list. Same label / hint / error contract as Input.
+//
+// It has ONE labelable element, the text field, so inside a Field it is an
+// ordinary (non-group) control: spread the Field's control props on it and the
+// field takes the id, the description and the invalid / required state.
 
 type ChipInputProps = {
   values: readonly string[];
@@ -39,6 +43,9 @@ type ChipInputProps = {
   "aria-label"?: string;
   /** Extra description ids, e.g. from a surrounding Field. */
   "aria-describedby"?: string;
+  /** Marks the control invalid without an `error` of its own (a surrounding Field shows the message). */
+  "aria-invalid"?: boolean;
+  "aria-required"?: boolean;
 };
 
 const SEPARATOR = /[,\n]/;
@@ -57,6 +64,8 @@ export function ChipInput({
   id,
   "aria-label": ariaLabel,
   "aria-describedby": ariaDescribedBy,
+  "aria-invalid": ariaInvalid,
+  "aria-required": ariaRequired,
 }: ChipInputProps) {
   const { t } = useI18n();
   const generatedId = useId();
@@ -64,7 +73,7 @@ export function ChipInput({
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraftState] = useState("");
 
-  const invalid = Boolean(error);
+  const invalid = Boolean(error) || ariaInvalid === true;
   const hintId = error || hint ? `${fid}-hint` : undefined;
   const describedBy = [ariaDescribedBy, hintId].filter(Boolean).join(" ") || undefined;
   const full = max !== undefined && values.length >= max;
@@ -88,11 +97,21 @@ export function ChipInput({
     if (next.length !== values.length) onChange(next);
   };
 
-  const remove = (value: string) => {
-    onChange(values.filter((v) => v !== value));
-    // The button that had focus is about to unmount; keep the keyboard user in
-    // the control instead of dropping them on <body>.
+  // The remove button that had focus unmounts with its chip; keep the keyboard
+  // user in the control instead of dropping them on <body>. At the cap the
+  // text field is still disabled when the button is pressed (a disabled field
+  // cannot take focus), so the move waits for the render with the shorter
+  // list.
+  const focusAfterRemove = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusAfterRemove.current) return;
+    focusAfterRemove.current = false;
     inputRef.current?.focus();
+  }, [values]);
+
+  const remove = (value: string) => {
+    focusAfterRemove.current = true;
+    onChange(values.filter((v) => v !== value));
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -170,6 +189,7 @@ export function ChipInput({
           autoComplete="off"
           aria-label={ariaLabel}
           aria-invalid={invalid || undefined}
+          aria-required={ariaRequired || undefined}
           aria-describedby={describedBy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}

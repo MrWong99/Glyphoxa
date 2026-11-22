@@ -77,9 +77,10 @@ describe("QueryBoundary", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  // TanStack Query drops a data-less query back to "pending" when it refetches,
-  // so a retry reads as loading again (the skeleton), not as a stale error.
-  it("shows the skeleton again during a retry, and the new error if that fails too", async () => {
+  // TanStack Query drops a data-less query back to "pending" when it refetches.
+  // Showing the skeleton there would unmount the button that was just pressed
+  // and leave a keyboard user on <body>; the panel stays, its button busy.
+  it("keeps the error panel, busy, during a retry, and shows the new error if that fails too", async () => {
     let rejectSecond!: (error: Error) => void;
     const load = vi
       .fn<() => Promise<Roster>>()
@@ -87,15 +88,46 @@ describe("QueryBoundary", () => {
       .mockImplementationOnce(() => new Promise<Roster>((_, reject) => (rejectSecond = reject)));
     render(withClient(<RosterPanel load={load} />));
 
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("status", { name: "Loading the cast" })).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).toBeNull();
+    const button = await screen.findByRole("button", { name: "Try again" });
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toHaveAttribute("aria-busy", "true"));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading the cast" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBe(button);
 
     rejectSecond(new Error("second"));
     await waitFor(() =>
       expect(screen.getByText("Technical details").closest("details")).toHaveTextContent("second"),
     );
-    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    // The same button, enabled again, still holding focus.
+    expect(screen.getByRole("button", { name: "Try again" })).toBe(button);
+    expect(button).toBeEnabled();
+    expect(button).toHaveFocus();
+  });
+
+  // Only a retry the GM asked for keeps the panel: a query that is simply
+  // loading again (a new key, a refetch from elsewhere) reads as loading.
+  it("shows the skeleton, not a stale error, for a load it did not start itself", () => {
+    const failed: QueryLike<Roster> = {
+      data: undefined,
+      error: new Error("first"),
+      isPending: false,
+      isError: true,
+      fetchStatus: "idle",
+      refetch: () => {},
+    };
+    const { rerender } = render(<QueryBoundary query={failed}>{() => null}</QueryBoundary>);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    rerender(
+      <QueryBoundary query={{ ...failed, error: null, isPending: true, isError: false, fetchStatus: "fetching" }}>
+        {() => null}
+      </QueryBoundary>,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("status")).toBeInTheDocument();
   });
 
   // A query-like source that keeps its error while it retries shows the retry

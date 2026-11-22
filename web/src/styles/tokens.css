@@ -266,13 +266,21 @@
   /* ===== LAYERS ======================================================
    * One ladder instead of literals. Before it, the select dropdown and the
    * phone sidebar drawer both sat on 60, so a dropdown inside a dialog (90/91)
-   * opened underneath it. Floating surfaces a modal can contain (dropdown,
-   * popover, menu, tooltip) are above the modal pair; toasts stay on top
-   * (sonner sets its own, far higher, z-index).
+   * opened underneath it. PORTALLED floating surfaces, which a modal can
+   * contain (the Radix select list, popover, menu, tooltip), are above the
+   * modal pair; toasts stay on top (sonner sets its own, far higher, z-index).
+   *
+   * --z-dropdown is for a panel that is NOT portalled: it opens in place, under
+   * its trigger, in whatever stacking context the trigger is in (the Combobox
+   * list, the campaign switcher panel). On the page it must stay BELOW the
+   * modal pair, so a dialog opened while it is up dims it like everything
+   * else; inside a dialog it is already inside that dialog's own stacking
+   * context, where any value puts it on top.
    */
   --z-sticky: 20;
   --z-scrim: 55;
   --z-drawer: 60;
+  --z-dropdown: 70;
   --z-overlay: 90;
   --z-modal: 91;
   --z-popover: 100;

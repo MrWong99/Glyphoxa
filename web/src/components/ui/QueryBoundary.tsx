@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { errorMessage } from "@/lib/connectError";
 import { ErrorState } from "./ErrorState";
@@ -16,6 +16,12 @@ import { Skeleton } from "./Skeleton";
 //                  empty={<EmptyState title="No NPCs yet" … />}>
 //     {(r) => <RosterList agents={r.agents} />}
 //   </QueryBoundary>
+//
+// A retry started from "Try again" keeps the ErrorState in place, its button
+// busy, until the retry settles. TanStack Query drops a data-less query back
+// to "pending" when it refetches; swapping to the skeleton there unmounted the
+// button the GM had just pressed and dropped keyboard focus to <body>, and a
+// second failure brought back a new button nobody was on.
 //
 // "Nothing to show" is the point: once a query HAS data, a failed background
 // refetch does not tear the screen down to an error. The data on screen stays
@@ -63,14 +69,26 @@ export function QueryBoundary<T>({
 }) {
   const { data } = query;
 
+  // The failure whose "Try again" is in flight. Cleared when that retry
+  // settles: a new error (the effect runs when isError comes back) or data.
+  const [retried, setRetried] = useState<{ error: unknown } | null>(null);
+  useEffect(() => {
+    if (query.isError || data !== undefined) setRetried(null);
+  }, [query.isError, query.error, data]);
+
   if (data === undefined) {
-    if (query.isError) {
+    const retrying =
+      retried !== null && !query.isError && query.isPending && query.fetchStatus !== "idle";
+    if (query.isError || retrying) {
       return (
         <ErrorState
           title={errorTitle}
-          message={errorMessage(query.error)}
-          onRetry={() => void query.refetch()}
-          retrying={query.isFetching ?? false}
+          message={errorMessage(query.isError ? query.error : retried?.error)}
+          onRetry={() => {
+            setRetried({ error: query.error });
+            void query.refetch();
+          }}
+          retrying={retrying || (query.isFetching ?? false)}
           size={errorSize}
         />
       );

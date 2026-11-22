@@ -144,6 +144,67 @@ describe("tokens in use", () => {
     expect(baseCss).not.toMatch(/var\(--focus-ring\)/);
   });
 
+  // base.css says every focusable element gets the outline. A later rule that
+  // says `outline: none` at the same specificity silently takes it away again
+  // (it did, for the campaign switcher's rows and the row-actions menu's
+  // items, through .gx-select__item). So every such reset has to be listed
+  // here with the thing that shows focus INSTEAD, and that thing has to exist.
+  describe("every `outline: none` names what shows focus instead", () => {
+    // selector of the reset -> selector of the rule that draws the indicator,
+    // or a reason there is nothing to indicate.
+    const SURFACE = "a surface that takes focus only as a container; focus inside it is drawn as usual";
+    const OWN_SHAPE = "draws its own mark on its shape (the screen's stylesheet)";
+    const resets: Record<string, string> = {
+      // The rule itself swaps the outline for a border colour and a glow.
+      ".gx-input:focus": ".gx-input:focus",
+      '.gx-select:focus, .gx-select[data-state="open"]': '.gx-select:focus, .gx-select[data-state="open"]',
+      // The highlighted row is the keyboard position in a listbox or a menu.
+      '.gx-select__item[role="option"]': ".gx-select__item[data-highlighted]",
+      ".gx-menu__item": ".gx-menu__item[data-highlighted]",
+      // A borderless field inside a frame: the frame shows it.
+      ".gx-combobox__input": ".gx-combobox__search:focus-within",
+      ".gx-chipinput__input": ".gx-chipinput:focus-within",
+      ".gx-dialog:focus-visible": SURFACE,
+      ".gx-popover:focus-visible, .gx-menu:focus-visible": SURFACE,
+      "svg g:focus-visible": OWN_SHAPE,
+    };
+
+    // Every `selector { declarations }` block, comments stripped. Blocks nest
+    // one level deep at most (@media), and the inner blocks are what match.
+    const rules = (css: string) =>
+      [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+        selector: m[1]!.trim().replace(/\s+/g, " "),
+        body: m[2]!,
+      }));
+    const all = [...rules(baseCss), ...rules(componentsCss)];
+    const INDICATOR = /(^|[\s;])(outline|box-shadow|border-color|background)\s*:\s*(?!none)/;
+
+    it("no reset is unlisted", () => {
+      const found = all.filter((rule) => /outline:\s*(none|0)\s*;/.test(rule.body)).map((rule) => rule.selector);
+      expect(found.length).toBeGreaterThan(0);
+      for (const selector of found) {
+        expect(Object.keys(resets), `"${selector}" resets the focus outline`).toContain(selector);
+      }
+    });
+
+    it.each(Object.entries(resets).filter(([, instead]) => instead !== SURFACE && instead !== OWN_SHAPE))(
+      "%s -> %s",
+      (_reset, instead) => {
+        const indicator = all.filter((rule) => rule.selector === instead);
+        expect(indicator.length, `no rule for ${instead}`).toBeGreaterThan(0);
+        expect(indicator.some((rule) => INDICATOR.test(rule.body.replace(/outline:\s*none\s*;/, "")))).toBe(true);
+      },
+    );
+
+    // The regression itself: the row class shared by listbox options and real
+    // buttons must not reset the outline for the buttons.
+    it(".gx-select__item itself keeps the outline (only its role=option form drops it)", () => {
+      const row = all.filter((rule) => rule.selector === ".gx-select__item");
+      expect(row.length).toBeGreaterThan(0);
+      for (const rule of row) expect(rule.body).not.toMatch(/outline\s*:/);
+    });
+  });
+
   it("layers come from the z-index tokens, not from literals", () => {
     for (const css of [componentsCss, baseCss]) {
       const literals = [...css.matchAll(/z-index:\s*([^;]+);/g)].map((m) => m[1]!.trim());
@@ -153,10 +214,25 @@ describe("tokens in use", () => {
     // dialog opens over it; the drawer and its scrim sit below.
     const z = (name: string) => Number(resolve(name));
     expect(z("--z-scrim")).toBeLessThan(z("--z-drawer"));
-    expect(z("--z-drawer")).toBeLessThan(z("--z-overlay"));
+    expect(z("--z-drawer")).toBeLessThan(z("--z-dropdown"));
+    expect(z("--z-dropdown")).toBeLessThan(z("--z-overlay"));
     expect(z("--z-overlay")).toBeLessThan(z("--z-modal"));
     expect(z("--z-modal")).toBeLessThan(z("--z-popover"));
     expect(z("--z-popover")).toBeLessThan(z("--z-tooltip"));
+  });
+
+  // .gx-select__content is two things: the portalled Radix Select list, which
+  // has to open above a dialog it is used in, and the surface of the panels
+  // that open in place on the page (Combobox list, campaign switcher), which
+  // have to stay under a dialog opened while they are up.
+  it("only the portalled select list sits above the modal pair", () => {
+    const zOf = (selector: string) => {
+      const match = new RegExp(`\\n${selector.replace(/[.\-[\]"=]/g, "\\$&")} \\{([^}]*)\\}`).exec(componentsCss);
+      if (!match) throw new Error(`no rule for ${selector}`);
+      return /z-index:\s*var\((--z-[a-z]+)\)/.exec(match[1]!.replace(/\/\*[\s\S]*?\*\//g, ""))?.[1];
+    };
+    expect(zOf(".gx-select__content")).toBe("--z-dropdown");
+    expect(zOf('.gx-select__content[role="listbox"]')).toBe("--z-popover");
   });
 
   it("the shared stylesheets carry no var() fallbacks (every token is defined)", () => {

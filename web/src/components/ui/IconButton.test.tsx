@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { IconButton } from "./IconButton";
+import { Menu, MenuItem } from "./Menu";
 
 describe("IconButton", () => {
   it("is named by its required label and fires onClick", () => {
@@ -74,5 +76,55 @@ describe("IconButton", () => {
       </IconButton>,
     );
     expect(ref.current).toBe(screen.getByRole("button", { name: "More" }));
+  });
+
+  // Swapping the tooltip wrapper in and out would replace the <button> node,
+  // and the click that set `loading` would lose keyboard focus to <body>.
+  it("stays the same element, with focus, when loading starts and ends", () => {
+    function Refresh() {
+      const [loading, setLoading] = useState(false);
+      return (
+        <>
+          <IconButton label="Refresh" loading={loading} onClick={() => setLoading(true)}>
+            <svg />
+          </IconButton>
+          <button onClick={() => setLoading(false)}>done</button>
+        </>
+      );
+    }
+    render(<Refresh />);
+    const button = screen.getByRole("button", { name: "Refresh" });
+    act(() => button.focus());
+    fireEvent.click(button);
+
+    expect(screen.getByRole("button", { name: "Refresh" })).toBe(button);
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(document.activeElement).toBe(button);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "done" }));
+    expect(screen.getByRole("button", { name: "Refresh" })).toBe(button);
+    expect(button).toBeEnabled();
+  });
+
+  it("holds its tooltip shut while the menu it opens is expanded", () => {
+    render(
+      <Menu
+        trigger={
+          <IconButton label="Campaign actions">
+            <svg />
+          </IconButton>
+        }
+      >
+        <MenuItem>Settings</MenuItem>
+      </Menu>,
+    );
+    const trigger = screen.getByRole("button", { name: "Campaign actions" });
+    act(() => trigger.focus());
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Campaign actions");
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 });

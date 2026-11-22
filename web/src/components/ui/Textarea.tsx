@@ -48,6 +48,18 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
   const fit = useCallback(() => {
     const el = localRef.current;
     if (!el || !autoGrow) return;
+    // Measuring collapses the box for an instant, which shortens the page. A
+    // scroll container that is scrolled near its end (the content area, a
+    // dialog body, the window) then has its scrollTop clamped by the layout
+    // the measurement forces, and nothing restores it: the view jumped to the
+    // top on every keystroke in a long text. Note where each scrolled ancestor
+    // is and put it back once the real height is set. All of it happens in
+    // this one synchronous pass, so nothing is painted in between. (Only a
+    // real browser shows the jump; jsdom has no layout.)
+    const scrolled: Array<[Element, number]> = [];
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      if (node.scrollTop !== 0) scrolled.push([node, node.scrollTop]);
+    }
     // Collapse first, so the box can also shrink when text is deleted.
     el.style.height = "auto";
     // Not laid out (hidden tab, test DOM): leave the height to `rows`.
@@ -66,6 +78,9 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
       }
     }
     el.style.height = `${height}px`;
+    for (const [node, top] of scrolled) {
+      if (node.scrollTop !== top) node.scrollTop = top;
+    }
     // The stylesheet shows the scrollbar only once the cap is reached.
     if (capped) el.dataset.capped = "true";
     else delete el.dataset.capped;

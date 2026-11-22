@@ -2,8 +2,12 @@ import { useRef, useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { toast, Toaster } from "sonner";
+
 import { Button } from "./Button";
+import { Combobox } from "./Combobox";
 import { Dialog, DialogClose } from "./Dialog";
+import { toastUndo } from "./toast";
 import { usePopoverDismiss } from "./usePopoverDismiss";
 
 type Variant = "modal" | "sheet";
@@ -179,5 +183,104 @@ describe("Dialog", () => {
     fireEvent.mouseDown(screen.getByRole("button", { name: "inside dialog" }));
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.getByText("popover open")).toBeInTheDocument();
+  });
+
+  // A hand-rolled popover INSIDE the dialog (the voice Combobox of a create
+  // form) is a layer above it: Escape and a press elsewhere in the dialog
+  // close the list, not the dialog and the form with it.
+  describe("with a Combobox inside", () => {
+    function FormInDialog({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+      const [voice, setVoice] = useState("");
+      return (
+        <Dialog open onOpenChange={onOpenChange} title="New NPC">
+          <input aria-label="Name" />
+          <Combobox
+            label="Voice"
+            options={[
+              { value: "v1", label: "Rachel" },
+              { value: "v2", label: "Adam" },
+            ]}
+            value={voice}
+            onValueChange={setVoice}
+          />
+        </Dialog>
+      );
+    }
+
+    function openList() {
+      fireEvent.click(screen.getByRole("button", { name: "Voice" }));
+      expect(screen.getByRole("option", { name: "Rachel" })).toBeInTheDocument();
+    }
+
+    it("Escape closes the list and leaves the dialog open; a second Escape closes the dialog", () => {
+      const onOpenChange = vi.fn();
+      render(<FormInDialog onOpenChange={onOpenChange} />);
+      openList();
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByRole("option")).toBeNull();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: "New NPC" })).toBeInTheDocument();
+      // Focus is back on the picker, so the GM carries on in the form.
+      expect(screen.getByRole("button", { name: "Voice" })).toHaveFocus();
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("a press elsewhere in the dialog closes the list", () => {
+      const onOpenChange = vi.fn();
+      render(<FormInDialog onOpenChange={onOpenChange} />);
+      openList();
+
+      fireEvent.mouseDown(screen.getByRole("textbox", { name: "Name" }));
+      expect(screen.queryByRole("option")).toBeNull();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
+
+    it("picking an option keeps the dialog open", () => {
+      const onOpenChange = vi.fn();
+      render(<FormInDialog onOpenChange={onOpenChange} />);
+      openList();
+
+      fireEvent.click(screen.getByRole("option", { name: "Adam" }));
+      expect(screen.queryByRole("option")).toBeNull();
+      expect(screen.getByRole("button", { name: "Voice" })).toHaveTextContent("Adam");
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // A toast is rendered outside the dialog. Radix would read a press on it as
+  // "outside" and close the dialog under the GM's Undo.
+  it("stays open when a toast's action is pressed over it", async () => {
+    const onOpenChange = vi.fn();
+    const onUndo = vi.fn();
+    render(
+      <>
+        <Toaster />
+        <Dialog open onOpenChange={onOpenChange} title="Cast">
+          <p>body</p>
+        </Dialog>
+      </>,
+    );
+    act(() => {
+      toastUndo("Removed Flo from the cast", onUndo);
+    });
+    // The toaster is a sibling of the dialog's portal, which Radix hides from
+    // the accessibility tree while the dialog is modal.
+    const undo = await screen.findByRole("button", { name: "Undo", hidden: true });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    fireEvent.pointerDown(undo, { button: 0 });
+    fireEvent.focusIn(undo);
+    fireEvent.pointerUp(undo, { button: 0 });
+    fireEvent.click(undo, { button: 0 });
+
+    expect(onUndo).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Cast" })).toBeInTheDocument();
+    act(() => {
+      toast.dismiss();
+    });
   });
 });

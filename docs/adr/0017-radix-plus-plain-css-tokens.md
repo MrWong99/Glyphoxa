@@ -63,7 +63,8 @@ Three notes on that table:
 
 - **`SegmentedControl` is hand-rolled, not a Radix ToggleGroup.** The screens' existing view switches are a `role="group"` of buttons with `aria-pressed`, and their tests query exactly that. A ToggleGroup renders radio semantics with roving focus; adopting it would have changed what a screen reader hears and broken those tests for no gain. Radix Tabs, ToggleGroup and Checkbox, named in the original decision, are still not installed: nothing uses them, and the sidebar sub-navigation (ADR-0063) replaced the in-page tabs.
 - **The sheet variant of `Dialog` is a right-edge drawer, and a bottom sheet at 880px and below.** It shares one surface with the modal variant and `ConfirmDialog`.
-- **A Radix modal driven controlled has no Trigger to return focus to**, so closing one left focus on `<body>`. `Dialog` and `ConfirmDialog` return focus to whatever had it when they opened (`ui/useRestoreFocus.ts`), including the trigger of a `Menu` whose item opened the dialog.
+- **A Radix modal driven controlled has no Trigger to return focus to**, so closing one left focus on `<body>`. `Dialog` and `ConfirmDialog` return focus to whatever had it when they opened (`ui/useRestoreFocus.ts`), including the trigger of a `Menu` whose item opened the dialog. Two cases are deliberate exceptions: when the opener no longer exists focus is left to Radix, and when the confirmed action has already put focus somewhere (a form that opens with its first field focused) it stays there.
+- **A hand-rolled picker inside a `Dialog` or `Popover` is the layer on top of it.** `Combobox` and the other `usePopoverDismiss` popovers close on their own Escape and on a press elsewhere in the dialog; the dialog stands back for that one Escape (`popoverOpenWithin`) and closes on the next. A modal layer only suspends the dismissal of popovers it does not contain.
 
 **The feedback rule.** Four situations, four answers, so the same event looks the same on every screen:
 
@@ -76,18 +77,22 @@ Three notes on that table:
 
 A failed read that still has data on screen (a background refetch) is not an error state: the data stays and the next refetch can succeed. A state that persists, such as a missing setup step, is an `Alert`, not a toast. A toast reports an event that has passed.
 
+One exception to the second row: **a mutation that fails inside an open `Dialog` or sheet is reported with an inline `Alert` in that dialog, not a toast.** While a modal is open Radix hides everything outside it from assistive technology, and that includes the toast region, so a `toast.error` raised there is never announced. The dialog also stays open on a failure, which makes the error a state of the form the GM is still looking at.
+
+While a retry started from **Try again** is in flight, `QueryBoundary` keeps the `ErrorState` in place with its button busy instead of going back to the skeleton, so the button that was pressed keeps keyboard focus.
+
 **Token changes.** `tokens.css` is no longer a verbatim copy of the 2026-06-24 handoff, and the next handoff must take these back rather than overwrite them:
 
 - `--text-subtle` is light-gray-80 (was marketing-gray-60, 3.6 to 4.4:1 on the app's surfaces; now 4.8:1 or better).
 - `--arcane-fill` and `--arcane-fill-hover` (violet-60 and violet-70) fill anything that carries white text. White on `--arcane` is 4.15:1.
 - `--border-control` and `--border-control-hover` edge inputs, selects and the switch track at 3:1 or better against the card and overlay surfaces. They are solid colours, computed as violet-20 over `--surface-card`, because an alpha border has a different contrast on every surface.
-- A z-index ladder (`--z-sticky` 20, `--z-scrim` 55, `--z-drawer` 60, `--z-overlay` 90, `--z-modal` 91, `--z-popover` 100, `--z-tooltip` 110). Floating surfaces sit above the modal pair so a dropdown inside a dialog opens over it.
+- A z-index ladder (`--z-sticky` 20, `--z-scrim` 55, `--z-drawer` 60, `--z-dropdown` 70, `--z-overlay` 90, `--z-modal` 91, `--z-popover` 100, `--z-tooltip` 110). Portalled floating surfaces (the Radix select list, popover, menu, tooltip) sit above the modal pair so a dropdown inside a dialog opens over it. `--z-dropdown` is for a panel that opens in place under its trigger (the `Combobox` list, the campaign switcher): on the page it stays below the modal pair, so a dialog opened while it is up covers it.
 - `--page-gutter` (32px, 24px at 880 and below, 16px at 640 and below), the page widths, the control sizes and the focus-outline tokens.
 
 `styles/tokens.test.ts` recomputes the WCAG ratios from the hex values, so a later palette change that drops below AA fails a test instead of shipping.
 
 **Three breakpoints.** 1100px (two-column editors stack), 880px (the sidebar becomes a drawer, sheets dock to the bottom), 640px (phone gutters). They are documented in `tokens.css` and exported from `web/src/lib/breakpoints.ts`; a custom property cannot be used in a media query, so stylesheets repeat the numbers. Two leftovers remain: the topbar's phone squeeze in `components.css` keeps 480, and the screens' co-located CSS still uses 520, 720 and 900 in places. They move to the three as each is next touched.
 
-**Focus, touch and forced colours.** Keyboard focus is a 2px outline on `:focus-visible`, not a box-shadow: a selected row's own box-shadow used to replace the ring, so focus disappeared on the item it was on. One `(pointer: coarse)` block gives small controls a 40px target. One `(forced-colors: active)` block restates, with outlines and system colours, what the theme otherwise says with fills and shadows.
+**Focus, touch and forced colours.** Keyboard focus is a 2px outline on `:focus-visible`, not a box-shadow: a selected row's own box-shadow used to replace the ring, so focus disappeared on the item it was on. A rule that resets the outline has to name what shows focus instead; `styles/tokens.test.ts` keeps that list and fails on an unlisted `outline: none`. One `(pointer: coarse)` block gives small controls a 40px target. One `(forced-colors: active)` block restates, with outlines and system colours, what the theme otherwise says with fills and shadows.
 
 **Not implemented: `data-accent`, `data-density`, `data-reduce-motion`.** The original text says density, accent and reduced motion are root attributes whose selectors flip token values, and that `tokens.css` holds `[data-accent]` overrides. None of the three exists. There is one accent and one density. Reduced motion is honoured, but through the `prefers-reduced-motion` media query in `base.css`, which follows the operating system setting and needs no attribute. The attributes stay unbuilt until a user-facing setting needs them (tracked with the rest of the web backlog in #695); treat the paragraph above as a design option that was not taken, not as a description of the code.

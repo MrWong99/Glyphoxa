@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
@@ -58,7 +59,7 @@ describe("Tooltip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("Second");
   });
 
-  it("renders the bare child when disabled or given no content", () => {
+  it("shows nothing when disabled or given no content", () => {
     render(
       <>
         <Tooltip content="Hidden" disabled>
@@ -73,5 +74,29 @@ describe("Tooltip", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
     focusTrigger("empty");
     expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("keeps the trigger mounted, and shuts, when it is disabled while open", () => {
+    function Toggle() {
+      const [disabled, setDisabled] = useState(false);
+      return (
+        <Tooltip content="Mute every NPC" disabled={disabled}>
+          <button onClick={() => setDisabled((d) => !d)}>Mute all</button>
+        </Tooltip>
+      );
+    }
+    render(<Toggle />);
+    const trigger = focusTrigger("Mute all");
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByRole("button", { name: "Mute all" })).toBe(trigger);
+    expect(trigger).toHaveFocus();
+
+    // Enabled again: it does not pop back open by itself.
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByRole("button", { name: "Mute all" })).toBe(trigger);
   });
 });

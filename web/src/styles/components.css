@@ -519,8 +519,8 @@ textarea.gx-input--autogrow[data-capped="true"] {
   margin-left: 2px;
   color: var(--status-danger);
 }
-/* A field whose control is a group (ChipInput, SegmentedControl) rather than
- * one labelable element. */
+/* A field whose control is a group (a SegmentedControl, a set of checkboxes)
+ * rather than one labelable element. */
 .gx-field--group {
   border: 0;
   margin: 0;
@@ -596,7 +596,16 @@ textarea.gx-input--autogrow[data-capped="true"] {
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-md);
   padding: 4px;
-  /* Above the modal pair: a select inside a dialog opens over it. */
+  /* This class is also the surface of the panels that open IN PLACE under
+   * their trigger (the Combobox list, the campaign switcher panel, the
+   * row-actions menu). Those stay below the modal pair, as they always were:
+   * a dialog opened while one is up covers and dims it. */
+  z-index: var(--z-dropdown);
+}
+/* The Radix Select list itself is portalled to <body>, so a select inside a
+ * dialog needs to open above the modal pair. (Radix copies this z-index onto
+ * the wrapper it positions.) */
+.gx-select__content[role="listbox"] {
   z-index: var(--z-popover);
 }
 .gx-select__item {
@@ -607,7 +616,21 @@ textarea.gx-input--autogrow[data-capped="true"] {
   border-radius: var(--radius-xs);
   cursor: pointer;
   user-select: none;
+}
+/* An OPTION (a Radix Select item, a cmdk Combobox item) shows where the
+ * keyboard is with its highlight below, so it drops the focus outline. The
+ * reset is scoped to role=option on purpose: this class is also on real
+ * buttons (the campaign switcher's rows, the row-actions menu's items) whose
+ * only focus indicator IS the global outline. A bare `outline: none` here,
+ * at the same specificity as :focus-visible and later in the bundle, left
+ * those with no visible focus at all. */
+.gx-select__item[role="option"] {
   outline: none;
+}
+/* On those buttons the outline is drawn inside the row: they sit in a
+ * scrolling list that would clip one drawn outside. */
+button.gx-select__item:focus-visible {
+  outline-offset: calc(-1 * var(--focus-outline-width));
 }
 .gx-select__item[data-highlighted] {
   background: rgba(144, 89, 255, 0.18);
@@ -619,6 +642,12 @@ textarea.gx-input--autogrow[data-capped="true"] {
  * the live ElevenLabs voice catalog (#88 slice 2). Reuses the .gx-select trigger
  * + .gx-select__content popover vocabulary; adds the filter input + bounded list.
  */
+/* In a flex row the field may shrink below the width of a long option name
+ * (the trigger text is nowrap and ellipsises); without this the voice picker
+ * pushed its row wider than a phone screen. */
+.gx-combobox {
+  min-width: 0;
+}
 .gx-combobox__anchor {
   position: relative;
 }
@@ -635,6 +664,7 @@ textarea.gx-input--autogrow[data-capped="true"] {
   flex: 0 0 auto;
 }
 .gx-combobox__value {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -656,6 +686,13 @@ textarea.gx-input--autogrow[data-capped="true"] {
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
   border-bottom: 1px solid var(--border-subtle);
+}
+/* The filter field has no box of its own to outline (it fills this row), so
+ * the row carries the focus indicator, drawn inside the popover's edge. */
+.gx-combobox__search:focus-within {
+  outline: var(--focus-outline-width) solid var(--focus-outline-color);
+  outline-offset: calc(-1 * var(--focus-outline-width));
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 .gx-combobox__search-icon {
   color: var(--text-muted);
@@ -1554,7 +1591,9 @@ textarea.gx-input--autogrow[data-capped="true"] {
 }
 @media (max-width: 640px) {
   /* Phone: full-width buttons stacked with the primary action on top (it is
-   * last in the row on desktop), so it is the nearest one to the thumb. */
+   * last in the row on desktop). Deliberate trade-off: Tab order stays the
+   * DOM order (Cancel, then the primary action), so with a keyboard on a
+   * narrow window focus moves up the stack. */
   .gx-dialog__footer {
     flex-direction: column-reverse;
     align-items: stretch;
@@ -1598,7 +1637,11 @@ textarea.gx-input--autogrow[data-capped="true"] {
   color: var(--text-default);
   font-size: var(--body-sm);
 }
-.gx-popover:focus-visible {
+/* Like the dialog surface: Radix focuses the panel itself (a popover with
+ * nothing focusable; a menu when the pointer leaves its items), and a ring
+ * around the whole surface would say nothing. */
+.gx-popover:focus-visible,
+.gx-menu:focus-visible {
   outline: none;
 }
 .gx-popover[data-state="open"],

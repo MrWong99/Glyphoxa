@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ChipInput } from "./ChipInput";
+import { Field } from "./Field";
 
 function Aliases({
   initial = [],
@@ -198,5 +199,31 @@ describe("ChipInput", () => {
   it("can be named without a visible label", () => {
     render(<ChipInput aria-label="Tags" values={["npc"]} onChange={() => {}} />);
     expect(screen.getByRole("textbox", { name: "Tags" })).toBeInTheDocument();
+  });
+
+  // At the cap the text field is disabled, and a disabled field cannot take
+  // focus: the focus has to move once the list has shrunk and it is enabled.
+  it("keeps focus in the control when a value is removed at max", () => {
+    render(<Aliases initial={["a", "b"]} max={2} />);
+    expect(field()).toBeDisabled();
+    const remove = screen.getByRole("button", { name: "Remove a" });
+    remove.focus();
+    fireEvent.click(remove);
+    expect(chips()).toEqual(["b"]);
+    expect(field()).toBeEnabled();
+    expect(field()).toHaveFocus();
+  });
+
+  it("takes its label, description, invalid and required state from a Field", () => {
+    render(
+      <Field label="Tags" error="Pick at least one." required>
+        {(control) => <ChipInput {...control} values={[]} onChange={() => {}} />}
+      </Field>,
+    );
+    const input = screen.getByRole("textbox", { name: /Tags/ });
+    expect(input).toBeInvalid();
+    expect(input).toBeRequired();
+    expect(input).toHaveAccessibleDescription("Pick at least one.");
+    expect(input.closest(".gx-chipinput")).toHaveAttribute("data-invalid", "true");
   });
 });

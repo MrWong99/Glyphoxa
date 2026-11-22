@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 
 import { Button } from "./Button";
+import { Combobox } from "./Combobox";
 import { Popover, PopoverClose } from "./Popover";
 import { usePopoverDismiss } from "./usePopoverDismiss";
 
@@ -97,5 +98,49 @@ describe("Popover", () => {
     // … and a press on the page still dismisses it while the panel is up.
     fireEvent.mouseDown(screen.getByRole("button", { name: "elsewhere" }));
     expect(screen.queryByText("hand-rolled open")).toBeNull();
+  });
+
+  // A hand-rolled picker INSIDE the panel is the layer on top of it.
+  describe("with a Combobox inside", () => {
+    function FilterWithPicker({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+      return (
+        <Popover label="Filter entries" trigger={<Button>Filter</Button>} onOpenChange={onOpenChange}>
+          <input aria-label="Tag" />
+          <Combobox label="Kind" options={[{ value: "npc", label: "NPC" }]} />
+        </Popover>
+      );
+    }
+
+    function openBoth() {
+      fireEvent.click(screen.getByRole("button", { name: "Filter" }));
+      fireEvent.click(screen.getByRole("button", { name: "Kind" }));
+      expect(screen.getByRole("option", { name: "NPC" })).toBeInTheDocument();
+    }
+
+    it("Escape closes the list first, then the panel", () => {
+      const onOpenChange = vi.fn();
+      render(<FilterWithPicker onOpenChange={onOpenChange} />);
+      openBoth();
+      onOpenChange.mockClear();
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByRole("option")).toBeNull();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: "Filter entries" })).toBeInTheDocument();
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    });
+
+    it("a press elsewhere in the panel closes the list", () => {
+      const onOpenChange = vi.fn();
+      render(<FilterWithPicker onOpenChange={onOpenChange} />);
+      openBoth();
+      onOpenChange.mockClear();
+
+      fireEvent.mouseDown(screen.getByRole("textbox", { name: "Tag" }));
+      expect(screen.queryByRole("option")).toBeNull();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
   });
 });
