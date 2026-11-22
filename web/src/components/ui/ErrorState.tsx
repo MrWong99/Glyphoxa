@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { RotateCw, TriangleAlert } from "lucide-react";
 
 import { useI18n } from "@/i18n";
@@ -17,6 +17,13 @@ import { Button } from "./Button";
 // Usually reached through QueryBoundary, which wires all three from a query.
 // The raw message is the server's own (English) sentence: it is shown, but
 // folded, so the screen reads in the GM's language first.
+//
+// Focus through a retry: the busy button is disabled, and a browser takes
+// focus off a control that becomes disabled (the focus fixup, one frame
+// later), so a keyboard user who pressed "Try again" would be on <body> by the
+// time the retry failed again. When the retry was started from the focused
+// button, focus is put back on it once the retry settles, unless it has gone
+// somewhere else on purpose in the meantime.
 
 export function ErrorState({
   title,
@@ -41,7 +48,18 @@ export function ErrorState({
   className?: string;
 }) {
   const { t } = useI18n();
-  const cls = ["gx-empty", "gx-empty--danger", `gx-empty--${size}`, className].filter(Boolean).join(" ");
+
+  const retryButton = useRef<HTMLButtonElement>(null);
+  // The retry in flight was started from the button while it held focus.
+  const pressedWithFocus = useRef(false);
+  useEffect(() => {
+    if (retrying || !pressedWithFocus.current) return;
+    pressedWithFocus.current = false;
+    const active = document.activeElement;
+    if (active === null || active === document.body) retryButton.current?.focus();
+  }, [retrying]);
+
+  const cls =["gx-empty", "gx-empty--danger", `gx-empty--${size}`, className].filter(Boolean).join(" ");
   const desc = description === undefined ? t("common.loadFailedDesc") : description;
   return (
     <div className={cls} role="alert">
@@ -61,11 +79,15 @@ export function ErrorState({
       {onRetry && (
         <div className="gx-empty__action">
           <Button
+            ref={retryButton}
             variant="secondary"
             size="sm"
             iconStart={<RotateCw />}
             loading={retrying}
-            onClick={onRetry}
+            onClick={() => {
+              pressedWithFocus.current = document.activeElement === retryButton.current;
+              onRetry();
+            }}
           >
             {t("common.retry")}
           </Button>

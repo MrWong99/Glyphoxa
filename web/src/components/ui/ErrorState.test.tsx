@@ -51,6 +51,63 @@ describe("ErrorState", () => {
     expect(button).toBeDisabled();
   });
 
+  // The busy button is disabled, and a browser takes focus off a disabled
+  // control (the focus fixup). When the retry fails again the keyboard user
+  // gets the button back instead of being left on <body>.
+  it("returns focus to Try again when a retry started from it fails again", () => {
+    const { rerender } = render(<ErrorState onRetry={() => {}} />);
+    const button = screen.getByRole("button", { name: "Try again" });
+    button.focus();
+    fireEvent.click(button);
+
+    rerender(<ErrorState onRetry={() => {}} retrying />);
+    button.blur(); // what the browser does to the now-disabled button
+    expect(document.body).toHaveFocus();
+
+    rerender(<ErrorState onRetry={() => {}} />);
+    expect(button).toBeEnabled();
+    expect(button).toHaveFocus();
+  });
+
+  it("leaves focus alone when it moved somewhere else during the retry", () => {
+    const { rerender } = render(
+      <>
+        <input aria-label="search" />
+        <ErrorState onRetry={() => {}} />
+      </>,
+    );
+    const button = screen.getByRole("button", { name: "Try again" });
+    button.focus();
+    fireEvent.click(button);
+
+    rerender(
+      <>
+        <input aria-label="search" />
+        <ErrorState onRetry={() => {}} retrying />
+      </>,
+    );
+    screen.getByLabelText("search").focus();
+
+    rerender(
+      <>
+        <input aria-label="search" />
+        <ErrorState onRetry={() => {}} />
+      </>,
+    );
+    expect(screen.getByLabelText("search")).toHaveFocus();
+  });
+
+  it("does not take focus after a retry that was not started from a focused button", () => {
+    const { rerender } = render(<ErrorState onRetry={() => {}} />);
+    // A pointer press that does not focus the button (Safari), or a retry the
+    // caller started itself.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    rerender(<ErrorState onRetry={() => {}} retrying />);
+    rerender(<ErrorState onRetry={() => {}} />);
+    expect(document.body).toHaveFocus();
+  });
+
   it("speaks German", () => {
     localStorage.setItem("gx-lang", "de");
     try {

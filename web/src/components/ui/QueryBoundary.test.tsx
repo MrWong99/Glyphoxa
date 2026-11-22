@@ -97,11 +97,17 @@ describe("QueryBoundary", () => {
     expect(screen.queryByRole("status", { name: "Loading the cast" })).toBeNull();
     expect(screen.getByRole("button", { name: "Try again" })).toBe(button);
 
+    // A browser takes focus off a control that becomes disabled (the focus
+    // fixup, on its next frame; jsdom does the same). Every real retry outlasts
+    // a frame, so do it here instead of racing one.
+    button.blur();
+    expect(document.body).toHaveFocus();
+
     rejectSecond(new Error("second"));
     await waitFor(() =>
       expect(screen.getByText("Technical details").closest("details")).toHaveTextContent("second"),
     );
-    // The same button, enabled again, still holding focus.
+    // The same button, enabled again, holding focus again.
     expect(screen.getByRole("button", { name: "Try again" })).toBe(button);
     expect(button).toBeEnabled();
     expect(button).toHaveFocus();

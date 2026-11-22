@@ -21,7 +21,8 @@ import { Skeleton } from "./Skeleton";
 // busy, until the retry settles. TanStack Query drops a data-less query back
 // to "pending" when it refetches; swapping to the skeleton there unmounted the
 // button the GM had just pressed and dropped keyboard focus to <body>, and a
-// second failure brought back a new button nobody was on.
+// second failure brought back a new button nobody was on. Keeping the same
+// button mounted is what lets ErrorState hand focus back to it afterwards.
 //
 // "Nothing to show" is the point: once a query HAS data, a failed background
 // refetch does not tear the screen down to an error. The data on screen stays
