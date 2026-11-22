@@ -326,6 +326,11 @@ func (r *Recaller) embedAndCache(ctx context.Context, text, norm string, campaig
 	// (worldOK false) so a later hit skips the (expensive) embed and fetches world
 	// inline, rather than silently returning empty world.
 	world, err := r.retriever.SearchChunksByCampaign(ctx, campaignID, vecs[0], r.k)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		// Preempted while the search ran (or just after): the text is stale, so it
+		// must not take the campaign's cache slot, and it is no failed prefetch.
+		return specCache{}
+	}
 	worldOK := err == nil
 	if err != nil {
 		r.log.Warn("memory speculation: world prefetch failed; caching vector only", "err", err)
