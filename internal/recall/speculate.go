@@ -2,6 +2,7 @@ package recall
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -42,8 +43,10 @@ type specCache struct {
 // final's normalized match self-heals a wrong speculation.
 func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	r.mailMu.Lock()
+	r.mailSeq++
 	r.pending = p.Text
 	r.pendingSID = p.SessionID // #487: scope the prefetch to the partial's session
+	r.pendingSeq = r.mailSeq
 	r.hasPending = true
 	r.mailMu.Unlock()
 	select {
@@ -63,6 +66,11 @@ func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 type flight struct {
 	norm string
 	done chan struct{}
+	// campaignID and cancel are set only on a SPECULATIVE flight (a partial's embed,
+	// tracked as Recaller.spec): the campaign scopes which final may join or preempt
+	// it, and cancel is how a final of a different text preempts it (#700).
+	campaignID uuid.UUID
+	cancel     context.CancelFunc
 	// result is the flight's own outcome, valid once done is closed (result.valid
 	// false = the embed failed). Recall reads it from here, not from the cache: a
 	// later final of the same campaign may have replaced the cache slot meanwhile.
@@ -74,6 +82,7 @@ type flight struct {
 // one table's chatter cannot queue ahead of another turn's recall. Like onPartial
 // it must not block.
 func (r *Recaller) onFinal(f voiceevent.STTFinal) {
+	r.finalArrived(f.SessionID)
 	norm := normalize(f.Text)
 	if norm == "" {
 		return
@@ -87,8 +96,8 @@ func (r *Recaller) onFinal(f voiceevent.STTFinal) {
 		return
 	}
 	campaignID := vs.CampaignID
-	if _, hit := r.cacheLookup(norm, campaignID); hit {
-		return // the partials already speculated this exact text
+	if r.finalPreempts(norm, campaignID) {
+		return // the partials already speculated (or are speculating) this exact text
 	}
 	select {
 	case r.finalSlots <- struct{}{}:
@@ -105,8 +114,39 @@ func (r *Recaller) onFinal(f voiceevent.STTFinal) {
 		defer r.finals.Done()
 		defer func() { <-r.finalSlots }()
 		defer close(fl.done)
-		fl.result = r.embedAndCache(f.Text, norm, campaignID)
+		fl.result = r.embedAndCache(r.ctx, f.Text, norm, campaignID)
 	}()
+}
+
+// finalPreempts settles a final against the partials' speculation (#700) and
+// reports whether the final needs no embed of its own. One embeddings slot serves
+// every caller in turn, so at speech end the final must not queue behind work it
+// makes pointless:
+//
+//   - the cache already holds this exact text: nothing to do;
+//   - the in-flight speculation is for this exact text and campaign: it becomes
+//     the campaign's flight, so Recall joins it instead of embedding it again;
+//   - the in-flight speculation of this campaign is for another text (an earlier
+//     partial): it is cancelled, freeing the slot for the final's own embed.
+//
+// One critical section, so a speculation finishing between the cache check and the
+// in-flight check cannot be missed by both.
+func (r *Recaller) finalPreempts(norm string, campaignID uuid.UUID) bool {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if c := r.cache[campaignID]; c.valid && c.norm == norm && time.Since(c.at) <= cacheTTL {
+		return true
+	}
+	sp := r.spec
+	if sp == nil || sp.campaignID != campaignID {
+		return false
+	}
+	if sp.norm == norm {
+		r.flights[campaignID] = sp
+		return true
+	}
+	sp.cancel()
+	return false
 }
 
 // flightFor returns the campaign's in-flight final speculation when it is for
@@ -120,15 +160,39 @@ func (r *Recaller) flightFor(norm string, campaignID uuid.UUID) *flight {
 	return nil
 }
 
-// takePending drains the latest-wins mailbox (text + originating session id).
-func (r *Recaller) takePending() (text, sessionID string, ok bool) {
+// finalArrived ends the session's speculation over partials (#700): once the
+// final text is known, a partial of that utterance can no longer help. The
+// session's waiting partial is dropped from the mailbox, and the arrival is
+// stamped so a partial the speculator had ALREADY taken (and has not embedded yet)
+// is recognised as stale by [Recaller.supersededByFinal].
+func (r *Recaller) finalArrived(sessionID string) {
+	r.mailMu.Lock()
+	defer r.mailMu.Unlock()
+	r.mailSeq++
+	r.lastFinalSID, r.lastFinalSeq = sessionID, r.mailSeq
+	if r.hasPending && r.pendingSID == sessionID {
+		r.hasPending = false
+	}
+}
+
+// supersededByFinal reports whether a partial taken from the mailbox at seq
+// predates the latest final of its own session.
+func (r *Recaller) supersededByFinal(sessionID string, seq uint64) bool {
+	r.mailMu.Lock()
+	defer r.mailMu.Unlock()
+	return r.lastFinalSID == sessionID && seq < r.lastFinalSeq
+}
+
+// takePending drains the latest-wins mailbox (text, originating session id, and
+// the arrival sequence number that orders it against finals).
+func (r *Recaller) takePending() (text, sessionID string, seq uint64, ok bool) {
 	r.mailMu.Lock()
 	defer r.mailMu.Unlock()
 	if !r.hasPending {
-		return "", "", false
+		return "", "", 0, false
 	}
 	r.hasPending = false
-	return r.pending, r.pendingSID, true
+	return r.pending, r.pendingSID, r.pendingSeq, true
 }
 
 // speculateLoop is the single speculator goroutine: it wakes on the mailbox
@@ -159,20 +223,20 @@ func (r *Recaller) speculateLoop() {
 // partial inside the interval window would never be embedded — a systematic
 // speculation miss on exactly the utterance the final matches.
 func (r *Recaller) drainAndSpeculate() {
-	text, sid, ok := r.takePending()
+	text, sid, seq, ok := r.takePending()
 	if !ok {
 		return
 	}
 	for {
-		wait := r.maybeSpeculate(text, sid)
+		wait := r.maybeSpeculate(text, sid, seq)
 		if wait <= 0 {
 			return
 		}
 		if err := r.sleep(r.ctx, wait); err != nil {
 			return // Close cancelled the recaller
 		}
-		if newer, newSID, ok := r.takePending(); ok {
-			text, sid = newer, newSID
+		if newer, newSID, newSeq, ok := r.takePending(); ok {
+			text, sid, seq = newer, newSID, newSeq
 		}
 	}
 }
@@ -186,7 +250,13 @@ func (r *Recaller) drainAndSpeculate() {
 // prefetched here (the vector is in hand); NPC-knowledge is deferred to Recall (the
 // target agent is unknown during speech). On success it replaces the single-slot
 // cache.
-func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
+func (r *Recaller) maybeSpeculate(text, sessionID string, seq uint64) time.Duration {
+	if r.supersededByFinal(sessionID, seq) {
+		return 0 // the utterance's final is already known; nothing can use this
+	}
+	if !endsSentence(text) {
+		return 0 // a mid-sentence prefix cannot equal the final (#700)
+	}
 	norm := normalize(text)
 	if wordCount(norm) < minSpeculateWords {
 		return 0 // no retrieval signal in a one/two-word interim
@@ -217,18 +287,37 @@ func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 	r.lastEmbedNorm = norm
 	r.lastEmbedAt = now
 
-	r.embedAndCache(text, norm, campaignID)
+	// Track the embed as the in-flight speculation so a final can join or cancel it
+	// (see finalPreempts). Its context is its own, under the recaller's.
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	fl := &flight{norm: norm, done: make(chan struct{}), campaignID: campaignID, cancel: cancel}
+	r.cacheMu.Lock()
+	r.spec = fl
+	r.cacheMu.Unlock()
+
+	fl.result = r.embedAndCache(ctx, text, norm, campaignID)
+
+	r.cacheMu.Lock()
+	r.spec = nil
+	r.cacheMu.Unlock()
+	close(fl.done)
 	return 0
 }
 
 // embedAndCache embeds text and prefetches its world-context chunks off the turn
 // path, replacing the campaign's cache slot on success. It returns the stored
 // entry (valid false when the embed failed).
-func (r *Recaller) embedAndCache(text, norm string, campaignID uuid.UUID) specCache {
-	ctx, cancel := context.WithTimeout(r.ctx, speculateTimeout)
+func (r *Recaller) embedAndCache(ctx context.Context, text, norm string, campaignID uuid.UUID) specCache {
+	ctx, cancel := context.WithTimeout(ctx, speculateTimeout)
 	defer cancel()
 
 	vecs, err := r.embedder.Embed(ctx, []string{text})
+	if errors.Is(err, context.Canceled) {
+		// Preempted by a final (or the recaller is closing): not a failure, and
+		// logging it would print the #700 warning for every turn.
+		return specCache{}
+	}
 	if err != nil || len(vecs) != 1 {
 		r.log.Warn("memory speculation: embed failed; will retry on the next utterance", "err", err)
 		return specCache{}
@@ -272,6 +361,17 @@ func (r *Recaller) cacheLookup(norm string, campaignID uuid.UUID) (specCache, bo
 		return c, true
 	}
 	return specCache{}, false
+}
+
+// endsSentence reports whether a RAW partial ends in sentence punctuation. Checked
+// before [normalize] strips it. Partials are growing prefixes of the utterance
+// (about one a second on Scribe v2 Realtime), and in the live traces behind #700
+// the only ones that ever equalled the final were those that already closed a
+// sentence — so every other one is an embed the final can never reuse.
+func endsSentence(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasSuffix(t, ".") || strings.HasSuffix(t, "?") ||
+		strings.HasSuffix(t, "!") || strings.HasSuffix(t, "…")
 }
 
 // wordCount counts whitespace-separated tokens in an already-normalized string.
