@@ -54,6 +54,10 @@ type Client struct {
 	// [WithThinkingFor] replaced it).
 	thinking func(model string) Thinking
 
+	// caching is the per-model prompt-caching gate ([DefaultPromptCaching]
+	// unless [WithPromptCachingFor] replaced it).
+	caching func(model string) bool
+
 	// thoughts keeps the thinking blocks of recent assistant tool turns so the
 	// next tool round can replay them (passthrough.go).
 	thoughts *thinkingStore
@@ -101,6 +105,7 @@ func New(apiKey string, opts ...Option) *Client {
 		http:    defaultHTTPClient(),
 
 		thinking: DefaultThinking,
+		caching:  DefaultPromptCaching,
 		thoughts: newThinkingStore(),
 	}
 	for _, opt := range opts {

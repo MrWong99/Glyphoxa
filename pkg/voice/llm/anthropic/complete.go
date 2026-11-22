@@ -34,7 +34,7 @@ const (
 type messagesBody struct {
 	Model      string          `json:"model"`
 	MaxTokens  int             `json:"max_tokens"`
-	System     string          `json:"system,omitempty"`
+	System     any             `json:"system,omitempty"` // string, or []systemBlock when cached
 	Messages   []wireMessage   `json:"messages"`
 	Tools      []wireTool      `json:"tools,omitempty"`
 	ToolChoice *wireToolChoice `json:"tool_choice,omitempty"`
@@ -136,7 +136,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	body := messagesBody{
 		Model:     model,
 		MaxTokens: maxTokens,
-		System:    system,
+		System:    c.wireSystem(model, system),
 		Messages:  messages,
 		Tools:     toWireTools(req.Tools),
 		Stream:    true,
@@ -220,17 +220,16 @@ func setAuth(h http.Header, key string) {
 	h.Set("x-api-key", key)
 }
 
-// toWireMessages splits the [llm] conversation into the Anthropic system string
-// and the user/assistant/tool message list. The first [llm.RoleSystem] message
-// becomes the system field; subsequent system messages are folded into it
-// (newline-joined) so a multi-part Persona survives. Tool-role messages map to
+// toWireMessages splits the [llm] conversation into the system messages' texts
+// (in order; [Client.wireSystem] renders them as the system field) and the
+// user/assistant/tool message list. System messages are lifted out wherever
+// they sit, so a multi-part Persona and the volatile tail survive. Tool-role messages map to
 // user-role tool_result blocks per the Anthropic protocol (ADR-0028).
 //
 // thoughts, when non-nil, supplies the thinking blocks to put back in front of
 // an assistant turn's tool calls (see passthrough.go); replayed lists the
 // tool_use ids whose blocks went into this request.
-func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (system string, out []wireMessage, replayed []string) {
-	var systemParts []string
+func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (systemParts []string, out []wireMessage, replayed []string) {
 	for _, m := range msgs {
 		switch m.Role {
 		case llm.RoleSystem:
@@ -250,7 +249,7 @@ func toWireMessages(msgs []llm.Message, thoughts *thinkingStore) (system string,
 			out = append(out, wireMessage{Role: "user", Content: []contentBlock{{Type: "text", Text: m.Text}}})
 		}
 	}
-	return strings.Join(systemParts, "\n\n"), out, replayed
+	return systemParts, out, replayed
 }
 
 // storedThinking returns the thinking blocks remembered for the assistant turn
@@ -610,11 +609,11 @@ type usageWire struct {
 }
 
 // promptTokens is every prompt token the request was billed for: the uncached
-// ones plus those written to and read from the prompt cache. The adapter sets
-// no cache_control itself, but a gateway (WithBaseURL) or a later change may,
-// and input_tokens alone then under-counts the prompt about 35-fold (#702).
-// Summing prices a cache read at the full input rate — the spend table has one
-// rate per direction — which over-estimates, the safe side for a spend cap.
+// ones plus those written to and read from the prompt cache (the adapter caches
+// the stable system prompt for the voice model, see caching.go). input_tokens
+// alone under-counts a cached prompt about 35-fold (#702). Summing prices a
+// cache read at the full input rate — the spend table has one rate per
+// direction — which over-estimates, the safe side for a spend cap.
 func (u *usageWire) promptTokens() int {
 	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
