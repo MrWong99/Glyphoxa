@@ -455,6 +455,13 @@ func (s *ProviderServer) SaveProviderConfig(
 		// the secret. Needs no cipher — nothing is sealed.
 		return s.saveModelOnly(ctx, tenantID, slot, req.Msg.GetModel(), req.Msg.GetActivate() && slot.isLLM())
 	}
+	if !isSaved(crypto.Last4(secret)) {
+		// Its last four ARE the keyless placeholder: the row would be read as
+		// "ride the platform key" (llmbuild.ResolveKey) while this path takes
+		// any model, bypassing [ProviderServer.platformModelPriced]. No real
+		// key is that short.
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is not a valid key"))
+	}
 	if s.cipher == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
@@ -539,7 +546,7 @@ func (s *ProviderServer) saveModelOnly(
 	}
 	if slot.isLLM() && !isSaved(existing[0].CredentialsLast4) {
 		// A keyless row rides the platform key: priced models only.
-		if err := platformModelPriced(slot, model); err != nil {
+		if err := s.platformModelPriced(slot, model); err != nil {
 			return nil, err
 		}
 	}
@@ -1131,7 +1138,7 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 	if s.lookupEnv(slot.envKey) == "" || !s.platformKeyGate(ctx, tenantID)(slot.components[0]) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
 	}
-	if err := platformModelPriced(slot, model); err != nil {
+	if err := s.platformModelPriced(slot, model); err != nil {
 		return nil, err
 	}
 	saved, err := s.store.UpsertProviderConfigs(ctx, []storage.NewProviderConfig{{
@@ -1162,10 +1169,14 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 // is dozens of times ABOVE it (the Tenant's allowance is gone in a few turns).
 // Only an exactly priced model is metered at what it costs, so only those run
 // on a key the platform pays for. The empty model is the default
-// ([llmbuild.DeploymentDefault.Select]) and always allowed; a Tenant's own key
-// keeps free-text entry — its spend is its own bill.
-func platformModelPriced(slot byokSlot, model string) error {
-	if model == "" || spend.LLMPriced(observe.Provider(slot.provider), model) {
+// ([llmbuild.DeploymentDefault.Select]) and always allowed, and so is the model
+// that default resolves to: it is the operator's explicit choice, what a
+// row-less Tenant already runs and what the catalog lists first (an unpriced
+// one is warned about at boot). A Tenant's own key keeps free-text entry — its
+// spend is its own bill.
+func (s *ProviderServer) platformModelPriced(slot byokSlot, model string) error {
+	if model == "" || model == s.llmDefault.VoiceModel(slot.provider, "") ||
+		spend.LLMPriced(observe.Provider(slot.provider), model) {
 		return nil
 	}
 	return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(

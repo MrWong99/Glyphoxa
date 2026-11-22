@@ -303,6 +303,51 @@ func TestProviderSave_PlatformSlotRefusesUnpricedModel(t *testing.T) {
 		}
 	})
 
+	// A "secret" whose last four ARE the keyless placeholder would be stored as
+	// a keyless row (it rides the platform key) by the path that takes any
+	// model: it is not a key, and it is refused before anything is sealed.
+	t.Run("a secret that reads as the keyless placeholder", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		client := llmServer(t, store, llmbuild.DeploymentDefault{}, env, &fakeKeyGate{allowed: true})
+		_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+			Provider: "anthropic", Secret: "env", Model: "claude-opus-4-1",
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("err = %v, want CodeInvalidArgument", err)
+		}
+		if len(store.configs) != 0 {
+			t.Errorf("a refused save wrote rows: %v", store.configs)
+		}
+	})
+
+	// The operator's explicit deployment default is what a row-less Tenant
+	// already runs and what the catalog lists first, priced or not: picking the
+	// listed entry must save.
+	t.Run("the deployment default model is accepted even unpriced", func(t *testing.T) {
+		t.Parallel()
+		store := newFakeProviderStore()
+		d, err := llmbuild.DeploymentDefaultFromEnv(func(k string) string {
+			return map[string]string{
+				llmbuild.EnvDefaultProvider: "anthropic",
+				llmbuild.EnvDefaultModel:    "claude-sonnet-5",
+				"ANTHROPIC_API_KEY":         "sk-ant",
+			}[k]
+		})
+		if err != nil {
+			t.Fatalf("deployment default: %v", err)
+		}
+		client := llmServer(t, store, d, env, &fakeKeyGate{allowed: true})
+		save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Activate: true, Model: "claude-sonnet-5"})
+		save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Model: "claude-sonnet-5"})
+		_, err = client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+			Provider: "anthropic", Model: "claude-opus-4-1",
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("another unpriced model: err = %v, want CodeInvalidArgument", err)
+		}
+	})
+
 	t.Run("a priced model and the default are accepted", func(t *testing.T) {
 		t.Parallel()
 		store := newFakeProviderStore()
