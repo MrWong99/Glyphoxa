@@ -23,6 +23,7 @@ import {
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
+import { registerGuardedSearchKeys } from "@/lib/navigationGuard";
 import { makeQueryClient } from "@/lib/queryClient";
 import { rememberReturnTo } from "@/lib/returnTo";
 import { NavigationGuard } from "./RouteFallbacks";
@@ -141,9 +142,11 @@ describe("return path after a re-login", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/t/acme/nowhere"));
   });
 
-  it("falls back to the default screen with nothing parked", async () => {
+  it("falls back to the campaign's Overview with nothing parked", async () => {
+    // "/" hands a signed-in visit to the tenant index, which opens the
+    // campaign's Overview (ADR-0063 amendment) — not Setup.
     const router = renderApp("/");
-    await waitFor(() => expect(router.state.location.pathname).toBe("/t/default/configuration"));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/t/default/campaign/overview"));
   });
 });
 
@@ -206,5 +209,46 @@ describe("NavigationGuard (W10)", () => {
 
     await waitFor(() => expect(router.state.location.search).toEqual({ x: 1 }));
     expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument();
+  });
+
+  // Guarded selection keys (ADR-0063 amendment): where a screen keeps its
+  // selection in the URL, a query change on the same path DOES replace what
+  // the editor is editing — so the screen declares the key, and the same
+  // rewrite that passed above is held.
+  it("holds a same-path query change of a key declared as guarded selection", async () => {
+    const release = registerGuardedSearchKeys(["x"]);
+    try {
+      const router = renderTree(tree, "/a");
+      fireEvent.change(await screen.findByLabelText("notes"), { target: { value: "half a thought" } });
+      fireEvent.click(screen.getByRole("button", { name: "same page, new query" }));
+
+      expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+      expect(router.state.location.search).toEqual({});
+
+      // Cancel keeps the selection — and the text — where they were.
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument());
+      expect(router.state.location.search).toEqual({});
+      expect((screen.getByLabelText("notes") as HTMLInputElement).value).toBe("half a thought");
+
+      // Confirming lets the selection change through.
+      fireEvent.click(screen.getByRole("button", { name: "same page, new query" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+      await waitFor(() => expect(router.state.location.search).toEqual({ x: 1 }));
+    } finally {
+      release();
+    }
+  });
+
+  it("lets a guarded key change through when nothing is unsaved", async () => {
+    const release = registerGuardedSearchKeys(["x"]);
+    try {
+      const router = renderTree(tree, "/a");
+      fireEvent.click(await screen.findByRole("button", { name: "same page, new query" }));
+      await waitFor(() => expect(router.state.location.search).toEqual({ x: 1 }));
+      expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument();
+    } finally {
+      release();
+    }
   });
 });

@@ -6,7 +6,7 @@ import { Card, CardBody } from "@/components/ui/Card";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/connectError";
-import { hasUnsavedEdits } from "@/lib/navigationGuard";
+import { guardedSearchChanged, hasUnsavedEdits } from "@/lib/navigationGuard";
 
 // The router-level fallbacks (ADR-0018): what renders when a route throws,
 // when no route matches, while a lazily loaded screen is on its way, and the
@@ -78,12 +78,21 @@ export function RouteNotFound() {
 // NavigationGuard holds a route change (sidebar click, palette jump, browser
 // back) and a tab close while any mounted editor reports unsaved edits
 // (useDirtyGuard → lib/navigationGuard). Mounted once, inside the tenant
-// shell. Only a change of PATH counts: the deep-link "consume then strip"
-// navigations rewrite the query on the same screen and unmount nothing.
+// shell. A change of PATH always counts. A change of QUERY on the same path
+// counts only for the keys a mounted screen declared as its selection
+// (useGuardedSearchKeys → lib/navigationGuard): the deep-link "consume then
+// strip" rewrites unmount nothing and pass, but where the URL carries what the
+// open editor is editing, Back to the previous selection would replace it.
 export function NavigationGuard() {
   const { t } = useI18n();
   const blocker = useBlocker({
-    shouldBlockFn: ({ current, next }) => current.pathname !== next.pathname && hasUnsavedEdits(),
+    shouldBlockFn: ({ current, next }) =>
+      hasUnsavedEdits() &&
+      (current.pathname !== next.pathname ||
+        guardedSearchChanged(
+          current.search as Record<string, unknown>,
+          next.search as Record<string, unknown>,
+        )),
     enableBeforeUnload: hasUnsavedEdits,
     withResolver: true,
   });

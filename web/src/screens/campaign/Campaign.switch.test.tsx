@@ -1,15 +1,21 @@
-import { describe, it, expect } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
+import { toast } from "sonner";
 
 import {
   CampaignService,
   ChatService,
+  SessionService,
   VoiceService,
   AgentSchema,
   CampaignSchema,
   DraftNodeSchema,
+  GetActiveCampaignResponseSchema,
+  GetSessionResponseSchema,
+  ListCampaignsResponseSchema,
+  SetActiveCampaignResponseSchema,
   GetCampaignRosterResponseSchema,
   GenerateKnowledgeResponseSchema,
   ApplyGeneratedKnowledgeResponseSchema,
@@ -23,10 +29,16 @@ import {
   PlanningThreadSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { MemoryScreenNav, type ScreenLocation } from "@/app/screenNav";
+import { CampaignSwitcher } from "@/components/CampaignSwitcher";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { hasUnsavedEdits } from "@/lib/navigationGuard";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Campaign } from "./Campaign";
 import type { CampaignView } from "./views";
+
+// The toast is the switch's feedback; the shell's <Toaster> is not mounted here.
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 
 // W3: the Active Campaign is ambient SERVER state — switching it in the topbar
 // changes what every write on this screen lands in without changing a single
@@ -176,5 +188,135 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     fireEvent.click(await screen.findByRole("button", { name: /generate entries with ai/i }));
     await screen.findByRole("heading", { name: "The Sunless Citadel" });
     expect(screen.getByLabelText("What should be drafted?")).toBeInTheDocument();
+  });
+});
+
+// A selection held in the URL names a row of ONE campaign. After a switch it
+// would point the new campaign's view at an id that is not in it.
+describe("URL selection across an Active Campaign switch", () => {
+  it("drops the previous campaign's selection params with the rest of its state", async () => {
+    const h = twoCampaignTransport();
+    const queryClient = makeQueryClient();
+    const moves: { next: ScreenLocation; replace: boolean }[] = [];
+    render(
+      <Providers transport={h.transport} queryClient={queryClient}>
+        <MemoryScreenNav
+          initial={{ screen: "campaign", view: "planning", search: { thread: "thread-c1" } }}
+          onNavigate={(next, opts) => moves.push({ next, replace: opts.replace })}
+        >
+          {(loc) => loc.view && <Campaign view={loc.view} />}
+        </MemoryScreenNav>
+      </Providers>,
+    );
+    expect(await screen.findAllByText("Citadel prep")).not.toHaveLength(0);
+    // Loading the first campaign is not a switch: the selection stays.
+    expect(moves).toEqual([]);
+
+    h.setActive("c2");
+    await act(async () => {
+      await invalidateActiveCampaignScopedQueries(queryClient);
+    });
+    expect(await screen.findAllByText("Saltmarsh prep")).not.toHaveLength(0);
+
+    // Stripped by replace, on the same view.
+    await waitFor(() =>
+      expect(moves).toEqual([
+        { next: { screen: "campaign", view: "planning", search: {} }, replace: true },
+      ]),
+    );
+  });
+});
+
+// The acceptance path of the guarded switch, end to end: the real topbar
+// switcher beside the real Cast editor.
+describe("switching campaign with unsaved cast edits", () => {
+  function mountWithSwitcher() {
+    let active: "c1" | "c2" = "c1";
+    const names = { c1: "The Sunless Citadel", c2: "Tides over Saltmarsh" };
+    const campaign = (id: "c1" | "c2") =>
+      create(CampaignSchema, { id, name: names[id], system: "5e", language: "en" });
+    const switches: string[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(SessionService, { getSession: () => create(GetSessionResponseSchema, { active: false }) });
+      service(CampaignService, {
+        listCampaigns: () =>
+          create(ListCampaignsResponseSchema, { campaigns: [campaign("c1"), campaign("c2")] }),
+        getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign: campaign(active) }),
+        setActiveCampaign: (req) => {
+          switches.push(req.campaignId);
+          active = req.campaignId as "c1" | "c2";
+          return create(SetActiveCampaignResponseSchema, { campaign: campaign(active) });
+        },
+        getCampaignRoster: () =>
+          create(GetCampaignRosterResponseSchema, {
+            campaign: campaign(active),
+            roster: [
+              create(AgentSchema, {
+                id: `butler-${active}`,
+                campaignId: active,
+                role: "butler",
+                name: "Glyphoxa",
+                persona: active === "c1" ? "Keeper of the Citadel." : "Keeper of the tides.",
+                addressOnly: true,
+              }),
+            ],
+          }),
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CampaignSwitcher />
+        <Campaign view="cast" />
+      </Providers>,
+    );
+    return { switches };
+  }
+
+  const persona = () => screen.getByLabelText("Personality & backstory") as HTMLTextAreaElement;
+
+  async function typeAndPickSaltmarsh() {
+    await waitFor(() => expect(persona().value).toBe("Keeper of the Citadel."));
+    fireEvent.change(persona(), { target: { value: "Keeper of the Citadel, and tired of it." } });
+    fireEvent.click(screen.getByTestId("campaign-switcher-trigger"));
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    fireEvent.click(await within(list).findByRole("button", { name: /Tides over Saltmarsh/ }));
+  }
+
+  it("asks first, and Cancel keeps both the campaign and the edits", async () => {
+    vi.mocked(toast.success).mockClear();
+    const { switches } = mountWithSwitcher();
+    await typeAndPickSaltmarsh();
+
+    expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+    expect(switches).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument());
+    expect(switches).toEqual([]);
+    expect(screen.getByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    expect(persona().value).toBe("Keeper of the Citadel, and tired of it.");
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
+  });
+
+  it("switches on confirm, toasts the new campaign's name, and shows ITS cast", async () => {
+    vi.mocked(toast.success).mockClear();
+    const { switches } = mountWithSwitcher();
+    await typeAndPickSaltmarsh();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(switches).toEqual(["c2"]));
+    await waitFor(() =>
+      expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Now working in Tides over Saltmarsh"),
+    );
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Tides over Saltmarsh" }),
+    ).toBeInTheDocument();
+    // The editor is the new campaign's Butler — the discarded text is gone, and
+    // nothing of it can be saved into Saltmarsh.
+    await waitFor(() => expect(persona().value).toBe("Keeper of the tides."));
+    expect(screen.queryByDisplayValue("Keeper of the Citadel, and tired of it.")).not.toBeInTheDocument();
+    expect(hasUnsavedEdits()).toBe(false);
   });
 });

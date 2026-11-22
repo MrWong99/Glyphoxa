@@ -1,0 +1,15 @@
+/* Campaign Settings view (CampaignSettingsPanel.tsx). A form reads best at a
+ * measured width; left to the screen's full width the fields stretch across a
+ * desktop monitor. */
+
+.gx-campaign-settings {
+  max-width: var(--content-md);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+}
+
+.gx-campaign-settings > .gx-card {
+  width: 100%;
+}

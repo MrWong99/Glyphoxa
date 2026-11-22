@@ -1,14 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useMutation } from "@connectrpc/connect-query";
+import { useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { Check, ChevronDown, Plus, Settings, Swords } from "lucide-react";
 
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
-import {
-  invalidateActiveCampaignScopedQueries,
-  watchVoiceSessionEnd,
-} from "@/lib/campaignCache";
+import { watchVoiceSessionEnd } from "@/lib/campaignCache";
 import { useI18n } from "@/i18n";
 import { errorMessage, isNotFound } from "@/lib/connectError";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
@@ -17,6 +13,7 @@ import { CampaignRowActions } from "./CampaignRowActions";
 import { CreateCampaignForm, useCreateCampaign } from "./CreateCampaignForm";
 import { CampaignSettingsForm } from "./CampaignSettingsForm";
 import { ImportCampaignButton } from "./ImportCampaignButton";
+import { useCampaignSwitch } from "./useCampaignSwitch";
 
 import "./campaignSwitcher.css";
 
@@ -26,13 +23,15 @@ import "./campaignSwitcher.css";
 // archive / unarchive / delete land via CampaignRowActions and the "Show
 // archived" toggle (#269); rename lives in the settings editor (#268).
 //
-// Switching writes the durable selection (SetActiveCampaign) and runs the
+// Switching goes through useCampaignSwitch: it asks before unsaved edits would
+// be lost, writes the durable selection (SetActiveCampaign), runs the
 // Active-Campaign cache sweep so every campaign-scoped screen follows without a
-// reload. resolveActiveCampaign stays live-first (#222): while a Voice Session
-// is live its campaign still wins, so a switch made mid-Voice-Session shows the
-// "takes effect after it ends" notice rather than being disabled (#266) — and
-// the watchVoiceSessionEnd watcher re-runs the sweep at the moment that promise
-// comes due, when the Voice Session actually ends.
+// reload, and toasts the result. resolveActiveCampaign stays live-first (#222):
+// while a Voice Session is live its campaign still wins, so a switch made
+// mid-Voice-Session shows the "takes effect after it ends" notice rather than
+// being disabled (#266) — and the watchVoiceSessionEnd watcher re-runs the
+// sweep at the moment that promise comes due, when the Voice Session actually
+// ends.
 
 // The panel is a single three-value state, so "which view" and "is it open" can
 // never desync — a stale create form can't survive a close/reopen.
@@ -98,14 +97,12 @@ export function CampaignSwitcher() {
 
   const close = () => setPanel("closed");
 
-  const setActive = useMutation(CampaignService.method.setActiveCampaign, {
-    onSuccess: () => {
-      void invalidateActiveCampaignScopedQueries(queryClient);
-      close();
-    },
-    onError: (err) => toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) })),
-  });
-  const switching = setActive.isPending;
+  // A row click goes through the guarded switch (useCampaignSwitch): it asks
+  // before a switch would discard unsaved edits, runs the sweep, and toasts
+  // what happened — the new campaign's name, or that a live Voice Session
+  // defers it. The panel closes once the selection is written.
+  const campaignSwitch = useCampaignSwitch({ onSwitched: close });
+  const switching = campaignSwitch.pending;
 
   // Create closes the panel once the new campaign is active; the sweep inside the
   // flow has already refreshed the screens behind it.
@@ -247,7 +244,7 @@ export function CampaignSwitcher() {
                         data-active={isActive || undefined}
                         disabled={switching || isArchived}
                         onClick={() =>
-                          isActive ? close() : setActive.mutate({ campaignId: c.id })
+                          isActive ? close() : campaignSwitch.switchTo({ id: c.id, name: c.name })
                         }
                       >
                         <span className="gx-campaign-switcher__item-meta">
@@ -331,6 +328,9 @@ export function CampaignSwitcher() {
           )}
         </div>
       )}
+      {/* Outside the panel on purpose: the "Discard unsaved changes?" question
+          must outlive a panel that closes underneath it. */}
+      {campaignSwitch.dialog}
     </div>
   );
 }

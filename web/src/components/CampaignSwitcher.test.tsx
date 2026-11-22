@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
+import { toast } from "sonner";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -23,8 +24,17 @@ import {
   UpdateCampaignResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignSwitcher } from "./CampaignSwitcher";
+
+// The switch reports through toasts and the shell's <Toaster> is not mounted
+// here. Only success is observed; the other kinds keep their real (inert,
+// host-less) behaviour so nothing else in this file changes.
+const toastSuccess = vi.spyOn(toast, "success");
+beforeEach(() => {
+  toastSuccess.mockClear();
+});
 
 type Camp = { id: string; name: string; system?: string; language?: string; archived?: boolean };
 
@@ -273,6 +283,86 @@ describe("CampaignSwitcher", () => {
     await waitFor(() => expect(calls.getCampaignRoster).toBeGreaterThan(rosterBefore));
     expect(screen.getByTestId("roster-probe")).toHaveTextContent("Alpha Quest");
     // The panel closed on a successful switch.
+    expect(screen.queryByRole("group", { name: /campaigns/i })).not.toBeInTheDocument();
+  });
+
+  // The row click goes through the guarded switch (useCampaignSwitch — its own
+  // test file covers the hook's branches); these pin that the switcher uses it.
+  it("asks before a switch would discard unsaved edits; Cancel leaves the selection alone", async () => {
+    const calls: Record<string, number> = {};
+    function DirtyEditor() {
+      const edits = useDirtyGuard();
+      return (
+        <button type="button" onClick={() => edits.markDirty(true)}>
+          type something
+        </button>
+      );
+    }
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "b", name: "Beta Tale" },
+        ],
+        activeId: "b",
+        calls,
+      }),
+      <DirtyEditor />,
+    );
+    expect(await screen.findByText("Beta Tale")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "type something" }));
+
+    openPanel();
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    fireEvent.click(await within(list).findByRole("button", { name: /Alpha Quest/ }));
+
+    // The question, and no write while it is open.
+    expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+    expect(calls.setActiveCampaign ?? 0).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument());
+    expect(calls.setActiveCampaign ?? 0).toBe(0);
+    expect(
+      screen.getByRole("button", { name: /switch campaign — active: Beta Tale/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("switches once the discard is confirmed, and toasts the new campaign's name", async () => {
+    const calls: Record<string, number> = {};
+    function DirtyEditor() {
+      const edits = useDirtyGuard();
+      return (
+        <button type="button" onClick={() => edits.markDirty(true)}>
+          type something
+        </button>
+      );
+    }
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "b", name: "Beta Tale" },
+        ],
+        activeId: "b",
+        calls,
+      }),
+      <DirtyEditor />,
+    );
+    expect(await screen.findByText("Beta Tale")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "type something" }));
+
+    openPanel();
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    fireEvent.click(await within(list).findByRole("button", { name: /Alpha Quest/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(calls.setActiveCampaign).toBe(1));
+    expect(
+      await screen.findByRole("button", { name: /switch campaign — active: Alpha Quest/i }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Now working in Alpha Quest"));
+    // The panel closed on the successful switch.
     expect(screen.queryByRole("group", { name: /campaigns/i })).not.toBeInTheDocument();
   });
 

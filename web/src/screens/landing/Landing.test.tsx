@@ -81,7 +81,9 @@ describe("root landing surface", () => {
   it("takes a signed-in visitor straight to the app", async () => {
     const router = renderRoot({ signedIn: true });
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/t/default/configuration"),
+      // The tenant index decides where the app opens: the campaign's Overview
+      // (ADR-0063 amendment), no longer Setup.
+      expect(router.state.location.pathname).toBe("/t/default/campaign/overview"),
     );
     expect(screen.queryByText(/NPCs a voice/i)).not.toBeInTheDocument();
   });
