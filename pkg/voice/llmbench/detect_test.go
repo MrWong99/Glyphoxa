@@ -72,7 +72,11 @@ func TestDetect_UnknownTags(t *testing.T) {
 		"[Pause] Na gut. [ clears throat ] Also.":                0, // case and padding are not a new tag
 		"[cheerfully] Hallo![/cheerfully]":                       0, // a closing tag is counted as tool markup
 		"Der Preis steht an der Tafel, zwei Silber [pro Nacht].": 1,
-		"Kein einziger Tag hier, nur Worte.":                     0,
+		// A stage direction longer than 40 characters is still one (#702
+		// review: the span was capped at 40, so a long action slipped through).
+		"[leans heavily on the polished oak bar and sighs] Na, was darf's sein?":                                            1,
+		"[wipes a tankard with a rag, glances at the door, then leans in close to the table and lowers her voice] Hört zu.": 1,
+		"Kein einziger Tag hier, nur Worte.": 0,
 	} {
 		if f := Detect(text, DetectOptions{NPCName: "Flo"}); f.UnknownTags != want {
 			t.Errorf("Detect(%q).UnknownTags = %d, want %d", text, f.UnknownTags, want)

@@ -72,7 +72,11 @@ var (
 	// text: a closing bracket tag like "[/final]", or a pipe token.
 	controlTokenRE = regexp.MustCompile(`\[/\w+\]|<\|[^|<>\n]{1,40}\|>`)
 
-	audioTagRE  = regexp.MustCompile(`\[[^\[\]\n]{1,40}\]`)
+	// audioTagRE matches one bracketed span on one line. Its length is not
+	// capped: a stage direction in brackets runs as long as the model likes
+	// ("[wipes a tankard, glances at the door, then leans in …]"), and the
+	// span is already bounded by the line and by the next bracket.
+	audioTagRE  = regexp.MustCompile(`\[[^\[\]\n]+\]`)
 	boldRE      = regexp.MustCompile(`\*\*[^*\n]+\*\*|__[^_\n]+__`)
 	asteriskRE  = regexp.MustCompile(`\*[^*\n]{2,120}\*`)
 	parenActRE  = regexp.MustCompile(`(?i)\((lacht|grinst|nickt|seufzt|lächelt|zwinkert|schmunzelt|kichert|flüstert|räuspert|laughs|smiles|sighs|nods|grins|winks)[^)\n]{0,80}\)`)
