@@ -1015,7 +1015,7 @@ func (s *markLiveFailStore) MarkVoiceSessionIntentLive(context.Context, uuid.UUI
 // claim time. Un-heartbeated, a slow wind-down crosses Expiry and the reaper
 // records the TRUE mark-live failure as "worker heartbeat expired" ('dead').
 // The path must drain-beat like endSession does: under a live reaper and a
-// wind-down held open for ~5x Expiry, the row stays 'claimed' the whole time
+// wind-down held open for reapHold (4x Expiry), the row stays 'claimed' the whole time
 // and then finishes 'failed' carrying the mark-live error — never 'dead'.
 func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	mstore := newFakeStore()
