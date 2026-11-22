@@ -648,3 +648,94 @@ func (f *fakeStream) isClosed() bool {
 	defer f.mu.Unlock()
 	return f.closed
 }
+
+// TestStreamManager_UnansweredCommits_BackOffHoweverOldTheSession is the provider
+// brownout (#702 review): the handshake is accepted and the session sits there
+// looking healthy, but no commit is ever answered. Age alone is not evidence the
+// session works — a session retired for a commit that failed or never resolved
+// has proved the opposite — so its redial must wait the growing backoff. With an
+// instant, forgiven redial every turn would stream, wait the full commit timeout
+// and fall back to batch for the whole incident.
+func TestStreamManager_UnansweredCommits_BackOffHoweverOldTheSession(t *testing.T) {
+	cases := []struct {
+		name   string
+		result *stt.CommitResult // nil = the commit never resolves
+	}{
+		{"commit timeout", nil},
+		{"commit error", &stt.CommitResult{Err: &stt.StreamError{Code: "rate_limited", Err: errors.New("slow down")}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDialScript()
+			clock := newLifeClock()
+			m := NewStreamManager(d, WithStreamBackoff(time.Second, 30*time.Second),
+				WithCommitTimeout(20*time.Millisecond))
+			bindLifecycle(t, m, d, clock)
+
+			for i := range 4 {
+				if !m.WaitStreamUp(2 * time.Second) {
+					t.Fatalf("session %d never installed", i)
+				}
+				s := d.session(i)
+				s.mu.Lock()
+				s.result = tc.result
+				s.mu.Unlock()
+				clock.advance(15 * time.Second) // well past the healthy lifetime
+				m.beginUtterance(clock.now())
+				m.send(streamFrame(t, 1))
+				c, ok := m.endUtterance()
+				if !ok {
+					t.Fatalf("turn %d did not stream", i)
+				}
+				if _, ok := m.awaitCommit(c); ok {
+					t.Fatalf("turn %d: awaitCommit ok=true on a failed commit", i)
+				}
+				d.awaitDial(t)
+			}
+			want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+			got := clock.slept()
+			if len(got) != len(want) {
+				t.Fatalf("sleeps = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("sleep[%d] = %v, want %v", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestStreamManager_HealthyDeath_ForgivesAGrownBackoff: the idle close of a
+// session that had been healthy does not just skip the sleep, it resets a backoff
+// that earlier failures had grown.
+func TestStreamManager_HealthyDeath_ForgivesAGrownBackoff(t *testing.T) {
+	d := newDialScript()
+	clock := newLifeClock()
+	m := NewStreamManager(d, WithStreamBackoff(time.Second, 30*time.Second))
+	bindLifecycle(t, m, d, clock)
+
+	for i := range 3 { // flap: grows the backoff
+		if !m.WaitStreamUp(2 * time.Second) {
+			t.Fatalf("session %d never installed", i)
+		}
+		d.kill(i, &stt.StreamError{Code: "resource_exhausted", Fatal: true, Err: errors.New("busy")})
+		d.awaitDial(t)
+	}
+	if !m.WaitStreamUp(2 * time.Second) {
+		t.Fatal("session 3 never installed")
+	}
+	clock.advance(15 * time.Second)
+	d.kill(3, idleClose())
+	d.awaitDial(t)
+
+	if got := clock.slept(); len(got) != 3 {
+		t.Errorf("sleeps = %v, want three (the flaps) and none for the healthy death", got)
+	}
+	m.mu.Lock()
+	b := m.backoff
+	m.mu.Unlock()
+	if b != time.Second {
+		t.Errorf("backoff = %v after a healthy death, want the 1s initial", b)
+	}
+}

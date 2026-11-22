@@ -72,7 +72,8 @@ type StreamManager struct {
 	// backoff is the current re-establish delay. It grows on a failed dial and on
 	// the death of a session younger than [streamHealthyLifetime], jumps to the cap
 	// on an auth-class failure, and resets to the initial when a session proves
-	// healthy: a commit resolves, or it lived at least that long.
+	// healthy: a commit resolves, or it lived at least that long before it ended.
+	// A session retired over a failed or unanswered commit grows it at any age.
 	backoff time.Duration
 	// upSince is when the current session was installed (zero when a test installs
 	// one directly, which reads as "long ago").
@@ -243,8 +244,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// bind starts the maintainer goroutine (which dials EAGERLY, so utterance 1 can
-// stream) and captures bus for STTPartial publishing. The returned func stops the
+// bind starts the maintainer goroutine (which dials eagerly so utterance 1 can
+// stream, or on the first speech under [WithStreamDialOnDemand] — what a lane
+// uses) and captures bus for STTPartial publishing. The returned func stops the
 // maintainer and closes the live session; the [Segmenter] calls it from its own
 // Bind teardown.
 func (m *StreamManager) bind(ctx context.Context, bus *voiceevent.Bus) func() {
@@ -285,7 +287,9 @@ func (m *StreamManager) bind(ctx context.Context, bus *voiceevent.Bus) func() {
 //   - the death of a session that had been healthy ([streamHealthyLifetime]) is
 //     redialed at once, with the backoff forgiven — the provider's idle close and
 //     an ordinary network drop land here;
-//   - the death of a younger session sleeps the growing backoff like a failed dial.
+//   - the death of a younger session sleeps the growing backoff like a failed
+//     dial, and so does a session of any age that the manager retired over a
+//     commit that failed or was never answered ([StreamManager.dropSession]).
 func (m *StreamManager) maintain(ctx context.Context) {
 	if m.onDemand {
 		// Nothing to keep alive until the lane speaks: beginUtterance pokes.
@@ -436,7 +440,7 @@ func (m *StreamManager) sessionClosed(h *dialHandle, cause error) {
 	s := h.stream
 	m.mu.Unlock()
 	if s != nil {
-		m.dropSession(s, cause)
+		m.dropSession(s, cause, true)
 	}
 }
 
@@ -448,11 +452,18 @@ func (m *StreamManager) sessionClosed(h *dialHandle, cause error) {
 //     must not continue on whatever session the redial installs (that session
 //     would hold only its tail): it is marked batch;
 //   - an auth-class cause jumps the backoff to the cap;
-//   - otherwise a session that had been healthy is redialed at once and forgives
-//     the backoff, while a younger one leaves the backoff to grow.
+//   - a session that ENDED (ended=true: the adapter reported its close, or a send
+//     found it dead) after a healthy lifetime is redialed at once and forgives
+//     the backoff, while a younger one leaves the backoff to grow;
+//   - a session the manager RETIRED (ended=false: a commit failed or was never
+//     answered, or a send poisoned it) leaves the backoff to grow however old it
+//     is. Its age is not evidence that it worked — it just proved it did not —
+//     and a provider that accepts the handshake but answers no commit would
+//     otherwise cost every turn the full commit timeout for the whole incident
+//     (#702). Only a resolved commit forgives ([StreamManager.resetBackoff]).
 //
 // It reports whether s was the live session. Safe from any goroutine.
-func (m *StreamManager) dropSession(s stt.Stream, cause error) bool {
+func (m *StreamManager) dropSession(s stt.Stream, cause error, ended bool) bool {
 	m.mu.Lock()
 	if s == nil || m.stream != s {
 		m.mu.Unlock()
@@ -472,7 +483,7 @@ func (m *StreamManager) dropSession(s stt.Stream, cause error) bool {
 	case auth:
 		m.backoff = m.backoffMax
 		m.redialNow = false
-	case lived >= streamHealthyLifetime:
+	case ended && lived >= streamHealthyLifetime:
 		m.backoff = m.backoffInitial
 		m.redialNow = true
 	default:
@@ -713,7 +724,7 @@ func (m *StreamManager) retireSession(s stt.Stream, cause error) {
 	if s == nil {
 		return
 	}
-	m.dropSession(s, cause)
+	m.dropSession(s, cause, false)
 	go func() { _ = s.Close() }()
 }
 
@@ -764,7 +775,7 @@ func (m *StreamManager) streamFailed(s stt.Stream, err error, why observe.STTFin
 	case poisoned:
 		m.retireSession(s, err)
 	case fatal:
-		m.dropSession(s, err)
+		m.dropSession(s, err, true)
 	}
 	// After the drop, so an auth-class code holds the cap even when s was no longer
 	// the live session (dropSession then decided nothing).
