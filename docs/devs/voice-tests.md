@@ -197,6 +197,36 @@ bin/voiceprobe -guild G -channel C -reply-from BOT -barge-after 3s -max-talkover
 
 In Go the same thing is `p.Interrupt(ctx, clip, over, after)`.
 
+### Live checklist: names and their homophones
+
+The recognizer is biased towards the session's names with keyterms (#701,
+ADR-0042 keyterm amendment). A keyterm also pulls its homophones towards its
+spelling, and no test without the real provider can show that. When a change
+touches the term list, the STT adapter's request, or Address Detection's
+handling of short names, run these against a live session whose Cast has an NPC
+called **Flo**, and read the transcript on the Session screen:
+
+- [ ] **Positives route.** "Flo?", "Flo, stopp.", "Flo, woran erinnerst du
+      dich?" are transcribed with "Flo" and answered by Flo.
+- [ ] **Homophone negatives — record what happens, do not expect a pass.**
+      "Der Floh springt über den Tisch.", "Der Flow des Flusses ist stark." and
+      a lone "Flow." were transcribed with "Flo" in the 2026-11-22 probe, and an
+      exact name routes. Note whether each one routed. If a new one appears, or
+      one starts routing mid-sentence where it did not, that is a regression in
+      the homophone residue and belongs in the PR description.
+- [ ] **Unrelated negatives stay clean.** "So, woran erinnerst du dich?", "Wo
+      ist der Ausgang?", "Froh bin ich, dass wir endlich hier sind." must not
+      gain a "Flo" and must not route.
+- [ ] **An everyday-word name is not biased.** With an NPC called "Wolf" in a
+      German campaign, the session-start log's `stt keyterms` count does not
+      include it, and "Der Wolf heult." is transcribed as spoken.
+- [ ] **Off-switch.** With `GLYPHOXA_STT_KEYTERMS=0` the log line is absent and
+      "Der Floh springt über den Tisch." keeps its "Floh".
+
+The transcripts alone, without Discord, come from
+`TestLive_Keyterms_BothTransports` in `pkg/voice/stt/elevenlabs` (`-tags=live`,
+both STT transports, with and without the list).
+
 What runs on every PR instead: the probe's reply detection and recording
 timeline (untagged tests, synthetic frames) and, in the `audio` job, a real
 clip through encode → decode.

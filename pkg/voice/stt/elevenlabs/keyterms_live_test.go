@@ -108,7 +108,7 @@ func TestLive_Keyterms_BothTransports(t *testing.T) {
 	// The smallest list a Voice Session sends: one NPC and the Butler. Override it
 	// to probe others — notably the name ALONE, which measured weaker on the
 	// realtime transport (2026-11-22: a lone "Flo?" was heard 2 times in 9 with
-	// ["Flo"], 9 in 9 with two or nine terms; batch was 9 in 9 either way).
+	// ["Flo"] and 6 in 6 with a two- or nine-term list; batch heard it every time).
 	terms := []string{name, "Glyphoxa"}
 	if list := os.Getenv("GLYPHOXA_STT_KEYTERM_LIST"); list != "" {
 		terms = strings.Split(list, "|")
