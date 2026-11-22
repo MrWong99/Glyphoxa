@@ -95,11 +95,6 @@ func (d DeploymentDefault) Provider() string {
 	return d.provider
 }
 
-// Model is the model named by [EnvDefaultModel], or "" when the deployment
-// leaves the choice to the provider's own default. Use [DeploymentDefault.VoiceModel]
-// for the concrete model a voice Agent runs.
-func (d DeploymentDefault) Model() string { return d.model }
-
 // Select resolves a Tenant's effective LLM Provider Config (nil = no row) to
 // the provider to build and the model to request. The provider is never empty.
 // The model is the row's, else the deployment model when the provider is the
