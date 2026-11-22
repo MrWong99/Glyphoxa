@@ -53,15 +53,16 @@ func ResolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component st
 }
 
 // New builds an [llm.Provider] for providerID with apiKey, keyed off
-// provider_config.provider (ADR-0004). An empty id is the CODE default, Groq
-// (ADR-0036) — but callers resolving for a Tenant never pass one: "no row" is
-// turned into a provider by [DeploymentDefault.Select], which is where the
-// deployment's own default applies (#702). An unrecognised id is a CLEAR error
-// naming it, never a silent hardwired adapter. An empty apiKey lets the adapter fall back to its
+// provider_config.provider (ADR-0004). The id is never empty: "no row" is
+// turned into a provider by [DeploymentDefault.Select], the ONE place a default
+// applies (#702) — an empty id here is a missed wire, and building Groq for it
+// would silently run and bill the wrong provider under another deployment
+// default. An empty or unrecognised id is a CLEAR error naming it, never a
+// silent hardwired adapter. An empty apiKey lets the adapter fall back to its
 // own *_API_KEY env var at request time (the hybrid policy, ADR-0039).
 func New(providerID, apiKey string) (llm.Provider, error) {
 	switch providerID {
-	case "", groq.ProviderID:
+	case groq.ProviderID:
 		return groq.New(apiKey), nil
 	case anthropic.ProviderID:
 		return anthropic.New(apiKey), nil

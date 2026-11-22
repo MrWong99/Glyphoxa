@@ -103,7 +103,11 @@ func TestNewDispatch(t *testing.T) {
 		providerID string
 		wantErr    string
 	}{
-		{providerID: "", wantErr: ""},
+		// "" is NOT Groq: "no row" becomes a provider in
+		// DeploymentDefault.Select, the one place the default applies. An
+		// empty id reaching New is a missed wire and must not silently build
+		// (and bill) Groq under another deployment default (#702).
+		{providerID: "", wantErr: "unknown LLM provider"},
 		{providerID: groq.ProviderID, wantErr: ""},
 		{providerID: anthropic.ProviderID, wantErr: ""},
 		{providerID: gemini.ProviderID, wantErr: ""},

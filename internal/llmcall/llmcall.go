@@ -128,12 +128,11 @@ func (c *Caller) record(in, out int) {
 // EstimateTokens is the ceil(chars/4) per-direction token estimate (ADR-0045).
 func EstimateTokens(runes int) int { return (runes + 3) / 4 }
 
-// ProviderLabel maps a provider_config id to the bounded [observe.Provider]
-// metric label; the empty id (default) is Groq (ADR-0036). The wired ids equal
-// their observe constants, so the cast is exact.
+// ProviderLabel maps a provider id to the bounded [observe.Provider] metric
+// label. The wired ids equal their observe constants, so the cast is exact.
+// Callers pass the id [llmbuild.DeploymentDefault.Select] resolved, which is
+// never empty; an empty id is deliberately NOT read as Groq — it stays an
+// unpriced, visibly wrong label instead of billing a missed wire as Groq (#702).
 func ProviderLabel(providerID string) observe.Provider {
-	if providerID == "" {
-		return observe.ProviderGroq
-	}
 	return observe.Provider(providerID)
 }

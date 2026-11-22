@@ -1542,8 +1542,8 @@ func TestDeploymentLLMDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unset envs: %v", err)
 	}
-	if p, m := d.Select(nil); p != "groq" || m != "" {
-		t.Errorf("unset envs resolve to (%q, %q), want (groq, \"\")", p, m)
+	if p, m := d.Select(nil); p != "groq" || m != "openai/gpt-oss-120b" {
+		t.Errorf("unset envs resolve to (%q, %q), want (groq, openai/gpt-oss-120b)", p, m)
 	}
 
 	d, err = deploymentLLMDefault(envMap(map[string]string{

@@ -187,7 +187,9 @@ func TestBuildHighlightDetectorGating(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{Tape: tc.tape, Highlights: tc.highlights}
+			// withSessionLLM is what every session start runs: it names the
+			// LLM provider the classifier is built for.
+			cfg := Config{Tape: tc.tape, Highlights: tc.highlights}.withSessionLLM(nil)
 			d := buildHighlightDetector(cfg, bus, log)
 			if tc.wantNil {
 				if d != nil {

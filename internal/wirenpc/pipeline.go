@@ -76,15 +76,14 @@ func (cfg Config) withSessionLLM(llmCfg *storage.ProviderConfig) Config {
 }
 
 // llmProviderLabel maps an LLM provider id to its bounded [observe.Provider] metric
-// label (#272): the empty id (env-only / nil config) is Groq (ADR-0036). The wired
-// ids equal their observe constants, so the cast is exact. It keeps the per-round
+// label (#272). The id is [Config.llmProviderID], which [Config.withSessionLLM]
+// sets on every session start and is never empty; an empty id is deliberately
+// NOT read as Groq (#702). The wired ids equal their observe constants, so the
+// cast is exact. It keeps the per-round
 // LLM spans AND the spend price lookup keyed to the ACTUAL provider — a non-Groq
 // adapter mislabelled groq would price (groq, claude-model) as a miss and trip caps
 // on the frontier default.
 func llmProviderLabel(providerID string) observe.Provider {
-	if providerID == "" {
-		return observe.ProviderGroq
-	}
 	return observe.Provider(providerID)
 }
 
