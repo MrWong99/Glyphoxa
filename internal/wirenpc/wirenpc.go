@@ -21,6 +21,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -218,6 +219,20 @@ type Config struct {
 	// the binary turns it ON unless GLYPHOXA_STT_STREAMING says otherwise
 	// (cmd/glyphoxa sttStreaming, default on since #702).
 	STTStreaming bool
+	// STTKeyterms biases the recognizer towards the names at the table (#701,
+	// ADR-0042 amendment 2026-11-22): the Cast NPCs' names and aliases, the
+	// Butler's and the player characters' are sent as keyterms on BOTH STT
+	// transports, so "Flo" stops arriving as "So" or "Flow". The list is built
+	// once per Voice Session ([sessionSTTTerms]); a roster edit applies on the next
+	// session. The zero value is OFF — the pre-#701 requests, which is what tests
+	// and rigs that build a Config get — while the binary turns it ON unless
+	// GLYPHOXA_STT_KEYTERMS says otherwise (cmd/glyphoxa sttKeyterms).
+	STTKeyterms bool
+	// STTLanguageHint pins the recognizer to the Campaign Language (language_code
+	// on both transports) instead of letting it detect the language per utterance.
+	// OFF by default and in the binary (GLYPHOXA_STT_LANGUAGE_HINT opts in): a
+	// table that mixes languages needs auto-detection.
+	STTLanguageHint bool
 	// TTSTransport selects how the cycle's ElevenLabs client synthesizes (#702):
 	// the zero value and [ttseleven.TransportHTTP] are the per-sentence HTTP
 	// stream, byte-for-byte; [ttseleven.TransportWS] moves sentences of the v3/v4
@@ -272,6 +287,15 @@ type Config struct {
 	// mid-session appears on the next session (re)start, exactly the roster's
 	// refresh cadence. Empty (the env-only Run path) renders no section.
 	playerCharacters []string
+	// players are the campaign's player characters as loaded ([RunFromDB]), on the
+	// same once-per-session cadence. [sessionConfig] derives playerCharacters from
+	// them, and their names and aliases are the player half of the STT keyterm
+	// list (#701).
+	players []storage.Character
+	// sttHints are this Voice Session's recognition hints, resolved once by [Run]
+	// from the fields above ([resolveSTTHints]) so every reconnect cycle of the
+	// session sends the same list on both STT transports.
+	sttHints sttHints
 
 	// Memory is the NPC memory recaller injected into every NPC's Agent loop
 	// (#122, ADR-0011/0042): it fills the Hot Context memory slot each turn. The
