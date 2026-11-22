@@ -1,0 +1,592 @@
+/* ── Maps view (#538, ADR-0060) ──────────────────────────────────────────────
+ * Everything a rule here styles sits under the panel root (.gx-maps), and every
+ * selector says so. That is deliberate, not tidiness: this sheet is imported by
+ * MapsPanel, which the Campaign host imports BEFORE its own campaign.css, so at
+ * equal specificity the older .gx-maps__* rules in campaign.css would win. The
+ * root prefix outranks them.
+ *
+ * The two layers that are portalled to <body> (the dialogs' form and the pin
+ * card) cannot sit under the root; they have roots of their own at the end.
+ */
+
+.gx-maps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+/* The map strip and "Add map". The strip scrolls sideways on its own, so a
+ * campaign with a dozen maps never pushes the page wider than a phone. */
+.gx-maps .gx-maps__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+  gap: var(--spacing-sm);
+}
+.gx-maps .gx-maps__strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.gx-maps .gx-maps__strip .gx-seg {
+  max-width: none;
+}
+.gx-maps .gx-maps__bar > .gx-btn {
+  flex: 0 0 auto;
+}
+
+.gx-maps .gx-maps__view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+/* A text button that reads as a link: breadcrumb steps, "Map settings" in the
+ * tray's note. */
+.gx-maps .gx-maps__link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.gx-maps .gx-maps__link:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-maps .gx-maps__crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+.gx-maps .gx-maps__crumb-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+.gx-maps .gx-maps__crumb-current {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+
+.gx-maps .gx-maps__tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+.gx-maps .gx-maps__zoom,
+.gx-maps .gx-maps__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+.gx-maps .gx-maps__zoom-readout {
+  min-width: 3.5em;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-default);
+}
+/* A zoom control at its limit stays focusable (aria-disabled, not disabled),
+ * so it only LOOKS unavailable. */
+.gx-maps .gx-maps__zoom [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* What the map is waiting for: an armed entry, a pin mid-move. */
+.gx-maps .gx-maps__hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+.gx-maps .gx-maps__hint > span {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+/* ── Stage: the map, and the tray beside it on a wide screen ─────────────── */
+
+.gx-maps .gx-maps__stage {
+  display: grid;
+  /* minmax(0, …), not a bare 1fr: a bare track grows to its widest child, and
+   * a zoomed-in surface would push the whole page sideways. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-md);
+  align-items: start;
+}
+@media (min-width: 1100px) {
+  .gx-maps .gx-maps__stage {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+.gx-maps .gx-maps__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+/* The frame clips and scrolls; the surface inside it is sized by WIDTH to
+ * zoom. No transform: pins keep their size on screen at every zoom level. */
+.gx-maps .gx-maps__frame {
+  position: relative;
+  overflow: auto;
+  max-height: clamp(320px, 65vh, 820px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+}
+.gx-maps .gx-maps__frame:focus-visible {
+  outline-offset: calc(-1 * var(--focus-outline-width));
+}
+.gx-maps .gx-maps__surface {
+  position: relative;
+  transform: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.gx-maps .gx-maps__surface[data-noimage] {
+  /* A very wide map on a phone is a strip too short for the notice below. */
+  min-height: 220px;
+}
+.gx-maps .gx-maps__surface[data-placing] {
+  cursor: crosshair;
+}
+.gx-maps .gx-maps__image {
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+}
+
+/* A map whose bundle carried no picture. It fills the surface so the pins that
+ * DID survive still land where they belong, at their normalized coordinates. */
+.gx-maps .gx-maps__noimage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  text-align: center;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    var(--surface-raised) 10px,
+    var(--surface-raised) 20px
+  );
+}
+.gx-maps .gx-maps__noimage-text {
+  margin: 0;
+  max-width: 44ch;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+.gx-maps .gx-maps__noimage-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+.gx-maps .gx-maps__noimage-hint {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+
+/* ── Pins ────────────────────────────────────────────────────────────────────
+ * Pins sit at NORMALIZED coordinates, so the whole layer is resolution
+ * independent and a re-uploaded image keeps every pin.
+ *
+ * The stored point is the DOT's centre, not the row's: the pin box's top-left
+ * sits on the point (left/top %), the row is [dot][label] with the dot first,
+ * so shifting left by half the dot puts the dot's horizontal centre on the
+ * point whatever the label's width, and -50% vertically centres the row.
+ *
+ * The row itself takes no pointer events — only the dot does — so a long label
+ * never swallows a click meant for the map underneath it.
+ */
+.gx-maps .gx-maps__pin {
+  --pin-dot: 14px;
+  position: absolute;
+  z-index: 1;
+  transform: translate(calc(var(--pin-dot) / -2), -50%);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.gx-maps .gx-maps__pin[data-moving] {
+  z-index: 2;
+}
+.gx-maps .gx-maps__pin-dot {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--pin-dot);
+  height: var(--pin-dot);
+  padding: 0;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  /* A dark ring between the dot and whatever colour the map is under it. */
+  box-shadow: 0 0 0 2px var(--surface-void);
+  cursor: grab;
+  pointer-events: auto;
+  /* The finger drags the PIN; without this the browser scrolls the frame
+   * instead and cancels the gesture. */
+  touch-action: none;
+}
+/* The hit area is larger than the dot: 32px for a cursor, the full touch
+ * target for a finger. */
+.gx-maps .gx-maps__pin-dot::after {
+  content: "";
+  position: absolute;
+  inset: -11px;
+  border-radius: 50%;
+}
+@media (pointer: coarse) {
+  .gx-maps .gx-maps__pin-dot::after {
+    inset: calc((var(--pin-dot) - var(--target-coarse)) / 2 - 2px);
+  }
+}
+.gx-maps .gx-maps__pin-dot:active {
+  cursor: grabbing;
+}
+.gx-maps .gx-maps__pin-dot[aria-expanded="true"],
+.gx-maps .gx-maps__pin[data-moving] .gx-maps__pin-dot {
+  box-shadow:
+    0 0 0 2px var(--surface-void),
+    0 0 0 4px currentColor;
+}
+/* The label is a small dark plate, so it reads on a pale parchment scan as
+ * well as on a dark cave map. */
+.gx-maps .gx-maps__pin-label {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface-void) 82%, transparent);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+  text-shadow: none;
+  pointer-events: none;
+}
+/* A pin withheld from players — by its own flag or its entry's — reads as
+ * withheld at a glance. */
+.gx-maps .gx-maps__pin[data-hidden] .gx-maps__pin-dot {
+  border-style: dashed;
+}
+.gx-maps .gx-maps__pin[data-hidden] .gx-maps__pin-label {
+  font-style: italic;
+  color: var(--text-muted);
+}
+/* A pin whose write is still in flight: there, but visibly not settled. */
+.gx-maps .gx-maps__pin--provisional {
+  opacity: 0.75;
+}
+.gx-maps .gx-maps__pin--provisional .gx-maps__pin-dot {
+  border-style: dashed;
+  color: var(--gold);
+  cursor: default;
+  pointer-events: none;
+}
+
+.gx-maps .gx-maps__gesture-hint {
+  margin: 0;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+
+.gx-maps .gx-maps__children {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+/* A small pill button: a nested map, a type filter. The pressed state is
+ * filled, the others are at full strength — not dimmed like something off. */
+.gx-maps .gx-maps__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: 3px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font: inherit;
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-default);
+  cursor: pointer;
+}
+.gx-maps .gx-maps__chip:hover {
+  border-color: var(--border-strong);
+}
+.gx-maps .gx-maps__chip[aria-pressed="true"] {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+/* ── Tray ────────────────────────────────────────────────────────────────── */
+
+.gx-maps .gx-maps__tray {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  padding: var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+}
+.gx-maps .gx-maps__tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+.gx-maps .gx-maps__tray-title {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  letter-spacing: normal;
+  color: var(--text-strong);
+}
+.gx-maps .gx-maps__tray-count {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+.gx-maps .gx-maps__tray-note {
+  margin: 0;
+  font-size: var(--body-xs);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+}
+.gx-maps .gx-maps__tray-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+/* One entry per row, in a list that scrolls on its own: a hundred unplaced
+ * entries must not push the map off the top of a phone. */
+.gx-maps .gx-maps__tray-list {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+@media (min-width: 1100px) {
+  .gx-maps .gx-maps__tray {
+    position: sticky;
+    top: var(--spacing-md);
+    max-height: clamp(320px, 65vh, 820px);
+  }
+  .gx-maps .gx-maps__tray-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+}
+.gx-maps .gx-maps__tray-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: 5px var(--spacing-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  text-align: left;
+  cursor: pointer;
+}
+.gx-maps .gx-maps__tray-item:hover {
+  background: var(--surface-card-hover);
+}
+/* A suggested entry is MARKED in place, not moved into a second list. */
+.gx-maps .gx-maps__tray-item[data-suggested] {
+  border-color: color-mix(in srgb, var(--gold) 50%, transparent);
+}
+/* The armed entry: the one the next click on the map places. */
+.gx-maps .gx-maps__tray-item[aria-pressed="true"] {
+  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  color: var(--text-strong);
+}
+.gx-maps .gx-maps__tray-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+}
+.gx-maps .gx-maps__tray-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-maps .gx-maps__tray-spark {
+  flex: none;
+  color: var(--gold);
+}
+
+@media (pointer: coarse) {
+  .gx-maps .gx-maps__chip,
+  .gx-maps .gx-maps__tray-item {
+    min-height: var(--target-coarse);
+  }
+  .gx-maps .gx-maps__chip {
+    min-width: var(--target-coarse);
+  }
+}
+
+@media (forced-colors: active) {
+  .gx-maps .gx-maps__pin-dot[aria-expanded="true"],
+  .gx-maps .gx-maps__pin[data-moving] .gx-maps__pin-dot,
+  .gx-maps .gx-maps__tray-item[aria-pressed="true"],
+  .gx-maps .gx-maps__chip[aria-pressed="true"] {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* ── Portalled: the Add-map and Map-settings dialogs ─────────────────────── */
+
+.gx-maps-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+.gx-maps-form__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+.gx-maps-form__file {
+  max-width: 100%;
+  font: inherit;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+/* The draft frame reads as PROVISIONAL: a dashed border, the same visual
+ * grammar the graph's proposal ghosts use. A preview that looks like a saved
+ * map invites the GM to assume it is one. */
+.gx-maps-form__draft {
+  padding: var(--spacing-xs);
+  border: 2px dashed var(--gold);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+}
+.gx-maps-form__draft-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Portalled: the pin card (a Popover) ─────────────────────────────────── */
+
+.gx-maps-card {
+  width: min(320px, calc(100vw - 2 * var(--spacing-md)));
+}
+.gx-maps-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+.gx-maps-card__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gx-maps-card__type {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+}
+.gx-maps-card__name {
+  font-size: var(--body-md);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.gx-maps-card__excerpt {
+  margin: 0;
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.gx-maps-card__excerpt--none {
+  font-style: italic;
+}
+.gx-maps-card__open {
+  align-self: flex-start;
+}
+.gx-maps-card__label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-xs);
+}
+.gx-maps-card__label > .gx-field {
+  width: 100%;
+}
+.gx-maps-card__privacy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-maps-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--border-subtle);
+}
