@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
@@ -72,6 +73,11 @@ const (
 	// when none is idle the sentence goes over HTTP.
 	wsSocketsTotal = 8
 
+	// wsCapBackoff is how long the pool dials nothing after the API refused a
+	// socket for the account's dialogue-session cap: sentences that find no idle
+	// socket go over HTTP meanwhile, without a refused handshake each.
+	wsCapBackoff = 15 * time.Second
+
 	// wsWarmKeys is how many most-recently-used voices [Client.Warm] pre-dials.
 	wsWarmKeys = 2
 )
@@ -81,6 +87,7 @@ type wsTuning struct {
 	keepAlive  time.Duration
 	idleTTL    time.Duration
 	firstAudio time.Duration
+	capBackoff time.Duration
 	perKey     int
 	total      int
 }
@@ -90,6 +97,7 @@ func defaultWSTuning() wsTuning {
 		keepAlive:  wsKeepAliveInterval,
 		idleTTL:    wsIdleTTL,
 		firstAudio: wsFirstAudioTimeout,
+		capBackoff: wsCapBackoff,
 		perKey:     wsSocketsPerKey,
 		total:      wsSocketsTotal,
 	}
@@ -163,7 +171,7 @@ type WSStats struct {
 	Dials     int64 // sockets opened (for a sentence or ahead of one)
 	Reuses    int64 // sentences that rode an already-open socket
 	Redials   int64 // sentences moved to a fresh socket because the pooled one was dead
-	Fallbacks int64 // sentences sent over HTTP because the pool was at its cap
+	Fallbacks int64 // sentences sent over HTTP: the pool or the account's dialogue-session pool was at its cap
 	Open      int   // sockets open right now
 }
 
@@ -199,6 +207,7 @@ type wsPool struct {
 	dialing map[wsKey]int        // background pre-dials in flight, per key
 	total   int                  // sum of open
 	recent  []wsKey              // most recently used first, at most wsWarmKeys
+	held    time.Time            // no dial before this instant (see holdDials)
 	wg      sync.WaitGroup       // socket goroutines and background dials
 
 	dials, reuses, redials, fallbacks atomic.Int64
@@ -236,6 +245,10 @@ func (p *wsPool) acquire(ctx context.Context, key wsKey, fresh bool) (c *wsConn,
 		p.mu.Unlock()
 		p.reuses.Add(1)
 		return c, true, nil
+	}
+	if time.Now().Before(p.held) {
+		p.mu.Unlock()
+		return nil, false, nil
 	}
 	victim, ok := p.reserveLocked(key, true)
 	p.mu.Unlock()
@@ -385,7 +398,7 @@ func (p *wsPool) prewarm(key wsKey) {
 		}
 		return
 	}
-	if p.dialing[key] > 0 {
+	if p.dialing[key] > 0 || time.Now().Before(p.held) {
 		return
 	}
 	if _, ok := p.reserveLocked(key, false); !ok {
@@ -404,6 +417,26 @@ func (p *wsPool) prewarm(key wsKey) {
 		}
 		p.mu.Unlock()
 	}()
+}
+
+// wsSessionCap reports whether err is the API refusing a socket because the
+// account's dialogue-session pool is full: a 429 on the handshake, or a
+// too_many_concurrent_requests error frame.
+func wsSessionCap(err error) bool {
+	var he *providererr.HTTPError
+	if errors.As(err, &he) {
+		return he.StatusCode == http.StatusTooManyRequests
+	}
+	var se *StreamError
+	return errors.As(err, &se) && se.Kind == "too_many_concurrent_requests"
+}
+
+// holdDials stops the pool dialling for the cap backoff. Idle sockets it
+// already holds keep serving sentences.
+func (p *wsPool) holdDials() {
+	p.mu.Lock()
+	p.held = time.Now().Add(p.tune.capBackoff)
+	p.mu.Unlock()
 }
 
 // warm pre-dials the most recently used voices and reports whether it knew any.
@@ -658,19 +691,28 @@ func (c *wsConn) keepLoop() {
 }
 
 // errWSNoRoom tells [Client.Synthesize] the pool could not lease a socket (at
-// its cap, or closed) and the sentence should go over HTTP.
+// its cap, closed, or refused by the API for the account's dialogue-session
+// cap) and the sentence should go over HTTP.
 var errWSNoRoom = errors.New("elevenlabs: no dialogue socket available")
 
 // synthesizeWS renders one sentence over a pooled dialogue socket. Like the HTTP
 // path it returns once the sentence has STARTED — the first frame arrived — so a
 // failure before any audio is a returned (retryable) start error, never a
 // terminal Err chunk on an empty stream. A pooled socket that turns out dead
-// before its first frame is replaced by a fresh dial once, transparently.
+// before its first frame is replaced by a fresh dial once, transparently. A
+// socket the API refuses for the account's dialogue-session cap is not a
+// failure of the sentence: it goes over HTTP ([errWSNoRoom]), whose concurrency
+// pool is a separate one, and the pool holds its dials for [wsCapBackoff].
 func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, sampleRate int) (<-chan tts.AudioChunk, error) {
 	p := c.ws
 	for attempt := 0; ; attempt++ {
 		conn, reused, err := p.acquire(ctx, key, attempt > 0)
 		if err != nil {
+			if wsSessionCap(err) {
+				p.holdDials()
+				p.fallbacks.Add(1)
+				return nil, errWSNoRoom
+			}
 			return nil, fmt.Errorf("elevenlabs.Synthesize: %w", err)
 		}
 		if conn == nil {
@@ -695,6 +737,11 @@ func (c *Client) synthesizeWS(ctx context.Context, sentence string, key wsKey, s
 			// sentence, so line up a replacement for the next one.
 			p.prewarm(key)
 			return nil, fmt.Errorf("elevenlabs.Synthesize: %w", ctx.Err())
+		}
+		if wsSessionCap(err) {
+			p.holdDials()
+			p.fallbacks.Add(1)
+			return nil, errWSNoRoom
 		}
 		if reused && attempt == 0 {
 			p.redials.Add(1)

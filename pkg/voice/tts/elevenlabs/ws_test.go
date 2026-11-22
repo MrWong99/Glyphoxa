@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/goleak"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -49,6 +50,8 @@ type ttdServer struct {
 	httpPosts atomic.Int64 // HTTP /stream syntheses served
 	heads     atomic.Int64 // HTTP HEAD warms served
 	keepAlive atomic.Int64 // keep_alive messages read, all sockets
+	refuse    atomic.Int64 // when non-zero, the HTTP status every handshake is refused with
+	refused   atomic.Int64 // handshakes refused
 
 	mu         sync.Mutex
 	dials      []ttdDial
@@ -78,6 +81,11 @@ func newTTDServer(t *testing.T, script func(c *ttdConn)) *ttdServer {
 			if r.Method == http.MethodHead {
 				s.heads.Add(1)
 			}
+			return
+		}
+		if status := s.refuse.Load(); status != 0 {
+			s.refused.Add(1)
+			http.Error(w, `{"detail":{"status":"too_many_concurrent_requests"}}`, int(status))
 			return
 		}
 		s.mu.Lock()
@@ -570,25 +578,92 @@ func TestWS_FreshSocketDyingBeforeAudioIsARetryableStartError(t *testing.T) {
 }
 
 // TestWS_RefusedHandshakeIsATypedHTTPError: the handshake is where the API
-// rejects a key, a model or a full dialogue-session pool; the status must reach
-// the retry policy as it does on HTTP.
+// rejects a key or a model; the status must reach the retry policy as it does on
+// HTTP, and the slot the failed dial had reserved must come back — else two
+// failed dials would leave the voice on HTTP for good.
 func TestWS_RefusedHandshakeIsATypedHTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, `{"detail":{"code":"too_many_concurrent_requests"}}`, http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL), elevenlabs.WithTransport(elevenlabs.TransportWS))
-	defer c.Close()
-	_, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")})
-	if err == nil || !retry.Retryable(err) {
-		t.Fatalf("error = %v, want a retryable HTTP 429", err)
+	srv := newTTDServer(t, echoScript)
+	c := wsClient(t, srv)
+	voice := wsVoice("voice-1")
+
+	srv.refuse.Store(http.StatusForbidden)
+	_, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: voice})
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusForbidden || retry.Retryable(err) {
+		t.Fatalf("error = %v, want a non-retryable HTTP 403", err)
 	}
-	if st := c.WSStats(); st.Open != 0 {
-		t.Errorf("open sockets = %d after a refused handshake, want 0", st.Open)
+
+	srv.refuse.Store(http.StatusServiceUnavailable)
+	for i := 0; i < 3; i++ { // more failed dials than the per-voice cap
+		if _, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: voice}); err == nil || !retry.Retryable(err) {
+			t.Fatalf("error = %v, want a retryable HTTP 503", err)
+		}
 	}
-	// The slot the failed dial reserved is free again.
-	if _, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "Ein Satz.", Voice: wsVoice("voice-1")}); err == nil || errors.Is(err, context.Canceled) {
-		t.Errorf("second attempt = %v, want the same handshake error (not an HTTP fallback)", err)
+	if st := c.WSStats(); st.Open != 0 || st.Fallbacks != 0 || srv.httpPosts.Load() != 0 {
+		t.Errorf("stats = %+v, POSTs = %d; want nothing open and no HTTP fallback", st, srv.httpPosts.Load())
+	}
+
+	srv.refuse.Store(0)
+	pcm, _, terminal := collect(t, say(t, c, context.Background(), voice, "Jetzt aber."))
+	if terminal != nil || !bytes.Equal(pcm, sentencePCM("Jetzt aber. ")) {
+		t.Errorf("after the refusals: audio %q, terminal %v; want the sentence on a socket (a failed dial must free its slot)", pcm, terminal)
+	}
+}
+
+// TestWS_DialogueSessionCapFallsBackToHTTP: every open socket holds one of the
+// account's dialogue-session slots, and the pool is shared by every Voice
+// Session on the key. A handshake refused with 429 means the account is at that
+// cap — which the HTTP path (its own concurrency pool) is not — so the sentence
+// is spoken over HTTP instead of failing the turn, and the pool stops dialling
+// for a while rather than paying a refused handshake per sentence.
+func TestWS_DialogueSessionCapFallsBackToHTTP(t *testing.T) {
+	srv := newTTDServer(t, echoScript)
+	srv.refuse.Store(http.StatusTooManyRequests)
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(80*time.Millisecond))
+	ctx := context.Background()
+	voice := wsVoice("voice-1")
+
+	for _, sentence := range []string{"Erster Satz.", "Zweiter Satz."} {
+		pcm, _, terminal := collect(t, say(t, c, ctx, voice, sentence))
+		if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+			t.Fatalf("%q at the cap: audio %q, terminal %v; want the HTTP path's audio", sentence, pcm, terminal)
+		}
+	}
+	if err := c.Warm(ctx); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if st := c.WSStats(); st.Fallbacks != 2 || st.Open != 0 || srv.refused.Load() != 1 {
+		t.Errorf("stats = %+v, refused handshakes = %d; want 2 fallbacks and ONE handshake (dials held back)", st, srv.refused.Load())
+	}
+
+	// The cap clears and the hold runs out: sentences ride a socket again.
+	srv.refuse.Store(0)
+	eventually(t, "a sentence on a socket once the hold ran out", func() bool {
+		pcm, _, terminal := collect(t, say(t, c, ctx, voice, "Wieder da."))
+		if terminal != nil {
+			t.Errorf("terminal error: %v", terminal)
+		}
+		return bytes.Equal(pcm, sentencePCM("Wieder da. "))
+	})
+}
+
+// TestWS_SessionCapErrorFrameFallsBackToHTTP: the same cap, announced after the
+// upgrade as an error frame before any audio.
+func TestWS_SessionCapErrorFrameFallsBackToHTTP(t *testing.T) {
+	srv := newTTDServer(t, func(c *ttdConn) {
+		c.read()
+		c.sentence()
+		c.fail("too_many_concurrent_requests", "Too many concurrent dialogue sessions.")
+	})
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(time.Minute))
+	for _, sentence := range []string{"Erster Satz.", "Zweiter Satz."} {
+		pcm, _, terminal := collect(t, say(t, c, context.Background(), wsVoice("voice-1"), sentence))
+		if terminal != nil || !bytes.Equal(pcm, httpPCM) {
+			t.Fatalf("%q: audio %q, terminal %v; want the HTTP path's audio", sentence, pcm, terminal)
+		}
+	}
+	if st := c.WSStats(); st.Fallbacks != 2 || srv.upgrades.Load() != 1 {
+		t.Errorf("stats = %+v over %d sockets; want 2 fallbacks and one socket (dials held back)", st, srv.upgrades.Load())
 	}
 }
 

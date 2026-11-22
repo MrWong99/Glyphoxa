@@ -28,3 +28,14 @@ func WithWSTuning(keepAlive, idleTTL, firstAudio time.Duration, perKey, total in
 		}
 	}
 }
+
+// WithWSCapBackoff overrides how long the pool stops dialling after the API
+// refused a socket for the account's dialogue-session cap. It must come after
+// WithTransport(TransportWS).
+func WithWSCapBackoff(d time.Duration) Option {
+	return func(c *Client) {
+		if c.ws != nil {
+			c.ws.tune.capBackoff = d
+		}
+	}
+}
