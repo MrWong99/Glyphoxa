@@ -135,15 +135,25 @@ wording — the SaaS-first launch decision, recorded as an amendment on ADR-0055
 Mechanically, platform keys are the **env-fallback path** that already exists
 (ADR-0039's hybrid policy): a Provider Config whose credential is the `env`
 placeholder makes the adapter read the deployment's own `GROQ_API_KEY` /
-`ELEVENLABS_API_KEY` / `GEMINI_API_KEY`. For a SaaS deployment:
+`ANTHROPIC_API_KEY` / `ELEVENLABS_API_KEY` / `GEMINI_API_KEY`. For a SaaS deployment:
 
 1. Set the provider keys on the deployment (the chart's
-   `groqApiKey`/`elevenLabsApiKey`/`geminiApiKey` values, or the env of the
+   `groqApiKey`/`anthropicApiKey`/`elevenLabsApiKey`/`geminiApiKey` values, or the env of the
    systemd/compose service). These are YOUR keys — the platform pool.
 2. Give paying Tenants a `key_source: "platform"` plan.
 3. Their env-placeholder Provider Configs (the seeded default) now run on your
    pool; the Usage Ledger (§3) attributes every token/character/second they
    burn to their Tenant, so you can see each subscription's real cost.
+
+Which LLM a platform-plan Tenant runs is the **deployment default**
+(`llm.defaultProvider` / `llm.defaultModel` in the chart, i.e.
+`GLYPHOXA_LLM_DEFAULT_PROVIDER` / `_MODEL` — docs/configuration.md): Groq
+`openai/gpt-oss-120b` unless you name another. If the pool also holds the other
+LLM provider's key, such a Tenant may switch to it in Configuration ("Use for
+voice"); that usage is metered against the same allowance, at that model's
+price — `claude-haiku-4-5` costs roughly ten times `openai/gpt-oss-120b` per
+turn, so leave `anthropicApiKey` empty if a trial allowance must not be spent
+that way.
 
 BYOK Tenants coexist on the same deployment: they save real keys in the
 console (encrypted with `GLYPHOXA_SECRET`, ADR-0004), and a real saved key

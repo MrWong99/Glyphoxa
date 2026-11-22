@@ -208,6 +208,14 @@ discordBotToken: "<bot token>"
 elevenLabsApiKey: ""
 geminiApiKey: ""
 groqApiKey: ""
+anthropicApiKey: ""
+
+# Optional: the LLM tenants WITHOUT their own choice run on (docs/configuration.md,
+# GLYPHOXA_LLM_DEFAULT_PROVIDER / _MODEL). Leave empty for the built-in default
+# (Groq, openai/gpt-oss-120b). A named provider needs its key above.
+# llm:
+#   defaultProvider: "anthropic"
+#   defaultModel: "claude-haiku-4-5"
 
 # Embeddings (semantic memory, L2): the image ships no Ollama and defaults to
 # loopback, so point this at a reachable Ollama server serving
