@@ -182,7 +182,7 @@ func TestLive_Keyterms_BothTransports(t *testing.T) {
 					}
 					row += fmt.Sprintf(" %q |", text)
 				}
-				table.WriteString(fmt.Sprintf("%s %d/%d |\n", row, heard, runs))
+				fmt.Fprintf(&table, "%s %d/%d |\n", row, heard, runs)
 				if withTerms && heard != runs {
 					t.Errorf("%s over %s with keyterms %q: the name was heard in %d of %d runs", clip, tr.label, terms, heard, runs)
 				}
