@@ -99,12 +99,9 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	if err != nil {
 		return fmt.Errorf("wirenpc: load player characters: %w", err)
 	}
-	for _, c := range chars {
-		cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
-	}
-	// Their names and aliases are also names said at the table: the player half
-	// of the STT keyterm list (#701).
-	cfg.playerCharacterTerms = playerCharacterTerms(chars)
+	// One assignment feeds both consumers: [sessionConfig] derives the prompt's
+	// name list AND the player half of the STT keyterm list (#701) from it.
+	cfg.players = chars
 
 	// Rollover tape (#306, ADR-0051): armed ONLY when the Campaign opted in
 	// (tape_armed). Seed it with the individually-consenting Speakers; agent speech
@@ -128,14 +125,27 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	return Run(ctx, cfg)
 }
 
+// serveCycle is the connect-and-serve seam (like newSTT/newDiscordClient): [Run]
+// calls it once per reconnect cycle with the session's resolved Config. A test
+// swaps it to see the Config a real Run/RunFromDB hands its cycles without
+// dialling Discord. Production always uses [connectAndServe].
+var serveCycle = connectAndServe
+
 // sessionConfig resolves what a Voice Session fixes ONCE at its start and every
 // reconnect cycle then shares: the env-only path's hardcoded NPC when no roster
-// was loaded, and the recognition hints both STT transports send (#701). The
+// was loaded, the player-character names the prompt lists (from the loaded
+// characters), and the recognition hints both STT transports send (#701). The
 // keyterm count is logged here, once; the terms themselves — the players' names —
 // only at debug level.
 func sessionConfig(cfg Config, log *slog.Logger) Config {
 	if len(cfg.npcs) == 0 {
 		cfg.npcs = []npcSpec{hardcodedNPC()}
+	}
+	if len(cfg.players) > 0 {
+		cfg.playerCharacters = make([]string, 0, len(cfg.players))
+		for _, c := range cfg.players {
+			cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
+		}
 	}
 	var dropped int
 	cfg.sttHints, dropped = resolveSTTHints(cfg)
@@ -251,7 +261,7 @@ func Run(ctx context.Context, cfg Config) error {
 	var disclosed sessionOnce
 	runErr := runWithReconnect(ctx, log, defaultReconnectPolicy(),
 		countCycles(cfg.ConnectCycle, func(ctx context.Context, connected func()) error {
-			return connectAndServe(ctx, cfg, guild, channel, log, connected, &disclosed)
+			return serveCycle(ctx, cfg, guild, channel, log, connected, &disclosed)
 		}))
 	// A non-nil return is a FATAL, terminal failure (a classified *FatalError):
 	// publish the terminal connection.state{failed} with its readable reason so the

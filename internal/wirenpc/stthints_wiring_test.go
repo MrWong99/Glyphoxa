@@ -131,7 +131,7 @@ func hintedSession() Config {
 			{agentID: "wolf", name: "Wolf"}, // an everyday German word: never a keyterm
 			{agentID: "butler", name: "Glyphoxa", role: string(storage.AgentRoleButler), addressOnly: true},
 		},
-		playerCharacterTerms: []string{"Artusas", "Art"},
+		players: []storage.Character{{Name: "Artusas", Aliases: []string{"Art"}}},
 	}
 }
 
@@ -208,7 +208,7 @@ func TestSTTHints_ReachBothTransportsOfOneSession(t *testing.T) {
 	cfg.STTLanguageHint = true
 	batches, dials := speakSTT(t, cfg, newFakeScribe(t))
 
-	want := sttRequest{keyterms: []string{"Flo", "Florian", "Glyphoxa", "Artusas", "Art"}, language: []string{"de"}}
+	want := sttRequest{keyterms: []string{"Flo", "Glyphoxa", "Florian", "Artusas", "Art"}, language: []string{"de"}}
 	for i, got := range batches {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("batch request %d carried %+v, want %+v", i, got, want)
@@ -286,7 +286,7 @@ func TestSTTHints_BatchOnlySession(t *testing.T) {
 		t.Fatalf("streaming is off but %d realtime sessions were dialled", len(dials))
 	}
 	for i, got := range batches {
-		if want := []string{"Flo", "Florian", "Glyphoxa", "Artusas", "Art"}; !reflect.DeepEqual(got.keyterms, want) {
+		if want := []string{"Flo", "Glyphoxa", "Florian", "Artusas", "Art"}; !reflect.DeepEqual(got.keyterms, want) {
 			t.Errorf("batch request %d keyterms = %q, want %q", i, got.keyterms, want)
 		}
 		if len(got.language) != 0 {

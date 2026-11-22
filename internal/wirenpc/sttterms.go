@@ -49,11 +49,12 @@ func (h sttHints) streamOptions() []orchestrator.StreamManagerOption {
 // resolveSTTHints builds the session's hints from its Config: the term list when
 // [Config.STTKeyterms] is on, the Campaign Language when
 // [Config.STTLanguageHint] is. The terms are returned as the adapter will send
-// them ([stteleven.Keyterms] — de-duplicated and inside the provider's limits),
-// and dropped is how many of the session's names that left out.
+// them ([stteleven.Keyterms] — inside the provider's limits), and dropped is how
+// many of the session's distinct names that left out: in practice the tail the
+// 50-term cap cut.
 func resolveSTTHints(cfg Config) (h sttHints, dropped int) {
 	if cfg.STTKeyterms {
-		offered := sessionSTTTerms(cfg.npcs, cfg.playerCharacterTerms, cfg.language)
+		offered := sessionSTTTerms(cfg.npcs, cfg.players, cfg.language)
 		h.terms = stteleven.Keyterms(offered)
 		dropped = len(offered) - len(h.terms)
 	}
@@ -74,46 +75,51 @@ func sttLanguageCode(language string) string {
 }
 
 // sessionSTTTerms lists the names the recognizer should expect in one Voice
-// Session, most important first: every Cast NPC's name and aliases — the names
-// Address Detection matches, not the truncation aliases derived from them — then
-// the Butler's, then the player characters' names and aliases (playerTerms, from
-// [playerCharacterTerms]).
+// Session, most important first — the provider's cap keeps the head of the list:
+//
+//  1. the NAMES that route an utterance: every Cast NPC's, then the Butler's. A
+//     big Cast must not lose an NPC's name to another NPC's third spelling;
+//  2. those NPCs' aliases, in the same order — the names Address Detection
+//     matches, not the truncation aliases derived from them;
+//  3. the player characters' names, then their aliases. They route nothing; they
+//     are there so the Transcript and the NPCs read them right.
 //
 // A term that is an everyday word of the Campaign Language is left out
 // ([address.IsCommonWord]). The recognizer rewrites a keyterm's homophones to the
 // keyterm, so an NPC literally called "Wolf" would otherwise turn every spoken
-// "Wolf" into the spelling that routes as an exact name.
-func sessionSTTTerms(npcs []npcSpec, playerTerms []string, language string) []string {
+// "Wolf" into the spelling that routes as an exact name. A term already listed,
+// ignoring case, is not listed twice.
+func sessionSTTTerms(npcs []npcSpec, players []storage.Character, language string) []string {
 	var terms []string
+	seen := make(map[string]struct{})
 	add := func(candidates ...string) {
 		for _, c := range candidates {
 			c = strings.TrimSpace(c)
-			if c == "" || address.IsCommonWord(language, c) {
+			key := strings.ToLower(c)
+			if _, dup := seen[key]; dup || c == "" || address.IsCommonWord(language, c) {
 				continue
 			}
+			seen[key] = struct{}{}
 			terms = append(terms, c)
 		}
 	}
-	isButler := func(spec npcSpec) bool { return spec.role == string(storage.AgentRoleButler) }
-	for _, butlerPass := range []bool{false, true} {
-		for _, spec := range npcs {
-			if isButler(spec) == butlerPass {
-				add(spec.name)
-				add(spec.aliases...)
+	// castThenButler visits the Cast NPCs in roster order, then the Butler.
+	castThenButler := func(visit func(npcSpec)) {
+		for _, butlerPass := range []bool{false, true} {
+			for _, spec := range npcs {
+				if (spec.role == string(storage.AgentRoleButler)) == butlerPass {
+					visit(spec)
+				}
 			}
 		}
 	}
-	add(playerTerms...)
-	return terms
-}
-
-// playerCharacterTerms flattens the campaign's player characters to the names
-// said at the table: each character's name, then its aliases.
-func playerCharacterTerms(chars []storage.Character) []string {
-	var terms []string
-	for _, c := range chars {
-		terms = append(terms, c.Name)
-		terms = append(terms, c.Aliases...)
+	castThenButler(func(spec npcSpec) { add(spec.name) })
+	castThenButler(func(spec npcSpec) { add(spec.aliases...) })
+	for _, c := range players {
+		add(c.Name)
+	}
+	for _, c := range players {
+		add(c.Aliases...)
 	}
 	return terms
 }

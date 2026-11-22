@@ -21,6 +21,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -280,10 +281,11 @@ type Config struct {
 	// mid-session appears on the next session (re)start, exactly the roster's
 	// refresh cadence. Empty (the env-only Run path) renders no section.
 	playerCharacters []string
-	// playerCharacterTerms are those characters' names AND aliases
-	// ([playerCharacterTerms]) — the player half of the STT keyterm list (#701).
-	// Loaded with playerCharacters, on the same once-per-session cadence.
-	playerCharacterTerms []string
+	// players are the campaign's player characters as loaded ([RunFromDB]), on the
+	// same once-per-session cadence. [sessionConfig] derives playerCharacters from
+	// them, and their names and aliases are the player half of the STT keyterm
+	// list (#701).
+	players []storage.Character
 	// sttHints are this Voice Session's recognition hints, resolved once by [Run]
 	// from the fields above ([resolveSTTHints]) so every reconnect cycle of the
 	// session sends the same list on both STT transports.
