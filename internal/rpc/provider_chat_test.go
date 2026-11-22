@@ -125,7 +125,7 @@ func TestProviderList_EffectiveChat_FollowsVoice(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	client := llmServer(t, store, haikuDefault(t), bothKeys, &fakeKeyGate{allowed: true})
-	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-own-key-9876", Model: "qwen/qwen3-32b"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "test-groq-own-key-9876", Model: "qwen/qwen3-32b"})
 
 	eff := effectiveChat(t, client)
 	if eff.GetProvider() != "groq" || eff.GetModel() != "qwen/qwen3-32b" {
@@ -148,7 +148,7 @@ func TestProviderList_EffectiveChat_Choice(t *testing.T) {
 	store := newFakeProviderStore()
 	client := llmServer(t, store, d, bothKeys, &fakeKeyGate{allowed: true})
 	// Voice on Groq with the tenant's own key; chat put on Anthropic, keyless.
-	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-own-key-9876"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "test-groq-own-key-9876"})
 	mustSaveChat(t, client, "anthropic", "", "")
 
 	eff := effectiveChat(t, client)
@@ -170,7 +170,7 @@ func TestProviderList_EffectiveChat_Choice(t *testing.T) {
 	}
 
 	// A chat-only key is reported with ITS last four, never the voice key's.
-	mustSaveChat(t, client, "anthropic", "", "sk-ant-chat-only-4321")
+	mustSaveChat(t, client, "anthropic", "", "test-anthropic-chat-only-4321")
 	eff = effectiveChat(t, client)
 	if eff.GetKeySource() != keyChat || eff.GetKeyLast4() != "4321" {
 		t.Errorf("key source/last4 = %v/%q, want CHAT_KEY/4321", eff.GetKeySource(), eff.GetKeyLast4())
@@ -300,7 +300,7 @@ func TestProviderSaveChat_OwnProviderKeyAllowsFreeText(t *testing.T) {
 	store := newFakeProviderStore()
 	// No platform entitlement at all: only the tenant's own Anthropic key.
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, bothKeys, &fakeKeyGate{allowed: false})
-	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Secret: "sk-ant-own-key-1234"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "anthropic", Secret: "test-anthropic-own-key-1234"})
 
 	mustSaveChat(t, client, "anthropic", "claude-fable-5-2", "")
 
@@ -356,11 +356,11 @@ func TestProviderSaveChat_SecretStoresChatOnlyKeyAndLeavesVoiceAlone(t *testing.
 	t.Parallel()
 	store := newFakeProviderStore()
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, map[string]string{}, &fakeKeyGate{allowed: false})
-	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-own-key-9876", Model: "qwen/qwen3-32b"})
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "test-groq-own-key-9876", Model: "qwen/qwen3-32b"})
 	voiceBefore, _ := listLLM(t, client)
 	llmRowBefore := store.configs["llm|groq"]
 
-	const secret = "sk-ant-chat-only-4321"
+	const secret = "test-anthropic-chat-only-4321"
 	resp, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
 		Slot: "chat", Provider: "anthropic", Secret: secret, Activate: true, // activate is ignored for chat
 	}))
@@ -406,7 +406,7 @@ func TestProviderSaveChat_ModelOnlyKeepsChatKey(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, map[string]string{}, &fakeKeyGate{allowed: false})
-	mustSaveChat(t, client, "anthropic", "", "sk-ant-chat-only-4321")
+	mustSaveChat(t, client, "anthropic", "", "test-anthropic-chat-only-4321")
 	before := chatRowsOf(store)[0]
 
 	mustSaveChat(t, client, "anthropic", "some-future-model", "")
@@ -439,9 +439,9 @@ func TestProviderSaveChat_SwitchProviderLeavesOneRow(t *testing.T) {
 	for i, step := range []struct{ provider, model, secret string }{
 		{"groq", "", ""},
 		{"anthropic", "claude-opus-5-5", ""},
-		{"groq", "", "gsk-chat-only-7777"},
+		{"groq", "", "test-groq-chat-only-7777"},
 		{"anthropic", "", ""},
-		{"anthropic", "", "sk-ant-chat-only-4321"},
+		{"anthropic", "", "test-anthropic-chat-only-4321"},
 		{"groq", "openai/gpt-oss-20b", ""},
 	} {
 		mustSaveChat(t, client, step.provider, step.model, step.secret)
@@ -462,7 +462,7 @@ func TestProviderSaveChat_UnknownProviderRejected(t *testing.T) {
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, bothKeys, &fakeKeyGate{allowed: true})
 
 	for _, provider := range []string{"", "gemini", "elevenlabs", "openai"} {
-		for _, secret := range []string{"", "some-real-looking-key-1234"} {
+		for _, secret := range []string{"", "test-real-looking-key-1234"} {
 			if err := saveChat(client, provider, "", secret); connect.CodeOf(err) != connect.CodeInvalidArgument {
 				t.Errorf("provider %q (secret set: %v): err = %v, want InvalidArgument", provider, secret != "", err)
 			}
@@ -470,7 +470,7 @@ func TestProviderSaveChat_UnknownProviderRejected(t *testing.T) {
 	}
 	// An unknown slot is refused too, rather than read as a provider key save.
 	_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
-		Slot: "voice", Provider: "groq", Secret: "some-real-looking-key-1234",
+		Slot: "voice", Provider: "groq", Secret: "test-real-looking-key-1234",
 	}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("unknown slot: err = %v, want InvalidArgument", err)
@@ -503,7 +503,7 @@ func TestProviderSaveChat_NoCipher(t *testing.T) {
 	srv.SetEnvLookupForTest(func(k string) string { return bothKeys[k] })
 	client, _ := clientForServer(t, srv)
 
-	if err := saveChat(client, "anthropic", "", "sk-ant-chat-only-4321"); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+	if err := saveChat(client, "anthropic", "", "test-anthropic-chat-only-4321"); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("keyed save without a cipher: err = %v, want FailedPrecondition", err)
 	}
 	if err := saveChat(client, "anthropic", "", ""); err != nil {
@@ -518,7 +518,7 @@ func TestProviderSaveChat_LegacyClientGroqWithSecretStillWorks(t *testing.T) {
 	store := newFakeProviderStore()
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, map[string]string{}, &fakeKeyGate{allowed: false})
 
-	mustSaveChat(t, client, "groq", "openai/gpt-oss-120b", "gsk-legacy-chat-key-5555")
+	mustSaveChat(t, client, "groq", "openai/gpt-oss-120b", "test-groq-legacy-chat-key-5555")
 
 	eff := effectiveChat(t, client)
 	if eff.GetProvider() != "groq" || eff.GetModel() != "openai/gpt-oss-120b" || eff.GetKeySource() != keyChat || eff.GetKeyLast4() != "5555" {
@@ -538,7 +538,7 @@ func TestProviderSaveChat_KeepsHealthCache(t *testing.T) {
 	srv.SetHealthInvalidator(func(uuid.UUID) { busts++ })
 	client, _ := clientForServer(t, srv)
 
-	mustSaveChat(t, client, "anthropic", "", "sk-ant-chat-only-4321")
+	mustSaveChat(t, client, "anthropic", "", "test-anthropic-chat-only-4321")
 	if err := deleteChat(client, "chat"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -552,8 +552,8 @@ func TestProviderDeleteChat_BackToSameAsVoice(t *testing.T) {
 	t.Parallel()
 	store := newFakeProviderStore()
 	client := llmServer(t, store, llmbuild.DeploymentDefault{}, bothKeys, &fakeKeyGate{allowed: true})
-	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "gsk-own-key-9876", Model: "qwen/qwen3-32b"})
-	mustSaveChat(t, client, "anthropic", "claude-opus-5-5", "sk-ant-chat-only-4321")
+	save(t, client, &managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "test-groq-own-key-9876", Model: "qwen/qwen3-32b"})
+	mustSaveChat(t, client, "anthropic", "claude-opus-5-5", "test-anthropic-chat-only-4321")
 
 	if err := deleteChat(client, "chat"); err != nil {
 		t.Fatalf("delete: %v", err)
