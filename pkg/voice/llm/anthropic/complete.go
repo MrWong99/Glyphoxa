@@ -142,7 +142,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 		Stream:    true,
 	}
 	if len(body.Tools) > 0 {
-		body.ToolChoice = wireToolChoiceFor(req.ToolChoice)
+		body.ToolChoice = c.toolChoiceFor(model, req.ToolChoice)
 	}
 	body.Thinking, body.OutputConfig = c.thinking(model).wireFields()
 
@@ -331,6 +331,24 @@ func wireToolChoiceFor(tc llm.ToolChoice) *wireToolChoice {
 	default: // ToolChoiceAuto / zero
 		return &wireToolChoice{Type: "auto"}
 	}
+}
+
+// toolChoiceFor is [wireToolChoiceFor] for one model: a forced choice (any /
+// tool) is sent as auto to a model that answers 400 to it
+// ([rejectsForcedToolChoice]). The caller asked for a guaranteed tool call and
+// gets a likely one, which beats a failed turn: the forced dice re-roll of a
+// Voice Session would otherwise 400 on Sonnet 5.5 or Opus 5.5. It warns once
+// per client and model, so the downgrade is visible without a line per turn.
+func (c *Client) toolChoiceFor(model string, tc llm.ToolChoice) *wireToolChoice {
+	forced := tc.Mode == llm.ToolChoiceRequired || tc.Mode == llm.ToolChoiceTool
+	if !forced || !rejectsForcedToolChoice(model) {
+		return wireToolChoiceFor(tc)
+	}
+	if _, seen := c.forcedDowngradeWarned.LoadOrStore(model, struct{}{}); !seen {
+		c.log.Warn("anthropic: this model rejects a forced tool_choice; sending auto instead",
+			"model", model, "requested", string(tc.Mode), "tool", tc.Tool)
+	}
+	return &wireToolChoice{Type: "auto"}
 }
 
 // toWireTools maps the [llm.ToolDef]s onto the Anthropic tools array. Returns
