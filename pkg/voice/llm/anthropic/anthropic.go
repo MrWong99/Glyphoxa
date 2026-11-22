@@ -53,6 +53,10 @@ type Client struct {
 	// thinking is the per-model reasoning policy ([DefaultThinking] unless
 	// [WithThinkingFor] replaced it).
 	thinking func(model string) Thinking
+
+	// thoughts keeps the thinking blocks of recent assistant tool turns so the
+	// next tool round can replay them (passthrough.go).
+	thoughts *thinkingStore
 }
 
 // Option mutates a [Client] during construction.
@@ -97,6 +101,7 @@ func New(apiKey string, opts ...Option) *Client {
 		http:    defaultHTTPClient(),
 
 		thinking: DefaultThinking,
+		thoughts: newThinkingStore(),
 	}
 	for _, opt := range opts {
 		opt(c)
