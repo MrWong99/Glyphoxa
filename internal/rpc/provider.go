@@ -23,8 +23,11 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -85,6 +88,11 @@ type byokSlot struct {
 // provider_config.
 var byokSlots = []byokSlot{
 	{provider: "groq", components: []storage.Component{storage.ComponentLLM}, envKey: groq.APIKeyEnv},
+	// Anthropic is the second voice-LLM slot (#702): its own (llm, anthropic)
+	// row beside Groq's. A Tenant runs whichever LLM row it saved most recently
+	// (storage.GetProviderConfigByComponent), so the two slots are a choice, not
+	// a pair: saving one — or activating it — puts the Tenant on it.
+	{provider: anthropic.ProviderID, components: []storage.Component{storage.ComponentLLM}, envKey: anthropic.APIKeyEnv},
 	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}, envKey: elevenlabs.APIKeyEnv},
 	// Gemini backs the image Component (#311, ADR-0004 amendment): a distinct
 	// BYOK slot + health check, even though Gemini already appears in the LLM
@@ -122,6 +130,9 @@ type ProviderServer struct {
 	store  providerStore
 	cipher *crypto.Cipher // nil when $GLYPHOXA_SECRET is unset: reads still work, saves fail loudly
 	log    *slog.Logger
+
+	// llmDefault is the deployment-default LLM (#702); see SetLLMDefault.
+	llmDefault llmbuild.DeploymentDefault
 
 	// invalidateHealth busts the tenant's provider-health cache after a
 	// credential save (#150), so a cached Degraded badge cannot outlive the
@@ -227,6 +238,13 @@ func (s *ProviderServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) 
 	s.keyEnt = ent
 }
 
+// SetLLMDefault wires the deployment-default LLM (#702) the Configuration read
+// reports for a Tenant with no LLM Provider Config of its own. Called once at
+// boot, before the server serves; unset is the code default (Groq, ADR-0036).
+func (s *ProviderServer) SetLLMDefault(d llmbuild.DeploymentDefault) {
+	s.llmDefault = d
+}
+
 // SetHealthInvalidator wires the health-cache buster called after a successful
 // credential save (#150). Called once at boot, before the server serves, so no
 // lock is needed.
@@ -287,12 +305,10 @@ func (s *ProviderServer) ListProviderConfigs(
 	// (ElevenLabs' stt/tts rows share one key, so either represents the slot),
 	// and keying by component — not provider — keeps the two groq-backed slots
 	// (llm vs chat_llm, #592) from shadowing each other.
-	byComponent := make(map[storage.Component]storage.ProviderConfig, len(configs))
-	for _, c := range configs {
-		if cur, ok := byComponent[c.Component]; !ok || c.UpdatedAt.After(cur.UpdatedAt) {
-			byComponent[c.Component] = c
-		}
-	}
+	byComponent := latestByComponent(configs)
+	// The LLM in effect (#702): the Tenant's most recently saved LLM row — the
+	// same row a Voice Session start reads — else the deployment default.
+	effective := effectiveLLM(s.llmDefault, byComponent)
 
 	dep, err := s.store.GetDeploymentConfig(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
@@ -307,8 +323,9 @@ func (s *ProviderServer) ListProviderConfigs(
 	creds := []*managementv1.ProviderCredential{discord}
 	platform := s.platformKeyGate(ctx, tenantID)
 	for _, slot := range byokSlots {
-		cred := providerCredential(string(slot.components[0]), slot.provider, byComponent[slot.components[0]])
+		cred := providerCredential(string(slot.components[0]), slot.provider, slotRow(slot, configs, byComponent))
 		cred.ProvidedByPlatform = !cred.GetEverSaved() && s.lookupEnv(slot.envKey) != "" && platform(slot.components[0])
+		cred.InEffect = slot.isLLM() && slot.provider == effective.GetProvider()
 		creds = append(creds, cred)
 	}
 
@@ -326,7 +343,59 @@ func (s *ProviderServer) ListProviderConfigs(
 		DiscordApplicationId: s.discordAppID,
 		IntegrationState:     integrationState,
 		IntegrationDetail:    integrationDetail,
+		EffectiveLlm:         effective,
 	}), nil
+}
+
+// isLLM reports whether the slot is a voice-LLM slot (groq, anthropic): the
+// slots a Tenant chooses BETWEEN, each with its own (llm, provider) row.
+func (s byokSlot) isLLM() bool {
+	return len(s.components) == 1 && s.components[0] == storage.ComponentLLM
+}
+
+// latestByComponent indexes configs by Component, keeping the most recently
+// updated row of each — the row storage.GetProviderConfigByComponent returns.
+func latestByComponent(configs []storage.ProviderConfig) map[storage.Component]storage.ProviderConfig {
+	out := make(map[storage.Component]storage.ProviderConfig, len(configs))
+	for _, c := range configs {
+		if cur, ok := out[c.Component]; !ok || c.UpdatedAt.After(cur.UpdatedAt) {
+			out[c.Component] = c
+		}
+	}
+	return out
+}
+
+// slotRow picks the stored row that represents slot. An LLM slot is its OWN
+// (llm, provider) row — two LLM slots share the Component, so the newest row
+// of the Component would show one slot's key under the other. Every other slot
+// is represented by its first Component's row, as before.
+func slotRow(slot byokSlot, configs []storage.ProviderConfig, byComponent map[storage.Component]storage.ProviderConfig) storage.ProviderConfig {
+	if !slot.isLLM() {
+		return byComponent[slot.components[0]]
+	}
+	for _, c := range configs {
+		if c.Component == storage.ComponentLLM && c.Provider == slot.provider {
+			return c
+		}
+	}
+	return storage.ProviderConfig{}
+}
+
+// effectiveLLM resolves the voice LLM in effect for a Tenant through the one
+// resolution every engine uses ([llmbuild.DeploymentDefault.Select]): its
+// newest LLM row, else the deployment default. The model is the concrete one a
+// voice Agent would run, never empty.
+func effectiveLLM(d llmbuild.DeploymentDefault, byComponent map[storage.Component]storage.ProviderConfig) *managementv1.EffectiveLlm {
+	var cfg *storage.ProviderConfig
+	if row, ok := byComponent[storage.ComponentLLM]; ok {
+		cfg = &row
+	}
+	provider, model := d.Select(cfg)
+	return &managementv1.EffectiveLlm{
+		Provider:        provider,
+		Model:           d.VoiceModel(provider, model),
+		PlatformDefault: cfg == nil,
+	}
 }
 
 // platformKeyGate returns a per-call memo of "would this Tenant's call-time key
@@ -384,7 +453,14 @@ func (s *ProviderServer) SaveProviderConfig(
 		// No secret on the wire = a model-only update for an already-saved key
 		// (#227): free-text model entry must not force the operator to re-paste
 		// the secret. Needs no cipher — nothing is sealed.
-		return s.saveModelOnly(ctx, tenantID, slot, req.Msg.GetModel())
+		return s.saveModelOnly(ctx, tenantID, slot, req.Msg.GetModel(), req.Msg.GetActivate() && slot.isLLM())
+	}
+	if !isSaved(crypto.Last4(secret)) {
+		// Its last four ARE the keyless placeholder: the row would be read as
+		// "ride the platform key" (llmbuild.ResolveKey) while this path takes
+		// any model, bypassing [ProviderServer.platformModelPriced]. No real
+		// key is that short.
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is not a valid key"))
 	}
 	if s.cipher == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
@@ -439,23 +515,46 @@ func (s *ProviderServer) saveModelOnly(
 	tenantID uuid.UUID,
 	slot byokSlot,
 	model string,
+	activate bool,
 ) (*connect.Response[managementv1.SaveProviderConfigResponse], error) {
+	configs, err := s.store.ListProviderConfigs(ctx, tenantID)
+	if err != nil {
+		return nil, internalErr(s.log, "SaveProviderConfig: read provider_config for model-only save failed", err)
+	}
+	// The slot's OWN rows: (component, slot.provider). Reading "the Component's
+	// newest row" instead would hand an LLM slot the other LLM slot's row.
 	existing := make([]storage.ProviderConfig, 0, len(slot.components))
 	for _, comp := range slot.components {
-		cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, comp)
-		if errors.Is(err, storage.ErrNotFound) || (err == nil && cfg.Provider != slot.provider) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
+		for _, cfg := range configs {
+			if cfg.Component == comp && cfg.Provider == slot.provider {
+				existing = append(existing, cfg)
+				break
+			}
 		}
-		if err != nil {
-			return nil, internalErr(s.log, "SaveProviderConfig: read provider_config for model-only save failed", err)
+	}
+	if len(existing) != len(slot.components) {
+		if activate {
+			return s.activatePlatformSlot(ctx, tenantID, slot, model)
 		}
-		existing = append(existing, cfg)
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
 	}
 
-	if model == "" {
+	if model == "" && !activate {
 		return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 			Credential: providerCredential(string(slot.components[0]), slot.provider, existing[0]),
 		}), nil
+	}
+	if slot.isLLM() && !isSaved(existing[0].CredentialsLast4) {
+		// A keyless row rides the platform key: priced models only.
+		if err := s.platformModelPriced(slot, model); err != nil {
+			return nil, err
+		}
+	}
+	if model == "" {
+		// Activating (#702) keeps the stored model: the re-upsert below then
+		// only advances updated_at, which is what makes this row the Tenant's
+		// newest LLM row and so its LLM in effect.
+		model = existing[0].Model
 	}
 
 	batch := make([]storage.NewProviderConfig, 0, len(existing))
@@ -472,6 +571,14 @@ func (s *ProviderServer) saveModelOnly(
 	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
 	if err != nil {
 		return nil, internalErr(s.log, "SaveProviderConfig: model-only upsert failed", err)
+	}
+	// A write to an LLM slot that was NOT the Tenant's newest LLM row makes it
+	// so, and with it changes which provider the LLM health entry is about: the
+	// cached verdict — the other provider's — must not outlive that (#702). A
+	// model save on the slot already in effect changes neither key nor provider
+	// and keeps the verdict.
+	if slot.isLLM() && latestByComponent(configs)[storage.ComponentLLM].Provider != slot.provider && s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
 	}
 
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
@@ -1016,6 +1123,65 @@ func providerCredential(component, provider string, c storage.ProviderConfig) *m
 		cred.UpdatedAt = timestamppb.New(c.UpdatedAt)
 	}
 	return cred
+}
+
+// activatePlatformSlot makes an LLM slot the Tenant never saved a key for its
+// LLM in effect (#702). That is only possible when the platform provides the
+// slot — the deployment has the provider's env key AND the Tenant is entitled
+// to the Platform Keys, the exact condition ListProviderConfigs reports as
+// provided_by_platform. The choice is stored as a keyless row carrying the
+// "env" placeholder: every key resolution reads it as "ride the env key" and
+// still consults the entitlement at call time, so it grants nothing the Tenant
+// did not already have. Otherwise there is no key to run on: InvalidArgument,
+// like any model-only save without a stored key, and nothing is written.
+func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid.UUID, slot byokSlot, model string) (*connect.Response[managementv1.SaveProviderConfigResponse], error) {
+	if s.lookupEnv(slot.envKey) == "" || !s.platformKeyGate(ctx, tenantID)(slot.components[0]) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
+	}
+	if err := s.platformModelPriced(slot, model); err != nil {
+		return nil, err
+	}
+	saved, err := s.store.UpsertProviderConfigs(ctx, []storage.NewProviderConfig{{
+		TenantID:  tenantID,
+		Component: slot.components[0],
+		Provider:  slot.provider,
+		Model:     model,
+		// NOT NULL column; never opened for an "env" row (llmbuild.ResolveKey).
+		CredentialsCiphertext: []byte{},
+		CredentialsLast4:      envPlaceholderLast4,
+	}})
+	if err != nil {
+		return nil, internalErr(s.log, "SaveProviderConfig: activate platform slot failed", err)
+	}
+	if s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
+	}
+	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
+		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),
+	}), nil
+}
+
+// platformModelPriced refuses a model the price table has no row for on a slot
+// that rides the PLATFORM key (#702 review). The spend meter prices an unknown
+// (provider, model) at one flat fallback, and the plan allowance is gated on
+// that estimate: for an Opus-class id the fallback is BELOW the real rate (the
+// platform pays the difference, past the allowance), for a cheap snapshot id it
+// is dozens of times ABOVE it (the Tenant's allowance is gone in a few turns).
+// Only an exactly priced model is metered at what it costs, so only those run
+// on a key the platform pays for. The empty model is the default
+// ([llmbuild.DeploymentDefault.Select]) and always allowed, and so is the model
+// that default resolves to: it is the operator's explicit choice, what a
+// row-less Tenant already runs and what the catalog lists first (an unpriced
+// one is warned about at boot). A Tenant's own key keeps free-text entry — its
+// spend is its own bill.
+func (s *ProviderServer) platformModelPriced(slot byokSlot, model string) error {
+	if model == "" || model == s.llmDefault.VoiceModel(slot.provider, "") ||
+		spend.LLMPriced(observe.Provider(slot.provider), model) {
+		return nil
+	}
+	return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
+		"model %q has no price on record and cannot run on the platform key: choose a listed model, or save your own %s key to use it",
+		model, slot.provider))
 }
 
 // discordCredential maps the deployment Bot token onto its write-only wire view.

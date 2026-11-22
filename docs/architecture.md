@@ -362,11 +362,24 @@ Consequences:
 |-----------|--------------------------|--------------------------|
 | STT | `pkg/voice/stt`, `pkg/voice/stt/elevenlabs` (batch + streaming) | yes |
 | TTS | `pkg/voice/tts/elevenlabs` | yes |
-| LLM | `pkg/voice/llm/groq`, `pkg/voice/llm/openaicompat`, `pkg/voice/llm/gemini`, `pkg/voice/llm/anthropic` | `groq` (via `openaicompat`, ADR-0037) |
+| LLM | `pkg/voice/llm/groq`, `pkg/voice/llm/openaicompat`, `pkg/voice/llm/gemini`, `pkg/voice/llm/anthropic` | all three providers, chosen per Voice Session by `internal/llmbuild`: `groq` and `gemini` via `openaicompat` (ADR-0037), `anthropic` on its own Messages adapter |
 | Embeddings | `pkg/voice/embeddings/ollama` | yes (`internal/embedworker`, `internal/recall`) |
 | VAD | `pkg/voice/vad/silero` | yes |
 
-The MVP provider matrix is Groq (LLM) + ElevenLabs (STT + TTS) (ADR-0039).
+Which LLM a session runs is one resolution, `llmbuild.DeploymentDefault.Select`:
+the Tenant's newest `llm` row, else the **deployment default** — `GLYPHOXA_LLM_DEFAULT_PROVIDER` /
+`GLYPHOXA_LLM_DEFAULT_MODEL`, read once at boot, Groq `openai/gpt-oss-120b` when
+unset (ADR-0036, amendment 2026-11-22). The voice loop, the Highlight
+classifier, recap, assist, the planning chat and the Configuration RPCs all go
+through it, so the adapter built, the model requested, the span label and the
+price row always name the same provider — and a row that names no model runs
+one default model everywhere (Claude Haiku on Anthropic, never the adapter's
+flagship fallback). On the Platform Key only priced models run. The Configuration screen offers two
+voice-LLM slots, Groq and Anthropic, and shows which is in effect; Gemini as a
+voice LLM is reachable as a deployment default only.
+
+The managed provider matrix is Groq or Anthropic (LLM) + ElevenLabs (STT + TTS)
+(ADR-0039 and its 2026-11-22 amendment).
 OpenAI TTS, named alongside ElevenLabs in
 [ADR-0023](adr/0023-tts-provider-matrix-elevenlabs-openai.md), is not built.
 Retries live in the orchestrator stages, not the adapters — `pkg/voice/retry`

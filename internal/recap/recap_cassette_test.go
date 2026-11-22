@@ -13,6 +13,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 )
 
@@ -57,7 +58,7 @@ func TestRecapSingleCassette(t *testing.T) {
 	var sysSeen string
 	calls := 0
 	factory := func(_, _ string) (llm.Provider, error) {
-		cass := voicecassette.LoadLLM(t, "llm-recap-single")
+		cass := asRecorded{voicecassette.LoadLLM(t, "llm-recap-single")}
 		return countingProvider{inner: capturingProvider{inner: cass, sys: &sysSeen}, calls: &calls}, nil
 	}
 	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
@@ -121,7 +122,7 @@ func TestRecapWindowedCassette(t *testing.T) {
 
 	calls := 0
 	factory := func(_, _ string) (llm.Provider, error) {
-		return countingProvider{inner: voicecassette.LoadLLM(t, "llm-recap-windowed"), calls: &calls}, nil
+		return countingProvider{inner: asRecorded{voicecassette.LoadLLM(t, "llm-recap-windowed")}, calls: &calls}, nil
 	}
 	eng := NewEngine(st, nil, billingtest.Ungated(), observe.Discard{}, nil, WithProviderFactory(factory))
 	res, err := eng.Recap(context.Background(), []uuid.UUID{sid})
@@ -141,6 +142,19 @@ func TestRecapWindowedCassette(t *testing.T) {
 
 // capturingProvider records the system prompt of the first request it sees, so the
 // cassette test can assert Persona/Language without pinning exact wording.
+// asRecorded replays a cassette recorded before the engine named its model
+// (#702): the recordings hash a request with model "" — which the Groq adapter
+// filled with the very default the engine now names itself — so the model is
+// blanked for the hash lookup only. The request on the wire is the same one.
+type asRecorded struct{ inner llm.Provider }
+
+func (p asRecorded) Complete(ctx context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
+	if req.Model == groq.DefaultModel {
+		req.Model = ""
+	}
+	return p.inner.Complete(ctx, req)
+}
+
 type capturingProvider struct {
 	inner llm.Provider
 	sys   *string

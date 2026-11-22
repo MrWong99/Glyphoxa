@@ -28,6 +28,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -170,10 +171,12 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
 	conv, roster, cleanup, err := buildConversation(conversationDeps{
-		bus:   voiceevent.NewBus(),
-		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		npcs:  specs,
-		synth: ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		npcs:          specs,
+		synth:         ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
@@ -244,10 +247,12 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 	// The two NPCs must assemble into a Roster that routes each by name to its own
 	// identity — the end-to-end multi-NPC acceptance bar.
 	conv, roster, cleanup, err := buildConversation(conversationDeps{
-		bus:   voiceevent.NewBus(),
-		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		npcs:  specs,
-		synth: ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		npcs:          specs,
+		synth:         ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("buildConversation from 2 DB NPCs: %v", err)
@@ -372,11 +377,13 @@ func TestCampaignLanguageDrivesMatcherPhonetics(t *testing.T) {
 	}
 
 	conv, roster, cleanup, err := buildConversation(conversationDeps{
-		bus:      voiceevent.NewBus(),
-		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		npcs:     specs,
-		language: loadedCampaign.Language,
-		synth:    ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		npcs:          specs,
+		language:      loadedCampaign.Language,
+		synth:         ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
@@ -442,11 +449,13 @@ func TestLoadedNPC_DerivesTruncationAliases(t *testing.T) {
 	}
 
 	conv, roster, cleanup, err := buildConversation(conversationDeps{
-		bus:      voiceevent.NewBus(),
-		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		npcs:     specs,
-		language: loadedCampaign.Language,
-		synth:    ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		npcs:          specs,
+		language:      loadedCampaign.Language,
+		synth:         ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
@@ -548,7 +557,9 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	conv1, _, cleanup1, err := buildConversation(conversationDeps{
-		bus: voiceevent.NewBus(), log: log, npcs: npcs, synth: ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(), log: log, npcs: npcs, synth: ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("first buildConversation: %v", err)
@@ -559,7 +570,9 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	cleanup1() // end of reconnect cycle 1
 
 	conv2, _, cleanup2, err := buildConversation(conversationDeps{
-		bus: voiceevent.NewBus(), log: log, npcs: npcs, synth: ttseleven.New(""),
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(), log: log, npcs: npcs, synth: ttseleven.New(""),
 	})
 	if err != nil {
 		t.Fatalf("second buildConversation after cleanup: %v — cleanup broke the shared Silero engine?", err)
@@ -602,11 +615,13 @@ func TestBuildConversation_ThreadsGMSpeakerIntoButlerGate(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gmSpeaker := func(id string) bool { return id == "gm-1" }
 	_, _, cleanup, err := buildConversation(conversationDeps{
-		bus:       voiceevent.NewBus(),
-		log:       log,
-		npcs:      []npcSpec{hardcodedNPC()},
-		synth:     ttseleven.New(""),
-		gmSpeaker: gmSpeaker,
+		// What withSessionLLM names on every real session start (#702).
+		llmProviderID: groq.ProviderID,
+		bus:           voiceevent.NewBus(),
+		log:           log,
+		npcs:          []npcSpec{hardcodedNPC()},
+		synth:         ttseleven.New(""),
+		gmSpeaker:     gmSpeaker,
 	})
 	if err != nil {
 		t.Fatalf("buildConversation with GMSpeaker: %v", err)
@@ -772,7 +787,7 @@ func TestLoadSeededNPCs_NoLLMConfigYieldsProviderDefaultModel(t *testing.T) {
 func TestDefaultEmptyModels_FollowsSessionProvider(t *testing.T) {
 	t.Parallel()
 	specs := []npcSpec{{name: "a"}, {name: "b", model: "explicit"}}
-	defaultEmptyModels(specs, anthropic.ProviderID)
+	defaultEmptyModels(specs, anthropic.ProviderID, llmbuild.DeploymentDefault{})
 	// The VOICE default, not the adapter's flagship fallback (#702).
 	if specs[0].model != anthropic.HaikuVoiceModel {
 		t.Errorf("empty model = %q, want %q", specs[0].model, anthropic.HaikuVoiceModel)
@@ -812,27 +827,6 @@ func TestSeedIdempotent(t *testing.T) {
 	}
 	if len(chars) != 1 {
 		t.Fatalf("expected 1 Character NPC after two seeds, got %d", len(chars))
-	}
-}
-
-// TestResolveNPCModel_BoundConfigOutranksTenantFallback pins the precedence
-// pure-functionally (#227 review finding): a resolver that ignored the bound
-// config and always returned the tenant fallback would pass the DB-backed
-// tests, whose single provider_config row is simultaneously both sources.
-func TestResolveNPCModel_BoundConfigOutranksTenantFallback(t *testing.T) {
-	t.Parallel()
-	bound := &storage.ProviderConfig{Model: "bound-model"}
-	if got := resolveNPCModel(bound, "tenant-model"); got != "bound-model" {
-		t.Errorf("bound + tenant = %q, want bound-model", got)
-	}
-	if got := resolveNPCModel(&storage.ProviderConfig{}, "tenant-model"); got != "tenant-model" {
-		t.Errorf("empty bound model + tenant = %q, want tenant-model", got)
-	}
-	if got := resolveNPCModel(nil, "tenant-model"); got != "tenant-model" {
-		t.Errorf("nil bound + tenant = %q, want tenant-model", got)
-	}
-	if got := resolveNPCModel(nil, ""); got != "" {
-		t.Errorf("nil bound + no tenant = %q, want empty (adapter default)", got)
 	}
 }
 
@@ -876,7 +870,7 @@ func TestLoadCampaignNPCs_ScopesToBoundCampaign(t *testing.T) {
 		t.Fatalf("CreateAgent (Yara): %v", err)
 	}
 
-	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campX)
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campX, llmbuild.DeploymentDefault{})
 	if err != nil {
 		t.Fatalf("loadCampaignNPCs(X): %v", err)
 	}
@@ -928,7 +922,7 @@ func TestLoadCampaignNPCs_FreshDBNoSeed(t *testing.T) {
 		t.Fatalf("CreateAgent (Wren): %v", err)
 	}
 
-	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campID)
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campID, llmbuild.DeploymentDefault{})
 	if err != nil {
 		t.Fatalf("loadCampaignNPCs on a fresh unseeded DB errored (must not): %v", err)
 	}
@@ -954,5 +948,5 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 	if err != nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 	}
-	return loadCampaignRoster(ctx, st, campaign)
+	return loadCampaignRoster(ctx, st, campaign, llmbuild.DeploymentDefault{})
 }

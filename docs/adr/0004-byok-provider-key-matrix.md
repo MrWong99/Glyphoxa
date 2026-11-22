@@ -62,3 +62,35 @@ to paste one key twice for pure attribution's sake. Attribution is preserved in
 the Usage Ledger instead: sound calls meter under their own model ids (SFX and
 Music separately) with their own ADR-0046 price-map entries. Revisit the
 Component question only if a non-ElevenLabs sound provider is ever adopted.
+
+## Amendment: the LLM matrix as built is Groq + Anthropic (2026-11-22, #702)
+
+The matrix at the top names "LLM: Anthropic + Ollama". What shipped first was
+Groq alone (ADR-0036, ADR-0039), Ollama as a voice LLM was never built, and
+Anthropic had an adapter but no place to save a key. As of #702 the
+Tenant-facing LLM matrix is **Groq + Anthropic**: two write-only credential
+slots, each its own `provider_config` row `(tenant, llm, provider)`.
+
+- **A choice, not a pair.** A Tenant runs one LLM provider at a time: the one
+  its most recently saved `llm` row names (the read every engine already did).
+  Saving a key or a model into a slot therefore puts the Tenant on it, and the
+  Configuration screen can switch back to the other slot without re-entering
+  its key. With no row at all the Tenant runs the deployment default (ADR-0036,
+  amendment 2026-11-22).
+- **Platform Keys cover both slots.** A Tenant entitled to the Platform Keys
+  (ADR-0054) may choose a slot it never saved a key for, when the deployment
+  holds that provider's key: the choice is stored as a keyless row carrying the
+  `env` placeholder. It grants nothing new — every key resolution still
+  consults the entitlement at call time.
+  On that key the Tenant may run only models the price table has a row for
+  (ADR-0036, amendment 2026-11-22): an unpriced id is refused, because the flat
+  fallback rate it would be metered at is wrong in both directions.
+- **Gemini stays the `image` slot** on the Configuration screen. As an LLM it is
+  reachable as a deployment default only, not as a third Tenant slot: nothing
+  measured it for voice.
+- **Models come from the provider.** Each slot lists its provider's live
+  catalog (Groq `GET /models`, Anthropic `GET /v1/models`). With the Tenant's
+  own key the whole catalog is listed and free text is accepted; on the
+  Platform Key the list is cut down to priced models. A hardcoded list is only
+  ever the fallback when the listing fails or there is no key to list with, and
+  only of models the price table knows.

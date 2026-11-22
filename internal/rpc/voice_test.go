@@ -30,7 +30,11 @@ import (
 // provider configs and a deployment config so the VoiceServer's key-resolution
 // is unit-tested keyless and offline.
 type fakeVoiceStore struct {
+	// configs is each Component's NEWEST row (what GetProviderConfigByComponent
+	// returns); older holds a Component's other rows — the LLM slot a Tenant
+	// saved earlier and is not currently on (#702).
 	configs map[storage.Component]storage.ProviderConfig
+	older   []storage.ProviderConfig
 	dep     *storage.DeploymentConfig
 
 	usageMu sync.Mutex
@@ -56,6 +60,14 @@ func (f *fakeVoiceStore) GetProviderConfigByComponent(_ context.Context, _ uuid.
 		return storage.ProviderConfig{}, storage.ErrNotFound
 	}
 	return cfg, nil
+}
+
+func (f *fakeVoiceStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) ([]storage.ProviderConfig, error) {
+	out := append([]storage.ProviderConfig(nil), f.older...)
+	for _, c := range f.configs {
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 func (f *fakeVoiceStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
@@ -127,13 +139,21 @@ func savedConfig(t *testing.T, cipher *crypto.Cipher, comp storage.Component, pr
 	}
 }
 
+// platformKeysSet is a lookupEnv for a deployment that has every Platform Key.
+func platformKeysSet(string) string { return "platform-key" }
+
 func tenantCtx() context.Context {
 	return auth.WithTenant(context.Background(), uuid.New())
 }
 
 func TestListModels_GroqLiveCatalog(t *testing.T) {
 	t.Parallel()
-	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	// The Tenant's OWN key: the whole live catalog is offered (the platform
+	// key's is cut down to priced models, #702).
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(&fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "groq", "sk-groq-secret"),
+	}}, cipher, nil)
 	// A live Groq /models catalog: unsorted, containing the default in the middle
 	// plus a duplicate. The handler pins the default first, sorts the rest
 	// ascending, and dedupes — and the deprecated hardcoded entries are gone.
@@ -181,6 +201,7 @@ func TestListModels_GroqLiveCatalog(t *testing.T) {
 func TestListModels_GroqCatalogFailureStaysUsable(t *testing.T) {
 	t.Parallel()
 	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.lookupEnv = platformKeysSet
 	srv.listModels = func(_ context.Context, _ string) ([]string, error) {
 		return nil, errors.New("groq unreachable")
 	}
@@ -804,6 +825,12 @@ func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, i
 	b.reads.Add(1)
 	<-b.release
 	return b.inner.GetProviderConfigByComponent(ctx, id, c)
+}
+
+func (b *blockingVoiceStore) ListProviderConfigs(ctx context.Context, id uuid.UUID) ([]storage.ProviderConfig, error) {
+	b.reads.Add(1)
+	<-b.release
+	return b.inner.ListProviderConfigs(ctx, id)
 }
 
 func (b *blockingVoiceStore) GetDeploymentConfig(ctx context.Context, id uuid.UUID) (storage.DeploymentConfig, error) {

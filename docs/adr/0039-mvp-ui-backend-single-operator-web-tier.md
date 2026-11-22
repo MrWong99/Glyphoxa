@@ -100,3 +100,34 @@ The standing-client seed no longer runs before the web listener binds (or before
 Each gateway open is bounded at the IDENTIFY pacer's single hold plus a minute (4 minutes), so an open that has to wait its turn in the pacer can outwait it; each Tenant's ensure in the reconcile gets a minute more. An open that times out counts toward the per-token rebuild pacing like any other failure, and the pacer refunds a reservation whose wait was abandoned (no IDENTIFY was sent). Both are needed: the first draft of this change exempted timed-out opens from pacing and capped them at 60s while the pacer kept abandoned reservations, so every reconcile pass re-queued in the pacer faster than it refills and the hold grew without end — after a 35-second outage no open ever reached Discord again. Refunding alone would be unsafe too: unpaced retries would then run at the pacer's ceiling indefinitely.
 
 The per-Tenant integration state gains `reconnecting` (a token is resolved but its client is down and being re-opened) next to `ok`/`waiting`/`failed`, and a token Discord refuses at its very first open reads `failed`. The Configuration screen shows `reconnecting` as a warning and never shows a state it does not know as connected.
+
+## Amendment: Anthropic joins the provider matrix; Configuration shows the LLM in effect (2026-11-22, #702)
+
+"MVP provider matrix = Groq (LLM) + ElevenLabs (STT + TTS) only" above no
+longer holds for the LLM: the matrix is **Groq or Anthropic** (ADR-0004,
+amendment 2026-11-22). Three things on the management surface follow.
+
+- **The hybrid credential source ends in the deployment default.** The
+  Tenant's row, else — where this ADR said "the adapter's ENV key", meaning
+  Groq's — the **deployment default** provider's env key (ADR-0036, amendment
+  2026-11-22). The `credentials_last4 == "env"` discriminator is unchanged, and
+  is now also what a Tenant's keyless choice of a platform-provided slot stores.
+- **The screen says which LLM is in effect.** `ListProviderConfigs` returns
+  `effective_llm` — provider, concrete model, and whether it is the Tenant's own
+  row or the platform default — computed by the same resolution a Voice Session
+  start uses (the Tenant's newest `llm` row through
+  `llmbuild.DeploymentDefault.Select`; Agent-bound LLM rows, which would have
+  outranked it, are retired — ADR-0036, amendment 2026-11-22), and marks the
+  matching slot `in_effect`. Without it two LLM rows
+  cannot tell a Tenant which one its sessions run.
+- **Health is the effective provider's.** `GetProviderHealth` reports exactly
+  one LLM entry, named after and probed with the key of the provider in effect.
+  Every entry carries its `component` (`llm`, `tts`, `image`, `discord`), and
+  the screen matches rows by it: a provider name is not unique (Gemini as the
+  default LLM and as the image slot are two entries with two keys), and a probe
+  that times out before the Tenant's row is read can only name the deployment
+  default.
+  The earlier behaviour — always "a Groq ping" — showed an Anthropic-backed
+  Tenant the health of a provider its sessions never call. The 2026-07-06
+  amendment's live catalog likewise becomes per-provider: `ListModels` serves
+  Groq and Anthropic, each with its own slot's key.

@@ -23,9 +23,10 @@ appSecret: ""
 # Runtime credentials the voice Deployment (#36) reads from the app Secret. The
 # voice pod reads DISCORD_BOT_TOKEN to join the gateway and the three provider
 # keys at request time (BYOK, ADR-0004): ELEVENLABS_API_KEY (STT + TTS),
-# GEMINI_API_KEY, and GROQ_API_KEY (LLM). They are stored in the Secret, never
-# baked into the image (ADR-0034). The bot token is required whenever voice or
-# web is enabled — the pod joins the gateway with it. The three provider keys
+# GEMINI_API_KEY, GROQ_API_KEY (LLM) and ANTHROPIC_API_KEY (LLM, #702). They
+# are stored in the Secret, never baked into the image (ADR-0034). The bot token
+# is required whenever voice or web is enabled — the pod joins the gateway with
+# it. The provider keys
 # are only the env FALLBACK of the hybrid BYOK policy (ADR-0004/ADR-0039):
 # leave them empty for a BYOK deployment where Tenants bring their own keys via
 # Provider Configs; fill them only if this deployment itself provides managed
@@ -36,6 +37,31 @@ discordBotToken: ""
 elevenLabsApiKey: ""
 geminiApiKey: ""
 groqApiKey: ""
+# Anthropic (Claude) platform key, optional like the others. Fill it when this
+# deployment's default LLM is Anthropic (llm.defaultProvider below), or to let
+# Tenants on the Platform Keys choose the Anthropic slot in Configuration.
+anthropicApiKey: ""
+
+# The deployment-default LLM (#702, ADR-0036 amendment 2026-11-22): the provider
+# and model a Tenant runs when it has saved no LLM Provider Config of its own —
+# Voice Sessions, Highlights, recap, assist and the planning chat alike. A
+# Tenant's own choice in Configuration always wins.
+#
+# Both empty (the default) emits no env var and keeps the binary's code default:
+# Groq, openai/gpt-oss-120b. Shared by BOTH pods, so the voice loop and the web
+# tier cannot disagree.
+llm:
+  # GLYPHOXA_LLM_DEFAULT_PROVIDER: "groq", "anthropic" or "gemini". The render
+  # fails on any other value, and when the named provider's key above
+  # (groqApiKey / anthropicApiKey / geminiApiKey) is empty — the binary refuses
+  # to boot in both cases, so the chart refuses first.
+  defaultProvider: ""
+  # GLYPHOXA_LLM_DEFAULT_MODEL: the model id asked of that provider, e.g.
+  # "claude-haiku-4-5". Empty keeps the provider's own voice default
+  # (openai/gpt-oss-120b on Groq, claude-haiku-5-5 on Anthropic). Without a
+  # defaultProvider it applies to Groq. Pick a model internal/spend/prices.go
+  # prices: an unpriced one is metered at a conservative fallback rate.
+  defaultModel: ""
 
 # Embeddings endpoint override (ADR-0011). Glyphoxa v1.0 embeds through Ollama
 # ONLY, and the binary's built-in endpoint is loopback (http://127.0.0.1:11434)

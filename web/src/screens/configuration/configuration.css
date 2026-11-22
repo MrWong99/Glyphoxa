@@ -36,6 +36,15 @@
   color: var(--status-danger);
 }
 
+/* What saving a key into the idle voice-LLM slot does (#702): same slot under
+ * the key field as the failure cue, muted — a note, not an alarm. */
+.gx-secret__hint {
+  display: block;
+  margin-top: var(--spacing-xs);
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
 .gx-secret__mask {
   letter-spacing: 0.18em;
   color: var(--text-subtle);

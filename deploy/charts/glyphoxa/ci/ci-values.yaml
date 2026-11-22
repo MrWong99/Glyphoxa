@@ -9,6 +9,7 @@ discordBotToken: "ci-dummy-discord-bot-token"
 elevenLabsApiKey: "ci-dummy-elevenlabs-api-key"
 geminiApiKey: "ci-dummy-gemini-api-key"
 groqApiKey: "ci-dummy-groq-api-key"
+anthropicApiKey: "ci-dummy-anthropic-api-key"
 voice:
   # Quoted strings, not numbers — snowflakes exceed float64 precision and the
   # glyphoxa.voice.snowflake helper rejects non-string values.

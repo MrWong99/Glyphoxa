@@ -11,6 +11,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -59,7 +60,7 @@ func TestManagementMounts_UnauthenticatedLargeBodyIsNeverBuffered(t *testing.T) 
 	sessions := session.NewIntentControl(store, log, session.IntentControlConfig{})
 	mounts := managementMounts(store, nil, nil, nil, log,
 		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, "", nil,
-		newOffSessionMetering(auth.AdmissionAllowlist, store, log))
+		newOffSessionMetering(auth.AdmissionAllowlist, store, log), llmbuild.DeploymentDefault{})
 	mux := http.NewServeMux()
 	services := 0
 	for _, m := range mounts {

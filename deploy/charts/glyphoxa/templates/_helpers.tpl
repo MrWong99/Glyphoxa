@@ -281,6 +281,8 @@ discord-bot-token: {{ required "discordBotToken is required when voice.enabled o
 elevenlabs-api-key: {{ .Values.elevenLabsApiKey | quote }}
 gemini-api-key: {{ .Values.geminiApiKey | quote }}
 groq-api-key: {{ .Values.groqApiKey | quote }}
+anthropic-api-key: {{ .Values.anthropicApiKey | quote }}
+{{- include "glyphoxa.llmDefaultGuard" . }}
 {{- end }}
 {{- if .Values.web.enabled }}
 discord-oauth-client-id: {{ required "web.oauth.clientId is required when web.enabled: the Discord OAuth application's Client ID (ADR-0016/0039). A Web Instance refuses to boot without a usable login (ADR-0041)." .Values.web.oauth.clientId | quote }}
@@ -372,6 +374,61 @@ Voice Session from starting.
 {{- else if and .Values.ingress.enabled .Values.ingress.host -}}
 {{- printf "%s://%s/privacy" (include "glyphoxa.web.ingressScheme" .) .Values.ingress.host -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+The platform key VALUE behind a default LLM provider (#702): the chart value
+whose env var that provider's adapter falls back to. Empty output for a provider
+this build does not have.
+*/}}
+{{- define "glyphoxa.llmDefaultKeyValueName" -}}
+{{- $names := dict "groq" "groqApiKey" "anthropic" "anthropicApiKey" "gemini" "geminiApiKey" -}}
+{{- $llm := .Values.llm | default dict -}}
+{{- get $names ($llm.defaultProvider | default "" | trim | lower) -}}
+{{- end }}
+
+{{/*
+Render-time mirror of the binary's fatal boot check on the deployment-default
+LLM (#702): an unknown llm.defaultProvider, or one whose platform key is empty,
+stops `helm install/upgrade` with the value to fix instead of crash-looping the
+pods. It renders nothing; it is included from the Secret's stringData so every
+template that hashes or renders the Secret runs it. Unset is always valid — and
+so is a values tree with no llm block at all (a release whose reused values
+predate #702).
+*/}}
+{{- define "glyphoxa.llmDefaultGuard" -}}
+{{- $llm := .Values.llm | default dict -}}
+{{- $provider := $llm.defaultProvider | default "" | trim | lower -}}
+{{- if $provider -}}
+{{- $valueName := include "glyphoxa.llmDefaultKeyValueName" . -}}
+{{- if not $valueName -}}
+{{- fail (printf "llm.defaultProvider %q is not an LLM provider this build has: use groq, anthropic or gemini (or leave it empty for the code default, Groq)." $provider) -}}
+{{- end -}}
+{{- if not (index .Values $valueName | default "" | trim) -}}
+{{- fail (printf "llm.defaultProvider=%s needs its platform key: set %s. Tenants without their own key could not speak, and the binary refuses to boot without it." $provider $valueName) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Deployment-default LLM env (#702), shared by the voice and web pods so the voice
+loop and the web tier's off-session engines + Configuration screen resolve the
+same default. Each key is emitted ONLY when set, so a stock install renders no
+env var and the binary's code default (Groq, openai/gpt-oss-120b) applies.
+*/}}
+{{- define "glyphoxa.llmDefaultEnv" -}}
+{{- with .Values.llm }}
+{{- if .defaultProvider }}
+# The provider a Tenant with no LLM Provider Config of its own runs on (#702).
+- name: GLYPHOXA_LLM_DEFAULT_PROVIDER
+  value: {{ .defaultProvider | trim | lower | quote }}
+{{- end }}
+{{- if .defaultModel }}
+# The model asked of the default provider (#702).
+- name: GLYPHOXA_LLM_DEFAULT_MODEL
+  value: {{ .defaultModel | trim | quote }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*

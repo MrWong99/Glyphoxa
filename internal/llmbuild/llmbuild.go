@@ -53,13 +53,16 @@ func ResolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component st
 }
 
 // New builds an [llm.Provider] for providerID with apiKey, keyed off
-// provider_config.provider (ADR-0004). An empty id defaults to Groq (the
-// deployment LLM, ADR-0036); an unrecognised id is a CLEAR error naming it, never
-// a silent hardwired adapter. An empty apiKey lets the adapter fall back to its
+// provider_config.provider (ADR-0004). The id is never empty: "no row" is
+// turned into a provider by [DeploymentDefault.Select], the ONE place a default
+// applies (#702) — an empty id here is a missed wire, and building Groq for it
+// would silently run and bill the wrong provider under another deployment
+// default. An empty or unrecognised id is a CLEAR error naming it, never a
+// silent hardwired adapter. An empty apiKey lets the adapter fall back to its
 // own *_API_KEY env var at request time (the hybrid policy, ADR-0039).
 func New(providerID, apiKey string) (llm.Provider, error) {
 	switch providerID {
-	case "", groq.ProviderID:
+	case groq.ProviderID:
 		return groq.New(apiKey), nil
 	case anthropic.ProviderID:
 		return anthropic.New(apiKey), nil
@@ -70,37 +73,31 @@ func New(providerID, apiKey string) (llm.Provider, error) {
 	}
 }
 
-// DefaultModel names the model providerID's adapter requests when a Provider
-// Config carries no explicit model, mirroring [New]'s provider set ("" and any
-// unrecognised id resolve to Groq, the deployment LLM per ADR-0036). Callers
-// resolve an empty model through it BEFORE building a request, so the model that
-// is requested and the model the spend meter prices are one and the same: an
-// empty model id misses the price map and is charged at the conservative
+// DefaultVoiceModel names the ONE model a Provider Config on providerID runs
+// when it carries no explicit model (#702) — in a Voice Session and off-session
+// alike ([DeploymentDefault.Select]). It mirrors [New]'s provider set ("" and
+// any unrecognised id resolve to Groq, the code default per ADR-0036; the
+// deployment's own default model is [DeploymentDefault]'s to add).
+//
+// It is each adapter's own default except for Anthropic, whose adapter falls
+// back to its flagship model: far too slow and costly for a spoken turn, and —
+// were recap, assist and the planning chat to use it while voice ran Haiku — a
+// second default billed at ~50x what the Configuration screen shows. Every
+// engine runs Claude Haiku there instead, the model the adapter's thinking
+// policy and the price table are set up for.
+//
+// Callers resolve an empty model through it BEFORE building a request, so the
+// model requested and the model the spend meter prices are one and the same:
+// an empty model id misses the price map and is charged at the conservative
 // fallback (~30x the real Groq rate), which exhausted a platform-key trial
 // allowance after a few cents of real spend.
-func DefaultModel(providerID string) string {
+func DefaultVoiceModel(providerID string) string {
 	switch providerID {
 	case anthropic.ProviderID:
-		return anthropic.DefaultModel
+		return anthropic.HaikuVoiceModel
 	case gemini.ProviderID:
 		return gemini.DefaultModel
 	default: // "" and groq
 		return groq.DefaultModel
 	}
-}
-
-// DefaultVoiceModel names the model a VOICE Agent runs when providerID's
-// Provider Config carries no explicit model (#702). It differs from
-// [DefaultModel] for Anthropic only: the adapter's own fallback there is the
-// flagship model, which the off-session callers (recap, assist — they send an
-// empty model and let the adapter fill it) rely on, but which is far too slow
-// and costly for a spoken turn. A Voice Session gets Claude Haiku instead, the
-// model the adapter's thinking policy and the price table are set up for. Like
-// [DefaultModel], the result is BOTH what the engine requests and what the
-// spend meter prices.
-func DefaultVoiceModel(providerID string) string {
-	if providerID == anthropic.ProviderID {
-		return anthropic.HaikuVoiceModel
-	}
-	return DefaultModel(providerID)
 }

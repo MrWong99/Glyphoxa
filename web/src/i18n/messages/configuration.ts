@@ -40,6 +40,13 @@ export const en = {
   "config.modelPlaceholder": "Model…",
   "config.modelSearchPlaceholder": "Search or type a model id…",
   "config.saveModel": "Save model",
+  // The voice-LLM choice (#702). "Platform default" is what a table that
+  // never picked runs; "your choice" is the tenant's own saved row.
+  "config.llmInUsePlatform": "Voice model in use: {provider} / {model} (platform default)",
+  "config.llmInUseOwn": "Voice model in use: {provider} / {model} (your choice)",
+  "config.useForVoice": "Use for voice",
+  "config.keySwitchesVoice": "Saving a key makes {name} your voice model.",
+  "config.badgeInUse": "In use",
 
   // Health badges (#70) — short and friendly, never internal status words.
   // "Saved" is the honest state between saving a key and the live probe
@@ -150,6 +157,11 @@ export const de: Record<keyof typeof en, string> = {
   "config.modelPlaceholder": "Modell…",
   "config.modelSearchPlaceholder": "Modell-ID suchen oder eintippen…",
   "config.saveModel": "Modell speichern",
+  "config.llmInUsePlatform": "Sprachmodell in Verwendung: {provider} / {model} (Plattform-Standard)",
+  "config.llmInUseOwn": "Sprachmodell in Verwendung: {provider} / {model} (deine Auswahl)",
+  "config.useForVoice": "Für Sprache verwenden",
+  "config.keySwitchesVoice": "Mit dem Speichern eines Schlüssels wird {name} dein Sprachmodell.",
+  "config.badgeInUse": "In Verwendung",
 
   "config.badgeKeyNeeded": "Schlüssel fehlt",
   "config.badgeOptional": "Optional",

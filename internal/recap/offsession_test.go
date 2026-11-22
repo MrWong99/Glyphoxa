@@ -37,7 +37,7 @@ func TestOffSessionRecapReachesTheUsageLedger(t *testing.T) {
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
 		t.Fatalf("Recap: %v", err)
 	}
-	row := billingtest.OneRow(t, usage, tenantID, storage.ComponentLLM, "groq", llmbuild.DefaultModel("groq"))
+	row := billingtest.OneRow(t, usage, tenantID, storage.ComponentLLM, "groq", llmbuild.DefaultVoiceModel("groq"))
 	if row.LLMInputTokens != 321 || row.LLMOutputTokens != 99 {
 		t.Errorf("ledger tokens = %d/%d, want 321/99", row.LLMInputTokens, row.LLMOutputTokens)
 	}
@@ -54,7 +54,7 @@ func TestOffSessionRecapFailureStillLedgers(t *testing.T) {
 	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err == nil {
 		t.Fatal("Recap err = nil, want failure")
 	}
-	billingtest.OneRow(t, usage, tenantID, storage.ComponentLLM, "groq", llmbuild.DefaultModel(""))
+	billingtest.OneRow(t, usage, tenantID, storage.ComponentLLM, "groq", llmbuild.DefaultVoiceModel(""))
 }
 
 // A platform-key Tenant with a spent allowance gets no recap and no provider

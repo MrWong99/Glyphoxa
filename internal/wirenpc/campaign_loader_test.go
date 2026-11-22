@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -16,7 +17,7 @@ import (
 // returns BEFORE any query, so this is a Docker-free unit test — no container —
 // and it asserts the actionable "empty campaign id" message, not just non-nil.
 func TestLoadCampaignNPCs_NilCampaignFailsLoud(t *testing.T) {
-	_, _, _, err := loadCampaignNPCs(context.Background(), storage.New(nil), uuid.Nil)
+	_, _, _, err := loadCampaignNPCs(context.Background(), storage.New(nil), uuid.Nil, llmbuild.DeploymentDefault{})
 	if err == nil {
 		t.Fatal("loadCampaignNPCs(uuid.Nil) returned nil error; want a loud refusal")
 	}

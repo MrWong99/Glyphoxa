@@ -117,10 +117,17 @@ type Engine struct {
 	log         *slog.Logger
 	newProvider ProviderFactory
 	keyEnt      llmbuild.PlatformKeyEntitlement
+	llmDefault  llmbuild.DeploymentDefault
 }
 
 // Option customises an [Engine].
 type Option func(*Engine)
+
+// WithLLMDefault sets the deployment-default LLM (#702) a Tenant with no LLM
+// Provider Config runs on. Unset is the code default (Groq, ADR-0036).
+func WithLLMDefault(d llmbuild.DeploymentDefault) Option {
+	return func(e *Engine) { e.llmDefault = d }
+}
 
 // WithProviderFactory overrides the LLM provider constructor — the seam a
 // deterministic test injects to replay a canned completion. The default is
@@ -257,22 +264,17 @@ func (e *Engine) newCaller(ctx context.Context, campaign storage.Campaign) (*llm
 	if err != nil {
 		return nil, nil, err
 	}
-	providerID, model := "", ""
-	if cfg != nil {
-		providerID, model = cfg.Provider, cfg.Model
-	}
+	// No row resolves to the deployment default (#702) — never to a bare "" a
+	// later hop would read as Groq.
+	providerID, model := e.llmDefault.Select(cfg)
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assist: build llm provider: %w", err)
 	}
-	// A config without a model sends request model "" (the adapter fills its own
-	// default) but prices on that real model id, for every provider: (provider,
-	// "") misses the price map and is charged at the conservative fallback rate
-	// (#272 review).
+	// Select never returns an empty model: a config without one runs the SAME
+	// default the voice session and the Configuration screen name for it, so the
+	// model requested and the model priced are one id (#272 review, #702 review).
 	priceModel := model
-	if priceModel == "" {
-		priceModel = llmbuild.DefaultModel(providerID)
-	}
 
 	return &llmcall.Caller{
 		Ctx:        ctx,

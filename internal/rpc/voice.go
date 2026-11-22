@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -23,8 +25,10 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
@@ -75,6 +79,9 @@ const healthProbeTimeout = healthCheckTimeout + 3*time.Second
 // BYOK keys. *storage.Store satisfies it; tests drive a fake.
 type voiceStore interface {
 	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
+	// ListProviderConfigs reads every row, so an LLM slot's OWN (llm, provider)
+	// row is reachable when another LLM slot's row is newer (#702).
+	ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]storage.ProviderConfig, error)
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	// AddUsage persists Usage Ledger rows (ADR-0054): a voice preview is paid TTS
 	// and is attributed to the Tenant like any other metered call. It backs the
@@ -115,6 +122,14 @@ type VoiceServer struct {
 	// (#227). Defaults to the Groq OpenAI-compatible GET /models via the shared
 	// adapter; unit tests fake it so the default `go test` makes no vendor call.
 	listModels func(ctx context.Context, apiKey string) ([]string, error)
+	// pingAnthropic and listAnthropicModels are the Anthropic counterparts
+	// (#702): the liveness test-call and the live catalog, both GET /v1/models
+	// through the adapter. Unit tests fake them.
+	pingAnthropic       func(ctx context.Context, apiKey string) error
+	listAnthropicModels func(ctx context.Context, apiKey string) ([]string, error)
+	// llmDefault is the deployment-default LLM (#702): the provider a Tenant
+	// with no LLM row runs, so the one its LLM health is probed against.
+	llmDefault llmbuild.DeploymentDefault
 	// botTag proves the Discord token via REST (GET /users/@me — no gateway
 	// IDENTIFY, #150) and returns the bot tag. Defaults to discordtag.Resolve.
 	botTag func(ctx context.Context, token string) (string, error)
@@ -180,15 +195,22 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		log = slog.Default()
 	}
 	return &VoiceServer{
-		store:        store,
-		cipher:       cipher,
-		log:          log,
-		metering:     billing.NewOffSession(store, nil, log),
-		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
-		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
-		pingLLM:      livePingGroq,
-		pingImage:    livePingGemini,
-		listModels:   func(ctx context.Context, apiKey string) ([]string, error) { return groq.New(apiKey).ListModels(ctx) },
+		store:      store,
+		cipher:     cipher,
+		log:        log,
+		metering:   billing.NewOffSession(store, nil, log),
+		newLister:  func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
+		newSynth:   func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
+		pingLLM:    livePingGroq,
+		pingImage:  livePingGemini,
+		listModels: func(ctx context.Context, apiKey string) ([]string, error) { return groq.New(apiKey).ListModels(ctx) },
+		pingAnthropic: func(ctx context.Context, apiKey string) error {
+			_, err := anthropic.New(apiKey).ListModels(ctx)
+			return err
+		},
+		listAnthropicModels: func(ctx context.Context, apiKey string) ([]string, error) {
+			return anthropic.New(apiKey).ListModels(ctx)
+		},
 		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
 		lookupEnv:    os.Getenv,
 		now:          time.Now,
@@ -235,6 +257,14 @@ func (s *VoiceServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
 	s.keyEnt = ent
 }
 
+// SetLLMDefault wires the deployment-default LLM (#702): the provider whose
+// health a Tenant with no LLM Provider Config is shown, and the model pinned
+// first in that provider's catalog. Called once at boot before the server
+// serves; unset is the code default (Groq, ADR-0036).
+func (s *VoiceServer) SetLLMDefault(d llmbuild.DeploymentDefault) {
+	s.llmDefault = d
+}
+
 // SetOffSessionMetering wires the process-wide off-session metering seam
 // (#658, ADR-0054 amendment 2026-11-20) PreviewVoice runs through, replacing
 // the ungated default: in `open` Admission Mode it carries the monthly
@@ -262,60 +292,111 @@ func (s *VoiceServer) Handler(opts ...connect.HandlerOption) (string, http.Handl
 // tenant is [requireTenant] (kept as a method so the handlers read as before).
 func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) { return requireTenant(ctx) }
 
-// ListModels returns the live Groq model catalog for the model select (#227):
-// the OpenAI-compatible GET /models fetched with the tenant's decrypted BYOK key
-// (the ListVoices / health-check posture, ADR-0039). The default model is pinned
-// first, the rest are sorted and deduped, and the previously-hardcoded allowlist
-// (with its deprecated ids) is gone. A failed fetch degrades gracefully — the
-// screen stays usable — by returning just the default and NO rpc error, since the
-// combobox accepts free-text entry regardless. An unknown provider is a client
-// error (unchanged).
+// anthropicFallbackModels is what the Anthropic model select offers when the
+// live catalog cannot be fetched (#702): the two Claude Haiku ids the adapter's
+// thinking policy and the price table are set up for. It is a FALLBACK, never
+// the source — the live Models API is — and every id in it must be priced
+// (TestOfferedDefaultModelsArePriced).
+var anthropicFallbackModels = []string{anthropic.HaikuVoiceModel, "claude-haiku-4-5"}
+
+// ListModels returns a voice-LLM provider's live model catalog for the model
+// select (#227, #702): Groq's OpenAI-compatible GET /models or Anthropic's GET
+// /v1/models, fetched with the key of THAT provider's slot — the Tenant's
+// decrypted BYOK key, else the platform key behind the entitlement (the
+// ListVoices / health-check posture, ADR-0039). The model a voice Agent gets by
+// default is pinned first; the rest are sorted and deduped. On the PLATFORM key
+// the list is cut down to the models the price table knows — the only ones a
+// keyless row may run (#702 review) — while a Tenant's own key lists the whole
+// catalog. A failed fetch
+// degrades gracefully — the screen stays usable — by returning the pinned
+// default (plus, for Anthropic, the priced Haiku ids) and NO rpc error, since
+// the combobox accepts free-text entry regardless. An unknown provider is a
+// client error.
 func (s *VoiceServer) ListModels(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListModelsRequest],
 ) (*connect.Response[managementv1.ListModelsResponse], error) {
-	if req.Msg.GetProvider() != "groq" {
+	provider := req.Msg.GetProvider()
+	var list func(context.Context, string) ([]string, error)
+	switch provider {
+	case groq.ProviderID:
+		list = s.listModels
+	case anthropic.ProviderID:
+		list = s.listAnthropicModels
+	default:
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("no model catalog for provider %q", req.Msg.GetProvider()))
+			fmt.Errorf("no model catalog for provider %q", provider))
 	}
 	tenantID, err := s.tenant(ctx)
 	if err != nil {
 		return nil, err
 	}
-	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentLLM)
+	key, err := s.resolveLLMSlotKey(ctx, tenantID, provider)
 	if err != nil {
 		return nil, err
 	}
 
-	models, err := s.listModels(ctx, key)
+	fallback := func() *connect.Response[managementv1.ListModelsResponse] {
+		var models []string
+		if provider == anthropic.ProviderID {
+			models = anthropicFallbackModels
+		}
+		return connect.NewResponse(&managementv1.ListModelsResponse{Models: pinFirst(s.llmDefault.VoiceModel(provider, ""), models)})
+	}
+	// key == "" is the platform key (the entitlement already said yes).
+	onPlatformKey := key == ""
+	if envKey, _ := llmbuild.PlatformKeyEnv(provider); onPlatformKey && s.lookupEnv(envKey) == "" {
+		// No key anywhere — a slot the Tenant never filled on a deployment
+		// without that provider's key. Not a catalog outage: do not call the
+		// provider (it can only answer "missing API key") and do not log.
+		return fallback(), nil
+	}
+
+	models, err := list(ctx, key)
 	if err != nil {
 		// Never fail the RPC: a broken catalog must not break the Configuration
 		// screen (free-text entry still saves and runs, ADR-0039). Fall back to the
 		// pinned default so the select still renders.
-		s.log.Warn("ListModels: live Groq catalog failed", "err", err)
-		return connect.NewResponse(&managementv1.ListModelsResponse{Models: []string{groq.DefaultModel}}), nil
+		s.log.Warn("ListModels: live catalog failed", "provider", provider, "err", err)
+		return fallback(), nil
 	}
-	return connect.NewResponse(&managementv1.ListModelsResponse{Models: groqCatalog(models)}), nil
+	if onPlatformKey {
+		// Only what a keyless row may store ([platformModelPriced]): a model
+		// the price table knows, so it is metered at what it costs.
+		models = slices.DeleteFunc(slices.Clone(models), func(m string) bool {
+			return !spend.LLMPriced(observe.Provider(provider), m)
+		})
+	}
+	return connect.NewResponse(&managementv1.ListModelsResponse{Models: llmCatalog(provider, s.llmDefault, models)}), nil
 }
 
-// groqCatalog shapes a raw Groq /models catalog for the select: the default model
-// is pinned first (even if the live list omits or re-orders it), and the rest are
-// deduped and sorted ascending. Curation of non-chat ids is deliberately NOT done
-// — the pinned default plus free-text entry make the extra ids harmless, and the
-// staleness the static allowlist caused is exactly what this removes (#227).
-func groqCatalog(models []string) []string {
-	out := []string{groq.DefaultModel}
-	seen := map[string]bool{groq.DefaultModel: true}
-	rest := make([]string, 0, len(models))
+// llmCatalog shapes a raw provider catalog for the select: the model a voice
+// Agent on provider runs by default — the deployment default's model when
+// provider is the deployment default, else the provider's voice default — is
+// pinned first (even if the live list omits or re-orders it), and the rest are
+// deduped and sorted ascending. Curation of non-chat ids is deliberately NOT
+// done — the pinned default plus free-text entry make the extra ids harmless,
+// and the staleness a static allowlist caused is exactly what the live fetch
+// removes (#227).
+func llmCatalog(provider string, d llmbuild.DeploymentDefault, models []string) []string {
+	rest := slices.Clone(models)
+	sort.Strings(rest)
+	return pinFirst(d.VoiceModel(provider, ""), rest)
+}
+
+// pinFirst returns first followed by models in their given order, without
+// empty ids or repeats.
+func pinFirst(first string, models []string) []string {
+	out := []string{first}
+	seen := map[string]bool{first: true}
 	for _, m := range models {
 		if m == "" || seen[m] {
 			continue
 		}
 		seen[m] = true
-		rest = append(rest, m)
+		out = append(out, m)
 	}
-	sort.Strings(rest)
-	return append(out, rest...)
+	return out
 }
 
 // ListVoices maps the ElevenLabs voice catalog onto the wire type for the voice
@@ -574,16 +655,41 @@ func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
 // sends land in the buffered channel and are dropped), and complete=false
 // tells the caller not to cache.
 func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, lastBotTag string) (providers []*managementv1.ProviderHealth, complete bool) {
+	// The LLM check reports under the provider in effect for the Tenant (#702),
+	// which only the check itself learns (a store read that must stay inside
+	// the probe's deadline). It publishes the name as soon as it knows it, so a
+	// probe that times out AFTER the read names the right provider; before
+	// that, the placeholder can only be the deployment default's.
+	var llmProvider atomic.Pointer[string]
+	static := func(name string) func() string { return func() string { return name } }
 	checks := []struct {
-		name string
+		// component is what the entry is the health OF — the unique key, stamped
+		// on every result: two entries can share a provider (Gemini as LLM and
+		// as image slot).
+		component string
+		// name is the provider a timeout placeholder is reported under.
+		name func() string
 		run  func(context.Context, uuid.UUID) *managementv1.ProviderHealth
 	}{
-		{"groq", s.healthLLM},
-		{"elevenlabs", s.healthTTS},
-		{"gemini", s.healthImage},
-		{"discord", func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+		{string(storage.ComponentLLM), func() string {
+			if p := llmProvider.Load(); p != nil {
+				return *p
+			}
+			return s.llmDefault.Provider()
+		}, func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+			return s.healthLLM(ctx, tenantID, func(provider string) { llmProvider.Store(&provider) })
+		}},
+		{string(storage.ComponentTTS), static("elevenlabs"), s.healthTTS},
+		{string(storage.ComponentImage), static("gemini"), s.healthImage},
+		{"discord", static("discord"), func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
 			return s.healthDiscord(ctx, tenantID, lastBotTag)
 		}},
+	}
+	stamp := func(providers []*managementv1.ProviderHealth) []*managementv1.ProviderHealth {
+		for i, check := range checks {
+			providers[i].Component = check.component
+		}
+		return providers
 	}
 
 	type slot struct {
@@ -616,27 +722,68 @@ func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, la
 			}
 			for i, check := range checks {
 				if providers[i] == nil {
-					providers[i] = s.degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
+					providers[i] = s.degraded(check.name(), fmt.Errorf("health probe timed out: %w", ctx.Err()))
 				}
 			}
-			return providers, false
+			return stamp(providers), false
 		}
 	}
-	return providers, true
+	return stamp(providers), true
 }
 
-// healthLLM pings Groq with the decrypted LLM key.
-func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
-	key, err := s.healthKey(ctx, tenantID, storage.ComponentLLM, groq.APIKeyEnv)
+// healthLLM pings the LLM provider in effect for the Tenant (#702) — the
+// provider of its newest LLM Provider Config, else the deployment default —
+// with the key a Voice Session would use, and reports under that provider's
+// name. A Tenant on Anthropic is never shown Groq's health, and vice versa.
+// resolved is told the provider as soon as the Tenant's row is read, before
+// any network call — the caller's name for a timeout placeholder.
+func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID, resolved func(provider string)) *managementv1.ProviderHealth {
+	// ONE read of the Tenant's newest LLM row decides both the provider and
+	// the key, so the badge cannot name one provider and probe another's key.
+	provider := s.llmDefault.Provider()
+	var cfgPtr *storage.ProviderConfig
+	cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, storage.ComponentLLM)
+	switch {
+	case err == nil:
+		cfgPtr = &cfg
+		provider, _ = s.llmDefault.Select(cfgPtr)
+	case !errors.Is(err, storage.ErrNotFound):
+		return s.degraded(provider, internalErr(s.log, "healthLLM: store read failed", err))
+	}
+	resolved(provider)
+	envKey, known := llmbuild.PlatformKeyEnv(provider)
+	ping := s.llmPing(provider)
+	if !known || ping == nil {
+		return s.degraded(provider, fmt.Errorf("no health check for LLM provider %q", provider))
+	}
+	key, err := s.resolveKey(ctx, tenantID, storage.ComponentLLM, cfgPtr)
 	if err != nil {
-		return s.degraded("groq", err)
+		return s.degraded(provider, err)
+	}
+	if key == "" && s.lookupEnv(envKey) == "" {
+		return s.degraded(provider, errMissingKey)
 	}
 	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
-	if err := s.pingLLM(cctx, key); err != nil {
-		return s.degraded("groq", err)
+	if err := ping(cctx, key); err != nil {
+		return s.degraded(provider, err)
 	}
-	return healthy("groq")
+	return healthy(provider)
+}
+
+// llmPing picks the liveness test-call for an LLM provider. Gemini-as-LLM
+// shares the image slot's ping: the same key, the same models endpoint.
+func (s *VoiceServer) llmPing(provider string) func(context.Context, string) error {
+	switch provider {
+	case groq.ProviderID:
+		return s.pingLLM
+	case anthropic.ProviderID:
+		return s.pingAnthropic
+	case gemini.ProviderID:
+		return s.pingImage
+	default:
+		return nil
+	}
 }
 
 // healthImage pings the Gemini image provider with the decrypted image key (#311),
@@ -752,18 +899,43 @@ func (s *VoiceServer) healthKey(ctx context.Context, tenantID uuid.UUID, compone
 // RPC tier's redaction posture (logged detail, generic wire error).
 func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUID, component storage.Component) (string, error) {
 	cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, component)
-	var cfgPtr *storage.ProviderConfig
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		// No row: an env-fallback candidate (nil cfg).
+		return s.resolveKey(ctx, tenantID, component, nil)
 	case err != nil:
 		return "", internalErr(s.log, "resolveComponentKey: store read failed", err, "component", component)
-	case !isSaved(cfg.CredentialsLast4):
-		// A row without a saved key ("" or the "env" placeholder) is the same
-		// env-fallback candidate as no row. Normalize to nil: llmbuild treats
-		// only "env" (not "") as unsaved and would try to decrypt an empty row.
-	default:
-		cfgPtr = &cfg
+	}
+	return s.resolveKey(ctx, tenantID, component, &cfg)
+}
+
+// resolveLLMSlotKey resolves the key of ONE LLM slot (#702): the Tenant's own
+// (llm, provider) row, which is not necessarily its newest LLM row — the model
+// catalog of the Anthropic slot must be fetched with the Anthropic key even
+// while the Tenant runs on Groq. No such row is the env-fallback candidate,
+// gated like every other.
+func (s *VoiceServer) resolveLLMSlotKey(ctx context.Context, tenantID uuid.UUID, provider string) (string, error) {
+	configs, err := s.store.ListProviderConfigs(ctx, tenantID)
+	if err != nil {
+		return "", internalErr(s.log, "resolveLLMSlotKey: store read failed", err, "provider", provider)
+	}
+	for _, cfg := range configs {
+		if cfg.Component == storage.ComponentLLM && cfg.Provider == provider {
+			return s.resolveKey(ctx, tenantID, storage.ComponentLLM, &cfg)
+		}
+	}
+	return s.resolveKey(ctx, tenantID, storage.ComponentLLM, nil)
+}
+
+// resolveKey is the shared tail of the key resolutions above, for cfg (nil =
+// no row).
+func (s *VoiceServer) resolveKey(ctx context.Context, tenantID uuid.UUID, component storage.Component, cfg *storage.ProviderConfig) (string, error) {
+	// A row without a saved key ("" or the "env" placeholder) is the same
+	// env-fallback candidate as no row. Normalize to nil: llmbuild treats
+	// only "env" (not "") as unsaved and would try to decrypt an empty row.
+	cfgPtr := cfg
+	if cfgPtr != nil && !isSaved(cfgPtr.CredentialsLast4) {
+		cfgPtr = nil
 	}
 
 	key, err := llmbuild.ResolveKeyGated(ctx, s.keyEnt, tenantID, s.cipher, cfgPtr, component)

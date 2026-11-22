@@ -260,9 +260,9 @@ type Config struct {
 	keys providerKeys
 	// llmProviderID is the primary Agent's LLM Provider Config provider id (#272):
 	// buildConversation dispatches [newLLM] off it so a DB Agent bound to a non-Groq
-	// LLM provider gets that adapter. Empty (the env-only Run path, or a nil LLM
-	// config) resolves to the Groq default (ADR-0036) — byte-identical to the
-	// pre-#272 hardwired constructor.
+	// LLM provider gets that adapter. [Config.withSessionLLM] sets it, to the
+	// deployment default ([Config.LLMDefault]) when no config names a provider,
+	// so it is never empty once a session runs.
 	llmProviderID string
 	// language is the Campaign Language (CONTEXT.md) of the campaign the npcs
 	// were loaded from: it selects the Roster matcher's phonetic encoder (#199).
@@ -489,6 +489,14 @@ type Config struct {
 	// EnvFallbackAllowed wiring grant everything — the ADR-0039 hybrid policy
 	// unchanged; `open` Admission Mode wires llmbuild.SubscriptionKeyGate.
 	KeyEntitlement llmbuild.PlatformKeyEntitlement
+
+	// LLMDefault is the deployment-default LLM (GLYPHOXA_LLM_DEFAULT_PROVIDER /
+	// _MODEL, read once at boot; #702): the provider and model a session runs
+	// when neither its primary Agent nor its Tenant saved an LLM Provider
+	// Config. The zero value is the code default (Groq, openai/gpt-oss-120b).
+	// A saved row always wins. The platform-key entitlement above gates the
+	// default provider's env key exactly as it gates Groq's.
+	LLMDefault llmbuild.DeploymentDefault
 }
 
 // npcNames returns the NPCs' display names for a log line.

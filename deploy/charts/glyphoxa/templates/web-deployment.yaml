@@ -166,6 +166,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: groq-api-key
+            # The Anthropic adapter's env fallback (#702): the platform key when
+            # the deployment default LLM, or a Tenant's choice, is Claude.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: anthropic-api-key
             # Discord OAuth application credentials (ADR-0016/0039): the login the
             # SPA sends the operator through. All three are `required` when
             # web.enabled — the process refuses to boot without them (ADR-0041).
@@ -223,6 +230,7 @@ spec:
             - name: GLYPHOXA_LOG_FORMAT
               value: json
             {{- include "glyphoxa.idleCloseEnv" . | nindent 12 }}
+            {{- include "glyphoxa.llmDefaultEnv" . | nindent 12 }}
             {{- with (include "glyphoxa.privacyPolicyURL" .) }}
             # The privacy-policy page the Bot links from the Voice Session
             # transcription disclosure it posts in the voice channel (#519).

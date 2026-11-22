@@ -929,6 +929,18 @@ textarea.gx-input {
   font-weight: 600;
   color: var(--text-strong);
   margin-top: 2px;
+  /* Room for the "In use" badge beside a voice-LLM slot's name (#702). */
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* The voice model a session started now would run (#702): one quiet line under
+ * the section title, above the rows it summarizes. */
+.gx-providers__llm-in-use {
+  margin: -4px 0 12px;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
 }
 /* Health badge + its visible failure detail (Configuration). The detail used
  * to hide in a title-attr tooltip — unreachable by keyboard/touch. */

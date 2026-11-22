@@ -151,6 +151,15 @@ func main() {
 	// by default, the Campaign Language hint and the TTS websocket transport
 	// (#702) opt-in. See applyVoiceEnv.
 	applyVoiceEnv(&cfg, os.Getenv, log)
+	// The deployment-default LLM (#702), read once for every Mode: the session
+	// Config carries it to the voice loop, and runWeb hands the same value to the
+	// off-session engines and the Configuration RPCs.
+	llmDefault, err := deploymentLLMDefault(os.Getenv, log)
+	if err != nil {
+		log.Error("invalid deployment-default LLM", "err", err)
+		os.Exit(1)
+	}
+	cfg.LLMDefault = llmDefault
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.
@@ -506,7 +515,7 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// tier); it exists only to persist transcript lines and finalize them at Stop.
 	// The set is built by the SAME helper the web/all boot uses (#483) so the two
 	// paths cannot drift; the worker has no dev mode, so dev is false.
-	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, false)
+	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, false, cfg.LLMDefault)
 	recapEngine, deps := vd.recapEngine, vd.deps
 
 	// Start this Voice Instance's Idle Close watchdog (ADR-0061). One goroutine per
@@ -647,7 +656,7 @@ type voiceDeps struct {
 // make the Manager panic at Start (#489), and web-only starts no sessions
 // anyway. dev admits every speaker in the per-Tenant Butler GM overlay (#490,
 // mirrors dev auto-auth); the worker has no dev mode and passes false.
-func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observe.PrometheusRecorder, log *slog.Logger, keyEnt llmbuild.PlatformKeyEntitlement, admission auth.AdmissionMode, eventBus *voiceevent.Bus, sessions *session.Registry, blobStore blob.Store, clients *presence.Clients, gmID *auth.GMIdentity, dev bool) voiceDeps {
+func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observe.PrometheusRecorder, log *slog.Logger, keyEnt llmbuild.PlatformKeyEntitlement, admission auth.AdmissionMode, eventBus *voiceevent.Bus, sessions *session.Registry, blobStore blob.Store, clients *presence.Clients, gmID *auth.GMIdentity, dev bool, llmDefault llmbuild.DeploymentDefault) voiceDeps {
 	// The one-shot recap Engine (#272), constructed ONCE so its consumers share
 	// it: the /glyphoxa recap slash command (#273), the GenerateRecap RPC (#274,
 	// web tier), and the recap knowledge Tool (Deps.Tools below). It reads
@@ -656,7 +665,7 @@ func buildVoiceDeps(store *storage.Store, cipher *crypto.Cipher, metrics *observ
 	// A recap no caller meters (the slash command, the RPC) is an off-session
 	// paid call: gated on the plan allowance and ledgered through the seam.
 	offSession := newOffSessionMetering(admission, store, log)
-	recapEngine := recap.NewEngine(store, cipher, offSession, metrics, log, recap.WithKeyEntitlement(keyEnt))
+	recapEngine := recap.NewEngine(store, cipher, offSession, metrics, log, recap.WithKeyEntitlement(keyEnt), recap.WithLLMDefault(llmDefault))
 
 	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
 	// Character/GM display name for the relay + chunk prefix, falling back to the
@@ -1144,7 +1153,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// voice worker uses (#483) so the two boot paths cannot drift. Web-only seams
 	// land right below: the relay's tenant scope (its SSE mounts are web-only),
 	// the boot gauge seed, and the assist engine.
-	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, dev)
+	vd := buildVoiceDeps(store, cipher, metrics, log, keyEnt, admission, eventBus, sessions, blobStore, clients, gmID, dev, cfg.LLMDefault)
 	recapEngine, speakerResolver, relay, deps := vd.recapEngine, vd.speakerResolver, vd.relay, vd.deps
 
 	// This process's Idle Close watchdog (ADR-0061), the same one the -mode voice
@@ -1162,7 +1171,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// chat — is gated and ledgered through this ONE seam (#658, ADR-0054
 	// amendment 2026-11-20).
 	offSession := vd.offSession
-	assistEngine := assist.NewEngine(store, cipher, offSession, metrics, log, assist.WithKeyEntitlement(keyEnt))
+	assistEngine := assist.NewEngine(store, cipher, offSession, metrics, log, assist.WithKeyEntitlement(keyEnt), assist.WithLLMDefault(cfg.LLMDefault))
 
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
@@ -1440,7 +1449,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt, offSession)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt, offSession, cfg.LLMDefault)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1605,7 +1614,7 @@ type sessionControl interface {
 	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
 }
 
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession, llmDefault llmbuild.DeploymentDefault) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1726,6 +1735,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// gap): health pings, model/voice catalogs, and the TTS preview refuse the
 	// env fallback for an unentitled tenant in `open` mode.
 	voiceSrv.SetKeyEntitlement(keyEnt)
+	// The deployment-default LLM (#702): a Tenant with no LLM row is shown —
+	// and health-probed on — the provider its sessions actually run.
+	voiceSrv.SetLLMDefault(llmDefault)
 	// PreviewVoice is paid TTS: gate it on the plan allowance and ledger it
 	// through the shared off-session seam (#658).
 	voiceSrv.SetOffSessionMetering(offSession)
@@ -1738,6 +1750,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// slot the Platform Keys serve as "Included" (W9), never contradicting what
 	// the call-time resolution would do.
 	providerSrv.SetKeyEntitlement(keyEnt)
+	providerSrv.SetLLMDefault(llmDefault)
 	// Saving Discord settings also reconciles the standing presence so the new
 	// token / Guild registers the slash-command surface without a restart (#102).
 	if presenceRefresh != nil {
@@ -1820,7 +1833,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// admission mode — checks the monthly allowance before each exchange.
 	chatKnowledge := knowledge.New(store, store.PromptKG())
 	chatRecap := knowledge.NewRecap(recapEngine, store)
-	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, offSession, metrics, log, planchat.WithKeyEntitlement(keyEnt))
+	chatEngine := planchat.NewEngine(store, cipher, searchEngine, chatKnowledge, chatRecap, offSession, metrics, log, planchat.WithKeyEntitlement(keyEnt), planchat.WithLLMDefault(llmDefault))
 	chatSrv := rpc.NewChatServer(store, log)
 	chatSrv.SetEngine(chatEngine)
 	chatPath, chatHandler := stack.Handler(chatSrv.Handler)

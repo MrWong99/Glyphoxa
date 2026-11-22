@@ -105,6 +105,7 @@ type Engine struct {
 	log         *slog.Logger
 	newProvider ProviderFactory
 	keyEnt      llmbuild.PlatformKeyEntitlement
+	llmDefault  llmbuild.DeploymentDefault
 }
 
 // Option customises an [Engine].
@@ -125,6 +126,12 @@ func WithProviderFactory(f func(providerID, apiKey string) (llm.Provider, error)
 // where the ADR-0039 hybrid policy stands.
 func WithKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) Option {
 	return func(e *Engine) { e.keyEnt = ent }
+}
+
+// WithLLMDefault sets the deployment-default LLM (#702) a Tenant with no LLM
+// Provider Config runs on. Unset is the code default (Groq, ADR-0036).
+func WithLLMDefault(d llmbuild.DeploymentDefault) Option {
+	return func(e *Engine) { e.llmDefault = d }
 }
 
 // NewEngine builds a recap Engine. cipher decrypts a BYOK LLM key (nil is fine for
@@ -206,23 +213,18 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, err
 	}
-	providerID, model := "", ""
-	if cfg != nil {
-		providerID, model = cfg.Provider, cfg.Model
-	}
+	// No row resolves to the deployment default (#702) — never to a bare "" a
+	// later hop would read as Groq.
+	providerID, model := e.llmDefault.Select(cfg)
 	provider, err := e.newProvider(providerID, key)
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)
 	}
-	// A config without a model sends request model "" (the adapter fills its own
-	// default, which keeps the recorded cassettes stable), but the spend sink must
-	// price on that real model id: (provider, "") misses the price map and
-	// warn-spams / prices at the conservative fallback (#272 review). The default
-	// comes from the one shared helper, for every provider, not just the env path.
+	// Select never returns an empty model: a config without one runs the SAME
+	// default the voice session and the Configuration screen name for it, so the
+	// model requested and the model the spend sink prices are one id (#272
+	// review, #702 review).
 	priceModel := model
-	if priceModel == "" {
-		priceModel = llmbuild.DefaultModel(providerID)
-	}
 
 	// Metering. The recorder is the CALLER's when the ctx carries one
 	// ([WithMetering]: a recap run from a live session's Tool or a planning chat

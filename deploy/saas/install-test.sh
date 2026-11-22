@@ -40,6 +40,9 @@ GX_TRUSTED_CLIENT_IP_HEADER=
 GX_GROQ_API_KEY=
 GX_ELEVENLABS_API_KEY=
 GX_GEMINI_API_KEY=
+GX_ANTHROPIC_API_KEY=
+GX_LLM_DEFAULT_PROVIDER=
+GX_LLM_DEFAULT_MODEL=
 GX_BACKUP_DIR=
 EOF
 }
@@ -115,9 +118,44 @@ if command -v helm >/dev/null 2>&1; then
   grep -A1 'name: GLYPHOXA_TRUSTED_CLIENT_IP_HEADER' "$workdir/render-cf.yaml" | grep -q 'value: "\?CF-Connecting-IP"\?' \
     || fail "the web container env lacks GLYPHOXA_TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP"
   pass "a named trusted client-IP header reaches the web container env (and is absent by default)"
+
+  # Deployment-default LLM variant (#702): the Anthropic platform key and the
+  # two default-LLM values must reach BOTH pods' env, and a stock install must
+  # set neither default (the binary's code default, Groq, then applies).
+  grep -q 'GLYPHOXA_LLM_DEFAULT_PROVIDER' "$workdir/render.yaml" \
+    && fail "the default render sets GLYPHOXA_LLM_DEFAULT_PROVIDER although none was named"
+  dllm="$workdir/llm-default"; mkdir -p "$dllm"
+  run_dry "$dllm" GX_ANTHROPIC_API_KEY=selftest-not-a-real-key \
+    GX_LLM_DEFAULT_PROVIDER=anthropic GX_LLM_DEFAULT_MODEL=claude-haiku-4-5 >/dev/null 2>&1 \
+    || fail "dry-run with an Anthropic default LLM failed"
+  helm template gx-selftest "$CHART" --values "$dllm/values.yaml" \
+    --set-string image.tag=v9.9.9-selftest >"$workdir/render-llm.yaml" \
+    || fail "the chart does not render with an Anthropic default LLM"
+  [ "$(grep -c 'name: GLYPHOXA_LLM_DEFAULT_PROVIDER' "$workdir/render-llm.yaml")" -ge 1 ] \
+    || fail "no container env carries GLYPHOXA_LLM_DEFAULT_PROVIDER"
+  grep -A1 'name: GLYPHOXA_LLM_DEFAULT_PROVIDER' "$workdir/render-llm.yaml" | grep -q 'value: "\?anthropic"\?' \
+    || fail "GLYPHOXA_LLM_DEFAULT_PROVIDER is not anthropic"
+  grep -A1 'name: GLYPHOXA_LLM_DEFAULT_MODEL' "$workdir/render-llm.yaml" | grep -q 'value: "\?claude-haiku-4-5"\?' \
+    || fail "GLYPHOXA_LLM_DEFAULT_MODEL is not claude-haiku-4-5"
+  grep -q 'anthropic-api-key: "selftest-not-a-real-key"' "$workdir/render-llm.yaml" \
+    || fail "the Anthropic platform key did not reach the chart Secret"
+  pass "an Anthropic default LLM + its platform key reach the chart (and no default is set on a stock install)"
 else
   echo "install-test: SKIP — helm not found; render cases not run" >&2
 fi
+
+# --- 3b. a default LLM provider without its platform key must refuse (#702) --
+dbad="$workdir/llm-default-nokey"; mkdir -p "$dbad"
+if out="$(run_dry "$dbad" GX_LLM_DEFAULT_PROVIDER=anthropic 2>&1)"; then
+  fail "dry-run with GX_LLM_DEFAULT_PROVIDER=anthropic and no Anthropic key succeeded"
+fi
+grep -q 'GX_ANTHROPIC_API_KEY' <<<"$out" || fail "the refusal does not name GX_ANTHROPIC_API_KEY: $out"
+dbad2="$workdir/llm-default-typo"; mkdir -p "$dbad2"
+if out="$(run_dry "$dbad2" GX_LLM_DEFAULT_PROVIDER=openai 2>&1)"; then
+  fail "dry-run with an unknown GX_LLM_DEFAULT_PROVIDER succeeded"
+fi
+grep -q 'GX_LLM_DEFAULT_PROVIDER' <<<"$out" || fail "the refusal does not name GX_LLM_DEFAULT_PROVIDER: $out"
+pass "a default LLM provider that is unknown or has no platform key is refused, naming the variable"
 
 # --- 4. a re-run must NOT rotate appSecret (sealed creds die with it) -------
 before="$(grep '^appSecret:' "$d/values.yaml")"

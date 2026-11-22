@@ -441,6 +441,35 @@ func applyVoiceEnv(cfg *wirenpc.Config, getenv func(string) string, log *slog.Lo
 	cfg.TTSTransport = transport
 }
 
+// deploymentLLMDefault reads the deployment-default LLM (#702, ADR-0036
+// amendment 2026-11-22) from GLYPHOXA_LLM_DEFAULT_PROVIDER and
+// GLYPHOXA_LLM_DEFAULT_MODEL, once, for every Mode: the provider and model a
+// Tenant with no LLM Provider Config of its own runs on. Both unset is the code
+// default (Groq, openai/gpt-oss-120b) and needs no key. An unknown provider, or
+// a named provider whose platform key env is empty, is an error the caller
+// treats as fatal — better a boot that says which variable is wrong than a
+// deployment where every keyless Tenant's session fails at its first turn.
+//
+// A model with no price row does not stop the boot (a new model id may be
+// perfectly valid) but is logged at WARN: it would be metered at the
+// conservative fallback rate, far above its real price.
+func deploymentLLMDefault(getenv func(string) string, log *slog.Logger) (llmbuild.DeploymentDefault, error) {
+	d, err := llmbuild.DeploymentDefaultFromEnv(getenv)
+	if err != nil {
+		return llmbuild.DeploymentDefault{}, err
+	}
+	provider := d.Provider()
+	model := d.VoiceModel(provider, "")
+	if !d.Priced() {
+		log.Warn("deployment-default LLM model has no price row: its usage is metered at the conservative fallback rate and can exhaust a plan allowance quickly; add it to internal/spend/prices.go or pick a priced model",
+			"provider", provider, "model", model, "env", llmbuild.EnvDefaultModel)
+	}
+	if getenv(llmbuild.EnvDefaultProvider) != "" || getenv(llmbuild.EnvDefaultModel) != "" {
+		log.Info("deployment-default LLM", "provider", provider, "model", model)
+	}
+	return d, nil
+}
+
 // privacyPolicyURL reads GLYPHOXA_PRIVACY_POLICY_URL — the deployment's published
 // privacy-policy page, which the Bot links from the transcription disclosure it
 // posts at Voice Session start (#519). Trimmed; blank means "not published", and
