@@ -69,34 +69,62 @@ func (b batchOnly) Generate(ctx context.Context, msgs []llm.Message) (string, er
 // NPC for the rest of the scene. A refused turn is therefore taken out of the
 // history; the turn itself still fails visibly (OnError, the fallback line).
 func TestReplier_RefusedTurnLeavesTheHistory(t *testing.T) {
+	// say runs one turn on a path and returns what it spoke.
+	type sayFunc func(t *testing.T, r *agent.Replier, text string) []string
+	stream := func(t *testing.T, r *agent.Replier, text string) []string {
+		t.Helper()
+		var spoken []string
+		if err := r.ReplyStream()(context.Background(), routed("bart", text), func(rep orchestrator.Reply) error {
+			spoken = append(spoken, rep.Sentence)
+			if rep.OnDelivered != nil {
+				rep.OnDelivered()
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("ReplyStream(%q) = %v", text, err)
+		}
+		return spoken
+	}
+	batch := func(t *testing.T, r *agent.Replier, text string) []string {
+		t.Helper()
+		var spoken []string
+		for _, rep := range deliver(r.Reply()(context.Background(), routed("bart", text))) {
+			spoken = append(spoken, rep.Sentence)
+		}
+		return spoken
+	}
 	for _, tc := range []struct {
 		name   string
 		engine func(*refusingEngine) agent.Engine
+		say    sayFunc
+		// textSink installs a TextSink (the Butler's textModalityTurn path).
+		textSink bool
 	}{
-		{"streaming engine", func(e *refusingEngine) agent.Engine { return e }},
-		{"batch engine", func(e *refusingEngine) agent.Engine { return batchOnly{e} }},
+		{"stream, streaming engine", func(e *refusingEngine) agent.Engine { return e }, stream, false},
+		{"stream, batch engine", func(e *refusingEngine) agent.Engine { return batchOnly{e} }, stream, false},
+		{"batch Reply", func(e *refusingEngine) agent.Engine { return e }, batch, false},
+		{"stream, TextSink Butler", func(e *refusingEngine) agent.Engine { return e }, stream, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng := &refusingEngine{trigger: "forbidden"}
 			var reported error
-			r := agent.NewReplier(agent.Config{
+			cfg := agent.Config{
 				Persona:     agent.Persona{AgentID: "bart", Voice: testVoice()},
 				Engine:      tc.engine(eng),
 				Synthesizer: stubSynth{},
 				OnError:     func(err error) { reported = err },
-			})
+			}
+			if tc.textSink {
+				cfg.TextSink = func(context.Context, string) error {
+					t.Error("a short answer must be spoken, not posted to the TextSink")
+					return nil
+				}
+			}
+			r := agent.NewReplier(cfg)
 			var spoken []string
 			say := func(text string) {
 				t.Helper()
-				if err := r.ReplyStream()(context.Background(), routed("bart", text), func(rep orchestrator.Reply) error {
-					spoken = append(spoken, rep.Sentence)
-					if rep.OnDelivered != nil {
-						rep.OnDelivered()
-					}
-					return nil
-				}); err != nil {
-					t.Fatalf("ReplyStream(%q) = %v", text, err)
-				}
+				spoken = append(spoken, tc.say(t, r, text)...)
 			}
 
 			say("Hail.")
