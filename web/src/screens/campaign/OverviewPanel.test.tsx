@@ -84,6 +84,8 @@ type World = {
   nodes: { id: string; name: string; nodeType?: NodeType; agentId?: string; bodyLen?: number }[];
   /** Agent ids the readiness read reports with facts in reach. */
   withFacts: string[];
+  /** Agent ids the readiness read has no row for (it predates them). */
+  readinessOmits?: string[];
   characters: number;
   maps: number;
   threads: number;
@@ -172,7 +174,7 @@ function mockTransport(world: World) {
       getRosterReadiness: () =>
         create(GetRosterReadinessResponseSchema, {
           agents: world.roster
-            .filter((a) => a.role === "character")
+            .filter((a) => a.role === "character" && !world.readinessOmits?.includes(a.id))
             .map((a) => ({
               agentId: a.id,
               linked: true,
@@ -362,6 +364,19 @@ describe("Overview attention band", () => {
     // A name goes straight to that NPC's editor.
     fireEvent.click(within(band).getByRole("button", { name: "Open Mira in Cast" }));
     expect(openAgent).toHaveBeenCalledWith("npc-2");
+  });
+
+  it("does not flag an NPC the readiness read predates, as the Cast view does not", async () => {
+    // Nova was created a moment ago: persona and voice are set, but neither the
+    // graph nor the readiness read has caught up with her yet.
+    renderOverview({
+      ...prepared(),
+      roster: [butler, npc("npc-1", "Bart", "rachel"), npc("npc-9", "Nova", "rachel")],
+      readinessOmits: ["npc-9"],
+    });
+    await settled();
+    expect(screen.queryByText(/not ready for a session/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nova/)).not.toBeInTheDocument();
   });
 
   it("reports things to tidy in the World wiki, by kind", async () => {

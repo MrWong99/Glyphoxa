@@ -337,12 +337,13 @@ describe("Campaign host", () => {
     switchView("cast");
     await waitFor(() => expect(persona().value).toBe("Grumbles."));
 
-    // Same for the mode within Cast.
-    fireEvent.click(screen.getByRole("button", { name: "Session prep" }));
+    // Same for the mode within Cast. (The segment's name carries the count of
+    // NPCs that are not ready once the readiness reads land: "Readiness 1".)
+    fireEvent.click(screen.getByRole("button", { name: /^Readiness/ }));
     switchView("players");
     await screen.findByText("Kira");
     switchView("cast");
-    expect(await screen.findByRole("button", { name: "Session prep" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByRole("button", { name: /^Readiness/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("offers the first-campaign card on every view while no campaign exists (#267)", async () => {
@@ -474,9 +475,9 @@ describe("Campaign cross-view jumps", () => {
     expect(moves).toEqual([]);
   });
 
-  it("jumps from a Session-prep mark to the NPC's wiki entry", async () => {
+  it("jumps from a Readiness mark to the NPC's wiki entry", async () => {
     const { moves } = renderScreen({ view: "cast" });
-    fireEvent.click(await screen.findByRole("button", { name: "Session prep" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Readiness/ }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Bart: Entry has content — missing, fix it" }),
     );
