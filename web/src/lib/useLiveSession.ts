@@ -3,6 +3,7 @@ import { useQuery } from "@connectrpc/connect-query";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 
 import { SessionService, type VoiceSession } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 
 // useLiveSession is the app-wide "is a Voice Session live right now" signal.
 // The shell mounts it on every screen, so the sidebar's Session item and the
@@ -46,7 +47,15 @@ export type LiveSession = {
 };
 
 export function useLiveSession(): LiveSession {
-  const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: liveSessionRefetchInterval });
+  // The live Voice Session is the GM's to see and run: no Guest Right covers
+  // it (ADR-0065), so a Campaign Guest's shell does not poll for it and always
+  // reads "not live".
+  const { manage } = useCan();
+  const { data } = useQuery(
+    SessionService.method.getSession,
+    {},
+    { refetchInterval: liveSessionRefetchInterval, enabled: manage },
+  );
   // Rendered from retained data: a failed background refetch keeps the last
   // known answer instead of flickering the marker off.
   const live = data?.active ?? false;

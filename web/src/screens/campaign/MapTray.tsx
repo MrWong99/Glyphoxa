@@ -44,8 +44,12 @@ export function MapTray({
   suggesting: boolean;
   suggestError: string | null;
   onSuggest: () => void;
-  /** Opens Map settings, where the "Depicts" entry is chosen. */
-  onLinkEntry: () => void;
+  /**
+   * Opens Map settings, where the "Depicts" entry is chosen. Absent for
+   * someone who may place pins but not change the map (ADR-0065): they are
+   * neither offered suggestions nor told how to turn them on.
+   */
+  onLinkEntry?: () => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -94,7 +98,7 @@ export function MapTray({
       {/* Without a "Depicts" entry there is no prose to read, so the button
           above is absent — and nothing used to say why, or what would bring it
           back. */}
-      {unpinned.length > 0 && !canSuggest && (
+      {unpinned.length > 0 && !canSuggest && onLinkEntry && (
         <p className="gx-maps__tray-note">
           {t("maps.suggestNeedsEntry")}{" "}
           <button type="button" className="gx-maps__link" onClick={onLinkEntry}>

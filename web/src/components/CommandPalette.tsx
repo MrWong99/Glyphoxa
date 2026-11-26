@@ -3,12 +3,25 @@ import { Command } from "cmdk";
 import { useQuery } from "@connectrpc/connect-query";
 import { keepPreviousData } from "@tanstack/react-query";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
-import { ArrowRightLeft, Lock, Plus, Radio, Search, ScrollText, Sparkles, UserRound } from "lucide-react";
+import {
+  ArrowRightLeft,
+  House,
+  Lock,
+  Plus,
+  Radio,
+  Search,
+  ScrollText,
+  Share2,
+  Sparkles,
+  UserRound,
+} from "lucide-react";
 import { toast } from "sonner";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
-import { CAMPAIGN_DESTINATIONS, screenDestinationsFor } from "@/app/destinations";
+import { useCan } from "@/app/capabilities";
+import { useCurrentUser } from "@/app/currentUser";
+import { campaignDestinationsFor, screenDestinationsFor } from "@/app/destinations";
 import { useScreenNav, type ScreenNav } from "@/app/screenNav";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
 import { useCampaignSwitch } from "@/components/useCampaignSwitch";
@@ -289,20 +302,52 @@ function PaletteDialog({
     return () => clearTimeout(id);
   }, [q]);
   const searching = debounced.trim() !== "";
-  const queryOpts = { enabled: searching, placeholderData: keepPreviousData, retry: false } as const;
+  const queryOpts = { placeholderData: keepPreviousData, retry: false } as const;
 
-  const nodesQ = useQuery(CampaignService.method.searchNodes, { query: debounced }, queryOpts);
-  const transcriptsQ = useQuery(SessionService.method.searchTranscripts, { query: debounced }, queryOpts);
-  const highlightsQ = useQuery(SessionService.method.searchHighlights, { query: debounced }, queryOpts);
+  // What this principal may search and reach (ADR-0065). For the GM every
+  // capability is true and the palette is what it always was; a Campaign Guest
+  // searches only what their Guest Rights open, and none of the GM's own
+  // reads below is made for them.
+  const can = useCan();
+  const user = useCurrentUser();
+  const viewer = { isPlatformAdmin: platformAdmin, guest: user?.guest };
+
+  const nodesQ = useQuery(
+    CampaignService.method.searchNodes,
+    { query: debounced },
+    { ...queryOpts, enabled: searching && can.wikiRead },
+  );
+  const transcriptsQ = useQuery(
+    SessionService.method.searchTranscripts,
+    { query: debounced },
+    { ...queryOpts, enabled: searching && can.transcriptsRead },
+  );
+  const highlightsQ = useQuery(
+    SessionService.method.searchHighlights,
+    { query: debounced },
+    { ...queryOpts, enabled: searching && can.highlightsRead },
+  );
 
   // The navigation layer's data: three reads the app already holds in its
   // cache on most screens (same requests, same cache entries), so opening the
   // palette is usually free. None of them is required — a read that fails
   // simply leaves its group out.
-  const activeQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
+  const activeQ = useQuery(
+    CampaignService.method.getActiveCampaign,
+    {},
+    { retry: false, enabled: can.manage },
+  );
   const activeId = activeQ.data?.campaign?.id;
-  const campaignsQ = useQuery(CampaignService.method.listCampaigns, { includeArchived: false });
-  const rosterQ = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
+  const campaignsQ = useQuery(
+    CampaignService.method.listCampaigns,
+    { includeArchived: false },
+    { enabled: can.manage },
+  );
+  const rosterQ = useQuery(
+    CampaignService.method.getCampaignRoster,
+    {},
+    { retry: rosterRetry, enabled: can.manage },
+  );
   const { live } = useLiveSession();
 
   // Tab must cycle INSIDE the dialog — without a trap it walks the inert page
@@ -337,9 +382,19 @@ function PaletteDialog({
   // ── Navigation layer, filtered by what is typed (not debounced: it is
   //    local, so it follows every keystroke) ────────────────────────────────
   const goToLabel = t("palette.groupGoTo");
-  const views = CAMPAIGN_DESTINATIONS.filter((d) => matches(q, goToLabel, t(d.label)));
-  const screens = screenDestinationsFor({ isPlatformAdmin: platformAdmin }).filter((d) =>
-    matches(q, goToLabel, t(d.label)),
+  const views = campaignDestinationsFor(viewer).filter((d) => matches(q, goToLabel, t(d.label)));
+  const screens = screenDestinationsFor(viewer).filter((d) => matches(q, goToLabel, t(d.label)));
+
+  // The other Workspaces (ADR-0065): the Campaigns shared with this user, and
+  // — while acting as a guest — the way back to their own table.
+  const workspacesLabel = t("access.workspaces");
+  const guestCampaignId = user?.guest?.campaignId;
+  const ownWorkspace =
+    user?.guest && user.hasOwnTenant && matches(q, workspacesLabel, t("access.myWorkspace"));
+  const sharedWorkspaces = (user?.guestWorkspaces ?? []).filter(
+    (w) =>
+      w.campaignId !== guestCampaignId &&
+      matches(q, workspacesLabel, t("access.sharedWithMe"), w.campaignName, w.tenantName),
   );
 
   // The cast is offered once something is typed: with an empty field the list
@@ -356,7 +411,7 @@ function PaletteDialog({
       matches(q, t("palette.switchCampaign", { name: c.name })),
   );
 
-  const showNewCampaign = matches(q, t("components.newCampaign"));
+  const showNewCampaign = can.manage && matches(q, t("components.newCampaign"));
   const showLiveSession = live && matches(q, t("palette.goToLiveSession"));
 
   const nodes = nodesQ.data?.nodes ?? [];
@@ -370,6 +425,8 @@ function PaletteDialog({
     screens.length > 0 ||
     cast.length > 0 ||
     otherCampaigns.length > 0 ||
+    ownWorkspace ||
+    sharedWorkspaces.length > 0 ||
     showNewCampaign ||
     showLiveSession;
   const anyResult = nodes.length > 0 || transcriptHits.length > 0 || highlightHits.length > 0;
@@ -470,6 +527,29 @@ function PaletteDialog({
               </Command.Group>
             )}
 
+            {(ownWorkspace || sharedWorkspaces.length > 0) && (
+              <Command.Group heading={workspacesLabel}>
+                {ownWorkspace && (
+                  <Row
+                    value="workspace:own"
+                    icon={<House size={14} />}
+                    title={t("access.myWorkspace")}
+                    onSelect={() => go((n) => n.goWorkspace(null))}
+                  />
+                )}
+                {sharedWorkspaces.map((w) => (
+                  <Row
+                    key={w.campaignId}
+                    value={`workspace:${w.campaignId}`}
+                    icon={<Share2 size={14} />}
+                    title={w.campaignName}
+                    meta={w.tenantName}
+                    onSelect={() => go((n) => n.goWorkspace(w.campaignId))}
+                  />
+                ))}
+              </Command.Group>
+            )}
+
             {(showNewCampaign || showLiveSession) && (
               <Command.Group heading={t("palette.groupActions")}>
                 {showLiveSession && (
@@ -491,7 +571,9 @@ function PaletteDialog({
               </Command.Group>
             )}
 
-            {!typed && <div className="gx-palette__hint">{t("palette.hint")}</div>}
+            {!typed && (
+              <div className="gx-palette__hint">{t(can.guest ? "access.paletteHint" : "palette.hint")}</div>
+            )}
 
             {searching && (
               <>

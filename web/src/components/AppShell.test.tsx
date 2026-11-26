@@ -227,7 +227,7 @@ describe("AppShell chrome", () => {
     expect(await screen.findByText("Select campaign")).toBeInTheDocument();
     // Every destination is still there to click; no count, no live marker.
     const nav = screen.getByRole("navigation", { name: "Main navigation" });
-    expect(within(nav).getAllByRole("link")).toHaveLength(11);
+    expect(within(nav).getAllByRole("link")).toHaveLength(12);
     expect(screen.queryByTestId("nav-live")).not.toBeInTheDocument();
     expect(container.querySelector(".gx-nav__count")).not.toBeInTheDocument();
   });
@@ -630,10 +630,11 @@ describe("AppShell sidebar (ADR-0063 amendment)", () => {
     ["Players", "/t/acme/campaign/players"],
     ["Suggestions", "/t/acme/campaign/proposals"],
     ["Planning", "/t/acme/campaign/planning"],
+    ["Sharing", "/t/acme/campaign/sharing"],
     ["Settings", "/t/acme/campaign/settings"],
   ];
 
-  it("labels the campaign section with the Active Campaign and lists its eight views", async () => {
+  it("labels the campaign section with the Active Campaign and lists its nine views", async () => {
     const { container } = renderShell();
     await settled(container);
 
@@ -681,7 +682,7 @@ describe("AppShell sidebar (ADR-0063 amendment)", () => {
 
     const main = nav.querySelector(".gx-nav__main") as HTMLElement;
     const foot = nav.querySelector(".gx-nav__foot") as HTMLElement;
-    // The scrolling list: the eight views, then Session.
+    // The scrolling list: the nine views, then Session.
     expect(within(main).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual([
       ...VIEWS.map(([, href]) => href),
       "/t/acme/session",
@@ -755,7 +756,7 @@ describe("AppShell sidebar (ADR-0063 amendment)", () => {
     expect(await within(sidebar(container)).findByText("No campaign yet")).toBeInTheDocument();
     // The views are still listed: each leads to the create-first-campaign card.
     const section = screen.getByRole("group", { name: /campaign.*no campaign yet/i });
-    expect(within(section).getAllByRole("link")).toHaveLength(8);
+    expect(within(section).getAllByRole("link")).toHaveLength(9);
   });
 
   it("is localized", async () => {

@@ -3,14 +3,15 @@ import { useMutation } from "@connectrpc/connect-query";
 import { toast } from "sonner";
 
 import { AdminService } from "@gen/glyphoxa/management/v1/management_pb";
+import { SNOWFLAKE_ERRORS } from "@/components/access/invitationParts";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
-import { useI18n, type MessageKey } from "@/i18n";
+import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/connectError";
-import { snowflakeProblem, type SnowflakeProblem } from "@/lib/invitationLink";
+import { snowflakeProblem } from "@/lib/invitationLink";
 import { useRefreshOverview } from "./refreshOverview";
 
 // "Add a person": an Access Grant by Discord User ID (ADR-0065). The grant is
@@ -20,11 +21,6 @@ import { useRefreshOverview } from "./refreshOverview";
 // "May use the platform's API keys" starts OFF: an admitted person brings their
 // own provider keys unless the admin decides the instance pays for them. The
 // sentence under the switch says what turning it on costs.
-
-export const SNOWFLAKE_ERRORS: Record<SnowflakeProblem, MessageKey> = {
-  digits: "access.discordUserIdDigits",
-  length: "access.discordUserIdLength",
-};
 
 export function AddPersonCard({ open }: { open: boolean }) {
   const { t } = useI18n();

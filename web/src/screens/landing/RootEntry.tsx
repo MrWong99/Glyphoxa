@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
+import { workspaceSlug } from "@/app/workspace";
 import { consumeReturnTo } from "@/lib/returnTo";
 import { Landing } from "./Landing";
 
@@ -29,9 +30,6 @@ import { Landing } from "./Landing";
 // the free-beta signup on an explicitly OPEN deployment (fail-safe: neutral
 // copy, plain sign-in CTA).
 
-// The cosmetic tenant slug in the app path (ADR-0039 pass-through) — the same
-// "default" the AuthGate login flow lands on.
-const DEFAULT_TENANT = "default";
 
 // How long the boot placeholder may hold the public root before the static
 // landing page wins over a still-pending session probe.
@@ -45,6 +43,10 @@ export function RootEntry() {
   const { data, status } = useQuery(AuthService.method.getCurrentUser, {}, { retry: false });
   const admission = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const signedIn = status === "success" && Boolean(data?.user);
+  // The slug of the Workspace the session acts as (ADR-0065): the user's own,
+  // or the Campaign they are a guest of. Landing on the other one would read
+  // as a request to switch.
+  const landingSlug = workspaceSlug(data);
   const open = admission.data?.admissionMode === AdmissionMode.OPEN;
 
   const [graceOver, setGraceOver] = useState(false);
@@ -66,11 +68,11 @@ export function RootEntry() {
       // ADR-0063 amendment) — one place owns that, not this component.
       void navigate({
         to: "/t/$tenantSlug",
-        params: { tenantSlug: DEFAULT_TENANT },
+        params: { tenantSlug: landingSlug },
         replace: true,
       });
     }
-  }, [signedIn, navigate]);
+  }, [signedIn, landingSlug, navigate]);
 
   if ((status === "pending" && !graceOver) || signedIn) {
     return <div className="gx-auth-boot" aria-busy="true" aria-label={t("common.loading")} />;

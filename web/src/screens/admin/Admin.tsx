@@ -14,7 +14,7 @@ import { AddPersonCard } from "./AddPersonCard";
 import { InvitationLinks } from "./InvitationLinks";
 import { PeopleSection } from "./PeopleSection";
 
-import "./admin.css";
+import "@/components/access/access.css";
 
 // The Admin screen (ADR-0065): who may use this instance, and whose tables may
 // spend its Platform Keys. It exists for a Platform Admin only — the route

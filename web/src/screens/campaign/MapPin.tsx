@@ -60,12 +60,16 @@ export function PinGlyph({
   onOpenChange: (open: boolean) => void;
   /** Pointer, keyboard and click handlers of the map's gesture grammar. */
   dotProps: ButtonHTMLAttributes<HTMLButtonElement>;
-  /** Id of the element that explains how a pin is moved. */
-  describedBy: string;
+  /** Id of the element that explains how a pin is moved (absent when it cannot be). */
+  describedBy?: string;
   updating: boolean;
-  onChange: (change: PinChange) => void;
+  /**
+   * Relabel / hide, and remove. Both absent for a viewer without maps.edit
+   * (ADR-0065): the card then only shows the entry and the way to open it.
+   */
+  onChange?: (change: PinChange) => void;
   onOpenEntry?: () => void;
-  onRemove: () => void;
+  onRemove?: () => void;
 }) {
   const { t } = useI18n();
   const meta = metaOf(pin.nodeType);
@@ -132,9 +136,9 @@ function PinCard({
   pin: Pin;
   node?: PbNode;
   updating: boolean;
-  onChange: (change: PinChange) => void;
+  onChange?: (change: PinChange) => void;
   onOpenEntry?: () => void;
-  onRemove: () => void;
+  onRemove?: () => void;
 }) {
   const { t } = useI18n();
   const meta = metaOf(pin.nodeType);
@@ -153,7 +157,7 @@ function PinCard({
   const saveLabel = (ev: FormEvent) => {
     ev.preventDefault();
     if (!labelChanged || updating) return;
-    onChange({ labelOverride: labelDraft.trim() });
+    onChange?.({ labelOverride: labelDraft.trim() });
   };
 
   return (
@@ -187,46 +191,52 @@ function PinCard({
         </Button>
       )}
 
-      <form className="gx-maps-card__label" onSubmit={saveLabel}>
-        <Input
-          label={t("maps.pinLabelLabel")}
-          hint={t("maps.pinLabelHint")}
-          value={labelDraft}
-          placeholder={pin.nodeName}
-          maxLength={200}
-          onChange={(e) => setLabelDraft(e.target.value)}
-        />
-        {/* Unavailable and busy through ARIA, not `disabled`/`loading`: a
-            browser moves focus off a natively disabled button to <body>, and
-            this one is pressed, then has nothing left to save. saveLabel
-            ignores a press in either state. */}
-        <Button
-          type="submit"
-          variant="secondary"
-          size="sm"
-          aria-disabled={!labelChanged || updating || undefined}
-          aria-busy={(updating && labelChanged) || undefined}
-        >
-          {t("maps.pinLabelSave")}
-        </Button>
-      </form>
+      {onChange && (
+        <>
+          <form className="gx-maps-card__label" onSubmit={saveLabel}>
+            <Input
+              label={t("maps.pinLabelLabel")}
+              hint={t("maps.pinLabelHint")}
+              value={labelDraft}
+              placeholder={pin.nodeName}
+              maxLength={200}
+              onChange={(e) => setLabelDraft(e.target.value)}
+            />
+            {/* Unavailable and busy through ARIA, not `disabled`/`loading`: a
+                browser moves focus off a natively disabled button to <body>, and
+                this one is pressed, then has nothing left to save. saveLabel
+                ignores a press in either state. */}
+            <Button
+              type="submit"
+              variant="secondary"
+              size="sm"
+              aria-disabled={!labelChanged || updating || undefined}
+              aria-busy={(updating && labelChanged) || undefined}
+            >
+              {t("maps.pinLabelSave")}
+            </Button>
+          </form>
 
-      <div className="gx-maps-card__privacy">
-        <Switch
-          label={t("maps.pinHideLabel")}
-          checked={pin.gmPrivate || pin.nodeGmPrivate}
-          // An entry that is GM-only hides every pin of it, whatever the pin says.
-          disabled={pin.nodeGmPrivate}
-          onCheckedChange={(next) => onChange({ gmPrivate: next })}
-        />
-        {pin.nodeGmPrivate && <span className="gx-field__hint">{t("maps.pinHiddenByEntry")}</span>}
-      </div>
+          <div className="gx-maps-card__privacy">
+            <Switch
+              label={t("maps.pinHideLabel")}
+              checked={pin.gmPrivate || pin.nodeGmPrivate}
+              // An entry that is GM-only hides every pin of it, whatever the pin says.
+              disabled={pin.nodeGmPrivate}
+              onCheckedChange={(next) => onChange({ gmPrivate: next })}
+            />
+            {pin.nodeGmPrivate && <span className="gx-field__hint">{t("maps.pinHiddenByEntry")}</span>}
+          </div>
+        </>
+      )}
 
-      <div className="gx-maps-card__actions">
-        <Button variant="ghost" size="sm" iconStart={<MapPinOff size={13} />} onClick={onRemove}>
-          {t("maps.pinRemove")}
-        </Button>
-      </div>
+      {onRemove && (
+        <div className="gx-maps-card__actions">
+          <Button variant="ghost" size="sm" iconStart={<MapPinOff size={13} />} onClick={onRemove}>
+            {t("maps.pinRemove")}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

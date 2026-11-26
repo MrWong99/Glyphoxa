@@ -3,6 +3,7 @@ import { useQuery } from "@connectrpc/connect-query";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useI18n } from "@/i18n";
 import { Select } from "@/components/ui/Select";
 import { egoNetwork } from "./layout";
@@ -63,7 +64,9 @@ type LensState = {
  */
 export function useAgentLens(agentID: string, nodes: GraphNode[], edges: GraphEdge[]) {
   const { t } = useI18n();
-  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {});
+  // The lens is a cast tool; a Campaign Guest has no cast to pick from.
+  const { manage } = useCan();
+  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { enabled: manage });
   // Only Character NPCs: the Butler is Address-Only and has no linked Node by
   // design (ADR-0009), so there is nothing to lens.
   const cast = useMemo(

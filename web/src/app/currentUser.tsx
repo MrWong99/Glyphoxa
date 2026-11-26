@@ -19,7 +19,22 @@ export type CurrentUser = User & {
   guest?: GuestWorkspace;
   /** Every Campaign the user is a Campaign Guest of. */
   guestWorkspaces: GuestWorkspace[];
+  /**
+   * The Tenant this session resolves to: the user's own, or — while acting as
+   * a guest — the HOST's. Empty when the session resolves to no Workspace.
+   */
+  tenantId: string;
 };
+
+/**
+ * True when the session has nowhere to be: no Tenant of the user's own and no
+ * Campaign shared with them (a Campaign Guest whose last Campaign was taken
+ * away). The shell has nothing to show such a user and says so instead of
+ * rendering screens whose every read would be refused.
+ */
+export function hasNoWorkspace(user: CurrentUser): boolean {
+  return !user.guest && !user.hasOwnTenant && user.tenantId === "" && user.guestWorkspaces.length === 0;
+}
 
 /** Folds a GetCurrentUser answer into a CurrentUser; undefined when it names no user. */
 export function toCurrentUser(res: GetCurrentUserResponse): CurrentUser | undefined {
@@ -30,6 +45,7 @@ export function toCurrentUser(res: GetCurrentUserResponse): CurrentUser | undefi
     hasOwnTenant: res.hasOwnTenant,
     guest: res.guest,
     guestWorkspaces: res.guestWorkspaces,
+    tenantId: res.tenantId,
   };
 }
 

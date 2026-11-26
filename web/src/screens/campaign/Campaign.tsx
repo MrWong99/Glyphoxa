@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { create } from "@bufbuild/protobuf";
 import { useQuery } from "@connectrpc/connect-query";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignSchema, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
+import { useCurrentUser } from "@/app/currentUser";
 import { campaignDestination } from "@/app/destinations";
 import { useScreenNav } from "@/app/screenNav";
 import { Card } from "@/components/ui/Card";
@@ -21,6 +24,7 @@ import { PlanningPanel } from "./PlanningPanel";
 import { stopExchangesOutside } from "./planningStream";
 import { PlayersPanel } from "./PlayersPanel";
 import { ProposalsPanel } from "./ProposalsPanel";
+import { SharingPanel } from "./SharingPanel";
 import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "./views";
 
 import "./campaign.css";
@@ -45,7 +49,7 @@ const NARROW_VIEWS: ReadonlySet<CampaignView> = new Set(["proposals", "settings"
 //
 // Everything a view does lives in its own panel file (OverviewPanel, CastPanel,
 // KnowledgePanel, MapsPanel, PlayersPanel, ProposalsPanel, PlanningPanel,
-// CampaignSettingsPanel). The host takes no callbacks from the route: it reaches
+// SharingPanel, CampaignSettingsPanel). The host takes no callbacks from the route: it reaches
 // navigation through useScreenNav(), so it — and every panel — stays router-free.
 
 // useCampaignEpoch counts Active Campaign CHANGES: it stays 0 while the first
@@ -73,7 +77,15 @@ function useCampaignEpoch(campaignID: string | undefined): number {
 export function Campaign({ view = DEFAULT_CAMPAIGN_VIEW }: { view?: CampaignView }) {
   // Same retry rule as the screen's own observer of this query: whichever
   // observer mounts first decides how the fetch retries, and this one does.
-  const { data } = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
+  // A Campaign Guest has no roster to read (the cast is the GM's) and no
+  // Active Campaign to switch: their Workspace IS one Campaign, and the
+  // WorkspaceGate already remounts everything when it changes.
+  const { manage } = useCan();
+  const { data } = useQuery(
+    CampaignService.method.getCampaignRoster,
+    {},
+    { retry: rosterRetry, enabled: manage },
+  );
   const epoch = useCampaignEpoch(data?.campaign?.id);
 
   // A planning-chat reply keeps streaming while the GM looks at other views
@@ -105,9 +117,21 @@ export function Campaign({ view = DEFAULT_CAMPAIGN_VIEW }: { view?: CampaignView
 function CampaignHost({ view }: { view: CampaignView }) {
   const { t } = useI18n();
   const nav = useScreenNav();
-  const rosterQ = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
+  const can = useCan();
+  const guest = useCurrentUser()?.guest;
+  const rosterQ = useQuery(
+    CampaignService.method.getCampaignRoster,
+    {},
+    { retry: rosterRetry, enabled: can.manage },
+  );
   const { data, status, error } = rosterQ;
-  const campaign = data?.campaign;
+  // For a Campaign Guest the campaign is the one their Workspace names — the
+  // session probe already said which — and its cast is not theirs to see.
+  const guestCampaign = useMemo(
+    () => (guest ? create(CampaignSchema, { id: guest.campaignId, name: guest.campaignName }) : undefined),
+    [guest],
+  );
+  const campaign = guestCampaign ?? data?.campaign;
   const roster = useMemo(() => data?.roster ?? [], [data]);
 
   // Cross-view jumps are navigations, not screen state: the target view lives
@@ -188,6 +212,11 @@ function CampaignHost({ view }: { view: CampaignView }) {
           <PlayersPanel />
         ) : view === "proposals" ? (
           <ProposalsPanel />
+        ) : view === "sharing" ? (
+          <SharingPanel />
+        ) : view === "planning" && guestCampaign ? (
+          // A guest's campaign id comes with their Workspace: nothing to wait for.
+          <PlanningPanel key={guestCampaign.id} campaignId={guestCampaign.id} />
         ) : view === "planning" ? (
           // The ChatService RPCs are campaign-scoped (ADR-0062), so the panel
           // waits for the roster read to hand it the campaign id.

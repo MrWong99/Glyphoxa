@@ -4,15 +4,18 @@ import {
   createRoute,
   createRouter,
   redirect,
+  Navigate,
   Outlet,
 } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
 import { useCurrentUser } from "@/app/currentUser";
+import { campaignDestinationsFor, landingFor, screenDestination } from "@/app/destinations";
+import { WorkspaceGate } from "@/app/WorkspaceGate";
 import { RouterScreenNav } from "@/app/RouterScreenNav";
 import type { ScreenSearch as NavSearch } from "@/app/screenNav";
-import { DEFAULT_CAMPAIGN_VIEW, isCampaignView } from "@/screens/campaign/views";
+import { DEFAULT_CAMPAIGN_VIEW, isCampaignView, type CampaignView } from "@/screens/campaign/views";
 import { useI18n } from "@/i18n";
 import { Login } from "@/screens/login/Login";
 import { CreateTenant } from "@/screens/onboarding/CreateTenant";
@@ -36,6 +39,11 @@ const screenChunks = {
 // exists for a Platform Admin only (ADR-0065), so warming it for every GM
 // would be a download nobody uses.
 const Admin = lazy(() => import("@/screens/admin/Admin").then((m) => ({ default: m.Admin })));
+// A Campaign Guest's Session screen (ADR-0065): the read-only archive of past
+// sessions. Its own chunk, fetched only by a guest who opens it.
+const SessionArchive = lazy(() =>
+  import("@/screens/session/SessionArchive").then((m) => ({ default: m.SessionArchive })),
+);
 const Configuration = lazy(() => screenChunks.configuration().then((m) => ({ default: m.Configuration })));
 const Campaign = lazy(() => screenChunks.campaign().then((m) => ({ default: m.Campaign })));
 const Session = lazy(() => screenChunks.session().then((m) => ({ default: m.Session })));
@@ -64,6 +72,11 @@ function loaded(screen: ReactNode) {
 // (ADR-0039) the slug is a thin pass-through. The shell is wrapped in the
 // AuthGate (ADR-0016): it probes GetCurrentUser at boot and redirects to /login
 // on a 401, then hands the real operator identity to the shell.
+//
+// Since ADR-0065 the slug also says which WORKSPACE the page belongs to: the
+// user's own Tenant (`default`, as ever) or a Campaign they are a guest of
+// (`guest-<campaignId>`) — see app/workspace.ts. It still authorizes nothing;
+// the WorkspaceGate under the AuthGate makes the server-side session follow it.
 
 const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -180,7 +193,13 @@ const tenantRoute = createRoute({
       // sidebar, the campaign switcher and the screen in the Outlet all move
       // through the same useScreenNav() and none of them imports the router.
       <RouterScreenNav tenantSlug={tenantSlug}>
-        <AuthGate>{(user) => <AppShell tenantSlug={tenantSlug} user={user} />}</AuthGate>
+        <AuthGate>
+          {(user) => (
+            <WorkspaceGate tenantSlug={tenantSlug} user={user}>
+              {(shown) => <AppShell tenantSlug={tenantSlug} user={shown} />}
+            </WorkspaceGate>
+          )}
+        </AuthGate>
         {/* Holds a navigation away while an editor has unsaved edits (W10). */}
         <NavigationGuard />
       </RouterScreenNav>
@@ -275,6 +294,64 @@ function AdminScreen() {
   return loaded(<Admin />);
 }
 
+// GuestGuard is the deep-link half of the guest shell (ADR-0065). The sidebar
+// and the palette only OFFER a Campaign Guest what their Guest Rights open;
+// this makes a typed or bookmarked URL obey the same list (app/destinations.ts),
+// so a screen whose every call would be refused is never mounted:
+//
+//   - a destination that is shared renders;
+//   - the Workspace's front door (the Overview, where the tenant index and
+//     every "unknown view" redirect land) forwards to the first destination
+//     that is shared;
+//   - anything else is the not-found page, worded for a guest and listing
+//     what they can open;
+//   - a guest nothing is shared with yet is told exactly that.
+//
+// For the GM it is a pass-through.
+function GuestGuard({
+  tenantSlug,
+  screen,
+  view,
+  children,
+}: {
+  tenantSlug: string;
+  screen: string;
+  view?: CampaignView;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  const user = useCurrentUser();
+  if (!user?.guest) return children;
+  const allowed = view
+    ? campaignDestinationsFor(user).some((d) => d.view === view)
+    : screenDestination(screen, user) !== undefined;
+  if (allowed) return children;
+  const landing = landingFor(user);
+  if (!landing) {
+    return (
+      <Placeholder
+        title={t("access.nothingSharedTitle")}
+        lede={t("access.nothingSharedBody", {
+          campaign: user.guest.campaignName,
+          tenant: user.guest.tenantName,
+        })}
+      />
+    );
+  }
+  if (screen === "campaign" && view === DEFAULT_CAMPAIGN_VIEW) {
+    return landing.screen === "campaign" ? (
+      <Navigate
+        to="/t/$tenantSlug/$screen/$view"
+        params={{ tenantSlug, screen: "campaign", view: landing.view }}
+        replace
+      />
+    ) : (
+      <Navigate to="/t/$tenantSlug/$screen" params={{ tenantSlug, screen: landing.screen }} replace />
+    );
+  }
+  return <Placeholder title={t("access.notSharedTitle")} lede={t("access.notSharedBody")} />;
+}
+
 // /t/:tenantSlug/:screen — selects the active screen: Setup (configuration),
 // Session, the Campaigns list and — for a Platform Admin — Admin. The Campaign
 // screen never renders here: its sub-view is a path segment (ADR-0063), so a
@@ -297,25 +374,34 @@ const screenRoute = createRoute({
     });
   },
   component: function Screen() {
-    const { screen } = screenRoute.useParams();
+    const { tenantSlug, screen } = screenRoute.useParams();
     // useI18n is called unconditionally (hook rules) even though only the
     // notFound branch renders localized copy of its own.
     const { t } = useI18n();
-    switch (screen) {
-      case "configuration":
-        return loaded(<Configuration />);
-      case "session":
-        // The Session screen owns its search keys through useScreenNav(), like
-        // the Campaign screen: ?session= is the session on screen (sticky),
-        // ?line= and ?highlight= are applied once and stripped by the screen.
-        return loaded(<Session />);
-      case "campaigns":
-        return loaded(<Campaigns />);
-      case "admin":
-        return <AdminScreen />;
-      default:
-        return <Placeholder title={t("auth.notFoundTitle")} />;
-    }
+    const guest = useCurrentUser()?.guest !== undefined;
+    const content = () => {
+      switch (screen) {
+        case "configuration":
+          return loaded(<Configuration />);
+        case "session":
+          // The Session screen owns its search keys through useScreenNav(), like
+          // the Campaign screen: ?session= is the session on screen (sticky),
+          // ?line= and ?highlight= are applied once and stripped by the screen.
+          // A Campaign Guest gets the archive instead: past sessions, read-only.
+          return guest ? loaded(<SessionArchive />) : loaded(<Session />);
+        case "campaigns":
+          return loaded(<Campaigns />);
+        case "admin":
+          return <AdminScreen />;
+        default:
+          return <Placeholder title={t("auth.notFoundTitle")} />;
+      }
+    };
+    return (
+      <GuestGuard tenantSlug={tenantSlug} screen={screen}>
+        {content()}
+      </GuestGuard>
+    );
   },
 });
 
@@ -371,7 +457,7 @@ const subviewRoute = createRoute({
     }
   },
   component: function SubviewScreen() {
-    const { screen, view } = subviewRoute.useParams();
+    const { tenantSlug, screen, view } = subviewRoute.useParams();
     const { t } = useI18n();
     if (screen === "campaign" && isCampaignView(view)) {
       // The screen is told only WHICH view the path names. Everything it used
@@ -380,7 +466,11 @@ const subviewRoute = createRoute({
       // useScreenNav(), provided by the tenant layout above (ADR-0063
       // amendment), so the screens stay router-free (and router-mock-free in
       // tests).
-      return loaded(<Campaign view={view} />);
+      return (
+        <GuestGuard tenantSlug={tenantSlug} screen={screen} view={view}>
+          {loaded(<Campaign view={view} />)}
+        </GuestGuard>
+      );
     }
     return <Placeholder title={t("auth.notFoundTitle")} />;
   },

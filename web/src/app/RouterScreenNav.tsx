@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 
 import { DEFAULT_CAMPAIGN_VIEW, isCampaignView } from "@/screens/campaign/views";
+import { OWN_WORKSPACE_SLUG, guestWorkspaceSlug } from "./workspace";
 import {
   SCREENS,
   ScreenNavProvider,
@@ -88,6 +89,15 @@ export function RouterScreenNav({ tenantSlug, children }: { tenantSlug: string; 
           });
         },
         goCampaignView,
+        // The tenant index of the other Workspace: its route decides where
+        // that Workspace opens (the first view this user may see there).
+        goWorkspace: (guestCampaignId) =>
+          void navigate({
+            to: "/t/$tenantSlug",
+            params: {
+              tenantSlug: guestCampaignId ? guestWorkspaceSlug(guestCampaignId) : OWN_WORKSPACE_SLUG,
+            },
+          }),
       };
     },
     [navigate, tenantSlug, screen, view, searchKey, params.screen, params.view],

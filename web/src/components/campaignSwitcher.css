@@ -239,3 +239,31 @@
     max-width: none;
   }
 }
+
+/* ── Workspaces (ADR-0065) ───────────────────────────────────────────────────
+ * "Shared with me": the campaigns the user is a Campaign Guest of, as a second
+ * group under their own. */
+.gx-campaign-switcher__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+  padding-top: var(--spacing-xs);
+  border-top: 1px solid var(--border-subtle);
+}
+/* The guest's switcher opens with the group: no rule above the first thing. */
+.gx-campaign-switcher__panel > .gx-campaign-switcher__group:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.gx-campaign-switcher__group-label {
+  padding: 0 var(--spacing-sm);
+  color: var(--text-subtle);
+}
+/* The guest indicator on the trigger: "Guest of <host table>". It reuses the
+ * "Next: …" line's size and weight, in the neutral gold of a role, not the
+ * live colour. */
+.gx-campaign-switcher__guest-of {
+  color: var(--text-muted);
+}

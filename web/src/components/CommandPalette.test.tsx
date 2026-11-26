@@ -286,6 +286,7 @@ describe("CommandPalette navigation layer", () => {
       "Players",
       "Suggestions",
       "Planning",
+      "Sharing",
       "Settings",
       "Session",
       "Campaigns",
@@ -480,7 +481,7 @@ describe("CommandPalette navigation layer", () => {
     const { queryClient } = renderPalette({ noCampaign: true });
     openPalette();
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(within(palette().getByRole("group", { name: "Go to" })).getAllByRole("option")).toHaveLength(11);
+    expect(within(palette().getByRole("group", { name: "Go to" })).getAllByRole("option")).toHaveLength(12);
     expect(palette().getByRole("option", { name: "New campaign" })).toBeInTheDocument();
     expect(palette().queryByRole("alert")).not.toBeInTheDocument();
   });

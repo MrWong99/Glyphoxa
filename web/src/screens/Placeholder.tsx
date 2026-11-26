@@ -1,7 +1,7 @@
 import { Link, useParams } from "@tanstack/react-router";
 
 import { useCurrentUser } from "@/app/currentUser";
-import { CAMPAIGN_DESTINATIONS, screenDestinationsFor } from "@/app/destinations";
+import { campaignDestinationsFor, screenDestinationsFor } from "@/app/destinations";
 import { Card, CardBody } from "@/components/ui/Card";
 import { useI18n } from "@/i18n";
 
@@ -11,25 +11,28 @@ import "./placeholder.css";
 // screen that does not exist. It says so plainly and then lists every place
 // that DOES exist — the campaign's views and the other screens, the same
 // destinations the sidebar offers THIS viewer (app/destinations.ts: the Admin
-// screen is listed for a Platform Admin only, ADR-0065) — so a mistyped or
+// screen is listed for a Platform Admin only, and a Campaign Guest is listed
+// exactly what is shared with them, ADR-0065) — so a mistyped or
 // outdated link is one click from wherever it was meant to go. The title
 // arrives pre-translated (the caller picks the key); this screen owns its lede
 // and the list.
-export function Placeholder({ title }: { title: string }) {
+export function Placeholder({ title, lede }: { title: string; lede?: string }) {
   const { t } = useI18n();
   const { tenantSlug } = useParams({ strict: false });
-  const screens = screenDestinationsFor(useCurrentUser());
+  const user = useCurrentUser();
+  const views = campaignDestinationsFor(user);
+  const screens = screenDestinationsFor(user);
   return (
     <div className="gx-providers">
       <h1>{title}</h1>
-      <p className="gx-providers__lede">{t("auth.placeholderLede")}</p>
-      {tenantSlug && (
+      <p className="gx-providers__lede">{lede ?? t("auth.placeholderLede")}</p>
+      {tenantSlug && views.length + screens.length > 0 && (
         <Card>
           <CardBody>
             <nav className="gx-placeholder" aria-label={t("shell.placeholderGoTo")}>
               <h2 className="gx-placeholder__heading">{t("shell.placeholderGoTo")}</h2>
               <ul className="gx-placeholder__list">
-                {CAMPAIGN_DESTINATIONS.map((d) => {
+                {views.map((d) => {
                   const Icon = d.icon;
                   return (
                     <li key={d.view}>
