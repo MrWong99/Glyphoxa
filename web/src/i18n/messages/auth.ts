@@ -40,6 +40,10 @@ export const en = {
     "Couldn't save the name — you can rename your table later, or try again now.",
   "auth.onboardingSaveContinue": "Save and continue",
   "auth.onboardingSkip": "Skip for now",
+  // The "Next" list reuses the Setup checklist's step labels (config.step*).
+  "auth.onboardingNextTitle": "Next",
+  "auth.onboardingNextDiscordHint": " — you need Manage Server rights on that server",
+  "auth.onboardingNextWhere": "Setup walks you through each step and ticks it off.",
 
   // ---- AuthGate boot error ----
   "auth.gateLoadError": "Couldn't load your account: {message}",
@@ -127,10 +131,10 @@ export const en = {
   "auth.howStep1Body": "Use the Discord account you play on.",
   "auth.howStep2Title": "Connect your Discord server",
   "auth.howStep2Body":
-    "In Setup, under “Discord connection”, add Glyphoxa to your server and save the server your group plays on.",
+    "In Setup, under “Discord”, add Glyphoxa to your server and link the server your group plays on.",
   "auth.howStep3Title": "Add your AI service keys",
   "auth.howStep3Body":
-    "Still in Setup, under “AI service keys”: one for the AI model, one for voice & speech. Each is checked and shows “Working” once it answers.",
+    "Still in Setup, under “AI services”: one for the AI model, one for voice & speech. Each is checked and shows “Working” once it answers.",
   "auth.howStep3BodyOpen":
     "On the free beta you can skip this at first: a small monthly allowance is included.",
   "auth.howStep4Title": "Create a campaign and its cast",
@@ -228,6 +232,9 @@ export const de: Record<keyof typeof en, string> = {
     "Der Name konnte nicht gespeichert werden — du kannst deinen Tisch später umbenennen oder es jetzt noch einmal versuchen.",
   "auth.onboardingSaveContinue": "Speichern und weiter",
   "auth.onboardingSkip": "Jetzt überspringen",
+  "auth.onboardingNextTitle": "Als Nächstes",
+  "auth.onboardingNextDiscordHint": " — dafür brauchst du auf dem Server das Recht „Server verwalten“",
+  "auth.onboardingNextWhere": "Die Einrichtung führt dich durch jeden Schritt und hakt ihn ab.",
 
   "auth.gateLoadError": "Dein Konto konnte nicht geladen werden: {message}",
 
@@ -304,10 +311,10 @@ export const de: Record<keyof typeof en, string> = {
   "auth.howStep1Body": "Nimm den Discord-Account, mit dem du spielst.",
   "auth.howStep2Title": "Deinen Discord-Server verbinden",
   "auth.howStep2Body":
-    "In der Einrichtung unter „Discord-Verbindung“ fügst du Glyphoxa zu deinem Server hinzu und speicherst den Server, auf dem deine Gruppe spielt.",
+    "In der Einrichtung unter „Discord“ fügst du Glyphoxa zu deinem Server hinzu und verknüpfst den Server, auf dem deine Gruppe spielt.",
   "auth.howStep3Title": "Deine KI-Dienst-Schlüssel hinterlegen",
   "auth.howStep3Body":
-    "Ebenfalls in der Einrichtung, unter „KI-Dienst-Schlüssel“: einer für das KI-Modell, einer für Stimme & Sprache. Jeder wird geprüft und zeigt „Funktioniert“, sobald er antwortet.",
+    "Ebenfalls in der Einrichtung, unter „KI-Dienste“: einer für das KI-Modell, einer für Stimme & Sprache. Jeder wird geprüft und zeigt „Funktioniert“, sobald er antwortet.",
   "auth.howStep3BodyOpen":
     "In der kostenlosen Beta kannst du das zunächst überspringen: Ein kleines monatliches Guthaben ist inklusive.",
   "auth.howStep4Title": "Kampagne und Besetzung anlegen",

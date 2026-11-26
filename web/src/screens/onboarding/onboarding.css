@@ -1,0 +1,26 @@
+/* Onboarding's "Next" list: the Setup checklist's steps, in order, on the
+ * login card (login.css). */
+.gx-login__next {
+  margin: 0 0 8px;
+  text-align: left;
+}
+
+.gx-login__next-title {
+  margin: 0 0 4px;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+.gx-login__next-list {
+  margin: 0 0 4px;
+  padding-left: var(--spacing-lg);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+.gx-login__next-hint {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}

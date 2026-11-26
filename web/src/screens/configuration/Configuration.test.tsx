@@ -1,9 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { toast } from "sonner";
 
 import {
+  AuthService,
   CampaignService,
   ProviderService,
   VoiceService,
@@ -30,8 +33,18 @@ import {
   type SetSpendCapsRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { MemoryScreenNav, type ScreenLocation } from "@/app/screenNav";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Configuration } from "./Configuration";
+import { currentUser, keyRow, usageSummary } from "./testRows";
+
+// Toasts are events the screen reports; the tests assert on them directly.
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+
+beforeEach(() => {
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.error).mockClear();
+});
 
 const CAMPAIGN = {
   id: "11111111-1111-1111-1111-111111111111",
@@ -42,6 +55,9 @@ const CAMPAIGN = {
 };
 
 // cred builds a ProviderCredential the List RPC returns. saved => masked + last4.
+// A saved key carries the date it was saved, as the server sends it.
+const SAVED_AT = new Date("2026-11-03T12:00:00Z");
+
 function cred(component: string, provider: string, last4?: string, model = "", platform = false) {
   return create(ProviderCredentialSchema, {
     component,
@@ -50,6 +66,7 @@ function cred(component: string, provider: string, last4?: string, model = "", p
     showMasked: Boolean(last4),
     last4: last4 ?? "",
     model,
+    updatedAt: last4 ? timestampFromDate(SAVED_AT) : undefined,
     // Mirrors the server: a saved own key is never "provided by the platform".
     providedByPlatform: platform && !last4,
     // Mirrors the server's code default (#702): with no deployment default and
@@ -88,7 +105,10 @@ function mockBackend(
     // boundGuild seeds an already-linked guild, the state the #504 unlink
     // control acts on. releaseCalls captures every ReleaseDiscordGuild
     // request's guild_id; releaseError fails the release.
-    boundGuild?: { guildId: string };
+    boundGuild?: { guildId: string; guildName?: string };
+    // linkName is the server name the guild-admin proof reads when a guild is
+    // linked; the server stores it with the link (ADR-0004 amendment 2026-11-26).
+    linkName?: string;
     releaseCalls?: string[];
     releaseError?: string;
     // providerSaves captures every SaveProviderConfig request so tests can pin
@@ -133,6 +153,7 @@ function mockBackend(
     gemini: opts.saved?.gemini,
     discord: opts.saved?.discord,
     guildId: opts.boundGuild?.guildId ?? "",
+    guildName: opts.boundGuild?.guildName ?? "",
     spendSoft: opts.spendCaps?.softUsd,
     spendHard: opts.spendCaps?.hardUsd,
   };
@@ -149,7 +170,9 @@ function mockBackend(
       getActiveCampaign: () =>
         create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
     });
+    service(AuthService, { getCurrentUser: currentUser });
     service(ProviderService, {
+      getUsageSummary: usageSummary,
       listProviderConfigs: () =>
         create(ListProviderConfigsResponseSchema, {
           credentials: [
@@ -161,6 +184,7 @@ function mockBackend(
             cred("image", "gemini", state.gemini, "", opts.platform?.gemini),
           ],
           guildId: state.guildId,
+          guildName: state.guildName,
           discordApplicationId: opts.discordApplicationId ?? "",
           integrationState: opts.integrationState ?? "",
           integrationDetail: opts.integrationDetail ?? "",
@@ -211,7 +235,10 @@ function mockBackend(
           );
         }
         if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
-        if (req.guildId !== undefined) state.guildId = req.guildId;
+        if (req.guildId !== undefined) {
+          state.guildId = req.guildId;
+          state.guildName = opts.linkName ?? "";
+        }
         return create(SaveDiscordSettingsResponseSchema, {
           credential: cred("discord", "discord", state.discord),
           guildId: state.guildId,
@@ -228,6 +255,7 @@ function mockBackend(
           );
         }
         state.guildId = "";
+        state.guildName = "";
         return create(ReleaseDiscordGuildResponseSchema, { guildId: "" });
       },
       resolveGuildInvite: async (req) => {
@@ -262,53 +290,222 @@ function mockBackend(
   });
 }
 
-function renderScreen(transport = mockBackend()) {
+function renderScreen(transport = mockBackend(), onNavigate?: (loc: ScreenLocation) => void) {
   return render(
     <Providers transport={transport} queryClient={makeQueryClient()}>
-      <Configuration />
+      <MemoryScreenNav initial={{ screen: "configuration" }} onNavigate={onNavigate}>
+        <Configuration />
+      </MemoryScreenNav>
     </Providers>,
   );
 }
 
+// The badge of a key row, by its text — not the checklist's "Optional"
+// heading, nor a step hint.
+const badges = (text: RegExp) => screen.queryAllByText(text, { selector: ".gx-badge" });
+
+// Opens the folded-away manual Server ID field of the Discord card.
+async function serverIdField() {
+  fireEvent.click(await screen.findByRole("button", { name: /enter the server id instead/i }));
+  return screen.getByLabelText("Server ID") as HTMLInputElement;
+}
+
+// Opens the "Use your own Discord bot" card and returns the token field.
+async function botTokenField() {
+  fireEvent.click(await screen.findByRole("button", { name: /use your own discord bot/i }));
+  return screen.findByLabelText("Bot token key");
+}
+
 describe("Configuration", () => {
-  it("renders the active campaign from the RPC", async () => {
+  it("opens with the checklist and says the settings are the whole table's", async () => {
     renderScreen();
-    expect(await screen.findByText(CAMPAIGN.name)).toBeInTheDocument();
-    expect(screen.getByText(CAMPAIGN.system)).toBeInTheDocument();
-    expect(screen.getByText(CAMPAIGN.language)).toBeInTheDocument();
+    const checklist = (await screen.findByRole("heading", { name: /get ready for your first session/i })).closest(
+      ".gx-setup-checklist",
+    ) as HTMLElement;
+    // Step 1 is done and names the campaign; the old "Active campaign" card is gone.
+    expect(await within(checklist).findByText(CAMPAIGN.name)).toBeInTheDocument();
+    expect(screen.queryByText(CAMPAIGN.system)).not.toBeInTheDocument();
+    expect(screen.getByText(/these settings belong to your whole table/i)).toBeInTheDocument();
+    // The four steps in order, and the optional extras apart from them.
+    const steps = within(checklist).getAllByRole("listitem").map((li) => li.textContent ?? "");
+    expect(steps.slice(0, 4)).toEqual([
+      expect.stringMatching(/^1\. Create a campaign/),
+      expect.stringMatching(/^2\. Connect Discord/),
+      expect.stringMatching(/^3\. Voice and speech/),
+      expect.stringMatching(/^4\. AI model/),
+    ]);
+    expect(within(checklist).getByRole("heading", { name: "Optional" })).toBeInTheDocument();
+    // Nothing is ready yet: no Discord, no keys.
+    expect(within(checklist).getByText("1 of 4 done")).toBeInTheDocument();
+    expect(screen.queryByText(/your table is ready to play/i)).not.toBeInTheDocument();
+  });
+
+  it("ticks all four steps for a trial table with a linked server and offers Go to Session", async () => {
+    const moves: ScreenLocation[] = [];
+    renderScreen(
+      mockBackend({
+        platform: { groq: true, anthropic: true, elevenlabs: true, discord: true },
+        boundGuild: { guildId: "472093001100", guildName: "Tides over Saltmarsh" },
+      }),
+      (loc) => moves.push(loc),
+    );
+    expect(await screen.findByText(/your table is ready to play/i)).toBeInTheDocument();
+    expect(screen.getByText("4 of 4 done")).toBeInTheDocument();
+    expect(screen.getByText("Linked to Tides over Saltmarsh")).toBeInTheDocument();
+    // No empty password field for a service the plan includes.
+    expect(screen.queryByLabelText("Groq key")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("ElevenLabs key")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to Session" }));
+    expect(moves.at(-1)?.screen).toBe("session");
+  });
+
+  it("links each open step to its section and moves focus there", async () => {
+    renderScreen();
+    await screen.findByLabelText(/paste a discord link/i);
+    const link = screen.getByRole("link", { name: /connect discord/i });
+    fireEvent.click(link);
+    expect(document.activeElement?.id).toBe("setup-discord");
+    fireEvent.click(screen.getByRole("link", { name: /voice and speech/i }));
+    expect(document.activeElement?.id).toBe("setup-voice");
+  });
+
+  it("shows skeletons while the setup read is out, never Key needed", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+        listModels: () => create(ListModelsResponseSchema, { models: [] }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
+      });
+      service(AuthService, { getCurrentUser: currentUser });
+      service(ProviderService, {
+        getUsageSummary: usageSummary,
+        listProviderConfigs: () => new Promise(() => {}),
+        getSpendCaps: () => create(GetSpendCapsResponseSchema, {}),
+      });
+    });
+    renderScreen(transport);
+    expect(await screen.findByTestId("config-loading")).toBeInTheDocument();
+    await screen.findByText(CAMPAIGN.name);
+    expect(screen.queryByText(/key needed/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Groq key")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /link server/i })).not.toBeInTheDocument();
+    // The steps that depend on the read are "checking", not to-dos.
+    expect(screen.getAllByText("Checking…").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("shows one error with Retry and no editable rows when the setup read fails", async () => {
+    let fail = true;
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+        listModels: () => create(ListModelsResponseSchema, { models: [] }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
+      });
+      service(AuthService, { getCurrentUser: currentUser });
+      service(ProviderService, {
+        getUsageSummary: usageSummary,
+        listProviderConfigs: () => {
+          if (fail) throw new ConnectError("database unavailable", Code.Unavailable);
+          return create(ListProviderConfigsResponseSchema, {
+            credentials: [cred("discord", "discord"), cred("llm", "groq"), cred("tts", "elevenlabs")],
+          });
+        },
+        getSpendCaps: () => create(GetSpendCapsResponseSchema, {}),
+      });
+    });
+    renderScreen(transport);
+
+    expect(await screen.findByText("Couldn't load your setup")).toBeInTheDocument();
+    expect(screen.getAllByText("Couldn't load your setup")).toHaveLength(1);
+    expect(screen.queryByText(/key needed/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Groq key")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/paste a discord link/i)).not.toBeInTheDocument();
+
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Groq key")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load your setup")).not.toBeInTheDocument();
+  });
+
+  it("says Checking… on a saved key while the health probe is out", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => new Promise(() => {}),
+        listModels: () => create(ListModelsResponseSchema, { models: [] }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
+      });
+      service(AuthService, { getCurrentUser: currentUser });
+      service(ProviderService, {
+        getUsageSummary: usageSummary,
+        listProviderConfigs: () =>
+          create(ListProviderConfigsResponseSchema, {
+            credentials: [cred("discord", "discord"), cred("llm", "groq"), cred("tts", "elevenlabs", "abcd")],
+          }),
+        getSpendCaps: () => create(GetSpendCapsResponseSchema, {}),
+      });
+    });
+    renderScreen(transport);
+    const row = await keyRow("ElevenLabs");
+    expect(within(row).getByText("Checking…", { selector: ".gx-badge" })).toBeInTheDocument();
+    expect(within(row).queryByText(/^saved$/i)).not.toBeInTheDocument();
   });
 
   it("shows Key needed for each required unsaved credential and Optional for the rest", async () => {
     renderScreen();
     // Two Key-needed badges (groq, elevenlabs) — a session needs both. Gemini
-    // (images), the Bot token (only for a BYOK Bot, ADR-0057) and the
-    // voice-LLM slot that is not in use (Anthropic, #702) read
-    // "Optional". The Planning chat is not a key row at all (ADR-0062
-    // amendment): its card carries no badge, it says what answers and on which
-    // key (Configuration.chat.test.tsx).
-    expect(await screen.findAllByText(/key needed/i)).toHaveLength(2);
-    expect(screen.getAllByText(/^optional$/i)).toHaveLength(3);
-    const geminiRow = screen.getByLabelText("Gemini key").closest(".gx-provider-row") as HTMLElement;
-    expect(within(geminiRow).getByText(/^optional$/i)).toBeInTheDocument();
-    const botRow = screen.getByLabelText("Bot token key").closest(".gx-provider-row") as HTMLElement;
-    expect(within(botRow).getByText(/^optional$/i)).toBeInTheDocument();
-    expect(within(botRow).getByText(/only needed if you run your own discord bot/i)).toBeInTheDocument();
+    // (images) and the voice-LLM slot that is not in use (Anthropic, #702)
+    // read "Optional". The own-bot token is folded away (ADR-0057: only a BYOK
+    // Bot needs one), and the Planning chat is not a key row (ADR-0062).
+    await waitFor(() => expect(badges(/key needed/i)).toHaveLength(2));
+    expect(badges(/^optional$/i)).toHaveLength(2);
+    expect(within(await keyRow("Gemini")).getByText(/^optional$/i, { selector: ".gx-badge" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Bot token key")).not.toBeInTheDocument();
     expect(screen.queryByText(/working/i)).not.toBeInTheDocument();
   });
 
-  it("shows Included, not Key needed, for slots the platform provides (W9)", async () => {
+  it("says what each service does and links to where its key is made", async () => {
+    renderScreen();
+    const groq = await keyRow("Groq");
+    expect(within(groq).getByText(/fast language model/i)).toBeInTheDocument();
+    expect(within(groq).getByRole("link", { name: /get a groq key/i })).toHaveAttribute(
+      "href",
+      "https://console.groq.com/keys",
+    );
+    const eleven = await keyRow("ElevenLabs");
+    expect(within(eleven).getByRole("link", { name: /get a elevenlabs key/i })).toHaveAttribute(
+      "href",
+      "https://elevenlabs.io/app/developers/api-keys",
+    );
+  });
+
+  it("shows Included with a way to an own key, not an empty field, for slots the platform provides (W9)", async () => {
     renderScreen(
       mockBackend({
         platform: { groq: true, anthropic: true, elevenlabs: true, gemini: true, discord: true },
       }),
     );
-    expect(await screen.findAllByText(/^included$/i)).toHaveLength(5);
-    expect(screen.queryByText(/key needed/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/^optional$/i)).not.toBeInTheDocument();
-    // The own-key override stays offered: the paste field + Save are still there.
-    const groqRow = screen.getByLabelText("Groq key").closest(".gx-provider-row") as HTMLElement;
-    expect(within(groqRow).getByText(/^included$/i)).toBeInTheDocument();
+    await waitFor(() => expect(badges(/^included$/i)).toHaveLength(4));
+    expect(badges(/key needed/i)).toHaveLength(0);
+    const groqRow = await keyRow("Groq");
+    expect(within(groqRow).getByText("Included with your plan")).toBeInTheDocument();
+    expect(within(groqRow).queryByLabelText("Groq key")).not.toBeInTheDocument();
+
+    // The own-key override is one click away, and can be backed out of.
+    fireEvent.click(within(groqRow).getByRole("button", { name: "Use my own key" }));
+    expect(within(groqRow).getByLabelText("Groq key")).toBeInTheDocument();
     expect(within(groqRow).getByRole("button", { name: /^save$/i })).toBeInTheDocument();
+    fireEvent.click(within(groqRow).getByRole("button", { name: /cancel/i }));
+    expect(within(groqRow).queryByLabelText("Groq key")).not.toBeInTheDocument();
   });
 
   it("downgrades an Included slot when its live probe fails (W9)", async () => {
@@ -325,9 +522,9 @@ describe("Configuration", () => {
         ],
       }),
     );
-    const groqRow = (await screen.findByLabelText("Groq key")).closest(".gx-provider-row") as HTMLElement;
+    const groqRow = await keyRow("Groq");
     expect(await within(groqRow).findByText(/having trouble/i)).toBeInTheDocument();
-    expect(within(groqRow).queryByText(/^included$/i)).not.toBeInTheDocument();
+    expect(within(groqRow).queryByText(/^included$/i, { selector: ".gx-badge" })).not.toBeInTheDocument();
     // The stable code is translated client-side; the server text is only a fallback.
     expect(within(groqRow).getByText(/the key was rejected/i)).toBeInTheDocument();
     expect(within(groqRow).queryByText("server fallback text")).not.toBeInTheDocument();
@@ -352,10 +549,10 @@ describe("Configuration", () => {
 
   it("gives the planning-chat model row its own overline", async () => {
     renderScreen();
-    expect(await screen.findByText("Planning chat model")).toBeInTheDocument();
+    expect(await screen.findByText("Planning chat model", { selector: ".gx-overline" })).toBeInTheDocument();
     // "AI model" is the overline of the two voice-LLM slots (Groq, Anthropic,
     // #702); the chat row must not make it three.
-    expect(screen.getAllByText("AI model")).toHaveLength(2);
+    expect(screen.getAllByText("AI model", { selector: ".gx-overline" })).toHaveLength(2);
   });
 
   it("surfaces a failed Discord integration to the tenant (#489)", async () => {
@@ -365,10 +562,8 @@ describe("Configuration", () => {
         integrationDetail: "invalid_bot_token: gateway rejected identify (close 4004)",
       }),
     );
-    const badge = await screen.findByText(/discord connection failed/i);
-    expect(badge).toBeInTheDocument();
-    // The detail renders VISIBLY under the badge — a title-attr tooltip was
-    // unreachable by keyboard and on touch.
+    expect(await screen.findByText(/discord connection failed/i)).toBeInTheDocument();
+    // The detail renders VISIBLY under the badge.
     expect(screen.getByText(/invalid_bot_token/)).toBeInTheDocument();
   });
 
@@ -385,34 +580,30 @@ describe("Configuration", () => {
   });
 
   it("never shows an unknown integration state as connected (#642)", async () => {
-    renderScreen(mockBackend({ integrationState: "something-new" }));
-    await screen.findByText(CAMPAIGN.name);
+    renderScreen(mockBackend({ integrationState: "something-new", boundGuild: { guildId: "472093001100" } }));
+    await screen.findByTestId("linked-server");
     expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
   });
 
   it("shows no integration badge in the waiting/web-only state (#489)", async () => {
     renderScreen();
-    // Default mock leaves integrationState empty → nothing rendered.
-    await screen.findByText(CAMPAIGN.name);
+    await screen.findByLabelText(/paste a discord link/i);
     expect(screen.queryByText(/discord connection failed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/bot connected/i)).not.toBeInTheDocument();
   });
 
-  it("saves the Gemini image key write-only: the row masks and shows Replace", async () => {
+  it("saves the Gemini image key write-only: the row masks with its last four and shows Replace", async () => {
     const saves: Array<{ provider: string; secret: string; model: string }> = [];
     renderScreen(mockBackend({ providerSaves: saves }));
 
-    // The Gemini image slot renders its own card.
-    const geminiInput = await screen.findByLabelText("Gemini key");
-    const geminiRow = geminiInput.closest(".gx-provider-row") as HTMLElement;
-    expect(within(geminiRow).getByText("Gemini")).toBeInTheDocument();
+    const geminiRow = await keyRow("Gemini");
     expect(within(geminiRow).getByText("Images")).toBeInTheDocument();
-
-    fireEvent.change(geminiInput, { target: { value: "gm-secret-abcd" } });
+    fireEvent.change(within(geminiRow).getByLabelText("Gemini key"), { target: { value: "gm-secret-abcd" } });
     fireEvent.click(within(geminiRow).getByRole("button", { name: "Save" }));
 
     // After the invalidated list refetches, the row masks with a Replace affordance.
-    expect(await within(geminiRow).findByText("••••••••")).toBeInTheDocument();
+    expect(await within(geminiRow).findByText("•••• abcd")).toBeInTheDocument();
+    expect(within(geminiRow).getByText("saved Nov 3, 2026")).toBeInTheDocument();
     expect(within(geminiRow).getByRole("button", { name: /replace/i })).toBeInTheDocument();
     // The save went out as the gemini provider; plaintext never lands in the DOM.
     expect(saves.some((s) => s.provider === "gemini" && s.secret === "gm-secret-abcd")).toBe(true);
@@ -421,22 +612,15 @@ describe("Configuration", () => {
 
   it("saves a provider key write-only: the row masks and the badge says Saved until a probe answers", async () => {
     renderScreen();
-
-    const groqInput = await screen.findByLabelText("Groq key");
-    fireEvent.change(groqInput, { target: { value: "test-groq-secret-eeee" } });
-
-    // The Save button in the Groq row.
-    const groqRow = groqInput.closest(".gx-provider-row") as HTMLElement;
+    const groqRow = await keyRow("Groq");
+    fireEvent.change(within(groqRow).getByLabelText("Groq key"), { target: { value: "test-groq-secret-eeee" } });
     fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
 
-    // After the invalidated list refetches, the row shows a masked value +
-    // Replace and a "Saved" badge — derived from key-presence, never the
-    // secret. No probe has reported yet, so it must not claim "Working".
-    expect(await within(groqRow).findByText("••••••••")).toBeInTheDocument();
+    // No probe has reported for the new key, so it must not claim "Working".
+    expect(await within(groqRow).findByText("•••• eeee")).toBeInTheDocument();
     expect(within(groqRow).getByRole("button", { name: /replace/i })).toBeInTheDocument();
-    expect(within(groqRow).getByText(/^saved$/i)).toBeInTheDocument();
+    expect(await within(groqRow).findByText(/^saved$/i, { selector: ".gx-badge" })).toBeInTheDocument();
     expect(within(groqRow).queryByText(/working/i)).not.toBeInTheDocument();
-    // The plaintext key never appears in the DOM.
     expect(screen.queryByText(/test-groq-secret-eeee/)).not.toBeInTheDocument();
   });
 
@@ -452,12 +636,12 @@ describe("Configuration", () => {
         getActiveCampaign: () =>
           create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
       });
+      service(AuthService, { getCurrentUser: currentUser });
       service(ProviderService, {
+        getUsageSummary: usageSummary,
         listProviderConfigs: () =>
           create(ListProviderConfigsResponseSchema, {
             credentials: [cred("discord", "discord"), cred("llm", "groq"), cred("tts", "elevenlabs")],
-            guildId: "",
-            voiceChannelId: "",
           }),
         saveProviderConfig: () => {
           throw new Error("secret sealing unavailable");
@@ -466,12 +650,10 @@ describe("Configuration", () => {
     });
     renderScreen(transport);
 
-    const groqInput = await screen.findByLabelText("Groq key");
-    fireEvent.change(groqInput, { target: { value: "sk-will-fail" } });
-    const groqRow = groqInput.closest(".gx-provider-row") as HTMLElement;
+    const groqRow = await keyRow("Groq");
+    fireEvent.change(within(groqRow).getByLabelText("Groq key"), { target: { value: "sk-will-fail" } });
     fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
 
-    // The failure renders in the row…
     const alert = await within(groqRow).findByRole("alert");
     expect(alert).toHaveTextContent(/couldn't save/i);
     // …and the key field stays editable for a retry, badge still unsaved.
@@ -480,8 +662,6 @@ describe("Configuration", () => {
   });
 
   it("clears the save error when the Replace edit is cancelled", async () => {
-    // Replace on a SAVED key → failing save → Cancel returns the row to the
-    // masked+Healthy state; a stale "Couldn't save" alert must not linger there.
     const transport = createRouterTransport(({ service }) => {
       service(VoiceService, {
         getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
@@ -491,7 +671,9 @@ describe("Configuration", () => {
         getActiveCampaign: () =>
           create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
       });
+      service(AuthService, { getCurrentUser: currentUser });
       service(ProviderService, {
+        getUsageSummary: usageSummary,
         listProviderConfigs: () =>
           create(ListProviderConfigsResponseSchema, {
             credentials: [cred("discord", "discord"), cred("llm", "groq", "eeee"), cred("tts", "elevenlabs")],
@@ -503,12 +685,9 @@ describe("Configuration", () => {
     });
     renderScreen(transport);
 
-    // The Groq key is saved → masked with a Replace affordance.
-    const mask = await screen.findByLabelText("Groq saved");
-    const groqRow = mask.closest(".gx-provider-row") as HTMLElement;
+    const groqRow = await keyRow("Groq");
+    await within(groqRow).findByLabelText("Groq saved");
     fireEvent.click(within(groqRow).getByRole("button", { name: /replace/i }));
-
-    // Replacement attempt fails → alert renders.
     fireEvent.change(within(groqRow).getByLabelText("Groq key"), { target: { value: "sk-new" } });
     fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
     expect(await within(groqRow).findByRole("alert")).toHaveTextContent(/couldn't save/i);
@@ -519,113 +698,25 @@ describe("Configuration", () => {
     expect(within(groqRow).queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("persists the Guild ID with a guild-only save (no voice channel on the wire)", async () => {
-    const discordSaves: SaveDiscordSettingsRequest[] = [];
-    renderScreen(mockBackend({ discordSaves }));
-
-    const guild = await screen.findByLabelText("Server ID");
-    fireEvent.change(guild, { target: { value: "472093001100" } });
-    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
-
-    // The typed guild rides the wire ALONE: voice_channel_id has proto3
-    // presence, and this screen must never set it — sessions pick their
-    // channel on the Session screen.
-    await waitFor(() => expect(discordSaves).toHaveLength(1));
-    expect(discordSaves[0].guildId).toBe("472093001100");
-    expect(discordSaves[0].voiceChannelId).toBeUndefined();
-
-    // The value survives the invalidation refetch (round-tripped through the RPC).
-    expect(await screen.findByDisplayValue("472093001100")).toBeInTheDocument();
-  });
-
-  it("omits the guild/voice IDs from a token-only save (#142)", async () => {
-    const discordSaves: SaveDiscordSettingsRequest[] = [];
-    renderScreen(mockBackend({ discordSaves }));
-
-    // Operator only edits the bot token — the IDs inputs are untouched (still
-    // seeding from the in-flight config load).
-    const tokenInput = await screen.findByLabelText("Bot token key");
-    fireEvent.change(tokenInput, { target: { value: "test-discord-token-zzzz" } });
-    const botRow = tokenInput.closest(".gx-provider-row") as HTMLElement;
-    fireEvent.click(within(botRow).getByRole("button", { name: "Save" }));
-    expect(await within(botRow).findByText("••••••••")).toBeInTheDocument();
-
-    // The request carries the token and NOTHING else: no guild/voice fields on
-    // the wire, so a slow/failed config load can never clobber the stored IDs.
-    expect(discordSaves).toHaveLength(1);
-    expect(discordSaves[0].botToken).toBe("test-discord-token-zzzz");
-    expect(discordSaves[0].guildId).toBeUndefined();
-    expect(discordSaves[0].voiceChannelId).toBeUndefined();
-  });
-
-  it("disables the IDs save until the Guild ID is non-empty (#142)", async () => {
-    renderScreen();
-
-    // Fresh install: nothing typed yet. The server rejects a present-but-empty
-    // ID, so the client must not offer the save at all — a click here used to
-    // fail invisibly and leave nothing stored.
-    const guild = await screen.findByLabelText("Server ID");
-    const save = screen.getByRole("button", { name: /save discord settings/i });
-    expect(save).toBeDisabled();
-
-    // Guild ID filled -> the save unlocks.
-    fireEvent.change(guild, { target: { value: "472093001100" } });
-    expect(save).toBeEnabled();
-
-    // Cleared again -> locked again.
-    fireEvent.change(guild, { target: { value: "" } });
-    expect(save).toBeDisabled();
-  });
-
-  it("surfaces a failed IDs save as a visible alert (#142)", async () => {
-    renderScreen(mockBackend({ discordSaveError: "database is down" }));
-
-    // Guild ID filled, save offered — but the RPC fails. The rejection must
-    // leave visible evidence: nothing was stored, and a silent failure here
-    // resurfaces later as an unrelated-looking session-start precondition error.
-    fireEvent.change(await screen.findByLabelText("Server ID"), { target: { value: "472093001100" } });
-    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/couldn't save/i);
-    expect(alert).toHaveTextContent(/database is down/);
-  });
-
   it("renders the Groq model combobox defaulting to the catalog's first model (ListModels)", async () => {
     renderScreen();
-    // The combobox mounts before the catalog resolves (#227 renders it even for
-    // an empty list), so await the default value, not just the control.
     const groqModelSelect = await screen.findByLabelText("Groq model");
     expect(await within(groqModelSelect).findByText("llama-3.3-70b-versatile")).toBeInTheDocument();
   });
 
   it("upgrades a saved provider's badge to Degraded from the health RPC", async () => {
-    renderScreen(
-      mockBackend({
-        saved: { elevenlabs: "abcd" },
-        health: [health("elevenlabs", HealthStatus.DEGRADED)],
-      }),
-    );
-    // ElevenLabs is saved → renders presence "Saved" instantly, then the async
-    // health RPC downgrades it to Degraded.
-    const degraded = await screen.findByText(/having trouble/i);
-    const row = degraded.closest(".gx-provider-row") as HTMLElement;
-    expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
+    renderScreen(mockBackend({ saved: { elevenlabs: "abcd" }, health: [health("elevenlabs", HealthStatus.DEGRADED)] }));
+    const row = await keyRow("ElevenLabs");
+    expect(await within(row).findByText(/having trouble/i)).toBeInTheDocument();
   });
 
   it("upgrades a saved provider's badge to Working only once the probe reports healthy", async () => {
-    renderScreen(
-      mockBackend({
-        saved: { elevenlabs: "abcd" },
-        health: [health("elevenlabs", HealthStatus.HEALTHY)],
-      }),
-    );
-    const working = await screen.findByText(/^working$/i);
-    const row = working.closest(".gx-provider-row") as HTMLElement;
-    expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
+    renderScreen(mockBackend({ saved: { elevenlabs: "abcd" }, health: [health("elevenlabs", HealthStatus.HEALTHY)] }));
+    const row = await keyRow("ElevenLabs");
+    expect(await within(row).findByText(/^working$/i)).toBeInTheDocument();
   });
 
-  it("shows the resolved Discord bot tag from the live login", async () => {
+  it("shows the resolved Discord bot tag from the live login, with the own-bot card open", async () => {
     renderScreen(
       mockBackend({
         saved: { discord: "tok9" },
@@ -634,110 +725,206 @@ describe("Configuration", () => {
     );
     expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
   });
+});
 
-  it("shows the Add-Glyphoxa-to-your-server link built from the server app id (#110)", async () => {
+describe("Configuration Discord card (#695)", () => {
+  it("leads with adding the bot as the primary action (#110)", async () => {
     renderScreen(mockBackend({ discordApplicationId: "987654321098765432" }));
     const link = await screen.findByRole("link", { name: /add glyphoxa to your server/i });
     expect(link).toHaveAttribute("href", expect.stringContaining("client_id=987654321098765432"));
     expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveClass("gx-btn--primary");
+    expect(screen.getByRole("heading", { name: "Add Glyphoxa to your server" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Link your server" })).toBeInTheDocument();
   });
 
   it("disables the Add-Glyphoxa action when no application id is configured (#110)", async () => {
-    renderScreen(); // default mock: empty discordApplicationId
+    renderScreen();
     expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /add glyphoxa to your server/i })).not.toBeInTheDocument();
   });
 
   it("does not flash the missing-app-id note while the config query is loading (#110)", async () => {
-    renderScreen(); // default mock resolves success with an empty id
-    // Synchronously after render the list query is still pending — the note must
-    // not flash (nor would it stick on a query error): only a resolved empty id
-    // is the disabled fallback.
+    renderScreen();
     expect(screen.queryByText(/no discord application id is configured/i)).not.toBeInTheDocument();
-    // Once the read resolves with an empty id, the disabled action + note appear.
     expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
   });
 
-  it("autofills the Guild ID from a pasted channel link with no network request (#101)", async () => {
+  it("links a server by its Server ID with a guild-only save and toasts it", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+
+    fireEvent.change(await serverIdField(), { target: { value: "472093001100" } });
+    fireEvent.click(screen.getByRole("button", { name: "Link server" }));
+
+    // The typed guild rides the wire ALONE: sessions pick their channel on the
+    // Session screen, so voice_channel_id stays off the wire.
+    await waitFor(() => expect(discordSaves).toHaveLength(1));
+    expect(discordSaves[0].guildId).toBe("472093001100");
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
+    expect(discordSaves[0].botToken).toBeUndefined();
+
+    // The form gives way to the linked summary; the save is announced.
+    expect(await screen.findByTestId("linked-server")).toHaveTextContent("Server ID 472093001100");
+    expect(toast.success).toHaveBeenCalledWith("Linked 472093001100");
+  });
+
+  it("keeps Link off until a server is entered (#142)", async () => {
+    renderScreen();
+    const field = await serverIdField();
+    const link = screen.getByRole("button", { name: "Link server" });
+    expect(link).toBeDisabled();
+    fireEvent.change(field, { target: { value: "472093001100" } });
+    expect(link).toBeEnabled();
+    fireEvent.change(field, { target: { value: "" } });
+    expect(link).toBeDisabled();
+  });
+
+  it("keeps a refused link on the form with the server's message (#504)", async () => {
+    renderScreen(
+      mockBackend({
+        discordSaveError: "you need the Manage Server permission in that Discord server to link it",
+        discordSaveCode: Code.PermissionDenied,
+      }),
+    );
+    fireEvent.change(await serverIdField(), { target: { value: "472093001100" } });
+    fireEvent.click(screen.getByRole("button", { name: "Link server" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't link the server/i);
+    expect(alert).toHaveTextContent(/manage server permission/i);
+    // Nothing was linked: the form is still there, no success toast.
+    expect(screen.getByRole("button", { name: "Link server" })).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("omits the guild/voice IDs from a token-only save (#142)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+
+    const tokenInput = await botTokenField();
+    fireEvent.change(tokenInput, { target: { value: "test-discord-token-zzzz" } });
+    const botRow = await keyRow("Bot token");
+    fireEvent.click(within(botRow).getByRole("button", { name: "Save" }));
+    expect(await within(botRow).findByText("•••• zzzz")).toBeInTheDocument();
+
+    expect(discordSaves).toHaveLength(1);
+    expect(discordSaves[0].botToken).toBe("test-discord-token-zzzz");
+    expect(discordSaves[0].guildId).toBeUndefined();
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
+  });
+
+  it("links a pasted channel link's server with no network request until Link (#101)", async () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
     const inviteCodes: string[] = [];
     renderScreen(mockBackend({ discordSaves, inviteCodes }));
 
-    const paste = await screen.findByLabelText(/paste a discord link/i);
-    fireEvent.change(paste, {
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
       target: { value: "https://discord.com/channels/472093001100472093/987654321098765432" },
     });
-
-    // The GUILD snowflake (not the channel's) lands in the still-editable
-    // Guild ID field, purely client-side.
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
-    // Parsing issues NO RPC — no save, no invite resolve; the autofill is
-    // local until the operator Saves.
+    // Parsing issues NO RPC — no save, no invite resolve.
     expect(discordSaves).toHaveLength(0);
     expect(inviteCodes).toHaveLength(0);
-  });
 
-  it("persists the autofilled Guild ID through Save and re-seeds it on reload (#101)", async () => {
-    const discordSaves: SaveDiscordSettingsRequest[] = [];
-    const transport = mockBackend({ discordSaves });
-    const { unmount } = renderScreen(transport);
-
-    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
-      target: { value: "discord.com/channels/472093001100472093/987654321098765432" },
-    });
-    // The autofill marks the field dirty, so Save picks up the pasted value.
-    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
-
-    // Pin the exact snowflake in the exact wire field: the GUILD id rides
-    // guild_id, and the channel snowflake from the link is NOT smuggled into
-    // voice_channel_id — that field stays off the wire entirely.
+    fireEvent.click(screen.getByRole("button", { name: "Link server" }));
+    // The GUILD snowflake rides guild_id; the channel snowflake is not smuggled
+    // into voice_channel_id.
     await waitFor(() => expect(discordSaves).toHaveLength(1));
     expect(discordSaves[0].guildId).toBe("472093001100472093");
     expect(discordSaves[0].voiceChannelId).toBeUndefined();
+  });
 
-    // Reload (AC2): a fresh mount against the SAME stateful backend re-seeds
-    // the field from what was persisted — the value survives the round-trip.
+  it("names the linked server after a reload, not its numeric id", async () => {
+    const transport = mockBackend({
+      linkName: "The Keep",
+      inviteResolve: { guildId: "472093001100472093", guildName: "The Keep", voiceChannels: [] },
+    });
+    const { unmount } = renderScreen(transport);
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Link The Keep" }));
+    expect(await screen.findByTestId("linked-server")).toHaveTextContent("The Keep");
+    expect(toast.success).toHaveBeenCalledWith("Linked The Keep");
+
     unmount();
     renderScreen(transport);
-    await waitFor(() =>
-      expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe(
-        "472093001100472093",
-      ),
-    );
+    const linked = await screen.findByTestId("linked-server");
+    expect(linked).toHaveTextContent("The Keep");
+    expect(screen.getByText("Server ID 472093001100472093")).toBeInTheDocument();
   });
 
-  it("rejects a non-link paste with an inline hint and leaves fields unchanged (#101)", async () => {
+  it("rejects a non-link paste with an inline hint and keeps Link off (#101)", async () => {
     renderScreen();
-
-    // Operator already has a Guild ID typed in.
-    const guild = await screen.findByLabelText("Server ID");
-    fireEvent.change(guild, { target: { value: "existing-guild" } });
-
-    // A paste that is not a channel deep-link surfaces a hint…
-    const paste = screen.getByLabelText(/paste a discord link/i);
-    fireEvent.change(paste, { target: { value: "not a discord link" } });
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "not a discord link" } });
     expect(screen.getByText(/couldn't read that link/i)).toBeInTheDocument();
-
-    // …and does not clobber what the operator already had.
-    expect((guild as HTMLInputElement).value).toBe("existing-guild");
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
   });
 
-  it("tolerates scheme/subdomain/trailing-slash/query variants when autofilling (#101)", async () => {
-    renderScreen();
-
-    const paste = await screen.findByLabelText(/paste a discord link/i);
-    fireEvent.change(paste, {
+  it("tolerates scheme/subdomain/trailing-slash/query variants (#101)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
       target: { value: "ptb.discord.com/channels/472093001100472093/987654321098765432/?jump=1" },
     });
-
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
-    // A rejected paste's hint must not linger after a successful one.
     expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Link server" }));
+    await waitFor(() => expect(discordSaves[0]?.guildId).toBe("472093001100472093"));
+  });
+
+  it("unlinks the linked server only after confirming in a dialog (#504)", async () => {
+    const releaseCalls: string[] = [];
+    renderScreen(mockBackend({ boundGuild: { guildId: "472093001100", guildName: "The Keep" }, releaseCalls }));
+
+    expect(await screen.findByTestId("linked-server")).toHaveTextContent("The Keep");
+    // No link form while a server is linked.
+    expect(screen.queryByLabelText(/paste a discord link/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unlink server" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Unlink The Keep?");
+    expect(releaseCalls).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Unlink server" }));
+    await waitFor(() => expect(releaseCalls).toEqual(["472093001100"]));
+    expect(await screen.findByLabelText(/paste a discord link/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("linked-server")).not.toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledWith("Unlinked The Keep");
+  });
+
+  it("changes the linked server through the form, with a way back", async () => {
+    renderScreen(mockBackend({ boundGuild: { guildId: "472093001100", guildName: "The Keep" } }));
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    expect(screen.getByLabelText(/paste a discord link/i)).toBeInTheDocument();
+    // Re-entering the server already linked is no change.
+    fireEvent.change(await serverIdField(), { target: { value: "472093001100" } });
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(await screen.findByTestId("linked-server")).toHaveTextContent("The Keep");
+  });
+
+  it("offers no unlink control while no server is linked (#504)", async () => {
+    renderScreen();
+    await screen.findByLabelText(/paste a discord link/i);
+    expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
+  });
+
+  it("reports a failed release (#504)", async () => {
+    renderScreen(
+      mockBackend({
+        boundGuild: { guildId: "472093001100" },
+        releaseError: "that Discord server is not the one currently linked; reload and try again",
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unlink server" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Unlink server" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/not the one currently linked/i)),
+    );
+    expect(screen.getByTestId("linked-server")).toBeInTheDocument();
   });
 });
 
 describe("Configuration invite autofill (#105)", () => {
-  it("resolves a pasted invite, sending the bare code, and auto-fills the Guild ID", async () => {
+  it("resolves a pasted invite, sending the bare code, and offers to link it by name", async () => {
     const inviteCodes: string[] = [];
     renderScreen(
       mockBackend({
@@ -753,25 +940,18 @@ describe("Configuration invite autofill (#105)", () => {
       }),
     );
 
-    const paste = await screen.findByLabelText(/paste a discord link/i);
-    fireEvent.change(paste, { target: { value: "https://discord.gg/abc123" } });
-
-    // The BARE code crosses the wire — the SPA extracted it, not the whole URL.
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "https://discord.gg/abc123" },
+    });
     await waitFor(() => expect(inviteCodes).toEqual(["abc123"]));
-
-    // On success the resolved guild id lands straight in the Guild ID field
-    // (no picker step — there is no channel picker anymore) and a confirmation
-    // line names the resolved guild.
-    const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep — click “Save Discord settings” to keep it.");
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
-    // The returned voice channels are NOT rendered — sessions pick their
-    // channel on the Session screen.
+    expect(await screen.findByTestId("resolved-guild")).toHaveTextContent("Found The Keep.");
+    // No auto-save: linking is an explicit press, named for the server.
+    expect(screen.getByRole("button", { name: "Link The Keep" })).toBeEnabled();
+    // The returned voice channels are NOT rendered.
     expect(screen.queryByRole("button", { name: /War Room/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Tavern/ })).not.toBeInTheDocument();
   });
 
-  it("fills the Guild ID from a resolved invite and persists it on Save", async () => {
+  it("links the resolved invite's server on Link", async () => {
     const discordSaves: SaveDiscordSettingsRequest[] = [];
     renderScreen(
       mockBackend({
@@ -783,85 +963,44 @@ describe("Configuration invite autofill (#105)", () => {
         },
       }),
     );
-
-    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
-      target: { value: "discord.gg/abc123" },
-    });
-
-    // The Guild ID fills from the RESOLVED guild once the confirmation lands.
-    await screen.findByTestId("resolved-guild");
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("472093001100472093");
-
-    // Save carries the exact guild snowflake in guild_id and NOTHING in
-    // voice_channel_id — the resolved guild's channels never ride this save.
-    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Link The Keep" }));
     await waitFor(() => expect(discordSaves).toHaveLength(1));
     expect(discordSaves[0].guildId).toBe("472093001100472093");
     expect(discordSaves[0].voiceChannelId).toBeUndefined();
   });
 
-  it("renders a precondition failure verbatim with an add-bot hint, leaving fields unchanged", async () => {
+  it("renders a precondition failure verbatim with an add-bot hint", async () => {
     renderScreen(
       mockBackend({
         inviteError: { code: Code.FailedPrecondition, message: "the Bot is not a member of that server" },
       }),
     );
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });
 
-    const guild = await screen.findByLabelText("Server ID");
-    fireEvent.change(guild, { target: { value: "existing-guild" } });
-
-    fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
-      target: { value: "discord.gg/abc123" },
-    });
-
-    // The server message renders VERBATIM — no-token vs not-a-member share the
-    // FailedPrecondition code and differ only by this message.
     expect(await screen.findByText("the Bot is not a member of that server")).toBeInTheDocument();
-    // …plus the hint pointing back at the Add-Glyphoxa action, which renders at
-    // the FOOT of the card (below the Save button) — the direction word must match.
-    expect(screen.getByText(/at the foot of this card/i)).toBeInTheDocument();
+    // …plus the hint pointing back at step 1, where the Add-Glyphoxa action is.
+    expect(screen.getByText(/in step 1/i)).toBeInTheDocument();
     expect(screen.getByText(/then paste the invite again/i)).toBeInTheDocument();
-
-    // A failed resolve touches nothing the operator already had, and no
-    // resolved-guild confirmation appears.
-    expect((guild as HTMLInputElement).value).toBe("existing-guild");
     expect(screen.queryByTestId("resolved-guild")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
   });
 
   it("renders a DISTINCT precondition message verbatim without the add-bot hint (no-token FP)", async () => {
-    // The no-token precondition shares FailedPrecondition with not-a-member but
-    // differs by message. Using a message distinct from the production not-a-member
-    // string pins that the SERVER text is rendered — a hardcoded client message
-    // dies here — and that the add-bot hint (apt only for not-a-member) is absent.
     renderScreen(
       mockBackend({
         inviteError: { code: Code.FailedPrecondition, message: "save the Discord bot token first" },
       }),
     );
-
-    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
-      target: { value: "discord.gg/abc123" },
-    });
-
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });
     expect(await screen.findByText("save the Discord bot token first")).toBeInTheDocument();
-    // The add-bot hint would be wrong guidance here (the token, not the Bot, is
-    // missing), so it must NOT append to this message.
     expect(screen.queryByText(/then paste the invite again/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/at the foot of this card/i)).not.toBeInTheDocument();
   });
 
   it("debounces the invite resolve so typing fires a single resolve, not one per keystroke", async () => {
     const inviteCodes: string[] = [];
-    renderScreen(
-      mockBackend({
-        inviteCodes,
-        inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] },
-      }),
-    );
+    renderScreen(mockBackend({ inviteCodes, inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] } }));
 
-    // Four change events in a burst (as if typing the code). Without a debounce
-    // each fires an authed GET /invites — three of them 404s that burn Discord's
-    // rate budget; with it, only the final value resolves, exactly once.
     const paste = await screen.findByLabelText(/paste a discord link/i);
     fireEvent.change(paste, { target: { value: "discord.gg/ab" } });
     fireEvent.change(paste, { target: { value: "discord.gg/abc" } });
@@ -869,89 +1008,49 @@ describe("Configuration invite autofill (#105)", () => {
     fireEvent.change(paste, { target: { value: "discord.gg/abc123" } });
 
     await waitFor(() => expect(inviteCodes).toEqual(["abc123"]));
-    // Let any wrongly-scheduled extra resolve fire — none does.
     await new Promise((r) => setTimeout(r, 500));
     expect(inviteCodes).toEqual(["abc123"]);
   });
 
   it("ignores a late resolve for a superseded invite (latest-wins)", async () => {
-    // Paste invite A (slow), then invite B (fast). B fills the Guild ID and
-    // shows its confirmation; A's LATE response must not swap either back —
-    // it would fill the WRONG guild's snowflake and Save would persist it.
-    let releaseA: (v: {
-      guildId: string;
-      guildName: string;
-      voiceChannels: { id: string; name: string }[];
-    }) => void = () => {};
-    const gateA = new Promise<{
-      guildId: string;
-      guildName: string;
-      voiceChannels: { id: string; name: string }[];
-    }>((res) => {
+    type Resolved = { guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] };
+    let releaseA: (v: Resolved) => void = () => {};
+    const gateA = new Promise<Resolved>((res) => {
       releaseA = res;
     });
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
     const inviteResolver = (code: string) =>
-      code === "slowaaa"
-        ? gateA
-        : Promise.resolve({ guildId: "222", guildName: "Guild B", voiceChannels: [] });
-
-    renderScreen(mockBackend({ inviteResolver }));
+      code === "slowaaa" ? gateA : Promise.resolve({ guildId: "222", guildName: "Guild B", voiceChannels: [] });
+    renderScreen(mockBackend({ inviteResolver, discordSaves }));
 
     const paste = await screen.findByLabelText(/paste a discord link/i);
-    // A's debounce ticks and A's resolve goes in flight (gated open).
     fireEvent.change(paste, { target: { value: "discord.gg/slowaaa" } });
     await new Promise((r) => setTimeout(r, 500));
-
-    // B supersedes A and resolves immediately → B's fill + confirmation win.
     fireEvent.change(paste, { target: { value: "discord.gg/fastbbb" } });
-    const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from Guild B — click “Save Discord settings” to keep it.");
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
+    expect(await screen.findByTestId("resolved-guild")).toHaveTextContent("Found Guild B.");
 
-    // A's slow resolve lands late — the guard drops it: the Guild ID stays
-    // B's and the confirmation still names Guild B.
+    // A's slow resolve lands late — the guard drops it.
     releaseA({ guildId: "111", guildName: "Guild A", voiceChannels: [] });
     await new Promise((r) => setTimeout(r, 50));
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("222");
-    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Server ID filled in from Guild B — click “Save Discord settings” to keep it.");
+    expect(screen.getByTestId("resolved-guild")).toHaveTextContent("Found Guild B.");
     expect(screen.queryByText(/Guild A/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Link Guild B" }));
+    await waitFor(() => expect(discordSaves[0]?.guildId).toBe("222"));
   });
 
-  it("surfaces an invalid/expired invite inline, leaving fields unchanged", async () => {
-    renderScreen(
-      mockBackend({
-        inviteError: { code: Code.NotFound, message: "invalid or expired invite" },
-      }),
-    );
-
-    const guild = await screen.findByLabelText("Server ID");
-    fireEvent.change(guild, { target: { value: "existing-guild" } });
-
-    fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
-      target: { value: "discord.gg/gone" },
-    });
-
+  it("surfaces an invalid/expired invite inline and keeps Link off", async () => {
+    renderScreen(mockBackend({ inviteError: { code: Code.NotFound, message: "invalid or expired invite" } }));
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/gone" } });
     expect(await screen.findByText(/invalid or expired/i)).toBeInTheDocument();
-    expect((guild as HTMLInputElement).value).toBe("existing-guild");
     expect(screen.queryByTestId("resolved-guild")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
   });
 
-  it("fills the Guild ID even when the resolved guild has no voice channels", async () => {
-    // No channel list exists on this screen anymore, so a channel-less guild
-    // is not a dead end: the guild fill and confirmation happen regardless.
-    renderScreen(
-      mockBackend({
-        inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] },
-      }),
-    );
-
-    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
-      target: { value: "discord.gg/abc123" },
-    });
-
-    const confirmation = await screen.findByTestId("resolved-guild");
-    expect(confirmation).toHaveTextContent("Server ID filled in from The Keep — click “Save Discord settings” to keep it.");
-    expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe("111");
+  it("offers the link even when the resolved server has no voice channels", async () => {
+    renderScreen(mockBackend({ inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] } }));
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });
+    expect(await screen.findByTestId("resolved-guild")).toHaveTextContent("Found The Keep.");
+    expect(screen.getByRole("button", { name: "Link The Keep" })).toBeEnabled();
   });
 });
 
@@ -960,34 +1059,23 @@ describe("Configuration model entry (#227)", () => {
     const providerSaves: Array<{ provider: string; secret: string; model: string }> = [];
     renderScreen(mockBackend({ saved: { groq: "eeee" }, providerSaves }));
 
-    // Open the Groq model combobox and type a model the catalog doesn't list.
     fireEvent.click(await screen.findByRole("button", { name: "Groq model" }));
-    fireEvent.change(screen.getByPlaceholderText(/search or type/i), {
-      target: { value: "my-custom-model" },
-    });
+    fireEvent.change(screen.getByPlaceholderText(/search or type/i), { target: { value: "my-custom-model" } });
     fireEvent.click(screen.getByRole("option", { name: /use "my-custom-model"/i }));
 
-    // The dirty pick grows a Save model button; clicking it fires the
-    // model-only mutation: empty secret, the typed model.
     fireEvent.click(await screen.findByRole("button", { name: "Save model" }));
     await screen.findByRole("button", { name: "Groq model" }); // settle
     expect(providerSaves).toContainEqual({ provider: "groq", secret: "", model: "my-custom-model" });
     // The key was never touched: the row still shows the masked saved state.
-    expect(screen.getByText("••••••••")).toBeInTheDocument();
+    expect(screen.getByText("•••• eeee")).toBeInTheDocument();
   });
 
   it("keeps free-text model entry usable when the catalog fetch fails", async () => {
     const providerSaves: Array<{ provider: string; secret: string; model: string }> = [];
-    renderScreen(
-      mockBackend({ saved: { groq: "eeee" }, providerSaves, listModelsError: "catalog down" }),
-    );
+    renderScreen(mockBackend({ saved: { groq: "eeee" }, providerSaves, listModelsError: "catalog down" }));
 
-    // The combobox renders despite the dead catalog (empty list)…
     fireEvent.click(await screen.findByRole("button", { name: "Groq model" }));
-    fireEvent.change(screen.getByPlaceholderText(/search or type/i), {
-      target: { value: "llama-fallback" },
-    });
-    // …and the typed id is still offered and saveable.
+    fireEvent.change(screen.getByPlaceholderText(/search or type/i), { target: { value: "llama-fallback" } });
     fireEvent.click(screen.getByRole("option", { name: /use "llama-fallback"/i }));
     fireEvent.click(await screen.findByRole("button", { name: "Save model" }));
     await screen.findByRole("button", { name: "Groq model" });
@@ -1001,42 +1089,67 @@ describe("Configuration model entry (#227)", () => {
   });
 });
 
-describe("Configuration spend caps (#130)", () => {
-  it("seeds the inputs from stored caps and saves edits (blank field clears)", async () => {
+describe("Configuration spending limits (#130)", () => {
+  const open = async () => fireEvent.click(await screen.findByRole("button", { name: /spending limits/i }));
+
+  it("states the current limits on the closed card, labelled by what they do", async () => {
+    renderScreen(mockBackend({ spendCaps: { softUsd: 5, hardUsd: 10 } }));
+    expect(await screen.findByText("Pause at $5.00 · end at $10.00")).toBeInTheDocument();
+    await open();
+    expect(await screen.findByLabelText("Pause new AI replies at (USD)")).toBeInTheDocument();
+    expect(screen.getByLabelText("End the session at (USD)")).toBeInTheDocument();
+  });
+
+  it("says when no limit is set", async () => {
+    renderScreen();
+    expect(await screen.findByText("No limits set")).toBeInTheDocument();
+  });
+
+  it("seeds the inputs, keeps Save off until something changed, saves and toasts", async () => {
     const spendSaves: SetSpendCapsRequest[] = [];
     renderScreen(mockBackend({ spendCaps: { softUsd: 5, hardUsd: 10 }, spendSaves }));
+    await open();
 
-    // The editor lives behind the closed-by-default "Spending limits"
-    // AdvancedCard — open it first (the body isn't rendered while closed).
-    fireEvent.click(await screen.findByRole("button", { name: /spending limits/i }));
-
-    const soft = (await screen.findByLabelText("Soft limit (USD)")) as HTMLInputElement;
-    const hard = screen.getByLabelText("Hard limit (USD)") as HTMLInputElement;
+    const soft = (await screen.findByLabelText("Pause new AI replies at (USD)")) as HTMLInputElement;
+    const hard = screen.getByLabelText("End the session at (USD)") as HTMLInputElement;
     await waitFor(() => expect(soft.value).toBe("5"));
     expect(hard.value).toBe("10");
+    const save = screen.getByRole("button", { name: /save spending limits/i });
+    expect(save).toBeDisabled();
 
-    // Raise the soft cap and clear the hard cap.
+    // Raise the pause amount and clear the end amount.
     fireEvent.change(soft, { target: { value: "7" } });
     fireEvent.change(hard, { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: /save spending limits/i }));
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
 
     await waitFor(() => expect(spendSaves).toHaveLength(1));
     // A blank field is omitted (undefined) so the server clears it; 7 is sent.
     expect(spendSaves[0].softUsd).toBe(7);
     expect(spendSaves[0].hardUsd).toBeUndefined();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Spending limits saved: Pause at $7.00"));
+    expect(await screen.findByText("Pause at $7.00")).toBeInTheDocument();
   });
 
-  it("surfaces a server rejection (hard < soft) inline", async () => {
-    renderScreen(mockBackend({ spendSaves: [] }));
+  it("rejects an end amount below the pause amount inline, before the server", async () => {
+    const spendSaves: SetSpendCapsRequest[] = [];
+    renderScreen(mockBackend({ spendSaves }));
+    await open();
+    fireEvent.change(await screen.findByLabelText("Pause new AI replies at (USD)"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("End the session at (USD)"), { target: { value: "5" } });
 
-    // Open the "Spending limits" AdvancedCard to mount the editor.
-    fireEvent.click(await screen.findByRole("button", { name: /spending limits/i }));
+    expect(screen.getByText(/must be at least the amount where replies pause/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("End the session at (USD)")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: /save spending limits/i })).toBeDisabled();
+    expect(spendSaves).toHaveLength(0);
+  });
 
-    fireEvent.change(await screen.findByLabelText("Soft limit (USD)"), { target: { value: "10" } });
-    fireEvent.change(screen.getByLabelText("Hard limit (USD)"), { target: { value: "5" } });
-    fireEvent.click(screen.getByRole("button", { name: /save spending limits/i }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't save/i);
+  it("rejects a negative amount inline", async () => {
+    renderScreen();
+    await open();
+    fireEvent.change(await screen.findByLabelText("Pause new AI replies at (USD)"), { target: { value: "-1" } });
+    expect(screen.getByText(/enter an amount of 0 or more/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save spending limits/i })).toBeDisabled();
   });
 });
 
@@ -1060,7 +1173,9 @@ describe("Configuration first-run (#267)", () => {
         getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
         listModels: () => create(ListModelsResponseSchema, { models: [] }),
       });
+      service(AuthService, { getCurrentUser: currentUser });
       service(ProviderService, {
+        getUsageSummary: usageSummary,
         listProviderConfigs: () =>
           create(ListProviderConfigsResponseSchema, {
             credentials: [],
@@ -1096,17 +1211,15 @@ describe("Configuration first-run (#267)", () => {
     });
   }
 
-  it("replaces the CodeNotFound error card with a create-first-campaign CTA", async () => {
+  it("makes step 1 the create-first-campaign form", async () => {
     renderScreen(firstRunBackend());
 
-    // The create CTA — pre-filled with the seed defaults — stands in for the card.
     expect(await screen.findByText(/create your first campaign/i)).toBeInTheDocument();
     expect((screen.getByLabelText("Game system") as HTMLInputElement).value).toBe("D&D 5e");
-    // Spoken language is the same SELECT Campaign settings uses, defaulting to
-    // the display language.
     expect(screen.getByRole("combobox", { name: /spoken language/i })).toHaveTextContent("English (en)");
-    // …and the old error card is gone.
-    expect(screen.queryByText(/couldn.t load the active campaign/i)).not.toBeInTheDocument();
+    // The form sits inside step 1 of the checklist.
+    const form = screen.getByLabelText("Game system").closest("#setup-campaign");
+    expect(form).not.toBeNull();
   });
 
   it("defaults the new campaign's spoken language to the German display language and sends it", async () => {
@@ -1118,7 +1231,9 @@ describe("Configuration first-run (#267)", () => {
           getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
           listModels: () => create(ListModelsResponseSchema, { models: [] }),
         });
+        service(AuthService, { getCurrentUser: currentUser });
         service(ProviderService, {
+          getUsageSummary: usageSummary,
           listProviderConfigs: () =>
             create(ListProviderConfigsResponseSchema, {
               credentials: [],
@@ -1151,16 +1266,12 @@ describe("Configuration first-run (#267)", () => {
     }
   });
 
-  it("creates the first campaign from the CTA and swaps in the live header", async () => {
+  it("creates the first campaign from step 1 and ticks it off", async () => {
     renderScreen(firstRunBackend());
 
-    fireEvent.change(await screen.findByLabelText("Name"), {
-      target: { value: "The Sunless Citadel" },
-    });
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "The Sunless Citadel" } });
     fireEvent.click(screen.getByRole("button", { name: /^create campaign$/i }));
 
-    // After create → activate → sweep, GetActiveCampaign resolves and the header
-    // replaces the CTA — no reload, no `glyphoxa seed`.
     expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
   });
@@ -1171,88 +1282,20 @@ describe("Configuration first-run (#267)", () => {
 
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Once Only" } });
     const button = screen.getByRole("button", { name: /^create campaign$/i });
-
-    // Both clicks land in one tick — before any re-render — so render-scoped
-    // pending state can't stop the second one; only the flow ref can. An
-    // unguarded submit here used to mint two identical campaigns.
     fireEvent.click(button);
     fireEvent.click(button);
 
-    // The flow completes once and the header swaps in the created campaign.
     expect(await screen.findByText("Once Only")).toBeInTheDocument();
     expect(calls.createCampaign).toBe(1);
     expect(calls.setActiveCampaign).toBe(1);
   });
 
-  it("keeps the error card (not the CTA) for a non-NotFound getActiveCampaign failure", async () => {
-    // Only CodeNotFound means "no campaign yet". A real backend failure (server
-    // down) must still show the error card — otherwise an install that already has
-    // a campaign would be lured into creating a duplicate.
+  it("shows an error with Retry (not the create form) for a non-NotFound campaign failure", async () => {
+    // Only CodeNotFound means "no campaign yet". A real backend failure must
+    // not lure a table that has campaigns into creating a duplicate.
     renderScreen(firstRunBackend({ activeErrorCode: Code.Internal }));
 
-    expect(await screen.findByText(/couldn.t load the active campaign/i)).toBeInTheDocument();
+    expect(await screen.findByText(/couldn.t check your campaigns/i)).toBeInTheDocument();
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
-  });
-
-  it("renders the server's PermissionDenied guild-proof message on a rejected save (#504)", async () => {
-    renderScreen(
-      mockBackend({
-        discordSaveError: "you need the Manage Server permission in that Discord server to link it",
-        discordSaveCode: Code.PermissionDenied,
-      }),
-    );
-
-    fireEvent.change(await screen.findByLabelText("Server ID"), { target: { value: "472093001100" } });
-    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
-
-    // The operator must see the server's actionable proof message, not a
-    // generic failure toast.
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/manage server permission/i);
-  });
-
-  it("unlinks the bound guild only after an explicit confirm (#504)", async () => {
-    const releaseCalls: string[] = [];
-    renderScreen(
-      mockBackend({
-        boundGuild: { guildId: "472093001100" },
-        releaseCalls,
-      }),
-    );
-
-    // A bound guild offers the unlink control; first click only arms it.
-    fireEvent.click(await screen.findByRole("button", { name: /unlink server/i }));
-    expect(releaseCalls).toHaveLength(0);
-
-    // The confirm step names the consequence and needs its own click.
-    fireEvent.click(screen.getByRole("button", { name: /confirm unlink/i }));
-    await waitFor(() => expect(releaseCalls).toEqual(["472093001100"]));
-
-    // The refetched config comes back unbound: field empty, control gone.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Server ID") as HTMLInputElement).value).toBe(""),
-    );
-    expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
-  });
-
-  it("offers no unlink control while no guild is bound (#504)", async () => {
-    renderScreen();
-    await screen.findByLabelText("Server ID");
-    expect(screen.queryByRole("button", { name: /unlink server/i })).not.toBeInTheDocument();
-  });
-
-  it("surfaces a failed release as a visible alert (#504)", async () => {
-    renderScreen(
-      mockBackend({
-        boundGuild: { guildId: "472093001100" },
-        releaseError: "that Discord server is not the one currently linked; reload and try again",
-      }),
-    );
-
-    fireEvent.click(await screen.findByRole("button", { name: /unlink server/i }));
-    fireEvent.click(screen.getByRole("button", { name: /confirm unlink/i }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/not the one currently linked/i);
   });
 });

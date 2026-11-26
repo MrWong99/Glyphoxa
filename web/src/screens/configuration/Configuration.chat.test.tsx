@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
+  AuthService,
   CampaignService,
   ProviderService,
   VoiceService,
@@ -28,6 +29,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Configuration } from "./Configuration";
+import { currentUser, usageSummary } from "./testRows";
 
 // The Planning chat model choice wired into the Setup screen (ADR-0062
 // amendment): what the screen sends to ProviderService and how it re-reads the
@@ -80,7 +82,9 @@ function backend(opts: {
         return create(ListModelsResponseSchema, { models: req.slot === "chat" ? chatCatalog : voiceCatalog });
       },
     });
+    service(AuthService, { getCurrentUser: currentUser });
     service(ProviderService, {
+      getUsageSummary: usageSummary,
       listProviderConfigs: () => {
         if (opts.listError) throw new ConnectError(opts.listError, Code.Unavailable);
         return create(ListProviderConfigsResponseSchema, {
@@ -140,8 +144,8 @@ describe("Configuration planning chat model", () => {
     expect(status()).toHaveTextContent("Answers with Anthropic / claude-haiku-5-5");
     // Still exactly two "AI model" overlines (the voice-LLM slots) and one for
     // the planning chat.
-    expect(screen.getAllByText("AI model")).toHaveLength(2);
-    expect(screen.getAllByText("Planning chat model")).toHaveLength(1);
+    expect(screen.getAllByText("AI model", { selector: ".gx-overline" })).toHaveLength(2);
+    expect(screen.getAllByText("Planning chat model", { selector: ".gx-overline" })).toHaveLength(1);
     // The chat has no key row of its own any more.
     expect(screen.queryByLabelText("Planning chat (Groq) key")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Planning chat key")).not.toBeInTheDocument();
@@ -201,21 +205,20 @@ describe("Configuration planning chat model", () => {
     await choose(/^Anthropic/);
     fireEvent.click(screen.getByRole("button", { name: "Save chat model" }));
 
-    const alert = await screen.findByRole("alert");
+    const card = document.getElementById("planning-chat") as HTMLElement;
+    const alert = await within(card).findByRole("alert");
     expect(alert).toHaveTextContent(/couldn't save.*no price on record/i);
-    expect(alert.closest("#planning-chat")).not.toBeNull();
     // Nothing was stored: the status line still names the voice model.
     expect(status()).toHaveTextContent("Answers with Anthropic / claude-haiku-5-5");
   });
 
   it("says so when the Setup read fails instead of showing a control that cannot be trusted", async () => {
     renderScreen(backend({ listError: "database unavailable" }));
-    const card = await waitFor(() => {
-      const el = document.getElementById("planning-chat");
-      expect(el?.querySelector('[role="alert"]')).not.toBeNull();
-      return el as HTMLElement;
-    });
-    expect(card).toHaveTextContent(/couldn't load the planning chat model/i);
+    // One error for the whole read, with a retry, and no chat card at all: a
+    // control drawn from no data would claim a choice nobody read.
+    expect(await screen.findByText("Couldn't load your setup")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(document.getElementById("planning-chat")).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Planning chat provider" })).not.toBeInTheDocument();
   });
 });

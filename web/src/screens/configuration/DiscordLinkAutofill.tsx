@@ -18,7 +18,7 @@ import { parseDiscordLink } from "@/lib/discordLink";
 //     Guild ID via onFill, and shows the resolved guild name as confirmation.
 // The voice channel is no longer picked here: sessions choose their channel on
 // the Session screen (where the Default Voice Channel is also set), so this
-// field only ever fills the guild. onFill MUST be the Configuration screen's
+// field only ever fills the guild. onFill MUST be the Discord card's
 // dirty-tracking edit path — a raw setState would let a config refetch clobber
 // the fill. A failed resolve leaves the field and any previously-resolved
 // confirmation untouched.
@@ -44,7 +44,8 @@ const RESOLVE_DEBOUNCE_MS = 400;
 export function DiscordLinkAutofill({
   onFill,
 }: {
-  onFill: (guildId: string) => void;
+  /** The server the pasted link names; the name only when an invite resolved it. */
+  onFill: (guildId: string, guildName?: string) => void;
 }) {
   const { t } = useI18n();
   const [link, setLink] = useState("");
@@ -71,7 +72,7 @@ export function DiscordLinkAutofill({
   const resolve = useMutation(ProviderService.method.resolveGuildInvite, {
     onSuccess: (res, variables) => {
       if (variables.inviteCode !== currentCode.current) return; // superseded
-      onFill(res.guildId);
+      onFill(res.guildId, res.guildName);
       setResolvedGuild(res.guildName);
       setLinkError(null);
     },
@@ -139,7 +140,7 @@ export function DiscordLinkAutofill({
       {resolvedGuild && (
         <p className="gx-discord__resolved" data-testid="resolved-guild">
           <Check size={13} aria-hidden="true" />{" "}
-          {t("config.serverIdFilledFrom", { guild: resolvedGuild })}
+          {t("config.inviteFound", { guild: resolvedGuild })}
         </p>
       )}
     </div>

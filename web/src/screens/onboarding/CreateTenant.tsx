@@ -14,6 +14,7 @@ import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
 
 import "@/screens/login/login.css";
+import "./onboarding.css";
 
 // The ADR-0055 name-your-Tenant onboarding step. The OAuth callback 302s a
 // FRESH open-mode signup here (onboardingRedirect in internal/auth/oauth.go —
@@ -119,6 +120,24 @@ function NameTenantCard({ initialName }: { initialName: string }) {
             required
           />
         </div>
+
+        {/* What comes after this screen: the Setup checklist's own steps, so
+            the list here and the one the GM lands on read the same. */}
+        <section className="gx-login__next" aria-labelledby="onboarding-next">
+          <h2 id="onboarding-next" className="gx-login__next-title">
+            {t("auth.onboardingNextTitle")}
+          </h2>
+          <ol className="gx-login__next-list">
+            <li>{t("config.stepCampaign")}</li>
+            <li>
+              {t("config.stepDiscord")}
+              <span className="gx-login__next-hint">{t("auth.onboardingNextDiscordHint")}</span>
+            </li>
+            <li>{t("config.stepVoice")}</li>
+            <li>{t("config.stepAiModel")}</li>
+          </ol>
+          <p className="gx-login__next-hint">{t("auth.onboardingNextWhere")}</p>
+        </section>
 
         {rename.isError && (
           <p className="gx-login__error" role="alert">

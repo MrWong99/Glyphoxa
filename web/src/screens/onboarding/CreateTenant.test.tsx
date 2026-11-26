@@ -100,6 +100,18 @@ describe("CreateTenant", () => {
     expect(await screen.findByText(/a table is your group's own space in glyphoxa/i)).toBeInTheDocument();
   });
 
+  it("lists what comes next with the Setup checklist's own steps", async () => {
+    renderScreen(backend());
+    const next = (await screen.findByRole("heading", { name: "Next" })).closest("section") as HTMLElement;
+    const steps = Array.from(next.querySelectorAll("li")).map((li) => li.textContent);
+    expect(steps).toEqual([
+      "Create a campaign",
+      "Connect Discord — you need Manage Server rights on that server",
+      "Voice and speech",
+      "AI model",
+    ]);
+  });
+
   it("renames the Tenant and navigates into the app on save", async () => {
     const renamed: { name?: string } = {};
     renderScreen(backend({ renamed }));

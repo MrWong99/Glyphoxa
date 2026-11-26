@@ -25,21 +25,30 @@ export function botAuthorizeUrl(applicationId: string): string {
   return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(applicationId)}&scope=bot%20applications.commands&permissions=3181568`;
 }
 
-// The always-visible copy (config.addBotCopy) distinguishes this step from
-// saving the Server ID and marks it a prerequisite for voice-join. "above"
-// because the action renders at the foot of the card, below the ID input.
-
+// The always-visible copy (config.addBotCopy) marks this a prerequisite for
+// voice-join: it is step 1 of the Discord card, before linking the server.
+//
 // The anchor wears the Button classes because the Button primitive is
-// button-only; a real <a> is needed to open Discord in a new tab.
-const BTN_CLASS = "gx-btn gx-btn--secondary gx-btn--sm";
-
-export function AddBotLink({ applicationId }: { applicationId: string }) {
+// button-only; a real <a> is needed to open Discord in a new tab. As step 1
+// it is the card's primary action (variant "primary").
+export function AddBotLink({
+  applicationId,
+  variant = "secondary",
+}: {
+  applicationId: string;
+  variant?: "primary" | "secondary";
+}) {
   const { t } = useI18n();
   return (
     <div className="gx-add-bot">
       <p className="gx-add-bot__copy">{t("config.addBotCopy")}</p>
       {applicationId ? (
-        <a className={BTN_CLASS} href={botAuthorizeUrl(applicationId)} target="_blank" rel="noopener noreferrer">
+        <a
+          className={`gx-btn gx-btn--${variant} gx-btn--sm`}
+          href={botAuthorizeUrl(applicationId)}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           <span className="gx-btn__icon">
             <ExternalLink size={16} />
           </span>
@@ -47,7 +56,7 @@ export function AddBotLink({ applicationId }: { applicationId: string }) {
         </a>
       ) : (
         <>
-          <Button variant="secondary" size="sm" disabled iconStart={<ExternalLink size={16} />}>
+          <Button variant={variant} size="sm" disabled iconStart={<ExternalLink size={16} />}>
             {t("config.addBotAction")}
           </Button>
           <p className="gx-add-bot__note">{t("config.addBotNoAppId")}</p>

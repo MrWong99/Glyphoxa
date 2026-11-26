@@ -3,11 +3,6 @@
  * tweaks go here.
  */
 
-/* The live campaign header sits above the provider list with breathing room. */
-.gx-providers__campaign {
-  margin-bottom: var(--spacing-lg);
-}
-
 /* Secret credential control (key field / masked + Replace), right-aligned in the
  * provider row before the status badge. */
 .gx-secret {
@@ -304,4 +299,508 @@
   opacity: 0.5;
   pointer-events: none;
   transform: none;
+}
+
+/* ---- Setup as a checklist (#695) ----------------------------------------- */
+
+.gx-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.gx-setup .gx-page-header {
+  margin-bottom: 0;
+}
+
+.gx-setup__scope {
+  margin: calc(-1 * var(--spacing-md)) 0 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* A section the checklist jumps to takes focus; its outline is the browser's
+ * focus ring only when that focus came from the keyboard. */
+.gx-setup-section,
+.gx-voice-llm,
+.gx-provider-card,
+.gx-setup-step {
+  scroll-margin-top: var(--spacing-xl);
+}
+
+.gx-setup-section:focus:not(:focus-visible),
+.gx-voice-llm:focus:not(:focus-visible),
+.gx-provider-card:focus:not(:focus-visible),
+.gx-setup-step:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.gx-setup .gx-section-title {
+  margin: 0 0 var(--spacing-md);
+}
+
+/* The checklist card. */
+.gx-setup-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+}
+
+.gx-setup-checklist__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.gx-setup-checklist__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  color: var(--text-strong);
+}
+
+.gx-setup-checklist__progress {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--rune);
+}
+
+.gx-setup-checklist__optional {
+  margin: var(--spacing-sm) 0 0;
+  font-size: var(--overline-size);
+  font-weight: var(--overline-weight);
+  letter-spacing: var(--overline-tracking);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.gx-setup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-setup-step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+}
+
+.gx-setup-step[data-state="done"] {
+  background: transparent;
+  border-color: transparent;
+}
+
+.gx-setup-step__mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--text-subtle);
+}
+
+.gx-setup-step__mark svg {
+  width: 18px;
+  height: 18px;
+}
+
+.gx-setup-step[data-state="done"] .gx-setup-step__mark {
+  color: var(--status-success);
+}
+
+.gx-setup-step[data-state="todo"] .gx-setup-step__mark {
+  color: var(--status-warning);
+}
+
+.gx-setup-step__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-setup-step__label {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.gx-setup-step__num {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.gx-setup-step[data-state="done"] .gx-setup-step__label {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+
+.gx-setup-step__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  align-self: flex-start;
+  min-height: var(--target-coarse);
+  text-decoration: none;
+}
+
+.gx-setup-step__link:hover {
+  color: var(--text-link-hover);
+  text-decoration: underline;
+}
+
+.gx-setup-step__chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text-subtle);
+}
+
+.gx-setup-step__hint {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.gx-setup-step__body {
+  margin-top: var(--spacing-sm);
+}
+
+/* Plan and usage card; "Your table" shares its head. */
+.gx-plan-card,
+.gx-table-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+}
+
+.gx-plan-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.gx-plan-card__name {
+  margin: 2px 0 0;
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+.gx-plan-card__line {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+.gx-plan-card__reset,
+.gx-plan-card__note {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-plan-card__note {
+  margin: 0;
+}
+
+.gx-plan-card__warn {
+  margin: 0;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-warning);
+}
+
+.gx-plan-card__remedies {
+  margin: var(--spacing-xs) 0 0;
+  padding-left: var(--spacing-lg);
+}
+
+.gx-plan-card .gx-alert p {
+  margin: 0;
+}
+
+.gx-plan-meter {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.gx-plan-meter__fill {
+  display: block;
+  height: 100%;
+  background: var(--arcane);
+  border-radius: inherit;
+}
+
+.gx-plan-meter[data-tone="warning"] .gx-plan-meter__fill {
+  background: var(--status-warning);
+}
+
+.gx-plan-meter[data-tone="danger"] .gx-plan-meter__fill {
+  background: var(--status-danger);
+}
+
+.gx-table-card__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  max-width: 28rem;
+}
+
+.gx-table-card__delete {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* Key rows: name and status on top, then the model, then the key control. */
+.gx-provider-card .gx-provider-row {
+  align-items: flex-start;
+}
+
+.gx-provider-card .gx-provider-row__meta {
+  flex: 1 1 auto;
+  max-width: none;
+}
+
+.gx-provider-card .gx-provider-row__model,
+.gx-provider-card .gx-secret {
+  margin-left: 0;
+  padding: 0 16px 16px;
+  flex-wrap: wrap;
+}
+
+.gx-provider-row__getkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: var(--body-xs);
+  color: var(--text-link);
+}
+
+.gx-provider-row__getkey:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-secret__saved,
+.gx-secret__included,
+.gx-secret__edit {
+  flex-wrap: wrap;
+}
+
+.gx-secret__included {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+.gx-secret__date {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-secret__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-left: auto;
+}
+
+.gx-secret__edit .gx-field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* The voice model group: its heading, the "in use" line, Back to default. */
+.gx-voice-llm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.gx-voice-llm__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+}
+
+.gx-voice-llm__title {
+  margin: 0;
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+.gx-voice-llm .gx-providers__llm-in-use {
+  margin: 0;
+  flex: 1 1 16rem;
+}
+
+/* Discord: the numbered steps, then the linked summary. */
+.gx-discord-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-discord__status:empty {
+  display: none;
+}
+
+.gx-discord-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.gx-discord-step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+}
+
+.gx-discord-step__num {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--text-strong);
+}
+
+.gx-discord-step__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-discord-step__title {
+  margin: 4px 0 0;
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+.gx-discord-step__copy,
+.gx-discord-step__note {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* Inside step 1 the add-bot block needs no divider: the step is the frame. */
+.gx-discord-step .gx-add-bot {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.gx-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  align-self: flex-start;
+  min-height: var(--target-coarse);
+  padding: 0;
+  font: inherit;
+  font-size: var(--body-sm);
+  color: var(--text-link);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.gx-disclosure:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-disclosure__chevron {
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.gx-disclosure__chevron[data-open] {
+  transform: rotate(90deg);
+}
+
+.gx-discord-linked {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+}
+
+.gx-discord-linked__meta {
+  flex: 1 1 14rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.gx-discord-linked__name {
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.gx-discord-linked__id {
+  font-family: var(--font-mono);
+  font-size: var(--mono-xs);
+  color: var(--text-muted);
+}
+
+.gx-discord-linked__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.gx-discord-linked .gx-health {
+  align-items: flex-start;
+}
+
+.gx-discord-linked .gx-health__detail {
+  text-align: left;
+}
+
+@media (max-width: 640px) {
+  .gx-setup-checklist {
+    padding: var(--spacing-md);
+  }
+  .gx-spendcaps__inputs {
+    grid-template-columns: 1fr;
+  }
+  .gx-secret__actions {
+    margin-left: 0;
+  }
 }

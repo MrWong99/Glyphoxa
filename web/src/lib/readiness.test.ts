@@ -2,10 +2,15 @@ import { describe, it, expect } from "vitest";
 
 import {
   deriveNextSteps,
+  deriveOptionalSetupItems,
+  deriveSetupSteps,
   isReady,
+  SETUP_ANCHORS,
   unmetSteps,
   type NextStepKey,
   type ReadinessInputs,
+  type SetupInputs,
+  type SetupStepKey,
 } from "./readiness";
 
 // A campaign with everything in place: each step's table row below removes
@@ -166,5 +171,143 @@ describe("unmetSteps / isReady", () => {
     expect(unmetSteps(steps)).toEqual([]);
     // Not known to be ready either: nothing may claim "all set" on a guess.
     expect(isReady(steps)).toBe(false);
+  });
+});
+
+// ---- Setup checklist ---------------------------------------------------------
+
+type Slot = {
+  component: string;
+  provider: string;
+  showMasked: boolean;
+  providedByPlatform: boolean;
+  inEffect: boolean;
+};
+const slot = (component: string, provider: string, over: Partial<Slot> = {}): Slot => ({
+  component,
+  provider,
+  showMasked: false,
+  providedByPlatform: false,
+  inEffect: false,
+  ...over,
+});
+
+const LINKED = "123456789012345678";
+
+// A trial table: a campaign, a linked server, and every service on the plan's keys.
+const TRIAL: SetupInputs = {
+  hasCampaign: true,
+  providers: {
+    guildId: LINKED,
+    credentials: [
+      slot("discord", "discord", { providedByPlatform: true }),
+      slot("llm", "groq", { providedByPlatform: true, inEffect: true }),
+      slot("llm", "anthropic", { providedByPlatform: true }),
+      slot("tts", "elevenlabs", { providedByPlatform: true }),
+      slot("image", "gemini"),
+    ],
+  },
+  spendCaps: { caps: {} },
+};
+
+const setupStep = (inputs: SetupInputs, key: SetupStepKey) => {
+  const found = deriveSetupSteps(inputs).find((s) => s.key === key);
+  if (!found) throw new Error(`no step ${key}`);
+  return found;
+};
+
+const withCreds = (credentials: Slot[]): SetupInputs => ({
+  ...TRIAL,
+  providers: { guildId: LINKED, credentials },
+});
+
+describe("deriveSetupSteps", () => {
+  it("lists the four steps in the order Setup asks for them, each with its section", () => {
+    expect(deriveSetupSteps(TRIAL).map((s) => [s.key, s.anchor])).toEqual([
+      ["campaign", SETUP_ANCHORS.campaign],
+      ["discord", SETUP_ANCHORS.discord],
+      ["voice", SETUP_ANCHORS.voice],
+      ["aiModel", SETUP_ANCHORS.aiModel],
+    ]);
+  });
+
+  it("a trial table with a linked server and a campaign is ready", () => {
+    const steps = deriveSetupSteps(TRIAL);
+    expect(steps.every((s) => s.done === true)).toBe(true);
+    expect(isReady(steps)).toBe(true);
+  });
+
+  const cases: { name: string; key: SetupStepKey; inputs: SetupInputs; done: boolean | undefined }[] = [
+    { name: "no campaign yet", key: "campaign", inputs: { ...TRIAL, hasCampaign: false }, done: false },
+    { name: "campaign read pending", key: "campaign", inputs: { ...TRIAL, hasCampaign: undefined }, done: undefined },
+
+    {
+      name: "no server linked",
+      key: "discord",
+      inputs: { ...TRIAL, providers: { guildId: "", credentials: [] } },
+      done: false,
+    },
+    { name: "Setup not read", key: "discord", inputs: { ...TRIAL, providers: undefined }, done: undefined },
+
+    {
+      name: "an own ElevenLabs key",
+      key: "voice",
+      inputs: withCreds([slot("tts", "elevenlabs", { showMasked: true })]),
+      done: true,
+    },
+    { name: "no voice key and none included", key: "voice", inputs: withCreds([slot("tts", "elevenlabs")]), done: false },
+    { name: "voice not read", key: "voice", inputs: { ...TRIAL, providers: undefined }, done: undefined },
+
+    {
+      name: "the model in use has an own key",
+      key: "aiModel",
+      inputs: withCreds([slot("llm", "anthropic", { showMasked: true, inEffect: true }), slot("llm", "groq")]),
+      done: true,
+    },
+    {
+      // A key on the OTHER slot does not run the sessions.
+      name: "only the slot not in use has a key",
+      key: "aiModel",
+      inputs: withCreds([slot("llm", "groq", { inEffect: true }), slot("llm", "anthropic", { showMasked: true })]),
+      done: false,
+    },
+    {
+      name: "a deployment default with no slot of its own",
+      key: "aiModel",
+      inputs: withCreds([slot("llm", "groq"), slot("llm", "anthropic")]),
+      done: true,
+    },
+    { name: "AI model not read", key: "aiModel", inputs: { ...TRIAL, providers: undefined }, done: undefined },
+  ];
+
+  it.each(cases)("$key: $name → $done", ({ key, inputs, done }) => {
+    expect(setupStep(inputs, key).done).toBe(done);
+  });
+
+  it("a pending read is never a to-do", () => {
+    const steps = deriveSetupSteps({});
+    expect(unmetSteps(steps)).toEqual([]);
+    expect(isReady(steps)).toBe(false);
+  });
+});
+
+describe("deriveOptionalSetupItems", () => {
+  it("lists images and spending limits as optional extras", () => {
+    expect(deriveOptionalSetupItems(TRIAL).map((i) => [i.key, i.done])).toEqual([
+      ["images", false],
+      ["spendingLimits", false],
+    ]);
+  });
+
+  it("ticks images on a key or the plan's, and limits once one is set", () => {
+    const items = deriveOptionalSetupItems({
+      providers: { guildId: "", credentials: [slot("image", "gemini", { providedByPlatform: true })] },
+      spendCaps: { caps: { hardUsd: 10 } },
+    });
+    expect(items.map((i) => i.done)).toEqual([true, true]);
+  });
+
+  it("is unknown while its reads are out", () => {
+    expect(deriveOptionalSetupItems({}).map((i) => i.done)).toEqual([undefined, undefined]);
   });
 });
