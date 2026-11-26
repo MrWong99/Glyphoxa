@@ -1,0 +1,160 @@
+/* ── Players view (#279) ─────────────────────────────────────────────────────
+ * Scoped under the panel root (.gx-players-panel). This sheet is imported by
+ * PlayersPanel, which the Campaign host imports BEFORE its own campaign.css, so
+ * at equal specificity the older .gx-players__* rules there would win; the root
+ * prefix outranks them.
+ */
+
+.gx-players-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  min-width: 0;
+}
+
+.gx-players-panel .gx-players {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-players-panel .gx-players__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The ROW is the card; the button inside it is the part that selects. Badges
+ * sit in the row beside the button, not in it, so each can take focus and show
+ * its tooltip. */
+.gx-players-panel .gx-players__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  padding-right: var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+.gx-players-panel .gx-players__row:hover {
+  background: var(--surface-card-hover);
+}
+.gx-players-panel .gx-players__row[data-active="true"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--glow-arcane-soft);
+}
+/* Someone in the voice channel without a Character: a dashed frame, the app's
+ * mark for "not there yet". */
+.gx-players-panel .gx-players__row--unlinked {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-style: dashed;
+  background: transparent;
+}
+.gx-players-panel .gx-players__row--unlinked:hover {
+  background: transparent;
+}
+
+.gx-players-panel .gx-players__item {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: var(--spacing-sm);
+  width: auto;
+  min-width: 0;
+  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  font: inherit;
+  color: var(--text-default);
+  text-align: left;
+  cursor: pointer;
+}
+.gx-players-panel .gx-players__item:hover {
+  background: transparent;
+}
+
+.gx-players-panel .gx-players__meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gx-players-panel .gx-players__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+.gx-players-panel .gx-players__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+.gx-players-panel .gx-players__who {
+  color: var(--text-default);
+}
+
+/* A real button (it is a tooltip trigger, and a focusable span is announced
+ * as bare text), stripped of the browser's button chrome. */
+.gx-players-panel .gx-players__badge {
+  display: inline-flex;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: help;
+}
+
+/* "In voice, not yet linked" */
+.gx-players-panel .gx-players__unlinked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-sm);
+}
+.gx-players-panel .gx-players__section-title {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  letter-spacing: normal;
+  color: var(--text-strong);
+}
+.gx-players-panel .gx-players__section-hint {
+  margin: 0 0 var(--spacing-xs);
+  font-size: var(--body-xs);
+  line-height: var(--body-line);
+  color: var(--text-muted);
+}
+
+.gx-players-panel .gx-players__prompt {
+  padding: var(--spacing-md) var(--spacing-lg);
+}
+
+/* Phone: a long Discord name must not push the button off the row. */
+@media (max-width: 480px) {
+  .gx-players-panel .gx-players__row--unlinked {
+    flex-wrap: wrap;
+  }
+  .gx-players-panel .gx-players__row--unlinked .gx-players__meta {
+    flex-basis: 60%;
+  }
+}
