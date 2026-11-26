@@ -24,6 +24,7 @@ import {
   type RejectKnowledgeProposalRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { flushPendingWrites, hasPendingWrites } from "@/lib/pendingWrites";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignScreenProvider, type CampaignScreen } from "./campaignContext";
 import { ProposalsPanel } from "./ProposalsPanel";
@@ -405,6 +406,45 @@ describe("Suggestions inbox: one at a time", () => {
     await waitFor(() => expect(rejectCalls.map((c) => c.id)).toEqual(["p-fact"]));
   });
 
+  it("tries to send a waiting dismissal when the page goes away", async () => {
+    const { rejectCalls } = renderPanel([factProposal]);
+    await screen.findByText(/He fears the dark/);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(rejectCalls).toHaveLength(0);
+
+    // A reload or a closed tab: best effort, but not dropped without trying.
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    await waitFor(() => expect(rejectCalls.map((c) => c.id)).toEqual(["p-fact"]));
+  });
+
+  it("holds a waiting dismissal for a campaign switch to send first, and only once", async () => {
+    const { rejectCalls, unmount } = renderPanel([factProposal]);
+    await screen.findByText(/He fears the dark/);
+    expect(hasPendingWrites()).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(hasPendingWrites()).toBe(true);
+
+    await act(async () => {
+      await flushPendingWrites();
+    });
+    expect(rejectCalls.map((c) => c.id)).toEqual(["p-fact"]);
+    expect(hasPendingWrites()).toBe(false);
+    // Leaving the view afterwards sends nothing more.
+    unmount();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rejectCalls).toHaveLength(1);
+  });
+
+  it("releases the hold on Undo", async () => {
+    renderPanel([factProposal], { toaster: true });
+    await screen.findByText(/He fears the dark/);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    expect(hasPendingWrites()).toBe(false);
+  });
+
   it("renders an unreadable proposal so the GM can still dismiss it", async () => {
     const { rejectCalls } = renderPanel([unreadableProposal], { undoWindowMs: 10 });
     expect(await screen.findByText("Unreadable suggestion")).toBeInTheDocument();
@@ -524,6 +564,60 @@ describe("Suggestions inbox: batches", () => {
     await waitFor(() => expect(counters.listCalls).toBe(2));
   });
 
+  it("leaves a suggestion whose own Add is still on its way out of the batch", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { approveCalls } = renderPanel(four, { hold });
+    await resolved();
+
+    fireEvent.click(within(row(/He fears the dark/)).getByRole("checkbox"));
+    fireEvent.click(within(row(/He owns the mine/)).getByRole("checkbox"));
+    // The first one's own Add is sent, and has not answered yet.
+    fireEvent.click(within(row(/He fears the dark/)).getByRole("button", { name: "Add to wiki" }));
+    await waitFor(() => expect(approveCalls.map((c) => c.id)).toEqual(["f1"]));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add selected" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Add 1 suggestion to the wiki?");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add to wiki" }));
+    release();
+    // f1 is sent once, not again by the batch.
+    await waitFor(() => expect(approveCalls.map((c) => c.id)).toEqual(["f1", "f3"]));
+    await waitFor(() => expect(screen.queryByText(/He owns the mine/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/couldn't be added/)).not.toBeInTheDocument();
+  });
+
+  it("puts keyboard focus on the inbox heading when a batch ends, not on the page", async () => {
+    renderPanel(four, {
+      refuse: { f2: 'no wiki entry named "Ilva" — create it first, then approve; or reject' },
+    });
+    await resolved();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all 4 shown" }));
+    const start = screen.getByRole("button", { name: "Add selected" });
+    act(() => start.focus());
+    fireEvent.click(start);
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Add to wiki" }));
+
+    await screen.findByText("1 suggestion couldn't be added");
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "1 pending suggestion" })).toHaveFocus());
+  });
+
+  it("puts keyboard focus on the empty state's action when a batch clears the queue", async () => {
+    renderPanel(four);
+    await resolved();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all 4 shown" }));
+    const start = screen.getByRole("button", { name: "Dismiss selected" });
+    act(() => start.focus());
+    fireEvent.click(start);
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Dismiss" }));
+
+    expect(await screen.findByText("No pending suggestions")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Planning" })).toHaveFocus());
+  });
+
   it("acts only on what the filter shows", async () => {
     const { approveCalls } = renderPanel(four);
     await resolved();
@@ -595,6 +689,39 @@ describe("Suggestions inbox: keyboard", () => {
     expect(within(row(/He owns the mine/)).getByRole("button", { name: "Add to wiki" })).not.toHaveAttribute(
       "aria-keyshortcuts",
     );
+  });
+
+  it("A and X do nothing while focus is on the bulk bar, outside every row", async () => {
+    const { approveCalls, rejectCalls } = renderPanel(three, { undoWindowMs: 10 });
+    await resolved();
+    // A row was current, then the GM tabbed on to the select-all box.
+    act(() => row(/He fears the dark/).focus());
+    act(() => screen.getByRole("checkbox", { name: "Select all 3 shown" }).focus());
+
+    press("x");
+    press("a");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(rejectCalls).toHaveLength(0);
+    expect(approveCalls).toHaveLength(0);
+    expect(screen.getByText(/He fears the dark/)).toBeInTheDocument();
+    // J and K still work inbox-wide.
+    press("j");
+    expect(row(/He owns the mine/)).toHaveFocus();
+  });
+
+  it("puts keyboard focus on the empty state's action when the last row leaves", async () => {
+    renderPanel([factProposal]);
+    await resolved();
+    act(() => row(/He fears the dark/).focus());
+    press("x");
+    expect(await screen.findByText("No pending suggestions")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Planning" })).toHaveFocus());
+  });
+
+  it("names a row by what it suggests", async () => {
+    renderPanel(three);
+    await resolved();
+    expect(row(/He fears the dark/)).toHaveAccessibleName("Bart: He fears the dark.");
   });
 
   it("works from a control inside a row, too", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -95,6 +95,9 @@ type World = {
   /** Calls to GetKnowledgeGraph that fail before it answers. */
   graphFailures: number;
   mapsFail: boolean;
+  rosterFail?: boolean;
+  /** Every ListMaps call waits for this before it answers. */
+  mapsHold?: Promise<void>;
 };
 
 // A campaign that is fully set up and has nothing waiting.
@@ -136,10 +139,14 @@ const brandNew = (): World => ({
 });
 
 function mockTransport(world: World) {
-  const calls = { graph: 0 };
+  const calls = { graph: 0, maps: 0 };
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
-      getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: world.roster }),
+      getCampaignRoster: () => {
+        // NotFound is the settled "no campaign" answer: not retried.
+        if (world.rosterFail) throw new ConnectError("no campaign", Code.NotFound);
+        return create(GetCampaignRosterResponseSchema, { campaign, roster: world.roster });
+      },
       listKnowledgeProposals: () =>
         create(ListKnowledgeProposalsResponseSchema, { proposals: world.proposals }),
       getKnowledgeGraph: () => {
@@ -178,7 +185,9 @@ function mockTransport(world: World) {
         create(ListCharactersResponseSchema, {
           characters: Array.from({ length: world.characters }, (_, i) => ({ id: `pc-${i}`, name: `PC ${i}` })),
         }),
-      listMaps: () => {
+      listMaps: async () => {
+        calls.maps++;
+        if (world.mapsHold) await world.mapsHold;
         if (world.mapsFail) throw new ConnectError("maps are down", Code.Unavailable);
         return create(ListMapsResponseSchema, {
           maps: Array.from({ length: world.maps }, (_, i) => ({ id: `m-${i}`, name: `Map ${i}` })),
@@ -288,6 +297,29 @@ describe("Overview next steps", () => {
     await settled();
     expect(screen.queryByRole("region", { name: "Next steps" })).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the checklist on screen while a failed read is retried", async () => {
+    const world: World = { ...brandNew(), mapsFail: true };
+    const { calls } = renderOverview(world);
+    const next = await screen.findByRole("region", { name: "Next steps" });
+    // The map step's read failed: it is left out, the rest are counted.
+    await waitFor(() => expect(within(next).getByText("0 of 5 done")).toBeInTheDocument());
+
+    world.mapsFail = false;
+    let release = () => {};
+    world.mapsHold = new Promise((r) => (release = r));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(calls.maps).toBe(2));
+    // The retry is on its way, which puts the read back to pending: the
+    // checklist stays.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByRole("region", { name: "Next steps" })).toBeInTheDocument();
+    release();
+    expect(await screen.findByText("0 of 6 done")).toBeInTheDocument();
   });
 
   it("keeps the finished steps in view, marked done, while others are open", async () => {
@@ -443,6 +475,15 @@ describe("Overview stat tiles", () => {
     }
     fireEvent.click(within(list).getByRole("button", { name: "Players: 4 players" }));
     expect(openView).toHaveBeenLastCalledWith("players");
+  });
+
+  it("does not show the Planning tile as loading for good when the campaign cannot be read", async () => {
+    renderOverview({ ...prepared(), rosterFail: true });
+    const list = await tiles();
+    // Planning threads are read by campaign id, which the failed roster read
+    // never delivered: no figure, like the Cast tile, not a skeleton forever.
+    expect(await within(list).findByRole("button", { name: "Planning: count unavailable" })).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: "Cast: count unavailable" })).toBeInTheDocument();
   });
 
   it("reports a count it could not load under the tiles, with a retry", async () => {

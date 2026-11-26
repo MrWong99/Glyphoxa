@@ -1,4 +1,4 @@
-import { useId, useMemo, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { timestampDate, timestampMs } from "@bufbuild/protobuf/wkt";
 import {
@@ -66,6 +66,11 @@ import "./overview.css";
 // Overview — the page a GM lands on every visit — reuses an answer for a
 // while instead of probing on every mount and window refocus.
 const HEALTH_STALE_MS = 10 * 60_000;
+// …but not a degraded one. The server caches only a probe that completed, so a
+// slot that timed out is retried by the next call; pinning that answer here for
+// ten minutes would put the pin back. A degraded answer is fresh for a minute,
+// and a window refocus after that asks again.
+const HEALTH_DEGRADED_STALE_MS = 60_000;
 
 // How many past sessions the Overview lists.
 const LAST_SESSIONS = 3;
@@ -283,7 +288,16 @@ function AttentionBand() {
   const graphQ = useQuery(CampaignService.method.getKnowledgeGraph, {});
   const readyQ = useQuery(CampaignService.method.getRosterReadiness, {});
   const providersQ = useQuery(ProviderService.method.listProviderConfigs, {});
-  const healthQ = useQuery(VoiceService.method.getProviderHealth, {}, { staleTime: HEALTH_STALE_MS });
+  const healthQ = useQuery(
+    VoiceService.method.getProviderHealth,
+    {},
+    {
+      staleTime: (query) =>
+        query.state.data?.providers.some((p) => p.status === HealthStatus.DEGRADED)
+          ? HEALTH_DEGRADED_STALE_MS
+          : HEALTH_STALE_MS,
+    },
+  );
 
   // The NPCs that fail a readiness check, in roster order. Graded by the same
   // rosterPrep() the Cast view's Session prep uses, so the two cannot disagree.
@@ -411,7 +425,9 @@ function AttentionBand() {
       icon: <Settings />,
       tone: "danger",
       title: t("home.attnSetup", { what: componentLabel(h, t) }),
-      detail: HEALTH_CODE[h.code] ? t(HEALTH_CODE[h.code]) : h.detail,
+      // A code this client does not know yet reads as the generic failure in
+      // the display language; Setup, where the action leads, shows the detail.
+      detail: t(HEALTH_CODE[h.code] ?? "config.healthCheckFailed"),
       action: t("home.attnSetupAction"),
       onAction: openSetup,
     });
@@ -495,8 +511,12 @@ function NextSteps() {
   const queries = [providersQ, rosterQ, graphQ, charactersQ, mapsQ, sessionsQ];
   // Wait until every read has answered, one way or the other: a checklist that
   // appears step by step, or shows for a moment on a campaign that needs none,
-  // reads as the page changing its mind.
-  if (queries.some((q) => q.isPending)) return null;
+  // reads as the page changing its mind. It waits for that first answer only: a
+  // retry of a failed read puts it back to pending (it has no data), and the
+  // checklist must not vanish while that runs — the step stays left out.
+  const [answered, setAnswered] = useState(false);
+  if (!answered && queries.every((q) => !q.isPending)) setAnswered(true);
+  if (!answered && queries.some((q) => q.isPending)) return null;
 
   const steps = deriveNextSteps({
     providers: providersQ.data,
@@ -634,7 +654,9 @@ function StatTiles({ campaignId }: { campaignId: string | undefined }) {
     {
       view: "planning",
       count: threadsQ.data?.threads.length,
-      loading: loading(threadsQ),
+      // Waiting for a campaign id that a failed roster read will not deliver
+      // is not loading: the tile shows no figure, like the Cast tile beside it.
+      loading: loading(threadsQ) && !(campaignId === undefined && rosterQ.isError),
       unitOne: "home.tileThreadOne",
       unitMany: "home.tileThreads",
     },

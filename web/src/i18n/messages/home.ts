@@ -176,14 +176,14 @@ export const de: Record<keyof typeof en, string> = {
   // ---- Übersicht: laufende Spielrunde ----
   "home.liveTitle": "Eine Spielrunde läuft",
   "home.liveBody": "Deine NPCs hören gerade am Tisch zu.",
-  "home.liveElapsed": "Läuft seit {elapsed}",
+  "home.liveElapsed": "Laufzeit {elapsed}",
 
   // ---- Übersicht: Aufmerksamkeit ----
   "home.attentionTitle": "Braucht deine Aufmerksamkeit",
   "home.attentionClear": "Gerade braucht dich nichts.",
   "home.attnSuggestionsOne": "1 Vorschlag wartet auf deine Prüfung",
   "home.attnSuggestions": "{n} Vorschläge warten auf deine Prüfung",
-  "home.attnSuggestionsDetail": "Deine NPCs und der Butler möchten das ins Welt-Wiki aufnehmen.",
+  "home.attnSuggestionsDetail": "Deine NPCs und der Butler möchten diese ins Welt-Wiki aufnehmen.",
   "home.attnSuggestionsAction": "Vorschläge prüfen",
   "home.attnNpcsOne": "1 NPC ist nicht bereit für eine Spielrunde",
   "home.attnNpcs": "{n} NPCs sind nicht bereit für eine Spielrunde",
@@ -199,7 +199,7 @@ export const de: Record<keyof typeof en, string> = {
   "home.attnWorld": "{n} Sachen zum Aufräumen im Welt-Wiki",
   "home.attnWorldCategory": "{title} ({n})",
   "home.attnWorldAction": "Welt-Wiki öffnen",
-  "home.attnSetup": "{what} braucht einen Blick in die Einrichtung",
+  "home.attnSetup": "{what} sollte in der Einrichtung geprüft werden",
   "home.attnSetupAction": "Einrichtung öffnen",
   "home.componentLlm": "Das Sprachmodell",
   "home.componentTts": "Der Stimmen-Dienst",
@@ -214,7 +214,7 @@ export const de: Record<keyof typeof en, string> = {
   // ---- Übersicht: nächste Schritte ----
   "home.nextTitle": "Nächste Schritte",
   "home.nextProgress": "{done} von {total} erledigt",
-  "home.nextLede": "Ein paar Dinge, die vor deiner ersten Spielrunde stehen sollten.",
+  "home.nextLede": "Ein paar Dinge, die du vor deiner ersten Spielrunde einrichten solltest.",
   "home.stepDone": "Erledigt",
   "home.stepDiscord": "Verknüpfe deinen Discord-Server",
   "home.stepDiscordHint": "Für eine Spielrunde tritt der Bot dort einem Sprachkanal bei.",
@@ -227,7 +227,7 @@ export const de: Record<keyof typeof en, string> = {
   "home.stepPlayersHint": "Damit die Mitschrift zeigt, wer spricht.",
   "home.stepMap": "Lade eine Karte hoch oder generiere eine",
   "home.stepMapHint": "Setze Wiki-Einträge dort als Pin, wo sie hingehören.",
-  "home.stepSession": "Spiele deine erste Spielrunde",
+  "home.stepSession": "Starte deine erste Spielrunde",
   "home.stepSessionHint": "Starte sie unter „Spielrunde“, sobald du im Sprachkanal bist.",
 
   // ---- Übersicht: Kacheln ----

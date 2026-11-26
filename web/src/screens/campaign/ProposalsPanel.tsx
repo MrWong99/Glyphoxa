@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MutableRefObject,
+} from "react";
 import { createClient } from "@connectrpc/connect";
 import { useQuery, useTransport } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
@@ -16,6 +24,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { toastUndo } from "@/components/ui/toast";
 import { useI18n, type TFunc } from "@/i18n";
 import { errorMessage, failedPreconditionMessage } from "@/lib/connectError";
+import { registerPendingWrites } from "@/lib/pendingWrites";
 import { rosterRetry, useCampaignScreen } from "./campaignContext";
 import { resolveProposals, type ResolvedProposal } from "./graph/proposalGhosts";
 import { invalidateProposalReview } from "./knowledgeCache";
@@ -101,8 +110,9 @@ export function ProposalsPanel({
       query={proposalsQ}
       errorTitle={t("inbox.loadError")}
       skeleton={<Skeleton.Row count={4} avatar={false} />}
-      isEmpty={(data) => data.proposals.length === 0}
-      empty={<InboxEmpty />}
+      // An empty queue is rendered by Inbox itself, so the empty state is the
+      // SAME one whether the GM just cleared the list or the refetch then
+      // confirms it: a swap here would drop the keyboard focus it holds.
     >
       {(data) => <Inbox proposals={data.proposals} undoWindowMs={undoWindowMs} />}
     </QueryBoundary>
@@ -111,16 +121,23 @@ export function ProposalsPanel({
 
 // An empty inbox is where the feature explains itself: where suggestions come
 // from, and that the GM is the one who decides.
-function InboxEmpty() {
+function InboxEmpty({ takeFocus }: { takeFocus?: MutableRefObject<boolean> }) {
   const { t } = useI18n();
   const { openView } = useCampaignScreen();
+  const action = useRef<HTMLButtonElement>(null);
+  // The GM just cleared the queue from the keyboard: focus stays on a control.
+  useEffect(() => {
+    if (!takeFocus?.current) return;
+    takeFocus.current = false;
+    action.current?.focus();
+  }, [takeFocus]);
   return (
     <EmptyState
       icon={<Lightbulb size={22} />}
       title={t("inbox.emptyTitle")}
       description={t("inbox.emptyDesc")}
       action={
-        <Button variant="secondary" onClick={() => openView("planning")}>
+        <Button ref={action} variant="secondary" onClick={() => openView("planning")}>
           {t("inbox.emptyAction")}
         </Button>
       }
@@ -137,7 +154,8 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
 
   // The wiki the suggestions are resolved against. Its failure costs the
   // grouping-by-entry, the links and the refusal forecast — not the inbox.
-  const graphQ = useQuery(CampaignService.method.getKnowledgeGraph, {});
+  // An empty queue needs no wiki.
+  const graphQ = useQuery(CampaignService.method.getKnowledgeGraph, {}, { enabled: proposals.length > 0 });
 
   // Suggestions already acted on in this view: added (the server has them) or
   // dismissed (sent, or waiting out their Undo). They leave the list at once
@@ -160,20 +178,26 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
 
   const mounted = useRef(true);
   const rows = useRef(new Map<string, HTMLLIElement>());
-  // Dismissals waiting out their Undo window, each with the call that sends it.
-  const pendingDismissals = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; send: () => void }>());
+  // Dismissals waiting out their Undo window, each with the call that sends it
+  // (at most once; it settles when the server has answered).
+  const pendingDismissals = useRef(new Map<string, { send: () => Promise<void> }>());
 
   useEffect(() => {
     mounted.current = true;
     const pending = pendingDismissals.current;
+    const sendAll = () => {
+      for (const { send } of [...pending.values()]) void send();
+    };
+    // Best effort on a reload or a closed tab: the request may or may not get
+    // out before the page goes, but it is not dropped without trying.
+    window.addEventListener("pagehide", sendAll);
     return () => {
       mounted.current = false;
+      window.removeEventListener("pagehide", sendAll);
       // Leaving the view ends the Undo window: what the GM dismissed is sent
-      // now, not dropped.
-      for (const { timer, send } of [...pending.values()]) {
-        clearTimeout(timer);
-        send();
-      }
+      // now, not dropped. (A campaign switch has already sent it — see
+      // lib/pendingWrites — before the remount that gets here.)
+      sendAll();
     };
   }, []);
 
@@ -198,8 +222,9 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
   const groups = groupItems(shown);
   // Display order: the order J/K walk.
   const ordered = groups.flatMap((g) => g.items);
-  // The selection only ever means what is on screen and checked.
-  const chosen = ordered.filter((i) => selected.has(i.proposal.id));
+  // The selection only ever means what is on screen and checked — and not a
+  // row whose own Add is still in flight, which a batch would send twice.
+  const chosen = ordered.filter((i) => selected.has(i.proposal.id) && !busy.has(i.proposal.id));
   const current = ordered.find((i) => i.proposal.id === cursor) ?? null;
 
   // ---- Cursor ---------------------------------------------------------------
@@ -227,9 +252,19 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
     // Keyboard focus follows only when it was on the row that is leaving (or
     // nowhere): a call that settles while the GM is busy in another row must
     // not pull focus out from under them.
-    if (holdsFocus(id)) focusAfterCommit.current = next;
-    else if (at === id) setCursor(next);
+    if (holdsFocus(id)) {
+      // The last one leaving: focus lands on the heading (or the empty
+      // state's way on), not on the page.
+      if (next === null) landFocus.current = true;
+      else focusAfterCommit.current = next;
+    } else if (at === id) setCursor(next);
   };
+  // Set when keyboard focus would otherwise be left on the page — the last row
+  // left, or a batch ended (its button was disabled while it ran). After the
+  // next commit focus lands on the inbox heading or, when the inbox is now
+  // empty, on the empty state's action (InboxEmpty takes the flag).
+  const landFocus = useRef(false);
+  const head = useRef<HTMLHeadingElement>(null);
   // True when keyboard focus is inside the row, or has been dropped to the
   // page (a busy button is disabled, and a browser takes focus off a control
   // that becomes disabled).
@@ -240,6 +275,12 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
   // Runs after every commit: the row is removed by the state change that
   // follows moveOn, and the next row can only take focus once that is on screen.
   useEffect(() => {
+    // An empty inbox's InboxEmpty has already taken the flag (a child's effect
+    // runs first).
+    if (landFocus.current) {
+      landFocus.current = false;
+      head.current?.focus();
+    }
     if (focusAfterCommit.current === undefined) return;
     const next = focusAfterCommit.current;
     focusAfterCommit.current = undefined;
@@ -303,28 +344,37 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
       if (mounted.current) setDismissed((prev) => withID(prev, id, false));
     };
     let toastID: string | number | undefined;
-    const send = () => {
+    // Ends the hold, whichever way: the timer, the registration that lets a
+    // campaign switch send it first, the entry in the map.
+    const release = () => {
+      clearTimeout(timer);
+      unregister();
       pendingDismissals.current.delete(id);
+    };
+    const send = async () => {
+      if (pendingDismissals.current.get(id)?.send !== send) return; // sent or undone
+      release();
       // Sent: Undo can no longer do anything, so it is no longer offered.
       if (toastID !== undefined) toast.dismiss(toastID);
-      client.rejectKnowledgeProposal({ id }).then(
-        () => invalidateProposalReview(queryClient),
-        (err: unknown) => {
-          // It is still pending on the server: put it back and say why.
-          restore();
-          toast.error(t("knowledge.dismissError", { message: errorMessage(err) }));
-        },
-      );
+      try {
+        await client.rejectKnowledgeProposal({ id });
+        invalidateProposalReview(queryClient);
+      } catch (err) {
+        // It is still pending on the server: put it back and say why.
+        restore();
+        toast.error(t("knowledge.dismissError", { message: errorMessage(err) }));
+      }
     };
-    const timer = setTimeout(send, undoWindowMs);
-    pendingDismissals.current.set(id, { timer, send });
+    const timer = setTimeout(() => void send(), undoWindowMs);
+    // A reject carries no campaign id: it must reach the server before the
+    // Active Campaign changes, or it would be resolved against the new one.
+    const unregister = registerPendingWrites(send);
+    pendingDismissals.current.set(id, { send });
     toastID = toastUndo(
       t("inbox.dismissedOne"),
       () => {
-        const pending = pendingDismissals.current.get(id);
-        if (!pending) return; // already sent
-        clearTimeout(pending.timer);
-        pendingDismissals.current.delete(id);
+        if (pendingDismissals.current.get(id)?.send !== send) return; // already sent
+        release();
         restore();
       },
       // The toast outlives the window by a moment and is closed by `send`, so
@@ -373,6 +423,10 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
     });
     setBatch(null);
     setFailures(failed.length > 0 ? { action, items: failed } : null);
+    // Focus was on the button that started the batch, disabled while it ran: a
+    // browser drops focus to the page from there (or leaves it, dead, on it).
+    const active = document.activeElement;
+    if (active === null || active === document.body || active.matches(":disabled")) landFocus.current = true;
     if (landed.length > 0) {
       const n = landed.length;
       toast.success(
@@ -403,15 +457,22 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
     if (!(e.target instanceof Node) || !e.currentTarget.contains(e.target)) return;
     if (isTypingTarget(e.target)) return;
     if (batch || confirm || ordered.length === 0) return;
-    e.preventDefault();
     if (key === "j" || key === "k") {
+      e.preventDefault();
       const at = current ? ordered.indexOf(current) : -1;
       const next = at === -1 ? 0 : Math.min(ordered.length - 1, Math.max(0, at + (key === "j" ? 1 : -1)));
       focusRow(ordered[next].proposal.id);
-    } else if (current) {
-      if (key === "a") void approveOne(current);
-      else dismissOne(current);
+      return;
     }
+    // A and X act on the row keyboard focus is in, and only there: pressed on
+    // the bulk bar or a filter chip they must not hit a remembered row that may
+    // be off screen, while "Dismiss selected" has the focus.
+    const target = e.target;
+    const at = ordered.find((i) => rows.current.get(i.proposal.id)?.contains(target));
+    if (!at) return;
+    e.preventDefault();
+    if (key === "a") void approveOne(at);
+    else dismissOne(at);
   };
 
   // ---- Render ---------------------------------------------------------------
@@ -434,6 +495,9 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
   // through the retries, because a queue the GM can read by name is worth more
   // than a placeholder.
   const [wikiAnswered, setWikiAnswered] = useState(false);
+  // Nothing pending at all: no wiki to wait for. (Same element, same place as
+  // the cleared-list return below, so React keeps the one instance.)
+  if (proposals.length === 0) return <InboxEmpty takeFocus={landFocus} />;
   if (
     !wikiAnswered &&
     (graphQ.data !== undefined || graphQ.isError || graphQ.failureCount > 0 || graphQ.fetchStatus === "paused")
@@ -445,7 +509,7 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
   // Everything was acted on. (The refetch may not have landed yet, and a
   // dismissal may still be waiting out its Undo: either way nothing is pending
   // on screen, and Undo brings a dismissed one back.)
-  if (count === 0 && !working && !failures) return <InboxEmpty />;
+  if (count === 0 && !working && !failures) return <InboxEmpty takeFocus={landFocus} />;
 
   // The row Tab lands on: the cursor's, or the first while there is none.
   const tabStop = current?.proposal.id ?? ordered[0]?.proposal.id;
@@ -455,7 +519,7 @@ function Inbox({ proposals, undoWindowMs }: { proposals: KnowledgeProposal[]; un
     // inside; the container itself takes no focus.
     <div className="gx-inbox" onKeyDown={onKeyDown}>
       <div className="gx-inbox__head">
-        <h2 className="gx-inbox__title">
+        <h2 ref={head} className="gx-inbox__title" tabIndex={-1}>
           {count === 1 ? t("inbox.pendingOne") : t("inbox.pending", { n: count })}
         </h2>
         <p className="gx-inbox__shortcuts">{t("inbox.shortcuts")}</p>
@@ -732,6 +796,9 @@ function SuggestionRow({
       // A roving tab stop: Tab enters the list on one row, J and K move between
       // rows, and Tab again goes on to that row's own controls.
       tabIndex={tabStop ? 0 : -1}
+      // Focused by J/K, the row is announced by what it suggests, not as the
+      // whole card read out (or a bare "list item").
+      aria-label={item.summary}
       aria-current={current ? "true" : undefined}
       data-selected={selected ? "true" : undefined}
       onFocus={onFocusRow}
