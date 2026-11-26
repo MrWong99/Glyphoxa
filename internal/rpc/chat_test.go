@@ -333,14 +333,16 @@ func TestPlanningExchange_StreamsFrames(t *testing.T) {
 func TestPlanningExchange_ErrorVocabulary(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		err  error
-		want connect.Code
+		name   string
+		err    error
+		want   connect.Code
+		reason string
 	}{
-		{"allowance", planchat.ErrAllowanceExhausted, connect.CodeResourceExhausted},
-		{"entitlement", llmbuild.ErrNoPlatformKeyEntitlement, connect.CodeFailedPrecondition},
-		{"thread gone", storage.ErrNotFound, connect.CodeNotFound},
-		{"anything else", errors.New("provider exploded"), connect.CodeUnavailable},
+		{"allowance", planchat.ErrAllowanceExhausted, connect.CodeResourceExhausted, "allowance_exhausted"},
+		{"entitlement", llmbuild.ErrNoPlatformKeyEntitlement, connect.CodeFailedPrecondition, ""},
+		{"thread gone", storage.ErrNotFound, connect.CodeNotFound, ""},
+		// Not a provider rejection the web can point at Setup for.
+		{"anything else", errors.New("provider exploded"), connect.CodeUnavailable, "unclassified"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,8 +360,16 @@ func TestPlanningExchange_ErrorVocabulary(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PlanningExchange: %v", err)
 			}
-			if _, err := receiveAll(t, stream); connect.CodeOf(err) != tc.want {
+			_, err = receiveAll(t, stream)
+			if connect.CodeOf(err) != tc.want {
 				t.Errorf("code = %v (%v), want %v", connect.CodeOf(err), err, tc.want)
+			}
+			var ce *connect.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("err = %v, want a *connect.Error", err)
+			}
+			if got := ce.Meta().Get("Glyphoxa-Error-Reason"); got != tc.reason {
+				t.Errorf("Glyphoxa-Error-Reason = %q, want %q", got, tc.reason)
 			}
 		})
 	}

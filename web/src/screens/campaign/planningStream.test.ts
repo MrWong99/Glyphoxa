@@ -5,6 +5,7 @@ import { Code, ConnectError } from "@connectrpc/connect";
 import { makeQueryClient } from "@/lib/queryClient";
 import { message, mockChat, thread } from "./planningTestKit";
 import {
+  busyExchange,
   classifyExchangeError,
   exchangeKey,
   exchangeView,
@@ -24,6 +25,7 @@ const CAMPAIGN = "c-1";
 
 function exchange(over: Partial<Exchange> = {}): Exchange {
   return {
+    id: 1,
     campaignId: CAMPAIGN,
     threadId: "t",
     userMessage: "Who guards the docks?",
@@ -36,6 +38,7 @@ function exchange(over: Partial<Exchange> = {}): Exchange {
     assistantMessageId: null,
     noticeDismissed: false,
     draftReturned: false,
+    awaitingRead: false,
     ...over,
   };
 }
@@ -54,6 +57,13 @@ describe("classifyExchangeError", () => {
     expect(classifyExchangeError(new ConnectError("no key", Code.FailedPrecondition)).kind).toBe("noKey");
     expect(classifyExchangeError(new ConnectError("thread not found", Code.NotFound)).kind).toBe("gone");
     expect(classifyExchangeError(new Error("network")).kind).toBe("generic");
+  });
+
+  it("does not send the GM to Setup for a failure the server could not name", () => {
+    const unnamed = new ConnectError("the planning chat is unavailable right now", Code.Unavailable, {
+      "Glyphoxa-Error-Reason": "unclassified",
+    });
+    expect(classifyExchangeError(unnamed)).toEqual({ kind: "generic", message: "the planning chat is unavailable right now" });
   });
 });
 
@@ -76,6 +86,25 @@ describe("exchangeView", () => {
     const stopped = exchange({ status: "stopped", reply: "The wa" });
     const fresh = [...before, message("3", "user", "Who guards the docks?"), message("4", "assistant", "The wa")];
     expect(exchangeView(stopped, fresh)).toMatchObject({ showReply: false, persistedReplyId: "4", settled: true });
+  });
+
+  it("anchors on the GM's words, so a row written in between does not shift it", () => {
+    // Sent with a copy one exchange behind: baseCount 2, but the thread
+    // already had the previous question and its reply at 2 and 3.
+    const behind = exchange({ status: "stopped", userMessage: "Question two", reply: "Partial", baseCount: 2 });
+    const rows = [...before, message("3", "user", "Question one"), message("4", "assistant", "Reply one.")];
+    expect(exchangeView(behind, rows)).toMatchObject({ userPersisted: false, showUser: true, persistedReplyId: null });
+    const withTurn = [...rows, message("5", "user", "Question two")];
+    expect(exchangeView(behind, withTurn)).toMatchObject({ userPersisted: true, showReply: true, persistedReplyId: null, settled: false });
+    const withReply = [...withTurn, message("6", "assistant", "Partial")];
+    expect(exchangeView(behind, withReply)).toMatchObject({ persistedReplyId: "6", settled: true });
+  });
+
+  it("settles a stop with nothing streamed only once the thread has been re-read", () => {
+    const withUser = [...before, message("3", "user", "Who guards the docks?")];
+    const stopped = exchange({ status: "stopped", awaitingRead: true });
+    expect(exchangeView(stopped, withUser).settled).toBe(false);
+    expect(exchangeView({ ...stopped, awaitingRead: false }, withUser).settled).toBe(true);
   });
 
   it("knows a retried turn is the existing row", () => {
@@ -129,6 +158,33 @@ describe("the exchange store", () => {
     stopExchange(CAMPAIGN);
     expect(getPlanningState().exchanges[key]).toMatchObject({ status: "stopped", reply: "The wa" });
     await waitFor(() => expect(chat.aborted).toEqual([true]));
+  });
+
+  it("holds the campaign's next send until a stopped thread has been re-read", async () => {
+    const chat = mockChat({ threads: [thread("t-1", "A", new Date())], scripts: [{ deltas: ["The wa"], hold: true }] });
+    const queryClient = makeQueryClient();
+    startExchange({ transport: chat.transport, queryClient, campaignId: CAMPAIGN, threadId: "t-1", message: "Q", persisted: [] });
+    const key = exchangeKey(CAMPAIGN, "t-1");
+    await waitFor(() => expect(getPlanningState().exchanges[key]?.reply).toBe("The wa"));
+    stopExchange(CAMPAIGN, queryClient);
+    expect(busyExchange(getPlanningState(), CAMPAIGN)?.status).toBe("stopped");
+    startExchange({ transport: chat.transport, queryClient, campaignId: CAMPAIGN, threadId: "t-1", message: "Next", persisted: [] });
+    expect(chat.exchanges).toHaveLength(1);
+    // The last stop re-read lands and releases the campaign.
+    await waitFor(() => expect(busyExchange(getPlanningState(), CAMPAIGN)).toBeNull(), { timeout: 3000 });
+  });
+
+  it("a replaced exchange leaves its stopped mark and chips on its persisted reply", async () => {
+    const chat = mockChat({ threads: [thread("t-1", "A", new Date())], scripts: [{ deltas: ["x"] }] });
+    const key = exchangeKey(CAMPAIGN, "t-1");
+    const rows = [message("u1", "user", "Q1"), message("a1", "assistant", "Part")];
+    // A stopped exchange the cache carries, not yet retired by a panel.
+    startExchange({ transport: chat.transport, queryClient: makeQueryClient(), campaignId: CAMPAIGN, threadId: "t-1", message: "Q1", persisted: [] });
+    stopExchange(CAMPAIGN);
+    await waitFor(() => expect(getPlanningState().exchanges[key]?.status).toBe("stopped"));
+    startExchange({ transport: chat.transport, queryClient: makeQueryClient(), campaignId: CAMPAIGN, threadId: "t-1", message: "Q2", persisted: rows, current: true });
+    expect(getPlanningState().exchanges[key]).toMatchObject({ userMessage: "Q2", baseCount: 2 });
+    expect(getPlanningState().stoppedMessages).toEqual({ a1: true });
   });
 
   it("a campaign change stops and forgets the other campaign's exchanges", async () => {

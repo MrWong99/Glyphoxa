@@ -341,7 +341,10 @@ const chatExchangeSubject = "the planning chat"
 //     the assist/maps surfaces);
 //   - anything left is logged raw and returned as a static CodeUnavailable —
 //     provider failures are the expected failure mode here, not an internal
-//     fault, and a retry may succeed.
+//     fault, and a retry may succeed. It carries [reasonUnclassified], so the
+//     web tells it apart from the classified provider rejections above (a
+//     rejected key, a provider outage) and does not send the GM to the
+//     provider settings for what may be a storage fault.
 func (s *ChatServer) chatExchangeErr(threadID uuid.UUID, err error) *connect.Error {
 	switch {
 	case errors.Is(err, planchat.ErrAllowanceExhausted):
@@ -356,9 +359,15 @@ func (s *ChatServer) chatExchangeErr(threadID uuid.UUID, err error) *connect.Err
 		return cerr
 	}
 	s.log.Error("PlanningExchange: exchange failed", "thread_id", threadID, "err", err)
-	return connect.NewError(connect.CodeUnavailable,
+	cerr := connect.NewError(connect.CodeUnavailable,
 		errors.New("the planning chat is unavailable right now — try again in a moment"))
+	cerr.Meta().Set(errorReasonHeader, reasonUnclassified)
+	return cerr
 }
+
+// reasonUnclassified is the [errorReasonHeader] value on a planning-chat
+// failure no rule above could name.
+const reasonUnclassified = "unclassified"
 
 // toProtoPlanningThread maps a storage thread onto the wire.
 func toProtoPlanningThread(t storage.PlanningThread) *managementv1.PlanningThread {

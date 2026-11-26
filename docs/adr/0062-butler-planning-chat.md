@@ -202,7 +202,13 @@ chat UX pass; no wire change.
   **change of Active Campaign** (a reply streaming into a campaign the GM has
   left is stopped). Closing the tab ends it as before. One exchange runs at a
   time per campaign; the composer stays editable meanwhile and only sending
-  waits. This replaces the abort-on-leave posture.
+  waits. Sending also waits after an exchange ends until its thread has been
+  read back (after a Stop, the server writes the partial a moment after the
+  browser's abort, and the wait ends early once the partial is read back), so
+  the next message is lined up against the rows the server has rather than a
+  stale copy. The server does not serialise exchanges per thread; this wait
+  is what keeps a follow-up from overtaking a late partial. This replaces the
+  abort-on-leave posture.
 - **Stop keeps what streamed.** When the client goes away mid-exchange (the
   request context is cancelled, or a send into the stream fails), the engine
   persists the text that had already reached the client as the assistant turn,

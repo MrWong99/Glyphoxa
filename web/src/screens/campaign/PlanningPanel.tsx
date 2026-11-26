@@ -41,12 +41,14 @@ import { IconButton } from "@/components/ui/IconButton";
 import { Markdown } from "@/components/ui/Markdown";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { Textarea } from "@/components/ui/Textarea";
 import { CHAT_MODEL_ANCHOR } from "@/screens/configuration/chatModelAnchor";
 import { llmProviderLabel } from "@/screens/configuration/llmProviders";
 
 import "./planning.css";
 import { loadDraft, saveDraft, messageLength, MESSAGE_COUNTER_FROM, MESSAGE_MAX } from "./planningDrafts";
 import {
+  busyExchange,
   dismissNotice,
   exchangeKey,
   exchangeView,
@@ -308,20 +310,20 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   };
 
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  // Auto-grow from one row to eight; past that the field scrolls (max-height
-  // in planning.css).
-  useLayoutEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
-  }, [draft]);
+  // Focus that should land in the composer once a sheet or dialog has closed:
+  // moved while the modal still traps focus, it would be pulled back.
+  const focusComposerNext = useRef(false);
 
   // ── The exchange ────────────────────────────────────────────────────────
   const exchange: Exchange | null = selectedId !== null ? (streams.exchanges[exchangeKey(campaignId, selectedId)] ?? null) : null;
   const view = exchange ? exchangeView(exchange, messages) : null;
   const streamingHere = exchange?.status === "streaming";
   const streamingElsewhere = inFlight !== null && inFlight.threadId !== selectedId ? inFlight : null;
+  // Sending waits while an exchange streams, and after one ends until its
+  // thread has been re-read (planningStream's awaitingRead).
+  const busyEx = busyExchange(streams, campaignId);
+  const busy = busyEx !== null;
+  const settling = busyEx !== null && busyEx.status !== "streaming";
   const [creating, setCreating] = useState(false);
 
   // The reply's end, for a screen reader: the streamed text itself is not a
@@ -368,19 +370,37 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streams.exchanges, campaignId, selectedId]);
 
+  // A Stop that landed before the server had saved the message: once the
+  // stop's re-reads are in and the thread still has no such turn, the words
+  // go back into the composer rather than sit as a turn a reload would drop.
+  // (A composer the GM has typed into since keeps the turn, marked not sent.)
+  const userPersisted = view?.userPersisted ?? false;
+  const threadCurrent = threadQuery.isSuccess && !threadQuery.isFetching;
+  useEffect(() => {
+    if (!exchange || exchange.status !== "stopped" || exchange.awaitingRead || exchange.draftReturned) return;
+    if (!threadCurrent || userPersisted || draft !== "") return;
+    setDraft(exchange.userMessage);
+    markDraftReturned(campaignId, exchange.threadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exchange, userPersisted, threadCurrent, campaignId]);
+
   const length = messageLength(draft);
   const tooLong = length > MESSAGE_MAX;
-  const canSend = length > 0 && !tooLong && inFlight === null && !creating;
+  // An open conversation's rows must be in before a message is lined up
+  // against them.
+  const threadReady = selectedId === null || threadQuery.isSuccess;
+  const canSend = length > 0 && !tooLong && !busy && !creating && threadReady;
 
   const send = async (override?: string) => {
     const text = (override ?? draft).trim();
-    if (text === "" || messageLength(text) > MESSAGE_MAX || inFlight !== null || creating) return;
+    if (text === "" || messageLength(text) > MESSAGE_MAX || busy || creating || !threadReady) return;
     const fromComposer = override === undefined;
 
     // No conversation yet: the first message creates it (it auto-titles from
     // this very message).
     let threadId = selectedId;
     let persisted = messages;
+    let current = false;
     if (threadId === null) {
       setCreating(true);
       try {
@@ -394,13 +414,14 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
       if (threadId === null) return;
       if (fromComposer) saveDraft(campaignId, null, "");
       persisted = [];
+      current = true;
       setComposingNew(false);
       select(threadId, { replace: true });
     } else if (fromComposer) {
       setDraft("");
     }
 
-    startExchange({ transport, queryClient, campaignId, threadId, message: text, persisted });
+    startExchange({ transport, queryClient, campaignId, threadId, message: text, persisted, current });
   };
 
   const retry = (ex: Exchange) =>
@@ -409,7 +430,36 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   const startNew = () => {
     setComposingNew(true);
     select(null);
-    setRailOpen(false);
+    if (railOpen) {
+      focusComposerNext.current = true;
+      setRailOpen(false);
+    } else {
+      composerRef.current?.focus();
+    }
+  };
+
+  useEffect(() => {
+    if (!focusComposerNext.current || railOpen || confirmThread) return;
+    focusComposerNext.current = false;
+    composerRef.current?.focus();
+  }, [railOpen, confirmThread]);
+
+  // The sheet is the phone's rail: a viewport that grows past the phone
+  // layout shows the rail beside the chat again, so the sheet closes.
+  useEffect(() => {
+    if (!railOpen || typeof window.matchMedia !== "function") return;
+    const phone = window.matchMedia("(max-width: 720px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!e.matches) setRailOpen(false);
+    };
+    phone.addEventListener("change", onChange);
+    return () => phone.removeEventListener("change", onChange);
+  }, [railOpen]);
+
+  const stop = () => {
+    stopExchange(campaignId, queryClient);
+    // Stop turns back into Send, which is disabled with an empty composer: a
+    // focused disabled button drops focus to <body>.
     composerRef.current?.focus();
   };
 
@@ -425,6 +475,8 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
       }
       return;
     }
+    // The starters go once the exchange starts, taking the focused button.
+    composerRef.current?.focus();
     void send(t(s.label));
   };
 
@@ -456,7 +508,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   useEffect(() => {
     const pane = paneRef.current;
     if (pane && stickRef.current) pane.scrollTop = pane.scrollHeight;
-  }, [messages.length, exchange?.reply, exchange?.tools.length, exchange?.status]);
+  }, [selectedId, messages.length, exchange?.reply, exchange?.tools.length, exchange?.status]);
 
   const threadTitle = (id: string) => threads.find((th) => th.id === id)?.title || t("chat.untitledThread");
 
@@ -536,7 +588,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
             )}
             {showStarters && (
               <li className="gx-planning__notice-item">
-                <Starters disabled={inFlight !== null || creating} onPick={pickStarter} />
+                <Starters disabled={busy || creating} onPick={pickStarter} />
               </li>
             )}
 
@@ -562,6 +614,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                 showReply={view.showReply}
                 showTools={view.persistedReplyId === null}
                 onReview={() => nav.goCampaignView("proposals")}
+                retryDisabled={busy}
                 onRetry={() => retry(exchange)}
                 onOpenSetup={() => nav.goScreen("configuration")}
                 onDismiss={() => dismissNotice(campaignId, exchange.threadId)}
@@ -611,10 +664,10 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           tooLong={tooLong}
           canSend={canSend}
           streaming={streamingHere}
-          sending={creating}
+          sending={creating || settling}
           onChange={setDraft}
           onSend={() => void send()}
-          onStop={() => stopExchange(campaignId, queryClient)}
+          onStop={stop}
         />
         <div className="gx-planning__foot">
           {chatLlm && (
@@ -659,6 +712,9 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           description={t("chat.deleteBody")}
           confirmLabel={t("chat.deleteConfirm")}
           onConfirm={() => {
+            // The row and its menu go with the conversation: focus moves on
+            // to the composer, not to <body>.
+            focusComposerNext.current = true;
             discardThread(campaignId, confirmThread.id);
             deleteThread.mutate({ campaignId, threadId: confirmThread.id });
             setConfirmThread(null);
@@ -773,6 +829,7 @@ function ExchangeTail({
   showUser,
   showReply,
   showTools,
+  retryDisabled,
   onReview,
   onRetry,
   onOpenSetup,
@@ -782,6 +839,7 @@ function ExchangeTail({
   showUser: boolean;
   showReply: boolean;
   showTools: boolean;
+  retryDisabled: boolean;
   onReview: () => void;
   onRetry: () => void;
   onOpenSetup: () => void;
@@ -790,8 +848,10 @@ function ExchangeTail({
   const { t } = useI18n();
   const { status, error } = exchange;
   const kind = error?.kind ?? null;
-  // Refused before anything was written (ADR-0055 gate, key resolution).
-  const notSent = status === "failed" && (kind === "allowance" || kind === "noKey");
+  // Refused before anything was written (ADR-0055 gate, key resolution), or
+  // stopped before the server had saved the message.
+  const notSent =
+    (status === "failed" && (kind === "allowance" || kind === "noKey")) || (status === "stopped" && !exchange.awaitingRead);
   const showNotice = status === "failed" && !exchange.noticeDismissed && kind !== "gone";
   // allowance: our own sentence (the server's is English and says the same);
   // otherwise the server's sentence, which names the actual cause.
@@ -839,7 +899,7 @@ function ExchangeTail({
                   </Button>
                 )}
                 {kind !== "allowance" && (
-                  <Button variant="secondary" size="sm" onClick={onRetry}>
+                  <Button variant="secondary" size="sm" disabled={retryDisabled} onClick={onRetry}>
                     {t("chat.retry")}
                   </Button>
                 )}
@@ -915,11 +975,27 @@ function Composer({
   onSend: () => void;
   onStop: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const counterId = useId();
   const showCounter = length >= MESSAGE_COUNTER_FROM;
+  const formRef = useRef<HTMLFormElement | null>(null);
+
+  // A reply that ends while the keyboard is on Stop: the button turns into
+  // Send, disabled with an empty composer, and a focused button that becomes
+  // disabled drops focus to <body>. Before the browser gets there (a layout
+  // effect runs before it does), focus moves to the composer.
+  const wasStreaming = useRef(streaming);
+  useLayoutEffect(() => {
+    if (wasStreaming.current && !streaming) {
+      const active = document.activeElement;
+      if (active instanceof HTMLButtonElement && formRef.current?.contains(active)) inputRef.current?.focus();
+    }
+    wasStreaming.current = streaming;
+  }, [streaming, inputRef]);
+
   return (
     <form
+      ref={formRef}
       className="gx-planning__composer"
       onSubmit={(e) => {
         e.preventDefault();
@@ -927,10 +1003,13 @@ function Composer({
       }}
     >
       <div className="gx-planning__field">
-        <textarea
-          className={tooLong ? "gx-input gx-textarea gx-planning__input gx-input--invalid" : "gx-input gx-textarea gx-planning__input"}
+        {/* Textarea's autoGrow: one row to eight, then it scrolls. */}
+        <Textarea
+          className={tooLong ? "gx-input--invalid" : undefined}
           ref={inputRef}
+          autoGrow
           rows={1}
+          maxRows={8}
           value={value}
           aria-label={t("chat.inputAria")}
           aria-invalid={tooLong || undefined}
@@ -950,11 +1029,11 @@ function Composer({
         />
         {showCounter && (
           <span id={counterId} className="gx-planning__counter" data-over={tooLong ? "true" : undefined}>
-            {t("chat.counter", { count: String(length), max: String(MESSAGE_MAX) })}
+            {t("chat.counter", { count: length.toLocaleString(lang), max: MESSAGE_MAX.toLocaleString(lang) })}
             {tooLong && (
               <span className="gx-planning__counter-error">
                 {" "}
-                {t("chat.tooLong", { over: String(length - MESSAGE_MAX), max: String(MESSAGE_MAX) })}
+                {t("chat.tooLong", { over: (length - MESSAGE_MAX).toLocaleString(lang), max: MESSAGE_MAX.toLocaleString(lang) })}
               </span>
             )}
           </span>
@@ -1033,7 +1112,7 @@ function ThreadRail({
             <input
               id={searchId}
               type="search"
-              className="gx-input gx-planning__search-input"
+              className="gx-input gx-input--has-icon"
               placeholder={t("chat.threadSearchPlaceholder")}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -1085,10 +1164,10 @@ function ThreadGroup({
 }) {
   const headingId = useId();
   return (
-    <section className="gx-planning__group" aria-labelledby={headingId}>
-      <h3 className="gx-planning__group-title" id={headingId}>
+    <div className="gx-planning__group" role="group" aria-labelledby={headingId}>
+      <h2 className="gx-planning__group-title" id={headingId}>
         {label}
-      </h3>
+      </h2>
       <ul className="gx-planning__thread-list">
         {threads.map((th) => (
           <ThreadRow
@@ -1103,7 +1182,7 @@ function ThreadGroup({
           />
         ))}
       </ul>
-    </section>
+    </div>
   );
 }
 

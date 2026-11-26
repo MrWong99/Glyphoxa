@@ -325,6 +325,18 @@ describe("Markdown lists", () => {
     const items = [...container.querySelectorAll("li")].map((li) => li.textContent);
     expect(items).toEqual(["buy rope", "hire a guide", "plain item"]);
     expect(container.querySelectorAll("li.gx-md__task")).toHaveLength(2);
+    // Each box is named by its item, for a screen reader.
+    expect(screen.getByRole("checkbox", { name: "buy rope" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "hire a guide" })).toBeChecked();
+  });
+
+  it("keeps a loose task item's box on its first line", () => {
+    const { container } = render(<Markdown text={"- [ ] ask Maren\n\n  She keeps the ledger.\n\n- [x] pay the guard"} />);
+    const first = container.querySelector("li.gx-md__task")!;
+    const head = first.querySelector("p")!;
+    expect(head.querySelector("input[type=checkbox]")).not.toBeNull();
+    expect(head).toHaveTextContent("ask Maren");
+    expect(screen.getByRole("checkbox", { name: "ask Maren" })).toBeDisabled();
   });
 
   it("keeps a fenced block inside its item", () => {

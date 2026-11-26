@@ -34,7 +34,9 @@ type fakeStore struct {
 	usage    []storage.UsageRow
 
 	appendErr error
-	nextSeq   int64
+	// replyErr fails assistant-row writes only (the user turn still lands).
+	replyErr error
+	nextSeq  int64
 }
 
 func newFakeStore(campaignID uuid.UUID) *fakeStore {
@@ -115,6 +117,9 @@ func (f *fakeStore) AppendPlanningMessage(ctx context.Context, campaignID, threa
 	}
 	if f.appendErr != nil {
 		return storage.PlanningMessage{}, f.appendErr
+	}
+	if f.replyErr != nil && role == storage.PlanningRoleAssistant {
+		return storage.PlanningMessage{}, f.replyErr
 	}
 	f.nextSeq++
 	m := storage.PlanningMessage{
@@ -579,8 +584,8 @@ func TestExchange_StopBeforeAnyTextPersistsNoReply(t *testing.T) {
 	defer cancel()
 	ev := &stopEvents{cancel: cancel, stopFirst: true}
 	_, err := eng.Exchange(ctx, uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "hi", ev)
-	if err == nil {
-		t.Fatal("a cancelled exchange reported success")
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("err = %v, want ErrStopped", err)
 	}
 	if len(st.messages) != 1 || st.messages[0].Role != storage.PlanningRoleUser {
 		t.Fatalf("messages = %+v, want only the user turn", st.messages)
@@ -589,6 +594,76 @@ func TestExchange_StopBeforeAnyTextPersistsNoReply(t *testing.T) {
 		if m.Role == storage.PlanningRoleAssistant {
 			t.Errorf("an empty stop persisted a reply: %+v", m)
 		}
+	}
+}
+
+// TestExchange_StoppedReplyWriteFailureIsAnError: a stopped partial that cannot
+// be written is reported as a failure, not as a clean stop — the result carries
+// no reply the client could take for persisted.
+func TestExchange_StoppedReplyWriteFailureIsAnError(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.replyErr = errors.New("disk full")
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{{
+		{Type: llm.EventText, Text: "The docks are "},
+		{Type: llm.EventText, Text: "guarded."},
+		{Type: llm.EventDone, StopReason: "end_turn"},
+	}}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res, err := eng.Exchange(ctx, uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "Who guards the docks?", &stopEvents{cancel: cancel})
+	if err == nil || errors.Is(err, ErrStopped) {
+		t.Fatalf("err = %v, want a persist failure that is not a clean stop", err)
+	}
+	if !errors.Is(err, st.replyErr) {
+		t.Errorf("err = %v, want it to wrap the write failure", err)
+	}
+	if res.AssistantMessage.ID != uuid.Nil {
+		t.Errorf("result carries a reply that was never written: %+v", res.AssistantMessage)
+	}
+	if len(st.messages) != 1 || st.messages[0].Role != storage.PlanningRoleUser {
+		t.Fatalf("messages = %+v, want only the user turn", st.messages)
+	}
+}
+
+// cancelAfterText cancels the exchange ctx once the last delta has reached the
+// client, but reports the send as delivered: the client went away right after
+// reading the whole answer.
+type cancelAfterText struct {
+	cancel context.CancelFunc
+	text   strings.Builder
+}
+
+func (c *cancelAfterText) Text(delta string) error {
+	c.text.WriteString(delta)
+	c.cancel()
+	return nil
+}
+func (c *cancelAfterText) Tool(string, bool) {}
+
+// TestExchange_CancelAfterTheAnswerStillPersistsIt: a disconnect that lands
+// after the model finished must not lose the answer — it is written on a ctx
+// the cancel does not reach, and the exchange reports success.
+func TestExchange_CancelAfterTheAnswerStillPersistsIt(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("The night watch.")}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := &cancelAfterText{cancel: cancel}
+	res, err := eng.Exchange(ctx, uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "Who guards the docks?", ev)
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if len(st.messages) != 2 || st.messages[1].Role != storage.PlanningRoleAssistant || st.messages[1].Content != "The night watch." {
+		t.Fatalf("messages = %+v, want the user turn and the full answer", st.messages)
+	}
+	if res.AssistantMessage.ID != st.messages[1].ID {
+		t.Errorf("result does not carry the persisted answer")
 	}
 }
 

@@ -410,14 +410,31 @@ function renderList(list: List, keyBase: number, opts: RenderOptions): ReactNode
     // loose list gives every paragraph its own <p>.
     const [head, ...rest] = item.blocks;
     const inlineHead = !list.loose && head?.kind === "p";
+    // Non-interactive by design: a reply's checklist is the Butler's text, not
+    // state anyone can tick. Disabled keeps it out of the tab order while a
+    // screen reader still hears checked / not checked.
+    const check =
+      item.task !== null ? <input type="checkbox" className="gx-md__check" checked={item.task} disabled readOnly /> : null;
+    if (check && head?.kind === "p") {
+      // The item's first line is the box's label: a screen reader names the
+      // box by it, and in a loose list the box stays on that line instead of
+      // sitting above the paragraph.
+      const label = (
+        <label className="gx-md__task-label">
+          {check}
+          {renderLines(head.lines)}
+        </label>
+      );
+      return (
+        <li key={i} className="gx-md__task">
+          {list.loose ? <p className="gx-md__p">{label}</p> : label}
+          {renderBlocks(rest, opts)}
+        </li>
+      );
+    }
     return (
       <li key={i} className={item.task !== null ? "gx-md__task" : undefined}>
-        {item.task !== null && (
-          // Non-interactive by design: a reply's checklist is the Butler's
-          // text, not state anyone can tick. Disabled keeps it out of the tab
-          // order while a screen reader still hears checked / not checked.
-          <input type="checkbox" className="gx-md__check" checked={item.task} disabled readOnly />
-        )}
+        {check}
         {inlineHead ? (
           <>
             {renderLines(head.lines)}

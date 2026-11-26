@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { Code, ConnectError, createClient, type Transport } from "@connectrpc/connect";
+import { createQueryOptions } from "@connectrpc/connect-query";
 import type { QueryClient } from "@tanstack/react-query";
 
 import { ChatService, type PlanningMessage } from "@gen/glyphoxa/management/v1/management_pb";
@@ -20,6 +21,11 @@ import { invalidateMethodQueries } from "@/lib/queryClient";
 // thread query shows it and the exchange stops drawing its own copy
 // (exchangeView). The exchange record only holds what the cache cannot know
 // yet — the pending turn, the streamed text, the tool chips, and how it ended.
+//
+// Lining the two up needs a cache that is current when a message goes out, so
+// a send waits while the campaign's previous exchange has ended but its
+// thread has not been re-read (awaitingRead), and startExchange re-reads a
+// copy that may be behind before the message leaves.
 
 export type ToolChip = { toolName: string; isError: boolean };
 
@@ -36,6 +42,8 @@ export type ExchangeErrorKind = "allowance" | "noKey" | "provider" | "gone" | "g
 export type ExchangeStatus = "streaming" | "done" | "stopped" | "failed";
 
 export type Exchange = {
+  /** Tells this exchange apart from a later one in the same thread. */
+  id: number;
   campaignId: string;
   threadId: string;
   userMessage: string;
@@ -56,8 +64,19 @@ export type Exchange = {
   assistantMessageId: string | null;
   /** The GM closed the failure notice. The streamed text stays. */
   noticeDismissed: boolean;
-  /** The refused message went back into the composer (allowance refusals). */
+  /**
+   * The message went back into the composer: an allowance refusal, or a Stop
+   * that landed before the server had saved it.
+   */
   draftReturned: boolean;
+  /**
+   * The stream has ended but the thread has not been re-read since. Until it
+   * has, the cache may not hold what this exchange wrote (after a Stop, the
+   * server saves the partial reply only once it notices the cancel), and a
+   * new message sent now would be lined up against the wrong rows — so the
+   * campaign's next send waits (busyExchange).
+   */
+  awaitingRead: boolean;
 };
 
 type State = {
@@ -74,6 +93,7 @@ let state: State = EMPTY;
 const listeners = new Set<() => void>();
 const controllers = new Map<string, AbortController>();
 const timers = new Set<ReturnType<typeof setTimeout>>();
+let lastId = 0;
 
 function emit(next: State) {
   state = next;
@@ -104,6 +124,11 @@ function patch(key: string, change: Partial<Exchange>) {
   emit({ ...state, exchanges: { ...state.exchanges, [key]: { ...cur, ...change } } });
 }
 
+/** patch, but only while the record is still exchange `id` (not a later send in the thread). */
+function patchIf(key: string, id: number, change: Partial<Exchange>) {
+  if (state.exchanges[key]?.id === id) patch(key, change);
+}
+
 function drop(key: string) {
   if (!state.exchanges[key]) return;
   const exchanges = { ...state.exchanges };
@@ -118,6 +143,27 @@ export function streamingExchange(s: State, campaignId: string): Exchange | null
   }
   return null;
 }
+
+/**
+ * The exchange that holds sending in campaign: one still streaming, or one
+ * that ended and whose thread has not been re-read yet (awaitingRead).
+ */
+export function busyExchange(s: State, campaignId: string): Exchange | null {
+  for (const ex of Object.values(s.exchanges)) {
+    if (ex.campaignId === campaignId && (ex.status === "streaming" || ex.awaitingRead)) return ex;
+  }
+  return null;
+}
+
+/**
+ * The reason the server puts on a failure it could not put a name to (a
+ * storage fault, an unclassified provider error): it is not the provider's
+ * configuration, so the panel must not send the GM to Setup for it.
+ */
+const REASON_UNCLASSIFIED = "unclassified";
+// The header the reason travels in (errorReasonHeader in internal/rpc, the
+// one lib/connectError reads for the allowance refusal).
+const ERROR_REASON_HEADER = "Glyphoxa-Error-Reason";
 
 /**
  * classifyExchangeError maps a failed exchange onto the kind the panel shows.
@@ -136,6 +182,8 @@ export function classifyExchangeError(err: unknown): { kind: ExchangeErrorKind; 
     case Code.NotFound:
       return { kind: "gone", message };
     case Code.Unavailable:
+      if (ce.metadata.get(ERROR_REASON_HEADER) === REASON_UNCLASSIFIED) return { kind: "generic", message };
+      return { kind: "provider", message };
     case Code.ResourceExhausted:
       return { kind: "provider", message };
     default:
@@ -154,15 +202,52 @@ const invalidateThreads = (qc: QueryClient) => invalidateMethodQueries(qc, ChatS
  */
 export const STOP_REFETCH_DELAYS_MS = [0, 700, 2000] as const;
 
-function refetchSoon(qc: QueryClient, delays: readonly number[]) {
-  for (const ms of delays) {
+/**
+ * Re-reads the thread (and the list) after each delay; once the last re-read
+ * has landed, onDone runs.
+ */
+function refetchSoon(qc: QueryClient, delays: readonly number[], onDone?: () => void) {
+  const last = delays.length - 1;
+  delays.forEach((ms, i) => {
     const timer = setTimeout(() => {
       timers.delete(timer);
-      void invalidateThread(qc);
-      void invalidateThreads(qc);
+      const reads = Promise.all([invalidateThread(qc), invalidateThreads(qc)]);
+      if (i === last && onDone) void reads.finally(onDone);
     }, ms);
     timers.add(timer);
+  });
+}
+
+/**
+ * The thread's rows as the server has them now, when the cached copy may be
+ * behind: a re-read is under way or due (a reply just finished, the panel
+ * just remounted), or there is no copy yet. null when the cached copy is
+ * current, or the read failed (the exchange then goes by what it was given).
+ */
+async function currentRows(
+  transport: Transport,
+  qc: QueryClient,
+  campaignId: string,
+  threadId: string,
+): Promise<readonly PlanningMessage[] | null> {
+  const options = createQueryOptions(ChatService.method.getPlanningThread, { campaignId, threadId }, { transport });
+  const cached = qc.getQueryState(options.queryKey);
+  if (cached && cached.status === "success" && cached.fetchStatus === "idle" && !cached.isInvalidated) return null;
+  try {
+    // A read already in flight is joined, not repeated.
+    return (await qc.fetchQuery({ ...options, staleTime: 0 })).messages;
+  } catch {
+    return null;
   }
+}
+
+/** Where an exchange's user turn will be, given the rows the thread has before it. */
+function baseOf(persisted: readonly PlanningMessage[], text: string): Pick<Exchange, "baseCount" | "reusesTurn"> {
+  const last = persisted[persisted.length - 1];
+  return {
+    baseCount: persisted.length,
+    reusesTurn: last !== undefined && last.role === "user" && last.content.trim() === text,
+  };
 }
 
 export type StartExchange = {
@@ -173,21 +258,29 @@ export type StartExchange = {
   message: string;
   /** The thread's persisted messages as the panel shows them at send time. */
   persisted: readonly PlanningMessage[];
+  /**
+   * persisted is known to be what the server has (a conversation created for
+   * this very message): no re-read before sending.
+   */
+  current?: boolean;
 };
 
 /**
  * startExchange sends one message and reads its stream into the store. It
  * returns at once; the stream runs on whether or not any panel is mounted.
- * A second send while one is streaming in the same campaign is ignored.
+ * A send while the campaign is busy (busyExchange) is ignored.
+ *
+ * The exchange is lined up with the thread's rows by where its user turn
+ * lands. When the cached rows may be behind, they are re-read before the
+ * message goes out, so that position is the server's, not a stale copy's.
  */
-export function startExchange({ transport, queryClient, campaignId, threadId, message, persisted }: StartExchange) {
+export function startExchange({ transport, queryClient, campaignId, threadId, message, persisted, current = false }: StartExchange) {
   const text = message.trim();
-  if (text === "" || streamingExchange(state, campaignId)) return;
+  if (text === "" || busyExchange(state, campaignId)) return;
   const key = exchangeKey(campaignId, threadId);
 
-  const last = persisted[persisted.length - 1];
-  const reusesTurn = last !== undefined && last.role === "user" && last.content.trim() === text;
   const exchange: Exchange = {
+    id: ++lastId,
     campaignId,
     threadId,
     userMessage: text,
@@ -195,23 +288,34 @@ export function startExchange({ transport, queryClient, campaignId, threadId, me
     tools: [],
     status: "streaming",
     error: null,
-    baseCount: persisted.length,
-    reusesTurn,
+    ...baseOf(persisted, text),
     assistantMessageId: null,
     noticeDismissed: false,
     draftReturned: false,
+    awaitingRead: false,
   };
-  emit({ ...state, exchanges: { ...state.exchanges, [key]: exchange } });
+  // A finished exchange of this thread is replaced: what it marked on its
+  // persisted reply (tool chips, "stopped") moves there first.
+  const prev = state.exchanges[key];
+  emit({ ...carryOver(prev, persisted), exchanges: { ...state.exchanges, [key]: exchange } });
 
   const abort = new AbortController();
   controllers.set(key, abort);
-  void run(key, abort, { transport, queryClient, campaignId, threadId, text });
+  void run(key, exchange.id, abort, { transport, queryClient, campaignId, threadId, text, current });
 }
 
 async function run(
   key: string,
+  id: number,
   abort: AbortController,
-  { transport, queryClient, campaignId, threadId, text }: { transport: Transport; queryClient: QueryClient; campaignId: string; threadId: string; text: string },
+  {
+    transport,
+    queryClient,
+    campaignId,
+    threadId,
+    text,
+    current,
+  }: { transport: Transport; queryClient: QueryClient; campaignId: string; threadId: string; text: string; current: boolean },
 ) {
   const client = createClient(ChatService, transport);
   // Only this run may write to its record: a later send in the same thread
@@ -219,6 +323,11 @@ async function run(
   const mine = () => controllers.get(key) === abort && !abort.signal.aborted;
   let doneId: string | null = null;
   try {
+    if (!current) {
+      const rows = await currentRows(transport, queryClient, campaignId, threadId);
+      if (!mine()) return;
+      if (rows) patch(key, baseOf(rows, text));
+    }
     for await (const res of client.planningExchange({ campaignId, threadId, message: text }, { signal: abort.signal })) {
       if (!mine()) return;
       const frame = res.frame;
@@ -242,37 +351,42 @@ async function run(
         ...state,
         toolsByMessage,
         exchanges: cur
-          ? { ...state.exchanges, [key]: { ...cur, status: "done", assistantMessageId: doneId || null } }
+          ? { ...state.exchanges, [key]: { ...cur, status: "done", assistantMessageId: doneId || null, awaitingRead: true } }
           : state.exchanges,
       });
       // The done frame's rows are persisted: re-read the thread (and the list,
       // for updated_at and an auto-filled title). The local copy keeps drawing
       // until the re-read carries the reply, so the pane never flashes empty.
       await Promise.all([invalidateThread(queryClient), invalidateThreads(queryClient)]);
+      patchIf(key, id, { awaitingRead: false });
     } else {
       // The stream closed without a done frame: a failed exchange.
-      patch(key, { status: "failed", error: { kind: "generic", message: "" } });
-      refetchSoon(queryClient, [0]);
+      patch(key, { status: "failed", error: { kind: "generic", message: "" }, awaitingRead: true });
+      refetchSoon(queryClient, [0], () => patchIf(key, id, { awaitingRead: false }));
     }
   } catch (err) {
     // Stop (or a campaign change) ended it: stopExchange already recorded that.
     if (abort.signal.aborted || controllers.get(key) !== abort) return;
     controllers.delete(key);
-    patch(key, { status: "failed", error: classifyExchangeError(err) });
+    patch(key, { status: "failed", error: classifyExchangeError(err), awaitingRead: true });
     // The user turn may have been persisted before the failure (ADR-0062's
     // persist-first order): re-read so the cache says what exists.
-    refetchSoon(queryClient, [0]);
+    refetchSoon(queryClient, [0], () => patchIf(key, id, { awaitingRead: false }));
   }
 }
 
-/** Stops the exchange streaming in this campaign (Stop). The partial reply stays. */
+/**
+ * Stops the exchange streaming in this campaign (Stop). The partial reply
+ * stays. The campaign's next send waits until the server's copy of it has
+ * been read back, or the last re-read has landed without one.
+ */
 export function stopExchange(campaignId: string, queryClient?: QueryClient) {
   for (const [key, ex] of Object.entries(state.exchanges)) {
     if (ex.campaignId !== campaignId || ex.status !== "streaming") continue;
     controllers.get(key)?.abort();
     controllers.delete(key);
-    patch(key, { status: "stopped" });
-    if (queryClient) refetchSoon(queryClient, STOP_REFETCH_DELAYS_MS);
+    patch(key, { status: "stopped", awaitingRead: queryClient !== undefined });
+    if (queryClient) refetchSoon(queryClient, STOP_REFETCH_DELAYS_MS, () => patchIf(key, ex.id, { awaitingRead: false }));
   }
 }
 
@@ -323,6 +437,8 @@ export function forgetExchange(campaignId: string, threadId: string) {
 
 /** What of an exchange still needs drawing next to the persisted messages. */
 export type ExchangeView = {
+  /** The cache has the exchange's user turn. */
+  userPersisted: boolean;
   /** Draw the pending user turn (the cache does not have it). */
   showUser: boolean;
   /** Draw the streamed reply (the cache does not have it). */
@@ -334,16 +450,32 @@ export type ExchangeView = {
 };
 
 /**
- * exchangeView reconciles an exchange with the thread's persisted messages.
- * The user turn is the row at baseCount (baseCount-1 for a reused dangling
- * turn); the reply is the assistant row right after it. While the exchange
- * streams, only the user turn can already be persisted (the server writes it
- * before calling the provider).
+ * The index of the exchange's user turn in persisted, or -1 while the cache
+ * does not have it. The turn is the first user row from its expected place
+ * on (baseCount, or baseCount-1 for a reused dangling turn) that carries the
+ * GM's words — anchored on the words, not on the bare position, so a row
+ * written in between (a stopped reply the server saved a moment late) does
+ * not shift it onto the wrong turn.
+ */
+function userTurnIndex(ex: Exchange, persisted: readonly PlanningMessage[]): number {
+  const from = Math.max(0, ex.reusesTurn ? ex.baseCount - 1 : ex.baseCount);
+  for (let i = from; i < persisted.length; i++) {
+    const m = persisted[i];
+    if (m.role === "user" && m.content.trim() === ex.userMessage) return i;
+  }
+  return -1;
+}
+
+/**
+ * exchangeView reconciles an exchange with the thread's persisted messages:
+ * its user turn (userTurnIndex), and its reply — the row the done frame
+ * named, or else the assistant row right after the user turn. While the
+ * exchange streams, only the user turn can already be persisted (the server
+ * writes it before calling the provider).
  */
 export function exchangeView(ex: Exchange, persisted: readonly PlanningMessage[]): ExchangeView {
-  const userIndex = ex.reusesTurn ? ex.baseCount - 1 : ex.baseCount;
-  const userRow = persisted[userIndex];
-  const userPersisted = userRow !== undefined && userRow.role === "user";
+  const userIndex = userTurnIndex(ex, persisted);
+  const userPersisted = userIndex >= 0;
   let replyRow: PlanningMessage | undefined;
   if (ex.assistantMessageId) {
     replyRow = persisted.find((m) => m.id === ex.assistantMessageId);
@@ -353,12 +485,29 @@ export function exchangeView(ex: Exchange, persisted: readonly PlanningMessage[]
   }
   const showUser = !userPersisted && !ex.draftReturned;
   const showReply = replyRow === undefined && ex.reply !== "";
+  // A stop with nothing streamed may still gain a reply row (the server can
+  // have sent text the browser never read): settle it only once re-read.
   const settled =
     ex.status !== "streaming" &&
     !showUser &&
     !showReply &&
-    (ex.status === "done" || ex.status === "stopped" ? replyRow !== undefined || ex.reply === "" : ex.noticeDismissed);
-  return { showUser, showReply, persistedReplyId: replyRow?.id ?? null, settled };
+    (ex.status === "failed" ? ex.noticeDismissed : replyRow !== undefined || (ex.reply === "" && !ex.awaitingRead));
+  return { userPersisted, showUser, showReply, persistedReplyId: replyRow?.id ?? null, settled };
+}
+
+/**
+ * What a retiring exchange leaves on its persisted reply for the page
+ * session: its tool chips and its "stopped" mark.
+ */
+function carryOver(ex: Exchange | undefined, persisted: readonly PlanningMessage[]): Omit<State, "exchanges"> {
+  const { toolsByMessage, stoppedMessages } = state;
+  if (!ex || ex.status === "streaming") return { toolsByMessage, stoppedMessages };
+  const replyId = exchangeView(ex, persisted).persistedReplyId;
+  if (!replyId) return { toolsByMessage, stoppedMessages };
+  return {
+    toolsByMessage: ex.tools.length > 0 ? { ...toolsByMessage, [replyId]: ex.tools } : toolsByMessage,
+    stoppedMessages: ex.status === "stopped" ? { ...stoppedMessages, [replyId]: true } : stoppedMessages,
+  };
 }
 
 /**
@@ -369,17 +518,10 @@ export function exchangeView(ex: Exchange, persisted: readonly PlanningMessage[]
 export function settleExchange(campaignId: string, threadId: string, persisted: readonly PlanningMessage[]) {
   const key = exchangeKey(campaignId, threadId);
   const ex = state.exchanges[key];
-  if (!ex) return;
-  const view = exchangeView(ex, persisted);
-  if (!view.settled) return;
+  if (!ex || !exchangeView(ex, persisted).settled) return;
   const exchanges = { ...state.exchanges };
   delete exchanges[key];
-  const replyId = view.persistedReplyId;
-  emit({
-    exchanges,
-    toolsByMessage: replyId && ex.tools.length > 0 ? { ...state.toolsByMessage, [replyId]: ex.tools } : state.toolsByMessage,
-    stoppedMessages: replyId && ex.status === "stopped" ? { ...state.stoppedMessages, [replyId]: true } : state.stoppedMessages,
-  });
+  emit({ ...carryOver(ex, persisted), exchanges });
 }
 
 /** Test seam: aborts everything and empties the store. */

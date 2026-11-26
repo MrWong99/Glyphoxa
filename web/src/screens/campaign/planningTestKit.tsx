@@ -48,6 +48,10 @@ export function message(id: string, role: "user" | "assistant", content: string)
  *   hold      after the deltas, wait for release() — or for the client to stop
  *   refuse    fail BEFORE persisting anything (allowance, no key)
  *   fail      fail AFTER persisting the user turn and streaming the deltas
+ *   latePartial  on a stop, save the partial reply only at releasePartial()
+ *                (the engine notices a cancel a moment after the browser)
+ *   stallBeforeSave  wait for the client to stop BEFORE saving the user turn;
+ *                    nothing is saved (a Stop during the server's checks)
  */
 export type Script = {
   deltas?: string[];
@@ -55,6 +59,8 @@ export type Script = {
   hold?: boolean;
   refuse?: ConnectError;
   fail?: ConnectError;
+  latePartial?: boolean;
+  stallBeforeSave?: boolean;
 };
 
 export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<string, PlanningMessage[]>; scripts?: Script[] } = {}) {
@@ -68,6 +74,10 @@ export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<s
   const aborted: boolean[] = [];
   let seq = 0;
   let release: () => void = () => {};
+  let releasePartial: () => void = () => {};
+  // While set, thread reads wait for it: a slow re-read.
+  let readGate: Promise<void> | null = null;
+  let openReads: () => void = () => {};
 
   const append = (threadId: string, role: "user" | "assistant", content: string) => {
     const m = message(`m-${++seq}`, role, content);
@@ -81,8 +91,9 @@ export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<s
         calls.list++;
         return create(ListPlanningThreadsResponseSchema, { threads });
       },
-      getPlanningThread: (req) => {
+      getPlanningThread: async (req) => {
         calls.get++;
+        if (readGate) await readGate;
         const th = threads.find((x) => x.id === req.threadId);
         if (!th) throw new ConnectError("thread not found", Code.NotFound);
         return create(GetPlanningThreadResponseSchema, { thread: th, messages: [...(messages.get(req.threadId) ?? [])] });
@@ -113,6 +124,11 @@ export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<s
         aborted.push(false);
         const script = scripts.shift() ?? { deltas: ["Start with the docks."] };
         if (script.refuse) throw script.refuse;
+        if (script.stallBeforeSave) {
+          await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
+          aborted[index] = true;
+          return;
+        }
 
         const history = messages.get(req.threadId) ?? [];
         const last = history[history.length - 1];
@@ -139,6 +155,7 @@ export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<s
           });
           if (stopped) {
             aborted[index] = true;
+            if (script.latePartial) await new Promise<void>((resolve) => (releasePartial = resolve));
             // The engine keeps what had streamed (ADR-0062 amendment).
             if (streamed.trim() !== "") append(req.threadId, "assistant", streamed.trim());
             return;
@@ -161,6 +178,15 @@ export function mockChat(opts: { threads?: PlanningThread[]; messages?: Record<s
     messages,
     threads,
     release: () => release(),
+    releasePartial: () => releasePartial(),
+    /** Holds every thread read from now until the returned function is called. */
+    holdReads: () => {
+      readGate = new Promise<void>((resolve) => (openReads = resolve));
+      return () => {
+        readGate = null;
+        openReads();
+      };
+    },
     userTurns: (threadId: string, text: string) =>
       (messages.get(threadId) ?? []).filter((m) => m.role === "user" && m.content === text).length,
   };

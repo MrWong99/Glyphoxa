@@ -50,9 +50,11 @@ describe("PlanningPanel threads", () => {
 
     const rail = screen.getByRole("complementary", { name: "Planning conversations" });
     expect(await within(rail).findByText("Harbour heist prep")).toBeInTheDocument();
-    const groups = within(rail).getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    const groups = within(rail).getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
     expect(groups).toEqual(["Today", "Last 7 days", "Earlier"]);
-    expect(within(rail).getByRole("region", { name: "Earlier" })).toHaveTextContent("Session zero");
+    // Groups, not landmarks: the rail is already one.
+    expect(within(rail).getByRole("group", { name: "Earlier" })).toHaveTextContent("Session zero");
+    expect(within(rail).queryByRole("region")).not.toBeInTheDocument();
 
     expect(await screen.findByText(/the keeper is a smuggler/)).toBeInTheDocument();
     expect(within(rail).getByRole("button", { name: /^Harbour heist prep/ })).toHaveAttribute("aria-current", "true");
@@ -120,6 +122,8 @@ describe("PlanningPanel threads", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete conversation" }));
     await waitFor(() => expect(within(rail).queryByText("Act two threads")).not.toBeInTheDocument());
     expect(chat.calls.delete).toBe(1);
+    // The row and its menu are gone: focus goes on to the composer, not <body>.
+    await waitFor(() => expect(composer()).toHaveFocus());
   });
 
   it("opens the conversations as a sheet from the phone bar", async () => {
@@ -131,6 +135,21 @@ describe("PlanningPanel threads", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     const rail = screen.getByRole("complementary", { name: "Planning conversations" });
     expect(within(rail).getByRole("button", { name: /^Act two loose ends/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("lands in the composer after 'New conversation' in the sheet", async () => {
+    renderPanel(standard());
+    await screen.findByText(/the keeper is a smuggler/);
+    fireEvent.click(screen.getByRole("button", { name: "Conversations (3)" }));
+    const sheet = await screen.findByRole("dialog", { name: "Conversations" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(composer()).toHaveFocus());
+    // …and stays there once the sheet's own focus handling has run.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(composer()).toHaveFocus();
   });
 
   it("speaks German", async () => {
@@ -168,6 +187,8 @@ describe("PlanningPanel new conversations", () => {
     await waitFor(() => expect(chat.exchanges).toHaveLength(1));
     expect(chat.calls.create).toBe(1);
     expect(chat.exchanges[0]).toMatchObject({ threadId: "t-new-1", message: "Recap the last session" });
+    // The starters went with the exchange; focus is in the composer, not on <body>.
+    expect(composer()).toHaveFocus();
     expect(await screen.findByText("Last time, the party met Bart.")).toBeInTheDocument();
     // The prefilled draft belonged to the not-yet-started conversation.
     expect(composer().value).toBe("");
@@ -215,6 +236,130 @@ describe("PlanningPanel exchange", () => {
     expect(screen.getByText("The Butler has replied.")).toBeInTheDocument();
     await waitFor(() => expect(userBubbles("Where should the session open?")).toHaveLength(1));
     expect(chat.userTurns("t-recent", "Where should the session open?")).toBe(1);
+  });
+
+  it("moves focus off Stop to the composer when the reply ends", async () => {
+    const chat = standard([{ deltas: ["Start with "], hold: true }]);
+    renderPanel(chat);
+    await screen.findByText(/the keeper is a smuggler/);
+    type("Where should the session open?");
+    pressEnter();
+    const stop = await screen.findByRole("button", { name: "Stop the Butler's reply" });
+    stop.focus();
+    act(() => chat.release());
+    await screen.findByRole("button", { name: "Send" });
+    expect(composer()).toHaveFocus();
+  });
+
+  it("holds a follow-up until the finished reply is read back, then Stop marks only the new partial", async () => {
+    const chat = standard([{ deltas: ["Reply one."] }, { deltas: ["Partial two"], hold: true }]);
+    renderPanel(chat);
+    await screen.findByText(/the keeper is a smuggler/);
+
+    type("Question one");
+    const openReads = chat.holdReads();
+    pressEnter();
+    await waitFor(() => expect(chat.messages.get("t-recent")).toHaveLength(4));
+    expect(await screen.findByText("Reply one.")).toBeInTheDocument();
+
+    // The reply is done but its re-read is still out: the follow-up typed in
+    // the meantime waits instead of being lined up against stale rows.
+    type("Question two");
+    pressEnter();
+    expect(chat.exchanges).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    act(() => openReads());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    pressEnter();
+    expect(await screen.findByText("Partial two")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop the Butler's reply" }));
+    await waitFor(() => expect(chat.messages.get("t-recent")?.at(-1)?.content).toBe("Partial two"));
+    await waitFor(() => expect(document.querySelectorAll('[data-pending="true"]')).toHaveLength(0), { timeout: 3000 });
+
+    const marked = [...document.querySelectorAll(".gx-planning__partial")].map((p) => p.closest("li")?.textContent ?? "");
+    expect(marked).toHaveLength(1);
+    expect(marked[0]).toContain("Partial two");
+    expect(userBubbles("Question one")).toHaveLength(1);
+    expect(userBubbles("Question two")).toHaveLength(1);
+    expect(chat.messages.get("t-recent")!.map((m) => m.content).slice(2)).toEqual([
+      "Question one",
+      "Reply one.",
+      "Question two",
+      "Partial two",
+    ]);
+  });
+
+  it("after Stop, holds a follow-up until the kept partial is read back, so each turn shows once", async () => {
+    const chat = standard([{ deltas: ["The watch "], hold: true, latePartial: true }, { deltas: ["At dawn."] }]);
+    renderPanel(chat);
+    await screen.findByText(/the keeper is a smuggler/);
+    type("When does the watch change?");
+    pressEnter();
+    await screen.findByText("The watch");
+
+    type("And at dawn?");
+    fireEvent.click(screen.getByRole("button", { name: "Stop the Butler's reply" }));
+    await waitFor(() => expect(chat.aborted).toEqual([true]));
+    // The server has not saved the partial yet, and the first re-read comes
+    // back without it: sending now would race it.
+    await waitFor(() => expect(chat.calls.get).toBeGreaterThanOrEqual(2));
+    pressEnter();
+    expect(chat.exchanges).toHaveLength(1);
+
+    act(() => chat.releasePartial());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled(), { timeout: 3000 });
+    pressEnter();
+    await waitFor(() => expect(screen.getByText("At dawn.")).toBeInTheDocument());
+    await waitFor(() => expect(document.querySelectorAll('[data-pending="true"]')).toHaveLength(0));
+
+    expect(userBubbles("When does the watch change?")).toHaveLength(1);
+    expect(userBubbles("And at dawn?")).toHaveLength(1);
+    expect(chat.messages.get("t-recent")!.map((m) => m.content).slice(2)).toEqual([
+      "When does the watch change?",
+      "The watch",
+      "And at dawn?",
+      "At dawn.",
+    ]);
+    const marked = [...document.querySelectorAll(".gx-planning__partial")].map((p) => p.closest("li")?.textContent ?? "");
+    expect(marked).toHaveLength(1);
+    expect(marked[0]).toContain("The watch");
+  });
+
+  it("waits for the open conversation's messages before sending into it", async () => {
+    const chat = standard();
+    const openReads = chat.holdReads();
+    renderPanel(chat);
+    const rail = screen.getByRole("complementary", { name: "Planning conversations" });
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^Harbour heist prep/ })).toHaveAttribute("aria-current", "true"));
+
+    type("Who guards the docks?");
+    pressEnter();
+    expect(chat.exchanges).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    act(() => openReads());
+    await screen.findByText(/the keeper is a smuggler/);
+    pressEnter();
+    await waitFor(() => expect(screen.getByText("Start with the docks.")).toBeInTheDocument());
+    await waitFor(() => expect(userBubbles("Who guards the docks?")).toHaveLength(1));
+    expect(chat.exchanges).toHaveLength(1);
+  });
+
+  it("a Stop before the server saved the message gives the words back to the composer", async () => {
+    const chat = standard([{ stallBeforeSave: true }]);
+    renderPanel(chat);
+    await screen.findByText(/the keeper is a smuggler/);
+    type("Who guards the docks?");
+    pressEnter();
+    await screen.findAllByText("The Butler is writing…");
+    expect(composer().value).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop the Butler's reply" }));
+    await waitFor(() => expect(composer().value).toBe("Who guards the docks?"), { timeout: 4000 });
+    expect(userBubbles("Who guards the docks?")).toHaveLength(0);
+    expect(chat.userTurns("t-recent", "Who guards the docks?")).toBe(0);
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
   });
 
   it("renders Butler replies as markdown but keeps the GM's own words verbatim", async () => {
@@ -286,6 +431,8 @@ describe("PlanningPanel exchange", () => {
     await screen.findByText("The watch changes at midnight");
 
     fireEvent.click(screen.getByRole("button", { name: "Stop the Butler's reply" }));
+    // Stop turns into a disabled Send: focus goes to the composer, not <body>.
+    expect(composer()).toHaveFocus();
     await waitFor(() => expect(chat.aborted).toEqual([true]));
     expect(document.querySelector(".gx-planning__partial")).toHaveTextContent("Stopped — this reply is incomplete.");
     expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument();
@@ -428,22 +575,34 @@ describe("PlanningPanel composer", () => {
     await screen.findByText(/the keeper is a smuggler/);
 
     type("x".repeat(3400));
-    expect(screen.queryByText(/\/ 4000/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/ 4,000/)).not.toBeInTheDocument();
 
     // Emoji are two UTF-16 units but one code point each, as the server counts.
     type("🐉".repeat(4000));
-    expect(screen.getByText("4000 / 4000")).toBeInTheDocument();
+    expect(screen.getByText("4,000 / 4,000")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
 
     type("y".repeat(5000));
-    const counter = screen.getByText(/5000 \/ 4000/);
+    const counter = screen.getByText(/5,000 \/ 4,000/);
     expect(counter).toHaveAttribute("data-over", "true");
-    expect(counter).toHaveTextContent("1000 characters too long");
+    expect(counter).toHaveTextContent("1,000 characters too long");
     expect(composer()).toHaveAttribute("aria-invalid", "true");
     expect(composer().value).toHaveLength(5000); // nothing silently cut off
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     pressEnter();
     expect(chat.exchanges).toHaveLength(0);
+  });
+
+  it("writes the counter's numbers the German way", async () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      renderPanel(standard());
+      await screen.findByText(/the keeper is a smuggler/);
+      fireEvent.change(document.querySelector("textarea")!, { target: { value: "x".repeat(4000) } });
+      expect(screen.getByText("4.000 / 4.000")).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("gx-lang");
+    }
   });
 
   it("keeps a draft per conversation", async () => {
