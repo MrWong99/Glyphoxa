@@ -9,6 +9,7 @@ import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
 import { apiErrorMessage, errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 
 // Node portraits (#590): a picture on an entry, generated from its own prose or
@@ -51,6 +52,9 @@ export function NodePortrait({ node }: { node: Node }) {
   };
 
   const fileInput = useRef<HTMLInputElement | null>(null);
+  // Removing a portrait is not undoable (a generated one cost an image run and
+  // cannot be regenerated identically), so it asks first.
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   const generate = useMutation(CampaignService.method.generateNodePortrait);
   const apply = useMutation(CampaignService.method.setNodePortrait);
@@ -177,7 +181,7 @@ export function NodePortrait({ node }: { node: Node }) {
             variant="ghost"
             iconStart={<Trash2 size={14} />}
             disabled={pending}
-            onClick={() => void remove()}
+            onClick={() => setConfirmRemove(true)}
           >
             {t("knowledge.removePortrait")}
           </Button>
@@ -199,6 +203,17 @@ export function NodePortrait({ node }: { node: Node }) {
       {generate.isPending && (
         <span className="gx-field__hint">{t("knowledge.portraitPromptHint")}</span>
       )}
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title={t("knowledge.removePortraitTitle", { name: node.name })}
+        description={t("knowledge.removePortraitBody")}
+        confirmLabel={t("knowledge.removePortraitConfirm")}
+        onConfirm={() => {
+          setConfirmRemove(false);
+          void remove();
+        }}
+      />
       {error && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
           {error}

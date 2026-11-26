@@ -4,6 +4,7 @@ import { MessageSquare } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n, type Lang } from "@/i18n";
+import { Button } from "@/components/ui/Button";
 import { stripMarkdown } from "@/components/ui/Markdown";
 
 // Where an entry was mentioned in play (#545, ADR-0008 amendment).
@@ -34,15 +35,32 @@ export function NodeAppearances({
   onOpenLine?: (sessionID: string, lineID: string) => void;
 }) {
   const { t, lang } = useI18n();
-  const { data, status } = useQuery(CampaignService.method.listNodeAppearances, { nodeId: nodeID });
+  const { data, status, refetch, isFetching } = useQuery(
+    CampaignService.method.listNodeAppearances,
+    { nodeId: nodeID },
+  );
 
   if (status === "pending") {
     return <div className="gx-skeleton gx-kg-appearances__skel" data-testid="appearances-loading" />;
   }
   if (status === "error") {
-    // Best-effort: a failed retrieval list is not worth a scary error on an entry
-    // the GM is editing. The entry itself is unaffected.
-    return null;
+    // A quiet line, not an error panel: a failed retrieval list is not worth a
+    // scary error on an entry the GM is reading, and the entry itself is
+    // unaffected. But it is a line and not nothing. Rendering nothing told the
+    // GM "never mentioned" about an entry that may have come up every session.
+    return (
+      <div className="gx-field gx-kg-appearances">
+        <span className="gx-field__label">
+          <MessageSquare size={12} /> {t("knowledge.mentionedLabel")}
+        </span>
+        <span className="gx-kg-appearances__retry">
+          <span className="gx-field__hint">{t("knowledge.mentionedLoadError")}</span>
+          <Button variant="ghost" size="sm" disabled={isFetching} onClick={() => void refetch()}>
+            {t("common.retry")}
+          </Button>
+        </span>
+      </div>
+    );
   }
 
   const rows = data.appearances;

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -88,6 +88,8 @@ function edgeTransport(opts: {
         }
         const i = outgoing.findIndex((e) => e.id === req.id);
         if (i >= 0) outgoing.splice(i, 1);
+        const j = incoming.findIndex((e) => e.id === req.id);
+        if (j >= 0) incoming.splice(j, 1);
         return create(DeleteEdgeResponseSchema, {});
       },
       setNodeAgent: (req) => {
@@ -103,11 +105,15 @@ function edgeTransport(opts: {
   return { transport, createCalls, deleteCalls, setAgentCalls, detailCalls };
 }
 
-function renderRelations(node: PbNode, extra?: Partial<Parameters<typeof edgeTransport>[0]>) {
+function renderRelations(
+  node: PbNode,
+  extra?: Partial<Parameters<typeof edgeTransport>[0]>,
+  onOpenNode?: (id: string) => void,
+) {
   const ctx = edgeTransport({ node, ...extra });
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
-      <NodeRelations node={node} />
+      <NodeRelations node={node} onOpenNode={onOpenNode} />
     </Providers>,
   );
   return ctx;
@@ -125,6 +131,21 @@ const locNode = create(NodeSchema, {
   nodeType: NodeType.LOCATION,
   name: "Barrow",
 });
+const factionNode = create(NodeSchema, { id: "fac", nodeType: NodeType.FACTION, name: "Smugglers" });
+const otherNpc = create(NodeSchema, { id: "n2", nodeType: NodeType.NPC, name: "Cyra" });
+
+// The target picker is the filterable Combobox: a button that opens a listbox.
+const openTargets = () => fireEvent.click(screen.getByRole("button", { name: "Target entry" }));
+const targetNames = () => screen.getAllByRole("option").map((o) => o.textContent);
+async function pickTarget(option: string) {
+  openTargets();
+  fireEvent.click(await screen.findByRole("option", { name: option }));
+}
+// The relations a Radix Select is offering right now (it stays open).
+function relationNames() {
+  fireEvent.keyDown(screen.getByRole("combobox", { name: "Connection" }), { key: "Enter" });
+  return screen.getAllByRole("option").map((o) => o.textContent);
+}
 
 // pick opens a Radix Select and chooses the named option. It awaits the option
 // because some option sets (targets, cast) arrive from an async query, so the
@@ -174,8 +195,164 @@ describe("NodeRelations", () => {
 
     const inc = screen.getByRole("region", { name: /incoming connections/i });
     expect(within(inc).getByText("Cyra")).toBeInTheDocument();
-    // Incoming rows are context-only: no delete affordance.
-    expect(within(inc).queryByRole("button", { name: /delete connection/i })).toBeNull();
+    // An incoming relation is authored on the other entry: it has no texture
+    // editor here, only the way to remove it.
+    expect(within(inc).queryByRole("button", { name: /edit what/i })).toBeNull();
+    expect(within(inc).getByRole("button", { name: "Delete connection from Cyra: knows" })).toBeInTheDocument();
+    // With nowhere to navigate to, a name is text, not a dead control.
+    expect(within(out).queryByRole("button", { name: "Barrow" })).toBeNull();
+  });
+
+  it("an incoming relation can be removed from here, after confirming", async () => {
+    const { deleteCalls } = renderRelations(npcNode, {
+      node: npcNode,
+      incoming: [
+        create(EdgeSchema, {
+          id: "e2",
+          fromNodeId: "cyra",
+          toNodeId: "n1",
+          edgeType: EdgeType.KNOWS,
+          fromNodeName: "Cyra",
+          fromNodeType: NodeType.CHARACTER,
+        }),
+      ],
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Delete connection from Cyra: knows" }));
+    // The question names the relation from the side it is asserted on.
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Cyra → knows");
+    expect(deleteCalls).toHaveLength(0);
+
+    await confirmInDialog();
+    await waitFor(() => expect(deleteCalls).toHaveLength(1));
+    expect(deleteCalls[0].id).toBe("e2");
+    await waitFor(() => expect(screen.queryByText("Cyra")).not.toBeInTheDocument());
+  });
+
+  it("a connection's name opens that entry", async () => {
+    const onOpenNode = vi.fn();
+    renderRelations(
+      npcNode,
+      {
+        node: npcNode,
+        outgoing: [
+          create(EdgeSchema, {
+            id: "e1",
+            fromNodeId: "n1",
+            toNodeId: "loc",
+            edgeType: EdgeType.RESIDES_IN,
+            toNodeName: "Barrow",
+            toNodeType: NodeType.LOCATION,
+          }),
+        ],
+        incoming: [
+          create(EdgeSchema, {
+            id: "e2",
+            fromNodeId: "cyra",
+            toNodeId: "n1",
+            edgeType: EdgeType.KNOWS,
+            fromNodeName: "Cyra",
+            fromNodeType: NodeType.CHARACTER,
+          }),
+        ],
+      },
+      onOpenNode,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Barrow" }));
+    expect(onOpenNode).toHaveBeenLastCalledWith("loc");
+    fireEvent.click(screen.getByRole("button", { name: "Cyra" }));
+    expect(onOpenNode).toHaveBeenLastCalledWith("cyra");
+  });
+
+  it("choosing 'lives in' offers only Location targets", async () => {
+    renderRelations(npcNode, { node: npcNode, others: [locNode, factionNode, otherNpc] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+
+    // Before a relation is chosen, every other entry is a possible target,
+    // each with its type.
+    openTargets();
+    await screen.findByRole("option", { name: "Barrow · Location" });
+    expect(targetNames()).toEqual(["Barrow · Location", "Smugglers · Faction", "Cyra · NPC"]);
+    fireEvent.click(screen.getByRole("button", { name: "Target entry" }));
+
+    await pick("Connection", "lives in");
+    openTargets();
+    expect(targetNames()).toEqual(["Barrow · Location"]);
+  });
+
+  it("a chosen target narrows the relations to the ones it can take", async () => {
+    renderRelations(npcNode, { node: npcNode, others: [locNode, factionNode, otherNpc] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+    await pickTarget("Smugglers · Faction");
+
+    const offered = relationNames();
+    expect(offered).toContain("member of");
+    expect(offered).toContain("knows");
+    // A faction is not a place, not a plot thread, and nobody's child.
+    expect(offered).not.toContain("lives in");
+    expect(offered).not.toContain("took part in");
+    expect(offered).not.toContain("parent of");
+  });
+
+  it("never offers a relation no entry could be the target of", async () => {
+    // A Location cannot be anyone's parent, and there is no plot thread yet.
+    renderRelations(locNode, { node: locNode, others: [npcNode, factionNode] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+    await screen.findByRole("combobox", { name: "Connection" });
+    await waitFor(() => expect(relationNames()).toContain("member of"));
+    const offered = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(offered).not.toContain("parent of");
+    expect(offered).not.toContain("took part in");
+    expect(offered).not.toContain("lives in");
+  });
+
+  it("switching to a relation the chosen target cannot take clears the target", async () => {
+    const { createCalls } = renderRelations(npcNode, { node: npcNode, others: [locNode, factionNode] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+    await pick("Connection", "lives in");
+    await pickTarget("Barrow · Location");
+    expect(screen.getByRole("button", { name: "Target entry" })).toHaveTextContent("Barrow · Location");
+
+    // The GM changes their mind: the relation stays switchable…
+    await pick("Connection", "member of");
+    // …and the location, which cannot be the target of it, is let go.
+    expect(screen.getByRole("button", { name: "Target entry" })).not.toHaveTextContent("Barrow");
+    expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
+
+    await pickTarget("Smugglers · Faction");
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0]).toMatchObject({ edgeType: EdgeType.MEMBER_OF, toNodeId: "fac" });
+  });
+
+  it("takes a note and a feeling while adding, chained through UpdateEdgeDetails", async () => {
+    const { createCalls, detailCalls } = renderRelations(npcNode, { node: npcNode, others: [otherNpc] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+    await pick("Connection", "knows");
+    await pickTarget("Cyra · NPC");
+    fireEvent.change(screen.getByLabelText("What it's like (optional)"), {
+      target: { value: "  owes her money  " },
+    });
+    await pick("How you feel", "wary");
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    // CreateEdge carries only the relation; the texture follows on the edge
+    // the server just created.
+    await waitFor(() => expect(detailCalls).toHaveLength(1));
+    expect(detailCalls[0]).toEqual({ id: "e101", note: "owes her money", disposition: -1 });
+    // The form closes once the connection exists.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^add$/i })).not.toBeInTheDocument());
+  });
+
+  it("a plain connection is one write: no details call", async () => {
+    const { createCalls, detailCalls } = renderRelations(npcNode, { node: npcNode, others: [otherNpc] });
+    fireEvent.click(await screen.findByRole("button", { name: /add connection/i }));
+    await pick("Connection", "knows");
+    await pickTarget("Cyra · NPC");
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^add$/i })).not.toBeInTheDocument());
+    expect(detailCalls).toHaveLength(0);
   });
 
   it("creates a relation with the chosen type and target", async () => {
@@ -187,7 +364,7 @@ describe("NodeRelations", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
     await pick("Connection", "lives in");
-    await pick("Target entry", "Barrow");
+    await pickTarget("Barrow · Location");
     fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
     await waitFor(() => expect(createCalls).toHaveLength(1));

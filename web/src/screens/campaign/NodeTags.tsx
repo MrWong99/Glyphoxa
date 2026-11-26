@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
-import { Input } from "@/components/ui/Input";
+import { ChipInput } from "@/components/ui/ChipInput";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { errorMessage } from "@/lib/connectError";
 
@@ -19,32 +19,56 @@ import { errorMessage } from "@/lib/connectError";
 // stops them quietly becoming a second, unvalidated type system inside NPC
 // context.
 
+/** How many of the campaign's other tags are offered as one-click chips. */
+const MAX_SUGGESTIONS = 8;
+
 /** invalidateTags drops the one campaign-wide tag read every surface derives from. */
 function invalidateTags(queryClient: ReturnType<typeof useQueryClient>): void {
   void invalidateMethodQueries(queryClient, CampaignService.method.getCampaignTags);
 }
 
+// Tags compare without case: "Act two" and "act two" are one tag, and the
+// first spelling wins.
+function dedupe(tags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tag of tags) {
+    const key = tag.trim().toLowerCase();
+    if (key === "" || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag.trim());
+  }
+  return out;
+}
+
+const sameList = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+
 export function NodeTags({ nodeID }: { nodeID: string }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const tagsQuery = useQuery(CampaignService.method.getCampaignTags, {});
-  const [draft, setDraft] = useState("");
-  // SetNodeTags is replace-in-full, so the payload is only as good as the list it
-  // was built from. Reading that list straight out of the cache loses tags to the
-  // GM's own typing speed: add A, then add B before A's refetch lands, and B's
-  // payload — built from the pre-A cache — deletes A. `settled` holds the
-  // authoritative list the SERVER last confirmed, so each save builds on the last
-  // one rather than on whatever the cache happens to show.
-  const [settled, setSettled] = useState<string[] | null>(null);
-  // What the server last CONFIRMED for this entry (null = nothing saved yet on
-  // this visit, so the cache is the truth). setTags paints its payload
-  // optimistically; a rejected save rolls the chips back to this — leaving the
-  // optimistic list up showed a tag the server refused as if it had been saved,
-  // and the next save then resent it.
+  // SetNodeTags is replace-in-full, so a payload is only as good as the list it
+  // was built from. `shown` is the list the GM is looking at: every edit paints
+  // it at once and the next edit builds on it, never on a cache that has not
+  // caught up with the last save.
+  const [shown, setShown] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // What the server last CONFIRMED on this visit (null = nothing saved yet, the
+  // cache is the truth). A rejected save rolls the chips back to it: leaving
+  // the refused tag up showed it as saved, and the next save then resent it.
   const confirmed = useRef<string[] | null>(null);
+  // Saves go out ONE AT A TIME, and the field is never locked while one is in
+  // flight. Two replace-in-full writes racing each other can land in either
+  // order, so the loser's list would win; instead, edits made during a save
+  // collapse into `queued` and go out as one write when it returns.
+  const inFlight = useRef(false);
+  const queued = useRef<string[] | null>(null);
   useEffect(() => {
     confirmed.current = null;
-    setSettled(null);
+    queued.current = null;
+    setShown(null);
+    setError(null);
   }, [nodeID]);
 
   const all = useMemo(() => tagsQuery.data?.entries ?? [], [tagsQuery.data]);
@@ -52,94 +76,88 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
     () => all.filter((e) => e.nodeId === nodeID).map((e) => e.tag),
     [all, nodeID],
   );
-  const mine = settled ?? fromServer;
-  // The campaign's vocabulary, for autocomplete — deduped case-insensitively so
-  // "Act two" and "act two" offer once.
-  const vocabulary = useMemo(() => {
-    const seen = new Map<string, string>();
+  const mine = shown ?? fromServer;
+
+  // The campaign's other tags, most used first: one click instead of retyping,
+  // which is also what keeps "harbor" and "harbour" from both existing.
+  const suggestions = useMemo(() => {
+    const have = new Set(mine.map((tag) => tag.toLowerCase()));
+    const usage = new Map<string, { tag: string; n: number }>();
     for (const e of all) {
       const key = e.tag.toLowerCase();
-      if (!seen.has(key)) seen.set(key, e.tag);
+      if (have.has(key)) continue;
+      const seen = usage.get(key);
+      if (seen) seen.n++;
+      else usage.set(key, { tag: e.tag, n: 1 });
     }
-    return [...seen.values()].sort((a, b) => a.localeCompare(b));
-  }, [all]);
+    return [...usage.values()]
+      .sort((a, b) => b.n - a.n || a.tag.localeCompare(b.tag))
+      .slice(0, MAX_SUGGESTIONS)
+      .map((u) => u.tag);
+  }, [all, mine]);
 
-  const save = useMutation(CampaignService.method.setNodeTags, {
-    // The response carries what actually landed (normalized, deduped) — that, not
-    // the request, is what the next save must build on.
-    onSuccess: (res) => {
-      confirmed.current = res.tags;
-      setSettled(res.tags);
-      invalidateTags(queryClient);
-    },
-    onError: () => setSettled(confirmed.current),
-  });
+  const save = useMutation(CampaignService.method.setNodeTags);
+
+  const run = async (first: string[]) => {
+    inFlight.current = true;
+    let next: string[] | null = first;
+    while (next) {
+      queued.current = null;
+      try {
+        const res = await save.mutateAsync({ nodeId: nodeID, tags: next });
+        // The response carries what actually landed (normalized, deduped).
+        confirmed.current = res.tags;
+        if (queued.current === null) setShown(res.tags);
+      } catch (err) {
+        queued.current = null;
+        setShown(confirmed.current);
+        setError(t("knowledge.saveTagsError", { message: errorMessage(err) }));
+      }
+      next = queued.current;
+    }
+    inFlight.current = false;
+    invalidateTags(queryClient);
+  };
 
   const setTags = (tags: string[]) => {
-    setSettled(tags);
-    save.mutate({ nodeId: nodeID, tags });
-  };
-  const add = () => {
-    const t = draft.trim();
-    if (t === "") return;
-    // Case-insensitive: adding "act two" to an entry that has "Act Two" is a no-op
-    // rather than a near-duplicate the GM has to notice.
-    if (!mine.some((x) => x.toLowerCase() === t.toLowerCase())) setTags([...mine, t]);
-    setDraft("");
+    const next = dedupe(tags);
+    if (sameList(next, mine)) return;
+    setShown(next);
+    setError(null);
+    if (inFlight.current) queued.current = next;
+    else void run(next);
   };
 
   return (
-    <div className="gx-field gx-kg-tags">
-      <span className="gx-field__label">{t("knowledge.tagsLabel")}</span>
-      <span className="gx-field__hint">{t("knowledge.tagsHint")}</span>
-
-      {mine.length > 0 && (
-        <ul className="gx-kg-tags__list">
-          {mine.map((tag) => (
+    <div className="gx-kg-tags">
+      <ChipInput
+        label={t("knowledge.tagsLabel")}
+        hint={t("knowledge.tagsHint")}
+        placeholder={t("knowledge.tagsPlaceholder")}
+        values={mine}
+        onChange={setTags}
+      />
+      {suggestions.length > 0 && (
+        <ul className="gx-wiki-facts__suggest" aria-label={t("knowledge.tagSuggestionsAria")}>
+          {suggestions.map((tag) => (
             <li key={tag}>
-              <span className="gx-kg-chip" data-tag>
+              <button
+                type="button"
+                className="gx-wiki-suggest"
+                data-tag
+                aria-label={t("knowledge.addExistingTagAria", { tag })}
+                onClick={() => setTags([...mine, tag])}
+              >
+                <Plus size={11} aria-hidden />
                 {tag}
-                <button
-                  type="button"
-                  className="gx-kg-tags__remove"
-                  aria-label={t("knowledge.removeTagAria", { tag })}
-                  disabled={save.isPending}
-                  onClick={() => setTags(mine.filter((t) => t !== tag))}
-                >
-                  <X size={11} />
-                </button>
-              </span>
+              </button>
             </li>
           ))}
         </ul>
       )}
-
-      <Input
-        aria-label={t("knowledge.addTagAria")}
-        placeholder={t("knowledge.tagsPlaceholder")}
-        list="gx-kg-tag-vocabulary"
-        value={draft}
-        disabled={save.isPending}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            add();
-          }
-        }}
-        onBlur={add}
-      />
-      {/* Autocomplete from what the campaign already uses, so the vocabulary
-          converges instead of sprouting near-duplicates. */}
-      <datalist id="gx-kg-tag-vocabulary">
-        {vocabulary.map((t) => (
-          <option key={t} value={t} />
-        ))}
-      </datalist>
-
-      {save.isError && (
+      {error && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
-          {t("knowledge.saveTagsError", { message: errorMessage(save.error) })}
+          {error}
         </span>
       )}
     </div>
