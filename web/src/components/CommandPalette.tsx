@@ -45,7 +45,7 @@ import "./commandPalette.css";
 //
 // Every move goes through the navigation seam (useScreenNav), so the palette
 // knows no URL shapes; deep-link params (?node=, ?agent=, ?session=&line=)
-// are consumed and stripped by the screen that owns them. Switching campaign
+// are read by the screen that owns them. Switching campaign
 // goes through useCampaignSwitch — the one guarded way to change the Active
 // Campaign — and so asks before unsaved edits are discarded.
 //
@@ -320,8 +320,7 @@ function PaletteDialog({
     }
   };
 
-  // go closes first, then moves. The target screen consumes any deep-link
-  // param and strips it from the URL.
+  // go closes first, then moves. The target screen reads any deep-link param.
   const go = (move: (nav: ScreenNav) => void) => {
     onClose();
     move(nav);
@@ -499,8 +498,10 @@ function PaletteDialog({
                           key={n.id}
                           value={`node:${n.id}`}
                           className="gx-palette__item"
-                          // Entry hits land on the World wiki with ?node= as
-                          // the consume-then-strip focus.
+                          // Entry hits land on the World-wiki sub-view with
+                          // ?node= naming the entry to open. The wiki keeps the
+                          // param as its selection, so the entry stays linkable
+                          // and Back returns to what was open before the jump.
                           onSelect={() => go((nv) => nv.goCampaignView("knowledge", { node: n.id }))}
                         >
                           <span

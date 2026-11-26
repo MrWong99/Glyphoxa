@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { toast } from "sonner";
 
@@ -13,7 +13,12 @@ import {
   CampaignSchema,
   DraftNodeSchema,
   GetActiveCampaignResponseSchema,
+  GetKnowledgeGraphResponseSchema,
   GetSessionResponseSchema,
+  KnowledgeProposalSchema,
+  ListKnowledgeProposalsResponseSchema,
+  ProposedFactSchema,
+  RejectKnowledgeProposalResponseSchema,
   ListCampaignsResponseSchema,
   SetActiveCampaignResponseSchema,
   GetCampaignRosterResponseSchema,
@@ -36,9 +41,13 @@ import { hasUnsavedEdits } from "@/lib/navigationGuard";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Campaign } from "./Campaign";
 import type { CampaignView } from "./views";
+import { pickNewEntry } from "./wikiTestKit";
 
 // The toast is the switch's feedback; the shell's <Toaster> is not mounted here.
-vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
+// It is callable (and dismissable) too: the Suggestions inbox's Undo toast.
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), info: vi.fn(), dismiss: vi.fn() }),
+}));
 
 // W3: the Active Campaign is ambient SERVER state — switching it in the topbar
 // changes what every write on this screen lands in without changing a single
@@ -119,7 +128,11 @@ function mount(view: CampaignView) {
   const queryClient = makeQueryClient();
   render(
     <Providers transport={h.transport} queryClient={queryClient}>
-      <Campaign view={view} />
+      {/* The wiki's open entry is the route's ?node, so the screen needs a
+          navigation seam that really moves. */}
+      <MemoryScreenNav initial={{ screen: "campaign", view }}>
+        <Campaign view={view} />
+      </MemoryScreenNav>
     </Providers>,
   );
   // What CampaignSwitcher's SetActiveCampaign onSuccess does.
@@ -137,7 +150,8 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     const { applied, switchTo } = mount("knowledge");
     await screen.findByRole("heading", { name: "The Sunless Citadel" });
 
-    fireEvent.click(await screen.findByRole("button", { name: /generate entries with ai/i }));
+    await screen.findByRole("button", { name: "New entry" });
+    pickNewEntry(/generate entries with ai/i);
     fireEvent.change(screen.getByLabelText("What should be drafted?"), {
       target: { value: "a kobold" },
     });
@@ -152,7 +166,7 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     // The Citadel's draft is gone: nothing can apply it into Saltmarsh.
     expect(screen.queryByRole("button", { name: "Add 1 entry" })).not.toBeInTheDocument();
     expect(screen.queryByText("Meepo")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /generate entries with ai/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("What should be drafted?")).not.toBeInTheDocument();
     expect(applied).toEqual([]);
   });
 
@@ -166,10 +180,13 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     await switchTo("c2");
     await screen.findByText("Saltmarsh");
 
-    // Back to the blank "new entry" editor — not the Citadel's node, whose id
-    // an UpdateNode from here would no longer resolve in this campaign.
-    await waitFor(() => expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(""));
+    // No editor is left open: not the Citadel's node, whose id an UpdateNode
+    // from here would no longer resolve in this campaign.
+    await waitFor(() => expect(screen.queryByTestId("entry-editor")).not.toBeInTheDocument());
     expect(screen.queryByDisplayValue("Oakhurst (burned)")).not.toBeInTheDocument();
+    // The switch itself is the explanation; the wiki does not add a "that
+    // entry is not in this campaign" on top of it.
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("re-selects a planning thread of the new campaign", async () => {
@@ -185,7 +202,8 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     mount("knowledge");
     // Open the generator BEFORE anything else settles, then let every query
     // land: the card must still be open (undefined → id is a load, not a switch).
-    fireEvent.click(await screen.findByRole("button", { name: /generate entries with ai/i }));
+    await screen.findByRole("button", { name: "New entry" });
+    pickNewEntry(/generate entries with ai/i);
     await screen.findByRole("heading", { name: "The Sunless Citadel" });
     expect(screen.getByLabelText("What should be drafted?")).toBeInTheDocument();
   });
@@ -318,5 +336,86 @@ describe("switching campaign with unsaved cast edits", () => {
     await waitFor(() => expect(persona().value).toBe("Keeper of the tides."));
     expect(screen.queryByDisplayValue("Keeper of the Citadel, and tired of it.")).not.toBeInTheDocument();
     expect(hasUnsavedEdits()).toBe(false);
+  });
+});
+
+// A dismissal in the Suggestions inbox waits out its Undo window before the
+// reject is sent — and a reject carries no campaign id: the server resolves it
+// against whatever campaign is active when it arrives. A switch inside the
+// window must send it while the OLD campaign is still the active one.
+describe("switching campaign while a dismissal waits for Undo", () => {
+  it("sends the dismissal to the old campaign before the switch is written", async () => {
+    vi.mocked(toast.error).mockClear();
+    let active: "c1" | "c2" = "c1";
+    const names = { c1: "The Sunless Citadel", c2: "Tides over Saltmarsh" };
+    const campaign = (id: "c1" | "c2") =>
+      create(CampaignSchema, { id, name: names[id], system: "5e", language: "en" });
+    const pending: Record<"c1" | "c2", string[]> = { c1: ["p-bart"], c2: [] };
+    // What reached the server, in order, and in which campaign.
+    const log: string[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(SessionService, { getSession: () => create(GetSessionResponseSchema, { active: false }) });
+      service(CampaignService, {
+        listCampaigns: () =>
+          create(ListCampaignsResponseSchema, { campaigns: [campaign("c1"), campaign("c2")] }),
+        getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign: campaign(active) }),
+        setActiveCampaign: (req) => {
+          log.push(`switch ${req.campaignId}`);
+          active = req.campaignId as "c1" | "c2";
+          return create(SetActiveCampaignResponseSchema, { campaign: campaign(active) });
+        },
+        getCampaignRoster: () =>
+          create(GetCampaignRosterResponseSchema, {
+            campaign: campaign(active),
+            roster: [
+              create(AgentSchema, { id: `butler-${active}`, campaignId: active, role: "butler", name: "Glyphoxa" }),
+            ],
+          }),
+        listKnowledgeProposals: () =>
+          create(ListKnowledgeProposalsResponseSchema, {
+            proposals: pending[active].map((id) =>
+              create(KnowledgeProposalSchema, {
+                id,
+                authoringAgentName: "Glyphoxa",
+                write: { case: "fact", value: create(ProposedFactSchema, { subject: "Bart", fact: "He fears the dark." }) },
+              }),
+            ),
+          }),
+        getKnowledgeGraph: () => create(GetKnowledgeGraphResponseSchema, { nodes: [] }),
+        rejectKnowledgeProposal: (req) => {
+          // The store's WHERE campaign_id = <active>: a proposal of another
+          // campaign is not found.
+          log.push(`reject ${req.id} in ${active}`);
+          if (!pending[active].includes(req.id)) throw new ConnectError("proposal not found", Code.NotFound);
+          pending[active] = pending[active].filter((id) => id !== req.id);
+          return create(RejectKnowledgeProposalResponseSchema, {});
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <CampaignSwitcher />
+        <Campaign view="proposals" />
+      </Providers>,
+    );
+
+    await screen.findByText(/He fears the dark/);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    // Waiting out its Undo window (8 s): nothing sent yet.
+    expect(log).toEqual([]);
+
+    fireEvent.click(screen.getByTestId("campaign-switcher-trigger"));
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    fireEvent.click(await within(list).findByRole("button", { name: /Tides over Saltmarsh/ }));
+
+    await waitFor(() => expect(log).toEqual(["reject p-bart in c1", "switch c2"]));
+    expect(pending.c1).toEqual([]);
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Tides over Saltmarsh" }),
+    ).toBeInTheDocument();
+    // Nothing more is sent on the remount, and nothing failed.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(log).toEqual(["reject p-bart in c1", "switch c2"]);
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled();
   });
 });

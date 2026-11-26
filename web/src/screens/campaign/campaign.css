@@ -25,61 +25,10 @@
   flex-wrap: wrap;
 }
 
-/* Knowledge view: list left, sticky editor card right (mirrors the roster grid). */
-.gx-kg-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: var(--spacing-lg);
-  align-items: start;
-}
-
-/* Stack below 1100px: with the 248px sidebar and page gutters, the 1fr list
-   track next to the fixed 380px editor shrank to ~180px between 881 and
-   1100px (the sidebar only turns off-canvas at 880px) — titles wrapped per
-   word. One column reads better there and on every narrower viewport. */
-@media (max-width: 1100px) {
-  .gx-kg-layout {
-    grid-template-columns: 1fr;
-  }
-}
-
-.gx-kg-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-  /* Grid items default to min-width:auto, so a long unwrappable draft snippet
-     would widen this column past its 1fr track and push row controls
-     off-screen. */
-  min-width: 0;
-}
-
-/* Each node type is its own titled group in the list. */
-.gx-kg-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-}
-
-.gx-kg-group__title {
-  margin: 0;
-  font-size: var(--mono-sm, var(--body-xs));
-  font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-subtle);
-}
-
-/* The gx-card base is a column; this card is an icon | text | actions row.
-   Row direction is also what lets __meta shrink and the snippet ellipsize
-   instead of pushing the card wider than the list. The compound selector
-   outranks the base rule, which the bundle emits after this file. */
-.gx-card.gx-kg-card {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-md);
-}
+/* The World wiki's own layout (toolbar, list, entry pane, editor) lives in
+ * wiki.css. What stays here is what other views share with it: the entry tile
+ * of the draft preview, the .gx-kg-chip / .gx-kg-iconbtn vocabulary the boards
+ * use, the relations rows, the relationship map and the checkup. */
 
 /* Type-colored icon tile: 38px rounded square, color + 14%-alpha bg set inline. */
 .gx-kg-card__icon {
@@ -123,15 +72,6 @@
   white-space: nowrap;
 }
 
-/* Per-card edit/delete affordances, right-aligned. */
-.gx-kg-card__actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-xs);
-  margin-left: auto;
-}
-
 .gx-kg-iconbtn {
   display: inline-flex;
   align-items: center;
@@ -169,11 +109,6 @@
 }
 
 /* --- LLM knowledge draft (#479) ------------------------------------------- */
-/* The on-demand "Generate entries" flow at the top of the list column: a single
-   collapsed affordance, expanding into prompt → preview → apply. */
-.gx-kg-draft-open {
-  align-self: flex-start;
-}
 
 .gx-kg-draft {
   display: flex;
@@ -204,7 +139,8 @@
   gap: var(--spacing-sm);
 }
 
-.gx-kg-draft__node .gx-kg-iconbtn {
+.gx-kg-draft__node .gx-icon-btn,
+.gx-kg-draft__edge .gx-icon-btn {
   margin-left: auto;
 }
 
@@ -222,16 +158,6 @@
   color: var(--text-strong);
 }
 
-/* Sticky create card on the right. */
-.gx-kg-editor {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-  padding: var(--spacing-lg);
-  position: sticky;
-  top: var(--spacing-lg);
-}
-
 /* Editor header row: title left, delete button pinned right (edit mode). */
 .gx-kg-editor__bar {
   display: flex;
@@ -244,68 +170,6 @@
   font-size: var(--body-lg);
   color: var(--text-strong);
   margin: 0;
-}
-
-/* Per-aspect editor (#542): one row per fact, each with its own privacy. */
-.gx-kg-aspects {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-}
-
-.gx-kg-aspects__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-}
-
-/* Label above, fact text below: the editor rail is narrow, and side-by-side left
-   the FACT — the field that matters — about eight characters wide. */
-.gx-kg-aspect {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--spacing-xs);
-}
-
-/* A GM-only fact is marked on the row itself, so the one line that never reaches
-   the table is obvious while scanning a public entry. */
-.gx-kg-aspect[data-private] {
-  border-left: 2px solid var(--gold);
-  padding-left: var(--spacing-xs);
-}
-
-.gx-kg-aspect__fields {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.gx-kg-aspect__key,
-.gx-kg-aspect__value {
-  min-width: 0;
-}
-
-/* The label is a short filing key; the fact is prose. Size them accordingly. */
-.gx-kg-aspect__key input {
-  font-size: var(--body-sm);
-  color: var(--text-muted);
-}
-
-.gx-kg-aspect__actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.gx-kg-editor__switch {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
 }
 
 .gx-kg-editor__actions {
@@ -621,8 +485,15 @@
 
 .gx-kg-relations__addgrid {
   display: grid;
-  grid-template-columns: 130px 1fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
   gap: var(--spacing-sm);
+}
+
+/* On a phone the two pickers stack: side by side neither label fits. */
+@media (max-width: 640px) {
+  .gx-kg-relations__addgrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .gx-kg-relations__addactions {
@@ -645,6 +516,10 @@
 .gx-kg-edge {
   display: flex;
   align-items: center;
+  /* Wraps: the collapsed texture editor (.gx-kg-edge__details) takes a line
+   * of its own under the row, and a long name must not push the row's
+   * actions out of a narrow pane. */
+  flex-wrap: wrap;
   gap: var(--spacing-xs);
   padding: var(--spacing-xs);
   border-radius: var(--radius-sm, 8px);
@@ -654,8 +529,12 @@
   background: var(--surface-card-hover);
 }
 
-.gx-kg-edge--incoming {
-  opacity: 0.75;
+/* An incoming relation belongs to the other entry. It is told apart by its
+ * arrow and its word order (the other entry's name comes first), not by
+ * dimming: it carries a link and a delete button now, and both must stay
+ * readable. */
+.gx-kg-edge--incoming .gx-kg-edge__type {
+  color: var(--text-muted);
 }
 
 .gx-kg-edge__dir {
@@ -666,11 +545,14 @@
 .gx-kg-edge__type {
   font-family: var(--font-mono);
   font-size: var(--body-xs);
-  color: var(--arcane);
+  /* --arcane itself is 4.1:1 on the card; one step lighter clears AA for
+   * text this small. */
+  color: var(--arcane-hover);
   flex: 0 0 auto;
 }
 
 .gx-kg-edge__target {
+  min-width: 0;
   color: var(--text-strong);
   font-size: var(--body-sm);
   overflow: hidden;
@@ -678,22 +560,9 @@
   white-space: nowrap;
 }
 
-.gx-kg-edge__incoming {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  margin-left: auto;
-  font-size: var(--body-xs);
-  color: var(--text-subtle);
-}
-
-.gx-kg-edge .gx-kg-iconbtn {
-  margin-left: auto;
-  width: 24px;
-  height: 24px;
-}
-
-.gx-kg-edge--incoming .gx-kg-edge__incoming {
+/* The row's icon actions sit at the trailing edge: the first of them (it
+ * always follows the type badge) takes the free space. */
+.gx-kg-edge > .gx-badge + .gx-icon-btn {
   margin-left: auto;
 }
 
@@ -981,6 +850,7 @@
 
 /* ── Knowledge Graph view (#534) ─────────────────────────────────────────── */
 
+/* .gx-kg-modes is the Cast view's Roster / Session prep switch (CastPanel). */
 .gx-kg-modes,
 .gx-kg-graph__modes {
   display: flex;
@@ -1703,15 +1573,6 @@
   font-size: var(--mono-sm);
 }
 
-.gx-kg-tags__remove {
-  background: none;
-  border: none;
-  padding: 0 0 0 2px;
-  color: inherit;
-  cursor: pointer;
-  line-height: 1;
-}
-
 /* Prep boards (#543): a session's shortlist, reachable during play. */
 .gx-boards {
   display: flex;
@@ -1923,13 +1784,3 @@
   gap: var(--spacing-xs);
 }
 
-/* The list card's portrait thumbnail sits in the type-icon tile's footprint so
-   the list rhythm is unchanged. */
-.gx-kg-card__portrait {
-  flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
-  object-fit: cover;
-  border-radius: var(--radius-md, 10px);
-  border: 1px solid var(--border-subtle);
-}

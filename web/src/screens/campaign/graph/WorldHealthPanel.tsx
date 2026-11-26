@@ -1,9 +1,13 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import { AlertTriangle, Copy } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import type {
+  FindDuplicateEntriesResponse,
+  GraphEdge,
+  GraphNode,
+} from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { metaOf } from "../knowledgeVocab";
@@ -18,15 +22,34 @@ import { errorMessage } from "@/lib/connectError";
 // judgment, and a wrong merge corrupts canon invisibly — the same reasoning
 // applies to every category here.
 
+/** The slice of the FindDuplicateEntries mutation this panel reads and drives. */
+export type DuplicateScan = {
+  mutate: (input: Record<string, never>) => void;
+  data: FindDuplicateEntriesResponse | undefined;
+  error: unknown;
+  isPending: boolean;
+  isError: boolean;
+  isSuccess: boolean;
+};
+
 export function WorldHealthPanel({
   nodes,
   edges,
   onOpenNode,
   onOpenCast,
+  duplicateScan,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   onOpenNode: (id: string) => void;
+  /**
+   * The duplicate scan, when the host holds it. The scan is an exact pairwise
+   * comparison the GM waits for, and its result is a to-do list they work
+   * through by opening entries; held here it was thrown away by the first
+   * switch to the list. The wiki panel owns it so it survives a mode switch.
+   * Without it (the panel mounted alone) it lives and dies with this panel.
+   */
+  duplicateScan?: DuplicateScan;
   /** Where a cast Agent with no entry gets fixed — the roster, not the wiki. */
   onOpenCast?: (agentID: string) => void;
 }) {
@@ -42,8 +65,8 @@ export function WorldHealthPanel({
 
   // The duplicate check is a mutation, not a query, precisely so it CANNOT fire on
   // render: it is an exact pairwise embedding scan and belongs behind a button.
-  const duplicates = useMutation(CampaignService.method.findDuplicateEntries);
-  const [ranDuplicates, setRanDuplicates] = useState(false);
+  const ownScan = useMutation(CampaignService.method.findDuplicateEntries);
+  const duplicates = duplicateScan ?? ownScan;
 
   // "Nothing to flag" must not be claimed while the roster read is still in
   // flight or failed: the cast-without-entry category depends on it, so a clean
@@ -104,10 +127,7 @@ export function WorldHealthPanel({
           variant="secondary"
           size="sm"
           disabled={duplicates.isPending}
-          onClick={() => {
-            setRanDuplicates(true);
-            duplicates.mutate({});
-          }}
+          onClick={() => duplicates.mutate({})}
         >
           {duplicates.isPending ? t("knowledge.duplicatesRunning") : t("knowledge.duplicatesRun")}
         </Button>
@@ -118,7 +138,7 @@ export function WorldHealthPanel({
           </span>
         )}
 
-        {ranDuplicates && duplicates.isSuccess && (
+        {duplicates.isSuccess && duplicates.data && (
           <>
             {duplicates.data.pairs.length === 0 ? (
               <p className="gx-kg-health__why">{t("knowledge.duplicatesNone")}</p>

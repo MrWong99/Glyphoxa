@@ -10,21 +10,30 @@ import type { MessageKey } from "@/i18n";
 // Node on Character-NPC create with an EMPTY body and never copies the Persona, so
 // "added an NPC, it has a voice and a persona but nothing to say about the world"
 // is the DEFAULT state after creation — discovered live, at the table.
+//
+// Three surfaces read the same derivation, so they can never disagree about who
+// is ready: the roster list's warning marker, the agent editor's callout and the
+// Readiness view.
 
 /** One readiness check, with the thing that fixes it. */
 export type Check = {
-  key: string;
+  key: "persona" | "voice" | "link" | "content" | "facts";
   /**
    * The check's display label as a MESSAGE KEY (plus interpolation params) —
    * this module runs outside React, so it never bakes a translated string into
-   * derived state; RosterPrep translates at render time.
+   * derived state; the components translate at render time.
    */
   labelKey: MessageKey;
   labelParams?: { n: number };
+  /**
+   * The same check worded as what is MISSING ("No voice"), for the places that
+   * only ever name failures: the roster marker's tooltip and the editor callout.
+   */
+  missingKey: MessageKey;
   ok: boolean;
   /**
    * Where the GM goes to satisfy it — `agent` opens the Agent editor, `entry`
-   * opens the linked wiki entry, and `link` opens the Knowledge tab where the
+   * opens the linked wiki entry, and `link` opens the World wiki, where the
    * "Voiced by" control actually lives. The Agent editor has NO link control, so
    * routing `link` there would land the GM somewhere the fix cannot be made.
    */
@@ -41,10 +50,17 @@ export type Readiness = {
   lastSpokeAt?: Date;
 };
 
-type RosterEntry = {
+export type RosterEntry = {
   agent: Agent;
   /** The Agent's linked Node, when it has one. */
   node: GraphNode | null;
+  /**
+   * With no linked Node: an unlinked NPC entry that carries the Agent's name —
+   * the one the GM almost certainly means to link. A failing link check opens
+   * it (its relations card holds the "Voiced by" control) instead of dropping
+   * the GM on the bare wiki list to hunt for it.
+   */
+  linkCandidate: GraphNode | null;
   checks: Check[];
   /** True once every check passes. Always true for the Butler, which is ungraded. */
   ready: boolean;
@@ -65,11 +81,84 @@ type RosterGroup = {
 };
 
 /**
+ * Whether the wiki-side checks (link, content, facts) can be graded at all:
+ * for everyone (a boolean, default true) or Agent by Agent (a predicate).
+ */
+export type WorldKnowledge = { world?: boolean | ((agentID: string) => boolean) };
+
+/**
  * UNPLACED_TITLE is the catch-all group's sentinel key. It is explicit rather
  * than hidden. RosterPrep renders it through the message catalog (the English
  * copy matches this constant); every other group title is a Node name (data).
  */
 export const UNPLACED_TITLE = "Not placed in the world";
+
+/**
+ * rosterEntries grades every roster member ONCE, in roster order (the Butler
+ * first). It is the de-duplicated view: the grouped view below lists an NPC
+ * under every place it belongs to, this lists it exactly once.
+ *
+ * `world: false` is for the moment before the Knowledge Graph and readiness
+ * reads have landed (or after they failed): only the checks the roster payload
+ * itself answers (personality, voice) are graded, so the roster never raises a
+ * "no wiki entry" alarm it cannot yet know to be true. As a predicate it
+ * answers per Agent — an NPC created a moment ago is not in a readiness read
+ * that predates it, and must not be graded against that read either.
+ */
+export function rosterEntries(
+  roster: Agent[],
+  nodes: GraphNode[],
+  readiness: Map<string, Readiness> = new Map(),
+  opts: WorldKnowledge = {},
+): RosterEntry[] {
+  const known = opts.world;
+  const world = typeof known === "function" ? known : () => known ?? true;
+  const nodeByAgent = new Map<string, GraphNode>();
+  const unlinkedByName = new Map<string, GraphNode>();
+  for (const n of nodes) {
+    if (n.agentId !== "") nodeByAgent.set(n.agentId, n);
+    else if (n.nodeType === NodeType.NPC && !unlinkedByName.has(nameKey(n.name))) {
+      unlinkedByName.set(nameKey(n.name), n);
+    }
+  }
+
+  return roster.map((agent) => {
+    const node = nodeByAgent.get(agent.id) ?? null;
+    // The Butler is present, ungraded. Excluding it entirely would hide a roster
+    // member the GM is looking for; grading it would flag it forever.
+    const exempt = agent.role !== "character";
+    const r = readiness.get(agent.id);
+    const checks = exempt ? [] : checksFor(agent, node, r, world(agent.id));
+    return {
+      agent,
+      node,
+      linkCandidate: node || exempt ? null : (unlinkedByName.get(nameKey(agent.name)) ?? null),
+      checks,
+      ready: checks.every((c) => c.ok),
+      exempt,
+      readiness: r,
+    };
+  });
+}
+
+function nameKey(name: string): string {
+  return name.trim().toLocaleLowerCase();
+}
+
+/**
+ * prepSummary is the headline over a graded roster: how many NPCs there are,
+ * how many are ready, and which ones are not. The Butler is exempt from all
+ * three — "3 of 3 NPCs ready" counts Character NPCs only.
+ */
+export function prepSummary(entries: RosterEntry[]): {
+  total: number;
+  ready: number;
+  attention: RosterEntry[];
+} {
+  const graded = entries.filter((e) => !e.exempt);
+  const attention = graded.filter((e) => !e.ready);
+  return { total: graded.length, ready: graded.length - attention.length, attention };
+}
 
 /**
  * rosterPrep groups roster members by their linked Node's faction/location
@@ -85,12 +174,9 @@ export function rosterPrep(
   nodes: GraphNode[],
   edges: GraphEdge[],
   readiness: Map<string, Readiness> = new Map(),
+  opts: WorldKnowledge = {},
 ): RosterGroup[] {
   const byID = new Map(nodes.map((n) => [n.id, n]));
-  const nodeByAgent = new Map<string, GraphNode>();
-  for (const n of nodes) {
-    if (n.agentId !== "") nodeByAgent.set(n.agentId, n);
-  }
 
   // Outgoing member_of / resides_in edges are what place an NPC in the world.
   const placement = new Map<string, string[]>();
@@ -111,23 +197,8 @@ export function rosterPrep(
     else groups.set(title, { key: title, title, entries: [entry] });
   };
 
-  for (const agent of roster) {
-    const node = nodeByAgent.get(agent.id) ?? null;
-    // The Butler is present, ungraded. Excluding it entirely would hide a roster
-    // member the GM is looking for; grading it would flag it forever.
-    const exempt = agent.role !== "character";
-    const r = readiness.get(agent.id);
-    const entry: RosterEntry = {
-      agent,
-      node,
-      checks: exempt ? [] : checksFor(agent, node, r),
-      ready: true,
-      exempt,
-      readiness: r,
-    };
-    entry.ready = entry.checks.every((c) => c.ok);
-
-    const places = node ? (placement.get(node.id) ?? []) : [];
+  for (const entry of rosterEntries(roster, nodes, readiness, opts)) {
+    const places = entry.node ? (placement.get(entry.node.id) ?? []) : [];
     if (places.length === 0) {
       put(UNPLACED_TITLE, entry);
       continue;
@@ -146,14 +217,37 @@ export function rosterPrep(
   return unplaced ? [...named, unplaced] : named;
 }
 
-function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[] {
+function checksFor(agent: Agent, node: GraphNode | null, r: Readiness | undefined, world: boolean): Check[] {
+  const own: Check[] = [
+    {
+      key: "persona",
+      labelKey: "campaign.checkPersona",
+      missingKey: "cast.missingPersona",
+      ok: agent.persona.trim() !== "",
+      fix: "agent",
+    },
+    {
+      key: "voice",
+      labelKey: "campaign.checkVoice",
+      missingKey: "cast.missingVoice",
+      ok: agent.voice !== "",
+      fix: "agent",
+    },
+  ];
+  if (!world) return own;
   return [
-    { key: "persona", labelKey: "campaign.checkPersona", ok: agent.persona.trim() !== "", fix: "agent" },
-    { key: "voice", labelKey: "campaign.checkVoice", ok: agent.voice !== "", fix: "agent" },
-    { key: "link", labelKey: "campaign.checkLink", ok: node !== null, fix: "link" },
+    ...own,
+    {
+      key: "link",
+      labelKey: "campaign.checkLink",
+      missingKey: "cast.missingLink",
+      ok: node !== null,
+      fix: "link",
+    },
     {
       key: "content",
       labelKey: "campaign.checkContent",
+      missingKey: "cast.missingContent",
       // The ADR-0008 auto-node starts empty; either facts or prose counts.
       ok: node !== null && (node.bodyLen > 0 || node.publicAspectCount > 0),
       fix: "entry",
@@ -168,6 +262,7 @@ function checksFor(agent: Agent, node: GraphNode | null, r?: Readiness): Check[]
           : "campaign.checkFactsCount"
         : "campaign.checkFacts",
       labelParams: r && r.factCount !== 1 ? { n: r.factCount } : undefined,
+      missingKey: "cast.missingFacts",
       ok: (r?.factCount ?? 0) > 0,
       fix: "entry",
     },

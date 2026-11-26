@@ -53,7 +53,12 @@ function fixture() {
 }
 
 function renderGraph(
-  opts: { onSelectNode?: (id: string) => void; onGraphChanged?: () => void } = {},
+  opts: {
+    onSelectNode?: (id: string) => void;
+    onGraphChanged?: () => void;
+    types?: ReadonlySet<NodeType>;
+    matchIDs?: ReadonlySet<string> | null;
+  } = {},
 ) {
   const { nodes, edges } = fixture();
   const createCalls: CreateEdgeRequest[] = [];
@@ -78,6 +83,8 @@ function renderGraph(
         nodes={nodes}
         edges={edges}
         selectedID={null}
+        types={opts.types}
+        matchIDs={opts.matchIDs}
         onSelectNode={opts.onSelectNode ?? (() => {})}
         onGraphChanged={opts.onGraphChanged ?? (() => {})}
       />
@@ -131,12 +138,32 @@ describe("KnowledgeGraph", () => {
     expect(node("Bart (NPC)")).toBeInTheDocument();
   });
 
-  it("a type chip filters that type out of the drawing", () => {
-    renderGraph();
-    const chips = screen.getByRole("group", { name: "Filter by type" });
-    fireEvent.click(within(chips).getByRole("button", { name: "Location" }));
+  // The type chips live in the wiki toolbar (shared with the list); the map
+  // draws the types it is handed. None handed means no narrowing.
+  it("draws only the types the toolbar chose", () => {
+    renderGraph({ types: new Set([NodeType.NPC, NodeType.FACTION]) });
     expect(screen.queryByLabelText("Saltmarsh (Location)")).not.toBeInTheDocument();
     expect(node("Bart (NPC)")).toBeInTheDocument();
+    expect(node("Smugglers (Faction)")).toBeInTheDocument();
+    // The graph no longer carries a type filter of its own.
+    expect(screen.queryByRole("group", { name: "Filter by type" })).not.toBeInTheDocument();
+  });
+
+  it("an empty type set draws every type", () => {
+    renderGraph({ types: new Set() });
+    expect(node("Saltmarsh (Location)")).toBeInTheDocument();
+    expect(node("Bart (NPC)")).toBeInTheDocument();
+  });
+
+  // A search on the map answers "where is it": matches are named, the rest
+  // recede, and nothing leaves the picture.
+  it("labels search matches and dims the rest without removing them", () => {
+    renderGraph({ matchIDs: new Set(["town"]) });
+    const hit = node("Saltmarsh (Location), matches the search");
+    expect(hit).toHaveAttribute("data-match", "hit");
+    expect(node("Bart (NPC)")).toHaveAttribute("data-match", "miss");
+    expect(within(hit).getByText("Saltmarsh")).toBeInTheDocument();
+    expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(4);
   });
 
   it("a relation chip hides the relation but keeps its endpoints", () => {
@@ -199,13 +226,28 @@ describe("KnowledgeGraph", () => {
     expect(screen.queryByRole("group", { name: "Create connection" })).not.toBeInTheDocument();
   });
 
-  it("shows an empty state when every type is filtered out", () => {
+  it("shows an empty state when no entry is of the chosen types", () => {
+    renderGraph({ types: new Set([NodeType.ITEM]) });
+    expect(screen.getByText(/no entry matches the filters above/i)).toBeInTheDocument();
+  });
+
+  // The relation picker offers only what the server will accept for THIS pair
+  // (storage.ValidateEdge) and starts on the first of them. It used to start on
+  // "lives in" for every pair, which is illegal for NPC → Faction.
+  it("the relation picker offers only legal relations and never preselects an illegal one", async () => {
     renderGraph();
-    const chips = screen.getByRole("group", { name: "Filter by type" });
-    for (const label of ["Character", "NPC", "Location", "Faction", "Item", "Plot thread", "Note"]) {
-      fireEvent.click(within(chips).getByRole("button", { name: label }));
-    }
-    expect(screen.getByText(/every entry is filtered out/i)).toBeInTheDocument();
+    fireEvent.mouseDown(node("Bart (NPC)"));
+    fireEvent.mouseUp(node("Smugglers (Faction)"));
+    const picker = await screen.findByRole("group", { name: "Create connection" });
+    const select = within(picker).getByRole("combobox", { name: "Connection" });
+    expect(select).toHaveTextContent("member of");
+    fireEvent.click(select);
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options).toContain("member of");
+    expect(options).toContain("knows");
+    expect(options).not.toContain("lives in");
+    expect(options).not.toContain("took part in");
+    expect(options).not.toContain("parent of");
   });
 
   // The issue explicitly refused "a smaller test fixture" as the answer to
@@ -238,24 +280,28 @@ describe("KnowledgeGraph", () => {
       return { nodes, edges };
     }
 
-    function renderBig() {
+    function renderBig(types?: ReadonlySet<NodeType>) {
       const { nodes, edges } = bigFixture();
       const transport = createRouterTransport(({ service }) => {
         service(CampaignService, {
           createEdge: () => create(CreateEdgeResponseSchema, { edge: create(EdgeSchema, {}) }),
         });
       });
-      render(
-        <Providers transport={transport} queryClient={makeQueryClient()}>
+      const queryClient = makeQueryClient();
+      const tree = (chosen?: ReadonlySet<NodeType>) => (
+        <Providers transport={transport} queryClient={queryClient}>
           <KnowledgeGraph
             nodes={nodes}
             edges={edges}
             selectedID={null}
+            types={chosen}
             onSelectNode={() => {}}
             onGraphChanged={() => {}}
           />
-        </Providers>,
+        </Providers>
       );
+      const view = render(tree(types));
+      return { rerender: (chosen?: ReadonlySet<NodeType>) => view.rerender(tree(chosen)) };
     }
 
     it("draws every node but drops the label soup", () => {
@@ -267,12 +313,10 @@ describe("KnowledgeGraph", () => {
     });
 
     it("a type chip halves it and focus mode cuts it to a neighbourhood", () => {
-      renderBig();
-      const chips = screen.getByRole("group", { name: "Filter by type" });
-      fireEvent.click(within(chips).getByRole("button", { name: "Location" }));
+      const { rerender } = renderBig(new Set([NodeType.NPC]));
       expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(110);
 
-      fireEvent.click(within(chips).getByRole("button", { name: "Location" })); // back on
+      rerender(); // every type again
       fireEvent.doubleClick(screen.getByLabelText("Entry 100 (NPC)"));
       // A chain graph: depth 1 around one node is itself plus two neighbours.
       expect(document.querySelectorAll(".gx-kg-graph__node")).toHaveLength(3);

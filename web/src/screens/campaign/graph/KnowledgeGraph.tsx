@@ -12,9 +12,9 @@ import {
   DISPOSITION_LABEL,
   EDGE_TYPES,
   EDGE_WIRE,
-  TYPE_META,
   TYPE_ORDER,
   alphaBg,
+  legalEdgeTypes,
   metaOf,
 } from "../knowledgeVocab";
 import { invalidateProposalReview } from "../knowledgeCache";
@@ -41,6 +41,11 @@ import { errorMessage } from "@/lib/connectError";
 // the existing EntryEditor in the side rail, and the one thing authored here —
 // drag one node onto another to create an Edge — goes through the existing
 // CreateEdge RPC.
+//
+// The TYPE filter and the search are not the graph's own: they belong to the
+// wiki's toolbar, which the list shares, so "show me the locations" and "where
+// is Bart" are asked once and answered in whichever view is open. The graph
+// keeps what only it has: the relation chips, player view, focus and the lens.
 
 /** Focus depth options. Depth 1 is exactly what AgentNodeFacts walks (ADR-0008). */
 const FOCUS_DEPTHS = [1, 2] as const;
@@ -58,17 +63,34 @@ export function KnowledgeGraph({
   nodes,
   edges,
   selectedID,
+  types,
+  matchIDs = null,
   onSelectNode,
   onGraphChanged,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   selectedID: string | null;
+  /**
+   * The entry types to draw, from the wiki toolbar's type chips. Empty (or
+   * absent) draws every type: the chips narrow, and none chosen means no
+   * narrowing.
+   */
+  types?: ReadonlySet<NodeType>;
+  /**
+   * The entries the toolbar's search matched, or null when nothing is being
+   * searched. Matches are labelled and the rest recede: a search on a map
+   * answers "where is it", so nothing is removed from the picture.
+   */
+  matchIDs?: ReadonlySet<string> | null;
   onSelectNode: (id: string) => void;
   onGraphChanged: () => void;
 }) {
   const { t } = useI18n();
-  const [types, setTypes] = useState<ReadonlySet<NodeType>>(() => new Set(TYPE_ORDER));
+  const shownTypes = useMemo<ReadonlySet<NodeType>>(
+    () => (types && types.size > 0 ? types : new Set(TYPE_ORDER)),
+    [types],
+  );
   const [relations, setRelations] = useState<ReadonlySet<EdgeType>>(
     () => new Set(EDGE_TYPES.map((e) => e.value)),
   );
@@ -134,7 +156,7 @@ export function KnowledgeGraph({
   const filtered = useMemo(
     () =>
       filterGraph(nodes, edges, {
-        types,
+        types: shownTypes,
         relations,
         // A lens exists to show what an NPC is DENIED, so table view (which removes
         // gm_private entries outright) would erase exactly the ghosts it is meant to
@@ -142,7 +164,7 @@ export function KnowledgeGraph({
         hidePrivate: hidePrivate && !lensOn,
         focus,
       }),
-    [nodes, edges, types, relations, hidePrivate, focus, lensOn],
+    [nodes, edges, shownTypes, relations, hidePrivate, focus, lensOn],
   );
 
   // Position memory. `layout` is pure in its inputs, so adding one Node reshuffles
@@ -156,7 +178,7 @@ export function KnowledgeGraph({
   const filterKey = useMemo(
     () =>
       JSON.stringify([
-        [...types].sort(),
+        [...shownTypes].sort(),
         [...relations].sort(),
         hidePrivate,
         focusID,
@@ -164,7 +186,7 @@ export function KnowledgeGraph({
         lensOn,
         layoutEpoch,
       ]),
-    [types, relations, hidePrivate, focusID, focusDepth, lensOn, layoutEpoch],
+    [shownTypes, relations, hidePrivate, focusID, focusDepth, lensOn, layoutEpoch],
   );
   const sticky = useRef<{ key: string; pins: Map<string, Pin>; seeds: Map<string, Pin> }>({
     key: "",
@@ -239,30 +261,13 @@ export function KnowledgeGraph({
   };
 
   const nodeName = (id: string) => nodes.find((n) => n.id === id)?.name ?? "";
+  const nodeTypeOf = (id: string) => nodes.find((n) => n.id === id)?.nodeType ?? NodeType.UNSPECIFIED;
 
   return (
     <div className="gx-kg-graph">
       <AgentLensBar agentID={lensAgentID} onAgentChange={setLensAgentID} lens={lens} />
 
       <div className="gx-kg-graph__filters">
-        <div className="gx-kg-graph__chips" role="group" aria-label={t("knowledge.filterByTypeAria")}>
-          {TYPE_ORDER.map((ty) => {
-            const meta = TYPE_META[ty];
-            const on = types.has(ty);
-            return (
-              <button
-                key={ty}
-                type="button"
-                className="gx-kg-chip"
-                aria-pressed={on}
-                onClick={() => setTypes((s) => toggle(s, ty))}
-                style={on ? { color: meta.color, background: alphaBg(meta.color) } : undefined}
-              >
-                {t(meta.labelKey)}
-              </button>
-            );
-          })}
-        </div>
         <div
           className="gx-kg-graph__chips"
           role="group"
@@ -463,8 +468,9 @@ export function KnowledgeGraph({
               // Past the budget only the nodes the GM is actively looking at keep
               // their name — including the focus root, which is the one node they
               // definitely care about in a focused view.
+              const matched = matchIDs ? matchIDs.has(p.node.id) : null;
               const labelled =
-                showAllLabels ||
+                (matchIDs ? matched === true : showAllLabels) ||
                 hoverID === p.node.id ||
                 selectedID === p.node.id ||
                 focusID === p.node.id;
@@ -475,12 +481,14 @@ export function KnowledgeGraph({
                   data-node-id={p.node.id}
                   data-private={p.node.gmPrivate || undefined}
                   data-selected={selectedID === p.node.id || undefined}
+                  data-match={matched === null ? undefined : matched ? "hit" : "miss"}
                   data-lens={active ? (ghosted ? "ghost" : dropped ? "dropped" : lit ? "lit" : "dim") : undefined}
                   role="button"
                   tabIndex={0}
                   aria-label={
                     `${p.node.name} (${t(meta.labelKey)})` +
                     (p.node.gmPrivate ? t("knowledge.ariaGmOnly") : "") +
+                    (matched ? t("knowledge.ariaSearchMatch") : "") +
                     (ghosted ? t("knowledge.ariaHiddenFrom", { agent: active?.agentName ?? "" }) : "") +
                     (dropped ? t("knowledge.ariaDropped", { agent: active?.agentName ?? "" }) : "")
                   }
@@ -656,8 +664,14 @@ export function KnowledgeGraph({
 
       {pendingLink && (
         <RelationPicker
+          // Keyed on the pair: a second drag while the picker is open must
+          // start from THAT pair's first legal relation, not keep a choice
+          // made for the previous one.
+          key={`${pendingLink.from}>${pendingLink.to}`}
           fromName={nodeName(pendingLink.from)}
           toName={nodeName(pendingLink.to)}
+          fromType={nodeTypeOf(pendingLink.from)}
+          toType={nodeTypeOf(pendingLink.to)}
           pending={createEdge.isPending}
           error={linkError}
           onCancel={() => {
@@ -768,11 +782,18 @@ function ProposalReview({
 // RelationPicker is the one authoring affordance on the graph: after dragging one
 // entry onto another, the GM names the relation. It deliberately reuses the closed
 // relation vocabulary rather than inventing a graph-only one, and it lands through
-// the existing CreateEdge RPC — including its server-side validity matrix, so an
-// illegal relation is refused here exactly as it is in NodeRelations.
+// the existing CreateEdge RPC.
+//
+// It offers only the relations the server will accept between THESE two entries
+// (legalEdgeTypes, the mirror of storage.ValidateEdge) and starts on the first
+// of them. It used to preselect "lives in" for every pair, so dragging an NPC
+// onto a faction and pressing the button was an "invalid edge" error by
+// default. The server still validates; this just stops offering the refusal.
 function RelationPicker({
   fromName,
   toName,
+  fromType,
+  toType,
   pending,
   error,
   onPick,
@@ -780,13 +801,16 @@ function RelationPicker({
 }: {
   fromName: string;
   toName: string;
+  fromType: NodeType;
+  toType: NodeType;
   pending: boolean;
   error: string | null;
   onPick: (edgeType: EdgeType) => void;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
-  const [edgeType, setEdgeType] = useState<EdgeType>(EDGE_TYPES[0].value);
+  const legal = legalEdgeTypes(fromType, toType);
+  const [edgeType, setEdgeType] = useState<EdgeType>(legal[0]);
   return (
     <div className="gx-kg-graph__picker" role="group" aria-label={t("knowledge.createConnection")}>
       <p className="gx-kg-graph__picker-text">
@@ -794,7 +818,10 @@ function RelationPicker({
       </p>
       <Select
         label={t("knowledge.connectionLabel")}
-        options={EDGE_TYPES.map((e) => ({ value: String(e.value), label: t(e.labelKey) }))}
+        options={EDGE_TYPES.filter((e) => legal.includes(e.value)).map((e) => ({
+          value: String(e.value),
+          label: t(e.labelKey),
+        }))}
         value={String(edgeType)}
         onValueChange={(v) => setEdgeType(Number(v) as EdgeType)}
       />
