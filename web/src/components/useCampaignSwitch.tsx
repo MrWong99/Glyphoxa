@@ -10,6 +10,7 @@ import { useI18n } from "@/i18n";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { errorMessage } from "@/lib/connectError";
 import { hasUnsavedEdits } from "@/lib/navigationGuard";
+import { flushPendingWrites, hasPendingWrites } from "@/lib/pendingWrites";
 
 // useCampaignSwitch is the ONE way the web console changes the Active Campaign
 // by hand (ADR-0063 amendment). The Active Campaign is ambient server state
@@ -21,7 +22,10 @@ import { hasUnsavedEdits } from "@/lib/navigationGuard";
 //
 //   1. asks first while any editor reports unsaved edits (the same register the
 //      route guard reads — lib/navigationGuard);
-//   2. writes the durable selection and runs the Active-Campaign cache sweep;
+//   2. sends any write a screen is holding back (lib/pendingWrites: a
+//      dismissal in its Undo window) while the old campaign is still active,
+//      then writes the durable selection and runs the Active-Campaign cache
+//      sweep;
 //   3. says what happened: "Now working in {name}", or — because resolution is
 //      live-first (#222) and a running Voice Session's campaign still wins —
 //      that the switch takes effect when the session ends.
@@ -257,39 +261,45 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
       // session's own campaign, in practice — takes the waiting one back.
       const waiting = pendingSwitch;
       markLocalCampaignSwitch(campaign.id);
+      // A write a screen is holding back (a dismissal in its Undo window)
+      // carries no campaign id: it is sent while the OLD campaign is still
+      // active, and the switch is written once it has settled.
       // mutateAsync, not mutate with callbacks: those are dropped when the
       // calling component unmounts mid-flight (a dialog that closes), and the
       // sweep and the "what happened" must not depend on who is still mounted.
-      mutateAsync({ campaignId: campaign.id }).then(
-        (res) => {
-          void invalidateActiveCampaignScopedQueries(queryClient);
-          // The response carries the RESOLVED Active Campaign. While a Voice
-          // Session is live that is still the session's campaign, not the one
-          // just selected — the switch is stored, and comes due when the
-          // session ends (watchVoiceSessionEnd re-runs the sweep then).
-          const resolved = res.campaign?.id;
-          const deferred = resolved !== undefined && resolved !== "" && resolved !== campaign.id;
-          setPendingSwitch(deferred ? campaign : null);
-          const result: SwitchResult = { campaign, deferred };
-          const announce = opts?.announce ?? defaultAnnounce;
-          if (announce) announce(result);
-          else if (deferred) toast.info(t("shell.switchDeferred", { name: campaign.name }));
-          else if (waiting && waiting.id !== campaign.id)
-            toast.success(t("campaigns.nextCancelled", { name: campaign.name }));
-          else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
-          (opts?.onSwitched ?? defaultOnSwitched)?.(result);
-        },
-        (err: unknown) => {
-          // The switch was refused (or never confirmed), so as far as this
-          // tab knows the campaign did not become active through it: put the
-          // flag back to what it said before — unless a newer switch has
-          // claimed it meanwhile.
-          if (localSwitchTarget === campaign.id) localSwitchTarget = before;
-          const onError = opts?.onError ?? defaultOnError;
-          if (onError) onError(err);
-          else toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) }));
-        },
-      );
+      const write = () =>
+        mutateAsync({ campaignId: campaign.id }).then(
+          (res) => {
+            void invalidateActiveCampaignScopedQueries(queryClient);
+            // The response carries the RESOLVED Active Campaign. While a Voice
+            // Session is live that is still the session's campaign, not the
+            // one just selected — the switch is stored, and comes due when the
+            // session ends (watchVoiceSessionEnd re-runs the sweep then).
+            const resolved = res.campaign?.id;
+            const deferred = resolved !== undefined && resolved !== "" && resolved !== campaign.id;
+            setPendingSwitch(deferred ? campaign : null);
+            const result: SwitchResult = { campaign, deferred };
+            const announce = opts?.announce ?? defaultAnnounce;
+            if (announce) announce(result);
+            else if (deferred) toast.info(t("shell.switchDeferred", { name: campaign.name }));
+            else if (waiting && waiting.id !== campaign.id)
+              toast.success(t("campaigns.nextCancelled", { name: campaign.name }));
+            else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
+            (opts?.onSwitched ?? defaultOnSwitched)?.(result);
+          },
+          (err: unknown) => {
+            // The switch was refused (or never confirmed), so as far as this
+            // tab knows the campaign did not become active through it: put the
+            // flag back to what it said before — unless a newer switch has
+            // claimed it meanwhile.
+            if (localSwitchTarget === campaign.id) localSwitchTarget = before;
+            const onError = opts?.onError ?? defaultOnError;
+            if (onError) onError(err);
+            else toast.error(t("components.couldntSwitchCampaign", { message: errorMessage(err) }));
+          },
+        );
+      if (hasPendingWrites()) void flushPendingWrites().then(write);
+      else void write();
     },
     [mutateAsync, queryClient, t, defaultOnSwitched, defaultAnnounce, defaultOnError],
   );
