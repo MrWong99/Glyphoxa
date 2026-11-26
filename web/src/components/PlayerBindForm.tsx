@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
 
 import type { DiscordVoiceMember } from "@gen/glyphoxa/management/v1/management_pb";
@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { useI18n } from "@/i18n";
+
+import "./playerBindForm.css";
 
 // PlayerBindForm is the shared Character bind form (#279): name, aliases, and the
 // mandatory Discord User binding. It is reused verbatim by the Campaign Players
@@ -20,6 +22,11 @@ import { useI18n } from "@/i18n";
 // current voice states, #279) with a free-text snowflake fallback — digits-only,
 // so a mistyped id can never reach storage. When the Bot is offline the member
 // list is simply empty and only the free-text path shows.
+//
+// `takenIds` (optional — the Session affordance does not pass it) names the
+// Discord Users that already have a Character: the picker marks and disables
+// them, and a typed id that is taken is refused here, with the Character's
+// name, instead of by the server after submit.
 
 export type PlayerBindFields = {
   name: string;
@@ -43,9 +50,16 @@ export function PlayerBindForm({
   onCancel,
   onDelete,
   onDirtyChange,
+  takenIds,
 }: {
   initial?: PlayerBindFields;
   members: DiscordVoiceMember[];
+  /**
+   * Discord user id → the name of the Character already bound to it. The id
+   * this form was opened with (`initial.discordUserId`) is never treated as
+   * taken: it is this Character's own.
+   */
+  takenIds?: ReadonlyMap<string, string>;
   submitLabel: string;
   pending?: boolean;
   error?: string | null;
@@ -62,6 +76,7 @@ export function PlayerBindForm({
   const [discordUserId, setDiscordUserId] = useState(initial?.discordUserId ?? "");
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const bindHintId = useId();
   usePopoverDismiss(pickerRef, pickerOpen, () => setPickerOpen(false));
 
   // A bound id that matches a live member shows that member's name beside the
@@ -71,9 +86,16 @@ export function PlayerBindForm({
     [members, discordUserId],
   );
 
+  // Who already holds a Discord user id — never this form's own.
+  const takenBy = (id: string): string | undefined =>
+    id !== "" && id !== (initial?.discordUserId ?? "") ? takenIds?.get(id) : undefined;
+
   const idEmpty = discordUserId.trim() === "";
   const idInvalid = !idEmpty && !isSnowflake(discordUserId.trim());
-  const canSubmit = name.trim() !== "" && !idEmpty && !idInvalid && !pending;
+  // One Discord User plays one Character per campaign: the server refuses a
+  // second binding, so say so before the round trip.
+  const idTakenBy = idInvalid ? undefined : takenBy(discordUserId.trim());
+  const canSubmit = name.trim() !== "" && !idEmpty && !idInvalid && !idTakenBy && !pending;
 
   const addAlias = () => {
     const a = aliasDraft.trim();
@@ -193,7 +215,8 @@ export function PlayerBindForm({
             // "snowflake" is Discord-internals jargon — the visible copy says
             // "numbers only"; the wire rule (isSnowflake) is unchanged.
             placeholder={t("components.discordUserIdPlaceholder")}
-            aria-invalid={idInvalid || undefined}
+            aria-invalid={idInvalid || Boolean(idTakenBy) || undefined}
+            aria-describedby={bindHintId}
             inputMode="numeric"
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -224,35 +247,62 @@ export function PlayerBindForm({
                   role="group"
                   aria-label={t("components.voiceChannelMembers")}
                 >
-                  {members.map((m) => (
-                    <li key={m.discordUserId}>
-                      <button
-                        type="button"
-                        className="gx-playerform__picker-item"
-                        aria-current={m.discordUserId === discordUserId || undefined}
-                        onClick={() => pickMember(m)}
-                      >
-                        <Avatar name={m.displayName} src={m.avatarUrl || null} size="sm" />
-                        <span className="gx-playerform__picker-name">{m.displayName}</span>
-                      </button>
-                    </li>
-                  ))}
+                  {members.map((m) => {
+                    const holder = takenBy(m.discordUserId);
+                    return (
+                      <li key={m.discordUserId}>
+                        <button
+                          type="button"
+                          className="gx-playerform__picker-item"
+                          aria-current={m.discordUserId === discordUserId || undefined}
+                          // Already someone's Character: shown, so the GM sees
+                          // who is in the channel, but not pickable.
+                          disabled={holder !== undefined}
+                          onClick={() => pickMember(m)}
+                        >
+                          <Avatar name={m.displayName} src={m.avatarUrl || null} size="sm" />
+                          <span className="gx-playerform__picker-name">{m.displayName}</span>
+                          {holder !== undefined && (
+                            <span className="gx-playerform__picker-taken">
+                              {t("players.memberTaken", { name: holder })}
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
           )}
         </div>
         {idInvalid ? (
-          <span className="gx-field__hint gx-field__hint--error" role="alert">
+          <span id={bindHintId} className="gx-field__hint gx-field__hint--error" role="alert">
             {t("components.discordUserIdDigitsOnly")}
           </span>
+        ) : idTakenBy ? (
+          <span id={bindHintId} className="gx-field__hint gx-field__hint--error" role="alert">
+            {t("players.idTaken", { name: idTakenBy })}
+          </span>
         ) : (
-          <span className="gx-field__hint">
+          <span id={bindHintId} className="gx-field__hint">
             {boundMember
               ? t("components.bindsTo", { name: boundMember.displayName })
-              : t("components.bindHint")}
+              : members.length > 0
+                ? t("components.bindHint")
+                : t("players.bindHintNoVoice")}
           </span>
         )}
+        {/* A Discord user id is not something a GM has at hand, and nothing in
+            Discord's own UI shows it until Developer Mode is on. */}
+        <details className="gx-playerform__help">
+          <summary>{t("players.idHelpSummary")}</summary>
+          <ol>
+            <li>{t("players.idHelpStep1")}</li>
+            <li>{t("players.idHelpStep2")}</li>
+            <li>{t("players.idHelpStep3")}</li>
+          </ol>
+        </details>
       </div>
 
       <div className="gx-playerform__actions">
@@ -270,7 +320,7 @@ export function PlayerBindForm({
           </Button>
         )}
         {error && (
-          <span className="gx-editor__status gx-editor__status--error" role="alert">
+          <span className="gx-playerform__error" role="alert">
             {error}
           </span>
         )}
