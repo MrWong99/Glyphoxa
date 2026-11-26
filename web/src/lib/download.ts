@@ -25,6 +25,45 @@ export type ImportSummary = {
   droppedParticipantRefs: number;
 };
 
+// BundleRequestError is what both bundle endpoints throw on a non-OK answer: the
+// server's own message plus the HTTP status, so a caller can tell the two
+// refusals it has a better answer for than "it failed" apart from the rest:
+//
+//   503  the pod builds one bundle at a time (import or export, either
+//        direction); the answer is "try again in a moment", not an error card;
+//   413  the bundle is over the upload cap — a duplicate can retry without the
+//        map images, which are almost always what made it that big.
+export class BundleRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "BundleRequestError";
+    this.status = status;
+  }
+}
+
+/** The server is already building or reading another bundle (HTTP 503). */
+export function isBundleBusy(err: unknown): boolean {
+  return err instanceof BundleRequestError && err.status === 503;
+}
+
+/** The bundle is over the upload or decode cap (HTTP 413). */
+export function isBundleTooLarge(err: unknown): boolean {
+  return err instanceof BundleRequestError && err.status === 413;
+}
+
+// What an export carries beyond the campaign's setup. Both default to ON: a
+// bundle someone downloads to keep is expected to be the whole campaign, and
+// the two things the server leaves out unless asked — the transcript history
+// and the map images — are exactly what cannot be rebuilt by hand. A caller
+// that wants a lighter bundle (Duplicate copies no history) says so.
+export type ExportOptions = {
+  /** Voice Sessions with their Transcript Lines, Chunks and Appearances. */
+  includeHistory?: boolean;
+  /** The image bytes of every map (they can be megabytes each). */
+  includeImages?: boolean;
+};
+
 // The filename used when the server sends no Content-Disposition (it always does,
 // but a proxy could strip it — a sensible name beats a bare "download").
 const FALLBACK_FILENAME = "campaign.glyphoxa.json.gz";
@@ -75,15 +114,27 @@ function bodylessFailure(status: number): string {
 }
 
 // fetchCampaignExport downloads a campaign's bundle. Returns the blob plus the
-// server-chosen filename (from Content-Disposition). A non-OK response throws the
-// server's plain-text error so the caller can surface it in a toast.
+// server-chosen filename (from Content-Disposition). A non-OK response throws a
+// BundleRequestError carrying the server's plain-text error and the status, so
+// the caller can surface it — or act on a 503/413.
+//
+// The two opt-ins ride as include_history=true / include_images=true; one that
+// is off is LEFT OUT rather than sent as "false" (the server reads anything but
+// "true" as off, and an absent parameter is the one spelling it cannot
+// misread).
 export async function fetchCampaignExport(
   campaignId: string,
+  options: ExportOptions = {},
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`/api/v1/campaigns/${campaignId}/export`);
+  const { includeHistory = true, includeImages = true } = options;
+  const params = new URLSearchParams();
+  if (includeHistory) params.set("include_history", "true");
+  if (includeImages) params.set("include_images", "true");
+  const query = params.toString();
+  const res = await fetch(`/api/v1/campaigns/${campaignId}/export${query ? `?${query}` : ""}`);
   if (!res.ok) {
     const text = (await res.text()).trim();
-    throw new Error(text || bodylessFailure(res.status));
+    throw new BundleRequestError(text || bodylessFailure(res.status), res.status);
   }
   const blob = await res.blob();
   return { blob, filename: filenameFromDisposition(res.headers.get("Content-Disposition")) };
@@ -92,11 +143,17 @@ export async function fetchCampaignExport(
 // importCampaignBundle uploads a bundle file to the importer. The file rides a
 // multipart field named "bundle"; the CSRF token mirrors the glyphoxa_csrf cookie
 // into X-CSRF-Token (ADR-0016 double-submit). On success it returns the counts;
-// on any error (400 bad bundle, 413 too large, 500) it throws the server's
-// {"error": …} message so the caller shows exactly why it failed.
-export async function importCampaignBundle(file: File): Promise<ImportSummary> {
+// on any error (400 bad bundle, 413 too large, 503 busy, 500) it throws a
+// BundleRequestError with the server's {"error": …} message and the status, so
+// the caller shows exactly why it failed.
+//
+// `bundle` is a File from a file picker, or the Blob fetchCampaignExport just
+// returned (Duplicate pipes one into the other); a bare Blob takes `filename`,
+// which is what makes its multipart part a file part.
+export async function importCampaignBundle(bundle: Blob, filename?: string): Promise<ImportSummary> {
   const form = new FormData();
-  form.append("bundle", file);
+  if (filename) form.append("bundle", bundle, filename);
+  else form.append("bundle", bundle);
   const token = readCookie("glyphoxa_csrf");
   const res = await fetch("/api/v1/campaigns/import", {
     method: "POST",
@@ -116,7 +173,7 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     } catch {
       // Non-JSON body (the plain-text 413) — keep the raw text.
     }
-    throw new Error(message);
+    throw new BundleRequestError(message, res.status);
   }
   const body = (await res.json()) as {
     campaign_id: string;

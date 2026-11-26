@@ -1,72 +1,35 @@
-/* Per-row campaign lifecycle menu (#269) — a kebab trigger opening a small
- * archive/unarchive/delete menu. Reuses the .gx-select__content popover +
- * .gx-select__item row vocabulary from the switcher.
+/* The dialogs behind a campaign's actions (useCampaignLifecycle.tsx,
+ * CampaignExportDialog.tsx). The menu itself is the shared Menu primitive and
+ * needs nothing here.
  */
 
-.gx-campaign-row-actions {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.gx-campaign-row-actions__trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-.gx-campaign-row-actions__trigger:hover {
-  background: rgba(144, 89, 255, 0.12);
-  color: var(--text-default);
-}
-.gx-campaign-row-actions__trigger:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-/* Portalled out of the switcher list (#338) so its overflow:auto can't clip it.
- * Position is driven inline from the trigger's viewport rect (top/right, plus a
- * translateY(-100%) when flipped above); only the fixed anchoring + surface live
- * here. */
-.gx-campaign-row-actions__menu {
-  position: fixed;
-  z-index: 40;
-  min-width: 160px;
+/* ── Export dialog ───────────────────────────────────────────────────────── */
+.gx-campaign-export {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--spacing-xs);
+  gap: var(--spacing-md);
 }
-.gx-campaign-row-actions__menu .gx-select__item {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-xs);
-  width: 100%;
-  border: none;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  color: var(--text-default);
-  font-family: var(--font-base);
+.gx-campaign-export__note {
+  margin: 0;
   font-size: var(--body-sm);
-  padding: 6px 8px;
-  border-radius: var(--radius-xs);
+  color: var(--text-muted);
 }
-.gx-campaign-row-actions__menu .gx-select__item:hover:not(:disabled) {
-  background: rgba(144, 89, 255, 0.12);
+
+/* ── "Download full bundle first", inside the delete dialog ──────────────────
+ * It sits in the dialog's description, which is a paragraph: the wrapper and
+ * the notes are spans laid out as blocks. */
+.gx-campaign-delete__backup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
 }
-.gx-campaign-row-actions__menu .gx-select__item:disabled {
-  opacity: 0.6;
-  cursor: default;
+.gx-campaign-delete__backup-note {
+  font-size: var(--body-sm);
+  color: var(--status-success);
 }
-.gx-campaign-row-actions__menu .gx-select__item--danger {
+.gx-campaign-delete__backup-note--error {
+  flex: 1 1 100%;
   color: var(--status-danger);
-}
-.gx-campaign-row-actions__menu .gx-select__item--danger:hover:not(:disabled) {
-  background: var(--status-danger-bg);
 }

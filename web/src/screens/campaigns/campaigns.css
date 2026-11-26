@@ -1,70 +1,200 @@
 /* Campaigns screen (Campaigns.tsx). Scoped under .gx-campaigns; the page frame
- * itself (.gx-providers: gutters, measure, lede) is the Setup screen's. */
+ * (centred column, gutters, header) is the Page primitive's. Every size and
+ * colour is a token (styles/tokens.css); tints are color-mix() over a token. */
 
-.gx-campaigns .gx-campaigns__list {
+/* ── Search and sort ─────────────────────────────────────────────────────── */
+.gx-campaigns .gx-campaigns__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+.gx-campaigns .gx-campaigns__search {
+  flex: 1 1 240px;
+  max-width: var(--content-sm);
+}
+
+/* ── The card grid ───────────────────────────────────────────────────────── */
+/* Also the skeleton's layout (it carries this class next to its own), which is
+ * why the selector outranks .gx-skeleton-group's flex column. */
+.gx-campaigns .gx-campaigns__grid {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-sm);
+  display: grid;
+  /* As many 280px-or-wider columns as fit: three at the page's full width,
+   * two on a tablet, one on a phone. min() keeps a single column from
+   * overflowing a viewport narrower than 280px plus the gutters. */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--spacing-md);
 }
 
-.gx-campaigns .gx-campaigns__row {
+.gx-campaigns .gx-campaign-card {
   display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  padding: var(--spacing-md);
+  min-width: 0;
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-inset);
+  transition: border-color var(--duration-base) var(--ease-standard);
 }
-
-.gx-campaigns .gx-campaigns__row[data-active] {
+.gx-campaigns .gx-campaign-card:hover {
+  border-color: var(--border-default);
+}
+/* The Active Campaign's card is the one the rest of the app is about. */
+.gx-campaigns .gx-campaign-card[data-active] {
   border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--arcane) 7%, var(--surface-card));
+}
+.gx-campaigns .gx-campaign-card[data-archived] {
+  background: var(--surface-raised);
+}
+/* A flow is running on this campaign (archive, delete, duplicate). */
+.gx-campaigns .gx-campaign-card[aria-busy="true"] {
+  cursor: progress;
 }
 
-.gx-campaigns .gx-campaigns__meta {
-  flex: 1;
+.gx-campaigns .gx-campaign-card__body {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-xs);
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
 }
 
-.gx-campaigns .gx-campaigns__name {
+.gx-campaigns .gx-campaign-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+}
+.gx-campaigns .gx-campaign-card[data-archived] .gx-avatar {
+  /* Archived: the monogram steps back with the card. */
+  filter: grayscale(0.7);
+  opacity: 0.75;
+}
+.gx-campaigns .gx-campaign-card__titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+.gx-campaigns .gx-campaign-card__name {
+  margin: 0;
   font-family: var(--font-display);
   font-size: var(--body-lg);
   font-weight: var(--weight-semibold);
   line-height: var(--body-line-tight);
   color: var(--text-strong);
-  /* A long campaign name wraps rather than pushing Open off a phone screen. */
+  /* A long campaign name wraps rather than pushing the menu off the card. */
   overflow-wrap: anywhere;
 }
+.gx-campaigns .gx-campaign-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
 
-.gx-campaigns .gx-campaigns__system {
-  font-family: var(--font-mono);
-  font-size: var(--mono-sm);
+/* System, language and the two dates: label over value, two to a row. */
+.gx-campaigns .gx-campaign-card__meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-sm) var(--spacing-md);
+  margin: 0;
+}
+.gx-campaigns .gx-campaign-card__meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.gx-campaigns .gx-campaign-card__meta dt {
+  font-size: var(--body-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.gx-campaigns .gx-campaign-card__meta dd {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  overflow-wrap: anywhere;
+}
+.gx-campaigns .gx-campaign-card__meta dd[data-empty] {
   color: var(--text-muted);
 }
 
-.gx-campaigns .gx-campaigns__loading {
+/* The primary action sits at the card's foot whatever the name's height. */
+.gx-campaigns .gx-campaign-card__actions {
   display: flex;
-  flex-direction: column;
-  gap: var(--spacing-sm);
+  justify-content: flex-end;
+  margin-top: auto;
+}
+/* Open while a switch is being written: still focusable, visibly waiting. */
+.gx-campaigns .gx-campaign-card__actions .gx-btn[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
 }
 
-.gx-campaigns .gx-campaigns__loading .gx-skeleton {
-  display: block;
-  width: 100%;
-  height: var(--layout-lg);
-  border-radius: var(--radius-md);
-}
-
-.gx-campaigns .gx-campaigns__error {
+/* ── Archived section ────────────────────────────────────────────────────── */
+.gx-campaigns .gx-campaigns__archived {
+  margin-top: var(--spacing-xl);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--spacing-md);
+}
+.gx-campaigns .gx-campaigns__archived > .gx-campaigns__grid {
+  width: 100%;
+}
+.gx-campaigns .gx-campaigns__archived-toggle {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  min-height: var(--control-md);
+  padding: 0 var(--spacing-sm) 0 var(--spacing-xs);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+.gx-campaigns .gx-campaigns__archived-toggle:hover {
+  background: color-mix(in srgb, var(--arcane) 12%, transparent);
+  color: var(--text-strong);
+}
+@media (pointer: coarse) {
+  .gx-campaigns .gx-campaigns__archived-toggle {
+    min-height: var(--target-coarse);
+  }
+}
+
+/* The empty states sit in the column the grid would have filled. */
+.gx-campaigns .gx-empty--panel + .gx-campaigns__archived {
+  margin-top: var(--spacing-lg);
+}
+
+@media (max-width: 640px) {
+  /* Phone: the two page actions share the row instead of one wrapping under
+   * the other at half width. */
+  .gx-campaigns .gx-page-header__actions > * {
+    flex: 1 1 0;
+  }
+  .gx-campaigns .gx-page-header__actions .gx-btn {
+    width: 100%;
+  }
+  .gx-campaigns .gx-campaigns__search {
+    max-width: none;
+  }
+  .gx-campaigns .gx-campaign-card__actions .gx-btn {
+    width: 100%;
+  }
 }

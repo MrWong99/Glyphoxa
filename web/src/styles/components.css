@@ -1029,6 +1029,12 @@ button.gx-select__item:focus-visible {
   border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--surface-base) 86%, transparent);
   backdrop-filter: blur(8px);
+  /* backdrop-filter makes the bar its own stacking context. Without a z-index
+     it paints in document order, so any positioned element in the page below
+     (a relative-positioned button, a sticky bar) showed THROUGH the campaign
+     switcher panel that opens out of the bar. */
+  position: relative;
+  z-index: var(--z-sticky);
 }
 .gx-topbar__titles {
   flex: 1;

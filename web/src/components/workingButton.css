@@ -1,0 +1,11 @@
+/* WorkingButton (components/WorkingButton.tsx): busy but still focusable, so it
+ * gets its own "wait" look instead of the :disabled one. Dimmed less than a
+ * disabled button, like Button's loading state, so the spinner stays legible. */
+.gx-btn--working {
+  opacity: 0.8;
+  cursor: progress;
+}
+/* The hover/active dress says "press me"; a busy button swallows the press. */
+.gx-btn--working:active {
+  transform: none;
+}

@@ -13,7 +13,11 @@ import {
   ListCampaignsResponseSchema,
   ListProviderConfigsResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
-import { invalidateActiveCampaignScopedQueries, watchVoiceSessionEnd } from "./campaignCache";
+import {
+  invalidateActiveCampaignScopedQueries,
+  resetActiveCampaignScopedQueries,
+  watchVoiceSessionEnd,
+} from "./campaignCache";
 
 // Real connect-query keys, exactly as the screens' useQuery calls build them.
 const rosterKey = createConnectQueryKey({
@@ -98,6 +102,26 @@ describe("invalidateActiveCampaignScopedQueries", () => {
     await invalidateActiveCampaignScopedQueries(queryClient);
 
     expect(invalidated(queryClient, futureKey)).toBe(true);
+  });
+});
+
+describe("resetActiveCampaignScopedQueries", () => {
+  it("drops the data of campaign-scoped reads and keeps campaign-invariant ones", async () => {
+    // The Active Campaign is gone: a read that will now answer NotFound must
+    // not keep handing its screen the archived campaign's data.
+    const queryClient = new QueryClient();
+    primeAll(queryClient);
+
+    await resetActiveCampaignScopedQueries(queryClient);
+
+    expect(queryClient.getQueryData(rosterKey)).toBeUndefined();
+    expect(queryClient.getQueryData(searchKey)).toBeUndefined();
+    expect(queryClient.getQueryData(futureKey)).toBeUndefined();
+    // The campaign set and the Tenant's provider config are not about the
+    // campaign that went away.
+    expect(queryClient.getQueryData(listKey)).toBeDefined();
+    expect(queryClient.getQueryData(providerKey)).toBeDefined();
+    expect(queryClient.getQueryData(foreignKey)).toBeDefined();
   });
 });
 

@@ -1,0 +1,274 @@
+/* ── Prep boards (#543) ──────────────────────────────────────────────────────
+ * A session's shortlist, reachable during play. PrepBoards renders on the
+ * Session screen as well as under the Campaign screen, and the Session chunk
+ * does not load campaign.css — so this sheet is complete on its own and is
+ * imported by the component. Every selector carries a root (.gx-boards for the
+ * boards, .gx-node-boards for the wiki editor's "put this on a board" field),
+ * which also outranks the older single-class .gx-boards__* rules in
+ * campaign.css whichever sheet loads last.
+ */
+
+.gx-boards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+.gx-boards .gx-boards__new {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.gx-boards .gx-boards__new > .gx-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* "Add board" / "New board" stay focusable with no name typed or while the
+ * write is out (aria-disabled, not disabled), so they only LOOK unavailable. */
+.gx-boards .gx-boards__new [aria-disabled="true"],
+.gx-node-boards .gx-node-boards__new [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.gx-boards .gx-boards__new [aria-busy="true"],
+.gx-node-boards .gx-node-boards__new [aria-busy="true"] {
+  cursor: progress;
+}
+
+/* One board: a framed card, so where one ends and the next begins is not a
+ * matter of counting gaps. */
+.gx-boards .gx-boards__board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  padding: var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.gx-boards .gx-boards__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+.gx-boards .gx-boards__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  letter-spacing: normal;
+  color: var(--text-strong);
+}
+/* The name IS the rename control: it looks like the heading it is, and shows a
+ * pencil when the pointer or the keyboard is on it. */
+.gx-boards .gx-boards__name-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  max-width: 100%;
+  margin: 0 calc(-1 * var(--spacing-xs));
+  padding: 2px var(--spacing-xs);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: text;
+}
+.gx-boards .gx-boards__name-btn:hover {
+  background: var(--surface-card-hover);
+}
+.gx-boards .gx-boards__name-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.gx-boards .gx-boards__name-icon {
+  flex: none;
+  color: var(--text-muted);
+  opacity: 0;
+}
+.gx-boards .gx-boards__name-btn:hover .gx-boards__name-icon,
+.gx-boards .gx-boards__name-btn:focus-visible .gx-boards__name-icon {
+  opacity: 1;
+}
+@media (hover: none) {
+  /* No hover to reveal it on a touch screen. */
+  .gx-boards .gx-boards__name-icon {
+    opacity: 1;
+  }
+}
+.gx-boards .gx-boards__rename {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+.gx-boards .gx-boards__rename > .gx-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gx-boards .gx-boards__empty {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+/* The entries: a numbered column, because the ORDER is the point — it is the
+ * order the GM expects to need them in. */
+.gx-boards .gx-boards__list {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: gx-board-entry;
+}
+.gx-boards .gx-boards__entry {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  padding: 2px 0 2px var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  counter-increment: gx-board-entry;
+}
+.gx-boards .gx-boards__entry:hover,
+.gx-boards .gx-boards__entry:focus-within {
+  background: var(--surface-card-hover);
+}
+.gx-boards .gx-boards__entry::before {
+  content: counter(gx-board-entry) ".";
+  flex: none;
+  min-width: 1.75em;
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-muted);
+}
+.gx-boards .gx-boards__entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  text-align: left;
+}
+.gx-boards button.gx-boards__entry-name {
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+.gx-boards button.gx-boards__entry-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.gx-boards .gx-boards__entry-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+/* A move that cannot happen (the first row up, the last row down): still
+ * focusable, visibly unavailable. */
+.gx-boards .gx-boards__entry-actions [aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.gx-boards .gx-boards__add {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+.gx-boards .gx-boards__add > .gx-combobox {
+  flex: 1 1 14rem;
+  min-width: 0;
+  max-width: 22rem;
+}
+.gx-boards .gx-boards__add-hint {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+@media (pointer: coarse) {
+  /* The keyboard shortcut is no use on a touch screen. */
+  .gx-boards .gx-boards__add-hint {
+    display: none;
+  }
+}
+
+/* ── The wiki editor's "Boards" field (NodeBoards) ───────────────────────── */
+
+.gx-node-boards .gx-node-boards__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A board the entry is ON is filled and ticked; one it is not on is a plain
+ * outline at full strength, not dimmed like something disabled. */
+.gx-node-boards .gx-node-boards__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 3px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font: inherit;
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-default);
+  cursor: pointer;
+}
+.gx-node-boards .gx-node-boards__chip:hover {
+  border-color: var(--border-strong);
+}
+.gx-node-boards .gx-node-boards__chip[aria-pressed="true"] {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--arcane) 26%, var(--surface-card));
+  color: var(--text-strong);
+}
+.gx-node-boards .gx-node-boards__chip[aria-disabled="true"] {
+  cursor: progress;
+}
+.gx-node-boards .gx-node-boards__chip--new {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+.gx-node-boards .gx-node-boards__new {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.gx-node-boards .gx-node-boards__new > .gx-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+@media (pointer: coarse) {
+  .gx-node-boards .gx-node-boards__chip {
+    min-height: var(--target-coarse);
+    min-width: var(--target-coarse);
+    justify-content: center;
+  }
+}

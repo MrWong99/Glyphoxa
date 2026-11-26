@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-import { downloadBlob, fetchCampaignExport, importCampaignBundle } from "./download";
+import {
+  BundleRequestError,
+  downloadBlob,
+  fetchCampaignExport,
+  importCampaignBundle,
+  isBundleBusy,
+  isBundleTooLarge,
+} from "./download";
 
 // jsdom has no real download pipeline: URL.createObjectURL is unimplemented and
 // anchor.click() is a no-op. We stub the object-URL lifecycle (mirrors audio.ts)
@@ -77,7 +84,11 @@ describe("fetchCampaignExport", () => {
 
     const out = await fetchCampaignExport("camp-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/campaigns/camp-1/export");
+    // A bundle is COMPLETE unless the caller says otherwise: history and map
+    // images are both asked for.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/campaigns/camp-1/export?include_history=true&include_images=true",
+    );
     expect(out.filename).toBe("The Prancing Pony.glyphoxa.json.gz");
     // Cross-realm again: which Blob class `res.blob()` returns depends on the
     // Node version (Node 22 hands back Node's, Node 24 jsdom's — which has no
@@ -86,6 +97,42 @@ describe("fetchCampaignExport", () => {
     // relies on and both realms implement them.
     expect(out.blob.type).toBe("application/gzip");
     expect(out.blob.size).toBe("bundle-bytes".length);
+    vi.unstubAllGlobals();
+  });
+
+  it("drops a parameter that is switched off instead of sending it as false", async () => {
+    const ok = () => new Response("x", { status: 200 });
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(ok()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchCampaignExport("camp-1", { includeHistory: false });
+    await fetchCampaignExport("camp-1", { includeImages: false });
+    await fetchCampaignExport("camp-1", { includeHistory: false, includeImages: false });
+
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/v1/campaigns/camp-1/export?include_images=true",
+      "/api/v1/campaigns/camp-1/export?include_history=true",
+      // Nothing asked for: no query string at all, not a dangling "?".
+      "/api/v1/campaigns/camp-1/export",
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("marks a 503 as 'busy' so the caller can offer a retry instead of an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("another campaign import or export is in progress; retry shortly\n", { status: 503 }),
+      ),
+    );
+    const err = await fetchCampaignExport("camp-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BundleRequestError);
+    expect((err as BundleRequestError).status).toBe(503);
+    expect((err as Error).message).toMatch(/import or export is in progress/);
+    expect(isBundleBusy(err)).toBe(true);
+    expect(isBundleTooLarge(err)).toBe(false);
+    // A plain Error (a dropped connection) is neither.
+    expect(isBundleBusy(new Error("network down"))).toBe(false);
     vi.unstubAllGlobals();
   });
 
@@ -251,9 +298,44 @@ describe("importCampaignBundle", () => {
         }),
       ),
     );
-    await expect(importCampaignBundle(bundleFile())).rejects.toThrow(
-      /bundle exceeds maximum upload size/,
+    const err = await importCampaignBundle(bundleFile()).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/bundle exceeds maximum upload size/);
+    // …and it is recognisable as "too large", which Duplicate answers by
+    // retrying without the map images.
+    expect(isBundleTooLarge(err)).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("marks the importer's JSON 503 as 'busy'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "another campaign import or export is in progress; retry shortly" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
     );
+    const err = await importCampaignBundle(bundleFile()).catch((e: unknown) => e);
+    expect(isBundleBusy(err)).toBe(true);
+    expect((err as Error).message).toBe("another campaign import or export is in progress; retry shortly");
+    vi.unstubAllGlobals();
+  });
+
+  it("uploads a bare Blob as a named file part (the bundle an export just returned)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ campaign_id: "camp-10", name: "Copy" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await importCampaignBundle(new Blob(["{}"], { type: "application/gzip" }), "The Prancing Pony.glyphoxa.json.gz");
+
+    const part = (fetchMock.mock.calls[0][1].body as FormData).get("bundle");
+    expect(part).toBeInstanceOf(File);
+    expect((part as File).name).toBe("The Prancing Pony.glyphoxa.json.gz");
     vi.unstubAllGlobals();
   });
 
