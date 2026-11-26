@@ -605,7 +605,14 @@ export function MapView({
               variant="secondary"
               size="sm"
               iconStart={<Crosshair size={13} />}
-              loading={createPin.isPending}
+              // Busy through ARIA, not `loading`: Button's loading state is the
+              // native `disabled`, and a browser moves focus off a disabled
+              // button to <body> — a keyboard GM whose placement is refused
+              // would have to find their way back to retry. place() itself
+              // ignores a press while a write is out, and the dashed
+              // provisional pin is the visible "pending".
+              aria-busy={createPin.isPending || undefined}
+              aria-disabled={createPin.isPending || undefined}
               onClick={() => place(placing, visibleCentre(), { focus: true })}
             >
               {t("maps.placeAtCentre")}

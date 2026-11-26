@@ -707,6 +707,35 @@ describe("MapsPanel placing from the tray", () => {
     await waitFor(() => expect(dot).toHaveFocus());
   });
 
+  it("'Place at centre' keeps keyboard focus while the write is out, and after a refusal", async () => {
+    const w = world({ pins: [], nodes: [INN] });
+    w.control.holdCreatePin = deferred();
+    w.control.failCreatePin = 1;
+    mount(w);
+    await theSurface();
+    fireEvent.click(await screen.findByRole("button", { name: "The Rusty Anchor", pressed: false }));
+
+    const button = screen.getByRole("button", { name: "Place at centre" });
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(w.calls.createPin).toHaveBeenCalledTimes(1));
+    // Busy, but NOT natively disabled: a browser moves focus off a disabled
+    // button to <body>, and a keyboard GM would lose their place mid-retry.
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    // A second press while the first is out asks for nothing.
+    fireEvent.click(button);
+    expect(w.calls.createPin).toHaveBeenCalledTimes(1);
+
+    await act(async () => w.control.holdCreatePin?.resolve());
+    expect(await screen.findByRole("alert")).toHaveTextContent("the server is having a moment");
+    // Refused: still armed, the same button is there and still focused, ready to retry.
+    expect(button).toBeInTheDocument();
+    expect(button).toHaveFocus();
+    expect(button).not.toHaveAttribute("aria-busy");
+  });
+
   it("a tap places after a touch drag, and the click that follows a drag never places", async () => {
     const w = world({ nodes: [LINE, INN] });
     mount(w);
