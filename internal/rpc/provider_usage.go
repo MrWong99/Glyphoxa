@@ -31,9 +31,11 @@ func (s *ProviderServer) GetUsageSummary(
 
 	resp := &managementv1.GetUsageSummaryResponse{
 		ResetsAt: timestamppb.New(nextMonthUTC(s.now())),
-		// The same entitlement every key resolution consults (W9), so the card
-		// and the "Included" badges can never disagree.
-		UsesPlatformKeys: s.platformKeyGate(ctx, tenantID)(storage.ComponentLLM),
+		// The same two halves the "Included" badges use (W9): the deployment
+		// has a Platform Key at all, and the entitlement every key resolution
+		// consults lets this Tenant ride it. A self-host with no env keys is on
+		// its own keys whatever the (absent) gate would say.
+		UsesPlatformKeys: s.anyPlatformKey() && s.platformKeyGate(ctx, tenantID)(storage.ComponentLLM),
 	}
 
 	if s.plans != nil {
@@ -59,6 +61,17 @@ func (s *ProviderServer) GetUsageSummary(
 		}
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// anyPlatformKey reports whether the deployment holds the env key of at least
+// one BYOK slot's provider: whether there is a Platform Key to ride at all.
+func (s *ProviderServer) anyPlatformKey() bool {
+	for _, slot := range byokSlots {
+		if s.lookupEnv(slot.envKey) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // nextMonthUTC is the first instant of the UTC calendar month after t: when

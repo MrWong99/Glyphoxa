@@ -58,6 +58,8 @@ func usageClient(t *testing.T, plans interface {
 	if gate != nil {
 		srv.SetKeyEntitlement(gate)
 	}
+	// The deployment holds Platform Keys unless a test says otherwise.
+	srv.SetEnvLookupForTest(func(k string) string { return bothKeys[k] })
 	srv.SetClockForTest(func() time.Time { return usageNow })
 	if allowance != nil {
 		srv.SetUsageSources(plans, spend.PlanAllowance{Reader: allowance, Now: func() time.Time { return usageNow }})
@@ -145,6 +147,17 @@ func TestGetUsageSummary_WithoutAllowance(t *testing.T) {
 		}
 		if !allowance.from.IsZero() {
 			t.Error("the ledger was read for a tenant with no allowance")
+		}
+	})
+
+	t.Run("a self-host with no platform keys is on its own keys", func(t *testing.T) {
+		t.Parallel()
+		srv := rpc.NewProviderServer(newFakeProviderStore(), testCipher(t), nil)
+		srv.SetEnvLookupForTest(func(string) string { return "" })
+		srv.SetUsageSources(fakePlans{err: storage.ErrNotFound}, nil)
+		client, _ := clientForServer(t, srv)
+		if got := usageSummary(t, client); got.GetUsesPlatformKeys() {
+			t.Error("uses_platform_keys = true with no env key in the deployment")
 		}
 	})
 

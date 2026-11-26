@@ -2239,9 +2239,9 @@ message GetUsageSummaryResponse {
   string plan_slug = 1;
   // plan_name is the plan's display name; empty with no subscription.
   string plan_name = 2;
-  // uses_platform_keys is true when the Tenant's key resolution may ride the
-  // deployment's Platform Keys (the entitlement every key resolution
-  // consults); false means it runs only on its own keys.
+  // uses_platform_keys is true when the deployment holds a Platform Key and
+  // the Tenant's key resolution may ride it (the entitlement every key
+  // resolution consults); false means it runs only on its own keys.
   bool uses_platform_keys = 3;
   // included_usd is the plan's monthly included usage. Absent when no
   // allowance applies (no plan, a plan without one, or a deployment that does
