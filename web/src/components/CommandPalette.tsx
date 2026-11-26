@@ -67,10 +67,17 @@ export function paletteShortcut(t: TFunc): string {
 }
 
 /** The palette chord as a key-cap chip, for the topbar's search button. */
-export function PaletteShortcut({ className = "" }: { className?: string }) {
+export function PaletteShortcut({ className = "", decorative = false }: { className?: string; decorative?: boolean }) {
   const { t } = useI18n();
   return (
-    <kbd className={className ? `gx-palette-kbd ${className}` : "gx-palette-kbd"}>{paletteShortcut(t)}</kbd>
+    <kbd
+      className={className ? `gx-palette-kbd ${className}` : "gx-palette-kbd"}
+      // decorative: the control it sits in already states the chord
+      // (aria-keyshortcuts), so the key cap stays out of its accessible name.
+      aria-hidden={decorative || undefined}
+    >
+      {paletteShortcut(t)}
+    </kbd>
   );
 }
 

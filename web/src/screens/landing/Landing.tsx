@@ -6,6 +6,7 @@ import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { IconButton } from "@/components/ui/IconButton";
 import { useI18n, type MessageKey } from "@/i18n";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
+import { useScrollToHash } from "@/lib/useScrollToHash";
 
 import "./landing.css";
 
@@ -137,6 +138,8 @@ const SOURCE_URL = "https://github.com/MrWong99/Glyphoxa";
 export function Landing({ open = false }: { open?: boolean }) {
   const { t } = useI18n();
   useDocumentTitle(t("auth.landingDocTitle"));
+  // A shared /#how opens at "How it works", not at the top.
+  useScrollToHash();
 
   // The capture shown large, or null. One lightbox for the whole page.
   const [enlarged, setEnlarged] = useState<Shot | null>(null);

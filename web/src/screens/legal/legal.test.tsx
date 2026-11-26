@@ -183,14 +183,53 @@ describe("legal page chrome", () => {
   });
 
   it("gives the sections stable, readable ids", async () => {
-    // A deep link into a document (#speicherdauer, sent to a player who asked)
-    // must keep working: the id comes from the heading's words, without its
-    // number, so renumbering a section does not break a link to it.
+    // A link into a document (#speicherdauer, sent to a player who asked)
+    // names its section by the heading's words, without its number, so
+    // renumbering a section does not change the id. (That such a link also
+    // OPENS at its section is the next test.)
     renderAt("/privacy");
     await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
     expect(document.getElementById("speicherdauer")).toHaveTextContent(/^7\. Speicherdauer/);
     expect(document.getElementById("aenderungen-dieser-erklaerung")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "7. Speicherdauer" })).toHaveAttribute("href", "#speicherdauer");
+  });
+
+  it("opens a shared link to a section at that section", async () => {
+    // The document is a lazily loaded chunk: the browser (and the router)
+    // looked for #speicherdauer before it existed, so the page itself has to
+    // look again once its sections are rendered. The router is handed the
+    // path WITHOUT the hash so its own attempt cannot stand in for the page's.
+    const scrolled: Element[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView(this: Element) {
+      scrolled.push(this);
+    };
+    window.history.replaceState(null, "", "/privacy#speicherdauer");
+    try {
+      renderAt("/privacy");
+      await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+      await waitFor(() => expect(scrolled).toContain(document.getElementById("speicherdauer")));
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("stays at the top when the link names no section", async () => {
+    const scrolled: Element[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView(this: Element) {
+      scrolled.push(this);
+    };
+    window.history.replaceState(null, "", "/privacy#no-such-section");
+    try {
+      renderAt("/privacy");
+      await screen.findByRole("heading", { name: "Datenschutzerklärung", level: 1 });
+      expect(scrolled).toEqual([]);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   it("finds sections the operator's identity decides on, too", async () => {

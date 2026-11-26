@@ -17,24 +17,53 @@ import type { QueryClient } from "@tanstack/react-query";
  * to "the server answered with an error".
  *
  * Three shapes count:
- *   - the request never completed: fetch rejects with a TypeError, which
- *     Connect wraps (code Unknown, the TypeError as `cause`);
- *   - a gateway in front of the server answered for it: HTTP 502/503/504 map
- *     to Unavailable, 408 to DeadlineExceeded;
+ *   - the request never completed: fetch rejects with a TypeError ("Failed to
+ *     fetch", "NetworkError when attempting to fetch resource.", "Load
+ *     failed"), which Connect wraps (code Unknown, the TypeError as `cause`).
+ *     Only that TypeError: one thrown by a bug in a query function is not an
+ *     outage;
+ *   - something in front of the server answered for it, with a bare HTTP
+ *     status and no Connect body. Connect names such an error "HTTP <status>"
+ *     and maps only 502/503/504 to Unavailable; everything else becomes
+ *     Unknown. So the status itself is read: 408, 502–504, and the 52x/530
+ *     pages Cloudflare serves when the tunnel or the origin behind it is
+ *     down. A bare 429 is NOT counted, although Connect maps it to
+ *     Unavailable: a rate limit is an answer from something that is up;
  *   - the call ran into its deadline with no response at all.
  *
  * Glyphoxa's own handlers ALSO use Unavailable and DeadlineExceeded for
  * things that are not an outage at all ("content generation is not
  * configured", a speech provider that timed out). Those arrive as a Connect
- * error body, which is always JSON — so an Unavailable that carries a JSON
- * content type is the server speaking, and proof that it is reachable.
+ * error body, which is always JSON — so an error that carries a JSON content
+ * type is the server speaking, and proof that it is reachable.
  */
 export function isUnreachableError(error: unknown): boolean {
-  if (error instanceof TypeError) return true;
+  if (error instanceof TypeError) return isFetchFailure(error);
   const ce = ConnectError.from(error);
-  if (ce.cause instanceof TypeError) return true;
-  if (ce.code !== Code.Unavailable && ce.code !== Code.DeadlineExceeded) return false;
-  return !answeredByServer(ce);
+  if (ce.cause instanceof TypeError) return isFetchFailure(ce.cause);
+  if (answeredByServer(ce)) return false;
+  const status = bareHttpStatus(ce);
+  if (status !== null) return UNREACHABLE_STATUS.test(String(status));
+  return ce.code === Code.Unavailable || ce.code === Code.DeadlineExceeded;
+}
+
+// The statuses a gateway or tunnel answers with when the server behind it
+// cannot be reached: 408, 502–504, 520–530 (Cloudflare's "origin is down" and
+// "tunnel is down" pages).
+const UNREACHABLE_STATUS = /^(408|50[234]|52\d|530)$/;
+
+// bareHttpStatus: the status of an error Connect built from an HTTP response
+// that carried no Connect error body (its message is then "HTTP <status>").
+function bareHttpStatus(error: ConnectError): number | null {
+  const match = /^HTTP (\d{3})$/.exec(error.rawMessage);
+  return match ? Number(match[1]) : null;
+}
+
+// isFetchFailure: the TypeError fetch rejects with when the request never got
+// an answer. Each engine words it differently; all of them say "fetch",
+// "network" or "load failed".
+function isFetchFailure(error: TypeError): boolean {
+  return /fetch|network|load failed/i.test(error.message);
 }
 
 // answeredByServer: the error was parsed from a Connect error response, which

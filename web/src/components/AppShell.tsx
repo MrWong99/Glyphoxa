@@ -472,7 +472,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
             >
               <Search size={16} aria-hidden="true" />
               <span className="gx-topbar__search-label">{t("palette.searchButton")}</span>
-              <PaletteShortcut className="gx-topbar__search-kbd" />
+              <PaletteShortcut className="gx-topbar__search-kbd" decorative />
             </button>
           </Tooltip>
           {/* The Active-Campaign switcher lives on every screen (#266a): the

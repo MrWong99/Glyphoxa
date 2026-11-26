@@ -27,6 +27,27 @@ describe("Tooltip", () => {
     expect(trigger).toHaveAttribute("aria-describedby", tooltip.id);
   });
 
+  it("stays shut on a focus the browser draws no ring for (script focus after a tap or click)", () => {
+    // jsdom says :focus-visible for every focus; a real browser does not after
+    // a tap. Model that: the trigger is focused, but not focus-visible.
+    const matches = Element.prototype.matches;
+    Element.prototype.matches = function (this: Element, selector: string) {
+      return selector === ":focus-visible" ? false : matches.call(this, selector);
+    } as Element["matches"];
+    try {
+      render(
+        <Tooltip content="Toggle sidebar">
+          <button>Menu</button>
+        </Tooltip>,
+      );
+      const trigger = focusTrigger("Menu");
+      expect(trigger).toHaveFocus();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      Element.prototype.matches = matches;
+    }
+  });
+
   it("closes on Escape and on blur", () => {
     render(
       <Tooltip content="Mute every NPC">

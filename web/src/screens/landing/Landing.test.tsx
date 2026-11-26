@@ -295,6 +295,24 @@ describe("landing structure", () => {
     expect(container.querySelector("#top")).toBeInTheDocument();
   });
 
+  it("opens a shared link to a section at that section", () => {
+    // The landing renders only once the session probe has answered, after
+    // the browser looked for #how: the page looks again itself.
+    const scrolled: Element[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView(this: Element) {
+      scrolled.push(this);
+    };
+    window.history.replaceState(null, "", "/#how");
+    try {
+      const { container } = render(<Landing />);
+      expect(scrolled).toEqual([container.querySelector("#how")]);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
   it("ends with a call to action, then the footer", () => {
     const { container } = render(<Landing />);
     const sections = [...container.querySelectorAll("main > section")];

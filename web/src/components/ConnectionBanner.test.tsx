@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport, type Transport } from "@connectrpc/connect";
@@ -178,5 +180,20 @@ describe("ConnectionBanner", () => {
     } finally {
       localStorage.removeItem("gx-lang");
     }
+  });
+});
+
+describe("ConnectionBanner styles", () => {
+  // jsdom applies no stylesheet, so the rule itself is pinned: the empty bar
+  // must stay in the accessibility tree (no display:none / visibility:hidden),
+  // or the live region appears together with its text and is not announced.
+  it("keeps the empty live region rendered, with no room taken", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/styles/components.css"), "utf8");
+    const rule = /\.gx-connection:empty\s*\{([^}]*)\}/.exec(css);
+    expect(rule, ".gx-connection:empty").not.toBeNull();
+    const body = rule?.[1] ?? "";
+    expect(body).not.toMatch(/display\s*:\s*none|visibility\s*:\s*hidden/);
+    expect(body).toMatch(/padding\s*:\s*0/);
+    expect(body).toMatch(/border\s*:\s*0/);
   });
 });

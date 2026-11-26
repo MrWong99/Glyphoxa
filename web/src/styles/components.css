@@ -2350,6 +2350,9 @@ button.gx-select__item:focus-visible {
  * components/ConnectionBanner.tsx: "You are offline" / "Can't reach Glyphoxa",
  * a slim bar between the topbar and the screen. The element is always in the
  * DOM (it is the live region) and takes no room while it has nothing to say.
+ * Empty, it loses its padding and border, not its box: display:none would
+ * take the region out of the accessibility tree, and a region that appears
+ * together with its text is the case screen readers announce unreliably.
  */
 .gx-connection {
   flex: 0 0 auto;
@@ -2365,7 +2368,8 @@ button.gx-select__item:focus-visible {
   line-height: var(--body-line-tight);
 }
 .gx-connection:empty {
-  display: none;
+  padding: 0;
+  border: 0;
 }
 .gx-connection > svg {
   flex: 0 0 auto;

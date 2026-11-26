@@ -5,6 +5,7 @@ import { LegalFooter } from "@/components/LegalFooter";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { useI18n } from "@/i18n";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
+import { useScrollToHash } from "@/lib/useScrollToHash";
 import { OPERATOR, isPlaceholder, operatorTodos } from "./operator";
 
 import "./legal.css";
@@ -23,7 +24,8 @@ import "./legal.css";
 // one-line notice that the German text is authoritative (when the display
 // language is not German), and an "Inhalt" list of the document's sections.
 // The sections carry stable ids derived from their headings, so a link into a
-// document (#speicherdauer) survives renumbering.
+// document (#speicherdauer) survives renumbering, and a page opened from such
+// a link opens at that section (useScrollToHash).
 
 /** The three documents, in the order the footer names them. */
 export type LegalDoc = "imprint" | "privacy" | "terms";
@@ -54,6 +56,7 @@ export function LegalPage({
   const { t, lang } = useI18n();
   const todos = operatorTodos();
   useDocumentTitle(title);
+  useScrollToHash();
   const sections = collectSections(children);
   const tocId = useId();
 

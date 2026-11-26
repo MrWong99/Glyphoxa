@@ -54,7 +54,7 @@ export const de: Record<keyof typeof en, string> = {
   "palette.groupGoTo": "Gehe zu",
   "palette.groupActions": "Aktionen",
   "palette.switchCampaign": "Kampagne wechseln: {name}",
-  "palette.goToLiveSession": "Zur laufenden Session",
+  "palette.goToLiveSession": "Zur laufenden Spielrunde",
   "palette.newCampaignDesc":
     "Sie wird deine aktive Kampagne — mit eigenem Butler, eigener Besetzung und eigenem Welt-Wiki.",
 

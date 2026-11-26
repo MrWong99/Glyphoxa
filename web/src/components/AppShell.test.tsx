@@ -377,6 +377,25 @@ describe("AppShell mobile drawer", () => {
     expect(toggleButton()).toHaveFocus();
   });
 
+  it("hands focus back after a tap without popping the toggle's tooltip over the page", async () => {
+    // After a tap the browser draws no focus ring where script puts focus
+    // (jsdom cannot tell; this models it), and a tooltip that opened there
+    // stayed stuck over the screen the GM had just navigated to.
+    const { container } = await openDrawer();
+    const matches = Element.prototype.matches;
+    Element.prototype.matches = function (this: Element, selector: string) {
+      return selector === ":focus-visible" ? false : matches.call(this, selector);
+    } as Element["matches"];
+    try {
+      fireEvent.click(screen.getByRole("link", { name: "Cast" }));
+      await waitFor(() => expect(shellOf(container)).toHaveAttribute("data-collapsed", "true"));
+      expect(toggleButton()).toHaveFocus();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      Element.prototype.matches = matches;
+    }
+  });
+
   it("keeps Tab inside the open drawer, in both directions", async () => {
     const { container } = await openDrawer();
     const first = screen.getByRole("link", { name: /glyphoxa — campaign overview/i });
@@ -483,8 +502,10 @@ describe("AppShell chrome around the screen", () => {
     const { container } = renderShell();
     await settled(container);
     const search = within(topbar(container)).getByRole("button", { name: /search or jump to/i });
-    // The chord is on a key cap inside the button (Ctrl+K off a Mac).
+    // The chord is on a key cap inside the button (Ctrl+K off a Mac), which
+    // stays out of the button's name: aria-keyshortcuts already says it.
     expect(search).toHaveTextContent("Ctrl+K");
+    expect(search).toHaveAccessibleName("Search or jump to…");
     expect(search).toHaveAttribute("aria-keyshortcuts", "Control+K");
 
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
