@@ -1,0 +1,318 @@
+/* Suggestions inbox (ProposalsPanel.tsx). Every rule is scoped under .gx-inbox
+ * so it wins over campaign.css — which styles the shared .gx-proposal-card
+ * parts — whatever order the two stylesheets load in. */
+
+.gx-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  /* The host puts this view on the narrow page (a readable measure for
+   * sentences), so the inbox simply fills its column. */
+  width: 100%;
+  min-width: 0;
+}
+
+/* ---- Header -------------------------------------------------------------- */
+
+.gx-inbox .gx-inbox__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+}
+
+.gx-inbox .gx-inbox__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+}
+
+.gx-inbox .gx-inbox__shortcuts {
+  margin: 0;
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+/* A phone has no J and K. */
+@media (hover: none) and (pointer: coarse) {
+  .gx-inbox .gx-inbox__shortcuts {
+    display: none;
+  }
+}
+
+/* ---- Filters ------------------------------------------------------------- */
+
+.gx-inbox .gx-inbox__filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-inbox .gx-inbox__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-inbox .gx-inbox__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  max-width: 100%;
+  padding: var(--spacing-xs) var(--spacing-md);
+  font: inherit;
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-muted);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.gx-inbox .gx-inbox__chip:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+/* The chosen filter is filled, the way the chosen segment of a segmented
+ * control is; the others stay at full strength so they do not look disabled. */
+.gx-inbox .gx-inbox__chip[aria-pressed="true"] {
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--arcane) 26%, var(--surface-card));
+  border-color: var(--border-strong);
+}
+
+.gx-inbox .gx-inbox__chip-count {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+
+/* ---- Selection bar ------------------------------------------------------- */
+
+.gx-inbox .gx-inbox__bulk {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.gx-inbox .gx-inbox__select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  cursor: pointer;
+}
+
+.gx-inbox .gx-inbox__selected {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--rune);
+}
+
+.gx-inbox .gx-inbox__bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-left: auto;
+}
+
+.gx-inbox .gx-inbox__check {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--arcane-fill);
+  cursor: pointer;
+}
+
+.gx-inbox .gx-inbox__check:disabled {
+  cursor: not-allowed;
+}
+
+/* A finger needs more than 18px to hit. */
+@media (pointer: coarse) {
+  .gx-inbox .gx-inbox__check {
+    width: 24px;
+    height: 24px;
+  }
+}
+
+/* ---- Batch progress and result ------------------------------------------- */
+
+.gx-inbox .gx-inbox__progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+.gx-inbox .gx-inbox__bar {
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+}
+
+.gx-inbox .gx-inbox__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--gradient-rune);
+  transition: width var(--duration-base) var(--ease-standard);
+}
+
+.gx-inbox .gx-inbox__failures {
+  margin: var(--spacing-xs) 0 0;
+  padding-left: var(--spacing-md);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Groups -------------------------------------------------------------- */
+
+.gx-inbox .gx-inbox__groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.gx-inbox .gx-inbox__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-inbox .gx-inbox__group-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--body-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.gx-inbox .gx-inbox__group-count {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+
+.gx-inbox .gx-inbox__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+/* ---- Row ----------------------------------------------------------------- */
+
+.gx-inbox .gx-inbox__row {
+  min-width: 0;
+  /* Room for the sticky selection bar when J/K scroll a row into view. */
+  scroll-margin-top: var(--layout-lg);
+}
+
+/* The row the keyboard acts on. A left edge, so it reads apart from both the
+ * focus outline and the selected tint. */
+.gx-inbox .gx-inbox__row[aria-current="true"] {
+  border-color: var(--border-rune);
+  box-shadow: inset 3px 0 0 var(--rune), var(--shadow-sm);
+}
+
+.gx-inbox .gx-inbox__row[data-selected="true"] {
+  background: color-mix(in srgb, var(--arcane) 10%, var(--surface-card));
+}
+
+.gx-inbox .gx-proposal-card__write {
+  overflow-wrap: anywhere;
+}
+
+/* An entry's name that opens the entry (proposalParts.tsx EntryName). */
+.gx-inbox .gx-proposal-card__entry {
+  padding: 0;
+  font: inherit;
+  font-weight: var(--weight-bold);
+  color: var(--text-link);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-xs);
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.gx-inbox .gx-proposal-card__entry:hover {
+  color: var(--text-link-hover);
+}
+
+.gx-inbox .gx-inbox__blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  background: var(--status-warning-bg);
+  border-left: 3px solid var(--status-warning);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.gx-inbox .gx-inbox__blocked svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--status-warning);
+}
+
+/* ---- Phone --------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .gx-inbox .gx-inbox__bulk-actions {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+  .gx-inbox .gx-inbox__bulk-actions > .gx-btn {
+    flex: 1 1 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gx-inbox .gx-inbox__chip,
+  .gx-inbox .gx-inbox__bar > span {
+    transition: none;
+  }
+}
