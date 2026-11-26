@@ -5,9 +5,12 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { campaignDestination } from "@/app/destinations";
 import { useScreenNav } from "@/app/screenNav";
 import { Card } from "@/components/ui/Card";
+import { Page, PageHeader } from "@/components/ui/Page";
+import { QueryBoundary } from "@/components/ui/QueryBoundary";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { FirstCampaignCTA } from "@/components/FirstCampaignCTA";
 import { useI18n } from "@/i18n";
-import { errorMessage, isNotFound } from "@/lib/connectError";
+import { isNotFound } from "@/lib/connectError";
 import { CampaignScreenProvider, rosterRetry, type CampaignScreen } from "./campaignContext";
 import { CampaignSettingsPanel } from "./CampaignSettingsPanel";
 import { CastPanel } from "./CastPanel";
@@ -20,13 +23,21 @@ import { ProposalsPanel } from "./ProposalsPanel";
 import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "./views";
 
 import "./campaign.css";
+import "./campaignHost.css";
+
+// The views that read line by line (a queue of sentences, a form) sit on the
+// narrow page; the ones with a list and a detail pane take the wide one.
+const NARROW_VIEWS: ReadonlySet<CampaignView> = new Set(["proposals", "settings"]);
 
 // The Campaign screen is a thin HOST (ADR-0063 amendment). It does four things
 // and nothing else:
 //
 //   1. resolves WHICH campaign is active, and remounts everything under it when
 //      that changes (see Campaign below);
-//   2. renders the header — the campaign's name, its System, the view's lede;
+//   2. renders the page and its header — the campaign's name, its System, the
+//      view's lede — on the shared Page/PageHeader, so every view sits in the
+//      same column under the same header (the Overview brings its own header,
+//      which also carries the campaign's language and its actions);
 //   3. switches on the view the route path names, one panel file per view;
 //   4. hands the panels what they share through useCampaignScreen(): the
 //      campaign, its roster and the cross-view jumps.
@@ -86,11 +97,8 @@ export function Campaign({ view = DEFAULT_CAMPAIGN_VIEW }: { view?: CampaignView
 function CampaignHost({ view }: { view: CampaignView }) {
   const { t } = useI18n();
   const nav = useScreenNav();
-  const { data, status, error } = useQuery(
-    CampaignService.method.getCampaignRoster,
-    {},
-    { retry: rosterRetry },
-  );
+  const rosterQ = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
+  const { data, status, error } = rosterQ;
   const campaign = data?.campaign;
   const roster = useMemo(() => data?.roster ?? [], [data]);
 
@@ -98,7 +106,7 @@ function CampaignHost({ view }: { view: CampaignView }) {
   // in the path and the thing to open rides as a search param the target panel
   // consumes (?node= on the wiki, ?agent= on Cast). Nothing is copied into
   // local state on the way, so Back returns to where the jump came from.
-  const { goCampaignView, goScreen, setSearch } = nav;
+  const { goCampaignView, goScreen } = nav;
   const screen = useMemo<CampaignScreen>(
     () => ({
       campaign,
@@ -110,16 +118,9 @@ function CampaignHost({ view }: { view: CampaignView }) {
     [campaign, roster, goCampaignView],
   );
 
-  // The wiki's focus IS the route's ?node — there is no local copy to drift
-  // from the URL. The panel decides when the focus has been honoured (once the
-  // entry's row has loaded) and reports it; only then is the param stripped
-  // (replace, no history entry), so a deep link survives a slow or retried
-  // list load, and a later jump to the same entry fires again.
-  const focusNodeID = nav.search.node ?? null;
-  const stripNode = useCallback(
-    () => setSearch({ node: undefined }, { replace: true }),
-    [setSearch],
-  );
+  // The wiki's open entry IS the route's ?node: the panel reads and writes it
+  // through useScreenNav() itself, so the host hands it nothing and Back steps
+  // through the entries the GM opened.
   // An appearances row jumps to the exact Transcript Line on the Session screen
   // — the session+line pair the palette uses (#591).
   const openTranscriptLine = useCallback(
@@ -133,36 +134,36 @@ function CampaignHost({ view }: { view: CampaignView }) {
   // Creating swaps the live screen in.
   if (!data && status === "error" && isNotFound(error)) {
     return (
-      <div className="gx-campaign-screen" data-view={view}>
-        <header className="gx-campaign-screen__header">
-          <div className="gx-campaign-screen__title-row">
-            <h1>{t("campaign.fallbackTitle")}</h1>
-          </div>
-        </header>
+      <Page className="gx-campaign-screen" data-view={view}>
+        <PageHeader title={t("campaign.fallbackTitle")} />
         <Card accent>
           <FirstCampaignCTA />
         </Card>
-      </div>
+      </Page>
     );
   }
 
   return (
     <CampaignScreenProvider value={screen}>
-      {/* data-view lets a view's stylesheet target the screen root (a view that
-          needs the full height, say) without the host knowing about it. */}
-      <div className="gx-campaign-screen" data-view={view}>
-        <header className="gx-campaign-screen__header">
-          {/* The view tabs that used to sit beside the title live in the
-              sidebar (ADR-0063); the header keeps the campaign identity and
-              the per-view lede. */}
-          <div className="gx-campaign-screen__title-row">
-            <h1>{campaign?.name ?? t("campaign.fallbackTitle")}</h1>
-          </div>
-          <div className="gx-campaign-screen__sub">
-            {campaign?.system && <span className="gx-campaign-screen__system">{campaign.system}</span>}
-            <span className="gx-campaign-screen__lede">{t(campaignDestination(view).lede)}</span>
-          </div>
-        </header>
+      {/* The shared Page: one centred column and one gutter for every view.
+          gx-campaign-screen and data-view stay on the root: a view's stylesheet
+          targets the screen through them (a view that needs the full height,
+          say) without the host knowing about it. */}
+      <Page
+        className="gx-campaign-screen"
+        width={NARROW_VIEWS.has(view) ? "narrow" : "wide"}
+        data-view={view}
+      >
+        {/* The view tabs that used to sit beside the title live in the sidebar
+            (ADR-0063); the header keeps the campaign's identity and says what
+            the view is for. The Overview renders its own. */}
+        {view !== "overview" && (
+          <PageHeader
+            eyebrow={campaign?.system || undefined}
+            title={campaign?.name ?? t("campaign.fallbackTitle")}
+            description={t(campaignDestination(view).lede)}
+          />
+        )}
 
         {view === "overview" ? (
           <OverviewPanel />
@@ -170,8 +171,6 @@ function CampaignHost({ view }: { view: CampaignView }) {
           <CastPanel />
         ) : view === "knowledge" ? (
           <KnowledgePanel
-            focusNodeID={focusNodeID}
-            onFocusHandled={stripNode}
             onOpenCast={screen.openAgent}
             onOpenLine={openTranscriptLine}
           />
@@ -184,19 +183,23 @@ function CampaignHost({ view }: { view: CampaignView }) {
         ) : view === "planning" ? (
           // The ChatService RPCs are campaign-scoped (ADR-0062), so the panel
           // waits for the roster read to hand it the campaign id.
-          campaign ? (
-            <PlanningPanel key={campaign.id} campaignId={campaign.id} />
-          ) : status === "error" ? (
-            <p className="gx-campaign__error" role="alert">
-              {t("campaign.loadError", { message: errorMessage(error) })}
-            </p>
-          ) : (
-            <div className="gx-skeleton" data-testid="planning-loading" />
-          )
+          // Until then: a placeholder, or — when the campaign cannot be read —
+          // the reason and a way to try again.
+          <QueryBoundary
+            query={rosterQ}
+            errorTitle={t("home.campaignLoadError")}
+            skeleton={<Skeleton.Row count={4} avatar={false} />}
+          >
+            {(loaded) =>
+              loaded.campaign ? (
+                <PlanningPanel key={loaded.campaign.id} campaignId={loaded.campaign.id} />
+              ) : null
+            }
+          </QueryBoundary>
         ) : (
           <CampaignSettingsPanel />
         )}
-      </div>
+      </Page>
     </CampaignScreenProvider>
   );
 }

@@ -19,19 +19,17 @@ export const en = {
   "campaign.ledeCast": "One Butler is required; add as many NPCs as your table needs.",
   "campaign.loadError": "Couldn't load the campaign: {message}",
 
-  // ── Cast view: roster list + prep mode switch ────────────────────────────
+  // ── Cast view: roster list + readiness mode switch ───────────────────────
+  // (The cast studio's newer strings live in the cast fragment, cast.*.)
   "campaign.castViewGroup": "Cast view",
   "campaign.castRoster": "Roster",
-  "campaign.castPrep": "Session prep",
+  "campaign.castPrep": "Readiness",
   "campaign.badgeButler": "Butler",
   "campaign.badgeAddressOnly": "By name only",
   "campaign.badgeAddressOnlyTitle": "Only answers when someone says its name — it stays out of general table talk.",
   "campaign.addNpc": "Add NPC",
-  "campaign.newNpcName": "New NPC",
-  "campaign.rosterEmpty": "No NPCs yet. The Butler can run a session alone, or add your first NPC above.",
 
   // ── Agent editor ─────────────────────────────────────────────────────────
-  "campaign.savedAgent": "Saved {name}",
   "campaign.badgeRequired": "Required",
   "campaign.badgeNpc": "NPC",
   "campaign.roleButler": "Butler · role locked",
@@ -57,10 +55,11 @@ export const en = {
   "campaign.addressOnlyButlerHint":
     "The Butler only answers the GM, and only when called by name; it never joins ambient table talk.",
   "campaign.addressOnlyNpcHint": "When on, this NPC only replies when addressed by name.",
-  "campaign.advancedAgentTitle": "Advanced: tools & addressing",
-  "campaign.advancedAgentHint": "Tool access and when this character answers — most groups keep the defaults.",
+  "campaign.advancedAgentTitle": "Advanced: tools",
+  "campaign.advancedAgentHint": "What this character may look up or do during play — most groups keep the defaults.",
   "campaign.toolsLabel": "Tools",
-  "campaign.toolsHint": "Grant the tools this cast member may use. Changes take effect in the next session.",
+  "campaign.toolsHint":
+    "Grant the tools this cast member may use. Unlike the fields above, changes apply immediately, from the next session.",
   "campaign.toolsNone": "No tools available.",
   "campaign.toolsLoadError": "Couldn't load the tools. Reload to try again.",
   "campaign.toolUpdateError": "Couldn't update {tool}: {message}",
@@ -89,8 +88,6 @@ export const en = {
   "campaign.savedStatus": "Saved",
 
   // ── Roster prep (readiness view) ─────────────────────────────────────────
-  "campaign.prepLoadError": "Couldn't load the world: {message}",
-  "campaign.prepEmpty": "No NPCs yet — the readiness view fills in as you add them.",
   "campaign.prepAria": "NPC readiness",
   "campaign.prepButlerExempt": "Butler — always ready",
   "campaign.prepUnplacedTitle": "Not placed in the world",
@@ -218,16 +215,13 @@ export const de: Record<keyof typeof en, string> = {
   // ── Cast view ────────────────────────────────────────────────────────────
   "campaign.castViewGroup": "Besetzungs-Ansicht",
   "campaign.castRoster": "Liste",
-  "campaign.castPrep": "Session-Vorbereitung",
+  "campaign.castPrep": "Bereitschaft",
   "campaign.badgeButler": "Butler",
   "campaign.badgeAddressOnly": "Nur auf Ansprache",
   "campaign.badgeAddressOnlyTitle": "Antwortet nur, wenn jemand den Namen nennt — hält sich aus dem allgemeinen Tischgespräch heraus.",
   "campaign.addNpc": "NPC hinzufügen",
-  "campaign.newNpcName": "Neuer NPC",
-  "campaign.rosterEmpty": "Noch keine NPCs. Der Butler kann eine Session allein stemmen — oder füge oben deinen ersten NPC hinzu.",
 
   // ── Agent editor ─────────────────────────────────────────────────────────
-  "campaign.savedAgent": "{name} gespeichert",
   "campaign.badgeRequired": "Erforderlich",
   "campaign.badgeNpc": "NPC",
   "campaign.roleButler": "Butler · Rolle fest",
@@ -253,10 +247,11 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.addressOnlyButlerHint":
     "Der Butler antwortet nur dem GM und nur, wenn er beim Namen gerufen wird; ins freie Tischgespräch mischt er sich nie ein.",
   "campaign.addressOnlyNpcHint": "Wenn aktiv, antwortet dieser NPC nur, wenn er beim Namen genannt wird.",
-  "campaign.advancedAgentTitle": "Erweitert: Tools & Ansprache",
-  "campaign.advancedAgentHint": "Tool-Zugriff und wann dieser Charakter antwortet — die meisten Gruppen lassen die Vorgaben.",
+  "campaign.advancedAgentTitle": "Erweitert: Tools",
+  "campaign.advancedAgentHint": "Was dieser Charakter im Spiel nachschlagen oder tun darf — die meisten Gruppen lassen die Vorgaben.",
   "campaign.toolsLabel": "Tools",
-  "campaign.toolsHint": "Lege fest, welche Tools dieses Ensemblemitglied nutzen darf. Änderungen greifen ab der nächsten Session.",
+  "campaign.toolsHint":
+    "Lege fest, welche Tools dieses Ensemblemitglied nutzen darf. Anders als die Felder oben gelten Änderungen sofort, ab der nächsten Session.",
   "campaign.toolsNone": "Keine Tools verfügbar.",
   "campaign.toolsLoadError": "Tools konnten nicht geladen werden. Lade die Seite neu.",
   "campaign.toolUpdateError": "{tool} konnte nicht aktualisiert werden: {message}",
@@ -282,8 +277,6 @@ export const de: Record<keyof typeof en, string> = {
   "campaign.savedStatus": "Gespeichert",
 
   // ── Roster prep ──────────────────────────────────────────────────────────
-  "campaign.prepLoadError": "Welt konnte nicht geladen werden: {message}",
-  "campaign.prepEmpty": "Noch keine NPCs — die Bereitschaftsansicht füllt sich, sobald du welche hinzufügst.",
   "campaign.prepAria": "NPC-Bereitschaft",
   "campaign.prepButlerExempt": "Butler — immer bereit",
   "campaign.prepUnplacedTitle": "Noch nicht in der Welt verortet",

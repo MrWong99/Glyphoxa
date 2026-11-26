@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -155,8 +155,24 @@ describe("NodePortrait", () => {
     const img = screen.getByAltText("Portrait of Bart");
     expect(img.getAttribute("src")).toContain("/api/v1/knowledge/nodes/n1/portrait");
 
+    // Removing asks first: a generated portrait cannot be brought back.
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const question = await screen.findByRole("alertdialog");
+    expect(question).toHaveTextContent("Remove the portrait of “Bart”?");
+    expect(t.clearCalls()).toBe(0);
+
+    fireEvent.click(within(question).getByRole("button", { name: "Remove portrait" }));
     await waitFor(() => expect(t.clearCalls()).toBe(1));
+  });
+
+  it("keeps the portrait when the removal is cancelled", async () => {
+    const t = renderPortrait(bart({ hasPortrait: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const question = await screen.findByRole("alertdialog");
+    fireEvent.click(within(question).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(t.clearCalls()).toBe(0);
+    expect(screen.getByAltText("Portrait of Bart")).toBeInTheDocument();
   });
 
   it("offers a GM-only entry upload but not generation", () => {
