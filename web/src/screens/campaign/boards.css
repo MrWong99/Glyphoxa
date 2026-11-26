@@ -24,6 +24,17 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+/* "Add board" / "New board" stay focusable with no name typed or while the
+ * write is out (aria-disabled, not disabled), so they only LOOK unavailable. */
+.gx-boards .gx-boards__new [aria-disabled="true"],
+.gx-node-boards .gx-node-boards__new [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.gx-boards .gx-boards__new [aria-busy="true"],
+.gx-node-boards .gx-node-boards__new [aria-busy="true"] {
+  cursor: progress;
+}
 
 /* One board: a framed card, so where one ends and the next begins is not a
  * matter of counting gaps. */

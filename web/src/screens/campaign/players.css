@@ -107,10 +107,18 @@
   color: var(--text-default);
 }
 
+/* A real button (it is a tooltip trigger, and a focusable span is announced
+ * as bare text), stripped of the browser's button chrome. */
 .gx-players-panel .gx-players__badge {
   display: inline-flex;
   flex: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-pill);
+  background: none;
+  font: inherit;
+  color: inherit;
   cursor: help;
 }
 

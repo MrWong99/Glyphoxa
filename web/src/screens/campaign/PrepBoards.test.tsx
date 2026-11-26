@@ -32,7 +32,9 @@ const NODES = [
   { id: "n4", nodeType: NodeType.FACTION, name: "The Hucrele Trading House" },
 ];
 
-function store(init: { boards?: BoardRow[]; failUpdate?: { on: boolean } } = {}) {
+function store(init: { boards?: BoardRow[]; failUpdate?: { on: boolean }; nodes?: typeof NODES } = {}) {
+  // Mutable: a test can add an entry "in another tab" after the first read.
+  const nodes = [...(init.nodes ?? NODES)];
   const boards: BoardRow[] = (init.boards ?? [{ id: "b1", name: "Tonight", nodeIds: ["n1", "n2", "n3"] }]).map(
     (b) => ({ ...b, nodeIds: [...b.nodeIds] }),
   );
@@ -45,7 +47,7 @@ function store(init: { boards?: BoardRow[]; failUpdate?: { on: boolean } } = {})
     service(CampaignService, {
       listBoards: () =>
         create(ListBoardsResponseSchema, { boards: boards.map((b) => create(BoardSchema, b)) }),
-      listNodes: () => create(ListNodesResponseSchema, { nodes: NODES.map((n) => create(NodeSchema, n)) }),
+      listNodes: () => create(ListNodesResponseSchema, { nodes: nodes.map((n) => create(NodeSchema, n)) }),
       createBoard: (req) => {
         creates.push(req.name);
         const b = { id: `b${nextID++}`, name: req.name, nodeIds: [] };
@@ -69,7 +71,7 @@ function store(init: { boards?: BoardRow[]; failUpdate?: { on: boolean } } = {})
       },
     });
   });
-  return { transport, boards, updates, creates, deletes };
+  return { transport, boards, updates, creates, deletes, nodes };
 }
 
 type Store = ReturnType<typeof store>;
@@ -245,6 +247,32 @@ describe("PrepBoards reorder", () => {
     expect(entries()).toEqual(["Gulthias Fruit", "Kerowyn Hucrele", "Oakhurst"]);
   });
 
+  it("a refused write is not replayed by the write queued behind it", async () => {
+    const failUpdate = { on: true };
+    const s = mount(store({ failUpdate }));
+    await screen.findByText("Oakhurst");
+
+    // A move, then a rename before the move has been answered: the rename's
+    // request is built on the move (the pending state merges them).
+    fireEvent.click(screen.getByRole("button", { name: "Move Oakhurst down" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tonight" }));
+    const field = screen.getByRole("textbox", { name: "New name for board Tonight" });
+    fireEvent.change(field, { target: { value: "Heist" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+
+    expect(await screen.findByText("Couldn't update the board: the board is locked")).toBeInTheDocument();
+    await waitFor(() => expect(entries()).toEqual(["Oakhurst", "Kerowyn Hucrele", "Gulthias Fruit"]));
+    expect(await screen.findByRole("heading", { name: "Tonight" })).toBeInTheDocument();
+    // Only the refused write went out; the one built on it was dropped.
+    expect(s.updates).toHaveLength(1);
+
+    // The next write starts from what the server has, not the refused move.
+    failUpdate.on = false;
+    fireEvent.click(screen.getByRole("button", { name: "Move Gulthias Fruit up" }));
+    await waitFor(() => expect(s.updates).toHaveLength(2));
+    expect(s.updates[1]).toEqual({ id: "b1", name: "Tonight", nodeIds: ["n1", "n3", "n2"] });
+  });
+
   it("a refused move says so and goes back to what the server has", async () => {
     const failUpdate = { on: true };
     mount(store({ failUpdate }));
@@ -295,6 +323,36 @@ describe("PrepBoards entries in and out", () => {
     await waitFor(() => expect(s.updates).toEqual([{ id: "b1", name: "Tonight", nodeIds: ["n1", "n3"] }]));
     expect(entries()).toEqual(["Oakhurst", "Gulthias Fruit"]);
   });
+
+  it("after a removal, focus moves to the next row, and to 'Add entry' once the board is empty", async () => {
+    mount(store({ boards: [{ id: "b1", name: "Tonight", nodeIds: ["n1", "n2"] }] }));
+    await screen.findByText("Oakhurst");
+
+    const first = screen.getByRole("button", { name: "Remove Oakhurst from Tonight" });
+    act(() => first.focus());
+    fireEvent.click(first);
+    // The row with the focused button is gone; focus is not left on <body>.
+    expect(screen.getByRole("button", { name: "Remove Kerowyn Hucrele from Tonight" })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Kerowyn Hucrele from Tonight" }));
+    expect(screen.getByRole("button", { name: "Add an entry to Tonight" })).toHaveFocus();
+  });
+
+  it("keeps an entry the cached list has not seen yet, and drops one that is really gone", async () => {
+    // "n9" is on the board but not in the first entry read: made in another tab.
+    const s = mount(store({ boards: [{ id: "b1", name: "Tonight", nodeIds: ["n1", "n9", "n8"] }] }));
+    await screen.findByText("Oakhurst");
+    s.nodes.push({ id: "n9", nodeType: NodeType.NPC, name: "Sildar Hallwinter" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Tonight" }));
+    const field = screen.getByRole("textbox", { name: "New name for board Tonight" });
+    fireEvent.change(field, { target: { value: "Heist" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+
+    // The list was read again before anything was dropped: n9 exists, n8 does not.
+    await waitFor(() => expect(s.updates).toEqual([{ id: "b1", name: "Heist", nodeIds: ["n1", "n9"] }]));
+    expect(await screen.findByText("Sildar Hallwinter")).toBeInTheDocument();
+  });
 });
 
 describe("PrepBoards boards", () => {
@@ -310,6 +368,39 @@ describe("PrepBoards boards", () => {
     );
     expect(await screen.findByRole("heading", { name: "Tonight (copy)" })).toBeInTheDocument();
     expect(await screen.findByText("Duplicated “Tonight”")).toBeInTheDocument();
+  });
+
+  it("a refused fill takes back the empty copy instead of leaving it behind", async () => {
+    const s = mount(store({ failUpdate: { on: true } }));
+    await screen.findByText("Oakhurst");
+    openBoardMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Duplicate" }));
+
+    expect(await screen.findByText("Couldn't update the board: the board is locked")).toBeInTheDocument();
+    await waitFor(() => expect(s.deletes).toEqual(["b2"]));
+    expect(s.boards.map((b) => b.name)).toEqual(["Tonight"]);
+    expect(screen.queryByRole("heading", { name: "Tonight (copy)" })).toBeNull();
+  });
+
+  it("duplicates a board with a long name within the server's 120-rune cap", async () => {
+    const long = "ä".repeat(118);
+    const s = mount(store({ boards: [{ id: "b1", name: long, nodeIds: ["n1"] }] }));
+    await screen.findByText("Oakhurst");
+    openBoardMenu(long);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Duplicate" }));
+
+    await waitFor(() => expect(s.creates).toHaveLength(1));
+    expect(Array.from(s.creates[0]).length).toBeLessThanOrEqual(120);
+    expect(s.creates[0]).toMatch(/^ä+ \(copy\)$/);
+    // The name fields stop at the same cap.
+    fireEvent.click(screen.getByRole("button", { name: long }));
+    expect(screen.getByRole("textbox", { name: `New name for board ${long}` })).toHaveAttribute("maxLength", "120");
+  });
+
+  it("says 'No boards yet' once, not twice", async () => {
+    mount(store({ boards: [] }));
+    expect(await screen.findByText("No boards yet")).toBeInTheDocument();
+    expect(screen.getAllByText(/No boards yet/)).toHaveLength(1);
   });
 
   it("creates a board from the name field", async () => {
@@ -355,7 +446,8 @@ describe("NodeBoards", () => {
     // It used to render nothing here, so the feature was invisible from the wiki.
     const field = await screen.findByRole("textbox", { name: "New board name" });
     expect(screen.getByText(/A board is a shortlist for one session/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New board" })).toBeDisabled();
+    // Unavailable with no name — but focusable (aria-disabled, not disabled).
+    expect(screen.getByRole("button", { name: "New board" })).toHaveAttribute("aria-disabled", "true");
 
     fireEvent.change(field, { target: { value: "Tonight" } });
     fireEvent.click(screen.getByRole("button", { name: "New board" }));

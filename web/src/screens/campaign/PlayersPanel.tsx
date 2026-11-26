@@ -280,23 +280,25 @@ export function PlayersPanel() {
                   </button>
                   {/* Outside the row's button: a badge that explains itself has
                       to be reachable on its own, and a focusable thing inside a
-                      button is not. */}
+                      button is not. A button of its own (the tooltip's
+                      trigger), not a focusable span a screen reader announces
+                      as bare text. */}
                   {c.linkedUserId !== "" ? (
                     <Tooltip content={t("players.badgeLinkedTip")}>
-                      <span className="gx-players__badge" tabIndex={0}>
+                      <button type="button" className="gx-players__badge">
                         <Badge variant="gold" size="sm">
                           {t("campaign.badgeLinked")}
                         </Badge>
-                      </span>
+                      </button>
                     </Tooltip>
                   ) : (
                     !member && (
                       <Tooltip content={t("players.badgeDiscordIdTip")}>
-                        <span className="gx-players__badge" tabIndex={0}>
+                        <button type="button" className="gx-players__badge">
                           <Badge variant="neutral" size="sm">
                             {t("campaign.badgeDiscordId")}
                           </Badge>
-                        </span>
+                        </button>
                       </Tooltip>
                     )
                   )}

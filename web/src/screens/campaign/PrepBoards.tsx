@@ -41,6 +41,13 @@ import "./boards.css";
 // meant opening each entry in the wiki, and the order was whatever order that
 // happened in.
 
+/**
+ * The server's cap on a board name, in runes (storage.MaxBoardNameRunes,
+ * internal/storage/kg_tag_board.go). Enforced here too, so a long name is
+ * stopped while it is typed rather than refused after the round trip.
+ */
+const MAX_BOARD_NAME_RUNES = 120;
+
 /** invalidateBoards drops the one board read every surface derives from. */
 function invalidateBoards(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
   return invalidateMethodQueries(queryClient, CampaignService.method.listBoards);
@@ -73,6 +80,7 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
 
   const update = useMutation(CampaignService.method.updateBoard);
   const create = useMutation(CampaignService.method.createBoard);
+  const remove = useMutation(CampaignService.method.deleteBoard);
   const busy = update.isPending || create.isPending;
 
   const fail = (err: unknown) => setError(t("campaign.boardUpdateError", { message: errorMessage(err) }));
@@ -97,13 +105,18 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
     const name = newName.trim();
     if (name === "" || busy) return;
     setError(null);
+    let made: Board | undefined;
     try {
-      const res = await create.mutateAsync({ name });
-      if (res.board) await update.mutateAsync({ id: res.board.id, name: res.board.name, nodeIds: [nodeID] });
+      made = (await create.mutateAsync({ name })).board;
+      if (made) await update.mutateAsync({ id: made.id, name: made.name, nodeIds: [nodeID] });
       setNewName("");
       setAdding(false);
     } catch (err) {
       fail(err);
+      // Two calls, not one: when the second is refused, the board the first
+      // made is empty — not the board the GM asked for. Take it back, so the
+      // error is the whole story.
+      if (made) await remove.mutateAsync({ id: made.id }).catch(() => undefined);
     } finally {
       void invalidateBoards(queryClient);
     }
@@ -158,6 +171,7 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
             aria-label={t("campaign.newBoardAria")}
             placeholder={t("campaign.newBoardPlaceholder")}
             value={newName}
+            maxLength={MAX_BOARD_NAME_RUNES}
             // Revealed by the chip above: the caret belongs here.
             autoFocus={adding}
             onChange={(e) => setNewName(e.target.value)}
@@ -177,8 +191,10 @@ export function NodeBoards({ nodeID }: { nodeID: string }) {
             variant="secondary"
             size="sm"
             iconStart={<Plus size={13} />}
-            disabled={newName.trim() === ""}
-            loading={busy && newName.trim() !== ""}
+            // aria-disabled, not disabled/loading: the pressed button must keep
+            // focus while the write is out and once the field has cleared.
+            aria-disabled={newName.trim() === "" || busy || undefined}
+            aria-busy={(busy && newName.trim() !== "") || undefined}
             onClick={() => void createWithEntry()}
           >
             {t("boards.newBoard")}
@@ -233,25 +249,48 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
   const queue = useRef<Promise<unknown>>(Promise.resolve());
+  // Bumped when a write to a board is refused. Every write queued behind it
+  // was built ON the refused one (the pending state merges them), so sending
+  // it would replay the refused change; it is dropped instead, and the board
+  // goes back to what the server has.
+  const generation = useRef(new Map<string, number>());
+
+  // An entry deleted in the wiki a moment ago would have the whole save
+  // refused; it is not on the board any more either way. But an id missing
+  // from the CACHED entry list may just be newer than the cache (made in
+  // another tab), so the list is read again before anything is dropped.
+  const liveIDs = async (ids: string[]): Promise<string[]> => {
+    if (!nodesLoaded || ids.every((id) => nodesByID.has(id))) return ids;
+    const fresh = (await nodesQuery.refetch()).data?.nodes;
+    if (!fresh) return ids;
+    const known = new Set(fresh.map((n) => n.id));
+    return ids.filter((id) => known.has(id));
+  };
 
   const write = (board: Board, change: Pending) => {
+    const gen = generation.current.get(board.id) ?? 0;
     const merged: Pending = { ...pendingRef.current[board.id], ...change };
     pendingRef.current = { ...pendingRef.current, [board.id]: merged };
     setPending(pendingRef.current);
-    const request = {
-      id: board.id,
-      name: merged.name ?? board.name,
-      // An entry deleted in the wiki a moment ago would have the whole save
-      // refused; it is not on the board any more either way.
-      nodeIds: (merged.nodeIds ?? board.nodeIds).filter((id) => !nodesLoaded || nodesByID.has(id)),
-    };
     queue.current = queue.current
-      .then(() => updateBoard.mutateAsync(request))
-      .then(() => invalidateBoards(queryClient))
-      .catch((err: unknown) => {
-        fail(err);
-        // Show what the server actually has.
-        return invalidateBoards(queryClient);
+      .then(async () => {
+        if ((generation.current.get(board.id) ?? 0) !== gen) return;
+        try {
+          await updateBoard.mutateAsync({
+            id: board.id,
+            name: merged.name ?? board.name,
+            nodeIds: await liveIDs(merged.nodeIds ?? board.nodeIds),
+          });
+        } catch (err) {
+          generation.current.set(board.id, gen + 1);
+          fail(err);
+          const rest = { ...pendingRef.current };
+          delete rest[board.id];
+          pendingRef.current = rest;
+          setPending(rest);
+        }
+        // Read back either way: on a refusal, show what the server actually has.
+        await invalidateBoards(queryClient);
       })
       .finally(() => {
         // Only this write's snapshot: a later one owns the board's pending state.
@@ -278,17 +317,31 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
     );
   };
 
+  // "{name} (copy)", with the name cut so the whole stays under the server's
+  // cap — a long name must still duplicate.
+  const copyNameOf = (name: string) => {
+    const suffix = Array.from(t("boards.copyName", { name: "" })).length;
+    const base = Array.from(name)
+      .slice(0, Math.max(1, MAX_BOARD_NAME_RUNES - suffix))
+      .join("")
+      .trimEnd();
+    return t("boards.copyName", { name: base });
+  };
+
   // A copy for next week: a new board with the same entries in the same order.
   const duplicate = async (board: Board, nodeIds: string[]) => {
+    let made: Board | undefined;
     try {
-      const res = await createBoard.mutateAsync({ name: t("boards.copyName", { name: board.name }) });
-      const ids = nodeIds.filter((id) => !nodesLoaded || nodesByID.has(id));
-      if (res.board && ids.length > 0) {
-        await updateBoard.mutateAsync({ id: res.board.id, name: res.board.name, nodeIds: ids });
+      made = (await createBoard.mutateAsync({ name: copyNameOf(board.name) })).board;
+      const ids = await liveIDs(nodeIds);
+      if (made && ids.length > 0) {
+        await updateBoard.mutateAsync({ id: made.id, name: made.name, nodeIds: ids });
       }
       toast.success(t("boards.duplicated", { name: board.name }));
     } catch (err) {
       fail(err);
+      // An empty "(copy)" left behind is not a copy: take it back.
+      if (made) await deleteBoard.mutateAsync({ id: made.id }).catch(() => undefined);
     } finally {
       void invalidateBoards(queryClient);
     }
@@ -311,6 +364,7 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
           aria-label={t("campaign.newBoardAria")}
           placeholder={t("campaign.newBoardPlaceholder")}
           value={newName}
+          maxLength={MAX_BOARD_NAME_RUNES}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") addBoard();
@@ -320,8 +374,10 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
           variant="secondary"
           size="sm"
           iconStart={<Plus size={13} />}
-          disabled={newName.trim() === ""}
-          loading={createBoard.isPending && newName.trim() !== ""}
+          // aria-disabled, not disabled/loading: the pressed button must keep
+          // focus while the write is out and once the field has cleared.
+          aria-disabled={newName.trim() === "" || createBoard.isPending || undefined}
+          aria-busy={(createBoard.isPending && newName.trim() !== "") || undefined}
           onClick={addBoard}
         >
           {t("campaign.addBoard")}
@@ -345,7 +401,7 @@ export function PrepBoards({ onOpenNode }: { onOpenNode?: (nodeID: string) => vo
           size="inline"
           icon={<ClipboardList size={16} />}
           title={t("boards.emptyTitle")}
-          description={t("campaign.boardsEmpty")}
+          description={t("boards.emptyDesc")}
         />
       ) : (
         boards.map((b) => (
@@ -456,12 +512,19 @@ function BoardCard({
 
   // ── Reorder ───────────────────────────────────────────────────────────────
   const listRef = useRef<HTMLOListElement | null>(null);
-  // The control that moved a row keeps focus as the row moves with it.
+  const addBox = useRef<HTMLDivElement | null>(null);
+  // The control that moved a row keeps focus as the row moves with it; after a
+  // removal, focus goes to the neighbouring row's remove button, or to the
+  // "Add entry" box once the board is empty.
   const keepFocus = useRef<{ nodeID: string; control: string } | null>(null);
   useLayoutEffect(() => {
     const want = keepFocus.current;
     if (!want) return;
     keepFocus.current = null;
+    if (want.control === "add") {
+      addBox.current?.querySelector<HTMLElement>("button")?.focus();
+      return;
+    }
     const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-node-id]") ?? [];
     const row = Array.from(rows).find((el) => el.dataset.nodeId === want.nodeID);
     const control = row?.querySelector<HTMLElement>(`[data-control="${want.control}"]`);
@@ -475,6 +538,12 @@ function BoardCard({
     [next[index], next[to]] = [next[to], next[index]];
     keepFocus.current = { nodeID: nodeIds[index], control };
     onWrite({ nodeIds: next });
+  };
+
+  const removeAt = (index: number) => {
+    const neighbour = nodeIds[index + 1] ?? nodeIds[index - 1];
+    keepFocus.current = neighbour ? { nodeID: neighbour, control: "remove" } : { nodeID: "", control: "add" };
+    onWrite({ nodeIds: nodeIds.filter((_, i) => i !== index) });
   };
 
   // Alt+Arrow moves the row from any control in it.
@@ -503,7 +572,7 @@ function BoardCard({
               className="gx-input"
               aria-label={t("boards.renameAria", { name })}
               value={draft}
-              maxLength={200}
+              maxLength={MAX_BOARD_NAME_RUNES}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
@@ -560,7 +629,9 @@ function BoardCard({
       {nodeIds.length === 0 ? (
         <p className="gx-boards__empty">{t("boards.boardEmpty")}</p>
       ) : (
-        <ol className="gx-boards__list" ref={listRef}>
+        // role="list": WebKit drops list semantics from a list styled
+        // list-style: none, and "2 of 5" is the point of an ordered board.
+        <ol className="gx-boards__list" ref={listRef} role="list">
           {nodeIds.map((id, index) => {
             const meta = metaOf(nodesByID.get(id)?.nodeType ?? 0);
             const label = nodesByID.get(id)?.name ?? t("campaign.entryWord");
@@ -615,7 +686,7 @@ function BoardCard({
                     label={t("campaign.removeFromBoardAria", { name: label, board: name })}
                     size="sm"
                     data-control="remove"
-                    onClick={() => onWrite({ nodeIds: nodeIds.filter((x) => x !== id) })}
+                    onClick={() => removeAt(index)}
                   >
                     <X size={14} />
                   </IconButton>
@@ -626,7 +697,7 @@ function BoardCard({
         </ol>
       )}
 
-      <div className="gx-boards__add">
+      <div className="gx-boards__add" ref={addBox}>
         <Combobox
           aria-label={t("boards.addEntryAria", { name })}
           options={available}

@@ -132,9 +132,11 @@ describe("PlayersPanel list", () => {
   it("explains its badges on keyboard focus", async () => {
     renderPanel({ members: [] });
     const row = rowOf(await screen.findByText("Aravel").then(() => "Aravel"));
-    const badge = within(row).getByText("Discord ID").closest("[tabindex]") as HTMLElement;
-    // Beside the row's button, not inside it: it has to take focus on its own.
-    expect(badge.closest("button")).toBeNull();
+    // A button of its own (a tooltip trigger with a role), not a focusable
+    // span announced as bare text…
+    const badge = within(row).getByRole("button", { name: "Discord ID" });
+    // …beside the row's button, not inside it: it has to take focus on its own.
+    expect(badge.parentElement?.closest("button")).toBeNull();
     act(() => badge.focus());
     expect(screen.getByRole("tooltip")).toHaveTextContent(/Known only by their Discord user ID/);
   });
@@ -142,7 +144,7 @@ describe("PlayersPanel list", () => {
   it("explains the Linked badge too", async () => {
     renderPanel({ members: [], linked: true });
     const row = rowOf(await screen.findByText("Aravel").then(() => "Aravel"));
-    const badge = within(row).getByText("Linked").closest("[tabindex]") as HTMLElement;
+    const badge = within(row).getByRole("button", { name: "Linked" });
     act(() => badge.focus());
     expect(screen.getByRole("tooltip")).toHaveTextContent(/signed in to Glyphoxa with their Discord account/);
   });
