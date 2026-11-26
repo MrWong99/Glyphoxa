@@ -6,8 +6,11 @@ import type { Map as PbMap } from "@gen/glyphoxa/management/v1/management_pb";
 // (ReplaceMapImage), so the two doors refuse the same files for the same reason.
 
 /** The image byte route (a plain guarded mount — an <img> cannot speak Connect). */
+//
+// The version carries the nanos too: two replacements inside one second would
+// otherwise share a URL, and the browser could keep showing the first image.
 export const mapImageURL = (map: PbMap) =>
-  `/api/v1/maps/${map.id}/image?v=${map.updatedAt ? Number(map.updatedAt.seconds) : 0}`;
+  `/api/v1/maps/${map.id}/image?v=${map.updatedAt ? `${map.updatedAt.seconds}.${map.updatedAt.nanos}` : 0}`;
 
 /** The blob seam's cap (ADR-0048, internal/blob.MaxSize). Stated in the UI BEFORE submit. */
 export const MAP_IMAGE_MAX_MB = 32;

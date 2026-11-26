@@ -69,7 +69,26 @@ const NUDGE_COARSE = 0.05;
 
 type Point = { x: number; y: number };
 
+/** Every field UpdatePin saves: it is a full-field write. */
+type PinFields = Point & { labelOverride: string; gmPrivate: boolean };
+
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+const fieldsOf = (pin: Pin): PinFields => ({
+  x: pin.x,
+  y: pin.y,
+  labelOverride: pin.labelOverride,
+  gmPrivate: pin.gmPrivate,
+});
+
+/**
+ * Whether a React event really happened inside `root`'s own DOM. React bubbles
+ * synthetic events through portals to their React ancestors, so a click inside
+ * a pin's card (portalled to <body>) still reaches the surface's handlers.
+ * Those clicks are not on the map.
+ */
+const fromInside = (ev: { target: EventTarget | null; currentTarget: EventTarget }) =>
+  ev.target instanceof Node && ev.currentTarget instanceof Node && ev.currentTarget.contains(ev.target);
 
 export function MapView({
   mapID,
@@ -140,6 +159,19 @@ export function MapView({
   const suppressClick = useRef(false);
   // The entry whose new pin should take focus once it renders (keyboard placing).
   const focusNode = useRef<string | null>(null);
+  // An entry armed from the keyboard hands focus to "Place at centre": it sits
+  // ABOVE the map, and reaching it from the tray would otherwise mean
+  // Shift+Tab past every pin on the map.
+  const placeButton = useRef<HTMLButtonElement | null>(null);
+  const focusPlace = useRef(false);
+
+  // UpdatePin saves every field, so two writes to one pin that overlap can undo
+  // each other: a privacy toggle sent while a move is still out would carry the
+  // OLD position and put the pin back. Writes to a pin are queued, and each is
+  // built on what the server last ACCEPTED for it (a refused write is never
+  // replayed by the one queued behind it).
+  const pinQueue = useRef(new Map<string, Promise<void>>());
+  const pinWrites = useRef(new Map<string, { count: number; accepted?: PinFields }>());
 
   // Every success clears the error line: an error from three actions ago,
   // still on screen after things work again, reads as a fault that is not there.
@@ -198,6 +230,21 @@ export function MapView({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [placing]);
+
+  useEffect(() => {
+    if (!focusPlace.current) return;
+    focusPlace.current = false;
+    if (placing) placeButton.current?.focus();
+  }, [placing]);
+
+  // A pin nudged past the edge of what is visible (zoomed in) scrolls into view:
+  // the keyboard GM has no other way to pan the frame while moving it.
+  useEffect(() => {
+    if (!nudge) return;
+    const dots = surfaceRef.current?.querySelectorAll<HTMLElement>("[data-pin-id]") ?? [];
+    const dot = Array.from(dots).find((el) => el.dataset.pinId === nudge.id);
+    if (dot && typeof dot.scrollIntoView === "function") dot.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [nudge]);
 
   // ── Zoom ──────────────────────────────────────────────────────────────────
   // The point that should stay under the cursor (or at the frame's centre)
@@ -294,38 +341,64 @@ export function MapView({
 
   // ── Writes ────────────────────────────────────────────────────────────────
 
+  /**
+   * Queues one UpdatePin for `pin` carrying `patch`. The fields it does not
+   * change come from the last write the server accepted for this pin, else
+   * from the pin as it was read — never from a write still waiting or refused.
+   */
+  const writePin = (
+    pin: Pin,
+    patch: Partial<PinFields>,
+    on: { accepted?: () => void; refused?: (e: unknown) => void; done?: () => void } = {},
+  ) => {
+    const slot = pinWrites.current.get(pin.id) ?? { count: 0 };
+    slot.count++;
+    pinWrites.current.set(pin.id, slot);
+    const step = async () => {
+      try {
+        const fields = { ...(slot.accepted ?? fieldsOf(pin)), ...patch };
+        try {
+          await updatePin.mutateAsync({ id: pin.id, ...fields });
+        } catch (e) {
+          on.refused?.(e);
+          return;
+        }
+        slot.accepted = fields;
+        on.accepted?.();
+        await settled();
+      } finally {
+        on.done?.();
+        slot.count--;
+        if (slot.count === 0 && pinWrites.current.get(pin.id) === slot) pinWrites.current.delete(pin.id);
+      }
+    };
+    const next = (pinQueue.current.get(pin.id) ?? Promise.resolve()).then(step, step);
+    pinQueue.current.set(pin.id, next);
+  };
+
   const movePin = (pin: Pin, at: Point) => {
     setPendingMoves((m) => ({ ...m, [pin.id]: at }));
-    const drop = () =>
-      setPendingMoves((m) => {
-        // Only this write's entry: a second move of the same pin owns its own.
-        if (m[pin.id] !== at) return m;
-        const rest = { ...m };
-        delete rest[pin.id];
-        return rest;
-      });
-    updatePin.mutate(
-      { id: pin.id, x: at.x, y: at.y, labelOverride: pin.labelOverride, gmPrivate: pin.gmPrivate },
+    writePin(
+      pin,
+      { x: at.x, y: at.y },
       {
-        onSuccess: () => {
-          setAnnouncement(t("maps.pinMoved", { name: labelOf(pin) }));
-          void settled().finally(drop);
-        },
-        onError: (e) => {
-          drop();
-          fail(e);
-        },
+        accepted: () => setAnnouncement(t("maps.pinMoved", { name: labelOf(pin) })),
+        refused: fail,
+        done: () =>
+          setPendingMoves((m) => {
+            // Only this write's entry: a second move of the same pin owns its own.
+            if (m[pin.id] !== at) return m;
+            const rest = { ...m };
+            delete rest[pin.id];
+            return rest;
+          }),
       },
     );
   };
 
-  const changePin = (pin: Pin, change: PinChange) => {
-    // Position rides along unchanged: UpdatePin is a full-field save.
-    updatePin.mutate(
-      { id: pin.id, x: pin.x, y: pin.y, labelOverride: change.labelOverride, gmPrivate: change.gmPrivate },
-      { onSuccess: () => void settled(), onError: fail },
-    );
-  };
+  // Only the field the card changed: position (and the other field) ride along
+  // from the queue, so a move still out is not undone.
+  const changePin = (pin: Pin, change: PinChange) => writePin(pin, change, { refused: fail });
 
   const place = (node: PbNode, at: Point, opts: { focus?: boolean } = {}) => {
     // One placement at a time: a second click while the first is in flight
@@ -386,6 +459,8 @@ export function MapView({
   };
 
   const replaceWith = async (file: File) => {
+    // One replacement at a time (the menu trigger stays live while one is out).
+    if (replacing) return;
     const problem = imageFileProblem(file);
     if (problem) {
       setError(problem === "type" ? t("maps.imageWrongType") : t("maps.imageTooLarge", { mb: MAP_IMAGE_MAX_MB }));
@@ -407,6 +482,10 @@ export function MapView({
       fail(e);
     } finally {
       setReplacing(false);
+      // The no-image upload button is busy (natively disabled) while the write
+      // is out, and on success it is gone: keep keyboard focus on the map
+      // rather than leave it on <body>.
+      if (document.activeElement === null || document.activeElement === document.body) frame?.focus();
     }
   };
 
@@ -555,7 +634,10 @@ export function MapView({
           </Button>
           <Menu
             trigger={
-              <IconButton label={t("maps.moreActions")} size="sm" loading={replacing}>
+              // Busy through ARIA, not `loading` (native disabled): the menu
+              // hands focus back to this trigger, and a disabled trigger would
+              // drop it to <body> for the length of the upload.
+              <IconButton label={t("maps.moreActions")} size="sm" aria-busy={replacing || undefined}>
                 <MoreVertical size={15} />
               </IconButton>
             }
@@ -593,8 +675,10 @@ export function MapView({
       )}
 
       {/* What the map is waiting for, said where the GM is looking. */}
+      {/* Not a live region: the hidden announcer below already says each
+          step of a keyboard move, and two would talk over each other. */}
       {nudging ? (
-        <p className="gx-maps__hint" role="status">
+        <p className="gx-maps__hint">
           {t("maps.nudgeHint", { name: labelOf(nudging) })}
         </p>
       ) : (
@@ -602,6 +686,7 @@ export function MapView({
           <div className="gx-maps__hint" role="status">
             <span>{t("campaign.placingHint", { name: placing.name })}</span>
             <Button
+              ref={placeButton}
               variant="secondary"
               size="sm"
               iconStart={<Crosshair size={13} />}
@@ -641,7 +726,7 @@ export function MapView({
                 suppressClick.current = false;
               }}
               onPointerMove={(ev) => {
-                if (!drag || ev.pointerId !== drag.pointerId) return;
+                if (!drag || ev.pointerId !== drag.pointerId || !fromInside(ev)) return;
                 const far =
                   Math.hypot(ev.clientX - drag.fromClientX, ev.clientY - drag.fromClientY) > DRAG_SLOP_PX;
                 // Below the slop the glyph does not move at all, so a click never
@@ -653,7 +738,7 @@ export function MapView({
                 setDrag({ ...drag, ...at, moved: true });
               }}
               onPointerUp={(ev) => {
-                if (!drag || ev.pointerId !== drag.pointerId) return;
+                if (!drag || ev.pointerId !== drag.pointerId || !fromInside(ev)) return;
                 const pin = view.pins.find((p) => p.id === drag.id);
                 const moved = drag.moved;
                 setDrag(null);
@@ -672,6 +757,11 @@ export function MapView({
                 if (drag && !drag.captured) setDrag(null);
               }}
               onClick={(ev) => {
+                // A click inside an open pin card (portalled to <body>, but a
+                // React child of this surface) is the card's — never a placement
+                // under wherever the card happens to sit, nor, for a keyboard
+                // press with no coordinates, at the map's top-left corner.
+                if (!fromInside(ev)) return;
                 // The click that follows a drag does not always land on the pin
                 // (some browsers send it to the common ancestor of where the
                 // press and the release were): it is never a placement.
@@ -783,7 +873,10 @@ export function MapView({
           unpinned={view.unpinned}
           suggested={suggested}
           placingID={placing?.id ?? null}
-          onToggle={(n) => setPlacing((p) => (p?.id === n.id ? null : n))}
+          onToggle={(n, viaKeyboard) => {
+            if (viaKeyboard && placing?.id !== n.id) focusPlace.current = true;
+            setPlacing((p) => (p?.id === n.id ? null : n));
+          }}
           canSuggest={map.anchorNodeId !== ""}
           suggesting={suggest.isPending}
           suggestError={suggest.isError ? apiErrorMessage(suggest.error, t) : null}

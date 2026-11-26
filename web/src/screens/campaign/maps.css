@@ -132,6 +132,12 @@
   flex: 1 1 12rem;
   min-width: 0;
 }
+/* "Place at centre" while its CreatePin is out: busy through ARIA so it keeps
+ * focus, and it has to LOOK pending too, since a press is ignored. */
+.gx-maps .gx-maps__hint [aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
 
 /* ── Stage: the map, and the tray beside it on a wide screen ─────────────── */
 
@@ -581,6 +587,15 @@
 }
 .gx-maps-card__label > .gx-field {
   width: 100%;
+}
+/* Save stays focusable with nothing to save or while saving (aria-disabled,
+ * not disabled), so it only looks unavailable. */
+.gx-maps-card .gx-maps-card__label [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.gx-maps-card .gx-maps-card__label [aria-busy="true"] {
+  cursor: progress;
 }
 .gx-maps-card__privacy {
   display: flex;

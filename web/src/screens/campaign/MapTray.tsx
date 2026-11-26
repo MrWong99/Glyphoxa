@@ -37,7 +37,8 @@ export function MapTray({
   suggested: ReadonlySet<string>;
   /** The armed entry, if any. */
   placingID: string | null;
-  onToggle: (node: PbNode) => void;
+  /** `viaKeyboard`: the press came from Enter/Space (a click with no pointer). */
+  onToggle: (node: PbNode, viaKeyboard: boolean) => void;
   /** The map depicts a Location entry, so there is prose to suggest from. */
   canSuggest: boolean;
   suggesting: boolean;
@@ -179,7 +180,8 @@ export function MapTray({
                       aria-pressed={placingID === n.id}
                       data-suggested={isSuggested || undefined}
                       aria-label={isSuggested ? t("campaign.suggestedAria", { name: n.name }) : undefined}
-                      onClick={() => onToggle(n)}
+                      // A click the keyboard made has no pointer press behind it.
+                      onClick={(ev) => onToggle(n, ev.detail === 0)}
                     >
                       <span
                         className="gx-maps__tray-icon"

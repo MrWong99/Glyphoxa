@@ -32,7 +32,8 @@ function excerptOf(body: string): string {
   return `${(space > EXCERPT_CHARS * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
-export type PinChange = { labelOverride: string; gmPrivate: boolean };
+/** Only what the card changed; the map fills in the rest of the full-field save. */
+export type PinChange = { labelOverride?: string; gmPrivate?: boolean };
 
 export function PinGlyph({
   pin,
@@ -103,9 +104,10 @@ export function PinGlyph({
           />
         }
       >
+        {/* No `key` on the label: remounting the card when a saved label is
+            read back took the focused field and button with it, and dropped
+            keyboard focus to <body> while the card stayed open. */}
         <PinCard
-          // Re-seed the label draft when the stored label changes under the card.
-          key={pin.labelOverride}
           pin={pin}
           node={node}
           updating={updating}
@@ -138,13 +140,20 @@ function PinCard({
   const meta = metaOf(pin.nodeType);
   const Icon = meta.Icon;
   const [labelDraft, setLabelDraft] = useState(pin.labelOverride);
+  // Re-seed the draft when the stored label changes under the card (a save read
+  // back, or another tab's), without remounting the card.
+  const [seenLabel, setSeenLabel] = useState(pin.labelOverride);
+  if (seenLabel !== pin.labelOverride) {
+    setSeenLabel(pin.labelOverride);
+    setLabelDraft(pin.labelOverride);
+  }
   const labelChanged = labelDraft.trim() !== pin.labelOverride;
   const excerpt = node ? excerptOf(node.body) : "";
 
   const saveLabel = (ev: FormEvent) => {
     ev.preventDefault();
     if (!labelChanged || updating) return;
-    onChange({ labelOverride: labelDraft.trim(), gmPrivate: pin.gmPrivate });
+    onChange({ labelOverride: labelDraft.trim() });
   };
 
   return (
@@ -187,7 +196,17 @@ function PinCard({
           maxLength={200}
           onChange={(e) => setLabelDraft(e.target.value)}
         />
-        <Button type="submit" variant="secondary" size="sm" disabled={!labelChanged} loading={updating && labelChanged}>
+        {/* Unavailable and busy through ARIA, not `disabled`/`loading`: a
+            browser moves focus off a natively disabled button to <body>, and
+            this one is pressed, then has nothing left to save. saveLabel
+            ignores a press in either state. */}
+        <Button
+          type="submit"
+          variant="secondary"
+          size="sm"
+          aria-disabled={!labelChanged || updating || undefined}
+          aria-busy={(updating && labelChanged) || undefined}
+        >
           {t("maps.pinLabelSave")}
         </Button>
       </form>
@@ -198,7 +217,7 @@ function PinCard({
           checked={pin.gmPrivate || pin.nodeGmPrivate}
           // An entry that is GM-only hides every pin of it, whatever the pin says.
           disabled={pin.nodeGmPrivate}
-          onCheckedChange={(next) => onChange({ labelOverride: pin.labelOverride, gmPrivate: next })}
+          onCheckedChange={(next) => onChange({ gmPrivate: next })}
         />
         {pin.nodeGmPrivate && <span className="gx-field__hint">{t("maps.pinHiddenByEntry")}</span>}
       </div>
