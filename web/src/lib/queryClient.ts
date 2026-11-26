@@ -4,6 +4,7 @@ import { MutationCache, QueryCache, QueryClient, type QueryKey } from "@tanstack
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import { isUnauthenticated } from "@/lib/connectError";
+import { connectionStore } from "@/lib/connectionStatus";
 
 // The session probe's cache key (every variant of it).
 const currentUserKey = createConnectQueryKey({
@@ -30,6 +31,12 @@ function isCurrentUserProbe(queryKey: QueryKey): boolean {
 // probe's own failure is excluded (it IS the signal; re-invalidating it would
 // loop), which also keeps the public pages — where an Unauthenticated probe is
 // the normal signed-out answer — untouched.
+//
+// The same two caches feed the connection status the shell's banner shows
+// (lib/connectionStatus.ts): a READ that nobody answered raises "can't reach
+// Glyphoxa", and any call the server did answer lowers it again. Only reads
+// raise it — a failed write already reports itself where the GM pressed the
+// button — but a write that succeeds is as good a sign of life as a read.
 export function makeQueryClient(): QueryClient {
   const reprobeSession = (error: unknown) => {
     if (isUnauthenticated(error)) void client.invalidateQueries({ queryKey: currentUserKey });
@@ -37,10 +44,15 @@ export function makeQueryClient(): QueryClient {
   const client: QueryClient = new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) => {
+        connectionStore(client).noteError(error);
         if (!isCurrentUserProbe(query.queryKey)) reprobeSession(error);
       },
+      onSuccess: () => connectionStore(client).noteSuccess(),
     }),
-    mutationCache: new MutationCache({ onError: reprobeSession }),
+    mutationCache: new MutationCache({
+      onError: reprobeSession,
+      onSuccess: () => connectionStore(client).noteSuccess(),
+    }),
     defaultOptions: {
       queries: {
         staleTime: 30_000,

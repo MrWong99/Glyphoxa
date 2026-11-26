@@ -1,11 +1,32 @@
-// Command palette (Ctrl+K campaign search, #591). en is the source of truth;
-// de must cover every key (compile-checked in i18n/index.tsx).
+// Command palette (Ctrl/Cmd+K): navigation layer + campaign search (#591). en
+// is the source of truth; de must cover every key (compile-checked in
+// i18n/index.tsx).
 
 export const en = {
-  "palette.title": "Campaign search",
-  "palette.openSearch": "Search the campaign (Ctrl+K)",
-  "palette.placeholder": "Search entries, transcripts, highlights…",
-  "palette.hint": "Type to search this campaign. Esc closes.",
+  "palette.title": "Search and jump",
+  // The topbar button. {shortcut} is the chord for this platform ("Ctrl+K",
+  // "⌘K"); the button's visible text is palette.searchButton.
+  "palette.openSearch": "Search and jump ({shortcut})",
+  "palette.searchButton": "Search or jump to…",
+  // The modifier key's cap, as printed on the keyboard for this language.
+  "palette.keyCtrl": "Ctrl",
+  "palette.placeholder": "Search or jump to…",
+  "palette.hint": "Type to search this campaign's entries, transcripts and highlights — or an NPC's name.",
+
+  // Navigation layer (filtered in the browser).
+  "palette.groupGoTo": "Go to",
+  "palette.groupActions": "Actions",
+  "palette.switchCampaign": "Switch campaign: {name}",
+  "palette.goToLiveSession": "Go to live session",
+  "palette.newCampaignDesc":
+    "It becomes your active campaign, with its own Butler, cast and world wiki.",
+
+  // Footer key hints.
+  "palette.keyHintMove": "move",
+  "palette.keyHintOpen": "open",
+  "palette.keyHintClose": "close",
+
+  // Campaign search (ranked by the server).
   "palette.groupEntries": "Entries",
   "palette.groupTranscripts": "Transcripts",
   "palette.groupHighlights": "Highlights",
@@ -22,10 +43,25 @@ export const en = {
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
-  "palette.title": "Kampagnen-Suche",
-  "palette.openSearch": "Kampagne durchsuchen (Strg+K)",
-  "palette.placeholder": "Einträge, Mitschriften, Highlights durchsuchen…",
-  "palette.hint": "Tippen, um diese Kampagne zu durchsuchen. Esc schließt.",
+  "palette.title": "Suchen und springen",
+  "palette.openSearch": "Suchen und springen ({shortcut})",
+  "palette.searchButton": "Suchen oder springen zu…",
+  "palette.keyCtrl": "Strg",
+  "palette.placeholder": "Suchen oder springen zu…",
+  "palette.hint":
+    "Tippe, um Einträge, Mitschriften und Highlights dieser Kampagne zu durchsuchen — oder den Namen eines NPCs.",
+
+  "palette.groupGoTo": "Gehe zu",
+  "palette.groupActions": "Aktionen",
+  "palette.switchCampaign": "Kampagne wechseln: {name}",
+  "palette.goToLiveSession": "Zur laufenden Spielrunde",
+  "palette.newCampaignDesc":
+    "Sie wird deine aktive Kampagne — mit eigenem Butler, eigener Besetzung und eigenem Welt-Wiki.",
+
+  "palette.keyHintMove": "bewegen",
+  "palette.keyHintOpen": "öffnen",
+  "palette.keyHintClose": "schließen",
+
   "palette.groupEntries": "Einträge",
   "palette.groupTranscripts": "Mitschriften",
   "palette.groupHighlights": "Highlights",

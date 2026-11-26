@@ -4,6 +4,8 @@ import type { ErrorComponentProps } from "@tanstack/react-router";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Page } from "@/components/ui/Page";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/connectError";
 import { guardedSearchChanged, hasUnsavedEdits } from "@/lib/navigationGuard";
@@ -14,12 +16,26 @@ import { guardedSearchChanged, hasUnsavedEdits } from "@/lib/navigationGuard";
 // two TanStack Router falls back to its own unstyled English defaults — a bare
 // "Something went wrong!" / "Not Found" on a white page.
 
-// RoutePending covers the gap while a code-split screen's chunk loads. It is
-// the same quiet boot placeholder the AuthGate shows, so a slow chunk reads as
-// "still loading", not as a different state.
+// RoutePending covers the gap while a code-split screen's chunk loads: the
+// outline of a page — a header, then rows — in the content column. It used to
+// be the AuthGate's full-viewport boot placeholder, which inside the shell
+// meant a 100vh blank with a spinner far below the fold of the content area,
+// and a page that jumped when the screen arrived. One status region ("Loading…")
+// for a screen reader; the bars are decoration.
 export function RoutePending() {
-  const { t } = useI18n();
-  return <div className="gx-auth-boot" aria-busy="true" aria-label={t("common.loading")} />;
+  return (
+    <div className="gx-route-pending" data-testid="route-pending">
+      <Page>
+        <Skeleton>
+          <div className="gx-route-pending__header">
+            <span className="gx-skeleton" />
+            <span className="gx-skeleton" />
+          </div>
+          <Skeleton.Row count={4} avatar={false} />
+        </Skeleton>
+      </Page>
+    </div>
+  );
 }
 
 // RouteError is the app's error boundary surface. "Try again" re-renders the
