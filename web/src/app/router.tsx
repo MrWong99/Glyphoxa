@@ -5,7 +5,6 @@ import {
   createRouter,
   redirect,
   Outlet,
-  useNavigate,
 } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/AppShell";
@@ -255,26 +254,18 @@ const screenRoute = createRoute({
     });
   },
   component: function Screen() {
-    const { screen, tenantSlug } = screenRoute.useParams();
-    const search = screenRoute.useSearch();
-    const navigate = useNavigate();
+    const { screen } = screenRoute.useParams();
     // useI18n is called unconditionally (hook rules) even though only the
     // notFound branch renders localized copy of its own.
     const { t } = useI18n();
-    // Consume-then-strip: the screen applies the deep link, then this replaces
-    // the URL without the params so the state isn't sticky (see ScreenSearch).
-    const clearDeepLink = () =>
-      void navigate({
-        to: "/t/$tenantSlug/$screen",
-        params: { tenantSlug, screen },
-        search: {},
-        replace: true,
-      });
     switch (screen) {
       case "configuration":
         return loaded(<Configuration />);
       case "session":
-        return loaded(<Session deepLink={search} onDeepLinkHandled={clearDeepLink} />);
+        // The Session screen owns its search keys through useScreenNav(), like
+        // the Campaign screen: ?session= is the session on screen (sticky),
+        // ?line= and ?highlight= are applied once and stripped by the screen.
+        return loaded(<Session />);
       case "campaigns":
         return loaded(<Campaigns />);
       default:
