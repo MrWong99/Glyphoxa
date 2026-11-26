@@ -69,6 +69,7 @@ export function WikiNav({
       },
       goScreen: () => {},
       goCampaignView: () => {},
+      goWorkspace: () => {},
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [search, history],

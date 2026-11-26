@@ -55,8 +55,12 @@ export const SCREEN_SEARCH_KEYS = [
   "agent",
 ] as const satisfies readonly (keyof ScreenSearch)[];
 
-/** The top-level screens under /t/:tenantSlug/. */
-export const SCREENS = ["campaign", "session", "campaigns", "configuration"] as const;
+/**
+ * The top-level screens under /t/:tenantSlug/. `admin` exists only for a
+ * Platform Admin (ADR-0065): app/destinations.ts marks it, and the route
+ * renders the not-found page for everyone else.
+ */
+export const SCREENS = ["campaign", "session", "campaigns", "configuration", "admin"] as const;
 export type ScreenName = (typeof SCREENS)[number];
 
 export type ScreenNav = {
@@ -78,6 +82,14 @@ export type ScreenNav = {
   goScreen: (screen: ScreenName, search?: ScreenSearch) => void;
   /** Goes to a Campaign sub-view. */
   goCampaignView: (view: CampaignView, search?: ScreenSearch) => void;
+  /**
+   * Opens another Workspace (ADR-0065): a Campaign the user is a Campaign Guest
+   * of, by its id, or — with null — their own. It is a navigation like the
+   * others (the Workspace is named by the path, app/workspace.ts), so unsaved
+   * edits are asked about first; the WorkspaceGate then switches the session
+   * and drops everything cached for the Workspace being left.
+   */
+  goWorkspace: (guestCampaignId: string | null) => void;
 };
 
 const NOOP_NAV: ScreenNav = {
@@ -85,6 +97,7 @@ const NOOP_NAV: ScreenNav = {
   setSearch: () => {},
   goScreen: () => {},
   goCampaignView: () => {},
+  goWorkspace: () => {},
 };
 
 const ScreenNavContext = createContext<ScreenNav>(NOOP_NAV);
@@ -144,11 +157,14 @@ export type ScreenLocation = { screen?: ScreenName; view?: CampaignView; search:
 export function MemoryScreenNav({
   initial,
   onNavigate,
+  onWorkspace,
   children,
 }: {
   initial?: Partial<ScreenLocation>;
   /** Called with every location the tree navigates to. */
   onNavigate?: (next: ScreenLocation, opts: { replace: boolean }) => void;
+  /** Called with the Workspace the tree asks to open (null: the user's own). */
+  onWorkspace?: (guestCampaignId: string | null) => void;
   children: ReactNode | ((location: ScreenLocation) => ReactNode);
 }) {
   const [location, setLocation] = useState<ScreenLocation>(() => ({
@@ -187,8 +203,9 @@ export function MemoryScreenNav({
         ),
       goCampaignView: (view, search) =>
         move({ screen: "campaign", view, search: compactSearch(search ?? {}) }, false),
+      goWorkspace: (guestCampaignId) => onWorkspace?.(guestCampaignId),
     }),
-    [location, move],
+    [location, move, onWorkspace],
   );
 
   return (

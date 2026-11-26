@@ -4,7 +4,7 @@ import { useQuery } from "@connectrpc/connect-query";
 import { useNavigate } from "@tanstack/react-router";
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { User } from "@gen/glyphoxa/management/v1/management_pb";
+import { CurrentUserProvider, toCurrentUser, type CurrentUser } from "@/app/currentUser";
 import { errorMessage, isUnauthenticated } from "@/lib/connectError";
 import { rememberReturnTo } from "@/lib/returnTo";
 import { useI18n } from "@/i18n";
@@ -16,17 +16,35 @@ import { useI18n } from "@/i18n";
 // retry is off so a 401 redirects immediately rather than after react-query's
 // default backoff.
 //
+// The user it hands on is a CurrentUser: the identity plus the access facts
+// that ride on the same response (ADR-0065: Platform Admin, own Tenant, guest
+// Workspaces). The same value is put in context, so a screen deep in the
+// Outlet — the Admin route, the not-found page — can ask who is signed in
+// without the shell threading it down.
+//
 // It is also where a session that lapses MID-USE ends up: the query client
 // re-probes GetCurrentUser when any other call comes back Unauthenticated
 // (lib/queryClient.ts), this gate sees the probe fail and redirects. The path
 // being left is parked first so the sign-in lands back on it (lib/returnTo.ts).
-export function AuthGate({ children }: { children: (user: User) => ReactNode }) {
+/** How often a guest session re-reads who it is. */
+export const GUEST_PROBE_MS = 30_000;
+
+export function AuthGate({ children }: { children: (user: CurrentUser) => ReactNode }) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const { data, status, error } = useQuery(
     AuthService.method.getCurrentUser,
     {},
-    { retry: false },
+    {
+      retry: false,
+      // While the session acts as a Campaign Guest, what it may do is someone
+      // else's to change (ADR-0065): the GM edits the rights or removes the
+      // guest, and the server then quietly resolves the session to another
+      // Workspace — no call is refused, so nothing else would notice. Re-reading
+      // on a short interval bounds how long the shell can show a Workspace the
+      // session no longer acts as. The GM's own shell does not poll.
+      refetchInterval: (query) => (query.state.data?.guest ? GUEST_PROBE_MS : false),
+    },
   );
 
   const unauthenticated = status === "error" && isUnauthenticated(error);
@@ -42,8 +60,9 @@ export function AuthGate({ children }: { children: (user: User) => ReactNode }) 
   // NON-auth reason (a blip, a restart) flips the status to error while the
   // operator is still signed in — tearing the whole shell down for that would
   // discard every screen's state over nothing.
-  if (data?.user && !unauthenticated) {
-    return <>{children(data.user)}</>;
+  const user = data ? toCurrentUser(data) : undefined;
+  if (user && !unauthenticated) {
+    return <CurrentUserProvider user={user}>{children(user)}</CurrentUserProvider>;
   }
 
   // A non-401 error is a real failure (server down, etc.) — surface it rather

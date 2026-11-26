@@ -70,6 +70,48 @@ describe("Login", () => {
     expect(screen.getByRole("link", { name: /continue with discord/i })).toBeInTheDocument();
   });
 
+  // ADR-0065: an instance that admits by Access Grant can say how to get in.
+  it("says an invite-only instance is invite-only, and to ask its admin for an invitation link", async () => {
+    await renderLogin(<Login notAuthorized />, backend({ mode: AdmissionMode.ALLOWLIST }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "This Discord account isn't authorized here. This instance is invite-only — ask its admin for an invitation link.",
+      ),
+    );
+    // Still non-leaky: nothing about why THIS account was refused.
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/allowlist|suspend|revoked/i);
+  });
+
+  it("does not call an open instance invite-only: a refusal there keeps the bare sentence", async () => {
+    // In open mode the same redirect means a suspended account; "invite-only"
+    // would be false.
+    await renderLogin(<Login notAuthorized />, backend({ mode: AdmissionMode.OPEN }));
+    await screen.findByText(/creates your own table/i);
+    const banner = screen.getByRole("alert");
+    expect(banner).toHaveTextContent("This Discord account isn't authorized here.");
+    expect(banner).not.toHaveTextContent(/invite-only|invitation link/i);
+  });
+
+  it("does not claim invite-only while the Admission Mode is unknown", async () => {
+    await renderLogin(<Login notAuthorized />, backend({ error: true }));
+    await waitFor(() => expect(screen.getByRole("link", { name: /continue with discord/i })).toBeInTheDocument());
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/invite-only/i);
+  });
+
+  it("says it in German too", async () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      await renderLogin(<Login notAuthorized />, backend({ mode: AdmissionMode.ALLOWLIST }));
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveTextContent(
+          /nur auf Einladung zugänglich — bitte ihren Admin um einen Einladungslink/,
+        ),
+      );
+    } finally {
+      localStorage.removeItem("gx-lang");
+    }
+  });
+
   it("renders no banner on a normal first visit", async () => {
     await renderLogin(<Login />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();

@@ -5,20 +5,22 @@ import { Toaster } from "sonner";
 import { Dices, PanelLeft, Search } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipProvider } from "./ui/Tooltip";
 import { SidebarUser } from "./SidebarUser";
 import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
+import { GuestWorkspaceSwitcher } from "./GuestWorkspaceSwitcher";
 import { CommandPalette, PaletteShortcut, isApplePlatform, paletteShortcut } from "./CommandPalette";
 import { ConnectionBanner } from "./ConnectionBanner";
+import type { CurrentUser } from "@/app/currentUser";
+import { capabilitiesFor } from "@/app/capabilities";
 import {
-  CAMPAIGN_DESTINATIONS,
-  SCREEN_DESTINATIONS,
   campaignDestination,
+  campaignDestinationsFor,
   screenDestination,
+  screenDestinationsFor,
 } from "@/app/destinations";
 import { useI18n } from "@/i18n";
 import { isAtMost, watchBreakpoint, type Breakpoint } from "@/lib/breakpoints";
@@ -41,8 +43,17 @@ import "./appShell.css";
 // The sidebar is campaign-first (ADR-0063 amendment): a section labelled with
 // the Active Campaign's name lists that campaign's views on EVERY screen — not
 // only while the Campaign screen is open — then Session, and, pinned at the
-// bottom, the two Tenant-wide destinations: Campaigns and Setup. The lists
-// themselves are app/destinations.ts.
+// bottom, the Tenant-wide destinations: Campaigns and Setup — and, for a
+// Platform Admin only, Admin (ADR-0065). The lists themselves are
+// app/destinations.ts.
+//
+// For a Campaign Guest (ADR-0065: `user.guest` is set) the same shell shows
+// ONLY what their Guest Rights open: the campaign section lists the shared
+// views, Session becomes the read-only archive when transcripts or highlights
+// are shared, and Campaigns, Setup and Admin are gone. The campaign is the one
+// their Workspace names — the shell reads nothing a guest is refused (no
+// Active Campaign, no suggestions count, no live-session poll) — and the
+// switcher in the topbar says whose guest they are, on every screen.
 
 // The desktop sidebar's hidden/shown choice, kept across reloads. It is a
 // per-browser preference like the display language, and only the DESKTOP
@@ -96,7 +107,7 @@ const PROPOSALS_REFETCH_MS = 60_000;
 // just delay the empty state.
 const proposalsRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
 
-export function AppShell(props: { tenantSlug: string; user: User }) {
+export function AppShell(props: { tenantSlug: string; user: CurrentUser }) {
   return (
     // One tooltip provider for the chrome: moving between neighbouring topbar
     // icons shows each tooltip at once after the first.
@@ -106,13 +117,23 @@ export function AppShell(props: { tenantSlug: string; user: User }) {
   );
 }
 
-function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
+function Shell({ tenantSlug, user }: { tenantSlug: string; user: CurrentUser }) {
   const { t } = useI18n();
   // Derived by hand rather than via Link activeProps so the mocked-router unit
   // test can observe it, and because the topbar needs the values anyway.
   const { screen, view } = useParams({ strict: false }) as { screen?: string; view?: string };
-  const activeView = screen === "campaign" && isCampaignView(view) ? view : undefined;
-  const activeScreen = screenDestination(screen);
+  const guest = user.guest;
+  const can = capabilitiesFor(guest);
+  // Filtered by who is signed in: a non-admin on /admin — or a guest on a view
+  // that is not shared with them — gets the not-found page, and the topbar
+  // must not title that page "Admin" or "Cast".
+  const campaignViews = campaignDestinationsFor(user);
+  const screens = screenDestinationsFor(user);
+  const activeView =
+    screen === "campaign" && isCampaignView(view) && campaignViews.some((d) => d.view === view)
+      ? view
+      : undefined;
+  const activeScreen = screenDestination(screen, user);
 
   // The Active Campaign names the sidebar section, the breadcrumb and the
   // browser tab. retry:false like every other observer of this shared cache
@@ -120,9 +141,14 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
   // settles at once whichever of them mounted first. Rendered from DATA, which
   // React Query retains through a failed background refetch — a transient blip
   // never blanks a name already shown.
-  const activeQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
-  const campaignName = activeQ.data?.campaign?.name;
-  const noCampaign = !activeQ.data && activeQ.isError && isNotFound(activeQ.error);
+  // A guest's campaign is the one their Workspace names: nothing to resolve.
+  const activeQ = useQuery(
+    CampaignService.method.getActiveCampaign,
+    {},
+    { retry: false, enabled: can.manage },
+  );
+  const campaignName = guest ? guest.campaignName : activeQ.data?.campaign?.name;
+  const noCampaign = !guest && !activeQ.data && activeQ.isError && isNotFound(activeQ.error);
 
   // Live and attention signals, on every screen.
   const { live, startedMs } = useLiveSession();
@@ -137,6 +163,8 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
       staleTime: PROPOSALS_REFETCH_MS,
       retry: proposalsRetry,
       refetchInterval: live ? PROPOSALS_REFETCH_MS : false,
+      // Suggestions are the GM's to review; a guest has no count to show.
+      enabled: can.manage,
     },
   );
   const pendingSuggestions = proposalsQ.data?.proposals.length ?? 0;
@@ -315,9 +343,14 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
                 ) : activeQ.isPending ? (
                   <span className="gx-skeleton" data-testid="nav-campaign-loading" />
                 ) : null}
+                {guest && (
+                  <span className="gx-nav__section-guest" title={guest.tenantName}>
+                    {t("access.guestOfTenant", { tenant: guest.tenantName })}
+                  </span>
+                )}
               </div>
               <div className="gx-nav__sub">
-                {CAMPAIGN_DESTINATIONS.map((d) => {
+                {campaignViews.map((d) => {
                   const Icon = d.icon;
                   const label = t(d.label);
                   const isActive = activeView === d.view;
@@ -350,7 +383,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
 
             <div className="gx-nav__rule" aria-hidden="true" />
 
-            {SCREEN_DESTINATIONS.filter((d) => d.screen === "session").map((d) => {
+            {screens.filter((d) => d.screen === "session").map((d) => {
               const Icon = d.icon;
               return (
                 <Link
@@ -372,7 +405,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
 
           {/* Tenant-wide destinations, pinned under the scrolling list. */}
           <div className="gx-nav__foot">
-            {SCREEN_DESTINATIONS.filter((d) => d.screen !== "session").map((d) => {
+            {screens.filter((d) => d.screen !== "session").map((d) => {
               const Icon = d.icon;
               return (
                 <Link
@@ -425,7 +458,8 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
               <nav className="gx-crumbs" aria-label={t("shell.breadcrumb")}>
                 <ol>
                   <li className="gx-crumbs__campaign">
-                    {activeView === "overview" ? (
+                    {activeView === "overview" || guest ? (
+                      // (A guest has no Overview to be led to.)
                       <span title={crumbCampaign}>{crumbCampaign}</span>
                     ) : (
                       <Link
@@ -479,7 +513,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
               titles' flex:1 pushes it to the topbar's right edge. The display
               language used to sit beside it; it is in the account menu now
               (sidebar footer), where a once-chosen preference belongs. */}
-          <CampaignSwitcher />
+          {guest ? <GuestWorkspaceSwitcher user={user} /> : <CampaignSwitcher />}
         </header>
 
         {/* "You are offline" / "Can't reach Glyphoxa" (#695), between the bar
@@ -503,7 +537,11 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
           authenticated screen and never renders for an unauthenticated visitor
           (the shell sits inside the AuthGate). Closed it renders nothing and
           fires no RPCs, so screen tests stay clean. */}
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        platformAdmin={user.isPlatformAdmin}
+      />
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
           in Providers, so the screen unit tests that render without the shell get a

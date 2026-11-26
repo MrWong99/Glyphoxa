@@ -6,6 +6,7 @@ import { ArrowRight, ArrowLeft, Pencil, X, Plus } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node as PbNode, Edge as PbEdge } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useI18n } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -71,7 +72,11 @@ export function NodeRelations({
 
   // The "Voiced by" roster is the campaign's Character NPC agents (never the
   // Butler). Only queried for an NPC node: it is the only type that can link.
-  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { enabled: isNPC });
+  // …and only for the GM: the cast is not a Campaign Guest's to read or link,
+  // even one who may edit the wiki (ADR-0065).
+  const { manage } = useCan();
+  const canVoice = isNPC && manage;
+  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { enabled: canVoice });
   const castOptions = useMemo(() => {
     const cast = (rosterQuery.data?.roster ?? []).filter((a) => a.role === "character");
     return [
@@ -201,7 +206,7 @@ export function NodeRelations({
 
   return (
     <div className="gx-kg-relations">
-      {isNPC && (
+      {canVoice && (
         <div className="gx-field gx-kg-voicedby">
           <Select
             label={t("knowledge.voicedByLabel")}

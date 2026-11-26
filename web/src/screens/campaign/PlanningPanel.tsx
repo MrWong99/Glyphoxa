@@ -27,6 +27,7 @@ import {
 
 import { ChatService, ChatLlmKeySource, ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useScreenNav } from "@/app/screenNav";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { errorMessage, isNotFound } from "@/lib/connectError";
@@ -195,7 +196,18 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   // Which model answers (ADR-0062 amendment): the server's own resolution, the
   // one the chat engine runs. A side read — while it is pending or has failed
   // the footer simply is not there and the chat works as before.
-  const chatLlm = useQuery(ProviderService.method.listProviderConfigs, {}, { retry: false }).data?.effectiveChatLlm;
+  // The GM's read: the provider configuration is the host table's, so a
+  // Campaign Guest's chat has no model line and no link to Setup (ADR-0065).
+  const can = useCan();
+  const chatLlm = useQuery(
+    ProviderService.method.listProviderConfigs,
+    {},
+    { retry: false, enabled: can.manage },
+  ).data?.effectiveChatLlm;
+  // Where a reply's "Review" and a failure's "Open Setup" lead are the GM's
+  // screens; for a guest the buttons are not there.
+  const onReview = can.manage ? () => nav.goCampaignView("proposals") : undefined;
+  const onOpenSetup = can.manage ? () => nav.goScreen("configuration") : undefined;
 
   // ── Selection: the URL's ?thread, mirrored locally ──────────────────────
   // Local state is the truth the panel renders from; the URL follows it (and
@@ -602,7 +614,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                   when={m.createdAt}
                   tools={streams.toolsByMessage[m.id] ?? (view?.persistedReplyId === m.id ? exchange?.tools : undefined)}
                   stopped={streams.stoppedMessages[m.id] === true || (view?.persistedReplyId === m.id && exchange?.status === "stopped")}
-                  onReview={() => nav.goCampaignView("proposals")}
+                  onReview={onReview}
                 />
               ),
             )}
@@ -613,10 +625,10 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                 showUser={view.showUser}
                 showReply={view.showReply}
                 showTools={view.persistedReplyId === null}
-                onReview={() => nav.goCampaignView("proposals")}
+                onReview={onReview}
                 retryDisabled={busy}
                 onRetry={() => retry(exchange)}
-                onOpenSetup={() => nav.goScreen("configuration")}
+                onOpenSetup={onOpenSetup}
                 onDismiss={() => dismissNotice(campaignId, exchange.threadId)}
               />
             )}
@@ -763,7 +775,7 @@ function AssistantMessage({
   when?: Timestamp;
   tools?: ToolChip[];
   stopped?: boolean;
-  onReview: () => void;
+  onReview?: () => void;
 }) {
   const { t, lang } = useI18n();
   const at = stamp(when, lang);
@@ -786,7 +798,7 @@ function AssistantMessage({
 // ToolChips are the tools the Butler ran for one reply — name and outcome
 // only, the arguments stay server-side (ADR-0062). A filed wiki suggestion
 // gets a way to the Suggestions inbox, where the GM approves it.
-function ToolChips({ tools, onReview }: { tools: ToolChip[]; onReview: () => void }) {
+function ToolChips({ tools, onReview }: { tools: ToolChip[]; onReview?: () => void }) {
   const { t } = useI18n();
   const filed = tools.some((tool) => tool.toolName === "propose_knowledge" && !tool.isError);
   return (
@@ -804,9 +816,11 @@ function ToolChips({ tools, onReview }: { tools: ToolChip[]; onReview: () => voi
         <span className="gx-planning__filed">
           <Check size={14} aria-hidden="true" />
           {t("chat.suggestionFiled")}
-          <Button variant="ghost" size="sm" aria-label={t("chat.suggestionReviewAria")} onClick={onReview}>
-            {t("chat.suggestionReview")}
-          </Button>
+          {onReview && (
+            <Button variant="ghost" size="sm" aria-label={t("chat.suggestionReviewAria")} onClick={onReview}>
+              {t("chat.suggestionReview")}
+            </Button>
+          )}
         </span>
       )}
     </div>
@@ -840,9 +854,9 @@ function ExchangeTail({
   showReply: boolean;
   showTools: boolean;
   retryDisabled: boolean;
-  onReview: () => void;
+  onReview?: () => void;
   onRetry: () => void;
-  onOpenSetup: () => void;
+  onOpenSetup?: () => void;
   onDismiss: () => void;
 }) {
   const { t } = useI18n();
@@ -893,7 +907,7 @@ function ExchangeTail({
               <p className="gx-planning__error-title">{t(ERROR_TITLE[kind])}</p>
               <p className="gx-planning__error-body">{body}</p>
               <div className="gx-planning__error-actions">
-                {(kind === "noKey" || kind === "provider") && (
+                {onOpenSetup && (kind === "noKey" || kind === "provider") && (
                   <Button variant="secondary" size="sm" onClick={onOpenSetup}>
                     {t("chat.openSetup")}
                   </Button>

@@ -1,0 +1,65 @@
+/* The join page of an invitation link (ADR-0065). It is the login card
+   (login.css) with a little more to say, so the card is a touch wider and the
+   list of Guest Rights reads left-aligned inside the centred card. */
+.gx-join .gx-login__card {
+  max-width: 420px;
+}
+
+/* "<inviter> invited you to …" — the page's h1 is the wordmark above it. */
+.gx-join__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--body-lg);
+  font-weight: 600;
+  color: var(--text-strong);
+  /* A long campaign or display name wraps rather than widening the card. */
+  overflow-wrap: anywhere;
+}
+
+.gx-join__what {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+}
+
+.gx-join__what .gx-login__lede {
+  margin: 0;
+}
+
+.gx-join__rights-title {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  text-align: left;
+}
+
+.gx-join__rights {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: var(--spacing-md);
+  list-style: none;
+  text-align: left;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.gx-join__rights li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-join__right {
+  color: var(--text-default);
+  font-size: var(--body-sm);
+  font-weight: 600;
+}
+
+.gx-join__right-desc {
+  color: var(--text-muted);
+  font-size: var(--body-xs);
+}

@@ -13,6 +13,8 @@ export function Switch({
   label = null,
   disabled = false,
   id,
+  "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
 }: {
   checked?: boolean;
   defaultChecked?: boolean;
@@ -20,6 +22,10 @@ export function Switch({
   label?: string | null;
   disabled?: boolean;
   id?: string;
+  /** Names a switch that has no visible label of its own. */
+  "aria-label"?: string;
+  /** The id of the sentence that explains the switch — or why it is disabled. */
+  "aria-describedby"?: string;
 }) {
   const generatedId = useId();
   const fid = id || generatedId;
@@ -32,6 +38,8 @@ export function Switch({
         defaultChecked={defaultChecked}
         onCheckedChange={onCheckedChange}
         disabled={disabled}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
       >
         <RSwitch.Thumb className="gx-switch__thumb" />
       </RSwitch.Root>

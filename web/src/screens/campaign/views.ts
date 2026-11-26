@@ -6,7 +6,9 @@
 //
 // Order is the sidebar's order. `overview` is where a campaign opens; `settings`
 // edits the campaign record itself (name, System, Campaign Language, highlight
-// recording) — not to be confused with the Tenant-wide Setup screen.
+// recording) — not to be confused with the Tenant-wide Setup screen. `sharing`
+// is who else may open the campaign: its Campaign Guests and invitation links
+// (ADR-0065).
 
 export const CAMPAIGN_VIEWS = [
   "overview",
@@ -16,6 +18,7 @@ export const CAMPAIGN_VIEWS = [
   "players",
   "proposals",
   "planning",
+  "sharing",
   "settings",
 ] as const;
 

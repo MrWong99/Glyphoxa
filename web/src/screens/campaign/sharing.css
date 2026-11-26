@@ -1,0 +1,130 @@
+/* ── Campaign · Sharing (ADR-0065) ───────────────────────────────────────────
+ * The guest and link rows reuse the Admin screen's wrapping card rows
+ * (components/access/access.css); what is here is the Guest Rights editor and
+ * the few things a guest row adds.
+ */
+
+/* A guest's rights as chips: they take the row's middle and wrap. */
+.gx-sharing__rights {
+  flex: 2 1 16rem;
+}
+
+/* ── The Guest Rights editor ──────────────────────────────────────────────── */
+
+.gx-rights {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+/* Presets: three starting points on one line, stacking when it gets narrow. */
+.gx-rights__presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--spacing-sm);
+}
+
+.gx-rights__preset {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--text-default);
+  text-align: left;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.gx-rights__preset:hover:not(:disabled) {
+  border-color: var(--border-control-hover);
+}
+
+.gx-rights__preset:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.gx-rights__preset[aria-pressed="true"] {
+  border-color: var(--border-rune);
+  background: var(--surface-card-hover);
+}
+
+.gx-rights__preset:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.gx-rights__preset-name {
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+}
+
+.gx-rights__preset-desc {
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+.gx-rights__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.gx-rights__legend {
+  padding: 0;
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+}
+
+/* One right: the box, then its label over its sentence. */
+.gx-rights__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.gx-rights__row input {
+  flex: none;
+  /* Lines the box up with the label's first line. */
+  margin-top: 0.25em;
+}
+
+.gx-rights__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gx-rights__label {
+  color: var(--text-default);
+  cursor: pointer;
+}
+
+.gx-rights__row[data-locked="true"] .gx-rights__label {
+  cursor: default;
+}
+
+.gx-rights__desc {
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+/* Why a ticked box cannot be cleared, on its own line under the sentence. */
+.gx-rights__locked {
+  display: block;
+  color: var(--text-subtle);
+}
+
+@media (pointer: coarse) {
+  .gx-rights__row input {
+    width: 20px;
+    height: 20px;
+  }
+}

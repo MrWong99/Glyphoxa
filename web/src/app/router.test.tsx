@@ -5,6 +5,7 @@ import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
+  AdminService,
   AuthService,
   CampaignService,
   SessionService,
@@ -12,12 +13,15 @@ import {
   AdmissionMode,
   AgentSchema,
   CampaignSchema,
+  GetAccessOverviewResponseSchema,
   GetActiveCampaignResponseSchema,
   GetAdmissionModeResponseSchema,
   GetCampaignRosterResponseSchema,
   GetCampaignTagsResponseSchema,
   GetCurrentUserResponseSchema,
+  GetInvitationResponseSchema,
   GetSessionResponseSchema,
+  InvitationKind,
   ListCampaignsResponseSchema,
   ListKnowledgeProposalsResponseSchema,
   ListNodesResponseSchema,
@@ -37,6 +41,10 @@ import { routeTree } from "./router";
 //   - /onboarding/create-tenant (onboardingRedirect, ADR-0055): where the OAuth
 //     callback 302s a fresh open-mode signup; the route must exist top-level and
 //     render the name-your-Tenant screen.
+//   - /join/<token> (ADR-0065): the page an invitation link opens, where the
+//     callback bounces a refused join with ?error=invalid or
+//     ?error=aup_required, and whose Discord start is
+//     /auth/discord/login?join=<token>&aup=1.
 // The component tests cover the screens' props/behaviour; these cover the
 // URL→screen wiring, so a drift on either side of a contract fails a test.
 
@@ -45,7 +53,11 @@ import { routeTree } from "./router";
 // the AuthGate probe GetCurrentUser (answered with the pre-provisioned Tenant
 // name), and the campaign routes read one campaign — a Butler, one NPC and that
 // NPC's wiki entry — so a deep link has something real to land on.
-function testTransport() {
+// `access` tunes the ADR-0065 answers: whether the signed-in user is a Platform
+// Admin, and which AdminService calls were made (none may be, for a non-admin).
+type Access = { platformAdmin?: boolean; adminCalls?: string[]; invitationTokens?: string[] };
+
+function testTransport(access: Access = {}) {
   const campaign = create(CampaignSchema, { id: "c1", name: "The Sunless Citadel", system: "5e", language: "en" });
   return createRouterTransport(({ service }) => {
     service(AuthService, {
@@ -56,7 +68,23 @@ function testTransport() {
           user: create(UserSchema, { name: "Rin", role: "operator", avatar: "" }),
           tenantId: "5b3f7c1e-0000-0000-0000-000000000000",
           tenantName: "Rin's Table",
+          isPlatformAdmin: access.platformAdmin ?? false,
         }),
+      // Any token previews as a live access invitation, except "dead".
+      getInvitation: (req) => {
+        access.invitationTokens?.push(req.token);
+        return create(GetInvitationResponseSchema, {
+          valid: req.token !== "dead",
+          kind: InvitationKind.ACCESS,
+          inviterName: "Sora Vance",
+        });
+      },
+    });
+    service(AdminService, {
+      getAccessOverview: () => {
+        access.adminCalls?.push("getAccessOverview");
+        return create(GetAccessOverviewResponseSchema, { admissionMode: AdmissionMode.ALLOWLIST });
+      },
     });
     service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
     service(SessionService, { getSession: () => create(GetSessionResponseSchema, { active: false }) });
@@ -81,13 +109,13 @@ function testTransport() {
   });
 }
 
-function renderAt(path: string) {
+function renderAt(path: string, access: Access = {}) {
   const router = createRouter({
     routeTree,
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   render(
-    <Providers transport={testTransport()} queryClient={makeQueryClient()}>
+    <Providers transport={testTransport(access)} queryClient={makeQueryClient()}>
       <RouterProvider router={router} />
     </Providers>,
   );
@@ -119,6 +147,86 @@ describe("onboardingRoute /onboarding/create-tenant contract", () => {
   it("renders the name-your-Tenant screen at /onboarding/create-tenant", async () => {
     renderAt("/onboarding/create-tenant");
     expect(await screen.findByLabelText(/name your table/i)).toHaveValue("Rin's Table");
+  });
+});
+
+// The join page's three URL contracts with the OAuth carve-out (ADR-0065). The
+// component tests cover what the page says; these pin that the URLs mean it.
+describe("joinRoute /join/$token contract", () => {
+  it("renders the join page for /join/<token>, outside the shell, and previews THAT token", async () => {
+    const invitationTokens: string[] = [];
+    renderAt("/join/tok-moonlit-harbor", { invitationTokens });
+    expect(await screen.findByRole("heading", { name: "Sora Vance invited you to Glyphoxa" })).toBeInTheDocument();
+    expect(invitationTokens).toEqual(["tok-moonlit-harbor"]);
+    // No AuthGate, no shell chrome: the visitor has no session.
+    expect(screen.queryByRole("navigation", { name: "Main navigation" })).not.toBeInTheDocument();
+  });
+
+  it("starts Discord OAuth at /auth/discord/login?join=<token>&aup=1 once the terms are ticked", async () => {
+    renderAt("/join/tok-moonlit-harbor");
+    await screen.findByRole("heading", { name: "Sora Vance invited you to Glyphoxa" });
+    expect(screen.queryByRole("link", { name: "Continue with Discord" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("link", { name: "Continue with Discord" })).toHaveAttribute(
+      "href",
+      "/auth/discord/login?join=tok-moonlit-harbor&aup=1",
+    );
+  });
+
+  it("surfaces ?error=invalid: the link no longer works or is for a different Discord account", async () => {
+    renderAt("/join/tok-moonlit-harbor?error=invalid");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /the link no longer works, or it is for a different Discord account/,
+    );
+  });
+
+  it("surfaces ?error=aup_required", async () => {
+    renderAt("/join/tok-moonlit-harbor?error=aup_required");
+    expect(await screen.findByRole("alert")).toHaveTextContent(/accept the Nutzungsbedingungen below before joining/);
+  });
+
+  it("renders the dead-link page for a token that no longer works", async () => {
+    renderAt("/join/dead");
+    expect(await screen.findByRole("heading", { name: "This invitation link no longer works" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows no banner for an error code it does not know", async () => {
+    renderAt("/join/tok-moonlit-harbor?error=something_else");
+    await screen.findByRole("heading", { name: "Sora Vance invited you to Glyphoxa" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+// The Admin screen (ADR-0065) exists for a Platform Admin only. For anyone
+// else /admin is a URL that does not exist: the app's normal not-found page,
+// and not one AdminService call.
+describe("admin route (ADR-0065)", () => {
+  it("renders the Admin screen for a Platform Admin", async () => {
+    const adminCalls: string[] = [];
+    renderAt("/t/acme/admin", { platformAdmin: true, adminCalls });
+    expect(await screen.findByRole("heading", { level: 1, name: "Admin" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 2, name: "People" })).toBeInTheDocument();
+    expect(adminCalls).toEqual(["getAccessOverview"]);
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(nav).getByRole("link", { name: "Admin" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("gives a non-admin who types the URL the not-found page, and never calls AdminService", async () => {
+    const adminCalls: string[] = [];
+    renderAt("/t/acme/admin", { adminCalls });
+    expect(await screen.findByRole("heading", { level: 1, name: "Not found" })).toBeInTheDocument();
+    // The not-found page lists where one CAN go — and Admin is not among it.
+    const nav = screen.getByRole("navigation", { name: "Go somewhere that exists" });
+    expect(within(nav).getByRole("link", { name: "Setup" })).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("navigation", { name: "Main navigation" })).queryByRole("link", { name: "Admin" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "People" })).not.toBeInTheDocument();
+    // Settle every read the shell started before concluding none was Admin's.
+    await screen.findByRole("group", { name: /campaign.*the sunless citadel/i });
+    expect(adminCalls).toEqual([]);
   });
 });
 

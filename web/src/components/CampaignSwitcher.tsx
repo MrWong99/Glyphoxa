@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Check, ChevronDown, LayoutGrid, Plus, Swords } from "lucide-react";
 
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCurrentUser } from "@/app/currentUser";
 import { useScreenNav } from "@/app/screenNav";
 import { invalidateActiveCampaignScopedQueries, watchVoiceSessionEnd } from "@/lib/campaignCache";
 import { useI18n } from "@/i18n";
@@ -12,6 +13,7 @@ import { errorMessage, isNotFound } from "@/lib/connectError";
 import { useLiveSession } from "@/lib/useLiveSession";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { Badge } from "@/components/ui/Badge";
+import { SharedWithMe } from "./GuestWorkspaceSwitcher";
 import { NewCampaignDialog } from "./NewCampaignDialog";
 import {
   clearPendingCampaignSwitch,
@@ -70,6 +72,9 @@ export function CampaignSwitcher() {
   const { t } = useI18n();
   const nav = useScreenNav();
   const queryClient = useQueryClient();
+  // The Campaigns other GMs share with this user (ADR-0065): another Workspace
+  // each, listed under the user's own campaigns.
+  const sharedWithMe = useCurrentUser()?.guestWorkspaces ?? [];
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -356,6 +361,16 @@ export function CampaignSwitcher() {
           </ul>
 
           {listQ.isPending && <div className="gx-skeleton" data-testid="campaign-list-loading" />}
+
+          {/* Opening one leaves this table for the host's: a navigation to
+              that Workspace, which the WorkspaceGate turns into the switch. */}
+          <SharedWithMe
+            workspaces={sharedWithMe}
+            onPick={(w) => {
+              close();
+              nav.goWorkspace(w.campaignId);
+            }}
+          />
 
           {listQ.isError && (
             <p className="gx-campaign__error gx-campaign-switcher__error" role="alert">

@@ -186,3 +186,38 @@ spell out. None changes what was decided; each says how it holds.
 - **The Party Marker has no RPC**, so `maps.edit` is the three Pin writes.
 - **The live SSE transcript relay is GM-only**; a guest reads a session, live
   or finished, through the snapshot.
+
+## Amendment 2026-11-27 — the Workspace in the URL (web)
+
+Decided while building the guest shell. The decision above stands unchanged:
+the Workspace is a property of the server-side session, re-authorized per
+request, and no request carries it. What this adds is how the SPA *names* it.
+
+- **The tenant slug in the path names the Workspace.** `/t/default/…` (and any
+  other slug, as before — ADR-0039's pass-through) is the user's own Tenant;
+  `/t/guest-<campaignId>/…` is that Campaign, opened as its guest. The slug
+  authorizes nothing and the server never reads it.
+- **The URL is the intent, and the session follows it.** When the path names a
+  Workspace the user can enter and the session acts as another, the SPA calls
+  `SwitchWorkspace` and re-reads `GetCurrentUser` before mounting anything.
+  That one rule is the workspace switcher (which only navigates), a bookmark
+  into a shared Campaign, and a second tab taking the session back. A
+  guest-only account on an own-Workspace URL (every sign-in lands on
+  `/t/default`) has its URL rewritten instead; a URL naming a Campaign the
+  user is not a guest of gets a page saying so, with the ways out.
+- **The cache never crosses Workspaces.** Requests carry no Workspace, so two
+  Workspaces' reads share the same cache keys. The shell is unmounted while
+  URL and session disagree, everything but the session probe is dropped once
+  they agree, and only then is a fresh shell mounted.
+- **Considered and rejected: one fixed slug, with the Workspace known only to
+  the session.** A bookmarked guest view would silently reopen as the same
+  view of whichever Workspace the session happened to be in — the GM's own
+  wiki under a link they saved from someone else's campaign.
+- **Known gap:** between another tab switching the session and this tab
+  noticing (its next probe: a refused call, a window focus, or the 30-second
+  guest poll), a request from this tab is answered for the other Workspace.
+  Nothing is written to the wrong place (by-id writes are scoped server-side)
+  and the cache is dropped on recovery, but closing the window entirely needs
+  the client to state the Workspace it expects per request and the server to
+  refuse a mismatch — the shape the "workspace header" alternative above
+  rejected as an *authorization* mechanism, used only as an assertion.
