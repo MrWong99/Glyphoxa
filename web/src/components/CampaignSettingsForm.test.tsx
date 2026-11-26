@@ -81,14 +81,26 @@ function makeCampaign(c: Camp = {}) {
 }
 
 function renderForm(
-  props: { campaign?: ReturnType<typeof makeCampaign>; onSaved?: () => void; onCancel?: () => void } = {},
+  props: {
+    campaign?: ReturnType<typeof makeCampaign>;
+    onSaved?: () => void;
+    onCancel?: () => void;
+    onDirtyChange?: (dirty: boolean) => void;
+    variant?: "page" | "dialog";
+  } = {},
   transport = mockBackend(),
 ) {
   const onSaved = props.onSaved ?? vi.fn();
   const onCancel = props.onCancel ?? vi.fn();
   render(
     <Providers transport={transport} queryClient={makeQueryClient()}>
-      <CampaignSettingsForm campaign={props.campaign ?? makeCampaign()} onSaved={onSaved} onCancel={onCancel} />
+      <CampaignSettingsForm
+        campaign={props.campaign ?? makeCampaign()}
+        onSaved={onSaved}
+        onCancel={onCancel}
+        onDirtyChange={props.onDirtyChange}
+        variant={props.variant}
+      />
     </Providers>,
   );
   return { onSaved, onCancel };
@@ -99,11 +111,6 @@ async function openLanguageSelect() {
   fireEvent.keyDown(screen.getByRole("combobox", { name: /language/i }), { key: "Enter" });
   return screen.getByRole("listbox");
 }
-
-// The Highlight-recording switch lives behind the closed-by-default
-// AdvancedCard, whose body isn't mounted until the disclosure is opened.
-const openAdvanced = () =>
-  fireEvent.click(screen.getByRole("button", { name: /advanced settings/i }));
 
 describe("CampaignSettingsForm", () => {
   it("prefills the fields from the campaign prop and shows the Voice Session hint", () => {
@@ -226,17 +233,26 @@ describe("CampaignSettingsForm", () => {
 
   // Highlight recording (the rollover tape, #412, ADR-0051): the Campaign-level
   // GM opt-in that arms consent-gated capture. Default OFF, round-trips through
-  // UpdateCampaign like the other fields — but its switch sits inside the
-  // closed-by-default AdvancedCard, so every test opens the disclosure first.
+  // UpdateCampaign like the other fields. It sits in a section of its own,
+  // shown openly — it used to be behind an "Advanced settings" disclosure.
+  it("shows the Session Highlights settings openly, in a section of their own", () => {
+    renderForm();
+    const section = screen.getByRole("region", { name: "Session Highlights" });
+    expect(within(section).getByRole("switch", { name: /highlight recording/i })).toBeInTheDocument();
+    expect(within(section).getByLabelText(/highlight score bar/i)).toBeInTheDocument();
+    expect(within(section).getByLabelText(/confirmation windows/i)).toBeInTheDocument();
+    // Name, System and Language are the other section.
+    expect(within(screen.getByRole("region", { name: "General" })).getByLabelText("Name")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /advanced settings/i })).not.toBeInTheDocument();
+  });
+
   it("prefills the Highlight recording toggle from the campaign prop", () => {
     renderForm({ campaign: makeCampaign({ tapeArmed: true }) });
-    openAdvanced();
     expect(screen.getByRole("switch", { name: /highlight recording/i })).toBeChecked();
   });
 
   it("explains the consent gating and next-session effectiveness in plain language", () => {
     renderForm();
-    openAdvanced();
     // The simplified hint keeps the three facts a GM must know: a consent
     // message is posted in the voice channel, only consenting speakers are
     // recorded, and the change applies from the next session. (The next-session
@@ -247,13 +263,6 @@ describe("CampaignSettingsForm", () => {
     expect(hint).toHaveTextContent(/applies from the next session/i);
   });
 
-  it("keeps the Highlight recording switch out of the tree while the advanced card is closed", () => {
-    // The AdvancedCard unmounts its body when closed — collapsed settings are
-    // out of the accessibility tree, not merely hidden.
-    renderForm();
-    expect(screen.queryByRole("switch", { name: /highlight recording/i })).not.toBeInTheDocument();
-  });
-
   it("round-trips the tape-armed field through UpdateCampaign when toggled on", async () => {
     const updated: { req?: Record<string, unknown> } = {};
     const onSaved = vi.fn();
@@ -262,7 +271,6 @@ describe("CampaignSettingsForm", () => {
       mockBackend({ languages: ["de", "en"], updated }),
     );
 
-    openAdvanced();
     fireEvent.click(screen.getByRole("switch", { name: /highlight recording/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
@@ -279,12 +287,11 @@ describe("CampaignSettingsForm", () => {
   });
 
   // Session-Highlights tuning (#632 follow-up): the bar/confirm-windows pair
-  // sits inside the same AdvancedCard as the arming switch (the knobs only act
-  // while recording is armed). 0 on the wire = engine default, shown as an
-  // empty field with the default in the placeholder.
+  // sits in the same section as the arming switch (the knobs only act while
+  // recording is armed). 0 on the wire = engine default, shown as an empty
+  // field with the default in the placeholder.
   it("shows empty knob fields with default placeholders for an untuned campaign", () => {
     renderForm({ campaign: makeCampaign() });
-    openAdvanced();
     const bar = screen.getByLabelText(/highlight score bar/i) as HTMLInputElement;
     const confirm = screen.getByLabelText(/confirmation windows/i) as HTMLInputElement;
     expect(bar.value).toBe("");
@@ -295,7 +302,6 @@ describe("CampaignSettingsForm", () => {
 
   it("prefills the knob fields from a tuned campaign", () => {
     renderForm({ campaign: makeCampaign({ highlightBar: 4.5, highlightConfirmWindows: 1 }) });
-    openAdvanced();
     expect((screen.getByLabelText(/highlight score bar/i) as HTMLInputElement).value).toBe("4.5");
     expect((screen.getByLabelText(/confirmation windows/i) as HTMLInputElement).value).toBe("1");
   });
@@ -311,7 +317,6 @@ describe("CampaignSettingsForm", () => {
       mockBackend({ languages: ["de", "en"], updated }),
     );
 
-    openAdvanced();
     fireEvent.change(screen.getByLabelText(/highlight score bar/i), { target: { value: "4.5" } });
     // Clearing the confirm field is the reset gesture: it must ride as 0.
     fireEvent.change(screen.getByLabelText(/confirmation windows/i), { target: { value: "" } });
@@ -327,5 +332,145 @@ describe("CampaignSettingsForm", () => {
       highlightBar: 4.5,
       highlightConfirmWindows: 0,
     });
+  });
+});
+
+describe("CampaignSettingsForm: saving is explicit and visible", () => {
+  it("says when something is unsaved, reports it to the host, and says Saved afterwards", async () => {
+    const onDirtyChange = vi.fn();
+    renderForm({ onDirtyChange });
+    // Nothing to report on a form nobody touched.
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Renamed Quest" } });
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Saved"));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("is clean again when an edit is typed back to what is saved", () => {
+    renderForm();
+    const name = screen.getByLabelText("Name");
+    fireEvent.change(name, { target: { value: "Something else" } });
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+    fireEvent.change(name, { target: { value: "The Sunless Citadel" } });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("keeps the edits, and says why, when the save is refused", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(CampaignService, {
+        listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
+        updateCampaign: () => {
+          throw new ConnectError("highlight_bar must be between 0 and 10", Code.InvalidArgument);
+        },
+      });
+    });
+    const { onSaved } = renderForm({}, transport);
+    fireEvent.change(screen.getByLabelText(/highlight score bar/i), { target: { value: "11" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn't save: highlight_bar must be between 0 and 10",
+    );
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/highlight score bar/i)).toHaveValue(11);
+  });
+
+  it("keeps Save focusable while a save is in flight, and sends nothing twice", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let updates = 0;
+    const transport = createRouterTransport(({ service }) => {
+      service(CampaignService, {
+        listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
+        updateCampaign: async (req) => {
+          updates++;
+          await gate;
+          return create(UpdateCampaignResponseSchema, { campaign: create(CampaignSchema, { id: req.id, name: req.name }) });
+        },
+      });
+    });
+    const { onSaved } = renderForm({}, transport);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Renamed Quest" } });
+    const save = screen.getByRole("button", { name: "Save changes" });
+    save.focus();
+    fireEvent.click(save);
+
+    // Busy, named for what it is doing — and NOT disabled: a button that turns
+    // disabled under the keyboard drops focus to <body>.
+    const saving = await screen.findByRole("button", { name: "Saving…" });
+    expect(saving).toBe(save);
+    expect(saving).toHaveAttribute("aria-busy", "true");
+    expect(saving).toBeEnabled();
+    expect(saving).toHaveFocus();
+
+    // Enter again while it is in flight: nothing more is sent.
+    fireEvent.click(saving);
+    fireEvent.submit(saving.closest("form")!);
+    release();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(updates).toBe(1);
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveFocus();
+  });
+
+  it("names a missing name instead of only greying Save out", () => {
+    renderForm();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "" } });
+    expect(screen.getByText("A campaign needs a name.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
+  });
+});
+
+describe("CampaignSettingsForm: the two hosts", () => {
+  it("on the page, offers Discard changes instead of Cancel, and it restores what is saved", async () => {
+    const onCancel = vi.fn();
+    renderForm({ variant: "page", onCancel, campaign: makeCampaign({ tapeArmed: true, highlightBar: 6 }) });
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    const discard = screen.getByRole("button", { name: "Discard changes" });
+    // Nothing to discard yet.
+    expect(discard).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Half an idea" } });
+    fireEvent.click(screen.getByRole("switch", { name: /highlight recording/i }));
+    fireEvent.change(screen.getByLabelText(/highlight score bar/i), { target: { value: "" } });
+    expect(discard).toBeEnabled();
+
+    fireEvent.click(discard);
+    expect(screen.getByLabelText("Name")).toHaveValue("The Sunless Citadel");
+    expect(screen.getByRole("switch", { name: /highlight recording/i })).toBeChecked();
+    expect(screen.getByLabelText(/highlight score bar/i)).toHaveValue(6);
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    // The button it was pressed on is disabled again; focus went to the first
+    // field, not to <body>.
+    expect(screen.getByLabelText("Name")).toHaveFocus();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("heads its sections one level under its host's title", () => {
+    renderForm({ variant: "page" });
+    expect(screen.getByRole("heading", { level: 2, name: "General" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Session Highlights" })).toBeInTheDocument();
+  });
+
+  it("gives two forms on one page ids of their own", () => {
+    // The Settings view and a Settings dialog (or, before, the topbar popover)
+    // can be mounted together; a shared id makes a label name the other form's
+    // control.
+    render(
+      <Providers transport={mockBackend()} queryClient={makeQueryClient()}>
+        <CampaignSettingsForm campaign={makeCampaign()} onSaved={() => {}} variant="page" />
+        <CampaignSettingsForm campaign={makeCampaign({ id: "camp-2" })} onSaved={() => {}} />
+      </Providers>,
+    );
+    const ids = Array.from(document.querySelectorAll("[id]")).map((el) => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(screen.getAllByRole("switch", { name: /highlight recording/i })).toHaveLength(2);
   });
 });
