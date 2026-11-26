@@ -453,7 +453,9 @@ func (s *ProviderServer) platformKeyGate(ctx context.Context, tenantID uuid.UUID
 			case err == nil:
 				allowed = true
 			case !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
-				s.log.Warn("ListProviderConfigs: platform-key entitlement read failed", "tenant_id", tenantID, "err", err)
+				// Shared by ListProviderConfigs, GetUsageSummary and the chat
+				// save path, so the log names the gate, not one caller.
+				s.log.Warn("platformKeyGate: platform-key entitlement read failed", "tenant_id", tenantID, "err", err)
 			}
 		}
 		return allowed
@@ -1292,7 +1294,9 @@ func (s *ProviderServer) deleteVoiceLLM(ctx context.Context, tenantID uuid.UUID,
 	if err != nil {
 		return nil, internalErr(s.log, "DeleteProviderConfig: re-read provider_config failed", err)
 	}
-	sel := llmbuild.DeploymentDefault{}.SelectChat(nil, configs)
+	// The deployment's own default, the same resolution the chat engine runs
+	// (provider_chat.go effectiveChatLLM), so this check and the chat agree.
+	sel := s.llmDefault.SelectChat(nil, configs)
 	if sel.Source != llmbuild.ChatSourceChoice || sel.KeySource != llmbuild.ChatKeyPlatform ||
 		chatModelPriced(sel.Provider, sel.StoredModel) == nil {
 		return connect.NewResponse(&managementv1.DeleteProviderConfigResponse{}), nil

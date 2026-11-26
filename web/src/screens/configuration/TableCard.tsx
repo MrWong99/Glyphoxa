@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { errorMessage } from "@/lib/connectError";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n } from "@/i18n";
-import { OPERATOR, isPlaceholder } from "@/screens/legal/operator";
+import { operatorHref } from "./operatorContact";
 
 // "Your table": the Tenant's name (RenameTenant, ADR-0055) and the way to
 // delete it. Deleting a table is not self-service — it needs a cascade over
@@ -52,18 +52,11 @@ export function TableCard() {
       )}
       <p className="gx-table-card__delete">
         {t("config.tableDeletePre")}
-        <a href={deleteHref()}>{t("config.tableDeleteLink")}</a>
+        <a href={operatorHref(t("config.tableDeleteSubject"))}>{t("config.tableDeleteLink")}</a>
         {t("config.tableDeletePost")}
       </p>
     </Card>
   );
-}
-
-// The operator's address when the deployment has filled it in, else the
-// Impressum page, which names the operator however it can be reached.
-function deleteHref(): string {
-  if (!OPERATOR.email || isPlaceholder(OPERATOR.email)) return "/imprint";
-  return `mailto:${OPERATOR.email}?subject=${encodeURIComponent("Glyphoxa: delete my table")}`;
 }
 
 function RenameForm({ current }: { current: string }) {

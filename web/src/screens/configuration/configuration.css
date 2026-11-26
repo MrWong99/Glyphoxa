@@ -64,6 +64,7 @@
 
 .gx-discord__save {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   gap: var(--spacing-md);
@@ -177,6 +178,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* The model combobox sits in the card, below the row: it takes the room the
+   row leaves (and all of it on a phone), never a fixed width. */
+.gx-provider-card .gx-provider-row__model .gx-select-field {
+  flex: 1 1 14rem;
+  min-width: 0;
 }
 
 /* "Paste a Discord link" autofill (#101/#105): the paste field plus, for an
@@ -722,6 +730,17 @@
   border-top: 0;
 }
 
+/* The step actions carry long text: "Link {server name}" (up to 100
+   characters of the server's own name) and, in German, "Glyphoxa zu deinem
+   Server hinzufügen". .gx-btn never wraps, so at phone width they would run
+   past the card; inside a step they wrap instead. */
+.gx-discord-step .gx-btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
 .gx-disclosure {
   display: inline-flex;
   align-items: center;
@@ -779,6 +798,11 @@
   color: var(--text-muted);
 }
 
+.gx-discord-linked__hint {
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
 .gx-discord-linked__actions {
   display: flex;
   flex-wrap: wrap;
@@ -802,5 +826,13 @@
   }
   .gx-secret__actions {
     margin-left: 0;
+  }
+  /* The spending limits header states the current limits: on a phone it
+     wraps under the title instead of being cut off. */
+  .gx-setup .gx-advanced__toggle {
+    flex-wrap: wrap;
+  }
+  .gx-setup .gx-advanced__hint {
+    white-space: normal;
   }
 }

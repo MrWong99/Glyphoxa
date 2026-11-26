@@ -51,7 +51,10 @@ describe("PlanUsageCard", () => {
     // A saved key does not lift the gate (ADR-0055): the screen says so.
     expect(alert).toHaveTextContent(/saving your own key does not lift this/i);
     expect(alert).toHaveTextContent(/wait until December 1/i);
-    expect(screen.getByRole("link", { name: "ask the operator" })).toHaveAttribute("href", "/imprint");
+    // The same way to the operator as the table card: a mail about the plan
+    // change where the address is filled in, else the Impressum.
+    const ask = screen.getByRole("link", { name: "ask the operator" }).getAttribute("href") ?? "";
+    expect(ask).toMatch(/^(mailto:.+\?subject=Glyphoxa%3A%20move%20my%20table|\/imprint$)/);
     expect(screen.getByRole("meter")).toHaveAttribute("data-tone", "danger");
   });
 

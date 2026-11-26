@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { Gauge } from "lucide-react";
@@ -9,6 +10,8 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
+import { SETUP_ANCHORS } from "@/lib/readiness";
+import { operatorHref } from "./operatorContact";
 
 // PlanUsageCard shows the table's plan and, where the plan includes a monthly
 // allowance (ADR-0055 gate (b)), how much of it this month has used — before
@@ -34,22 +37,26 @@ export function PlanUsageCard() {
 
   if (q.isPending && !q.failureReason) {
     return (
-      <Card className="gx-plan-card">
-        <Skeleton lines={2} label={t("config.planLoading")} />
-      </Card>
+      <PlanSection>
+        <Card className="gx-plan-card">
+          <Skeleton lines={2} label={t("config.planLoading")} />
+        </Card>
+      </PlanSection>
     );
   }
   if (!q.data) {
     return (
-      <Card className="gx-plan-card">
-        <ErrorState
-          size="inline"
-          title={t("config.planLoadError")}
-          message={errorMessage(q.error ?? q.failureReason)}
-          onRetry={() => void q.refetch()}
-          retrying={q.isFetching}
-        />
-      </Card>
+      <PlanSection>
+        <Card className="gx-plan-card">
+          <ErrorState
+            size="inline"
+            title={t("config.planLoadError")}
+            message={errorMessage(q.error ?? q.failureReason)}
+            onRetry={() => void q.refetch()}
+            retrying={q.isFetching}
+          />
+        </Card>
+      </PlanSection>
     );
   }
 
@@ -89,7 +96,7 @@ export function PlanUsageCard() {
               <li>{t("config.usageRemedyWait", { date: resets })}</li>
               <li>
                 {t("config.usageRemedyByokPre")}
-                <a href="/imprint">{t("config.usageRemedyAskOperator")}</a>
+                <a href={operatorHref(t("config.planChangeSubject"))}>{t("config.usageRemedyAskOperator")}</a>
                 {t("config.usageRemedyByokPost")}
               </li>
             </ul>
@@ -108,20 +115,40 @@ export function PlanUsageCard() {
   }
 
   return (
-    <Card className="gx-plan-card" aria-labelledby="setup-plan-title">
-      <div className="gx-plan-card__head">
-        <span className="gx-provider-row__icon" aria-hidden="true">
-          <Gauge size={19} />
-        </span>
-        <div>
-          <span className="gx-overline">{t("config.planOverline")}</span>
-          <h2 id="setup-plan-title" className="gx-plan-card__name">
-            {planName || t("config.planNone")}
-          </h2>
+    <PlanSection labelledBy="setup-plan-title">
+      <Card className="gx-plan-card">
+        <div className="gx-plan-card__head">
+          <span className="gx-provider-row__icon" aria-hidden="true">
+            <Gauge size={19} />
+          </span>
+          <div>
+            <span className="gx-overline">{t("config.planOverline")}</span>
+            <h2 id="setup-plan-title" className="gx-plan-card__name">
+              {planName || t("config.planNone")}
+            </h2>
+          </div>
         </div>
-      </div>
-      {body}
-      <p className="gx-plan-card__note">{t("config.usageEstimateNote")}</p>
-    </Card>
+        {body}
+        <p className="gx-plan-card__note">{t("config.usageEstimateNote")}</p>
+      </Card>
+    </PlanSection>
+  );
+}
+
+// The card's region: the target of the ready banner's "See your plan" link,
+// present in every state so that link always lands. Named by the plan's
+// heading once there is one (a generic div cannot carry a name, a section can).
+function PlanSection({ labelledBy, children }: { labelledBy?: string; children: ReactNode }) {
+  const { t } = useI18n();
+  return (
+    <section
+      id={SETUP_ANCHORS.plan}
+      tabIndex={-1}
+      className="gx-setup-section"
+      aria-labelledby={labelledBy}
+      aria-label={labelledBy ? undefined : t("config.planOverline")}
+    >
+      {children}
+    </section>
   );
 }

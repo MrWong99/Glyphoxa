@@ -21,13 +21,14 @@ import {
   GetSpendCapsResponseSchema,
   EffectiveLlmSchema,
   DeleteProviderConfigResponseSchema,
+  GetUsageSummaryResponseSchema,
   type DeleteProviderConfigRequest,
   type SaveProviderConfigRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Configuration } from "./Configuration";
-import { currentUser, keyRow, usageSummary } from "./testRows";
+import { currentUser, keyRow } from "./testRows";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
@@ -60,6 +61,9 @@ function backend(opts: {
   // what the server answers about the planning chat.
   deletes?: DeleteProviderConfigRequest[];
   chatModelReset?: boolean;
+  // usesPlatformKeys is GetUsageSummary's answer: whether the plan has a
+  // platform default to go back to (default yes, the platformDefault above).
+  usesPlatformKeys?: boolean;
 }) {
   const slots: Record<"groq" | "anthropic", Slot> = {
     groq: { ...opts.slots?.groq },
@@ -103,7 +107,8 @@ function backend(opts: {
     });
     service(AuthService, { getCurrentUser: currentUser });
     service(ProviderService, {
-      getUsageSummary: usageSummary,
+      getUsageSummary: () =>
+        create(GetUsageSummaryResponseSchema, { usesPlatformKeys: opts.usesPlatformKeys ?? true }),
       listProviderConfigs: () =>
         create(ListProviderConfigsResponseSchema, {
           credentials: [
@@ -380,6 +385,22 @@ describe("Configuration voice-LLM choice (#702)", () => {
     await waitFor(() => expect(screen.getByTestId("llm-in-use")).toHaveTextContent(/platform default/i));
     // Nothing left to go back from.
     expect(screen.queryByRole("button", { name: "Back to platform default" })).not.toBeInTheDocument();
+  });
+
+  it("offers no way back on a plan without platform keys: it would leave no AI model", async () => {
+    renderScreen(
+      backend({
+        slots: { groq: { last4: "1111", row: true }, anthropic: { last4: "4242", row: true } },
+        newest: "anthropic",
+        usesPlatformKeys: false,
+      }),
+    );
+    expect(await screen.findByTestId("llm-in-use")).toHaveTextContent(/your choice/i);
+    // Wait for the plan read to answer, then the button is gone; the rows keep Remove key.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Back to platform default" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByRole("button", { name: "Remove key" }).length).toBeGreaterThan(0);
   });
 
   it("offers no way back while the table already runs the platform default", async () => {

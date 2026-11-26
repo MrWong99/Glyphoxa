@@ -159,7 +159,12 @@ export type SetupInputs = {
    */
   hasCampaign?: boolean;
   /** ProviderService.ListProviderConfigs. */
-  providers?: { guildId: string; credentials: readonly SlotView[] };
+  providers?: {
+    guildId: string;
+    /** The table's standing Discord client: "failed" is a rejected own bot token (#489). */
+    integrationState?: string;
+    credentials: readonly SlotView[];
+  };
   /** ProviderService.GetSpendCaps (only the optional item reads it). */
   spendCaps?: { caps?: { softUsd?: number; hardUsd?: number } };
 };
@@ -182,6 +187,10 @@ export const SETUP_ANCHORS = {
   aiModel: "setup-ai-model",
   images: "setup-images",
   spendingLimits: "setup-spending-limits",
+  /** The plan and usage card (the ready banner points there when sessions are paused). */
+  plan: "setup-plan",
+  /** The key list's stand-in while its read is out or failed: a step link lands there. */
+  configStatus: "setup-config-status",
 } as const;
 
 /** A slot runs: the table saved a key, or its plan's keys cover it. */
@@ -202,6 +211,9 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
   // on; it is the operator's configuration, so it counts as running.
   const inEffect = creds?.find((c) => c.component === "llm" && c.inEffect);
   const aiModel = creds === undefined ? undefined : inEffect === undefined ? true : slotRuns(inEffect);
+  // A linked server whose bot connection failed cannot carry a session: the
+  // step is open again, and its hint names the cause.
+  const discordFailed = providers?.integrationState === "failed";
 
   return [
     {
@@ -213,9 +225,9 @@ export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
     },
     {
       key: "discord",
-      done: providers && providers.guildId !== "",
+      done: providers && providers.guildId !== "" && !discordFailed,
       label: "config.stepDiscord",
-      hint: "config.stepDiscordHint",
+      hint: discordFailed ? "config.stepDiscordFailedHint" : "config.stepDiscordHint",
       anchor: SETUP_ANCHORS.discord,
     },
     {

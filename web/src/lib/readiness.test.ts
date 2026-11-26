@@ -248,6 +248,19 @@ describe("deriveSetupSteps", () => {
       done: false,
     },
     { name: "Setup not read", key: "discord", inputs: { ...TRIAL, providers: undefined }, done: undefined },
+    {
+      // A rejected own bot token: linked, but no session can join (#489).
+      name: "linked but the bot connection failed",
+      key: "discord",
+      inputs: { ...TRIAL, providers: { ...TRIAL.providers!, integrationState: "failed" } },
+      done: false,
+    },
+    {
+      name: "linked and reconnecting",
+      key: "discord",
+      inputs: { ...TRIAL, providers: { ...TRIAL.providers!, integrationState: "reconnecting" } },
+      done: true,
+    },
 
     {
       name: "an own ElevenLabs key",
@@ -282,6 +295,12 @@ describe("deriveSetupSteps", () => {
 
   it.each(cases)("$key: $name → $done", ({ key, inputs, done }) => {
     expect(setupStep(inputs, key).done).toBe(done);
+  });
+
+  it("names the cause when a linked server's bot connection failed", () => {
+    const failed = { ...TRIAL, providers: { ...TRIAL.providers!, integrationState: "failed" } };
+    expect(setupStep(failed, "discord").hint).toBe("config.stepDiscordFailedHint");
+    expect(setupStep(TRIAL, "discord").hint).toBe("config.stepDiscordHint");
   });
 
   it("a pending read is never a to-do", () => {

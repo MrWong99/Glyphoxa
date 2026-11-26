@@ -1,20 +1,23 @@
 import type { MouseEvent, ReactNode } from "react";
-import { Check, Circle, CircleDashed, ChevronRight } from "lucide-react";
+import { Check, Circle, CircleAlert, CircleDashed, ChevronRight } from "lucide-react";
 
 import { useScreenNav } from "@/app/screenNav";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { useI18n } from "@/i18n";
-import { isReady, type SetupOptionalKey, type SetupStep } from "@/lib/readiness";
+import { useI18n, type MessageKey } from "@/i18n";
+import { isReady, SETUP_ANCHORS, type SetupOptionalKey, type SetupStep } from "@/lib/readiness";
 
 // SetupChecklist opens Setup (#695): the four things a first Voice Session
 // needs, in order, each ticked from the reads the page already makes
 // (deriveSetupSteps), each linking to the section below where it is done. A
 // step whose read has not answered shows as "checking", never as a to-do.
 // When all four are known to be done the list leads with a success banner
-// and "Go to Session". The optional extras are listed apart, so they never
-// read as something the table is missing.
+// and "Go to Session" — unless the plan's allowance is used up, when the
+// banner says sessions are paused and points at the plan card instead. A step
+// whose read FAILED says it could not be checked rather than "checking" for
+// ever. The optional extras are listed apart, so they never read as something
+// the table is missing.
 
 /**
  * Moves to a Setup section without touching the URL hash (the router owns
@@ -23,7 +26,9 @@ import { isReady, type SetupOptionalKey, type SetupStep } from "@/lib/readiness"
  */
 export function jumpTo(anchor: string, e?: MouseEvent) {
   e?.preventDefault();
-  const target = document.getElementById(anchor);
+  // A section drawn from the config read is absent while that read is out or
+  // after it failed: land on its stand-in (the skeleton, or the error with Retry).
+  const target = document.getElementById(anchor) ?? document.getElementById(SETUP_ANCHORS.configStatus);
   if (!target) return;
   target.scrollIntoView?.({ behavior: "smooth", block: "start" });
   target.focus({ preventScroll: true });
@@ -35,6 +40,8 @@ export function SetupChecklist({
   details,
   bodies,
   go,
+  unavailable,
+  exhausted = false,
 }: {
   steps: SetupStep[];
   optional: SetupStep<SetupOptionalKey>[];
@@ -44,6 +51,10 @@ export function SetupChecklist({
   bodies?: Partial<Record<string, ReactNode>>;
   /** Where a step's link goes instead of its section (a done campaign: the Campaigns page). */
   go?: Partial<Record<string, () => void>>;
+  /** Steps (and optional items) whose read failed: "couldn't check", not "checking". */
+  unavailable?: Partial<Record<string, boolean>>;
+  /** The plan's included usage is used up: new sessions are refused (ADR-0055). */
+  exhausted?: boolean;
 }) {
   const { t } = useI18n();
   const { goScreen } = useScreenNav();
@@ -52,50 +63,67 @@ export function SetupChecklist({
   const done = known.filter((s) => s.done).length;
 
   return (
-    <Card className="gx-setup-checklist" aria-labelledby="setup-checklist-title">
-      <div className="gx-setup-checklist__head">
-        <h2 id="setup-checklist-title" className="gx-setup-checklist__title">
-          {t("config.checklistTitle")}
-        </h2>
-        <span className="gx-setup-checklist__progress">
-          {t("config.checklistProgress", { done, total: steps.length })}
-        </span>
-      </div>
+    <section aria-labelledby="setup-checklist-title">
+      <Card className="gx-setup-checklist">
+        <div className="gx-setup-checklist__head">
+          <h2 id="setup-checklist-title" className="gx-setup-checklist__title">
+            {t("config.checklistTitle")}
+          </h2>
+          <span className="gx-setup-checklist__progress">
+            {t("config.checklistProgress", { done, total: steps.length })}
+          </span>
+        </div>
 
-      {ready && (
-        <Alert
-          tone="success"
-          title={t("config.readyTitle")}
-          action={
-            <Button size="sm" variant="primary" onClick={() => goScreen("session")}>
-              {t("config.goToSession")}
-            </Button>
-          }
-        >
-          {t("config.readyLede")}
-        </Alert>
-      )}
+        {ready && exhausted ? (
+          <Alert
+            tone="warning"
+            title={t("config.readyPausedTitle")}
+            action={
+              <Button size="sm" variant="secondary" onClick={() => jumpTo(SETUP_ANCHORS.plan)}>
+                {t("config.seePlan")}
+              </Button>
+            }
+          >
+            {t("config.readyPausedLede")}
+          </Alert>
+        ) : (
+          ready && (
+            <Alert
+              tone="success"
+              title={t("config.readyTitle")}
+              action={
+                <Button size="sm" variant="primary" onClick={() => goScreen("session")}>
+                  {t("config.goToSession")}
+                </Button>
+              }
+            >
+              {t("config.readyLede")}
+            </Alert>
+          )
+        )}
 
-      <ol className="gx-setup-steps">
-        {steps.map((step, i) => (
-          <StepItem
-            key={step.key}
-            step={step}
-            number={i + 1}
-            detail={details?.[step.key]}
-            body={bodies?.[step.key]}
-            go={go?.[step.key]}
-          />
-        ))}
-      </ol>
+        <ol className="gx-setup-steps">
+          {steps.map((step, i) => (
+            <StepItem
+              key={step.key}
+              step={step}
+              number={i + 1}
+              detail={details?.[step.key]}
+              body={bodies?.[step.key]}
+              go={go?.[step.key]}
+              unavailable={unavailable?.[step.key]}
+            />
+          ))}
+        </ol>
 
-      <h3 className="gx-setup-checklist__optional">{t("config.optionalTitle")}</h3>
-      <ul className="gx-setup-steps gx-setup-steps--optional">
-        {optional.map((item) => (
-          <StepItem key={item.key} step={item} />
-        ))}
-      </ul>
-    </Card>
+        <h3 className="gx-setup-checklist__optional">{t("config.optionalTitle")}</h3>
+        <ul className="gx-setup-steps gx-setup-steps--optional">
+          {optional.map((item) => (
+            <StepItem key={item.key} step={item} go={go?.[item.key]} unavailable={unavailable?.[item.key]} />
+          ))}
+        </ul>
+      </Card>
+    </section>
   );
 }
 
@@ -105,18 +133,25 @@ function StepItem({
   detail,
   body,
   go,
+  unavailable = false,
 }: {
   step: SetupStep<string>;
   number?: number;
   detail?: string;
   body?: ReactNode;
   go?: () => void;
+  unavailable?: boolean;
 }) {
   const { t } = useI18n();
-  const state = step.done === true ? "done" : step.done === false ? "todo" : "checking";
-  const Mark = state === "done" ? Check : state === "todo" ? Circle : CircleDashed;
+  const state = step.done === true ? "done" : step.done === false ? "todo" : unavailable ? "unavailable" : "checking";
+  const Mark = { done: Check, todo: Circle, unavailable: CircleAlert, checking: CircleDashed }[state];
   const status = t(
-    state === "done" ? "config.stepStatusDone" : state === "todo" ? "config.stepStatusTodo" : "config.stepStatusChecking",
+    {
+      done: "config.stepStatusDone",
+      todo: "config.stepStatusTodo",
+      unavailable: "config.stepStatusUnavailable",
+      checking: "config.stepStatusChecking",
+    }[state] as MessageKey,
   );
   const label = (
     <>
@@ -125,7 +160,12 @@ function StepItem({
   );
 
   return (
-    <li id={body ? step.anchor : undefined} tabIndex={body ? -1 : undefined} className="gx-setup-step" data-state={state}>
+    <li
+      id={body ? step.anchor : undefined}
+      tabIndex={body ? -1 : undefined}
+      className="gx-setup-step"
+      data-state={state}
+    >
       <span className="gx-setup-step__mark" aria-hidden="true">
         <Mark />
       </span>
@@ -151,7 +191,11 @@ function StepItem({
         {state === "done" && detail ? (
           <span className="gx-setup-step__hint">{detail}</span>
         ) : (
-          state !== "done" && <span className="gx-setup-step__hint">{t(step.hint)}</span>
+          state !== "done" && (
+            <span className="gx-setup-step__hint">
+              {t(state === "unavailable" ? "config.stepUnavailableHint" : step.hint)}
+            </span>
+          )
         )}
         {body && state !== "done" && <div className="gx-setup-step__body">{body}</div>}
       </div>

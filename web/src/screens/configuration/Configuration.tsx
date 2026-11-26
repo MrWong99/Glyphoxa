@@ -29,7 +29,7 @@ import { DiscordCard } from "./DiscordCard";
 import { llmProviderLabel } from "./llmProviders";
 import { PlanUsageCard } from "./PlanUsageCard";
 import { SecretRow } from "./SecretRow";
-import { SetupChecklist } from "./SetupChecklist";
+import { jumpTo, SetupChecklist } from "./SetupChecklist";
 import { SpendLimitsCard } from "./SpendLimitsCard";
 import { TableCard } from "./TableCard";
 
@@ -185,12 +185,27 @@ export function Configuration() {
   const healthPending = healthQuery.isPending;
 
   const capsQuery = useQuery(ProviderService.method.getSpendCaps, {});
+  // The same read PlanUsageCard makes (one request): whether sessions are
+  // paused by a used-up allowance, and whether the plan has platform keys.
+  const usageQuery = useQuery(ProviderService.method.getUsageSummary, {});
+  // Bumped by the checklist's Spending limits link: the card opens on arrival.
+  const [limitsOpened, setLimitsOpened] = useState(0);
 
   const steps = deriveSetupSteps({
     hasCampaign: campaign ? true : noCampaign ? false : undefined,
     providers: config.data,
   });
   const optional = deriveOptionalSetupItems({ providers: config.data, spendCaps: capsQuery.data });
+  // A read that failed (not one still out) leaves its steps "couldn't check".
+  const campaignFailed = campaignQ.isError && !noCampaign;
+  const unavailable = {
+    campaign: campaignFailed,
+    discord: configFailed,
+    voice: configFailed,
+    aiModel: configFailed,
+    images: configFailed,
+    spendingLimits: !capsQuery.data && capsQuery.isError,
+  };
 
   return (
     <Page width="narrow" className="gx-setup">
@@ -221,19 +236,31 @@ export function Configuration() {
             />
           ) : undefined,
         }}
-        go={{ campaign: () => goScreen("campaigns") }}
+        go={{
+          campaign: () => goScreen("campaigns"),
+          spendingLimits: () => {
+            setLimitsOpened((n) => n + 1);
+            jumpTo(SETUP_ANCHORS.spendingLimits);
+          },
+        }}
+        unavailable={unavailable}
+        exhausted={Boolean(usageQuery.data?.exhausted)}
       />
 
       <PlanUsageCard />
 
       {configFailed ? (
-        <ErrorState
-          title={t("config.loadErrorTitle")}
-          description={t("config.loadErrorDesc")}
-          message={errorMessage(config.error ?? config.failureReason)}
-          onRetry={() => void config.refetch()}
-          retrying={config.isFetching}
-        />
+        // The checklist's Discord and key links land here while there is
+        // nothing else to land on: on the error, with its Retry.
+        <div id={SETUP_ANCHORS.configStatus} tabIndex={-1} className="gx-setup-section">
+          <ErrorState
+            title={t("config.loadErrorTitle")}
+            description={t("config.loadErrorDesc")}
+            message={errorMessage(config.error ?? config.failureReason)}
+            onRetry={() => void config.refetch()}
+            retrying={config.isFetching}
+          />
+        </div>
       ) : !config.data ? (
         <SetupSkeleton />
       ) : (
@@ -261,12 +288,15 @@ export function Configuration() {
             health={health}
             healthPending={healthPending}
             config={config.data}
+            // Unknown (still loading, or failed) keeps the way back offered:
+            // only a plan known to have no platform keys hides it.
+            platformDefault={usageQuery.data?.usesPlatformKeys !== false}
             onChanged={invalidateList}
           />
         </>
       )}
 
-      <SpendLimitsCard anchor={SETUP_ANCHORS.spendingLimits} />
+      <SpendLimitsCard anchor={SETUP_ANCHORS.spendingLimits} openSignal={limitsOpened} />
 
       <TableCard />
     </Page>
@@ -278,7 +308,12 @@ export function Configuration() {
 function SetupSkeleton() {
   const { t } = useI18n();
   return (
-    <div className="gx-setup-skeleton" data-testid="config-loading">
+    <div
+      id={SETUP_ANCHORS.configStatus}
+      tabIndex={-1}
+      className="gx-setup-section gx-setup-skeleton"
+      data-testid="config-loading"
+    >
       <Skeleton.Row count={5} label={t("config.loadingKeys")} />
     </div>
   );
@@ -289,12 +324,15 @@ function KeysSection({
   health,
   healthPending,
   config,
+  platformDefault,
   onChanged,
 }: {
   creds: ProviderCredential[];
   health: ProviderHealth[];
   healthPending: boolean;
   config: ListProviderConfigsResponse;
+  /** The plan has a platform default to go back to (GetUsageSummary.uses_platform_keys). */
+  platformDefault: boolean;
   onChanged: () => void;
 }) {
   const { t } = useI18n();
@@ -316,12 +354,20 @@ function KeysSection({
   // instances, so a refused chat save paints the chat card and never a key row.
   const saveChatModel = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: onChanged });
   const resetChatModel = useMutation(ProviderService.method.deleteProviderConfig, { onSuccess: onChanged });
-  // Removing a voice LLM key, one slot or both (ADR-0004 amendment 2026-11-26).
-  const removeLlm = useMutation(ProviderService.method.deleteProviderConfig, {
+  // Removing a voice LLM key (ADR-0004 amendment 2026-11-26): one slot from
+  // its row, or both with Back to platform default. Two mutation instances, so
+  // a row's removal never spins (or paints its error on) the group's button.
+  const removedToast = (what: string, chatModelReset: boolean) =>
+    toast.success(what, chatModelReset ? { description: t("config.toastChatModelReset") } : undefined);
+  const removeKey = useMutation(ProviderService.method.deleteProviderConfig, {
     onSuccess: (res, req) => {
-      const what =
-        req.slot === "voice_llm" ? t("config.toastBackToDefault") : t("config.toastKeyRemoved", { name: llmProviderLabel(req.slot ?? "") });
-      toast.success(what, res.chatModelReset ? { description: t("config.toastChatModelReset") } : undefined);
+      removedToast(t("config.toastKeyRemoved", { name: llmProviderLabel(req.slot ?? "") }), res.chatModelReset);
+      onChanged();
+    },
+  });
+  const backToDefault = useMutation(ProviderService.method.deleteProviderConfig, {
+    onSuccess: (res) => {
+      removedToast(t("config.toastBackToDefault"), res.chatModelReset);
       onChanged();
     },
   });
@@ -351,7 +397,7 @@ function KeysSection({
         onSave={(secret, model, activate) =>
           saveProvider.mutateAsync({ provider: slot.provider, secret, model, activate })
         }
-        onRemove={slot.voiceLlm ? () => removeLlm.mutateAsync({ slot: slot.provider }) : undefined}
+        onRemove={slot.voiceLlm ? () => removeKey.mutateAsync({ slot: slot.provider }) : undefined}
       />
     );
   };
@@ -362,7 +408,7 @@ function KeysSection({
         {t("config.aiServiceKeysTitle")}
       </h2>
 
-      <div id={SETUP_ANCHORS.aiModel} tabIndex={-1} className="gx-voice-llm" aria-labelledby="setup-ai-title">
+      <section id={SETUP_ANCHORS.aiModel} tabIndex={-1} className="gx-voice-llm" aria-labelledby="setup-ai-title">
         <div className="gx-voice-llm__head">
           <h3 id="setup-ai-title" className="gx-voice-llm__title">
             {t("config.voiceLlmTitle")}
@@ -376,12 +422,12 @@ function KeysSection({
               })}
             </p>
           )}
-          {effectiveLlm && !effectiveLlm.platformDefault && (
+          {effectiveLlm && !effectiveLlm.platformDefault && platformDefault && (
             <Button
               variant="ghost"
               size="sm"
               iconStart={<Undo2 size={14} />}
-              loading={removeLlm.isPending}
+              loading={backToDefault.isPending}
               onClick={() => setConfirmDefault(true)}
             >
               {t("config.backToDefault")}
@@ -389,25 +435,30 @@ function KeysSection({
           )}
         </div>
         {/* A failed single-key removal shows on its row; this is "Back to platform default". */}
-        {removeLlm.isError && removeLlm.variables?.slot === "voice_llm" && (
+        {backToDefault.isError && (
           <p className="gx-secret__error" role="alert">
-            {t("config.couldntRemove", { message: errorMessage(removeLlm.error) })}
+            {t("config.couldntRemove", { message: errorMessage(backToDefault.error) })}
           </p>
         )}
         <div className="gx-providers__list">{VOICE_LLM_SLOTS.map(row)}</div>
-      </div>
+      </section>
 
-      <div className="gx-providers__list">
-        {OTHER_SLOTS.map(row)}
-        {/* The Planning chat model: a choice over the providers above, with
+      <section className="gx-voice-llm" aria-labelledby="setup-other-title">
+        <h3 id="setup-other-title" className="gx-voice-llm__title">
+          {t("config.otherServicesTitle")}
+        </h3>
+        <div className="gx-providers__list">
+          {OTHER_SLOTS.map(row)}
+          {/* The Planning chat model: a choice over the providers above, with
             the truthful "answers with" line (ADR-0062 amendment). */}
-        <ChatModelCard
-          effective={config.effectiveChatLlm}
-          voice={effectiveLlm}
-          onSave={(provider, model, secret) => saveChatModel.mutateAsync({ slot: "chat", provider, model, secret })}
-          onReset={() => resetChatModel.mutateAsync({ slot: "chat" })}
-        />
-      </div>
+          <ChatModelCard
+            effective={config.effectiveChatLlm}
+            voice={effectiveLlm}
+            onSave={(provider, model, secret) => saveChatModel.mutateAsync({ slot: "chat", provider, model, secret })}
+            onReset={() => resetChatModel.mutateAsync({ slot: "chat" })}
+          />
+        </div>
+      </section>
 
       <ConfirmDialog
         open={confirmDefault}
@@ -417,7 +468,7 @@ function KeysSection({
         confirmLabel={t("config.backToDefault")}
         onConfirm={() => {
           setConfirmDefault(false);
-          removeLlm.mutate({ slot: "voice_llm" });
+          backToDefault.mutate({ slot: "voice_llm" });
         }}
       />
     </section>

@@ -32,6 +32,7 @@ export function SecretRow({
   name,
   description,
   getKeyUrl,
+  getKeyLabel,
   placeholder,
   credential,
   health,
@@ -50,6 +51,8 @@ export function SecretRow({
   description?: string;
   /** Where a key for this service is created (opens in a new tab). */
   getKeyUrl?: string;
+  /** The Get-a-key link's text, where "Get a {name} key" does not read (the bot token). */
+  getKeyLabel?: string;
   placeholder: string;
   credential?: ProviderCredential;
   health?: ProviderHealth;
@@ -187,7 +190,7 @@ export function SecretRow({
           {description && <div className="gx-provider-row__desc">{description}</div>}
           {getKeyUrl && (
             <a className="gx-provider-row__getkey" href={getKeyUrl} target="_blank" rel="noopener noreferrer">
-              {t("config.getKey", { name })}
+              {getKeyLabel ?? t("config.getKey", { name })}
               <ExternalLink size={12} aria-hidden="true" />
               <span className="gx-visually-hidden">{t("shell.opensInNewTab")}</span>
             </a>

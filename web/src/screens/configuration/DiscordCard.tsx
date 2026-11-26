@@ -80,8 +80,12 @@ export function DiscordCard({
               <span className="gx-discord-linked__name" data-testid="linked-server">
                 {linkedName || t("config.serverIdValue", { id: config.guildId })}
               </span>
-              {linkedName && (
+              {linkedName ? (
                 <span className="gx-discord-linked__id">{t("config.serverIdValue", { id: config.guildId })}</span>
+              ) : (
+                // Linked before names were stored: linking the same server
+                // again stores it (the link and the voice channel stay).
+                <span className="gx-discord-linked__hint">{t("config.relinkForName")}</span>
               )}
               <IntegrationBadge state={config.integrationState} detail={config.integrationDetail} />
             </div>
@@ -121,6 +125,7 @@ export function DiscordCard({
           name={t("config.botTokenName")}
           description={t("config.botTokenHint")}
           getKeyUrl="https://discord.com/developers/applications"
+          getKeyLabel={t("config.botGetKey")}
           optional
           placeholder={t("config.pasteBotToken")}
           credential={botCredential}
@@ -169,6 +174,11 @@ function LinkForm({
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState("");
+  // The paste box and the Server ID field are two sources for ONE candidate:
+  // the last one edited wins and the other is emptied, so the screen never
+  // shows a server other than the one Link would link. Bumping this key
+  // remounts (and so empties) the paste box.
+  const [pasteKey, setPasteKey] = useState(0);
 
   const link = useMutation(ProviderService.method.saveDiscordSettings, {
     onSuccess: (_res, req) => {
@@ -181,8 +191,12 @@ function LinkForm({
   });
 
   const id = candidate?.id ?? "";
-  // Nothing to link, or the server that is already linked: Link stays off.
-  const unchanged = id === "" || id === config.guildId;
+  // The server already linked, with its name stored. A link made before
+  // names were stored (migration 00061) may be linked again: the proof then
+  // stores the name, and the server keeps the link and its voice channel.
+  const alreadyLinked = id !== "" && id === config.guildId && Boolean(config.guildName);
+  // Nothing to link, or nothing a new link would change: Link stays off.
+  const unchanged = id === "" || alreadyLinked;
   const submit = () => {
     if (unchanged || link.isPending) return;
     link.mutate({ guildId: id });
@@ -209,8 +223,10 @@ function LinkForm({
             <h3 className="gx-discord-step__title">{t("config.discordStep2Title")}</h3>
             <p className="gx-discord-step__copy">{t("config.discordStep2Copy")}</p>
             <DiscordLinkAutofill
+              key={pasteKey}
               onFill={(guildId, guildName) => {
                 link.reset();
+                setManual("");
                 setCandidate({ id: guildId, name: guildName, from: "paste" });
               }}
               // A typed Server ID stands; only a pasted server goes with its paste.
@@ -221,10 +237,16 @@ function LinkForm({
               type="button"
               className="gx-disclosure"
               aria-expanded={manualOpen}
-              aria-controls={manualId}
+              // Only while the target is in the DOM: a closed disclosure renders none.
+              aria-controls={manualOpen ? manualId : undefined}
               onClick={() => setManualOpen((o) => !o)}
             >
-              <ChevronRight size={14} className="gx-disclosure__chevron" data-open={manualOpen || undefined} aria-hidden="true" />
+              <ChevronRight
+                size={14}
+                className="gx-disclosure__chevron"
+                data-open={manualOpen || undefined}
+                aria-hidden="true"
+              />
               {t("config.enterServerId")}
             </button>
             {manualOpen && (
@@ -242,7 +264,14 @@ function LinkForm({
                     const v = e.target.value.trim();
                     setManual(e.target.value);
                     link.reset();
-                    setCandidate(v === "" ? null : { id: v, from: "manual" });
+                    if (v === "") {
+                      // Emptying the field withdraws only what it typed.
+                      setCandidate((c) => (c?.from === "manual" ? null : c));
+                      return;
+                    }
+                    // Typing takes over from a paste: empty the paste box too.
+                    if (candidate?.from === "paste") setPasteKey((k) => k + 1);
+                    setCandidate({ id: v, from: "manual" });
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -267,11 +296,10 @@ function LinkForm({
                 </Button>
               )}
               <Button variant="primary" size="sm" onClick={submit} disabled={unchanged} loading={link.isPending}>
-                {candidate?.name
-                  ? t("config.linkServerNamed", { server: candidate.name })
-                  : t("config.linkServer")}
+                {candidate?.name ? t("config.linkServerNamed", { server: candidate.name }) : t("config.linkServer")}
               </Button>
             </div>
+            {alreadyLinked && <p className="gx-discord-step__note">{t("config.alreadyLinked")}</p>}
             <p className="gx-discord-step__note">{t("config.linkNeedsManageServer")}</p>
           </div>
         </li>

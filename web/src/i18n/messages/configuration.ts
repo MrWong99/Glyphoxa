@@ -29,12 +29,18 @@ export const en = {
   "config.stepStatusDone": "Done",
   "config.stepStatusTodo": "Still to do",
   "config.stepStatusChecking": "Checking…",
+  "config.stepStatusUnavailable": "Couldn't check",
+  "config.stepUnavailableHint": "Setup couldn't read this. Retry below.",
+  "config.readyPausedTitle": "Ready, but new sessions are paused",
+  "config.readyPausedLede": "This month's included usage is used up. Your plan says how to go on.",
+  "config.seePlan": "See your plan",
   "config.stepCampaign": "Create a campaign",
   "config.stepCampaignHint": "Your NPCs, world wiki and sessions live in a campaign.",
   "config.stepCampaignDone": "{name}",
   "config.stepDiscord": "Connect Discord",
   "config.stepDiscordHint": "Add Glyphoxa to your server and link it. You need Manage Server rights there.",
   "config.stepDiscordDone": "Linked to {server}",
+  "config.stepDiscordFailedHint": "The Discord connection failed. Check the bot token under Discord.",
   "config.stepVoice": "Voice and speech",
   "config.stepVoiceHint": "ElevenLabs hears the table and speaks for your NPCs.",
   "config.stepAiModel": "AI model",
@@ -84,8 +90,9 @@ export const en = {
   "config.descAnthropic": "Claude models for your NPCs' replies.",
   "config.descElevenLabs": "Hears the table and speaks for your NPCs.",
   "config.descGemini": "Draws portraits, maps and highlight pictures.",
-  "config.getKey": "Get a {name} key",
-  "config.voiceLlmTitle": "Voice model",
+  "config.getKey": "Get your {name} key",
+  "config.voiceLlmTitle": "AI model",
+  "config.otherServicesTitle": "Voice, images and planning",
 
   // SecretRow controls + aria. {name} is the slot's display name ("Groq",
   // "Bot token"), so the aria strings compose e.g. "Groq key" / "Groq saved".
@@ -156,6 +163,8 @@ export const en = {
   "config.discordStep2Copy": "Paste an invite or channel link from your server, then link it.",
   "config.linkServer": "Link server",
   "config.linkServerNamed": "Link {server}",
+  "config.alreadyLinked": "This server is already linked.",
+  "config.relinkForName": "Linked before server names were kept: choose Change and link this server again to show its name.",
   "config.linkNeedsManageServer": "Linking needs Manage Server rights on that Discord server.",
   "config.couldntLinkTitle": "Couldn't link the server",
   "config.toastLinked": "Linked {server}",
@@ -166,6 +175,7 @@ export const en = {
   "config.ownBotTitle": "Use your own Discord bot",
   "config.ownBotHint": "Only if you run your own bot",
   "config.botTokenName": "Bot token",
+  "config.botGetKey": "Create a bot in the Discord Developer Portal",
   "config.pasteBotToken": "Paste the Discord bot token",
   "config.botTokenHint":
     "Only needed if you run your own Discord bot. Otherwise leave it empty: Glyphoxa's bot joins through step 1.",
@@ -236,6 +246,8 @@ export const en = {
   "config.tableDeletePre": "To delete your table and everything in it, ",
   "config.tableDeleteLink": "write to the operator",
   "config.tableDeletePost": ". It can't be undone.",
+  "config.tableDeleteSubject": "Glyphoxa: delete my table",
+  "config.planChangeSubject": "Glyphoxa: move my table to the bring-your-own-keys plan",
 } as const;
 
 export const de: Record<keyof typeof en, string> = {
@@ -259,6 +271,11 @@ export const de: Record<keyof typeof en, string> = {
   "config.stepStatusDone": "Erledigt",
   "config.stepStatusTodo": "Noch offen",
   "config.stepStatusChecking": "Wird geprüft…",
+  "config.stepStatusUnavailable": "Nicht prüfbar",
+  "config.stepUnavailableHint": "Setup konnte das nicht lesen. Versuche es unten erneut.",
+  "config.readyPausedTitle": "Bereit, aber neue Sessions sind pausiert",
+  "config.readyPausedLede": "Das enthaltene Kontingent dieses Monats ist aufgebraucht. Dein Tarif zeigt, wie es weitergeht.",
+  "config.seePlan": "Zum Tarif",
   "config.stepCampaign": "Kampagne erstellen",
   "config.stepCampaignHint": "Deine NSCs, das Welt-Wiki und die Sessions gehören zu einer Kampagne.",
   "config.stepCampaignDone": "{name}",
@@ -266,6 +283,7 @@ export const de: Record<keyof typeof en, string> = {
   "config.stepDiscordHint":
     "Füge Glyphoxa zu deinem Server hinzu und verknüpfe ihn. Dafür brauchst du dort das Recht „Server verwalten“.",
   "config.stepDiscordDone": "Verknüpft mit {server}",
+  "config.stepDiscordFailedHint": "Die Discord-Verbindung ist fehlgeschlagen. Prüfe den Bot-Token unter Discord.",
   "config.stepVoice": "Stimme und Sprache",
   "config.stepVoiceHint": "ElevenLabs hört dem Tisch zu und spricht für deine NSCs.",
   "config.stepAiModel": "KI-Modell",
@@ -315,7 +333,8 @@ export const de: Record<keyof typeof en, string> = {
   "config.descElevenLabs": "Hört dem Tisch zu und spricht für deine NSCs.",
   "config.descGemini": "Zeichnet Porträts, Karten und Bilder zu Highlights.",
   "config.getKey": "{name}-Schlüssel holen",
-  "config.voiceLlmTitle": "Sprachmodell",
+  "config.voiceLlmTitle": "KI-Modell",
+  "config.otherServicesTitle": "Stimme, Bilder und Planung",
 
   "config.secretKeyAria": "{name}-Schlüssel",
   "config.secretSavedAria": "{name} gespeichert",
@@ -375,6 +394,9 @@ export const de: Record<keyof typeof en, string> = {
   "config.discordStep2Copy": "Füge einen Einladungs- oder Kanallink von deinem Server ein und verknüpfe ihn dann.",
   "config.linkServer": "Server verknüpfen",
   "config.linkServerNamed": "{server} verknüpfen",
+  "config.alreadyLinked": "Dieser Server ist bereits verknüpft.",
+  "config.relinkForName":
+    "Verknüpft, bevor Servernamen gespeichert wurden: Wähle „Ändern“ und verknüpfe diesen Server erneut, damit sein Name erscheint.",
   "config.linkNeedsManageServer": "Zum Verknüpfen brauchst du auf diesem Discord-Server das Recht „Server verwalten“.",
   "config.couldntLinkTitle": "Der Server konnte nicht verknüpft werden",
   "config.toastLinked": "{server} verknüpft",
@@ -385,6 +407,7 @@ export const de: Record<keyof typeof en, string> = {
   "config.ownBotTitle": "Eigenen Discord-Bot verwenden",
   "config.ownBotHint": "Nur, wenn du einen eigenen Bot betreibst",
   "config.botTokenName": "Bot-Token",
+  "config.botGetKey": "Bot im Discord Developer Portal erstellen",
   "config.pasteBotToken": "Füge den Discord-Bot-Token ein",
   "config.botTokenHint":
     "Nur nötig, wenn du einen eigenen Discord-Bot betreibst. Sonst lass das Feld leer: Der Bot von Glyphoxa kommt über Schritt 1 dazu.",
@@ -449,4 +472,6 @@ export const de: Record<keyof typeof en, string> = {
   "config.tableDeletePre": "Um deinen Tisch mit allem darin zu löschen, ",
   "config.tableDeleteLink": "schreib dem Betreiber",
   "config.tableDeletePost": ". Das lässt sich nicht rückgängig machen.",
+  "config.tableDeleteSubject": "Glyphoxa: meinen Tisch löschen",
+  "config.planChangeSubject": "Glyphoxa: meinen Tisch auf den Tarif mit eigenen Schlüsseln umstellen",
 };

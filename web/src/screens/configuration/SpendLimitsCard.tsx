@@ -21,10 +21,19 @@ import { useI18n, type TFunc } from "@/i18n";
 // number, and the session can only end at or above where replies pause (the
 // server enforces the same, ADR-0046). Save is off until something changed.
 
-/** A field's text as a cap: undefined for blank (= no cap), NaN when unreadable. */
-function parse(v: string): number | undefined {
+/**
+ * A field's text as a cap: undefined for blank (= no cap), NaN when
+ * unreadable. A decimal comma reads like a point ("2,50" is 2.5), because the
+ * German placeholder writes it so. The fields are text, not type="number": a
+ * number field reports an entry it cannot parse as "", which would read as
+ * "no cap" and let Save clear a stored limit without a word (#725 review).
+ */
+function parseCap(v: string): number | undefined {
   const s = v.trim();
-  return s === "" ? undefined : Number(s);
+  if (s === "") return undefined;
+  // Digits with at most one decimal separator; nothing else (no exponent, no sign).
+  if (!/^\d*(?:[.,]\d*)?$/.test(s) || s === "." || s === ",") return NaN;
+  return Number(s.replace(",", "."));
 }
 
 const usd = (lang: string, n: number) =>
@@ -39,7 +48,14 @@ function capsSummary(t: TFunc, lang: string, soft?: number, hard?: number): stri
   return t("config.capsNone");
 }
 
-export function SpendLimitsCard({ anchor }: { anchor: string }) {
+export function SpendLimitsCard({
+  anchor,
+  openSignal = 0,
+}: {
+  anchor: string;
+  /** Bumped when the checklist links here: the card (re)opens on arrival. */
+  openSignal?: number;
+}) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const capsQuery = useQuery(ProviderService.method.getSpendCaps, {});
@@ -70,8 +86,8 @@ export function SpendLimitsCard({ anchor }: { anchor: string }) {
     set(v);
   };
 
-  const softV = parse(soft);
-  const hardV = parse(hard);
+  const softV = parseCap(soft);
+  const hardV = parseCap(hard);
   const invalid = (n: number | undefined) => n !== undefined && (!Number.isFinite(n) || n < 0);
   const softError = invalid(softV) ? t("config.capInvalid") : null;
   const hardError = invalid(hardV)
@@ -87,14 +103,21 @@ export function SpendLimitsCard({ anchor }: { anchor: string }) {
 
   return (
     <section id={anchor} tabIndex={-1} className="gx-setup-section" aria-label={t("config.spendingLimitsTitle")}>
-      <AdvancedCard title={t("config.spendingLimitsTitle")} hint={header}>
+      {/* Keyed on the signal: each arrival from the checklist remounts it open.
+          The fields' text lives up here, so a remount loses nothing typed. */}
+      <AdvancedCard key={openSignal} defaultOpen={openSignal > 0} title={t("config.spendingLimitsTitle")} hint={header}>
         <div className="gx-spendcaps">
           <p className="gx-spendcaps__lede">{t("config.spendCapsLede")}</p>
           {capsQuery.isError && (
             <Alert
               tone="danger"
               action={
-                <Button size="sm" variant="secondary" loading={capsQuery.isFetching} onClick={() => void capsQuery.refetch()}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={capsQuery.isFetching}
+                  onClick={() => void capsQuery.refetch()}
+                >
                   {t("common.retry")}
                 </Button>
               }
@@ -105,10 +128,8 @@ export function SpendLimitsCard({ anchor }: { anchor: string }) {
           <div className="gx-spendcaps__inputs">
             <Input
               label={t("config.softLimitLabel")}
-              type="number"
               inputMode="decimal"
-              min="0"
-              step="0.01"
+              autoComplete="off"
               placeholder={t("config.softLimitPlaceholder")}
               hint={t("config.softLimitHint")}
               error={softError}
@@ -117,10 +138,8 @@ export function SpendLimitsCard({ anchor }: { anchor: string }) {
             />
             <Input
               label={t("config.hardLimitLabel")}
-              type="number"
               inputMode="decimal"
-              min="0"
-              step="0.01"
+              autoComplete="off"
               placeholder={t("config.hardLimitPlaceholder")}
               hint={t("config.hardLimitHint")}
               error={hardError}
