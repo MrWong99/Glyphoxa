@@ -223,3 +223,43 @@ func TestCheckAdmin_UnexpectedStatusIsGenericError(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckAdminGuild_ReturnsName: a passing proof hands back the guild name
+// from the same guild read (owner and role paths alike), so the link can be
+// stored by name; a failing proof returns no name.
+func TestCheckAdminGuild_ReturnsName(t *testing.T) {
+	t.Parallel()
+	const member = "777000000000000000"
+	fake := &fakeGuildAPI{
+		guildStatus: http.StatusOK,
+		guild: map[string]any{
+			"id": testGuildID, "name": "Tides over Saltmarsh", "owner_id": testUserID,
+			"roles": []map[string]any{{"id": "900", "permissions": "32"}},
+		},
+		memberStatus: http.StatusOK,
+		member:       map[string]any{"roles": []string{"900"}},
+	}
+	owner := fake.server(t, testGuildID, testUserID)
+	name, err := discordguild.CheckAdminGuildAt(context.Background(), "tok", testGuildID, testUserID, owner.URL, nil)
+	if err != nil || name != "Tides over Saltmarsh" {
+		t.Fatalf("owner = (%q, %v), want the guild name", name, err)
+	}
+
+	byRole := fake.server(t, testGuildID, member)
+	name, err = discordguild.CheckAdminGuildAt(context.Background(), "tok", testGuildID, member, byRole.URL, nil)
+	if err != nil || name != "Tides over Saltmarsh" {
+		t.Fatalf("manage-guild role = (%q, %v), want the guild name", name, err)
+	}
+
+	denied := &fakeGuildAPI{
+		guildStatus:  http.StatusOK,
+		guild:        map[string]any{"id": testGuildID, "name": "Tides over Saltmarsh", "owner_id": "1", "roles": []map[string]any{}},
+		memberStatus: http.StatusOK,
+		member:       map[string]any{"roles": []string{}},
+	}
+	srv := denied.server(t, testGuildID, member)
+	name, err = discordguild.CheckAdminGuildAt(context.Background(), "tok", testGuildID, member, srv.URL, nil)
+	if !errors.Is(err, discordguild.ErrNoPermission) || name != "" {
+		t.Fatalf("no permission = (%q, %v), want (\"\", ErrNoPermission)", name, err)
+	}
+}

@@ -26,13 +26,13 @@ var ErrGuildTaken = errors.New("storage: this guild is already bound by another 
 
 const deploymentConfigColumns = `
 	tenant_id, discord_bot_token_ciphertext, discord_bot_token_last4,
-	guild_id, voice_channel_id, created_at, updated_at`
+	guild_id, COALESCE(guild_name, ''), voice_channel_id, created_at, updated_at`
 
 func scanDeploymentConfig(row pgx.Row) (DeploymentConfig, error) {
 	var d DeploymentConfig
 	err := row.Scan(
 		&d.TenantID, &d.DiscordBotTokenCiphertext, &d.DiscordBotTokenLast4,
-		&d.GuildID, &d.VoiceChannelID, &d.CreatedAt, &d.UpdatedAt,
+		&d.GuildID, &d.GuildName, &d.VoiceChannelID, &d.CreatedAt, &d.UpdatedAt,
 	)
 	return d, err
 }
@@ -145,6 +145,8 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 		 ON CONFLICT (tenant_id) DO UPDATE
 		   SET guild_id = EXCLUDED.guild_id,
 		       voice_channel_id = EXCLUDED.voice_channel_id,
+		       guild_name = CASE WHEN deployment_config.guild_id = EXCLUDED.guild_id
+		                         THEN deployment_config.guild_name END,
 		       updated_at = now()
 		 RETURNING `+deploymentConfigColumns,
 		tenantID, guildID, voiceChannelID)
@@ -164,7 +166,8 @@ func (s *Store) SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, gui
 // and returns the resulting row. The stored Default Voice Channel
 // (voice_channel_id) survives a re-save of the SAME guild but is cleared when
 // the guild changes — a channel snowflake belongs to one guild, so carrying it
-// across a re-bind would point sessions at a channel of the OLD guild. A
+// across a re-bind would point sessions at a channel of the OLD guild. The
+// stored guild name (SaveDiscordGuildName) follows the same rule. A
 // guild_id already bound by a DIFFERENT Tenant trips the first-registrar-wins
 // partial UNIQUE index (23505 on deployment_config_guild_owner) and yields
 // ErrGuildTaken, exactly like SaveDiscordChannels.
@@ -177,6 +180,8 @@ func (s *Store) SaveDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildI
 		       voice_channel_id = CASE WHEN deployment_config.guild_id = EXCLUDED.guild_id
 		                               THEN deployment_config.voice_channel_id
 		                               ELSE '' END,
+		       guild_name = CASE WHEN deployment_config.guild_id = EXCLUDED.guild_id
+		                         THEN deployment_config.guild_name END,
 		       updated_at = now()
 		 RETURNING `+deploymentConfigColumns,
 		tenantID, guildID)
@@ -220,13 +225,13 @@ func (s *Store) SaveDefaultVoiceChannel(ctx context.Context, tenantID uuid.UUID,
 // the row is cleared only when tenant AND guild match (no read-then-write race).
 // guild_id = ” is the unconfigured state (migration 00037), so release needs no
 // schema change and frees the first-registrar-wins index slot for the next
-// binder (legit transfer: A releases, B saves with proof). The Bot token is
-// untouched. No matching bound row — wrong echo, already released, or no config
+// binder (legit transfer: A releases, B saves with proof). The stored guild
+// name goes with the binding. The Bot token is untouched. No matching bound row — wrong echo, already released, or no config
 // at all — returns ErrNotFound.
 func (s *Store) ReleaseDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (DeploymentConfig, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE deployment_config
-		    SET guild_id = '', voice_channel_id = '', updated_at = now()
+		    SET guild_id = '', guild_name = NULL, voice_channel_id = '', updated_at = now()
 		  WHERE tenant_id = $1 AND guild_id = $2 AND guild_id <> ''
 		 RETURNING `+deploymentConfigColumns,
 		tenantID, guildID)

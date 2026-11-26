@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -65,6 +66,16 @@ type providerStore interface {
 	// ReleaseDiscordGuild frees the Tenant's bound guild via an atomic
 	// compare-and-clear (#504): the echoed guild_id must match the binding.
 	ReleaseDiscordGuild(ctx context.Context, tenantID uuid.UUID, guildID string) (storage.DeploymentConfig, error)
+	// SaveDiscordGuildName stores the linked server's display name, read by the
+	// guild-admin proof at link time; a no-op unless guildID is still linked.
+	SaveDiscordGuildName(ctx context.Context, tenantID uuid.UUID, guildID, name string) (bool, error)
+	// InsertKeylessProviderConfig writes a "ride the Platform Key" row only
+	// when the slot has none, returning the existing row untouched otherwise
+	// (#712 item 3: activating can never clear a key saved concurrently).
+	InsertKeylessProviderConfig(ctx context.Context, c storage.NewProviderConfig) (storage.ProviderConfig, bool, error)
+	// DeleteTenantLLMConfigs removes the Tenant's voice LLM rows of the given
+	// providers (ADR-0004 amendment 2026-11-26).
+	DeleteTenantLLMConfigs(ctx context.Context, tenantID uuid.UUID, providers []string) (int64, error)
 	// GetTenantSpendCaps / SetTenantSpendCaps back the per-Tenant spend caps
 	// Configuration surface (#130, ADR-0046).
 	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
@@ -155,11 +166,13 @@ type ProviderServer struct {
 	resolveInvite func(ctx context.Context, token, code string) (discordinvite.Resolved, error)
 
 	// checkGuildAdmin proves the saver administers the guild being bound (#504,
-	// ADR-0058): guild owner or a role with ADMINISTRATOR/MANAGE_GUILD. It is a
-	// seam mirroring resolveInvite: NewProviderServer defaults it to the live
-	// discordguild.CheckAdmin, and unit tests override it so SaveDiscordSettings
-	// never touches the network (ADR-0033 keyless suite).
-	checkGuildAdmin func(ctx context.Context, token, guildID, userID string) error
+	// ADR-0058): guild owner or a role with ADMINISTRATOR/MANAGE_GUILD. On
+	// success it returns the guild's display name, read by the same guild
+	// fetch, which is stored with the link. It is a seam mirroring
+	// resolveInvite: NewProviderServer defaults it to the live
+	// discordguild.CheckAdminGuild, and unit tests override it so
+	// SaveDiscordSettings never touches the network (ADR-0033 keyless suite).
+	checkGuildAdmin func(ctx context.Context, token, guildID, userID string) (string, error)
 
 	// voiceChannelInGuild reports whether channelID is one of guildID's voice
 	// channels, read with a Bot token, so a Default Voice Channel save can prove
@@ -183,6 +196,28 @@ type ProviderServer struct {
 	// lookupEnv reads a deployment env var (os.Getenv in prod); a seam so tests
 	// pin the "platform key present" half of provided_by_platform.
 	lookupEnv func(string) string
+
+	// plans reads the Tenant's active plan for GetUsageSummary; nil (not
+	// wired) reports no plan. allowance is the monthly allowance read the
+	// session and off-session gates use (ADR-0055 gate (b)); nil — allowlist
+	// mode, where no allowance gates anything — reports none. See
+	// SetUsageSources.
+	plans     activePlanReader
+	allowance allowanceStateReader
+	// now is the clock behind GetUsageSummary's resets_at; a test seam.
+	now func() time.Time
+}
+
+// activePlanReader is the plan read behind GetUsageSummary; *storage.Store
+// satisfies it.
+type activePlanReader interface {
+	TenantActivePlan(ctx context.Context, tenantID uuid.UUID) (storage.Plan, error)
+}
+
+// allowanceStateReader is the monthly allowance read; spend.PlanAllowance
+// satisfies it, the same value the session and off-session gates hold.
+type allowanceStateReader interface {
+	AllowanceState(ctx context.Context, tenantID uuid.UUID) (spend.AllowanceState, error)
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -194,12 +229,12 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &ProviderServer{store: store, cipher: cipher, log: log, lookupEnv: os.Getenv}
+	s := &ProviderServer{store: store, cipher: cipher, log: log, lookupEnv: os.Getenv, now: time.Now}
 	s.resolveInvite = func(ctx context.Context, token, code string) (discordinvite.Resolved, error) {
 		return discordinvite.Resolve(ctx, token, code, log)
 	}
-	s.checkGuildAdmin = func(ctx context.Context, token, guildID, userID string) error {
-		return discordguild.CheckAdmin(ctx, token, guildID, userID, log)
+	s.checkGuildAdmin = func(ctx context.Context, token, guildID, userID string) (string, error) {
+		return discordguild.CheckAdminGuild(ctx, token, guildID, userID, log)
 	}
 	s.voiceChannelInGuild = func(ctx context.Context, token, guildID, channelID string) (bool, error) {
 		channels, err := discordshare.ListVoiceChannels(ctx, token, guildID, log)
@@ -234,6 +269,15 @@ func (s *ProviderServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) 
 // boot, before the server serves; unset is the code default (Groq, ADR-0036).
 func (s *ProviderServer) SetLLMDefault(d llmbuild.DeploymentDefault) {
 	s.llmDefault = d
+}
+
+// SetUsageSources wires the reads behind GetUsageSummary: the active plan
+// (the store) and the monthly allowance (the same spend.PlanAllowance the
+// session and off-session gates hold, nil where no allowance gates anything).
+// Called once at boot, before the server serves; either may be nil.
+func (s *ProviderServer) SetUsageSources(plans activePlanReader, allowance allowanceStateReader) {
+	s.plans = plans
+	s.allowance = allowance
 }
 
 // SetHealthInvalidator wires the health-cache buster called after a successful
@@ -328,6 +372,7 @@ func (s *ProviderServer) ListProviderConfigs(
 	return connect.NewResponse(&managementv1.ListProviderConfigsResponse{
 		Credentials:          creds,
 		GuildId:              dep.GuildID,
+		GuildName:            dep.GuildName,
 		VoiceChannelId:       dep.VoiceChannelID,
 		DiscordApplicationId: s.discordAppID,
 		IntegrationState:     integrationState,
@@ -648,8 +693,10 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// ErrGuildTaken message below is only ever reachable by proven guild admins,
 	// closing the cross-tenant existence oracle. A channel-only save needs no
 	// proof: the guild it defaults within was already proven at link time.
+	var guildName string
 	if hasGuild {
-		if err := s.proveGuildAdmin(ctx, tenantID, req.Msg.GetBotToken(), req.Msg.GetGuildId()); err != nil {
+		guildName, err = s.proveGuildAdmin(ctx, tenantID, req.Msg.GetBotToken(), req.Msg.GetGuildId())
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -730,6 +777,17 @@ func (s *ProviderServer) SaveDiscordSettings(
 			return nil, internalErr(s.log, "SaveDiscordSettings: save channels failed", err)
 		}
 	}
+	// The server's name, read by the proof above, is stored with the link so
+	// Setup names the server instead of showing its id. Display data only: a
+	// failed write is logged and the link stands (the screen falls back to the
+	// id).
+	if hasGuild && guildName != "" {
+		if _, nerr := s.store.SaveDiscordGuildName(ctx, tenantID, req.Msg.GetGuildId(), guildName); nerr != nil {
+			s.log.Warn("SaveDiscordSettings: store guild name failed", "tenant_id", tenantID, "err", nerr)
+		} else {
+			dep.GuildName = guildName
+		}
+	}
 
 	if req.Msg.BotToken != nil {
 		dep, err = s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4)
@@ -763,36 +821,38 @@ func (s *ProviderServer) SaveDiscordSettings(
 // proveGuildAdmin runs the #504 guild-ownership proof for a SaveDiscordSettings
 // that binds guildID: the authenticated saver (auth.CurrentUser — the session
 // principal, ADR-0055, never an env allowlist) must administer the guild per
-// the checkGuildAdmin seam. reqToken is the request's plaintext Bot token when
+// the checkGuildAdmin seam, and returns the guild's display name the check
+// read. reqToken is the request's plaintext Bot token when
 // one rode along (pre-seal), else the check-token ladder falls back to the
 // stored BYOK token and finally the central env token — the same token that
 // will serve the guild (BYOK + central-token tenants both covered). Error
 // granularity (no membership oracle): Bot-cannot-see-guild is FailedPrecondition
 // "not a member"; user-not-in-guild and member-without-perms collapse to ONE
 // PermissionDenied message.
-func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID, reqToken, guildID string) error {
+func (s *ProviderServer) proveGuildAdmin(ctx context.Context, tenantID uuid.UUID, reqToken, guildID string) (string, error) {
 	user, ok := auth.CurrentUser(ctx)
 	if !ok || user.DiscordUserID == "" {
-		return connect.NewError(connect.CodeUnauthenticated,
+		return "", connect.NewError(connect.CodeUnauthenticated,
 			errors.New("no authenticated Discord user to verify guild permissions for"))
 	}
 
 	token, err := s.checkToken(ctx, tenantID, reqToken)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	switch err := s.checkGuildAdmin(ctx, token, guildID, user.DiscordUserID); {
+	name, err := s.checkGuildAdmin(ctx, token, guildID, user.DiscordUserID)
+	switch {
 	case err == nil:
-		return nil
+		return name, nil
 	case errors.Is(err, discordguild.ErrBotNotInGuild):
-		return connect.NewError(connect.CodeFailedPrecondition,
+		return "", connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("the Bot is not a member of that server"))
 	case errors.Is(err, discordguild.ErrUserNotInGuild), errors.Is(err, discordguild.ErrNoPermission):
-		return connect.NewError(connect.CodePermissionDenied,
+		return "", connect.NewError(connect.CodePermissionDenied,
 			errors.New("you need the Manage Server permission in that Discord server to link it"))
 	default:
-		return internalErr(s.log, "SaveDiscordSettings: guild-admin proof failed", err)
+		return "", internalErr(s.log, "SaveDiscordSettings: guild-admin proof failed", err)
 	}
 }
 
@@ -1123,7 +1183,8 @@ func providerCredential(component, provider string, c storage.ProviderConfig) *m
 // slot — the deployment has the provider's env key AND the Tenant is entitled
 // to the Platform Keys, the exact condition ListProviderConfigs reports as
 // provided_by_platform. The choice is stored as a keyless row carrying the
-// "env" placeholder: every key resolution reads it as "ride the env key" and
+// "env" placeholder, inserted only when the slot has no row at all (never an
+// overwrite, #712 item 3): every key resolution reads it as "ride the env key" and
 // still consults the entitlement at call time, so it grants nothing the Tenant
 // did not already have. Otherwise there is no key to run on: InvalidArgument,
 // like any model-only save without a stored key, and nothing is written.
@@ -1134,15 +1195,17 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 	if err := s.platformModelPriced(slot, model); err != nil {
 		return nil, err
 	}
-	saved, err := s.store.UpsertProviderConfigs(ctx, []storage.NewProviderConfig{{
+	// Insert-only (#712 item 3): the "no row" this path was chosen on was read
+	// a moment ago, and a key saved since must never be overwritten by an empty
+	// credential. A row that appeared in between is returned as it is: a key
+	// save always activates its slot, and a concurrent activation wrote what
+	// this one would have.
+	saved, _, err := s.store.InsertKeylessProviderConfig(ctx, storage.NewProviderConfig{
 		TenantID:  tenantID,
 		Component: slot.components[0],
 		Provider:  slot.provider,
 		Model:     model,
-		// NOT NULL column; never opened for an "env" row (llmbuild.ResolveKey).
-		CredentialsCiphertext: []byte{},
-		CredentialsLast4:      envPlaceholderLast4,
-	}})
+	})
 	if err != nil {
 		return nil, internalErr(s.log, "SaveProviderConfig: activate platform slot failed", err)
 	}
@@ -1150,7 +1213,7 @@ func (s *ProviderServer) activatePlatformSlot(ctx context.Context, tenantID uuid
 		s.invalidateHealth(tenantID)
 	}
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
-		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),
+		Credential: providerCredential(string(slot.components[0]), slot.provider, saved),
 	}), nil
 }
 
@@ -1175,6 +1238,73 @@ func (s *ProviderServer) platformModelPriced(slot byokSlot, model string) error 
 	return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
 		"model %q has no price on record and cannot run on the platform key: choose a listed model, or save your own %s key to use it",
 		model, slot.provider))
+}
+
+// voiceLLMSlot is the DeleteProviderConfig slot that removes every voice LLM
+// row: the way back to the platform default (ADR-0004 amendment 2026-11-26).
+const voiceLLMSlot = "voice_llm"
+
+// voiceLLMDeleteSlot maps a DeleteProviderConfig slot onto the voice LLM
+// providers it removes: one voice LLM slot by its provider id, or all of them
+// for voiceLLMSlot. ok is false for any other slot.
+func voiceLLMDeleteSlot(slot string) (providers []string, ok bool) {
+	if slot == voiceLLMSlot {
+		for _, s := range byokSlots {
+			if s.isLLM() {
+				providers = append(providers, s.provider)
+			}
+		}
+		return providers, true
+	}
+	if s, found := slotFor(slot); found && s.isLLM() {
+		return []string{s.provider}, true
+	}
+	return nil, false
+}
+
+// deleteVoiceLLM removes the Tenant's voice LLM rows of providers — a saved
+// key or a keyless platform choice — so its sessions run on the newest LLM row
+// left, else the platform default (ADR-0004 amendment 2026-11-26). Nothing is
+// re-sealed and no secret is read.
+//
+// Two consequences are handled here, because the screen cannot:
+//   - the provider-health cache is busted: its LLM entry was about the LLM in
+//     effect, which may have just changed;
+//   - the Planning chat is re-validated. A chat choice may name a model with
+//     no price on record only because it ran on the Tenant's own key for that
+//     provider (provider_chat.go); with that key gone it would fall to the
+//     Platform Key, which only runs priced models. Its model is then reset to
+//     the provider's chat default (priced by test) and the response says so.
+func (s *ProviderServer) deleteVoiceLLM(ctx context.Context, tenantID uuid.UUID, providers []string) (*connect.Response[managementv1.DeleteProviderConfigResponse], error) {
+	removed, err := s.store.DeleteTenantLLMConfigs(ctx, tenantID, providers)
+	if err != nil {
+		return nil, internalErr(s.log, "DeleteProviderConfig: delete voice llm rows failed", err)
+	}
+	if removed == 0 {
+		// Idempotent: nothing was stored, nothing changed.
+		return connect.NewResponse(&managementv1.DeleteProviderConfigResponse{}), nil
+	}
+	if s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
+	}
+
+	configs, err := s.store.ListProviderConfigs(ctx, tenantID)
+	if err != nil {
+		return nil, internalErr(s.log, "DeleteProviderConfig: re-read provider_config failed", err)
+	}
+	sel := llmbuild.DeploymentDefault{}.SelectChat(nil, configs)
+	if sel.Source != llmbuild.ChatSourceChoice || sel.KeySource != llmbuild.ChatKeyPlatform ||
+		chatModelPriced(sel.Provider, sel.StoredModel) == nil {
+		return connect.NewResponse(&managementv1.DeleteProviderConfigResponse{}), nil
+	}
+	// A keyless model-only chat save: the credential columns are not written,
+	// so this can never touch a chat-only key (there is none on this rung).
+	if _, err := s.store.SaveChatLLMChoice(ctx, storage.ChatLLMChoice{
+		TenantID: tenantID, Provider: sel.Provider, Model: "",
+	}); err != nil {
+		return nil, internalErr(s.log, "DeleteProviderConfig: reset unpriced chat model failed", err)
+	}
+	return connect.NewResponse(&managementv1.DeleteProviderConfigResponse{ChatModelReset: true}), nil
 }
 
 // discordCredential maps the deployment Bot token onto its write-only wire view.

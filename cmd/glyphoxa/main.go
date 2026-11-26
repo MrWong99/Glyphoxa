@@ -1764,6 +1764,11 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// the call-time resolution would do.
 	providerSrv.SetKeyEntitlement(keyEnt)
 	providerSrv.SetLLMDefault(llmDefault)
+	// Setup's plan and usage card (GetUsageSummary): the plan row, and the
+	// same monthly allowance the session and off-session gates read. Allowlist
+	// mode wires no allowance because none is enforced there, so the card
+	// shows none rather than a meter nothing acts on.
+	providerSrv.SetUsageSources(store, allowanceForMode(admission, store))
 	// Saving Discord settings also reconciles the standing presence so the new
 	// token / Guild registers the slash-command surface without a restart (#102).
 	if presenceRefresh != nil {

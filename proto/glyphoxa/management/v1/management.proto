@@ -1912,12 +1912,27 @@ service ProviderService {
   // ElevenLabs) and returns only its masked metadata. Replacing an existing key
   // updates its last4 + updated_at. State-changing: auth + CSRF guard it.
   rpc SaveProviderConfig(SaveProviderConfigRequest) returns (SaveProviderConfigResponse);
-  // DeleteProviderConfig removes a stored choice. v1 accepts only slot "chat":
-  // it removes the Tenant's Planning chat model choice (and a chat-only key
-  // stored with it), returning the chat to "same as voice" (ADR-0062 amendment
-  // 2026-11-22). Idempotent: deleting when nothing is stored succeeds. Any
-  // other slot is InvalidArgument. State-changing: auth + CSRF guard it.
+  // DeleteProviderConfig removes a stored choice or key (see
+  // DeleteProviderConfigRequest.slot for the accepted slots):
+  //   - "chat" removes the Tenant's Planning chat model choice (and a
+  //     chat-only key stored with it), returning the chat to "same as voice"
+  //     (ADR-0062 amendment 2026-11-22);
+  //   - "groq" / "anthropic" remove that voice LLM slot's key (or its keyless
+  //     platform choice), and "voice_llm" removes both, putting the Tenant back
+  //     on the platform default LLM (ADR-0004 amendment 2026-11-26). The
+  //     health cache is busted, and a Planning chat choice that would
+  //     otherwise run an unpriced model on the Platform Key falls back to its
+  //     provider's chat default (chat_model_reset).
+  // Idempotent: deleting when nothing is stored succeeds. Any other slot is
+  // InvalidArgument. State-changing: auth + CSRF guard it.
   rpc DeleteProviderConfig(DeleteProviderConfigRequest) returns (DeleteProviderConfigResponse);
+  // GetUsageSummary reports the Tenant's plan and this month's estimated usage
+  // against the plan's included allowance (ADR-0054/0055), so Setup can show
+  // the allowance before a feature refuses. The month is the UTC calendar
+  // month the allowance gate uses (internal/spend). A read (NO_SIDE_EFFECTS).
+  rpc GetUsageSummary(GetUsageSummaryRequest) returns (GetUsageSummaryResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   // SaveDiscordSettings stores the Discord deployment integration: the Bot token
   // (a write-only secret, sealed at rest) and the non-secret Guild / Voice
   // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
@@ -2146,6 +2161,11 @@ message ListProviderConfigsResponse {
   // effective_chat_llm is the LLM the Planning chat answers with for the
   // Tenant, with the key it runs on and the providers it can be switched to.
   EffectiveChatLlm effective_chat_llm = 8;
+  // guild_name is the linked Discord server's display name as it was when the
+  // server was linked (read by the guild-admin proof, stored with the link and
+  // cleared on release). Empty when no server is linked, or for a link made
+  // before the name was stored: the screen then shows guild_id.
+  string guild_name = 9;
 }
 
 // SaveProviderConfigRequest seals one BYOK provider key, or — with slot "chat"
@@ -2191,12 +2211,53 @@ message SaveProviderConfigRequest {
 
 // DeleteProviderConfigRequest names the stored choice to remove.
 message DeleteProviderConfigRequest {
-  // slot is what to remove. Only "chat" is accepted in v1.
+  // slot is what to remove: "chat" (the Planning chat model choice), "groq" or
+  // "anthropic" (that voice LLM slot's key), or "voice_llm" (every voice LLM
+  // slot: back to the platform default). Anything else is InvalidArgument.
   string slot = 1;
 }
 
-// DeleteProviderConfigResponse is empty: the caller re-reads the Configuration.
-message DeleteProviderConfigResponse {}
+// DeleteProviderConfigResponse reports what else the removal changed; the
+// caller re-reads the Configuration for the rest.
+message DeleteProviderConfigResponse {
+  // chat_model_reset is true when removing a voice LLM key would have left the
+  // Planning chat on a model without a price on the Platform Key, so the
+  // chat's model choice was reset to its provider's chat default.
+  bool chat_model_reset = 1;
+}
+
+// GetUsageSummaryRequest is the (empty) request; the tenant is resolved
+// server-side from the session.
+message GetUsageSummaryRequest {}
+
+// GetUsageSummaryResponse is the Tenant's plan and its month-to-date usage.
+// Every USD figure is an ESTIMATE from the static price table (ADR-0046), not
+// a billed amount.
+message GetUsageSummaryResponse {
+  // plan_slug is the active subscription's plan slug; empty when the Tenant
+  // has no active subscription (a self-hosted table).
+  string plan_slug = 1;
+  // plan_name is the plan's display name; empty with no subscription.
+  string plan_name = 2;
+  // uses_platform_keys is true when the Tenant's key resolution may ride the
+  // deployment's Platform Keys (the entitlement every key resolution
+  // consults); false means it runs only on its own keys.
+  bool uses_platform_keys = 3;
+  // included_usd is the plan's monthly included usage. Absent when no
+  // allowance applies (no plan, a plan without one, or a deployment that does
+  // not gate on it).
+  optional double included_usd = 4;
+  // month_usd is the estimated usage recorded this month (UTC calendar month).
+  // 0 when no allowance applies: the ledger is not read then.
+  double month_usd = 5;
+  // resets_at is the start of the next UTC calendar month, when the allowance
+  // starts over.
+  google.protobuf.Timestamp resets_at = 6;
+  // exhausted is true when an allowance applies and month_usd has reached it:
+  // new Voice Sessions and paid off-session calls are refused until
+  // resets_at. The gate is per plan, so a saved own key does not lift it.
+  bool exhausted = 7;
+}
 
 // SaveProviderConfigResponse returns the saved key's masked metadata.
 message SaveProviderConfigResponse {

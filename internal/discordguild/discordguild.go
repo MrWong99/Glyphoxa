@@ -53,14 +53,23 @@ var ErrNoPermission = errors.New("discordguild: user lacks Manage Guild")
 // ADMINISTRATOR/MANAGE_GUILD, else one of the sentinel errors above. An empty
 // token fails fast (no dial). A ctx deadline bounds each call. log may be nil.
 func CheckAdmin(ctx context.Context, token, guildID, userID string, log *slog.Logger) error {
+	_, err := checkAdmin(ctx, token, guildID, userID, "", log)
+	return err
+}
+
+// CheckAdminGuild is [CheckAdmin] that also returns the guild's display name,
+// read by the same GET /guilds/{id} the proof makes, so a caller linking the
+// guild can store the name without a second call. The name is "" whenever the
+// error is not nil.
+func CheckAdminGuild(ctx context.Context, token, guildID, userID string, log *slog.Logger) (string, error) {
 	return checkAdmin(ctx, token, guildID, userID, "", log)
 }
 
-// checkAdmin is CheckAdmin with a base-URL seam: "" means the live Discord API,
-// tests point it at a fake HTTP server.
-func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log *slog.Logger) error {
+// checkAdmin is CheckAdminGuild with a base-URL seam: "" means the live
+// Discord API, tests point it at a fake HTTP server.
+func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log *slog.Logger) (string, error) {
 	if token == "" {
-		return errors.New("discordguild: empty bot token")
+		return "", errors.New("discordguild: empty bot token")
 	}
 	if log == nil {
 		log = slog.Default()
@@ -70,6 +79,7 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 	// GET /guilds/{id} → owner_id + the guild's role table. The Bot must be a
 	// member to read this; 403/404 both mean it is not (Discord is inconsistent).
 	var guild struct {
+		Name    string `json:"name"`
 		OwnerID string `json:"owner_id"`
 		Roles   []struct {
 			ID          string `json:"id"`
@@ -78,17 +88,17 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 	}
 	status, err := discordrest.GetJSON(ctx, token, baseURL+"/guilds/"+url.PathEscape(guildID), &guild)
 	if err != nil {
-		return fmt.Errorf("discordguild: GET /guilds: %w", err)
+		return "", fmt.Errorf("discordguild: GET /guilds: %w", err)
 	}
 	if status == http.StatusForbidden || status == http.StatusNotFound {
-		return ErrBotNotInGuild
+		return "", ErrBotNotInGuild
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("discordguild: GET /guilds: HTTP %d", status)
+		return "", fmt.Errorf("discordguild: GET /guilds: HTTP %d", status)
 	}
 	if guild.OwnerID == userID {
 		log.Debug("guild-admin proof: user is the guild owner", "guild", guildID)
-		return nil
+		return guild.Name, nil
 	}
 
 	// GET /guilds/{id}/members/{userID} → the user's role ids. 404 here means
@@ -100,16 +110,16 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 	status, err = discordrest.GetJSON(ctx, token,
 		baseURL+"/guilds/"+url.PathEscape(guildID)+"/members/"+url.PathEscape(userID), &member)
 	if err != nil {
-		return fmt.Errorf("discordguild: GET /guilds/members: %w", err)
+		return "", fmt.Errorf("discordguild: GET /guilds/members: %w", err)
 	}
 	if status == http.StatusNotFound {
-		return ErrUserNotInGuild
+		return "", ErrUserNotInGuild
 	}
 	if status == http.StatusForbidden {
-		return ErrBotNotInGuild
+		return "", ErrBotNotInGuild
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("discordguild: GET /guilds/members: HTTP %d", status)
+		return "", fmt.Errorf("discordguild: GET /guilds/members: HTTP %d", status)
 	}
 
 	// Union of the member's roles plus @everyone (role id == guild id, held by
@@ -125,12 +135,12 @@ func checkAdmin(ctx context.Context, token, guildID, userID, baseURL string, log
 		}
 		perms, err := strconv.ParseUint(role.Permissions, 10, 64)
 		if err != nil {
-			return fmt.Errorf("discordguild: parse role %s permissions %q: %w", role.ID, role.Permissions, err)
+			return "", fmt.Errorf("discordguild: parse role %s permissions %q: %w", role.ID, role.Permissions, err)
 		}
 		if perms&(permAdministrator|permManageGuild) != 0 {
 			log.Debug("guild-admin proof: role grants Manage Guild", "guild", guildID, "role", role.ID)
-			return nil
+			return guild.Name, nil
 		}
 	}
-	return ErrNoPermission
+	return "", ErrNoPermission
 }

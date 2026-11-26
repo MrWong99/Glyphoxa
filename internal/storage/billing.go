@@ -272,6 +272,31 @@ func (s *Store) ActiveSubscription(ctx context.Context, tenantID uuid.UUID) (Sub
 	return sub, nil
 }
 
+// TenantActivePlan returns the catalog row of the Tenant's ACTIVE
+// subscription's plan, joined live (display name and allowance follow catalog
+// edits, like TenantIncludedUsageUSD), for Setup's plan and usage card.
+// ErrNotFound when the Tenant has no active subscription (a self-hosted
+// table).
+func (s *Store) TenantActivePlan(ctx context.Context, tenantID uuid.UUID) (Plan, error) {
+	var p Plan
+	err := s.db.QueryRow(ctx,
+		`SELECT p.id, p.slug, p.display_name, p.description, p.monthly_price_usd,
+		        p.key_source, p.included_usage_usd, p.limits, p.archived, p.created_at, p.updated_at
+		   FROM tenant_subscription ts
+		   JOIN plan p ON p.id = ts.plan_id
+		  WHERE ts.tenant_id = $1 AND ts.ended_at IS NULL`, tenantID).
+		Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Description,
+			&p.MonthlyPriceUSD, &p.KeySource, &p.IncludedUsageUSD, &p.Limits,
+			&p.Archived, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Plan{}, ErrNotFound
+	}
+	if err != nil {
+		return Plan{}, fmt.Errorf("storage: active plan for tenant %s: %w", tenantID, err)
+	}
+	return p, nil
+}
+
 // TenantHasPlatformKeySource reports whether an ACTIVE subscription on a
 // key_source='platform' Plan backs the tenant — the ADR-0054 entitlement-seam
 // read behind llmbuild.SubscriptionKeyGate (ADR-0055 gate (a)). A BYOK plan, an
