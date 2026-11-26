@@ -104,10 +104,14 @@ describe("PlanningPanel threads", () => {
     fireEvent.keyDown(within(rail).getByRole("button", { name: "Actions for “Act two loose ends”" }), { key: "Enter" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
     const field = await within(rail).findByRole("textbox", { name: "Conversation name" });
+    // Keyboard users land in the field, not on <body>.
+    await waitFor(() => expect(field).toHaveFocus());
     fireEvent.change(field, { target: { value: "Act two threads" } });
     fireEvent.keyDown(field, { key: "Enter" });
     expect(await within(rail).findByText("Act two threads")).toBeInTheDocument();
     expect(chat.calls.rename).toBe(1);
+    // …and back on the row when it ends.
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^Act two threads/ })).toHaveFocus());
 
     fireEvent.keyDown(within(rail).getByRole("button", { name: "Actions for “Act two threads”" }), { key: "Enter" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete…" }));
@@ -116,6 +120,29 @@ describe("PlanningPanel threads", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete conversation" }));
     await waitFor(() => expect(within(rail).queryByText("Act two threads")).not.toBeInTheDocument());
     expect(chat.calls.delete).toBe(1);
+  });
+
+  it("opens the conversations as a sheet from the phone bar", async () => {
+    renderPanel(standard());
+    await screen.findByText(/the keeper is a smuggler/);
+    fireEvent.click(screen.getByRole("button", { name: "Conversations (3)" }));
+    const sheet = await screen.findByRole("dialog", { name: "Conversations" });
+    fireEvent.click(within(sheet).getByRole("button", { name: /^Act two loose ends/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const rail = screen.getByRole("complementary", { name: "Planning conversations" });
+    expect(within(rail).getByRole("button", { name: /^Act two loose ends/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("speaks German", async () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      renderPanel(mockChat({ threads: [] }));
+      expect(await screen.findByText("Was kann der Butler?")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Fass die letzte Session zusammen/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Unterhaltungen (0)" })).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("gx-lang");
+    }
   });
 });
 
@@ -184,6 +211,8 @@ describe("PlanningPanel exchange", () => {
     act(() => chat.release());
     expect(await screen.findByRole("button", { name: "Send" })).toBeEnabled();
     expect(composer().value).toBe("And then?");
+    // Said once to a screen reader; the deltas themselves are not read out.
+    expect(screen.getByText("The Butler has replied.")).toBeInTheDocument();
     await waitFor(() => expect(userBubbles("Where should the session open?")).toHaveLength(1));
     expect(chat.userTurns("t-recent", "Where should the session open?")).toBe(1);
   });
@@ -258,7 +287,7 @@ describe("PlanningPanel exchange", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Stop the Butler's reply" }));
     await waitFor(() => expect(chat.aborted).toEqual([true]));
-    expect(screen.getByText("Stopped — this reply is incomplete.")).toBeInTheDocument();
+    expect(document.querySelector(".gx-planning__partial")).toHaveTextContent("Stopped — this reply is incomplete.");
     expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument();
 
     // The re-read brings the server's copy; the reply shows once, still marked.
@@ -267,7 +296,7 @@ describe("PlanningPanel exchange", () => {
       timeout: 3000,
     });
     expect(screen.getAllByText("The watch changes at midnight")).toHaveLength(1);
-    expect(screen.getByText("Stopped — this reply is incomplete.")).toBeInTheDocument();
+    expect(document.querySelector(".gx-planning__partial")).toHaveTextContent("Stopped — this reply is incomplete.");
   });
 
   it("Try again after a failure re-sends the same text and the thread holds one user turn", async () => {

@@ -324,6 +324,19 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   const streamingElsewhere = inFlight !== null && inFlight.threadId !== selectedId ? inFlight : null;
   const [creating, setCreating] = useState(false);
 
+  // The reply's end, for a screen reader: the streamed text itself is not a
+  // live region (every delta would be read out), so its end is said once.
+  // Failures speak through their own alert.
+  const [announcement, setAnnouncement] = useState("");
+  const lastStatus = useRef<string | null>(null);
+  const exchangeStatus = exchange?.status ?? null;
+  useEffect(() => {
+    if (lastStatus.current === "streaming" && exchangeStatus === "done") setAnnouncement(t("chat.replyDone"));
+    else if (lastStatus.current === "streaming" && exchangeStatus === "stopped") setAnnouncement(t("chat.stopped"));
+    else if (exchangeStatus === "streaming") setAnnouncement("");
+    lastStatus.current = exchangeStatus;
+  }, [exchangeStatus, t]);
+
   // Retire an exchange once the thread's re-read carries all of it.
   useEffect(() => {
     if (exchange && exchange.status !== "streaming" && selectedId !== null && threadQuery.isSuccess) {
@@ -586,6 +599,10 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
             {t("chat.noKeyNotice")}
           </p>
         )}
+
+        <p className="gx-visually-hidden" aria-live="polite">
+          {announcement}
+        </p>
 
         <Composer
           inputRef={composerRef}
@@ -1117,6 +1134,19 @@ function ThreadRow({
   const displayName = thread.title || t("chat.untitledThread");
   const when = stamp(thread.updatedAt, lang);
 
+  // Focus follows the mode: into the field when Rename is chosen (after the
+  // menu has put focus back on its trigger, which this swap unmounts), back
+  // to the row when the rename ends — never left on <body>.
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const openRef = useRef<HTMLButtonElement | null>(null);
+  const wasEditing = useRef(false);
+  useEffect(() => {
+    if (editing === wasEditing.current) return;
+    wasEditing.current = editing;
+    const frame = requestAnimationFrame(() => (editing ? inputRef.current?.focus() : openRef.current?.focus()));
+    return () => cancelAnimationFrame(frame);
+  }, [editing]);
+
   const commit = () => {
     const next = title.trim();
     setEditing(false);
@@ -1130,11 +1160,11 @@ function ThreadRow({
     return (
       <li className="gx-planning__thread" data-active={active ? "true" : undefined}>
         <input
+          ref={inputRef}
           className="gx-input gx-planning__rename"
           aria-label={t("chat.renameInputAria")}
           value={title}
           maxLength={TITLE_MAX}
-          autoFocus
           disabled={renaming}
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => {
@@ -1167,7 +1197,13 @@ function ThreadRow({
       data-active={active ? "true" : undefined}
       data-streaming={streaming ? "true" : undefined}
     >
-      <button type="button" className="gx-planning__thread-open" aria-current={active ? "true" : undefined} onClick={onSelect}>
+      <button
+        ref={openRef}
+        type="button"
+        className="gx-planning__thread-open"
+        aria-current={active ? "true" : undefined}
+        onClick={onSelect}
+      >
         <span className="gx-planning__thread-title">{displayName}</span>
         <span className="gx-planning__thread-when">
           {streaming ? <span className="gx-planning__thread-live">{t("chat.working")}</span> : when}
