@@ -5,7 +5,7 @@ import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
 vi.mock("sonner", () => ({
-  toast: { error: vi.fn(), success: vi.fn() },
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), warning: vi.fn(), dismiss: vi.fn() }),
   Toaster: () => null,
 }));
 
@@ -26,7 +26,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { MockEventSource } from "@/test/mockEventSource";
-import { Session } from "./Session";
+import { Screen } from "./testScreen";
 
 const BUTLER = create(AgentSchema, { id: "butler-1", campaignId: "c1", role: "butler", name: "Butler", speakerColor: 0 });
 const BART = create(AgentSchema, { id: "bart-1", campaignId: "c1", role: "character", name: "Bart", speakerColor: 1 });
@@ -88,7 +88,7 @@ function renderPanel(opts: { active: boolean; muted?: string[]; rosterFails?: bo
   if (opts.rosterFails) queryClient.setDefaultOptions({ queries: { retry: false } });
   render(
     <Providers transport={panelTransport(opts)} queryClient={queryClient}>
-      <Session />
+      <Screen />
     </Providers>,
   );
 }
@@ -98,7 +98,7 @@ describe("VoicePanel (#211)", () => {
     // A live snapshot so the SSE stream opens for the no-reload test.
     globalThis.fetch = (async () =>
       new Response(
-        JSON.stringify({ lines: [], status: "live", typing: { active: false, label: "" } }),
+        JSON.stringify({ lines: [], status: "live", connection: "connected", typing: { active: false, label: "" } }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       )) as typeof fetch;
   });
@@ -193,5 +193,79 @@ describe("VoicePanel (#211)", () => {
     expect(alert).not.toBeNull();
     expect(within(alert).getByRole("button", { name: /try again/i })).toBeInTheDocument();
     expect(screen.queryAllByTestId("voice-row")).toHaveLength(0);
+  });
+});
+
+describe("VoicePanel: who is speaking is the row that is lit", () => {
+  beforeEach(() => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "live", connection: "connected", typing: { active: false, label: "" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+  });
+
+  const rowOf = (name: string) => screen.getByText(name).closest('[data-testid="voice-row"]') as HTMLElement;
+
+  async function stream() {
+    return waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+  }
+
+  it("marks the NPC the relay says is speaking, and drops the mark when the table speaks", async () => {
+    renderPanel({ active: true });
+    await screen.findByText("Bart");
+    const es = await stream();
+
+    act(() =>
+      es.emit("status", {
+        status: "live",
+        typing: { active: true, label: "Bart is speaking…", state: "speaking", who: "Bart" },
+      }),
+    );
+    await waitFor(() => expect(rowOf("Bart")).toHaveAttribute("data-speaking"));
+    expect(within(rowOf("Bart")).getByText("Speaking")).toBeInTheDocument();
+    expect(rowOf("Greta")).not.toHaveAttribute("data-speaking");
+    // The folded strip carries the speaker and their mute button too.
+    const now = screen.getByTestId("voice-now");
+    expect(now).toHaveTextContent("Bart is speaking…");
+    expect(within(now).getByRole("button", { name: "Mute Bart" })).toBeEnabled();
+
+    act(() =>
+      es.emit("status", {
+        status: "live",
+        typing: { active: true, label: "Listening to the table…", state: "listening" },
+      }),
+    );
+    await waitFor(() => expect(rowOf("Bart")).not.toHaveAttribute("data-speaking"));
+    expect(within(rowOf("Bart")).getByText("Voice on")).toBeInTheDocument();
+    expect(screen.queryByTestId("voice-now")).not.toBeInTheDocument();
+  });
+
+  it("recovers the speaker from an older relay's English label", async () => {
+    renderPanel({ active: true });
+    await screen.findByText("Greta");
+    const es = await stream();
+    act(() => es.emit("status", { status: "live", typing: { active: true, label: "Greta is speaking…" } }));
+    await waitFor(() => expect(rowOf("Greta")).toHaveAttribute("data-speaking"));
+  });
+
+  it("folds and unfolds the strip with a named, stateful toggle", async () => {
+    renderPanel({ active: true });
+    await screen.findByText("Bart");
+    const panel = screen.getByRole("complementary", { name: "Voice control" });
+    const toggle = within(panel).getByRole("button", { name: "Show the NPC voices" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(panel).toHaveAttribute("data-collapsed");
+
+    fireEvent.click(toggle);
+    const hide = within(panel).getByRole("button", { name: "Hide the NPC voices" });
+    expect(hide).toHaveAttribute("aria-expanded", "true");
+    expect(panel).not.toHaveAttribute("data-collapsed");
+    // The toggle names the rows it controls.
+    expect(document.getElementById(hide.getAttribute("aria-controls")!)).toContainElement(rowOf("Bart"));
   });
 });

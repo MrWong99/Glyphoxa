@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactElement, type ReactNode } from "react";
+import { createContext, useContext, useState, type FocusEvent, type ReactElement, type ReactNode } from "react";
 import * as RTooltip from "@radix-ui/react-tooltip";
 
 // Tooltip — a Radix Tooltip (ADR-0017) on the .gx-tooltip surface. It opens on
@@ -20,6 +20,25 @@ import * as RTooltip from "@radix-ui/react-tooltip";
 // corner without ceremony.
 
 const DELAY_MS = 400;
+
+// Radix opens a tooltip on ANY focus that did not follow a pointerdown on the
+// trigger itself — script focus included. The shell hands focus back to the
+// drawer toggle after a tap closes the drawer, and the palette hands it back
+// to the search button after a tap picks a row: on a phone that left a
+// "Toggle sidebar" (or a "Ctrl+K") bubble stuck over the screen the GM had
+// just opened. Open on focus only when the browser would draw a focus ring
+// there (:focus-visible), which it does after keyboard use and not after a
+// tap or a click. Hover opens it as before. (preventDefault is how Radix's
+// composed handlers are told to skip their own.)
+function holdShutUnlessFocusVisible(event: FocusEvent<HTMLElement>) {
+  let visible = true;
+  try {
+    visible = event.currentTarget.matches(":focus-visible");
+  } catch {
+    // An engine without :focus-visible: keep the keyboard path working.
+  }
+  if (!visible) event.preventDefault();
+}
 
 const InsideProvider = createContext(false);
 
@@ -80,7 +99,9 @@ export function Tooltip({
         onOpenChange?.(next);
       }}
     >
-      <RTooltip.Trigger asChild>{children}</RTooltip.Trigger>
+      <RTooltip.Trigger asChild onFocus={holdShutUnlessFocusVisible}>
+        {children}
+      </RTooltip.Trigger>
       <RTooltip.Portal>
         <RTooltip.Content className="gx-tooltip" side={side} align={align} sideOffset={6} collisionPadding={8}>
           {content}

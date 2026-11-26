@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, Outlet, useParams } from "@tanstack/react-router";
 import { useQuery } from "@connectrpc/connect-query";
 import { Toaster } from "sonner";
@@ -8,11 +8,12 @@ import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
+import { Tooltip, TooltipProvider } from "./ui/Tooltip";
 import { SidebarUser } from "./SidebarUser";
 import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
-import { CommandPalette } from "./CommandPalette";
-import { LanguageSwitcher } from "./LanguageSwitcher";
+import { CommandPalette, PaletteShortcut, isApplePlatform, paletteShortcut } from "./CommandPalette";
+import { ConnectionBanner } from "./ConnectionBanner";
 import {
   CAMPAIGN_DESTINATIONS,
   SCREEN_DESTINATIONS,
@@ -20,7 +21,9 @@ import {
   screenDestination,
 } from "@/app/destinations";
 import { useI18n } from "@/i18n";
+import { isAtMost, watchBreakpoint, type Breakpoint } from "@/lib/breakpoints";
 import { isNotFound } from "@/lib/connectError";
+import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import { formatElapsed, useElapsedSeconds, useLiveSession } from "@/lib/useLiveSession";
 import { isCampaignView } from "@/screens/campaign/views";
 
@@ -41,12 +44,40 @@ import "./appShell.css";
 // bottom, the two Tenant-wide destinations: Campaigns and Setup. The lists
 // themselves are app/destinations.ts.
 
-// The sidebar's off-canvas drawer breakpoint. Must stay in sync with the
-// @media block in styles/components.css; every JS check goes through
-// isDrawerViewport so the width lives in one place on this side.
-const DRAWER_BREAKPOINT = "(max-width: 880px)";
-const isDrawerViewport = () =>
-  typeof window !== "undefined" && (window.matchMedia?.(DRAWER_BREAKPOINT).matches ?? false);
+// The desktop sidebar's hidden/shown choice, kept across reloads. It is a
+// per-browser preference like the display language, and only the DESKTOP
+// choice: on a drawer-sized viewport the sidebar always starts shut.
+const SIDEBAR_PREF_KEY = "gx-sidebar-collapsed";
+
+function readDesktopCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_PREF_KEY) === "1";
+  } catch {
+    return false; // storage unavailable (privacy mode): the default, shown
+  }
+}
+
+function writeDesktopCollapsed(collapsed: boolean): void {
+  try {
+    if (collapsed) localStorage.setItem(SIDEBAR_PREF_KEY, "1");
+    else localStorage.removeItem(SIDEBAR_PREF_KEY);
+  } catch {
+    // not persisted; the toggle still works for this visit
+  }
+}
+
+// useAtMost follows one of the app's breakpoints (lib/breakpoints.ts — the
+// same numbers the stylesheets use). False where matchMedia is absent (jsdom),
+// which is the desktop layout.
+function useAtMost(breakpoint: Breakpoint): boolean {
+  const [atMost, setAtMost] = useState(() => isAtMost(breakpoint));
+  useEffect(() => watchBreakpoint(breakpoint, setAtMost), [breakpoint]);
+  return atMost;
+}
+
+// What Tab may land on inside the open drawer.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 // How often the pending-suggestions count is re-read while a Voice Session is
 // live — that is when the Butler and the NPCs file them. Idle, the count only
@@ -65,7 +96,17 @@ const PROPOSALS_REFETCH_MS = 60_000;
 // just delay the empty state.
 const proposalsRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
 
-export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
+export function AppShell(props: { tenantSlug: string; user: User }) {
+  return (
+    // One tooltip provider for the chrome: moving between neighbouring topbar
+    // icons shows each tooltip at once after the first.
+    <TooltipProvider>
+      <Shell {...props} />
+    </TooltipProvider>
+  );
+}
+
+function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
   const { t } = useI18n();
   // Derived by hand rather than via Link activeProps so the mocked-router unit
   // test can observe it, and because the topbar needs the values anyway.
@@ -112,20 +153,10 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
 
   // "<View> · <Campaign> · Glyphoxa" — with several Glyphoxa tabs open, an
   // all-"Glyphoxa" tab strip is a guessing game, and two campaigns' Cast tabs
-  // are no better.
-  const documentTitle = [pageTitle, crumbCampaign, "Glyphoxa"].filter(Boolean).join(" · ");
-  useEffect(() => {
-    document.title = documentTitle;
-  }, [documentTitle]);
-  // Nothing else writes the tab title, so the shell hands it back when it
-  // unmounts: a lapsed session leaves by an in-app navigation to /login, and
-  // the public page must not keep a campaign's name in the tab.
-  useEffect(
-    () => () => {
-      document.title = "Glyphoxa";
-    },
-    [],
-  );
+  // are no better. The hook hands the tab back to the bare product name when
+  // the shell unmounts: a lapsed session leaves by an in-app navigation to
+  // /login, and that page must not inherit a campaign's name.
+  useDocumentTitle(pageTitle, crumbCampaign);
 
   // A new screen or view starts at its top. .gx-content is the scroll
   // container (the shell itself never scrolls), so without this a GM who
@@ -136,28 +167,110 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
   }, [screen, view]);
 
   // Sidebar collapse (#88 slice 4). On narrow viewports the sidebar is an
-  // off-canvas drawer the topbar toggle opens; on wide viewports the toggle hides
-  // it for focus. State lives on data-collapsed so the CSS breakpoints (and the
-  // unit test) read it without media-query support. It starts collapsed on a
-  // small viewport so mobile loads with the drawer shut (matchMedia is absent in
-  // jsdom → the shell defaults to expanded under test).
-  const [collapsed, setCollapsed] = useState(isDrawerViewport);
+  // off-canvas drawer the topbar toggle opens; on wide viewports the toggle
+  // hides it for focus. State lives on data-collapsed so the CSS breakpoints
+  // (and the unit test) read it without media-query support.
+  //
+  // The two layouts have different defaults, and crossing the breakpoint
+  // applies the one that belongs to the side just entered: the drawer starts
+  // shut, the desktop sidebar as the GM last left it (remembered across
+  // reloads). Without that reset a window narrowed to phone width and widened
+  // again kept the drawer's "shut" as the desktop state — a sidebar gone until
+  // someone found the toggle. (matchMedia is absent in jsdom → the shell is on
+  // the desktop layout under test unless a test stubs it.)
+  const [drawer, setDrawer] = useState(() => isAtMost("drawer"));
+  const [collapsed, setCollapsed] = useState(() => (isAtMost("drawer") ? true : readDesktopCollapsed()));
+  useEffect(
+    () =>
+      watchBreakpoint("drawer", (nowDrawer) => {
+        setDrawer(nowDrawer);
+        setCollapsed(nowDrawer ? true : readDesktopCollapsed());
+      }),
+    [],
+  );
+  const drawerOpen = drawer && !collapsed;
+
+  const toggleSidebar = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    if (!drawer) writeDesktopCollapsed(next);
+  };
+
+  // The open drawer behaves like the modal layer it looks like: focus moves
+  // into it, Tab stays in it, Escape and the scrim close it, the page behind
+  // is inert (see .gx-main below), and closing hands focus back to the toggle
+  // that opened it. Before this a keyboard user who opened it was left on the
+  // toggle, behind the scrim, tabbing through a page they could not see.
+  const sidebarRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const wasDrawerOpen = useRef(false);
+  useEffect(() => {
+    if (drawerOpen && !wasDrawerOpen.current) {
+      sidebarRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    } else if (!drawerOpen && wasDrawerOpen.current) {
+      // Only if focus is still in the drawer (or nowhere): a dialog the GM
+      // opened from the account menu has taken it on purpose.
+      const active = document.activeElement;
+      if (!active || active === document.body || sidebarRef.current?.contains(active)) {
+        toggleRef.current?.focus();
+      }
+    }
+    wasDrawerOpen.current = drawerOpen;
+  }, [drawerOpen]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      // defaultPrevented: something on top of the drawer (the account menu, a
+      // dialog, the palette) took this Escape for itself.
+      if (e.key === "Escape" && !e.defaultPrevented) setCollapsed(true);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
+
+  const trapDrawerTab = (e: ReactKeyboardEvent<HTMLElement>) => {
+    if (!drawerOpen || e.key !== "Tab") return;
+    const root = sidebarRef.current;
+    // A menu or dialog portalled out of the drawer reports its keys here too
+    // (React events follow the component tree); those manage their own focus.
+    if (!root || !root.contains(e.target as Node)) return;
+    const focusables = root.querySelectorAll<HTMLElement>(FOCUSABLE);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   // The Ctrl+K palette, lifted so the topbar's search button can open it too —
   // a keyboard chord alone is undiscoverable and unreachable on touch.
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Below the "stack" breakpoint the search button is down to its icon, and
+  // only then does it need a tooltip to say what it is.
+  const searchIconOnly = useAtMost("stack");
 
   // On the drawer breakpoint a nav tap should navigate AND shut the drawer —
   // otherwise it keeps covering the screen it just navigated to. On wide
   // viewports this is a no-op so the sidebar stays put.
   const closeDrawerOnMobile = () => {
-    if (isDrawerViewport()) setCollapsed(true);
+    if (drawer) setCollapsed(true);
   };
 
   const sectionLabelId = useId();
+  const sidebarId = useId();
 
   return (
-    <div className="gx-shell" data-collapsed={collapsed ? "true" : undefined}>
+    <div
+      className="gx-shell"
+      data-collapsed={collapsed ? "true" : undefined}
+      data-drawer-open={drawerOpen ? "true" : undefined}
+    >
       <button
         type="button"
         className="gx-shell__scrim"
@@ -165,7 +278,7 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
         tabIndex={-1}
         onClick={() => setCollapsed(true)}
       />
-      <aside className="gx-sidebar">
+      <aside className="gx-sidebar" id={sidebarId} ref={sidebarRef} onKeyDown={trapDrawerTab}>
         {/* The brand is the way home: the tenant index, which opens the
             campaign's Overview. */}
         <Link
@@ -282,18 +395,26 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
         <SidebarUser user={user} />
       </aside>
 
-      <div className="gx-main">
+      {/* inert while the drawer is open: it is covered by the scrim, so it
+          must be out of the tab order and out of a screen reader's reach too. */}
+      <div className="gx-main" inert={drawerOpen}>
         <header className="gx-topbar">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gx-topbar__toggle"
-            aria-label={t("shell.toggleSidebar")}
-            aria-expanded={!collapsed}
-            title={t("shell.toggleSidebar")}
-            onClick={() => setCollapsed((c) => !c)}
-            iconStart={<PanelLeft size={18} />}
-          />
+          {/* Tooltip, not title: it also shows on keyboard focus. (Not an
+              IconButton: that one keeps its tooltip shut while aria-expanded
+              is true, which for this toggle is whenever the sidebar is open.) */}
+          <Tooltip content={t("shell.toggleSidebar")} side="bottom">
+            <Button
+              ref={toggleRef}
+              variant="ghost"
+              size="sm"
+              className="gx-topbar__toggle"
+              aria-label={t("shell.toggleSidebar")}
+              aria-expanded={!collapsed}
+              aria-controls={sidebarId}
+              onClick={toggleSidebar}
+              iconStart={<PanelLeft size={18} />}
+            />
+          </Tooltip>
           <div className="gx-topbar__divider" />
           <div className="gx-topbar__titles">
             {pageTitle && crumbCampaign ? (
@@ -332,44 +453,72 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
               offer the way back. On the Session screen itself the screen's own
               controls already do. */}
           {live && screen !== "session" && <LivePill tenantSlug={tenantSlug} startedMs={startedMs} />}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gx-topbar__search"
-            aria-label={t("palette.openSearch")}
-            title={t("palette.openSearch")}
-            onClick={() => setPaletteOpen(true)}
-            iconStart={<Search size={17} />}
-          />
+          {/* The palette's visible door. On a wide bar it reads as a search
+              field with its shortcut on a key cap; below the "stack"
+              breakpoint it is down to the icon (the words are clipped, not
+              removed, so its accessible name never changes) and a tooltip
+              says what it is. */}
+          <Tooltip
+            content={t("palette.openSearch", { shortcut: paletteShortcut(t) })}
+            side="bottom"
+            disabled={!searchIconOnly}
+          >
+            <button
+              type="button"
+              className="gx-topbar__search"
+              aria-keyshortcuts={isApplePlatform() ? "Meta+K" : "Control+K"}
+              aria-haspopup="dialog"
+              onClick={() => setPaletteOpen(true)}
+            >
+              <Search size={16} aria-hidden="true" />
+              <span className="gx-topbar__search-label">{t("palette.searchButton")}</span>
+              <PaletteShortcut className="gx-topbar__search-kbd" decorative />
+            </button>
+          </Tooltip>
           {/* The Active-Campaign switcher lives on every screen (#266a): the
-              titles' flex:1 pushes it to the topbar's right edge. */}
+              titles' flex:1 pushes it to the topbar's right edge. The display
+              language used to sit beside it; it is in the account menu now
+              (sidebar footer), where a once-chosen preference belongs. */}
           <CampaignSwitcher />
-          {/* Display-language picker — on every screen so a German group can
-              switch before they've learned the UI. */}
-          <LanguageSwitcher className="gx-topbar__lang" />
         </header>
+
+        {/* "You are offline" / "Can't reach Glyphoxa" (#695), between the bar
+            and the screen so it is seen from everywhere and covers nothing. */}
+        <ConnectionBanner />
 
         <main className="gx-content" ref={contentRef}>
           <Outlet />
+          {/* Impressum / Datenschutz / Nutzungsbedingungen on every app screen
+              (#518) — German law wants them reachable from anywhere, not
+              buried in a settings page. Inside the scrolling area, after the
+              screen: as a fixed strip under it, it cost every screen a row of
+              height and sat on top of the last lines of a long page on a
+              phone. (The account menu links the same three documents.) */}
+          <LegalFooter />
         </main>
-
-        {/* Impressum / Datenschutz / Nutzungsbedingungen on every app screen
-            (#518) — German law wants them reachable from anywhere, not buried
-            in a settings page. */}
-        <LegalFooter />
       </div>
 
-      {/* Ctrl+K campaign search (#591). Mounted in the shell like the Toaster —
+      {/* The Ctrl/Cmd+K palette (#591). Mounted in the shell like the Toaster —
           the global-overlay convention — so it is reachable from every
           authenticated screen and never renders for an unauthenticated visitor
           (the shell sits inside the AuthGate). Closed it renders nothing and
           fires no RPCs, so screen tests stay clean. */}
-      <CommandPalette tenantSlug={tenantSlug} open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
           in Providers, so the screen unit tests that render without the shell get a
-          clean DOM and their deterministic inline cues instead of toast portals. */}
-      <Toaster theme="dark" position="bottom-right" richColors />
+          clean DOM and their deterministic inline cues instead of toast portals.
+          On a drawer-sized viewport toasts come in at the top, with a close
+          button: at the bottom they cover the controls a thumb is on (a chat
+          composer, a Save bar), and there is no hover to pause them, so the
+          GM needs a way to put one away. */}
+      <Toaster
+        theme="dark"
+        richColors
+        position={drawer ? "top-center" : "bottom-right"}
+        closeButton={drawer}
+        toastOptions={{ closeButtonAriaLabel: t("common.dismiss") }}
+      />
     </div>
   );
 }

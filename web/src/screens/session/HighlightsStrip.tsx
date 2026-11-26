@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
-import { Sparkles, Trash2 } from "lucide-react";
+import { Settings, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SessionService } from "@gen/glyphoxa/management/v1/management_pb";
@@ -11,9 +11,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { stripMarkdown } from "@/components/ui/Markdown";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { invalidateMethodQueries } from "@/lib/queryClient";
 import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
+import { formatDay } from "./sessionFormat";
 import { HighlightSoundMenu } from "./HighlightSoundMenu";
 import { useHighlights } from "./useHighlights";
 import { errorMessage } from "@/lib/connectError";
@@ -32,6 +34,11 @@ function fmtScore(score: number, lang: Lang): string {
   return score.toLocaleString(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
+// CANDIDATE_TTL_MS is how long an unkept highlight outlives its session: the
+// server purges candidates 7 days after the Voice Session ENDED (ADR-0051,
+// internal/highlight/purge.go purgeDelay) — not 7 days after the moment.
+export const CANDIDATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 // HighlightsStrip is the Session screen's highlight-replay surface (#309, Epic 8):
 // the Session Highlights of the rendered Voice Session, newest moment first (the
 // server's #308 order). Each row shows its status, clock range, score, the
@@ -45,6 +52,9 @@ export function HighlightsStrip({
   renderActions,
   focusHighlightId = null,
   onFocusHandled,
+  sessionEndedMs = null,
+  tapeArmed,
+  onOpenSettings,
 }: {
   sessionId: string | undefined;
   live: boolean;
@@ -57,6 +67,14 @@ export function HighlightsStrip({
   // no-ops until the row is present and reports back via onFocusHandled.
   focusHighlightId?: string | null;
   onFocusHandled?: () => void;
+  // When the rendered session ended (epoch ms), or null while it runs: an
+  // unkept highlight is deleted 7 days after THAT, and the row says which day.
+  sessionEndedMs?: number | null;
+  // The campaign's highlight-recording switch; undefined while unknown. It
+  // decides what an empty strip means: recording is off (nothing can appear —
+  // here is where to turn it on) or on (nothing has been epic enough yet).
+  tapeArmed?: boolean;
+  onOpenSettings?: () => void;
 }) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
@@ -135,11 +153,31 @@ export function HighlightsStrip({
 
   if (highlights.length === 0) {
     // "Rollover tape" is internal vocabulary — users see "Highlight recording"
-    // (glossary), matching the renamed switch in Campaign settings.
+    // (glossary), matching the switch in Campaign settings. An empty strip is
+    // two different stories, and only one of them is the GM's to fix.
     return (
       <>
         {staleNotice}
-        <p className="gx-highlights__empty">{t("session.noHighlights")}</p>
+        {tapeArmed === false ? (
+          <EmptyState
+            icon={<Sparkles size={22} />}
+            title={t("session.highlightsOffTitle")}
+            description={t("session.highlightsOffDesc")}
+            action={
+              onOpenSettings && (
+                <Button variant="secondary" size="sm" iconStart={<Settings size={14} />} onClick={onOpenSettings}>
+                  {t("session.openCampaignSettings")}
+                </Button>
+              )
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<Sparkles size={22} />}
+            title={t("session.highlightsNoneTitle")}
+            description={live ? t("session.highlightsNoneLiveDesc") : t("session.highlightsNoneDesc")}
+          />
+        )}
       </>
     );
   }
@@ -164,7 +202,13 @@ export function HighlightsStrip({
             <div className="gx-highlight__head">
               {isCandidate ? (
                 <Badge variant="neutral" size="sm">
-                  {t("session.candidateBadge")}
+                  {/* The real expiry once the session has one; while it still
+                      runs, the seven days have not started. */}
+                  {sessionEndedMs != null
+                    ? t("session.candidateBadgeUntil", {
+                        date: formatDay(new Date(sessionEndedMs + CANDIDATE_TTL_MS), lang),
+                      })
+                    : t("session.candidateBadge")}
                 </Badge>
               ) : (
                 <Badge variant="live" size="sm">

@@ -2,8 +2,62 @@ import { describe, it, expect } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { createConnectQueryKey } from "@connectrpc/connect-query";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import { invalidateKnowledgeReads } from "./knowledgeCache";
+import { create } from "@bufbuild/protobuf";
+
+import {
+  CampaignService,
+  ListNodesResponseSchema,
+  NodeSchema,
+  type ListNodesResponse,
+} from "@gen/glyphoxa/management/v1/management_pb";
+import { invalidateKnowledgeReads, writeNodeToList } from "./knowledgeCache";
+
+// The wiki keeps a saved entry open and selects a created one at once; both
+// read the row from the list, which the mutation's response must reach before
+// the refetch does.
+describe("writeNodeToList", () => {
+  const listKey = createConnectQueryKey({
+    schema: CampaignService.method.listNodes,
+    cardinality: "finite",
+    input: {},
+  });
+  const seed = () => {
+    const qc = new QueryClient();
+    qc.setQueryData(
+      listKey,
+      create(ListNodesResponseSchema, {
+        nodes: [
+          create(NodeSchema, { id: "n1", name: "Bart" }),
+          create(NodeSchema, { id: "n2", name: "Saltmarsh" }),
+        ],
+      }),
+    );
+    return qc;
+  };
+  const names = (qc: QueryClient) => qc.getQueryData<ListNodesResponse>(listKey)?.nodes.map((n) => n.name);
+
+  it("replaces the saved entry's row in place", () => {
+    const qc = seed();
+    writeNodeToList(
+      qc,
+      create(NodeSchema, { id: "n1", name: "Bart the innkeeper", aspects: [{ id: "a1", key: "Role" }] }),
+    );
+    expect(names(qc)).toEqual(["Bart the innkeeper", "Saltmarsh"]);
+    expect(qc.getQueryData<ListNodesResponse>(listKey)?.nodes[0].aspects[0].id).toBe("a1");
+  });
+
+  it("appends an entry that was just created", () => {
+    const qc = seed();
+    writeNodeToList(qc, create(NodeSchema, { id: "n3", name: "The old harbor" }));
+    expect(names(qc)).toEqual(["Bart", "Saltmarsh", "The old harbor"]);
+  });
+
+  it("does not invent a list that was never loaded", () => {
+    const qc = new QueryClient();
+    writeNodeToList(qc, create(NodeSchema, { id: "n3", name: "The old harbor" }));
+    expect(qc.getQueryData(listKey)).toBeUndefined();
+  });
+});
 
 // The same nodes and edges are served by four queries and mutated from three
 // surfaces. Each surface used to invalidate the subset it happened to know about,

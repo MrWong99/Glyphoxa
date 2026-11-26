@@ -7,7 +7,7 @@ import { OPERATOR } from "./operator";
 
 export function Imprint() {
   return (
-    <LegalPage title="Impressum" lede="Angaben gemäß § 5 DDG">
+    <LegalPage doc="imprint" title="Impressum" lede="Angaben gemäß § 5 DDG">
       <Section heading="Diensteanbieter">
         <p>
           <OperatorValue value={OPERATOR.legalName} />

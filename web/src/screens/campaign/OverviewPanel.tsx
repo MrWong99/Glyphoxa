@@ -314,7 +314,12 @@ function AttentionBand() {
         lastSpokeAt: r.lastSpokeAt ? timestampDate(r.lastSpokeAt) : undefined,
       });
     }
-    const groups = rosterPrep(rosterQ.data.roster, graphQ.data.nodes, graphQ.data.edges, readiness);
+    // Graded Agent by Agent like the Cast view's useCastReadiness: an NPC the
+    // readiness read predates (created a moment ago) is graded on persona and
+    // voice only, never flagged "no wiki entry" against a read that cannot see it.
+    const groups = rosterPrep(rosterQ.data.roster, graphQ.data.nodes, graphQ.data.edges, readiness, {
+      world: (id) => readiness.has(id),
+    });
     // An NPC in a faction AND a town sits in two groups; it is one NPC.
     const failing = new Map<string, string[]>();
     for (const g of groups) {

@@ -1,185 +1,681 @@
 /* The public landing surface (#521) — the first thing an unauthenticated
    visitor sees at the root. It shares the app's token vocabulary but none of
-   its chrome: no sidebar, no topbar, nothing that implies a session. */
+   its chrome: no sidebar, no topbar, nothing that implies a session.
+
+   Layout: full-width bands, each with its content in one centred column
+   (.gx-landing__wrap) on the page gutter. Two columns where there is room
+   (the hero, the story rows), one column at the drawer breakpoint and below. */
+
 .gx-landing {
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 20px 20px 8px;
+  min-height: 100%;
+  background-color: var(--surface-base);
+  background-image: var(--wash-arcane);
+  background-repeat: no-repeat;
 }
 
+.gx-landing__wrap {
+  width: 100%;
+  max-width: var(--content-xl);
+  margin: 0 auto;
+  padding: 0 var(--page-gutter);
+}
+
+/* In-page links land below the sticky bar, not under it. */
+.gx-landing [id] {
+  scroll-margin-top: calc(var(--layout-lg) + var(--spacing-md));
+}
+
+/* ── Sticky bar ─────────────────────────────────────────────────────────── */
 .gx-landing__bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-base) 86%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.gx-landing__bar-row {
   display: flex;
-  gap: 12px;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 0 28px;
+  gap: var(--spacing-md);
+  min-height: var(--layout-lg);
 }
 
 .gx-landing__brand {
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 10px;
   align-items: center;
-  font-size: 18px;
-  font-weight: 600;
+  color: inherit;
+  text-decoration: none;
+}
+
+.gx-landing__brand:hover {
+  text-decoration: none;
 }
 
 .gx-landing__sigil {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  color: #fff;
+  width: var(--layout-sm);
+  height: var(--layout-sm);
+  border-radius: var(--radius-md);
+  color: var(--text-on-arcane);
   background: var(--gradient-arcane-diag);
+  box-shadow: var(--glow-arcane-soft);
 }
 
+.gx-landing__wordmark {
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--display-tracking);
+}
+
+.gx-landing__nav {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--spacing-xs);
+  justify-content: center;
+  min-width: 0;
+}
+
+.gx-landing__nav a {
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.gx-landing__nav a:hover {
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--arcane) 12%, transparent);
+  text-decoration: none;
+}
+
+.gx-landing__lang {
+  flex: 0 0 auto;
+  width: 7.5rem;
+}
+
+.gx-landing__bar .gx-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* ── Hero ───────────────────────────────────────────────────────────────── */
 .gx-landing__hero {
-  max-width: 46ch;
-  margin: 24px 0 56px;
+  padding: var(--layout-lg) 0 var(--layout-md);
+}
+
+.gx-landing__hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: var(--spacing-2xl);
+  align-items: center;
 }
 
 .gx-landing__headline {
-  margin: 0 0 14px;
-  font-size: clamp(30px, 5vw, 46px);
-  line-height: 1.12;
+  margin: 0 0 var(--spacing-md);
+  font-size: clamp(var(--display-md), 4.6vw, var(--display-xl));
+  line-height: var(--display-line);
+  letter-spacing: var(--display-tracking);
+  text-wrap: balance;
 }
 
 .gx-landing__lede {
-  margin: 0 0 24px;
-  color: var(--text-subtle, #9a93a8);
-  font-size: 1.05rem;
-  line-height: 1.6;
+  margin: 0 0 var(--spacing-lg);
+  max-width: 52ch;
+  color: var(--text-muted);
+  font-size: var(--body-lg);
+  line-height: var(--body-line);
 }
 
 .gx-landing__cta {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 16px;
+  gap: var(--spacing-sm) var(--spacing-lg);
   align-items: center;
 }
 
+.gx-landing__cta-how {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--text-default);
+  font-weight: var(--weight-semibold);
+  text-decoration: none;
+}
+
+.gx-landing__cta-how:hover {
+  color: var(--text-strong);
+}
+
 .gx-landing__cta-note {
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
+  display: block;
+  margin: var(--spacing-md) 0 0;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
 }
 
-.gx-landing__features {
-  display: grid;
-  gap: 18px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  margin-bottom: 56px;
-}
-
-.gx-landing__feature {
-  padding: 18px;
-  background: var(--surface-card, #16131f);
-  border: 1px solid var(--border-subtle, #2a2535);
-  border-radius: 14px;
-}
-
-.gx-landing__feature h2 {
-  margin: 12px 0 6px;
-  font-size: 17px;
-}
-
-.gx-landing__feature p {
-  margin: 0;
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
-  line-height: 1.55;
-}
-
-.gx-landing__feature-icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  color: #fff;
-  background: var(--gradient-arcane-diag);
-}
-
-.gx-landing__shots {
-  display: grid;
-  gap: 18px;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  margin-bottom: 56px;
-}
-
+/* ── Captures ───────────────────────────────────────────────────────────── */
 .gx-landing__shot {
   margin: 0;
+  min-width: 0;
 }
 
-/* The capture link is a plain block so the img keeps the frame's geometry. */
-.gx-landing__shot a {
-  display: block;
-}
-
-.gx-landing__shot img,
-.gx-landing__shot-placeholder {
+/* The image is the button that opens the lightbox. */
+.gx-landing__shot-button {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  border: 1px solid var(--border-subtle, #2a2535);
-  border-radius: 12px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  cursor: zoom-in;
 }
 
-/* Fallback for a slot with no capture: a quiet frame rather than a fake image.
-   All shipped slots carry real captures (web/public/shots/); this survives as
-   the graceful degradation for a src that goes missing. */
-.gx-landing__shot-placeholder {
-  background:
-    radial-gradient(circle at 30% 25%, rgba(144, 89, 255, 0.18), transparent 55%),
-    radial-gradient(circle at 75% 70%, rgba(0, 221, 255, 0.14), transparent 50%),
-    var(--surface-card, #16131f);
+.gx-landing__shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
 }
 
 .gx-landing__shot figcaption {
-  margin-top: 8px;
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
+  margin-top: var(--spacing-sm);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  line-height: var(--body-line-tight);
 }
 
-.gx-landing__beta {
-  padding: 24px;
-  background: var(--surface-card, #16131f);
-  border: 1px solid var(--border-subtle, #2a2535);
-  border-radius: 16px;
+/* The hero's capture carries the page: a stronger frame and a glow. */
+.gx-landing__hero-shot .gx-landing__shot-button {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-lg), var(--glow-arcane-soft);
 }
 
-.gx-landing__beta h2 {
-  margin: 0 0 16px;
-  font-size: 20px;
+/* ── Sections ───────────────────────────────────────────────────────────── */
+.gx-landing__section {
+  padding: var(--layout-md) 0;
 }
 
+.gx-landing__section--tinted {
+  border-block: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-raised) 70%, transparent);
+}
+
+.gx-landing__section-title {
+  margin: 0 0 var(--spacing-sm);
+  font-size: var(--display-sm);
+  line-height: var(--display-line);
+}
+
+.gx-landing__section-lede {
+  margin: 0 0 var(--spacing-xl);
+  max-width: 60ch;
+  color: var(--text-muted);
+}
+
+/* ── The story: five rows, text beside the screen that does it ──────────── */
+.gx-landing__stories {
+  display: flex;
+  flex-direction: column;
+  gap: var(--layout-lg);
+  margin-top: var(--spacing-xl);
+}
+
+.gx-landing__story {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: var(--spacing-2xl);
+  align-items: center;
+}
+
+/* Every other row mirrors, so the page reads as a zigzag rather than a list. */
+.gx-landing__story:nth-child(even) .gx-landing__story-text {
+  order: 2;
+}
+
+.gx-landing__story-text h3 {
+  margin: var(--spacing-sm) 0;
+  font-size: var(--display-xs);
+  line-height: var(--body-line-tight);
+}
+
+.gx-landing__story-text p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: var(--body-line);
+}
+
+.gx-landing__story-shots {
+  display: grid;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+.gx-landing__story-shots[data-count="2"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* A check-marked list: the GM's controls in a story row, a plan's terms. */
+.gx-landing__points {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin: var(--spacing-md) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gx-landing__points li {
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: flex-start;
+  color: var(--text-default);
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+}
+
+.gx-landing__points svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--status-success);
+}
+
+/* A plan's lines have no icon element of their own (they carry a link in the
+   middle of a sentence), so the mark is drawn before the text. */
+.gx-landing__points--plan li {
+  display: block;
+  position: relative;
+  padding-left: var(--spacing-lg);
+}
+
+.gx-landing__points--plan li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.45em;
+  width: 10px;
+  height: 6px;
+  border-left: 2px solid var(--status-success);
+  border-bottom: 2px solid var(--status-success);
+  transform: rotate(-45deg);
+}
+
+/* ── How it works: numbered steps ───────────────────────────────────────── */
+.gx-landing__steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--spacing-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gx-landing__step {
+  padding: var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+
+.gx-landing__step-number {
+  display: grid;
+  place-items: center;
+  width: var(--layout-sm);
+  height: var(--layout-sm);
+  border-radius: var(--radius-pill);
+  background: var(--arcane-fill);
+  color: var(--text-on-arcane);
+  font-family: var(--font-display);
+  font-size: var(--body-md);
+  font-weight: var(--weight-bold);
+}
+
+.gx-landing__step h3 {
+  margin: var(--spacing-md) 0 var(--spacing-sm);
+  font-size: var(--body-lg);
+  line-height: var(--body-line-tight);
+}
+
+.gx-landing__step p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
+}
+
+.gx-landing__step p + p {
+  margin-top: var(--spacing-sm);
+  color: var(--text-default);
+}
+
+/* ── The free beta: two plan cards ──────────────────────────────────────── */
 .gx-landing__plans {
   display: grid;
-  gap: 18px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-lg);
+  margin-top: var(--spacing-lg);
+}
+
+.gx-landing__plan {
+  padding: var(--spacing-lg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
 }
 
 .gx-landing__plan h3 {
-  margin: 0 0 6px;
-  font-size: 16px;
+  margin: 0 0 var(--spacing-sm);
+  font-size: var(--display-xs);
 }
 
-.gx-landing__plan p {
+.gx-landing__plan > p {
   margin: 0;
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
-  line-height: 1.55;
+  color: var(--text-muted);
+  line-height: var(--body-line);
 }
 
 .gx-landing__beta-note {
-  margin: 20px 0 0;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-subtle, #2a2535);
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
-  line-height: 1.55;
+  margin: var(--spacing-lg) 0 0;
+  max-width: 78ch;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  line-height: var(--body-line);
 }
 
-.gx-landing__beta-note a {
-  color: var(--arcane);
+/* ── Privacy at the table ───────────────────────────────────────────────── */
+.gx-landing__callout {
+  display: flex;
+  gap: var(--spacing-md);
+  align-items: flex-start;
+  padding: var(--spacing-lg);
+  border: 1px solid var(--border-rune);
+  border-radius: var(--radius-lg);
+  background: var(--rune-soft);
+}
+
+.gx-landing__callout-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: var(--layout-sm);
+  height: var(--layout-sm);
+  border-radius: var(--radius-md);
+  color: var(--rune);
+  background: color-mix(in srgb, var(--rune) 14%, transparent);
+}
+
+.gx-landing__callout h2 {
+  margin: 0 0 var(--spacing-xs);
+  font-size: var(--body-lg);
+  line-height: var(--body-line-tight);
+}
+
+.gx-landing__callout p {
+  margin: 0;
+  max-width: 78ch;
+  color: var(--text-default);
+  line-height: var(--body-line);
+}
+
+/* ── Closing call to action ─────────────────────────────────────────────── */
+.gx-landing__closing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  align-items: center;
+  padding: var(--spacing-2xl) var(--spacing-lg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background-color: var(--surface-card);
+  background-image: var(--wash-arcane);
+  background-repeat: no-repeat;
+  box-shadow: var(--glow-arcane-soft);
+  text-align: center;
+}
+
+.gx-landing__closing h2 {
+  margin: 0;
+  font-size: var(--display-sm);
+  line-height: var(--display-line);
+  text-wrap: balance;
+}
+
+.gx-landing__closing p {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--text-muted);
+}
+
+.gx-landing__closing .gx-landing__cta-note {
+  margin: 0;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+.gx-landing__footer {
+  margin-top: var(--layout-md);
+  padding: var(--spacing-xl) 0 var(--spacing-md);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-void);
+}
+
+.gx-landing__footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-lg) var(--spacing-2xl);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.gx-landing__footer-brand p {
+  margin: var(--spacing-xs) 0 0;
+  max-width: 44ch;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+}
+
+.gx-landing__footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-lg);
+}
+
+.gx-landing__footer-nav a {
+  color: var(--text-default);
+  font-size: var(--body-sm);
+}
+
+.gx-landing__footer-note {
+  margin: var(--spacing-lg) 0 0;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  text-align: center;
+}
+
+/* ── Lightbox (a native <dialog>) ───────────────────────────────────────── */
+.gx-lightbox {
+  /* The UA sheet centres a modal dialog; only its box is restyled here. */
+  width: min(1600px, calc(100vw - 2 * var(--spacing-md)));
+  max-width: none;
+  max-height: calc(100dvh - 2 * var(--spacing-md));
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  overflow: visible;
+}
+
+.gx-lightbox::backdrop {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.gx-lightbox__frame {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.gx-lightbox figure {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  max-height: calc(100dvh - 2 * var(--spacing-md));
+}
+
+.gx-lightbox img {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  /* Never taller than the window: the whole capture stays in view. */
+  max-height: calc(100dvh - 2 * var(--spacing-md) - var(--layout-lg));
+  object-fit: contain;
+  background: var(--surface-void);
+}
+
+.gx-lightbox figcaption {
+  padding: 12px var(--layout-md) 12px var(--spacing-md);
+  color: var(--text-default);
+  font-size: var(--body-sm);
+  line-height: var(--body-line-tight);
+}
+
+.gx-lightbox__close {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: var(--spacing-sm);
+  background: color-mix(in srgb, var(--surface-void) 80%, transparent);
+}
+
+/* ── Hover and depth — only where there is a pointer, and only for visitors
+      who have not asked for less motion ──────────────────────────────────── */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .gx-landing__shot-button,
+  .gx-landing__step,
+  .gx-landing__plan {
+    transition:
+      transform var(--duration-slow) var(--ease-out),
+      box-shadow var(--duration-slow) var(--ease-out),
+      border-color var(--duration-slow) var(--ease-out);
+  }
+  .gx-landing__shot-button:hover {
+    transform: translateY(-3px);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-lg), var(--glow-arcane-soft);
+  }
+  .gx-landing__step:hover,
+  .gx-landing__plan:hover {
+    transform: translateY(-2px);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-md);
+  }
+  .gx-landing__cta-how svg {
+    transition: transform var(--duration-base) var(--ease-out);
+  }
+  .gx-landing__cta-how:hover svg {
+    transform: translateX(3px);
+  }
+}
+
+/* In-page links glide, unless the visitor asked for less motion. */
+@media (prefers-reduced-motion: no-preference) {
+  :root:has(.gx-landing) {
+    scroll-behavior: smooth;
+  }
+}
+
+/* ── Narrower ───────────────────────────────────────────────────────────── */
+/* Five step cards across need room; below it they wrap to rows of their own. */
+@media (max-width: 1100px) {
+  .gx-landing__steps {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  }
+}
+
+/* One column: the hero's capture goes under the words, every story row puts
+   its text first, and the bar keeps the brand, the language and Sign in. */
+@media (max-width: 880px) {
+  .gx-landing__nav {
+    display: none;
+  }
+  .gx-landing__bar-row {
+    justify-content: space-between;
+  }
+  .gx-landing__brand {
+    margin-right: auto;
+  }
+  .gx-landing__hero {
+    padding: var(--layout-md) 0 var(--layout-sm);
+  }
+  .gx-landing__hero-grid,
+  .gx-landing__story {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--spacing-lg);
+  }
+  .gx-landing__story:nth-child(even) .gx-landing__story-text {
+    order: 0;
+  }
+  .gx-landing__stories {
+    gap: var(--layout-md);
+  }
+  .gx-landing__plans {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A phone: paired captures stack, the bar tightens, the buttons fill the row. */
+@media (max-width: 640px) {
+  .gx-landing__bar-row {
+    gap: var(--spacing-sm);
+  }
+  .gx-landing__lang {
+    width: 6.5rem;
+  }
+  .gx-landing__section {
+    padding: var(--layout-sm) 0;
+  }
+  .gx-landing__story-shots[data-count="2"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .gx-landing__cta .gx-btn,
+  .gx-landing__closing .gx-btn {
+    width: 100%;
+  }
+  .gx-landing__callout {
+    flex-direction: column;
+    padding: var(--spacing-md);
+  }
+  .gx-landing__closing {
+    padding: var(--spacing-xl) var(--spacing-md);
+  }
+  .gx-landing__footer-note {
+    text-align: left;
+  }
+  .gx-lightbox figcaption {
+    padding-right: var(--spacing-md);
+  }
+}
+
+/* Narrower than the bar's three controls with the wordmark: the sigil alone
+   stands for the brand (the link keeps its accessible name). */
+@media (max-width: 400px) {
+  .gx-landing__wordmark {
+    display: none;
+  }
+  .gx-landing__footer-brand .gx-landing__wordmark {
+    display: inline;
+  }
 }

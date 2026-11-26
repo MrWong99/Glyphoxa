@@ -5,6 +5,8 @@ import { readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 
+import { shareTags, withLargeCard } from "./src/lib/shareMeta";
+
 // pruneStaleAssets removes the hashed files of EARLIER builds from
 // <outDir>/assets. With emptyOutDir off (see below) every `npm run build` only
 // ever added files there, and `//go:embed all:dist` embeds whatever is on
@@ -44,6 +46,25 @@ function pruneStaleAssets(): Plugin {
   };
 }
 
+// shareOrigin adds the link-preview tags that need an absolute URL (og:url,
+// og:image) to index.html — only when the build is given the deployment's
+// public address, e.g. `VITE_PUBLIC_ORIGIN=https://glyphoxa.example npm run
+// build`. Without it the document keeps its text-only tags. The rules, and
+// why, are in src/lib/shareMeta.ts.
+function shareOrigin(): Plugin {
+  let origin: string | undefined;
+  return {
+    name: "gx-share-origin",
+    configResolved(config) {
+      origin = config.env.VITE_PUBLIC_ORIGIN as string | undefined;
+    },
+    transformIndexHtml(html) {
+      const tags = shareTags(origin);
+      return tags.length === 0 ? html : { html: withLargeCard(html), tags };
+    },
+  };
+}
+
 // The built bundle lands in internal/spa/dist so Go's `//go:embed all:dist`
 // picks it up (ADR-0013/0039). emptyOutDir is FALSE: the committed placeholder
 // index.html that keeps `go build` working on a fresh checkout must NOT be
@@ -51,7 +72,7 @@ function pruneStaleAssets(): Plugin {
 // stale hashed assets that policy would otherwise pile up are pruned by
 // pruneStaleAssets instead.
 export default defineConfig({
-  plugins: [react(), pruneStaleAssets()],
+  plugins: [react(), pruneStaleAssets(), shareOrigin()],
   resolve: {
     alias: {
       "@gen": fileURLToPath(new URL("../gen/ts", import.meta.url)),

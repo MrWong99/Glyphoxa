@@ -1,9 +1,13 @@
 /* The always-present legal footer (#518). Deliberately quiet: small, subdued,
    and out of the way on the app screens, but present on every one of them —
    including login/signup, where it is the only place a visitor can reach the
-   Impressum and the privacy policy before creating anything. */
+   Impressum and the privacy policy before creating anything.
+
+   In the app shell it is the last thing in the scrolling area, after the
+   screen (styles/components.css, .gx-content): it scrolls with the content
+   rather than sitting on top of it. */
 .gx-legalfooter {
-  padding: 10px 16px;
+  padding: 10px var(--spacing-md);
   text-align: center;
 }
 
@@ -16,13 +20,32 @@
 }
 
 .gx-legalfooter a {
-  color: var(--text-subtle, #9a93a8);
-  font-size: var(--body-sm, 0.875rem);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
   text-decoration: none;
 }
 
 .gx-legalfooter a:hover,
 .gx-legalfooter a:focus-visible {
-  color: var(--text-strong, #efeaf7);
+  color: var(--text-strong);
   text-decoration: underline;
+}
+
+/* A phone: one compact line wherever the three names fit. */
+@media (max-width: 640px) {
+  .gx-legalfooter nav {
+    gap: var(--spacing-xs) 12px;
+  }
+  .gx-legalfooter a {
+    font-size: var(--body-xs);
+  }
+}
+
+/* A touch screen: each link is tall enough to hit. */
+@media (pointer: coarse) {
+  .gx-legalfooter a {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--layout-sm);
+  }
 }
