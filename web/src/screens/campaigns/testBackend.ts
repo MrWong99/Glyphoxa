@@ -67,6 +67,8 @@ export function campaignBackend(
     failLists?: number;
     /** Fail this many GetActiveCampaign calls (Unavailable) before answering. */
     failActive?: number;
+    /** GetSession fails (Unavailable): whether a session is live cannot be told. */
+    failSession?: boolean;
     /** Refuse these RPCs with the given message (CodeInternal / InvalidArgument). */
     errors?: Partial<Record<"createCampaign" | "setActiveCampaign" | "updateCampaign" | "deleteCampaign", string>>;
   } = {},
@@ -224,7 +226,10 @@ export function campaignBackend(
       listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
     });
     service(SessionService, {
-      getSession: () => create(GetSessionResponseSchema, { active: state.liveOn !== undefined }),
+      getSession: () => {
+        if (opts.failSession) throw new ConnectError("session store offline", Code.Unavailable);
+        return create(GetSessionResponseSchema, { active: state.liveOn !== undefined });
+      },
     });
   });
 

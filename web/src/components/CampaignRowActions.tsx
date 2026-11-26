@@ -38,6 +38,9 @@ export function CampaignRowActions({
   // actions that would collide with it wait. Settings and Export do not touch
   // what it is doing.
   const busy = lifecycle.busy.has(campaign.id);
+  // Archive and Delete also wait for the Active Campaign to be known: whether
+  // they ask first, and what they say becomes active, depends on it.
+  const settling = !lifecycle.ready;
 
   return (
     <Menu
@@ -63,7 +66,7 @@ export function CampaignRowActions({
           {t("components.unarchive")}
         </MenuItem>
       ) : (
-        <MenuItem icon={<Archive />} disabled={busy} onSelect={() => lifecycle.archive(campaign)}>
+        <MenuItem icon={<Archive />} disabled={busy || settling} onSelect={() => lifecycle.archive(campaign)}>
           {/* The ellipsis is the "this asks first" convention: archiving the
               Active Campaign does, archiving any other is immediate (and
               undoable). */}
@@ -71,7 +74,7 @@ export function CampaignRowActions({
         </MenuItem>
       )}
       <MenuSeparator />
-      <MenuItem tone="danger" icon={<Trash2 />} disabled={busy} onSelect={() => lifecycle.remove(campaign)}>
+      <MenuItem tone="danger" icon={<Trash2 />} disabled={busy || settling} onSelect={() => lifecycle.remove(campaign)}>
         {t("components.deleteEllipsis")}
       </MenuItem>
     </Menu>

@@ -131,6 +131,8 @@ export const en = {
   "campaigns.allCampaigns": "All campaigns",
   "campaigns.next": "Next: {name}",
   "campaigns.nextBadge": "Next",
+  // Picking the session's own campaign while another one is waiting as "Next".
+  "campaigns.nextCancelled": "Switch cancelled — {name} stays the active campaign",
   "campaigns.switcherLive": "Switch campaign — live voice session in {name}",
   "campaigns.switcherLiveNext": "Switch campaign — live voice session in {name}, next: {next}",
   "campaigns.changedElsewhere": "Active campaign changed to {name} (another tab or Discord)",
@@ -252,6 +254,7 @@ export const de: Record<keyof typeof en, string> = {
   "campaigns.allCampaigns": "Alle Kampagnen",
   "campaigns.next": "Als Nächstes: {name}",
   "campaigns.nextBadge": "Als Nächstes",
+  "campaigns.nextCancelled": "Wechsel abgebrochen — {name} bleibt die aktive Kampagne",
   "campaigns.switcherLive": "Kampagne wechseln — Session läuft in {name}",
   "campaigns.switcherLiveNext": "Kampagne wechseln — Session läuft in {name}, als Nächstes: {next}",
   "campaigns.changedElsewhere":

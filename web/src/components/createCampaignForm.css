@@ -108,7 +108,12 @@
   border-top: 1px solid var(--border-subtle);
 }
 .gx-settings-savebar__status {
+  /* The state, and under it a save error when there is one. */
+  display: flex;
   flex: 1 1 200px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-xs);
   min-width: 0;
   font-size: var(--body-sm);
 }

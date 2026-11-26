@@ -9,7 +9,7 @@ import { CampaignRowActions } from "@/components/CampaignRowActions";
 import { ImportCampaignButton } from "@/components/ImportCampaignButton";
 import { NewCampaignDialog } from "@/components/NewCampaignDialog";
 import { useCampaignLifecycle, type CampaignLifecycle } from "@/components/useCampaignLifecycle";
-import { useCampaignSwitch } from "@/components/useCampaignSwitch";
+import { useCampaignSwitch, usePendingCampaignSwitch } from "@/components/useCampaignSwitch";
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -83,11 +83,23 @@ export function Campaigns() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("name");
   const [archivedOpen, setArchivedOpen] = useState(false);
+  // While a search forces the archived section open, the toggle still has the
+  // last word — until the search changes.
+  const [archivedOverride, setArchivedOverride] = useState<boolean | null>(null);
+  const search = (value: string) => {
+    setQuery(value);
+    setArchivedOverride(null);
+  };
 
   const campaignSwitch = useCampaignSwitch();
+  // A switch a live Voice Session is holding back ("Next:" in the topbar).
+  const waiting = usePendingCampaignSwitch();
 
   const open = (campaign: { id: string; name: string }) => {
-    if (campaign.id === activeId) {
+    // Open on the Active Campaign is just its Overview — unless another
+    // campaign is waiting to take over when the session ends: then it is also
+    // the way to take that back, so it writes the selection.
+    if (campaign.id === activeId && !waiting) {
       nav.goCampaignView("overview");
       return;
     }
@@ -107,11 +119,15 @@ export function Campaigns() {
 
   const lifecycle = useCampaignLifecycle({
     activeId,
+    activeSettled: !activeQ.isPending,
     campaigns: listQ.data ? inUse : undefined,
     onOpen: open,
   });
 
-  const needle = query.trim().toLowerCase();
+  const toolbar = all.length >= TOOLBAR_FROM;
+  // The search applies only while its field is on screen: a filter nobody can
+  // see or clear would just hide campaigns.
+  const needle = toolbar ? query.trim().toLowerCase() : "";
   const shown = (list: Campaign[]) => {
     const matching =
       needle === ""
@@ -129,7 +145,14 @@ export function Campaigns() {
   const shownArchived = shown(archived);
   // A search that only matches archived campaigns must not look like "nothing
   // found": the section opens for as long as the search has hits in it.
-  const archivedExpanded = archivedOpen || (needle !== "" && shownArchived.length > 0);
+  const archivedExpanded =
+    archivedOverride ?? (archivedOpen || (needle !== "" && shownArchived.length > 0));
+  const toggleArchived = () => {
+    if (needle === "") setArchivedOpen(!archivedExpanded);
+    else setArchivedOverride(!archivedExpanded);
+  };
+  // A search with no archived hits has nothing to show there.
+  const showArchivedSection = archived.length > 0 && (needle === "" || shownArchived.length > 0);
   const archivedListId = useId();
 
   const card = (c: Campaign) => (
@@ -185,7 +208,7 @@ export function Campaigns() {
           />
         }
       >
-        {all.length >= TOOLBAR_FROM && (
+        {toolbar && (
           <div className="gx-campaigns__toolbar">
             <div className="gx-campaigns__search" role="search">
               <Input
@@ -194,7 +217,7 @@ export function Campaigns() {
                 placeholder={t("campaigns.searchPlaceholder")}
                 icon={<Search />}
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => search(e.target.value)}
               />
             </div>
             <SegmentedControl<Sort>
@@ -216,7 +239,7 @@ export function Campaigns() {
             title={t("campaigns.noMatchesTitle", { query: query.trim() })}
             description={t("campaigns.noMatchesDesc")}
             action={
-              <Button variant="secondary" onClick={() => setQuery("")}>
+              <Button variant="secondary" onClick={() => search("")}>
                 {t("campaigns.clearSearch")}
               </Button>
             }
@@ -239,14 +262,15 @@ export function Campaigns() {
               </ul>
             )}
 
-            {archived.length > 0 && (
+            {showArchivedSection && (
               <section className="gx-campaigns__archived">
                 <button
                   type="button"
                   className="gx-campaigns__archived-toggle"
                   aria-expanded={archivedExpanded}
-                  aria-controls={archivedListId}
-                  onClick={() => setArchivedOpen(!archivedExpanded)}
+                  // Only while the list it names is rendered.
+                  aria-controls={archivedExpanded ? archivedListId : undefined}
+                  onClick={toggleArchived}
                 >
                   {archivedExpanded ? <ChevronDown size={16} aria-hidden /> : <ChevronRight size={16} aria-hidden />}
                   {t("campaigns.archivedSection", {

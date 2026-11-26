@@ -403,19 +403,54 @@ describe("CampaignSwitcher: while a Voice Session is live", () => {
   });
 
   it("drops “Next:” when the GM switches back to the session's own campaign", async () => {
-    renderSwitcher({ campaigns: TWO, activeId: "a", liveOn: "a" });
+    const { callsOf } = renderSwitcher({ campaigns: TWO, activeId: "a", liveOn: "a" });
     await screen.findByRole("button", { name: "Switch campaign — live voice session in Alpha Quest" });
     openPanel();
     fireEvent.click(await row(/Beta Tale/));
     expect(await screen.findByText("Next: Beta Tale")).toBeInTheDocument();
 
-    // Alpha Quest is the resolved campaign, so its row only closes the panel;
-    // the stored selection is changed back from the Campaigns page or by
-    // picking it once the session is over. What matters here: picking the
-    // waiting campaign again does not stack a second "Next".
+    // Picking the waiting campaign again does not stack a second "Next".
     openPanel();
     fireEvent.click(await row(/Beta Tale/));
-    await waitFor(() => expect(screen.getAllByText("Next: Beta Tale")).toHaveLength(1));
+    await waitFor(() => expect(callsOf("setActiveCampaign")).toHaveLength(2));
+    expect(screen.getAllByText("Next: Beta Tale")).toHaveLength(1);
+
+    // Alpha Quest's row — the session's own campaign — is how the waiting
+    // switch is taken back: it writes the selection instead of just closing.
+    openPanel();
+    fireEvent.click(await row(/Alpha Quest/));
+    await waitFor(() => expect(callsOf("setActiveCampaign").at(-1)).toEqual({ method: "setActiveCampaign", id: "a" }));
+    await waitFor(() => expect(screen.queryByText("Next: Beta Tale")).not.toBeInTheDocument());
+    expect(await screen.findByText("Switch cancelled — Alpha Quest stays the active campaign")).toBeInTheDocument();
+    expect(trigger()).toHaveAccessibleName("Switch campaign — live voice session in Alpha Quest");
+  });
+
+  it("closes on the Active Campaign's row when nothing is waiting: no RPC", async () => {
+    const { callsOf } = renderSwitcher({ campaigns: TWO, activeId: "a" });
+    await screen.findByRole("button", { name: "Switch campaign — active: Alpha Quest" });
+    openPanel();
+    fireEvent.click(await row(/Alpha Quest/));
+    await waitFor(() => expect(screen.queryByRole("group", { name: "Campaigns" })).not.toBeInTheDocument());
+    expect(callsOf("setActiveCampaign")).toEqual([]);
+  });
+
+  it("says when it could not check for a live session", async () => {
+    const h = campaignBackend({ campaigns: TWO, activeId: "a", failSession: true });
+    const queryClient = makeQueryClient();
+    // No backoff: the failing check settles into its error at once.
+    queryClient.setDefaultOptions({ queries: { retryDelay: 0 } });
+    render(
+      <Providers transport={h.transport} queryClient={queryClient}>
+        <MemoryScreenNav initial={{ screen: "campaign", view: "cast" }}>
+          <CampaignSwitcher />
+        </MemoryScreenNav>
+      </Providers>,
+    );
+    await screen.findByRole("button", { name: "Switch campaign — active: Alpha Quest" });
+    openPanel();
+    expect(await screen.findByRole("note")).toHaveTextContent(
+      "Couldn't check for a live voice session — a switch may take effect only after it ends.",
+    );
   });
 });
 

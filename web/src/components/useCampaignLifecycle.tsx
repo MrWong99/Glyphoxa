@@ -10,7 +10,11 @@ import { CampaignExportDialog } from "@/components/CampaignExportDialog";
 import { CampaignSettingsDialog } from "@/components/CampaignSettingsDialog";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { toastUndo } from "@/components/ui/toast";
-import { noteLocalActiveCampaignChange, useCampaignSwitch } from "@/components/useCampaignSwitch";
+import {
+  endLocalActiveCampaignChange,
+  noteLocalActiveCampaignChange,
+  useCampaignSwitch,
+} from "@/components/useCampaignSwitch";
 import { WorkingButton } from "@/components/WorkingButton";
 import { useI18n } from "@/i18n";
 import {
@@ -57,6 +61,14 @@ import "./campaignRowActions.css";
 // Every change refreshes the campaign lists (campaign-invariant, so the sweep
 // skips them) and runs the Active-Campaign sweep, so a screen scoped to a
 // campaign that just went away follows resolution without a reload.
+//
+// And none of them leaves the Active Campaign to chance. Archiving or deleting
+// it clears the durable selection on the server, and without one the server
+// resolves to the most recently created campaign that is not archived — so the
+// next import, duplicate or unarchive of a newer campaign would quietly become
+// the Active Campaign. Archive and Delete therefore select the campaign the
+// confirm named; Duplicate and Unarchive keep the Active Campaign where it was
+// (useCampaignSwitch's pinActive / keepActive).
 
 type Target = { id: string; name: string };
 
@@ -100,18 +112,27 @@ export type CampaignLifecycle = {
   remove: (campaign: Campaign) => void;
   /** Ids of the campaigns with a flow in flight (archive, delete, duplicate). */
   busy: ReadonlySet<string>;
+  /** False until the Active Campaign is known: Archive and Delete wait for it. */
+  ready: boolean;
   /** Render this once — every dialog the actions above can open. */
   dialogs: ReactNode;
 };
 
 export function useCampaignLifecycle({
   activeId,
+  activeSettled = true,
   campaigns,
   onOpen,
   onActiveRemoved,
 }: {
   /** The resolved Active Campaign's id. */
   activeId: string | undefined;
+  /**
+   * False while the Active Campaign is still being read. Archive and Delete
+   * wait for it: whether they ask first, and which campaign they name, depends
+   * on it.
+   */
+  activeSettled?: boolean;
   /** The campaigns that are not archived, once known: names what becomes active after an archive. */
   campaigns: readonly Campaign[] | undefined;
   /** Opens a campaign (switch, then its Overview): the action on "Duplicated as …". */
@@ -141,16 +162,28 @@ export function useCampaignLifecycle({
 
   // The lists across every include_archived input (the key is built without an
   // input, so it prefix-matches them all), plus the Active-Campaign sweep —
-  // as a RESET when the Active Campaign itself just went away, so nothing keeps
-  // showing a campaign that no longer resolves (see campaignCache).
+  // as a RESET when the Active Campaign went away and nothing took its place,
+  // so nothing keeps showing a campaign that no longer resolves (see
+  // campaignCache). When another campaign took its place, its reads replace
+  // the old ones like after any switch, and the rest of the screen (and an
+  // open form) is left alone.
   const refresh = useCallback(
-    (activeGone = false) => {
+    (nothingResolves = false) => {
       void invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
-      if (activeGone) void resetActiveCampaignScopedQueries(queryClient);
+      if (nothingResolves) void resetActiveCampaignScopedQueries(queryClient);
       else void invalidateActiveCampaignScopedQueries(queryClient);
     },
     [queryClient],
   );
+
+  // After this tab archived or deleted the Active Campaign: select the campaign
+  // the confirm named, or — when the list was not in hand — whatever resolves
+  // now. False when nothing is left to select.
+  const pinNext = async (removedId: string): Promise<boolean> => {
+    const next = campaigns ? nextActiveCampaign(campaigns, removedId) : undefined;
+    const pinned = await campaignSwitch.pinActive(next && { id: next.id, name: next.name });
+    return pinned !== undefined;
+  };
 
   // The one refusal both Archive and Delete can get that is not a failure: the
   // campaign backs the live Voice Session. (Delete's other FailedPrecondition,
@@ -171,7 +204,10 @@ export function useCampaignLifecycle({
 
   const undoArchive = async (campaign: Campaign, wasActive: boolean) => {
     try {
-      await unarchiveAsync({ id: campaign.id });
+      // When it was the Active Campaign it is selected again below; otherwise
+      // a restored campaign must not take the Active Campaign's place.
+      if (wasActive) await unarchiveAsync({ id: campaign.id });
+      else await campaignSwitch.keepActive(() => unarchiveAsync({ id: campaign.id }));
     } catch (err) {
       toast.error(t("components.couldntUnarchiveCampaign", { message: errorMessage(err) }));
       return;
@@ -200,20 +236,25 @@ export function useCampaignLifecycle({
     // is this tab's doing, not something that happened elsewhere.
     if (wasActive) noteLocalActiveCampaignChange();
     markBusy(campaign.id, true);
+    let nothingResolves = false;
     try {
       await archiveAsync({ id: campaign.id });
+      if (wasActive) nothingResolves = !(await pinNext(campaign.id));
     } catch (err) {
+      // Refused: nothing moved, so a change seen now happened elsewhere.
+      if (wasActive) endLocalActiveCampaignChange();
       toast.error(refusal(err, campaign, "components.couldntArchiveCampaign"));
       return;
     } finally {
       markBusy(campaign.id, false);
     }
-    refresh(wasActive);
+    refresh(nothingResolves);
     toastUndo(t("campaigns.archived", { name: campaign.name }), () => void undoArchive(campaign, wasActive));
     if (wasActive) onActiveRemoved?.();
   };
 
   const archive = (campaign: Campaign) => {
+    if (!activeSettled) return;
     if (campaign.id === activeId) setDialog({ kind: "archive", campaign });
     else void runArchive(campaign);
   };
@@ -221,7 +262,7 @@ export function useCampaignLifecycle({
   const unarchive = async (campaign: Campaign) => {
     markBusy(campaign.id, true);
     try {
-      await unarchiveAsync({ id: campaign.id });
+      await campaignSwitch.keepActive(() => unarchiveAsync({ id: campaign.id }));
     } catch (err) {
       toast.error(t("components.couldntUnarchiveCampaign", { message: errorMessage(err) }));
       return;
@@ -240,6 +281,7 @@ export function useCampaignLifecycle({
     // Set once the campaign is at least archived: from then on it no longer
     // resolves as the Active Campaign, whatever the delete does.
     let activeGone = false;
+    let nothingResolves = false;
     markBusy(campaign.id, true);
     try {
       if (!wasArchived) {
@@ -247,10 +289,12 @@ export function useCampaignLifecycle({
         try {
           await archiveAsync({ id: campaign.id });
         } catch (err) {
+          if (wasActive) endLocalActiveCampaignChange();
           toast.error(refusal(err, campaign, "components.couldntDeleteCampaign"));
           return;
         }
         activeGone = wasActive;
+        if (activeGone) nothingResolves = !(await pinNext(campaign.id));
       }
       try {
         await deleteAsync({ id: campaign.id });
@@ -266,11 +310,17 @@ export function useCampaignLifecycle({
         return;
       }
       toast.success(t("campaigns.deleted", { name: campaign.name }));
-      if (wasActive) onActiveRemoved?.();
     } finally {
       markBusy(campaign.id, false);
-      refresh(activeGone);
+      refresh(nothingResolves);
+      // Archived counts: from then on it is no longer the Active Campaign,
+      // whether or not the delete went through.
+      if (activeGone) onActiveRemoved?.();
     }
+  };
+
+  const remove = (campaign: Campaign) => {
+    if (activeSettled) setDialog({ kind: "delete", campaign });
   };
 
   // ── Duplicate ────────────────────────────────────────────────────────────
@@ -284,17 +334,20 @@ export function useCampaignLifecycle({
       // set of the same transcripts. Images on: maps without their picture are
       // not a copy of the maps.
       let withImages = true;
-      let bundle = await fetchCampaignExport(campaign.id, { includeHistory: false, includeImages: true });
-      let imported;
-      try {
-        imported = await importCampaignBundle(bundle.blob, bundle.filename);
-      } catch (err) {
-        if (!isBundleTooLarge(err)) throw err;
-        // Over the upload cap: the images are what made it that big.
-        withImages = false;
-        bundle = await fetchCampaignExport(campaign.id, { includeHistory: false, includeImages: false });
-        imported = await importCampaignBundle(bundle.blob, bundle.filename);
-      }
+      // The copy is the newest campaign: it must not become the Active
+      // Campaign by being that (see the header).
+      const imported = await campaignSwitch.keepActive(async () => {
+        const bundle = await fetchCampaignExport(campaign.id, { includeHistory: false, includeImages: true });
+        try {
+          return await importCampaignBundle(bundle.blob, bundle.filename);
+        } catch (err) {
+          if (!isBundleTooLarge(err)) throw err;
+          // Over the upload cap: the images are what made it that big.
+          withImages = false;
+          const smaller = await fetchCampaignExport(campaign.id, { includeHistory: false, includeImages: false });
+          return await importCampaignBundle(smaller.blob, smaller.filename);
+        }
+      });
       copyId = imported.campaignId;
       // The importer keeps the bundle's name; two campaigns called the same
       // would be indistinguishable in every list.
@@ -304,6 +357,11 @@ export function useCampaignLifecycle({
         name: copyName,
         system: campaign.system,
         language: campaign.language,
+        // A bundle does not carry the Session Highlights tuning; the source row
+        // does. Highlight recording itself stays off on the copy: arming it is
+        // a consent decision for the table that plays it.
+        highlightBar: campaign.highlightBar,
+        highlightConfirmWindows: campaign.highlightConfirmWindows,
       });
       const copy = { id: copyId, name: copyName };
       toast.success(
@@ -409,8 +467,9 @@ export function useCampaignLifecycle({
     duplicate: (campaign) => setDialog({ kind: "duplicate", campaign }),
     archive,
     unarchive: (campaign) => void unarchive(campaign),
-    remove: (campaign) => setDialog({ kind: "delete", campaign }),
+    remove,
     busy,
+    ready: activeSettled,
     dialogs,
   };
 }

@@ -234,6 +234,25 @@ describe("CampaignSettingsPanel: Danger zone", () => {
     await waitFor(() => expect(moves).toEqual([{ screen: "campaigns", view: undefined, search: {} }]));
   });
 
+  it("leaves for the Campaigns page when the campaign got archived but the delete failed", async () => {
+    const { callsOf, moves } = renderPanel({ errors: { deleteCampaign: "blob store offline" } });
+    await loaded();
+    fireEvent.click(danger().getByRole("button", { name: "Delete…" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.change(within(dialog).getByTestId("confirm-text-input"), {
+      target: { value: "The Sunless Citadel" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete campaign" }));
+
+    expect(
+      await screen.findByText("The Sunless Citadel is archived now, but couldn't be deleted: blob store offline"),
+    ).toBeInTheDocument();
+    expect(callsOf("archiveCampaign")).toHaveLength(1);
+    // It is no longer the Active Campaign: staying would show the next one's
+    // settings under this campaign's Danger zone.
+    await waitFor(() => expect(moves).toEqual([{ screen: "campaigns", view: undefined, search: {} }]));
+  });
+
   it("reports the server's refusal while a Voice Session is live in the campaign, and stays", async () => {
     const { callsOf, moves } = renderPanel({ liveOn: "c1" });
     await loaded();

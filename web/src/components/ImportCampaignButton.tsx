@@ -95,7 +95,9 @@ export function ImportCampaignButton({
     setBusy(true);
     setError(null);
     try {
-      const result = await importCampaignBundle(file);
+      // The imported campaign is the newest one; it must not become the Active
+      // Campaign by being that before the GM chose "Switch" (ADR-0053 d7).
+      const result = await campaignSwitch.keepActive(() => importCampaignBundle(file));
       // The new campaign must appear in the lists whether or not the GM switches
       // to it — listCampaigns is sweep-invariant, so invalidate it now.
       void invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);

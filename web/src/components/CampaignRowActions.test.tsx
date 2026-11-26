@@ -22,7 +22,7 @@ function campaign(opts: { archived?: boolean } = {}) {
   });
 }
 
-function lifecycle(busy: string[] = []): CampaignLifecycle {
+function lifecycle(busy: string[] = [], ready = true): CampaignLifecycle {
   return {
     openSettings: vi.fn(),
     exportBundle: vi.fn(),
@@ -31,6 +31,7 @@ function lifecycle(busy: string[] = []): CampaignLifecycle {
     unarchive: vi.fn(),
     remove: vi.fn(),
     busy: new Set(busy),
+    ready,
     dialogs: null,
   };
 }
@@ -103,6 +104,18 @@ describe("CampaignRowActions", () => {
     // Settings and Export do not touch what the flow is doing.
     expect(screen.getByRole("menuitem", { name: "Settings" })).not.toHaveAttribute("aria-disabled");
     expect(screen.getByRole("menuitem", { name: "Export bundle…" })).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("holds Archive and Delete until the Active Campaign is known", () => {
+    const actions = lifecycle([], false);
+    render(<CampaignRowActions campaign={campaign()} lifecycle={actions} />);
+    openMenu();
+    for (const label of ["Archive", "Delete…"]) {
+      expect(screen.getByRole("menuitem", { name: label })).toHaveAttribute("aria-disabled", "true");
+    }
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    expect(actions.archive).not.toHaveBeenCalled();
+    expect(screen.getByRole("menuitem", { name: "Duplicate…" })).not.toHaveAttribute("aria-disabled");
   });
 
   it("is keyboard operable: opens on the first item, Escape closes and returns focus to the trigger", async () => {

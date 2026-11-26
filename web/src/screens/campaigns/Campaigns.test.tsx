@@ -4,9 +4,11 @@ import { toast, Toaster } from "sonner";
 
 import { Providers } from "@/app/Providers";
 import { MemoryScreenNav, type ScreenLocation } from "@/app/screenNav";
-import { resetLocalCampaignSwitch } from "@/components/useCampaignSwitch";
+import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignSwitcher } from "@/components/CampaignSwitcher";
+import { expectsLocalActiveCampaignChange, resetLocalCampaignSwitch } from "@/components/useCampaignSwitch";
 import { useDirtyGuard } from "@/components/ui/useDirtyGuard";
-import { makeQueryClient } from "@/lib/queryClient";
+import { invalidateMethodQueries, makeQueryClient } from "@/lib/queryClient";
 import { Campaigns } from "./Campaigns";
 import { campaignBackend, type Camp } from "./testBackend";
 
@@ -62,7 +64,7 @@ function Editor() {
   );
 }
 
-function renderScreen(opts: Parameters<typeof campaignBackend>[0] = {}) {
+function renderScreen(opts: Parameters<typeof campaignBackend>[0] = {}, { withSwitcher = false } = {}) {
   const h = campaignBackend(opts);
   const moves: ScreenLocation[] = [];
   // No backoff between retries, so a test that fails the list reaches the
@@ -73,12 +75,14 @@ function renderScreen(opts: Parameters<typeof campaignBackend>[0] = {}) {
     <Providers transport={h.transport} queryClient={queryClient}>
       <MemoryScreenNav initial={{ screen: "campaigns" }} onNavigate={(next) => moves.push(next)}>
         <Editor />
+        {/* The topbar switcher, where a change this tab did not make is noticed. */}
+        {withSwitcher && <CampaignSwitcher />}
         <Campaigns />
       </MemoryScreenNav>
       <Toaster />
     </Providers>,
   );
-  return { ...h, moves };
+  return { ...h, moves, queryClient };
 }
 
 const grid = () => screen.findByRole("list", { name: "Your campaigns" });
@@ -227,6 +231,50 @@ describe("Campaigns: search and sort", () => {
     expect(await names()).toHaveLength(6);
   });
 
+  it("let the archived toggle collapse a section the search opened", async () => {
+    renderScreen({ campaigns: MANY, activeId: "1" });
+    const search = await screen.findByRole("searchbox", { name: "Search campaigns" });
+    fireEvent.change(search, { target: { value: "gloam" } });
+    const toggle = screen.getByRole("button", { name: "Archived (1)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).not.toHaveAttribute("aria-controls");
+    expect(screen.queryByRole("list", { name: "Archived campaigns" })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("list", { name: "Archived campaigns" })).toBeInTheDocument();
+
+    // A new search opens it again for its own hits.
+    fireEvent.click(toggle);
+    fireEvent.change(search, { target: { value: "gloamw" } });
+    expect(screen.getByRole("button", { name: "Archived (1)" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("hide the archived section while the search has no hits in it", async () => {
+    renderScreen({ campaigns: MANY, activeId: "1" });
+    const search = await screen.findByRole("searchbox", { name: "Search campaigns" });
+    expect(screen.getByRole("button", { name: "Archived (1)" })).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "pathfinder" } });
+    expect(screen.queryByRole("button", { name: /^Archived \(/ })).not.toBeInTheDocument();
+  });
+
+  it("stop filtering once the toolbar is gone", async () => {
+    renderScreen({ campaigns: MANY, activeId: "2" });
+    const search = await screen.findByRole("searchbox", { name: "Search campaigns" });
+    fireEvent.change(search, { target: { value: "ashes" } });
+    expect(await names()).toEqual(["Ashes of Valen"]);
+
+    // Deleting it leaves six campaigns: no toolbar, so no filter either.
+    await openMenu("Ashes of Valen");
+    choose("Delete…");
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.change(within(dialog).getByTestId("confirm-text-input"), { target: { value: "Ashes of Valen" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete campaign" }));
+    await waitFor(() => expect(screen.queryByRole("searchbox")).not.toBeInTheDocument());
+    await waitFor(async () => expect(await names()).toHaveLength(5));
+  });
+
   it("sort by name, or by what was edited most recently", async () => {
     renderScreen({ campaigns: MANY, activeId: "1" });
     expect(await names()).toEqual([
@@ -298,6 +346,25 @@ describe("Campaigns: Open", () => {
     ).toBeInTheDocument();
     // The Overview would still be the session's campaign: do not pretend.
     expect(moves).toEqual([]);
+  });
+});
+
+describe("Campaigns: Open while a switch is waiting", () => {
+  it("on the session's own campaign takes the waiting switch back", async () => {
+    const { callsOf, moves } = renderScreen({ campaigns: TWO, activeId: "a", liveOn: "a" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Beta Tale" }));
+    await waitFor(() => expect(callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "b" }]));
+    expect(moves).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Alpha Quest" }));
+    await waitFor(() =>
+      expect(callsOf("setActiveCampaign")).toEqual([
+        { method: "setActiveCampaign", id: "b" },
+        { method: "setActiveCampaign", id: "a" },
+      ]),
+    );
+    expect(await screen.findByText("Switch cancelled — Alpha Quest stays the active campaign")).toBeInTheDocument();
+    await waitFor(() => expect(moves).toEqual([{ screen: "campaign", view: "overview", search: {} }]));
   });
 });
 
@@ -446,13 +513,20 @@ describe("Campaigns: Archive", () => {
     fireEvent.click(within(question).getByRole("button", { name: "Archive" }));
     await waitFor(() => expect(callsOf("archiveCampaign")).toHaveLength(1));
     expect(await screen.findByText("Archived Alpha Quest")).toBeInTheDocument();
-    // Resolution moved on: Beta Tale is the active one now.
+    // Resolution moved on: Beta Tale is the active one now — selected, not
+    // left to the server's fallback, so a newer campaign cannot take over.
     await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+    await waitFor(() => expect(callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "b" }]));
 
     // Undo puts it back AND makes it the active campaign again.
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(callsOf("unarchiveCampaign")).toHaveLength(1));
-    await waitFor(() => expect(callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "a" }]));
+    await waitFor(() =>
+      expect(callsOf("setActiveCampaign")).toEqual([
+        { method: "setActiveCampaign", id: "b" },
+        { method: "setActiveCampaign", id: "a" },
+      ]),
+    );
     expect(await screen.findByText("Unarchived Alpha Quest — it is your active campaign again")).toBeInTheDocument();
     await waitFor(async () => expect(within(await cardOf("Alpha Quest")).getByText("Active")).toBeInTheDocument());
   });
@@ -481,6 +555,8 @@ describe("Campaigns: Archive", () => {
     // Still in use, and no Undo for something that did not happen.
     expect(within(await grid()).getAllByRole("listitem")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    // Nothing moved: a change seen from now on was made somewhere else.
+    expect(expectsLocalActiveCampaignChange()).toBe(false);
   });
 
   it("unarchives from the archived section", async () => {
@@ -583,6 +659,103 @@ describe("Campaigns: Delete", () => {
   });
 });
 
+describe("Campaigns: the Active Campaign stays put", () => {
+  // No durable selection at the start: the server resolves to the most
+  // recently created campaign that is not archived (Beta Tale here), and a
+  // newer campaign would take over by being newer.
+  const copyOf = (h: ReturnType<typeof renderScreen>, name: string) => async () => {
+    h.state.campaigns.push({
+      id: "copy-1",
+      name,
+      system: "",
+      language: "",
+      created: "2026-11-22T12:00:00Z",
+      updated: "2026-11-22T12:00:00Z",
+      tapeArmed: false,
+      highlightBar: 0,
+      highlightConfirmWindows: 0,
+    });
+    return {
+      campaignId: "copy-1",
+      name,
+      agents: 0,
+      nodes: 0,
+      edges: 0,
+      characters: 0,
+      sessions: 0,
+      lines: 0,
+      chunks: 0,
+      droppedParticipantRefs: 0,
+    };
+  };
+
+  it("after archiving it, a duplicate of the next one does not become active by being newest", async () => {
+    const h = renderScreen({ campaigns: TWO }, { withSwitcher: true });
+    await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+
+    await openMenu("Beta Tale");
+    choose("Archive…");
+    const question = await screen.findByRole("alertdialog", { name: "Archive “Beta Tale”?" });
+    expect(question).toHaveTextContent("“Alpha Quest” becomes the active campaign.");
+    fireEvent.click(within(question).getByRole("button", { name: "Archive" }));
+    // What the confirm said is made durable.
+    await waitFor(() => expect(h.callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "a" }]));
+    await waitFor(async () => expect(within(await cardOf("Alpha Quest")).getByText("Active")).toBeInTheDocument());
+
+    mockExport.mockResolvedValue({ blob: new Blob(["gz"]), filename: "Alpha Quest.glyphoxa.json.gz" });
+    mockImport.mockImplementation(copyOf(h, "Alpha Quest"));
+    await openMenu("Alpha Quest");
+    choose("Duplicate…");
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Duplicate" }));
+    expect(await screen.findByText("Duplicated as Alpha Quest (copy)")).toBeInTheDocument();
+
+    // Long after the archive (a window focus, a sweep): still Alpha Quest.
+    await act(() => invalidateMethodQueries(h.queryClient, CampaignService.method.getActiveCampaign));
+    await waitFor(async () => expect(within(await cardOf("Alpha Quest")).getByText("Active")).toBeInTheDocument());
+    expect(within(await cardOf("Alpha Quest (copy)")).queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByText(/another tab or Discord/)).not.toBeInTheDocument();
+  });
+
+  it("a duplicate, without any selection made yet, keeps the campaign that resolved before", async () => {
+    const h = renderScreen({ campaigns: TWO }, { withSwitcher: true });
+    await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+
+    mockExport.mockResolvedValue({ blob: new Blob(["gz"]), filename: "Beta Tale.glyphoxa.json.gz" });
+    mockImport.mockImplementation(copyOf(h, "Beta Tale"));
+    await openMenu("Beta Tale");
+    choose("Duplicate…");
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Duplicate" }));
+    expect(await screen.findByText("Duplicated as Beta Tale (copy)")).toBeInTheDocument();
+
+    // The copy resolved for a moment; the selection that was implicit is now
+    // written down.
+    await waitFor(() => expect(h.callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "b" }]));
+    await act(() => invalidateMethodQueries(h.queryClient, CampaignService.method.getActiveCampaign));
+    await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+    expect(within(await cardOf("Beta Tale (copy)")).queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByText(/another tab or Discord/)).not.toBeInTheDocument();
+    // Nothing to say: from the GM's side nothing changed.
+    expect(screen.queryByText(/Now working in/)).not.toBeInTheDocument();
+  });
+
+  it("unarchiving a newer campaign does not make it the active one", async () => {
+    const h = renderScreen(
+      { campaigns: [...TWO, { id: "z", name: "Zenith", archived: true, created: "2026-10-01T12:00:00Z" }] },
+      { withSwitcher: true },
+    );
+    await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Archived (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unarchive Zenith" }));
+
+    expect(await screen.findByText("Unarchived Zenith")).toBeInTheDocument();
+    await waitFor(() => expect(h.callsOf("setActiveCampaign")).toEqual([{ method: "setActiveCampaign", id: "b" }]));
+    await act(() => invalidateMethodQueries(h.queryClient, CampaignService.method.getActiveCampaign));
+    await waitFor(async () => expect(within(await cardOf("Beta Tale")).getByText("Active")).toBeInTheDocument());
+    expect(within(await cardOf("Zenith")).queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByText(/another tab or Discord/)).not.toBeInTheDocument();
+  });
+});
+
 describe("Campaigns: Duplicate", () => {
   const exported = { blob: new Blob(["gz"]), filename: "Beta Tale.glyphoxa.json.gz" };
   const summary = (campaignId: string) => ({
@@ -629,7 +802,10 @@ describe("Campaigns: Duplicate", () => {
   }
 
   it("copies the campaign as “<name> (copy)” with its system and language, and offers to open it", async () => {
-    const h = renderScreen({ campaigns: TWO, activeId: "a" });
+    const h = renderScreen({
+      campaigns: [TWO[0], { ...TWO[1], highlightBar: 6.5, highlightConfirmWindows: 3, tapeArmed: true }],
+      activeId: "a",
+    });
     mockExport.mockResolvedValue(exported);
     mockImport.mockImplementation(importInto(h.state));
     await confirmDuplicate();
@@ -645,7 +821,12 @@ describe("Campaigns: Duplicate", () => {
       name: "Beta Tale (copy)",
       system: "Pathfinder 2e",
       language: "de",
+      // The bundle does not carry the Session Highlights tuning; the rename does.
+      highlightBar: 6.5,
+      highlightConfirmWindows: 3,
     });
+    // Arming highlight recording is the copy's table's decision, not copied.
+    expect(h.callsOf("updateCampaign")[0].req.tapeArmed).toBeUndefined();
 
     expect(await screen.findByRole("heading", { level: 2, name: "Beta Tale (copy)" })).toBeInTheDocument();
     expect(await screen.findByText("Duplicated as Beta Tale (copy)")).toBeInTheDocument();

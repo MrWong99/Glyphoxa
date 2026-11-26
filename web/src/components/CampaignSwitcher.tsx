@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, ChevronDown, LayoutGrid, Plus, Swords } from "lucide-react";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useScreenNav } from "@/app/screenNav";
 import { invalidateActiveCampaignScopedQueries, watchVoiceSessionEnd } from "@/lib/campaignCache";
 import { useI18n } from "@/i18n";
@@ -61,6 +61,11 @@ function SwitchBackLabel() {
   return useI18n().t("campaigns.switchBack");
 }
 
+// The notice itself, for the same reason: it can stay up for a long time.
+function ChangedElsewhereMessage({ name }: { name: string }) {
+  return useI18n().t("campaigns.changedElsewhere", { name });
+}
+
 export function CampaignSwitcher() {
   const { t } = useI18n();
   const nav = useScreenNav();
@@ -98,6 +103,10 @@ export function CampaignSwitcher() {
   // request of its own.
   const { live } = useLiveSession();
   const pending = usePendingCampaignSwitch();
+  // Whether that answer could be had at all: the same cache entry, observed
+  // without fetching (useLiveSession polls it). A failed check means "live"
+  // above may be stale, and a switch may be deferred without the panel saying.
+  const sessionCheckFailed = useQuery(SessionService.method.getSession, {}, { enabled: false }).isError;
 
   // The campaign list renders only inside the open panel, so it isn't fetched
   // from every screen on boot/focus — the query wakes when the panel opens (a
@@ -199,7 +208,7 @@ export function CampaignSwitcher() {
 
     void invalidateActiveCampaignScopedQueries(queryClient);
     noticeUp.current = true;
-    toast.info(t("campaigns.changedElsewhere", { name: activeName }), {
+    toast.info(createElement(ChangedElsewhereMessage, { name: activeName }), {
       id: CHANGED_ELSEWHERE_TOAST,
       duration: Infinity,
       onDismiss: () => {
@@ -215,7 +224,7 @@ export function CampaignSwitcher() {
         },
       },
     });
-  }, [firstRun, activeId, activeName, queryClient, t]);
+  }, [firstRun, activeId, activeName, queryClient]);
 
   const onTriggerClick = () => {
     if (open) {
@@ -308,7 +317,9 @@ export function CampaignSwitcher() {
               non-filterable list with no roving-tabindex keyboard model, so the
               announced role matches the actual behaviour. The Active Campaign's
               row carries aria-current; clicking it just closes the panel — no
-              RPC, no sweep, nothing to re-select. */}
+              RPC, no sweep, nothing to re-select — unless a switch is waiting
+              for the live session to end: then picking the session's own
+              campaign is how that switch is taken back. */}
           <ul className="gx-campaign-switcher__list" role="group" aria-label={t("components.campaignsGroupLabel")}>
             {campaigns.map((c) => {
               const isActive = c.id === activeId;
@@ -324,7 +335,7 @@ export function CampaignSwitcher() {
                     // that was just pressed would drop focus to <body>.
                     aria-disabled={switching || undefined}
                     onClick={() => {
-                      if (isActive) close();
+                      if (isActive && !pending) close();
                       else if (!switching) switchTo({ id: c.id, name: c.name });
                     }}
                   >
@@ -373,10 +384,16 @@ export function CampaignSwitcher() {
 
           {/* The deferral notice: a switch made now is stored, and takes effect
               when the session ends. */}
-          {live && (
+          {live ? (
             <p className="gx-campaign-switcher__notice" role="note">
               {t("components.sessionLiveNotice")}
             </p>
+          ) : (
+            sessionCheckFailed && (
+              <p className="gx-campaign-switcher__notice" role="note">
+                {t("components.sessionCheckFailedNotice")}
+              </p>
+            )
           )}
         </div>
       )}

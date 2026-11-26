@@ -15,6 +15,8 @@ export const en = {
   "components.couldntSwitchCampaign": "Couldn't switch campaign: {message}",
   "components.sessionLiveNotice":
     "A voice session is live — switching takes effect after it ends.",
+  "components.sessionCheckFailedNotice":
+    "Couldn't check for a live voice session — a switch may take effect only after it ends.",
 
   // — Campaign lifecycle actions (card menu and dialogs, #269) —
   "components.campaignActionsFor": "Actions for {name}",
@@ -129,6 +131,8 @@ export const de: Record<keyof typeof en, string> = {
   "components.couldntSwitchCampaign": "Kampagne konnte nicht gewechselt werden: {message}",
   "components.sessionLiveNotice":
     "Gerade läuft eine Session — der Wechsel gilt erst, wenn sie endet.",
+  "components.sessionCheckFailedNotice":
+    "Konnte nicht prüfen, ob gerade eine Session läuft — ein Wechsel gilt eventuell erst nach ihrem Ende.",
 
   // — CampaignRowActions —
   "components.campaignActionsFor": "Aktionen für {name}",

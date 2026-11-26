@@ -296,15 +296,15 @@ export function CampaignSettingsForm({
           scrolling body — Save is never below the fold. */}
       <div className="gx-settings-savebar">
         <div className="gx-settings-savebar__status">
-          {update.error ? (
+          {/* One polite live region for the two quiet states, so "Saved" is
+              heard without stealing focus. It stays beside a save error: the
+              edits are still unsaved, and the error alone does not say so. */}
+          <span className="gx-settings-savebar__state" role="status" data-dirty={isDirty || undefined}>
+            {isDirty ? t("common.unsavedChanges") : justSaved && !update.error ? t("common.saved") : ""}
+          </span>
+          {update.error && (
             <span className="gx-campaign-create__error" role="alert">
               {t("common.couldntSave", { message: errorMessage(update.error) })}
-            </span>
-          ) : (
-            // One polite live region for the two quiet states, so "Saved" is
-            // heard without stealing focus.
-            <span className="gx-settings-savebar__state" role="status" data-dirty={isDirty || undefined}>
-              {isDirty ? t("common.unsavedChanges") : justSaved ? t("common.saved") : ""}
             </span>
           )}
         </div>

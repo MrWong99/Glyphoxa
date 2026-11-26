@@ -1,5 +1,6 @@
 import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
-import { useMutation } from "@connectrpc/connect-query";
+import { createClient } from "@connectrpc/connect";
+import { useMutation, useTransport } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -111,6 +112,14 @@ export function noteLocalActiveCampaignChange(): void {
   localChangeUntil = Date.now() + LOCAL_CHANGE_WINDOW_MS;
 }
 
+/**
+ * Closes the window again: the action that opened it was refused, so nothing
+ * moved, and a change seen now was made somewhere else.
+ */
+export function endLocalActiveCampaignChange(): void {
+  localChangeUntil = 0;
+}
+
 /** True while a change of the Active Campaign is explained by this tab's own action. */
 export function expectsLocalActiveCampaignChange(): boolean {
   return Date.now() < localChangeUntil;
@@ -202,6 +211,27 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
    * that ENDS in a switch but has work to do first (create a campaign).
    */
   confirmDiscard: (action: () => void) => void;
+  /**
+   * Runs `write` — something that creates or restores a campaign: an import, a
+   * duplicate, an unarchive — and keeps the Active Campaign where it was.
+   *
+   * Without a durable selection the server resolves to the most recently
+   * created campaign that is not archived, so a campaign that becomes the
+   * newest one would become active by itself: the GM's next write would land
+   * in it, and the topbar would blame "another tab or Discord". When the
+   * resolved campaign moved across `write`, the previous one is selected again
+   * (and that selection is durable from then on).
+   */
+  keepActive: <T>(write: () => Promise<T>) => Promise<T>;
+  /**
+   * Makes `campaign` — or, when none is given, whatever resolves right now —
+   * the durable selection, without a word. For the flows that move the Active
+   * Campaign to "whatever comes next" (archiving or deleting it): the server
+   * clears the selection then, and an implicit fallback would let the next
+   * import or duplicate take over. Resolves to the campaign selected, or
+   * undefined when nothing resolves or the write was refused.
+   */
+  pinActive: (campaign?: Target) => Promise<Target | undefined>;
   /** True while the selection is being written. */
   pending: boolean;
   /** Render this once — it is the "Discard unsaved changes?" question. */
@@ -223,6 +253,9 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
       // response is handled, and an observer must already see this change as
       // ours.
       const before = localSwitchTarget;
+      // A switch to another campaign while one was waiting as "Next:" — the
+      // session's own campaign, in practice — takes the waiting one back.
+      const waiting = pendingSwitch;
       markLocalCampaignSwitch(campaign.id);
       // mutateAsync, not mutate with callbacks: those are dropped when the
       // calling component unmounts mid-flight (a dialog that closes), and the
@@ -241,6 +274,8 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
           const announce = opts?.announce ?? defaultAnnounce;
           if (announce) announce(result);
           else if (deferred) toast.info(t("shell.switchDeferred", { name: campaign.name }));
+          else if (waiting && waiting.id !== campaign.id)
+            toast.success(t("campaigns.nextCancelled", { name: campaign.name }));
           else toast.success(t("shell.nowWorkingIn", { name: campaign.name }));
           (opts?.onSwitched ?? defaultOnSwitched)?.(result);
         },
@@ -269,6 +304,69 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
     [confirmDiscard, activate],
   );
 
+  // The resolved Active Campaign, read now rather than from the cache (which
+  // can be a refetch behind); undefined when nothing resolves or the read fails.
+  const transport = useTransport();
+  const readActive = useCallback(
+    () =>
+      createClient(CampaignService, transport)
+        .getActiveCampaign({})
+        .then(
+          (res) => res.campaign,
+          () => undefined,
+        ),
+    [transport],
+  );
+
+  // Writes `campaign` as the durable selection, quietly and awaited: nothing
+  // is said, and the caller's own refresh reads the selection back. The id is
+  // marked as this tab's switch first, like every other switch.
+  const select = useCallback(
+    async (campaign: Target): Promise<boolean> => {
+      const before = localSwitchTarget;
+      markLocalCampaignSwitch(campaign.id);
+      try {
+        await mutateAsync({ campaignId: campaign.id });
+        return true;
+      } catch {
+        if (localSwitchTarget === campaign.id) localSwitchTarget = before;
+        return false;
+      }
+    },
+    [mutateAsync],
+  );
+
+  const pinActive = useCallback(
+    async (campaign?: Target): Promise<Target | undefined> => {
+      const target = campaign ?? (await readActive());
+      if (!target) return undefined;
+      return (await select({ id: target.id, name: target.name })) ? { id: target.id, name: target.name } : undefined;
+    },
+    [readActive, select],
+  );
+
+  const keepActive = useCallback(
+    async <T,>(write: () => Promise<T>): Promise<T> => {
+      const before = await readActive();
+      noteLocalActiveCampaignChange();
+      let result: T;
+      try {
+        result = await write();
+      } catch (err) {
+        endLocalActiveCampaignChange();
+        throw err;
+      }
+      const after = await readActive();
+      if (before && after && after.id !== before.id) {
+        await select({ id: before.id, name: before.name });
+        // A refetch may have shown the newcomer in the meantime.
+        void invalidateActiveCampaignScopedQueries(queryClient);
+      }
+      return result;
+    },
+    [readActive, select, queryClient],
+  );
+
   const dialog = asking ? (
     <ConfirmDialog
       open
@@ -286,5 +384,5 @@ export function useCampaignSwitch(defaults: SwitchOptions = {}): {
     />
   ) : null;
 
-  return { switchTo, activate, confirmDiscard, pending: setActive.isPending, dialog };
+  return { switchTo, activate, confirmDiscard, pinActive, keepActive, pending: setActive.isPending, dialog };
 }
