@@ -128,3 +128,94 @@ export function dispositionOptions(t: TFunc): { value: string; label: string }[]
  * before finding that out.
  */
 export const MAX_EDGE_NOTE_RUNES = 280;
+
+const isCharacterOrNpc = (t: NodeType) => t === NodeType.CHARACTER || t === NodeType.NPC;
+
+/**
+ * isEdgeLegal mirrors the four rules of the server's validity matrix
+ * (internal/storage/kg_edge.go ValidateEdge, ADR-0008 amendment), so the UI can
+ * offer only what the server will accept instead of letting the GM pick a pair
+ * and then refusing it:
+ *
+ *   lives in      points at a Location
+ *   member of     points at a Faction
+ *   took part in  points at a Plot thread
+ *   parent of     joins a Character/NPC to a Character/NPC
+ *
+ * Every other relation (knows, owns, enemy of, ally of, mentioned in) is
+ * unconstrained on both ends. The server stays the authority: this is a mirror,
+ * and knowledgeVocab.test.ts writes the same table out so the two cannot drift
+ * unnoticed.
+ */
+export function isEdgeLegal(edgeType: EdgeType, fromType: NodeType, toType: NodeType): boolean {
+  switch (edgeType) {
+    case EdgeType.RESIDES_IN:
+      return toType === NodeType.LOCATION;
+    case EdgeType.MEMBER_OF:
+      return toType === NodeType.FACTION;
+    case EdgeType.PARTICIPATED_IN:
+      return toType === NodeType.PLOT_THREAD;
+    case EdgeType.PARENT_OF:
+      return isCharacterOrNpc(fromType) && isCharacterOrNpc(toType);
+    case EdgeType.KNOWS:
+    case EdgeType.OWNS:
+    case EdgeType.ENEMY_OF:
+    case EdgeType.ALLY_OF:
+    case EdgeType.MENTIONED_IN:
+      return true;
+    default:
+      // An unknown relation is never legal, exactly as on the server.
+      return false;
+  }
+}
+
+/** The relations the server will accept between these two entry types, in vocabulary order. */
+export function legalEdgeTypes(fromType: NodeType, toType: NodeType): EdgeType[] {
+  return EDGE_TYPES.filter((e) => isEdgeLegal(e.value, fromType, toType)).map((e) => e.value);
+}
+
+/**
+ * Suggested fact labels per entry type: the handful of things a GM is asked
+ * about that kind of entry at the table. A suggestion only pre-fills a row's
+ * label (the GM writes the fact), and the ones that are secrets by nature start
+ * GM only, so a hidden motive is not public by accident.
+ */
+export type FactSuggestion = { labelKey: MessageKey; gmPrivate?: boolean };
+
+export const FACT_SUGGESTIONS: Record<number, FactSuggestion[]> = {
+  [NodeType.CHARACTER]: [
+    { labelKey: "knowledge.factSuggestAppearance" },
+    { labelKey: "knowledge.factSuggestBackground" },
+    { labelKey: "knowledge.factSuggestGoal" },
+  ],
+  [NodeType.NPC]: [
+    { labelKey: "knowledge.factSuggestRole" },
+    { labelKey: "knowledge.factSuggestAppearance" },
+    { labelKey: "knowledge.factSuggestWants" },
+    { labelKey: "knowledge.factSuggestSecret", gmPrivate: true },
+  ],
+  [NodeType.LOCATION]: [
+    { labelKey: "knowledge.factSuggestAtmosphere" },
+    { labelKey: "knowledge.factSuggestWhoIsHere" },
+    { labelKey: "knowledge.factSuggestDangers" },
+    { labelKey: "knowledge.factSuggestSecret", gmPrivate: true },
+  ],
+  [NodeType.FACTION]: [
+    { labelKey: "knowledge.factSuggestGoal" },
+    { labelKey: "knowledge.factSuggestLeader" },
+    { labelKey: "knowledge.factSuggestMethods" },
+    { labelKey: "knowledge.factSuggestSecret", gmPrivate: true },
+  ],
+  [NodeType.ITEM]: [
+    { labelKey: "knowledge.factSuggestAppearance" },
+    { labelKey: "knowledge.factSuggestPowers" },
+    { labelKey: "knowledge.factSuggestHistory" },
+  ],
+  [NodeType.PLOT_THREAD]: [
+    { labelKey: "knowledge.factSuggestStatus" },
+    { labelKey: "knowledge.factSuggestStakes" },
+    { labelKey: "knowledge.factSuggestNextStep" },
+    { labelKey: "knowledge.factSuggestTruth", gmPrivate: true },
+  ],
+  [NodeType.NOTE]: [],
+};
