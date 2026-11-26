@@ -174,7 +174,9 @@ function Boards({
                     type="button"
                     className="gx-session-board__toggle"
                     aria-expanded={open}
-                    aria-controls={panelId}
+                    // Only while open: the panel is not rendered when closed,
+                    // and aria-controls must not point at a missing element.
+                    aria-controls={open ? panelId : undefined}
                     onClick={() => setOpenId(open ? null : id)}
                   >
                     {open ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}

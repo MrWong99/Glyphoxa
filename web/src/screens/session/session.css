@@ -576,7 +576,12 @@
   min-width: 0;
 }
 
+/* position: relative makes the scroller the containing block of what sits
+ * inside it absolutely, the .gx-visually-hidden speaker names on a run's later
+ * lines among them. Without it they resolve to the frame OUTSIDE the overflow,
+ * escape its clip, and stretch the PAGE to the transcript's full height. */
 .gx-transcript-pane {
+  position: relative;
   --gx-pane-chrome: 380px;
   max-height: max(280px, calc(100dvh - var(--gx-pane-chrome)));
   overflow-y: auto;
@@ -841,6 +846,8 @@
   text-transform: none;
 }
 .gx-tsearch__group-count {
+  /* Contains its visually hidden "N matching lines" inside the scrolling results. */
+  position: relative;
   margin-left: auto;
   font-variant-numeric: tabular-nums;
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { tDe, tEn } from "./testT";
-import { transcriptFilename, transcriptMarkdown } from "./transcriptMarkdown";
+import { literalBlock, transcriptFilename, transcriptMarkdown } from "./transcriptMarkdown";
 import type { TranscriptLine } from "./useSessionEvents";
 
 // Local-time instants, so the HH:MM in the output is the same in any timezone
@@ -36,20 +36,22 @@ describe("transcriptMarkdown", () => {
       [
         `# The Sunless Citadel — session of ${day}`,
         "",
-        "**Bart** (NPC) · 20:15",
-        "Well met, traveller.",
+        // Inside a run every line but the last ends in a hard break, so a
+        // renderer keeps the name and each line on their own lines.
+        "**Bart** (NPC) · 20:15  ",
+        "Well met, traveller.  ",
         // Bart's second line joins his run: no second name line. His own
         // markdown is left as markdown.
         "The road east is **closed**.",
         "",
-        "**Player / GM** · 20:16",
+        "**Player / GM** · 20:16  ",
         "Where is the dragon?",
         "",
-        "**Anna** · 20:17",
+        "**Anna** · 20:17  ",
         "I draw my sword.",
         "",
         // A Butler still called "Butler" gets no "(Butler)" after its name.
-        "**Butler** · 20:18",
+        "**Butler** · 20:18  ",
         "Roll for initiative.",
         "",
       ].join("\n"),
@@ -75,6 +77,24 @@ describe("transcriptMarkdown", () => {
     expect(transcriptMarkdown({ campaignName: undefined, startedAt: null, lines: [], t: tEn, lang: "en" })).toBe(
       "# Session transcript\n",
     );
+  });
+});
+
+describe("literalBlock", () => {
+  it("escapes an opening that would read as Markdown block structure", () => {
+    expect(literalBlock("# not a heading")).toBe("\\# not a heading");
+    expect(literalBlock("> not a quote")).toBe("\\> not a quote");
+    expect(literalBlock("- not a bullet")).toBe("\\- not a bullet");
+    expect(literalBlock("1. we go left")).toBe("1\\. we go left");
+    expect(literalBlock("2) then right")).toBe("2\\) then right");
+    expect(literalBlock("===")).toBe("\\===");
+    expect(literalBlock("---")).toBe("\\---");
+  });
+
+  it("leaves ordinary words and inline markdown alone", () => {
+    for (const text of ["#hashtag", "**bold** move", "1.5 gold pieces", "a - b", "Where is the dragon?"]) {
+      expect(literalBlock(text)).toBe(text);
+    }
   });
 });
 

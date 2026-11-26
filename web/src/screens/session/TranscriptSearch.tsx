@@ -145,7 +145,14 @@ export function TranscriptSearch({
                   {group.sessionId === currentSessionId && (
                     <span className="gx-tsearch__here">{t("session.searchGroupHere")}</span>
                   )}
-                  <span className="gx-tsearch__group-count">{group.hits.length}</span>
+                  <span className="gx-tsearch__group-count">
+                    <span aria-hidden="true">{group.hits.length}</span>
+                    <span className="gx-visually-hidden">
+                      {group.hits.length === 1
+                        ? t("session.searchGroupCountOne")
+                        : t("session.searchGroupCount", { n: group.hits.length })}
+                    </span>
+                  </span>
                 </h3>
                 <ul className="gx-tsearch__hits">
                   {group.hits.map((m) => {

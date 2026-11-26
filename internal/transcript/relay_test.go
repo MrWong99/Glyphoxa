@@ -436,11 +436,22 @@ func TestTyping_StructuredState(t *testing.T) {
 	}
 
 	// Idle: no state, no who — the terminal frame's bytes are what they were.
+	// The replay half of attach is the frames read above; only Finalize's
+	// frame arrives on the channel.
+	sub, _ := r.attach(id, 0)
+	defer r.detach(sub)
 	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
-	if got, want := string(mustJSON(status{Status: "idle", Typing: Typing{}})), `{"status":"idle","typing":{"active":false,"label":""}}`; got != want {
-		t.Fatalf("idle status JSON = %s, want %s", got, want)
+	// The ring is torn down by Finalize, so the frame is read where a client
+	// reads it: on an attached subscriber, past everything already buffered.
+	select {
+	case f := <-sub.ch:
+		if got, want := string(f.Data), `{"status":"idle","typing":{"active":false,"label":""}}`; f.Event != "status" || got != want {
+			t.Fatalf("terminal frame = %s %s, want status %s", f.Event, got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no terminal frame after Finalize")
 	}
 }
 

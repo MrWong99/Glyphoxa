@@ -261,6 +261,54 @@ describe("Session stop confirmation", () => {
     await waitFor(() => expect(stops.count).toBe(1));
   });
 
+  it("closes the confirm when the session ends by itself, so no Stop is sent to nothing", async () => {
+    const stops = { count: 0 };
+    const state = { active: true };
+    const started = timestampFromDate(new Date(Date.now() - 90 * 60 * 1000));
+    const transport = createRouterTransport(({ service }) => {
+      service(SessionService, {
+        listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
+        getSession: () =>
+          create(GetSessionResponseSchema, {
+            session: create(VoiceSessionSchema, {
+              id: "vs1",
+              campaignId: "c1",
+              status: state.active ? "running" : "ended",
+              startedAt: started,
+              ...(state.active ? {} : { endedAt: timestampFromDate(new Date()), endReason: "idle_timeout" }),
+            }),
+            active: state.active,
+          }),
+        stopSession: () => {
+          stops.count += 1;
+          return create(StopSessionResponseSchema, {});
+        },
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, {
+            campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+          }),
+      });
+    });
+    const qc = makeQueryClient();
+    render(
+      <Providers transport={transport} queryClient={qc}>
+        <Screen />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /stop session/i }));
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+
+    // The idle watchdog ends the session while the GM is still deciding.
+    state.active = false;
+    act(() => {
+      void qc.invalidateQueries();
+    });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(stops.count).toBe(0);
+  });
+
   it("shows the estimated spend beside the clock whenever there is one", async () => {
     render(
       <Providers transport={spendCapTransport("", 1.5)} queryClient={makeQueryClient()}>
@@ -1743,6 +1791,84 @@ describe("Session live default unchanged with picker present (#270 AC5)", () => 
       es2.emit("line", { id: "a:t2", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "back on the live tail" }),
     );
     expect(await screen.findByText("back on the live tail")).toBeInTheDocument();
+  });
+});
+
+// The control bar describes the RUNNING session, whichever one is on screen: a
+// past session's snapshot carries no connection state, so reading it would
+// flip a connected table to "Connecting…" while the GM looks something up.
+describe("Session status badge while browsing during live play", () => {
+  // The live session vs1 is connected with no lines yet (a quiet table); vsOld's
+  // snapshot never arrives (still loading) and vsEmpty has no lines at all.
+  beforeEach(() => {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/sessions/vsOld")) return new Promise<Response>(() => {});
+      if (url.includes("/api/v1/sessions/vsEmpty")) {
+        return json({ lines: [], status: "idle", typing: { active: false, label: "" } });
+      }
+      return json(CONNECTED);
+    }) as typeof fetch;
+  });
+
+  function transport() {
+    const running = create(VoiceSessionSchema, {
+      id: "vs1",
+      campaignId: "c1",
+      status: "running",
+      startedAt: timestampFromDate(new Date()),
+    });
+    const past = (id: string, lineCount: number) =>
+      create(VoiceSessionSchema, {
+        id,
+        campaignId: "c1",
+        status: "ended",
+        startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+        endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+        lineCount,
+      });
+    return createRouterTransport(({ service }) => {
+      service(SessionService, {
+        listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
+        getSession: () => create(GetSessionResponseSchema, { session: running, active: true }),
+        listSessions: () =>
+          create(ListSessionsResponseSchema, { sessions: [running, past("vsOld", 5), past("vsEmpty", 0)] }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, {
+            campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+          }),
+      });
+    });
+  }
+
+  it("stays Live while a past session's snapshot is still loading", async () => {
+    render(
+      <Providers transport={transport()} queryClient={makeQueryClient()}>
+        <Screen />
+      </Providers>,
+    );
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    const picker = await openHistory();
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    expect(await screen.findByRole("button", { name: "Back to live" })).toBeInTheDocument();
+    // vsOld's transcript is a skeleton; the bar still says what vs1 is.
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(screen.queryByTestId("connection-state")).not.toBeInTheDocument();
+  });
+
+  it("is Live when the page opens straight onto a past session with no lines", async () => {
+    render(
+      <Providers transport={transport()} queryClient={makeQueryClient()}>
+        <Screen search={{ session: "vsEmpty" }} />
+      </Providers>,
+    );
+    expect(await screen.findByRole("button", { name: "Back to live" })).toBeInTheDocument();
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    expect(screen.queryByTestId("connection-state")).not.toBeInTheDocument();
   });
 });
 

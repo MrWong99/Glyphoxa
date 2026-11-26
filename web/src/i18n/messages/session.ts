@@ -49,9 +49,9 @@ export const en = {
   "session.preflightDiscordPick": "Pick the voice channel to join.",
   "session.preflightDiscordOk": "Server linked. The Bot joins “{channel}”.",
   "session.preflightProviders": "AI services",
-  "session.preflightProvidersChecking": "Checking speech, voices and the language model…",
+  "session.preflightProvidersChecking": "Checking the voices and the language model…",
   "session.preflightProvidersUnknown": "Couldn't check the services right now. You can still start.",
-  "session.preflightProvidersOk": "Speech, voices and the language model answer.",
+  "session.preflightProvidersOk": "The voices and the language model answer.",
   "session.preflightProviderOf": "{component} ({provider})",
   "session.preflightComponentLlm": "Language model",
   "session.preflightComponentTts": "Voices",
@@ -177,6 +177,8 @@ export const en = {
   "session.searchGroup": "Session of {date}, {time}",
   "session.searchGroupUndated": "Earlier session",
   "session.searchGroupHere": "on screen",
+  "session.searchGroupCount": "{n} matching lines",
+  "session.searchGroupCountOne": "1 matching line",
 
   // --- Section titles --------------------------------------------------------
   "session.highlightsTitle": "Highlights",
@@ -236,6 +238,7 @@ export const en = {
   "session.highlightsNoneTitle": "No highlights yet",
   "session.highlightsNoneDesc":
     "Highlight recording is on, but nothing in this session was epic enough to keep.",
+  "session.highlightsNoSessionDesc": "Highlights from your sessions appear here.",
   "session.highlightsNoneLiveDesc":
     "Highlight recording is on. A moment appears here as soon as one is epic enough to keep.",
   "session.highlightCaptured": "New highlight captured.",
@@ -349,10 +352,10 @@ export const de: Record<keyof typeof en, string> = {
   "session.preflightDiscordPick": "Wähle den Sprachkanal, dem der Bot beitreten soll.",
   "session.preflightDiscordOk": "Server verknüpft. Der Bot tritt „{channel}“ bei.",
   "session.preflightProviders": "KI-Dienste",
-  "session.preflightProvidersChecking": "Spracherkennung, Stimmen und Sprachmodell werden geprüft…",
+  "session.preflightProvidersChecking": "Stimmen und Sprachmodell werden geprüft…",
   "session.preflightProvidersUnknown":
     "Die Dienste konnten gerade nicht geprüft werden. Du kannst trotzdem starten.",
-  "session.preflightProvidersOk": "Spracherkennung, Stimmen und Sprachmodell antworten.",
+  "session.preflightProvidersOk": "Stimmen und Sprachmodell antworten.",
   "session.preflightProviderOf": "{component} ({provider})",
   "session.preflightComponentLlm": "Sprachmodell",
   "session.preflightComponentTts": "Stimmen",
@@ -474,6 +477,8 @@ export const de: Record<keyof typeof en, string> = {
   "session.searchGroup": "Session vom {date}, {time}",
   "session.searchGroupUndated": "Frühere Session",
   "session.searchGroupHere": "wird angezeigt",
+  "session.searchGroupCount": "{n} passende Zeilen",
+  "session.searchGroupCountOne": "1 passende Zeile",
 
   "session.highlightsTitle": "Highlights",
   "session.boardTitle": "Heutiges Board",
@@ -529,6 +534,7 @@ export const de: Record<keyof typeof en, string> = {
   "session.highlightsNoneTitle": "Noch keine Highlights",
   "session.highlightsNoneDesc":
     "Die Highlight-Aufnahme ist an, aber in dieser Session war nichts episch genug, um es zu behalten.",
+  "session.highlightsNoSessionDesc": "Hier erscheinen die Highlights deiner Sessions.",
   "session.highlightsNoneLiveDesc":
     "Die Highlight-Aufnahme ist an. Ein Moment erscheint hier, sobald einer episch genug ist, um ihn zu behalten.",
   "session.highlightCaptured": "Neues Highlight aufgenommen.",

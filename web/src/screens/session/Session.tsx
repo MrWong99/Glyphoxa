@@ -293,20 +293,29 @@ export function Session() {
   // persisted snapshot with no stream (#270, AC5).
   const transcript = useSessionEvents(renderedSessionId ?? undefined, renderedLive, viewingPast);
   const hasLines = transcript.lines.length > 0;
+  // The RUNNING session's transcript, whichever session is on screen: the
+  // control bar describes the live session, and a past session's snapshot
+  // carries no connection state. While a past one is viewed, a second,
+  // stream-less read holds the live session's entry: the state its stream last
+  // reported, or its snapshot when the page opened straight onto a past one.
+  const liveWhileBrowsing = useSessionEvents(active && viewingPast ? (currentId ?? undefined) : undefined, false);
+  const liveTranscript = viewingPast ? liveWhileBrowsing : transcript;
+  const liveConnection = liveTranscript.connection;
+  const liveHasLines = liveTranscript.lines.length > 0;
 
   // Gateway connection state (#123): a fatal rejection is failed from EITHER the
   // durable session status (the reload/poll truth: status "failed" + end_reason) OR
   // the live SSE "connection" frame (immediate, with its detail).
   const sessionFailed = session?.status === "failed";
-  const liveFailed = active && transcript.connection === "failed";
+  const liveFailed = active && liveConnection === "failed";
   const failed = sessionFailed || liveFailed;
-  const failureReason = sessionFailed ? session?.endReason : transcript.connectionDetail;
+  const failureReason = sessionFailed ? session?.endReason : liveTranscript.connectionDetail;
   // "Live" is a claim that the Bot is in the channel, so the badge only makes
   // it once the relay reports the gateway connected — until then it reads
   // "Connecting…". A transcript line is proof of the same thing, for a relay
   // that reports no connection state.
   const connected =
-    active && !failed && (transcript.connection === "connected" || (transcript.connection === undefined && hasLines));
+    active && !failed && (liveConnection === "connected" || (liveConnection === undefined && liveHasLines));
 
   // ---- tabs --------------------------------------------------------------------
   //
@@ -467,7 +476,8 @@ export function Session() {
   const recapsInFlight = useRecapsInFlight();
   const recapPending = renderedSessionId != null && recapsInFlight.has(renderedSessionId);
   // A recap needs an ended session's persisted lines.
-  const canRecap = renderedSession != null && renderedSession.status !== "running";
+  // A session with no lines (a false start) has nothing to recap.
+  const canRecap = renderedSession != null && renderedSession.status !== "running" && renderedSession.lineCount > 0;
 
   // ---- highlights --------------------------------------------------------------
   //
@@ -509,8 +519,9 @@ export function Session() {
     wasActive.current = sessionPending ? null : active;
     if (prev !== true || active || !session) return;
     const reason = failureText(session.endReason, t);
+    // A false start with no lines has nothing to recap.
     const recapAction =
-      session.status === "ended"
+      session.status === "ended" && session.lineCount > 0
         ? { action: { label: t("session.generateRecap"), onClick: () => generateRecap(session.id) } }
         : {};
     if (session.status === "failed") {
@@ -539,19 +550,41 @@ export function Session() {
 
   // The sticky bar's height feeds the voice rail's sticky offset (the bar wraps
   // on a narrow screen, so it is measured, not assumed).
-  const barRef = useRef<HTMLDivElement | null>(null);
+  // The bar is held in state (a callback ref), not a ref object: the first
+  // render can be the zero-campaign card, and the observer must attach when
+  // the bar mounts later.
+  const [bar, setBar] = useState<HTMLDivElement | null>(null);
   const [barHeight, setBarHeight] = useState<number | null>(null);
   useLayoutEffect(() => {
-    const bar = barRef.current;
     if (!bar || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => setBarHeight(Math.round(bar.getBoundingClientRect().height)));
     observer.observe(bar);
     return () => observer.disconnect();
-  }, []);
+  }, [bar]);
 
   // ---- in-flight player bind ---------------------------------------------------
   const [bindOpen, setBindOpen] = useState(false);
   const [bindPrefill, setBindPrefill] = useState<BindPrefill | null>(null);
+
+  // What belongs to the running session goes with it when it ends, whoever
+  // ended it (the idle watchdog, a spending limit): an open Stop confirm would
+  // otherwise send a Stop to nothing, and the bind form would greet the next
+  // evening already open, seeded with tonight's person.
+  useEffect(() => {
+    if (active) return;
+    setConfirmingStop(false);
+    setBindOpen(false);
+    setBindPrefill(null);
+  }, [active]);
+
+  // "Back to live" unmounts itself; the transcript it returned to takes the
+  // keyboard focus instead of <body>.
+  const focusPaneOnReturn = useRef(false);
+  useEffect(() => {
+    if (!focusPaneOnReturn.current || viewingPast) return;
+    focusPaneOnReturn.current = false;
+    document.querySelector<HTMLElement>('[data-testid="transcript-pane"]')?.focus({ preventScroll: true });
+  });
 
   // Zero campaigns (#267): GetActiveCampaign is CodeNotFound and a session can't
   // start, so the create-first-campaign card replaces the screen instead of
@@ -614,7 +647,7 @@ export function Session() {
         {/* The sticky element is this wrapper, not the card: its page-coloured
             padding is what keeps a scrolling line from showing above the card
             or around its rounded corners. */}
-        <div className="gx-session__top" ref={barRef}>
+        <div className="gx-session__top" ref={setBar}>
         <Card accent className="gx-session__control">
           <div className="gx-session__bar">
             <div className="gx-session__status">
@@ -803,7 +836,10 @@ export function Session() {
                       variant="secondary"
                       size="sm"
                       iconStart={active ? <Mic size={14} /> : <ArrowLeft size={14} />}
-                      onClick={() => viewSession(null)}
+                      onClick={() => {
+                        focusPaneOnReturn.current = true;
+                        viewSession(null);
+                      }}
                     >
                       {active ? t("session.backToLive") : t("session.backToLatest")}
                     </Button>
@@ -846,7 +882,9 @@ export function Session() {
             />
           </div>
 
-          <section className="gx-session__panel" hidden={tab !== "transcript"} aria-label={paneLabel}>
+          {/* No accessible name on the section: the scrolling pane inside is the
+              "Live transcript" region, and two nested regions of one name read twice. */}
+          <section className="gx-session__panel" hidden={tab !== "transcript"}>
             <div className="gx-session__panel-head">
               <h2 className="gx-session__panel-title">{paneLabel}</h2>
               {exportable && (
@@ -900,6 +938,10 @@ export function Session() {
               </Card>
             ) : (
               <TranscriptPane
+                // One pane per session: a switch starts at that session's own
+                // position (a live one at its tail and following, a past one at
+                // its top), not at the scroll offset the previous one left.
+                key={renderedSessionId ?? ""}
                 lines={transcript.lines}
                 typing={transcript.typing}
                 live={renderedLive}
@@ -961,7 +1003,7 @@ export function Session() {
                   description={
                     campaign?.tapeArmed === false
                       ? t("session.highlightsOffDesc")
-                      : t("session.highlightsNoneDesc")
+                      : t("session.highlightsNoSessionDesc")
                   }
                   action={
                     campaign?.tapeArmed === false && (

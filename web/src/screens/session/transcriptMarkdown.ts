@@ -10,16 +10,23 @@ import { formatClockShort, type TranscriptLine } from "./useSessionEvents";
 //
 //   # The Sunless Citadel — session of Sat, Nov 21
 //
-//   **Bart** (NPC) · 20:15
-//   Well met, traveller.
+//   **Bart** (NPC) · 20:15␣␣
+//   Well met, traveller.␣␣
 //   The road east is closed.
 //
-//   **Player / GM** · 20:16
+//   **Player / GM** · 20:16␣␣
 //   Where is the dragon?
 //
-// Line text is written as it was said: an Agent's own markdown is already
-// markdown, and a human line is speech-to-text — escaping it would only put
-// backslashes in front of somebody's words.
+// Inside a run every line but the last ends in a hard break (two trailing
+// spaces, ␣␣ above): a bare newline is a soft break, and a Markdown renderer
+// would fold the name and the whole run into one paragraph.
+//
+// Line text is written as it was said: an Agent's own inline markdown stays
+// markdown, and a human line is speech-to-text, so no backslash goes in front
+// of somebody's words. The one exception is a line that OPENS like Markdown
+// block structure ("# ", "- ", "1. ", "> "): the screen shows such a line
+// literally, so the export escapes that opening, or a spoken "1. we go left"
+// would become a list and a "#" a heading.
 
 export function transcriptMarkdown({
   campaignName,
@@ -43,19 +50,38 @@ export function transcriptMarkdown({
         : (campaignName ?? t("session.sessionTranscript"));
 
   const out: string[] = [`# ${title}`];
+  let run: string[] = [];
+  const flush = () => {
+    if (run.length > 0) out.push("", run.join(HARD_BREAK));
+    run = [];
+  };
   let prev: TranscriptLine | undefined;
   for (const line of lines) {
     if (!prev || prev.who !== line.who || prev.kind !== line.kind) {
+      flush();
       const name = speakerName(line.who, line.kind, t);
       const tag = tagLabel(line.tag, line.kind, t);
       const clock = formatClockShort(line.ts);
       // A Butler still called "Butler" needs no "(Butler)" after its name.
-      out.push("", `**${name}**${tag && tag !== name ? ` (${tag})` : ""}${clock ? ` · ${clock}` : ""}`);
+      run.push(`**${name}**${tag && tag !== name ? ` (${tag})` : ""}${clock ? ` · ${clock}` : ""}`);
     }
-    out.push(line.text);
+    run.push(literalBlock(line.text));
     prev = line;
   }
+  flush();
   return out.join("\n") + "\n";
+}
+
+// HARD_BREAK ends a line inside a run: two trailing spaces, then the newline.
+const HARD_BREAK = "  \n";
+
+// literalBlock escapes a line's opening when it would read as Markdown block
+// structure (a heading, quote, bullet or ordered item, or a setext/thematic
+// underline). Inline markdown is left alone.
+export function literalBlock(text: string): string {
+  const ordered = /^(\s*\d{1,9})([.)])(?=\s|$)/;
+  if (ordered.test(text)) return text.replace(ordered, "$1\\$2");
+  return text.replace(/^(\s*)(?=#{1,6}(?:\s|$)|>|[-+*](?:\s|$)|[-_*=]{3,}\s*$|=+\s*$)/, "$1\\");
 }
 
 /** A filesystem-safe file name for the export: "sunless-citadel-2026-11-21.md". */

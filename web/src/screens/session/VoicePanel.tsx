@@ -187,6 +187,15 @@ export function VoicePanel({
         </button>
       </div>
 
+      {/* Who is speaking, for a screen reader. A live region announces a change
+          to content it already holds, so this one is always mounted while the
+          session runs and only its text follows the speaker. */}
+      {active && (
+        <div className="gx-visually-hidden" role="status" aria-live="polite" data-testid="voice-announcer">
+          {speaking && !isButler(speaking) ? t("session.typingSpeaking", { name: speaking.name }) : ""}
+        </div>
+      )}
+
       {/* The folded strip still names — and can mute — whoever is speaking: on
           a phone that is the one control the GM reaches for mid-scene. Hidden
           wherever the rows themselves are on screen (CSS). */}
@@ -252,9 +261,8 @@ export function VoicePanel({
                   <span
                     className="gx-voice-row__state"
                     data-warn={idle?.warn || undefined}
-                    // The speaking marker changes under the GM's eyes; a screen
-                    // reader hears it at the next pause.
-                    aria-live={isSpeaking ? "polite" : undefined}
+                    // The speaking marker changes under the GM's eyes; the
+                    // panel's own status region above says it aloud.
                   >
                     {state}
                   </span>

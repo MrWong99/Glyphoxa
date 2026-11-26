@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ArrowDown } from "lucide-react";
 
 import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
@@ -123,17 +123,17 @@ export function TranscriptPane({
     toTail();
   }, [lines.length, lastLength, showTyping, live, visible]);
 
-  // Switching to another session starts at that session's own position: a live
-  // one at its tail (and following), a past one at its top.
-  useEffect(() => {
-    followRef.current = true;
-    setAtTail(true);
-  }, [live]);
+  // Switching to another session starts at that session's own position (a live
+  // one at its tail and following, a past one at its top): the screen keys the
+  // pane on the session, so each one mounts fresh.
 
   const jumpToLatest = () => {
     followRef.current = true;
     setAtTail(true);
     toTail();
+    // The pill hides itself once the pane is at the tail; the keyboard focus
+    // goes to the pane it scrolled, not to <body>.
+    paneRef.current?.focus({ preventScroll: true });
   };
 
   const unseen = Math.max(0, lines.length - unseenFrom);
@@ -197,7 +197,7 @@ export function TranscriptPane({
               );
             })}
             {showTyping && (
-              <li className="gx-typing" aria-live="polite" data-testid="typing">
+              <li className="gx-typing" data-testid="typing">
                 <span className="gx-typing__dots" aria-hidden="true">
                   <i />
                   <i />

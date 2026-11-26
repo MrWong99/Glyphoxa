@@ -19,14 +19,13 @@ import type { BindPrefill } from "./SessionBindAffordance";
 // it is a check at the start of the evening, not a live roster. Linking someone
 // refreshes the Character list, which takes them off the notice.
 //
-// Two honest limits, both from the wire as it is today:
+// The server lists the channel the running session joined (the stored Default
+// Voice Channel only while idle), so these are the people at tonight's table.
 //
-//   - the GM is in the channel too and is nobody's Character. The web console
-//     is not told which Discord User the signed-in GM is, so it cannot leave
-//     them out by itself: "Not a player" does, and is remembered for the
-//     campaign in this browser;
-//   - the server lists the Tenant's DEFAULT voice channel. A session started
-//     in another channel shows the people in the default one (usually nobody).
+// One honest limit, from the wire as it is today: the GM is in the channel too
+// and is nobody's Character. The web console is not told which Discord User
+// the signed-in GM is, so it cannot leave them out by itself: "Not a player"
+// does, and is remembered for the campaign in this browser.
 
 const ignoredKey = (campaignId: string) => `gx-voice-not-players:${campaignId}`;
 const dismissedKey = (sessionId: string) => `gx-unlinked-dismissed:${sessionId}`;
