@@ -243,11 +243,18 @@ func (s *ChatServer) DeletePlanningThread(
 
 // streamEvents adapts one exchange's engine events onto the server stream.
 // Send errors (a gone client) propagate through Text and abort the exchange.
+// A cancelled request fails Text before it sends: a write into a stopped
+// stream can still land in a buffer and report success, and the engine needs
+// the failure to stop spending and keep what was already shown.
 type streamEvents struct {
+	ctx    context.Context
 	stream *connect.ServerStream[managementv1.PlanningExchangeResponse]
 }
 
 func (s streamEvents) Text(delta string) error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	if delta == "" {
 		return nil
 	}
@@ -296,8 +303,17 @@ func (s *ChatServer) PlanningExchange(
 	}
 	tenantID, _ := auth.TenantID(ctx) // present: chatCampaign already required it
 
-	res, err := s.engine.Exchange(ctx, tenantID, c, threadID, text, streamEvents{stream: stream})
+	res, err := s.engine.Exchange(ctx, tenantID, c, threadID, text, streamEvents{ctx: ctx, stream: stream})
 	if err != nil {
+		// The client went away (Stop, closed tab): the engine has already kept
+		// whatever streamed (ADR-0062 amendment 2026-11-26). Nobody reads this
+		// error and nothing failed, so it is no fault to log — the sends that
+		// failed after the cancel are expected, not a broken server.
+		if errors.Is(err, planchat.ErrStopped) || ctx.Err() != nil {
+			s.log.Info("PlanningExchange: stopped by the client",
+				"thread_id", threadID, "kept_partial", res.AssistantMessage.ID != uuid.Nil)
+			return connect.NewError(connect.CodeCanceled, errors.New("the exchange was stopped"))
+		}
 		return s.chatExchangeErr(threadID, err)
 	}
 	return stream.Send(&managementv1.PlanningExchangeResponse{

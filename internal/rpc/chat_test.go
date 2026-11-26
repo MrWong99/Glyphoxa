@@ -3,10 +3,15 @@ package rpc_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -357,6 +362,115 @@ func TestPlanningExchange_ErrorVocabulary(t *testing.T) {
 				t.Errorf("code = %v (%v), want %v", connect.CodeOf(err), err, tc.want)
 			}
 		})
+	}
+}
+
+// stoppingChatEngine streams one delta, then waits for the client to go away
+// and — like the real engine — keeps sending into the dead stream before it
+// persists the partial reply and reports ErrStopped.
+type stoppingChatEngine struct {
+	finished    chan struct{}
+	lateSendErr error
+}
+
+func (f *stoppingChatEngine) Exchange(ctx context.Context, _ uuid.UUID, _ storage.Campaign, threadID uuid.UUID, _ string, ev planchat.Events) (planchat.Result, error) {
+	defer close(f.finished)
+	if err := ev.Text("The docks are"); err != nil {
+		return planchat.Result{}, err
+	}
+	<-ctx.Done()
+	f.lateSendErr = ev.Text(" guarded.")
+	ev.Tool("find_node", false) // advisory: must not panic on a dead stream
+	asst := storage.PlanningMessage{ID: uuid.New(), ThreadID: threadID, Role: storage.PlanningRoleAssistant, Content: "The docks are"}
+	return planchat.Result{AssistantMessage: asst}, planchat.ErrStopped
+}
+
+// levelRecorder is a slog handler that remembers the records it saw.
+type levelRecorder struct {
+	mu       sync.Mutex
+	levels   []slog.Level
+	messages []string
+}
+
+func (h *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *levelRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	h.messages = append(h.messages, r.Message)
+	return nil
+}
+
+func (h *levelRecorder) saw(msg string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Contains(h.messages, msg)
+}
+func (h *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelRecorder) WithGroup(string) slog.Handler      { return h }
+
+func (h *levelRecorder) errors() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, l := range h.levels {
+		if l >= slog.LevelError {
+			n++
+		}
+	}
+	return n
+}
+
+// TestPlanningExchange_StopIsNotAFault: the GM's Stop cancels the request. The
+// handler lets the engine run on to persist the partial (its late sends fail
+// quietly) and records the stop as information, not as an exchange failure.
+func TestPlanningExchange_StopIsNotAFault(t *testing.T) {
+	t.Parallel()
+	store := newFakeChatStore(uuid.New())
+	c := store.addCampaign()
+	thread, _ := store.CreatePlanningThread(context.Background(), c.ID, "")
+	engine := &stoppingChatEngine{finished: make(chan struct{})}
+	logs := &levelRecorder{}
+
+	server := rpc.NewChatServer(store, slog.New(logs))
+	server.SetEngine(engine)
+	mux := http.NewServeMux()
+	mux.Handle(server.Handler(connect.WithInterceptors(tenantInjector{tenantID: store.tenantID})))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewChatServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := client.PlanningExchange(ctx, connect.NewRequest(&managementv1.PlanningExchangeRequest{
+		CampaignId: c.ID.String(), ThreadId: thread.ID.String(), Message: "Who guards the docks?",
+	}))
+	if err != nil {
+		t.Fatalf("PlanningExchange: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("no first frame: %v", stream.Err())
+	}
+	cancel() // Stop
+
+	select {
+	case <-engine.finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine never finished after the client stopped")
+	}
+	if engine.lateSendErr == nil {
+		t.Error("a send into the stopped stream reported success")
+	}
+	// The handler's own log line lands after the engine returns.
+	deadline := time.Now().Add(5 * time.Second)
+	for !logs.saw("PlanningExchange: stopped by the client") {
+		if time.Now().After(deadline) {
+			t.Fatal("the handler never recorded the stop")
+		}
+		runtime.Gosched()
+	}
+	if n := logs.errors(); n != 0 {
+		t.Errorf("a Stop logged %d error records, want none", n)
 	}
 }
 

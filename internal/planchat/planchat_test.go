@@ -107,7 +107,12 @@ func (f *fakeStore) ListPlanningMessages(_ context.Context, _, _ uuid.UUID) ([]s
 	return append([]storage.PlanningMessage(nil), f.messages...), nil
 }
 
-func (f *fakeStore) AppendPlanningMessage(_ context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error) {
+func (f *fakeStore) AppendPlanningMessage(ctx context.Context, campaignID, threadID uuid.UUID, role, content string) (storage.PlanningMessage, error) {
+	// A real store's write fails on a cancelled ctx; so does this one, which is
+	// what proves the engine persists a stopped reply on a detached ctx.
+	if err := ctx.Err(); err != nil {
+		return storage.PlanningMessage{}, err
+	}
 	if f.appendErr != nil {
 		return storage.PlanningMessage{}, f.appendErr
 	}
@@ -170,13 +175,16 @@ func (fakeRecapper) RecapLastSessions(context.Context, int) (string, error) {
 	return "Last session: the party met Bart.", nil
 }
 
-// scriptedProvider replays one llm.StreamEvent script per Complete call.
+// scriptedProvider replays one llm.StreamEvent script per Complete call and
+// records every request it was sent.
 type scriptedProvider struct {
 	calls   int
 	scripts [][]llm.StreamEvent
+	reqs    []llm.Request
 }
 
-func (p *scriptedProvider) Complete(_ context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
+func (p *scriptedProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
+	p.reqs = append(p.reqs, req)
 	script := p.scripts[min(p.calls, len(p.scripts)-1)]
 	p.calls++
 	ch := make(chan llm.StreamEvent, len(script))
@@ -499,6 +507,204 @@ func TestResolveChatLLM_Ladder(t *testing.T) {
 	st.listErr = errors.New("db down")
 	if _, err = eng.ResolveChatLLM(ctx, tenantID, st.butler); err == nil {
 		t.Fatal("a failed provider-config read resolved to a model")
+	}
+}
+
+// stopEvents is a client that presses Stop after the first streamed delta: it
+// cancels the exchange ctx (what the RPC layer sees when the browser aborts)
+// and every later send fails, like a dead stream does.
+type stopEvents struct {
+	cancel    context.CancelFunc
+	stopFirst bool // Stop lands before the first delta reaches the client
+	text      strings.Builder
+	sent      int
+}
+
+func (s *stopEvents) Text(delta string) error {
+	if s.stopFirst {
+		s.cancel()
+		return context.Canceled
+	}
+	if s.sent > 0 {
+		return context.Canceled
+	}
+	s.text.WriteString(delta)
+	s.sent++
+	s.cancel()
+	return nil
+}
+func (s *stopEvents) Tool(string, bool) {}
+
+// TestExchange_StopPersistsThePartialReply: Stop (a client cancel) with text
+// already streamed keeps that text as the assistant turn, written on a ctx the
+// cancel does not reach (ADR-0062 amendment), so a refetch shows what the GM saw.
+func TestExchange_StopPersistsThePartialReply(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{{
+		{Type: llm.EventText, Text: "The docks are "},
+		{Type: llm.EventText, Text: "guarded by the watch."},
+		{Type: llm.EventUsage, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		{Type: llm.EventDone, StopReason: "end_turn"},
+	}}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := &stopEvents{cancel: cancel}
+	res, err := eng.Exchange(ctx, uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "Who guards the docks?", ev)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("err = %v, want ErrStopped", err)
+	}
+	if len(st.messages) != 2 {
+		t.Fatalf("persisted messages = %d (%+v), want the user turn and the partial reply", len(st.messages), st.messages)
+	}
+	if st.messages[1].Role != storage.PlanningRoleAssistant || st.messages[1].Content != "The docks are" {
+		t.Errorf("partial reply = %s %q, want assistant %q", st.messages[1].Role, st.messages[1].Content, "The docks are")
+	}
+	if res.AssistantMessage.ID != st.messages[1].ID {
+		t.Errorf("result does not carry the persisted partial reply")
+	}
+}
+
+// TestExchange_StopBeforeAnyTextPersistsNoReply: nothing streamed, nothing to
+// keep — the user turn stays and is the dangling turn a retry reuses.
+func TestExchange_StopBeforeAnyTextPersistsNoReply(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("never seen")}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := &stopEvents{cancel: cancel, stopFirst: true}
+	_, err := eng.Exchange(ctx, uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "hi", ev)
+	if err == nil {
+		t.Fatal("a cancelled exchange reported success")
+	}
+	if len(st.messages) != 1 || st.messages[0].Role != storage.PlanningRoleUser {
+		t.Fatalf("messages = %+v, want only the user turn", st.messages)
+	}
+	for _, m := range st.messages {
+		if m.Role == storage.PlanningRoleAssistant {
+			t.Errorf("an empty stop persisted a reply: %+v", m)
+		}
+	}
+}
+
+// TestExchange_ProviderFailureDoesNotPersistAPartial: only Stop keeps a partial.
+// A provider that breaks off mid-reply leaves the user turn dangling, so the
+// GM's "Try again" re-runs it instead of continuing from a broken reply.
+func TestExchange_ProviderFailureDoesNotPersistAPartial(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{{
+		{Type: llm.EventText, Text: "The docks are"},
+		{Type: llm.EventError, Err: "connection reset"},
+	}}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	var ev collectEvents
+	_, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID, "hi", &ev)
+	if err == nil || errors.Is(err, ErrStopped) {
+		t.Fatalf("err = %v, want a provider failure that is not a stop", err)
+	}
+	if len(st.messages) != 1 || st.messages[0].Role != storage.PlanningRoleUser {
+		t.Fatalf("messages = %+v, want only the dangling user turn", st.messages)
+	}
+}
+
+// countUserTurns counts the user turns carrying text in one provider request.
+func countUserTurns(req llm.Request, text string) int {
+	n := 0
+	for _, m := range req.Messages {
+		if m.Role == llm.RoleUser && m.Text == text {
+			n++
+		}
+	}
+	return n
+}
+
+// TestExchange_RetryReusesTheDanglingUserTurn: a failed exchange left the GM's
+// message without a reply; sending the same text again is a retry — the row is
+// reused (one user turn in the thread) and the model sees the question once.
+func TestExchange_RetryReusesTheDanglingUserTurn(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.thread.Title = "Docks"
+	st.messages = []storage.PlanningMessage{
+		{ID: uuid.New(), Role: storage.PlanningRoleUser, Content: "Earlier question"},
+		{ID: uuid.New(), Role: storage.PlanningRoleAssistant, Content: "Earlier answer"},
+		{ID: uuid.New(), Role: storage.PlanningRoleUser, Content: "Who guards the docks?"},
+	}
+	dangling := st.messages[2].ID
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("The watch does.")}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	var ev collectEvents
+	res, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID,
+		"  Who guards the docks?  ", &ev)
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if len(st.messages) != 4 {
+		t.Fatalf("messages = %d, want the reused user turn plus one reply", len(st.messages))
+	}
+	if res.UserMessage.ID != dangling {
+		t.Errorf("user message = %s, want the reused row %s", res.UserMessage.ID, dangling)
+	}
+	if st.messages[3].Role != storage.PlanningRoleAssistant || st.messages[3].Content != "The watch does." {
+		t.Errorf("reply = %+v", st.messages[3])
+	}
+	if got := countUserTurns(provider.reqs[0], "Who guards the docks?"); got != 1 {
+		t.Errorf("the model saw the question %d times, want once", got)
+	}
+}
+
+// TestExchange_DifferentTextAfterADanglingTurnAppends: only an identical
+// message is a retry; anything else is a new turn.
+func TestExchange_DifferentTextAfterADanglingTurnAppends(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.thread.Title = "Docks"
+	st.messages = []storage.PlanningMessage{{ID: uuid.New(), Role: storage.PlanningRoleUser, Content: "Who guards the docks?"}}
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("The watch.")}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	var ev collectEvents
+	if _, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID,
+		"And at night?", &ev); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if len(st.messages) != 3 || st.messages[1].Content != "And at night?" {
+		t.Fatalf("messages = %+v, want the old turn, the new turn and a reply", st.messages)
+	}
+	// The earlier dangling turn is still history the model sees.
+	if got := countUserTurns(provider.reqs[0], "Who guards the docks?"); got != 1 {
+		t.Errorf("history lost the earlier turn (seen %d times)", got)
+	}
+}
+
+// TestExchange_AnsweredTurnIsNotReused: the same question asked again after it
+// WAS answered is a new turn, not a retry.
+func TestExchange_AnsweredTurnIsNotReused(t *testing.T) {
+	campaignID := uuid.New()
+	st := newFakeStore(campaignID)
+	st.thread.Title = "Docks"
+	st.messages = []storage.PlanningMessage{
+		{ID: uuid.New(), Role: storage.PlanningRoleUser, Content: "Recap please"},
+		{ID: uuid.New(), Role: storage.PlanningRoleAssistant, Content: "Here it is."},
+	}
+	provider := &scriptedProvider{scripts: [][]llm.StreamEvent{textDone("Again.")}}
+	eng, _, _ := newTestEngine(t, st, provider)
+
+	var ev collectEvents
+	if _, err := eng.Exchange(context.Background(), uuid.New(), storage.Campaign{ID: campaignID}, st.thread.ID,
+		"Recap please", &ev); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if len(st.messages) != 4 {
+		t.Fatalf("messages = %d, want a fresh user turn and reply appended", len(st.messages))
 	}
 }
 
