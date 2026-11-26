@@ -1,26 +1,50 @@
 /* Planning panel (#592, ADR-0062): thread rail + Butler chat pane.
-   Mirrors the campaign screen's two-column rhythm (gx-roster-layout) and
-   speaks only gx- tokens. */
+   Speaks only gx- tokens.
+
+   The view fills the content area's height instead of growing with its
+   messages: the message list is the one thing that scrolls, the composer is
+   pinned under it and the rail scrolls on its own. It targets the screen root
+   through the Campaign host's data-view, so no other view changes. */
+
+.gx-content > .gx-campaign-screen[data-view="planning"] {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* A landscape phone or a tiny window still gets a usable chat; past this the
+     content area scrolls as a whole. */
+  min-height: 420px;
+}
+
+.gx-campaign-screen[data-view="planning"] > .gx-page-header {
+  flex: none;
+}
+
+.gx-campaign-screen[data-view="planning"] > .gx-planning {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 .gx-planning {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   gap: var(--spacing-lg);
-  align-items: start;
-}
-
-@media (max-width: 720px) {
-  .gx-planning {
-    grid-template-columns: 1fr;
-  }
+  min-height: 0;
 }
 
 /* ── Thread rail ─────────────────────────────────────────────────────────── */
 
+.gx-planning__rail {
+  min-height: 0;
+  overflow-y: auto;
+  /* Room for the focus ring of the rows at the rail's edge. */
+  padding: 2px;
+  margin: -2px;
+}
+
 .gx-planning__threads {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-xs);
+  gap: var(--spacing-sm);
   min-width: 0;
 }
 
@@ -28,9 +52,44 @@
   align-self: stretch;
 }
 
-/* The role="list" wrapper around only the ThreadRows (the create button and
-   loading/error states above it are not list items). */
+.gx-planning__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.gx-planning__search-icon {
+  position: absolute;
+  left: 11px;
+  color: var(--text-subtle);
+  pointer-events: none;
+}
+
+.gx-planning__groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-planning__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-planning__group-title {
+  margin: 0;
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
 .gx-planning__thread-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
@@ -41,7 +100,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
-  padding: var(--spacing-xs) var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-xs) var(--spacing-sm);
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -68,6 +127,7 @@
   background: none;
   border: none;
   color: var(--text-default);
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -82,7 +142,11 @@
 
 .gx-planning__thread-when {
   font-size: var(--body-xs);
-  color: var(--text-subtle);
+  color: var(--text-muted);
+}
+
+.gx-planning__thread-live {
+  color: var(--arcane-hover);
 }
 
 .gx-planning__thread-actions {
@@ -103,17 +167,31 @@
   flex-direction: column;
   gap: var(--spacing-sm);
   min-width: 0;
+  min-height: 0;
+}
+
+/* Only on a phone: the rail lives behind this bar's button. */
+.gx-planning__phonebar {
+  display: none;
+}
+
+.gx-planning__pane {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .gx-planning__messages {
   list-style: none;
   margin: 0;
   padding: var(--spacing-md);
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-sm);
-  min-height: 320px;
-  max-height: 60vh;
+  gap: var(--spacing-md);
   overflow-y: auto;
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
@@ -123,18 +201,14 @@
 .gx-planning__msg {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-width: 78%;
+  gap: var(--spacing-xs);
 }
 
+/* The GM's turns keep the bubble, on the right. */
 .gx-planning__msg[data-role="user"] {
   align-self: flex-end;
   align-items: flex-end;
-}
-
-.gx-planning__msg[data-role="assistant"] {
-  align-self: flex-start;
-  align-items: flex-start;
+  max-width: 78%;
 }
 
 .gx-planning__bubble {
@@ -143,32 +217,58 @@
   font-size: var(--body-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  /* The bubble is a non-stretched flex item, so it sizes to fit-content —
-   * and a scroll container's intrinsic size is its CONTENT'S, so a wide
-   * markdown table (unbreakable cells by design) would inflate the bubble
-   * past the msg's 78% cap and pan the whole message list sideways. Clamping
-   * here bounds fit-content, which is what lets .gx-md__tablewrap actually
-   * scroll instead. */
   max-width: 100%;
-}
-
-.gx-planning__msg[data-role="user"] .gx-planning__bubble {
-  background: var(--surface-raised, var(--surface-card-hover));
+  background: var(--surface-raised);
   border: 1px solid var(--border-strong);
 }
 
-.gx-planning__msg[data-role="assistant"] .gx-planning__bubble {
-  background: var(--surface-card-hover);
-  border: 1px solid var(--border-subtle);
+/* The Butler's replies are prose, read like a document: no bubble, a line
+   length that reads well (about 72 characters), the full pane width below it. */
+.gx-planning__msg[data-role="assistant"] {
+  align-self: stretch;
+  align-items: flex-start;
+}
+
+.gx-planning__reply {
+  max-width: 72ch;
+  min-width: 0;
+  /* A wide markdown table scrolls inside .gx-md__tablewrap rather than
+     widening the reply. */
+  width: 100%;
+  font-size: var(--body-md);
+  line-height: var(--body-line);
+  color: var(--text-default);
 }
 
 .gx-planning__msg[data-pending="true"] .gx-planning__bubble {
   opacity: 0.92;
 }
 
+.gx-planning__msgfoot {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-left: calc(-1 * var(--spacing-xs));
+}
+
 .gx-planning__when {
   font-size: var(--body-xs);
-  color: var(--text-subtle);
+  color: var(--text-muted);
+}
+
+.gx-planning__notsent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--status-danger);
+}
+
+/* "Stopped" / "Incomplete" under a reply that did not finish. */
+.gx-planning__partial {
+  margin: 0;
+  font-size: var(--body-xs);
+  font-style: italic;
+  color: var(--text-muted);
 }
 
 .gx-planning__notice-item {
@@ -179,6 +279,16 @@
 }
 
 .gx-planning__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+
+.gx-planning__chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-wrap: wrap;
   gap: var(--spacing-xs);
@@ -202,6 +312,14 @@
   border-color: currentColor;
 }
 
+.gx-planning__filed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--body-xs);
+  color: var(--status-success);
+}
+
 .gx-planning__working {
   margin: 0;
   color: var(--text-muted);
@@ -215,34 +333,211 @@
   font-size: var(--body-sm);
 }
 
+/* A failed exchange: heading in the GM's language, the server's sentence
+   under it, the ways forward, and a close that keeps what streamed. */
 .gx-planning__error {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: flex-start;
   gap: var(--spacing-sm);
-  padding: var(--spacing-xs) var(--spacing-sm);
+  padding: var(--spacing-sm);
   border: 1px solid var(--status-danger);
   border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--status-danger) 8%, transparent);
+}
+
+.gx-planning__error-icon {
+  flex: none;
   color: var(--status-danger);
+}
+
+.gx-planning__error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-planning__error-title {
+  margin: 0;
   font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+
+.gx-planning__error-body {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  overflow-wrap: anywhere;
+}
+
+.gx-planning__error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-planning__error-actions:empty {
+  display: none;
+}
+
+/* "Jump to latest": over the bottom of the list while the GM reads back. */
+.gx-planning__jump {
+  position: absolute;
+  bottom: var(--spacing-sm);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 4px var(--spacing-sm);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: var(--body-xs);
+  box-shadow: var(--glow-arcane-soft);
+  cursor: pointer;
+}
+
+.gx-planning__jump:hover {
+  background: var(--surface-card-hover);
+}
+
+/* A reply is streaming in another conversation. */
+.gx-planning__elsewhere {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-xs) var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+/* ── Starters ────────────────────────────────────────────────────────────── */
+
+.gx-planning__starters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  max-width: 72ch;
+  padding: var(--spacing-sm) 0;
+}
+
+.gx-planning__starters-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  color: var(--text-strong);
+}
+
+.gx-planning__starters-lede {
+  margin: 0 0 var(--spacing-sm);
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-planning__starter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: var(--spacing-sm);
+}
+
+.gx-planning__starter {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-card-hover);
+  color: var(--text-default);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+
+.gx-planning__starter:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.gx-planning__starter:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gx-planning__starter-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--arcane-hover);
+  padding-top: 2px;
+}
+
+.gx-planning__starter-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gx-planning__starter-label {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-strong);
+}
+
+.gx-planning__starter-tool {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
 }
 
 /* ── Composer ────────────────────────────────────────────────────────────── */
 
 .gx-planning__composer {
+  flex: none;
   display: flex;
   align-items: flex-end;
   gap: var(--spacing-sm);
 }
 
-.gx-planning__input {
+.gx-planning__field {
   flex: 1 1 auto;
-  resize: vertical;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gx-planning__counter {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gx-planning__counter[data-over="true"] {
+  color: var(--status-danger);
 }
 
 /* Under the composer: which model answers (left) and the send hint (right).
  * Wraps to two lines at phone width instead of squeezing either. */
 .gx-planning__foot {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -287,4 +582,48 @@
   background: var(--status-warning-bg);
   color: var(--text-default);
   font-size: var(--body-sm);
+}
+
+/* ── The phone sheet ─────────────────────────────────────────────────────── */
+
+.gx-planning__sheet .gx-planning__threads {
+  padding-bottom: var(--spacing-md);
+}
+
+/* ── Phone: the rail becomes a sheet ─────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  .gx-planning {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gx-planning__rail {
+    display: none;
+  }
+
+  .gx-planning__phonebar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-xs);
+  }
+
+  /* The header keeps the campaign's name; the lede is the starter panel's job
+     here, so the composer stays on screen. */
+  .gx-campaign-screen[data-view="planning"] .gx-page-header__desc {
+    display: none;
+  }
+
+  .gx-planning__messages {
+    padding: var(--spacing-sm);
+  }
+
+  .gx-planning__msg[data-role="user"] {
+    max-width: 88%;
+  }
+
+  .gx-planning__hint {
+    display: none;
+  }
 }

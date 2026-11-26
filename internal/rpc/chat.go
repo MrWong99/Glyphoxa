@@ -243,11 +243,18 @@ func (s *ChatServer) DeletePlanningThread(
 
 // streamEvents adapts one exchange's engine events onto the server stream.
 // Send errors (a gone client) propagate through Text and abort the exchange.
+// A cancelled request fails Text before it sends: a write into a stopped
+// stream can still land in a buffer and report success, and the engine needs
+// the failure to stop spending and keep what was already shown.
 type streamEvents struct {
+	ctx    context.Context
 	stream *connect.ServerStream[managementv1.PlanningExchangeResponse]
 }
 
 func (s streamEvents) Text(delta string) error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	if delta == "" {
 		return nil
 	}
@@ -296,8 +303,17 @@ func (s *ChatServer) PlanningExchange(
 	}
 	tenantID, _ := auth.TenantID(ctx) // present: chatCampaign already required it
 
-	res, err := s.engine.Exchange(ctx, tenantID, c, threadID, text, streamEvents{stream: stream})
+	res, err := s.engine.Exchange(ctx, tenantID, c, threadID, text, streamEvents{ctx: ctx, stream: stream})
 	if err != nil {
+		// The client went away (Stop, closed tab): the engine has already kept
+		// whatever streamed (ADR-0062 amendment 2026-11-26). Nobody reads this
+		// error and nothing failed, so it is no fault to log — the sends that
+		// failed after the cancel are expected, not a broken server.
+		if errors.Is(err, planchat.ErrStopped) || ctx.Err() != nil {
+			s.log.Info("PlanningExchange: stopped by the client",
+				"thread_id", threadID, "kept_partial", res.AssistantMessage.ID != uuid.Nil)
+			return connect.NewError(connect.CodeCanceled, errors.New("the exchange was stopped"))
+		}
 		return s.chatExchangeErr(threadID, err)
 	}
 	return stream.Send(&managementv1.PlanningExchangeResponse{
@@ -325,7 +341,10 @@ const chatExchangeSubject = "the planning chat"
 //     the assist/maps surfaces);
 //   - anything left is logged raw and returned as a static CodeUnavailable —
 //     provider failures are the expected failure mode here, not an internal
-//     fault, and a retry may succeed.
+//     fault, and a retry may succeed. It carries [reasonUnclassified], so the
+//     web tells it apart from the classified provider rejections above (a
+//     rejected key, a provider outage) and does not send the GM to the
+//     provider settings for what may be a storage fault.
 func (s *ChatServer) chatExchangeErr(threadID uuid.UUID, err error) *connect.Error {
 	switch {
 	case errors.Is(err, planchat.ErrAllowanceExhausted):
@@ -340,9 +359,15 @@ func (s *ChatServer) chatExchangeErr(threadID uuid.UUID, err error) *connect.Err
 		return cerr
 	}
 	s.log.Error("PlanningExchange: exchange failed", "thread_id", threadID, "err", err)
-	return connect.NewError(connect.CodeUnavailable,
+	cerr := connect.NewError(connect.CodeUnavailable,
 		errors.New("the planning chat is unavailable right now — try again in a moment"))
+	cerr.Meta().Set(errorReasonHeader, reasonUnclassified)
+	return cerr
 }
+
+// reasonUnclassified is the [errorReasonHeader] value on a planning-chat
+// failure no rule above could name.
+const reasonUnclassified = "unclassified"
 
 // toProtoPlanningThread maps a storage thread onto the wire.
 func toProtoPlanningThread(t storage.PlanningThread) *managementv1.PlanningThread {

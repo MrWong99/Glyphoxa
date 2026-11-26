@@ -21,6 +21,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { PlanningPanel } from "./PlanningPanel";
+import { resetPlanningStreams } from "./planningStream";
 
 // The Planning panel's footer (ADR-0062 amendment): which model answers, from
 // the server's own resolution, with a way to Setup to change it — and a
@@ -79,6 +80,9 @@ const composer = () => screen.getByRole("textbox", { name: /message to the butle
 afterEach(() => {
   window.history.replaceState(null, "", "/");
   localStorage.removeItem("gx-lang");
+  // The exchange store is module state (planningStream.ts): one test's stream
+  // must not gate the next one's composer.
+  resetPlanningStreams();
 });
 
 describe("PlanningPanel model footer", () => {
@@ -100,7 +104,7 @@ describe("PlanningPanel model footer", () => {
 
   it("has no footer while the read is pending, and the composer still sends", async () => {
     const { exchanges } = renderPanel("pending");
-    await screen.findByText(/no messages yet/i);
+    await screen.findByText("What can the Butler do?");
     expect(screen.queryByTestId("planning-model")).not.toBeInTheDocument();
     // The send hint is still there on its own.
     expect(screen.getByText(/enter sends/i)).toBeInTheDocument();
@@ -112,7 +116,7 @@ describe("PlanningPanel model footer", () => {
 
   it("has no footer when the read failed, without an error in the chat", async () => {
     const { exchanges } = renderPanel("error");
-    await screen.findByText(/no messages yet/i);
+    await screen.findByText("What can the Butler do?");
     // Give the failed side read time to settle: it must stay silent.
     await waitFor(() => expect(screen.queryByTestId("planning-model")).not.toBeInTheDocument());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -125,7 +129,7 @@ describe("PlanningPanel model footer", () => {
 
   it("warns before sending when the chat's model has no key to run on", async () => {
     renderPanel({ provider: "anthropic", model: "claude-sonnet-5-5", keySource: ChatLlmKeySource.NONE });
-    const warning = await screen.findByRole("status");
+    const warning = await screen.findByText("The planning chat has no AI model key yet. Add one in Setup.");
     expect(warning).toHaveTextContent("The planning chat has no AI model key yet. Add one in Setup.");
     // A standing notice, shown before anything was sent: it must not read like
     // the reply to a failed attempt.
