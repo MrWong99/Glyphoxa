@@ -182,3 +182,67 @@ paste the same Groq key a second time; and nothing led back to "same as voice".
   fall back to its voice provider. This is deliberate and visible.
 - `effective_chat_llm` is Tenant-scoped and ignores the Butler rung. Whoever
   gives that rung a writer must make the read Campaign-scoped.
+
+## Amendment: the reply outlives the view, Stop keeps the partial, a retry reuses the turn (2026-11-26)
+
+The first web slice tied an exchange to the Planning panel's lifetime: leaving
+the view aborted the stream (so no paid reply streamed to nobody), the server
+threw away whatever had streamed, and a retry after a failure appended the
+GM's message a second time. In use that read as lost work: a GM who glanced at
+the World wiki mid-reply came back to nothing, Stop did not exist, and "try
+again" left two copies of the question in the thread. Decided for the planning
+chat UX pass; no wire change.
+
+### What this decides
+
+- **An exchange belongs to the campaign, not to the view.** The web client
+  holds the in-flight exchange outside the panel (one module-level store keyed
+  by campaign and thread), so switching views keeps it streaming and the panel
+  picks it up again when it returns. Two things end it early: **Stop**, and a
+  **change of Active Campaign** (a reply streaming into a campaign the GM has
+  left is stopped). Closing the tab ends it as before. One exchange runs at a
+  time per campaign; the composer stays editable meanwhile and only sending
+  waits. This replaces the abort-on-leave posture.
+- **Stop keeps what streamed.** When the client goes away mid-exchange (the
+  request context is cancelled, or a send into the stream fails), the engine
+  persists the text that had already reached the client as the assistant turn,
+  written on a context the cancel does not reach (`context.WithoutCancel`,
+  bounded). It returns `planchat.ErrStopped`; the RPC layer answers
+  `CodeCanceled` and logs it as information, not as a failed exchange. The RPC
+  layer also fails a text send once the request is cancelled, so the tool loop
+  stops spending at the next delta instead of writing into a buffer nobody
+  reads. Nothing streamed, nothing kept: the user turn stays as it is.
+- **Only Stop keeps a partial.** A provider failure or the exchange timeout
+  keeps nothing; the user turn is left without a reply, so a retry re-runs it
+  rather than continuing from a broken answer. The client shows the partial
+  marked incomplete until the GM moves on.
+- **A retry reuses the dangling turn.** When a thread ends in a user turn that
+  never got a reply and the new message is the same text (after trimming), the
+  engine reuses that row instead of appending a duplicate, and the model sees
+  the question once. Any other text after a dangling turn is a new turn, and
+  the same question asked again after it *was* answered is a new turn too.
+
+### Considered and rejected
+
+- **Keep aborting on leave, and re-send on return.** Pays twice for one
+  answer and still loses the first reply.
+- **Persist every partial, provider failures included.** A broken reply would
+  then be history the next exchange builds on, and "Try again" would have to
+  delete it first — an RPC this pass does not have.
+- **A `retry_of` field on `PlanningExchangeRequest`.** Explicit, but a wire
+  change for a case the server can recognise from the thread itself.
+
+### Consequences
+
+- The usage a stopped exchange spent before the provider reported its token
+  counts is not in the Usage Ledger: providers report usage at the end of a
+  completion, and a stopped completion never reaches it. This was already true
+  of the abort-on-leave posture; Stop makes it a GM-visible action. Estimating
+  the unreported tail is a follow-up for the metering seam, not the chat.
+- A persisted partial is an ordinary assistant message on the wire (no
+  "incomplete" field); the client marks it as stopped for the rest of the page
+  session only.
+- The streamed text the client saw can differ from what a completed exchange
+  persists when the model spoke in a tool-calling round ("Let me check."),
+  because the completed reply is the final round's text. A stopped partial is
+  what the GM saw, rounds included.
