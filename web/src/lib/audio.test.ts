@@ -102,6 +102,34 @@ describe("playAudioBlob", () => {
     expect(instances).toHaveLength(0);
   });
 
+  // A clip the browser cannot load fires "error" BEFORE play() rejects. The
+  // rejection carries the reason, so the error must not first report the
+  // playback as ended: the caller would go idle and drop the reason.
+  it("leaves a load failure to play()'s rejection: no onEnded for an error before play() settles", async () => {
+    let rejectPlay: (err: Error) => void = () => {};
+    playImpl = () =>
+      new Promise<void>((_, reject) => {
+        rejectPlay = reject;
+      });
+    const onEnded = vi.fn();
+    const playing = playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { onEnded });
+
+    instances[0].dispatchEvent(new Event("error"));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+    expect(instances[0].isConnected).toBe(false);
+    rejectPlay(new Error("NotSupportedError: no supported source"));
+
+    await expect(playing).rejects.toThrow(/no supported source/);
+    expect(onEnded).not.toHaveBeenCalled();
+  });
+
+  it("reports an error after playback started as the playback being over", async () => {
+    const onEnded = vi.fn();
+    await playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { onEnded });
+    instances[0].dispatchEvent(new Event("error"));
+    expect(onEnded).toHaveBeenCalledTimes(1);
+  });
+
   it("calls onEnded once when the playback finishes on its own", async () => {
     const onEnded = vi.fn();
     await playAudioBlob(new Uint8Array([1, 2]), "audio/wav", { onEnded });

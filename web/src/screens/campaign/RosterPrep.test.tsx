@@ -172,7 +172,7 @@ describe("RosterPrep headline and modes", () => {
     renderPrep(twoPlaces);
     const todo = await screen.findByRole("group", { name: "NPCs that need attention" });
     // The mode switch says where we are and how much there is to do.
-    expect(screen.getByRole("button", { name: "Needs attention 1" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Needs attention 1 not ready" })).toHaveAttribute("aria-pressed", "true");
 
     // Mira, once; not Bart (ready), not the Butler (exempt).
     expect(within(todo).getAllByRole("button", { name: "Mira" })).toHaveLength(1);

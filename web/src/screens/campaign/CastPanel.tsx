@@ -25,7 +25,7 @@ import { rosterRetry, useCampaignPanelState, useCampaignScreen } from "./campaig
 import { useCastReadiness } from "./castReadiness";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { NewNpcDialog } from "./NewNpcDialog";
-import { RosterPrep } from "./RosterPrep";
+import { NotReadyLabel, RosterPrep } from "./RosterPrep";
 import type { RosterEntry } from "./rosterPrep";
 import { voiceName } from "./VoicePicker";
 
@@ -261,10 +261,9 @@ export function CastPanel() {
             { value: "edit", label: t("campaign.castRoster") },
             {
               value: "prep",
-              label: t("campaign.castPrep"),
               // The number of NPCs that are not session-ready; no number at
               // all when everyone is.
-              count: attentionCount > 0 ? attentionCount : undefined,
+              label: <NotReadyLabel label={t("campaign.castPrep")} n={attentionCount} />,
             },
           ]}
         />
@@ -277,10 +276,9 @@ export function CastPanel() {
             }}
             onOpenNode={openNode}
             onOpenKnowledge={() => openView("knowledge")}
-            onAddNpc={() => {
-              setCastMode("edit");
-              setNewOpen(true);
-            }}
+            // The view stays put until the NPC exists: cancelling the dialog
+            // leaves the GM where they were; creating switches to the editor.
+            onAddNpc={() => setNewOpen(true)}
           />
         ) : (
           <div className="gx-roster-layout">
@@ -297,7 +295,9 @@ export function CastPanel() {
                     {attentionCount > 0 ? (
                       <>
                         <span aria-hidden="true">·</span>
-                        <Tooltip content={t("cast.summaryAttentionHint")}>
+                        <Tooltip
+                          content={attentionFilter ? t("cast.summaryAttentionHintAll") : t("cast.summaryAttentionHint")}
+                        >
                           <button
                             type="button"
                             className="gx-cast-chip gx-cast-chip--warning"
@@ -409,6 +409,7 @@ export function CastPanel() {
           campaignLanguage={campaignLanguage}
           onCreated={(agent, prompt) => {
             setNewOpen(false);
+            setCastMode("edit");
             setAttentionOnly(false);
             setFilter("");
             setConcept(prompt ? { agentId: agent.id, prompt } : null);
@@ -491,7 +492,9 @@ function RosterRow({
               {voice && (
                 <span className="gx-cast__row-voice">
                   <Volume2 size={11} aria-hidden="true" />
-                  <span aria-hidden="true">{voice}</span>
+                  <span className="gx-cast__row-voice-name" aria-hidden="true">
+                    {voice}
+                  </span>
                   <span className="gx-visually-hidden">{t("cast.rowVoice", { name: voice })}</span>
                 </span>
               )}

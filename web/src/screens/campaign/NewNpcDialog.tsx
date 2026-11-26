@@ -103,7 +103,13 @@ export function NewNpcDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
+      // While Create is on its way the NPC is as good as made: Cancel and
+      // Escape wait for the answer rather than close over an NPC that then
+      // appears (and is selected) anyway.
+      onOpenChange={(next) => {
+        if (!next && create.isPending) return;
+        onOpenChange(next);
+      }}
       title={t("cast.newNpcTitle")}
       description={t("cast.newNpcDesc")}
       // A stray click on the backdrop must not throw the typing away.
@@ -112,7 +118,9 @@ export function NewNpcDialog({
       footer={
         <>
           <DialogClose>
-            <Button type="button" variant="ghost">{t("common.cancel")}</Button>
+            <Button type="button" variant="ghost" disabled={create.isPending}>
+              {t("common.cancel")}
+            </Button>
           </DialogClose>
           <Button type="submit" form={formId} loading={create.isPending}>
             {t("cast.newNpcCreate")}
@@ -153,6 +161,9 @@ export function NewNpcDialog({
           value={voice}
           onChange={setVoice}
           campaignLanguage={campaignLanguage}
+          // The Combobox's in-place list would be clipped by the dialog body's
+          // scroll box; here the field opens the picker instead.
+          pickerOnly
         />
         {create.isError && (
           <Alert tone="danger" title={t("cast.newNpcErrorTitle")}>

@@ -401,6 +401,10 @@ describe("AgentEditor aliases", () => {
     expect(updates[0].aliases).toEqual(["the Harbormaster", "Meera"]);
     expect(await screen.findByText("Saved")).toBeInTheDocument();
     expect(aliasChips()).toEqual(["the Harbormaster", "Meera"]);
+    // The word became a chip; it does not also still sit in the field, and
+    // the GM is still in the field to type the next one.
+    expect(aliasField()).toHaveValue("");
+    expect(aliasField()).toHaveFocus();
   });
 
   it("offers aliases for the Butler too, and keeps it Address-Only", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -113,6 +113,15 @@ export function AgentEditor({
   // because the GM never left the field.
   const [aliasDraft, setAliasDraft] = useState("");
   const [aliasFieldEpoch, setAliasFieldEpoch] = useState(0);
+  const aliasFieldId = useId();
+  // Save empties the alias field by remounting it; a GM still typing there
+  // (Ctrl+S) keeps the focus in it.
+  const refocusAlias = useRef(false);
+  useEffect(() => {
+    if (!refocusAlias.current) return;
+    refocusAlias.current = false;
+    document.getElementById(aliasFieldId)?.focus();
+  }, [aliasFieldEpoch, aliasFieldId]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const personaRef = useRef<HTMLTextAreaElement>(null);
@@ -192,6 +201,13 @@ export function AgentEditor({
     const nextAliases = hasPendingAlias ? [...aliases, pendingAlias] : aliases;
     if (nextName !== name) setName(nextName);
     if (hasPendingAlias) setAliases(nextAliases);
+    if (pendingAlias !== "") {
+      // The typed word is a chip now (or already was one); a new key empties
+      // the ChipInput so it does not still sit in the field beside its chip.
+      refocusAlias.current = document.activeElement?.id === aliasFieldId;
+      setAliasDraft("");
+      setAliasFieldEpoch((n) => n + 1);
+    }
     update.mutate({
       id: agent.id,
       name: nextName,
@@ -339,6 +355,7 @@ export function AgentEditor({
           than anyone. */}
       <ChipInput
         key={aliasFieldEpoch}
+        id={aliasFieldId}
         label={t("cast.aliasesLabel")}
         hint={t("cast.aliasesHint")}
         placeholder={t("cast.aliasesPlaceholder")}

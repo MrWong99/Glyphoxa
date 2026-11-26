@@ -26,11 +26,12 @@ const VOICES = [
 // jsdom has no media pipeline, and "the sample stopped" is only observable on
 // the element (paused, released from the document).
 const players: { el: HTMLAudioElement; pause: ReturnType<typeof vi.fn> }[] = [];
+let playImpl: (el: HTMLAudioElement) => Promise<void> = () => Promise.resolve();
 function FakeAudio(src: string): HTMLAudioElement {
   const el = document.createElement("audio");
   el.src = src;
   const pause = vi.fn();
-  Object.defineProperty(el, "play", { value: () => Promise.resolve(), configurable: true });
+  Object.defineProperty(el, "play", { value: () => playImpl(el), configurable: true });
   Object.defineProperty(el, "pause", { value: pause, configurable: true });
   players.push({ el, pause });
   return el;
@@ -38,6 +39,7 @@ function FakeAudio(src: string): HTMLAudioElement {
 
 beforeEach(() => {
   players.length = 0;
+  playImpl = () => Promise.resolve();
   vi.stubGlobal("Audio", FakeAudio);
   (URL as unknown as Record<string, unknown>).createObjectURL = () => "blob:preview";
   (URL as unknown as Record<string, unknown>).revokeObjectURL = () => {};
@@ -243,6 +245,21 @@ describe("VoicePicker", () => {
     expect(await within(dialog()).findByRole("alert")).toHaveTextContent(/couldn't preview.*unavailable/i);
     // And the row is ready for another try.
     expect(screen.getByRole("button", { name: "Play Marcus" })).toBeInTheDocument();
+  });
+
+  // A clip the browser cannot play: the element fires "error" first, then
+  // play() rejects (the media failure steps). The GM must still be told (#154).
+  it("says so when the returned clip cannot be played", async () => {
+    playImpl = (el) => {
+      el.dispatchEvent(new Event("error"));
+      return Promise.reject(new DOMException("The element has no supported sources.", "NotSupportedError"));
+    };
+    renderPicker();
+    await screen.findByRole("list", { name: "Voices" });
+    fireEvent.click(screen.getByRole("button", { name: "Play Marcus" }));
+    expect(await within(dialog()).findByRole("alert")).toHaveTextContent(/couldn't preview.*no supported sources/i);
+    expect(screen.getByRole("button", { name: "Play Marcus" })).toBeInTheDocument();
+    expect(players[0].el.isConnected).toBe(false);
   });
 
   it("hands the chosen voice to the form only on confirm, and closes", async () => {

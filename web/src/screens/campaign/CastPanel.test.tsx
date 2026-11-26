@@ -799,7 +799,7 @@ describe("CastPanel roster readiness", () => {
   it("shows the count of NPCs that are not ready on the Readiness segment", async () => {
     renderScreen(oneWithoutVoice);
     await screen.findByText("Mira");
-    expect(await screen.findByRole("button", { name: "Readiness 1" })).toHaveAttribute("aria-pressed", "false");
+    expect(await screen.findByRole("button", { name: "Readiness 1 not ready" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "Roster" })).toHaveAttribute("aria-pressed", "true");
   });
 

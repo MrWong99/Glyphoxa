@@ -19,6 +19,26 @@ import {
 
 import "./cast.css";
 
+/**
+ * A segment label with the number of NPCs that are not session-ready: the
+ * number as the segment's usual badge, and for a screen reader the words
+ * ("Readiness 2 not ready", not a bare "Readiness 2"). No number at all when
+ * nobody needs attention.
+ */
+export function NotReadyLabel({ label, n }: { label: string; n: number }) {
+  const { t } = useI18n();
+  if (n <= 0) return <>{label}</>;
+  return (
+    <>
+      {label}{" "}
+      <span className="gx-seg__count" aria-hidden="true">
+        {n}
+      </span>
+      <span className="gx-visually-hidden">{t("cast.notReadyCount", { n })}</span>
+    </>
+  );
+}
+
 // The Readiness view (#544). The roster was a flat list of Agents; this shows
 // what a GM needs BEFORE a session: whether each NPC can actually say anything,
 // and where it sits in the world.
@@ -145,8 +165,7 @@ export function RosterPrep({
               options={[
                 {
                   value: "attention",
-                  label: t("cast.prepModeAttention"),
-                  count: summary.attention.length > 0 ? summary.attention.length : undefined,
+                  label: <NotReadyLabel label={t("cast.prepModeAttention")} n={summary.attention.length} />,
                 },
                 { value: "all", label: t("cast.prepModeAll") },
               ]}

@@ -20,8 +20,9 @@ import { NewNpcDialog } from "./NewNpcDialog";
 
 type Created = { name: string; title: string; persona: string; voice: string; addressOnly: boolean; aliases: string[] };
 
-function renderDialog(opts: { failCreate?: number } = {}) {
+function renderDialog(opts: { failCreate?: number; holdCreate?: boolean } = {}) {
   const created: Created[] = [];
+  const held: (() => void)[] = [];
   const onCreated = vi.fn<(agent: Agent, concept: string) => void>();
   let failures = opts.failCreate ?? 0;
   const transport = createRouterTransport(({ service }) => {
@@ -35,7 +36,8 @@ function renderDialog(opts: { failCreate?: number } = {}) {
         }),
     });
     service(CampaignService, {
-      createAgent: (req) => {
+      createAgent: async (req) => {
+        if (opts.holdCreate) await new Promise<void>((resolve) => held.push(resolve));
         if (failures > 0) {
           failures -= 1;
           throw new ConnectError("roster store offline", Code.Unavailable);
@@ -88,7 +90,7 @@ function renderDialog(opts: { failCreate?: number } = {}) {
       <Harness />
     </Providers>,
   );
-  return { created, onCreated };
+  return { created, onCreated, release: () => held.splice(0).forEach((resolve) => resolve()) };
 }
 
 const dialog = () => screen.getByRole("dialog", { name: "New NPC" });
@@ -155,14 +157,44 @@ describe("NewNpcDialog", () => {
     expect(onCreated.mock.calls[0][1]).toBe("a stern harbourmaster who counts every crate");
   });
 
-  it("sends the voice picked in the dialog", async () => {
+  // An in-place list (the editor's Combobox) would open below the trigger and
+  // be clipped by the dialog body's scroll box, the voice field being the last
+  // one in the form. Here the field is a button that opens the picker, which is
+  // a dialog of its own.
+  it("opens the voice picker from the voice field, with no in-place list to be clipped", async () => {
     const { created } = renderDialog();
     type("Name", "Mira");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Voice (optional)" }));
-    fireEvent.click(await screen.findByText("ElevenLabs · Marcus"));
+    const voiceButton = within(dialog()).getByRole("button", { name: "Voice (optional)" });
+    expect(voiceButton).toHaveTextContent("Pick a voice…");
+    expect(voiceButton).toHaveAttribute("aria-haspopup", "dialog");
+    fireEvent.click(voiceButton);
+
+    const picker = await screen.findByRole("dialog", { name: "Choose a voice" });
+    // The form underneath is aria-hidden now; nothing opened in place in it.
+    expect(document.querySelector(".gx-cast-new .gx-combobox__content")).toBeNull();
+    fireEvent.click(await within(picker).findByRole("button", { name: /^Marcus\b/ }));
+    fireEvent.click(within(picker).getByRole("button", { name: "Use this voice" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Choose a voice" })).not.toBeInTheDocument());
+    expect(within(dialog()).getByRole("button", { name: "Voice (optional)" })).toHaveTextContent("ElevenLabs · Marcus");
+
     submit();
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0].voice).toBe("marcus");
+  });
+
+  // Cancel while Create is on its way would close over an NPC that then
+  // appears and is selected anyway.
+  it("holds Cancel and Escape while Create is on its way", async () => {
+    const { created, onCreated, release } = renderDialog({ holdCreate: true });
+    type("Name", "Mira");
+    submit();
+    await waitFor(() => expect(within(dialog()).getByRole("button", { name: "Cancel" })).toBeDisabled());
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+    expect(dialog()).toBeInTheDocument();
+
+    release();
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(created).toHaveLength(1);
   });
 
   // The voice picker opens OVER this dialog. Choosing there must come back to
@@ -171,7 +203,7 @@ describe("NewNpcDialog", () => {
   it("takes a voice from the picker opened inside the dialog", async () => {
     const { created, onCreated } = renderDialog();
     type("Name", "Mira");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Browse voices" }));
+    fireEvent.click(within(dialog()).getByRole("button", { name: "Voice (optional)" }));
 
     const picker = await screen.findByRole("dialog", { name: "Choose a voice" });
     fireEvent.click(await within(picker).findByRole("button", { name: /^Marcus\b/ }));
@@ -192,7 +224,7 @@ describe("NewNpcDialog", () => {
   it("closing the picker with Escape leaves the New NPC dialog open", async () => {
     renderDialog();
     type("Name", "Mira");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Browse voices" }));
+    fireEvent.click(within(dialog()).getByRole("button", { name: "Voice (optional)" }));
     const picker = await screen.findByRole("dialog", { name: "Choose a voice" });
     fireEvent.keyDown(picker, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Choose a voice" })).not.toBeInTheDocument());

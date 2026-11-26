@@ -111,9 +111,15 @@
   gap: 3px;
   flex: 0 0 auto;
   max-width: 60%;
-  overflow: hidden;
+  min-width: 0;
   font-size: var(--body-xs);
   color: var(--text-subtle);
+}
+/* The ellipsis belongs on the text itself: on the inline-flex row it never
+ * applies, the name is just cut. */
+.gx-cast .gx-cast__row-voice-name {
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }

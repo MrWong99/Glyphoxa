@@ -17,9 +17,16 @@
 // Two optional hooks for a caller that offers a Stop button (the voice picker):
 // `signal` stops the playback and releases the element when it aborts, and
 // `onEnded` is called once when the playback is over on its own account
-// (finished, errored, or never started because there is no media pipeline).
-// It is not called for an abort or a rejected play(): the caller did the one
-// and hears about the other through the returned promise.
+// (finished, errored mid-playback, or never started because there is no media
+// pipeline). It is not called for an abort or a rejected play(): the caller did
+// the one and hears about the other through the returned promise.
+//
+// A clip the browser cannot load (unsupported or corrupt media) fires the
+// element's "error" event FIRST and only then rejects the pending play() with
+// NotSupportedError (the media failure steps; Chromium orders them the same
+// way). An "error" before play() has settled therefore only releases the
+// element: reporting it as "ended" would let the caller go idle and drop the
+// rejection that carries the reason.
 export function playAudioBlob(
   audio: Uint8Array,
   mimeType: string,
@@ -29,6 +36,9 @@ export function playAudioBlob(
   if (signal?.aborted) return Promise.resolve();
   let el: HTMLAudioElement;
   let cleanup: () => void;
+  // play() has resolved; an "error" before that is reported by its rejection.
+  let started = false;
+  let failedEarly = false;
   try {
     if (typeof Audio === "undefined" || typeof URL?.createObjectURL !== "function") {
       onEnded?.();
@@ -50,7 +60,17 @@ export function playAudioBlob(
       onEnded?.();
     };
     el.addEventListener("ended", over, { once: true });
-    el.addEventListener("error", over, { once: true });
+    el.addEventListener(
+      "error",
+      () => {
+        if (started) over();
+        else {
+          failedEarly = true;
+          cleanup();
+        }
+      },
+      { once: true },
+    );
     signal?.addEventListener(
       "abort",
       () => {
@@ -69,8 +89,16 @@ export function playAudioBlob(
     onEnded?.();
     return Promise.resolve();
   }
-  return Promise.resolve(el.play()).catch((err: unknown) => {
-    cleanup();
-    throw err;
-  });
+  return Promise.resolve(el.play()).then(
+    () => {
+      started = true;
+      // An "error" came first, yet play() resolved: nothing is playing, so the
+      // playback is over all the same.
+      if (failedEarly) onEnded?.();
+    },
+    (err: unknown) => {
+      cleanup();
+      throw err;
+    },
+  );
 }

@@ -20,6 +20,12 @@ import { apiErrorMessage } from "@/lib/connectError";
 // The request carries an AbortSignal, so a sample that is stopped while it is
 // still being synthesized is cancelled rather than fetched and thrown away.
 
+// The sample talking anywhere on the page. Every voice field and the picker
+// has its own hook, and the editor stays mounted under the New NPC dialog, so
+// "one sample at a time" is kept here rather than per hook: starting a sample
+// stops whichever other hook's sample is loading or playing.
+let pageSample: { owner: object; stop: () => void } | null = null;
+
 /** The longest sample line the server accepts (internal/rpc/voice.go maxPreviewRunes). */
 export const MAX_PREVIEW_CHARS = 300;
 
@@ -54,16 +60,25 @@ export function useVoicePreview(): VoicePreview {
   const current = useRef<AbortController | null>(null);
   const activeId = useRef<string | null>(null);
 
+  // This hook's identity in the page-wide slot.
+  const [owner] = useState(() => ({}));
+  const release = useCallback(() => {
+    if (pageSample?.owner === owner) pageSample = null;
+  }, [owner]);
+
   const stop = useCallback(() => {
+    release();
     current.current?.abort();
     current.current = null;
     activeId.current = null;
     setState({ activeId: null, phase: "idle" });
-  }, []);
+  }, [release]);
 
   const play = useCallback(
     (voiceId: string, text = "") => {
       if (!voiceId) return;
+      if (pageSample && pageSample.owner !== owner) pageSample.stop();
+      pageSample = { owner, stop };
       current.current?.abort();
       const run = new AbortController();
       current.current = run;
@@ -76,6 +91,7 @@ export function useVoicePreview(): VoicePreview {
       const live = () => current.current === run;
       const finish = () => {
         if (!live()) return;
+        release();
         current.current = null;
         activeId.current = null;
         setState({ activeId: null, phase: "idle" });
@@ -94,7 +110,7 @@ export function useVoicePreview(): VoicePreview {
         }
       })();
     },
-    [client, t],
+    [client, t, owner, release, stop],
   );
 
   const reset = useCallback(() => {
@@ -113,10 +129,11 @@ export function useVoicePreview(): VoicePreview {
   // Unmount: silence, and no state update on the way out.
   useEffect(
     () => () => {
+      release();
       current.current?.abort();
       current.current = null;
     },
-    [],
+    [release],
   );
 
   return { activeId: state.activeId, phase: state.phase, error, play, stop, reset, toggle };

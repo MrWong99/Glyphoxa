@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { ListMusic, Square, Volume2 } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
@@ -19,6 +19,11 @@ import "./cast.css";
 // the vendor voice id persisted on the agent and its label is "ElevenLabs ·
 // Name". The agent's persisted voice id is kept as a bare option even when the
 // catalog is empty or stale, so the current selection always shows.
+//
+// `pickerOnly` (the New NPC dialog) swaps the Combobox for a button that names
+// the chosen voice and opens the picker. The Combobox's list opens in place
+// under its trigger, and inside a dialog body — which scrolls — it would be
+// clipped by that scroll box; the picker is a dialog of its own and is not.
 export function VoiceField({
   label,
   voicesQuery,
@@ -27,6 +32,7 @@ export function VoiceField({
   campaignLanguage,
   pickerOpen,
   onPickerOpenChange,
+  pickerOnly = false,
 }: {
   label: string;
   voicesQuery: VoicesQuery;
@@ -36,8 +42,11 @@ export function VoiceField({
   /** Drive the picker from outside (the editor's "No voice" jump link). */
   pickerOpen?: boolean;
   onPickerOpenChange?: (open: boolean) => void;
+  /** No in-place list: the field is a button that opens the picker. */
+  pickerOnly?: boolean;
 }) {
   const { t } = useI18n();
+  const triggerId = useId();
   const preview = useVoicePreview();
   const [ownOpen, setOwnOpen] = useState(false);
   const open = pickerOpen ?? ownOpen;
@@ -55,20 +64,41 @@ export function VoiceField({
     return opts;
   }, [voices, value]);
 
+  const chosenLabel = value ? (options.find((o) => o.value === value)?.label ?? value) : null;
   const previewing = preview.activeId !== null;
 
   return (
     <div className="gx-cast-voice">
       <div className="gx-editor__voice">
-        <Combobox
-          label={label}
-          options={options}
-          value={value || undefined}
-          onValueChange={onChange}
-          placeholder={t("campaign.voicePlaceholder")}
-          searchPlaceholder={t("campaign.voiceSearch")}
-          emptyText={t("campaign.voiceEmpty")}
-        />
+        {pickerOnly ? (
+          <div className="gx-select-field gx-combobox">
+            <label className="gx-select-field__label" htmlFor={triggerId}>
+              {label}
+            </label>
+            <button
+              type="button"
+              id={triggerId}
+              className="gx-select gx-combobox__trigger"
+              aria-haspopup="dialog"
+              onClick={() => setOpen(true)}
+            >
+              <span className={chosenLabel ? "gx-combobox__value" : "gx-combobox__placeholder"}>
+                {chosenLabel ?? t("campaign.voicePlaceholder")}
+              </span>
+              <ListMusic size={14} className="gx-select-chevron" aria-hidden="true" />
+            </button>
+          </div>
+        ) : (
+          <Combobox
+            label={label}
+            options={options}
+            value={value || undefined}
+            onValueChange={onChange}
+            placeholder={t("campaign.voicePlaceholder")}
+            searchPlaceholder={t("campaign.voiceSearch")}
+            emptyText={t("campaign.voiceEmpty")}
+          />
+        )}
         {/* Preview failures — a degraded-TTS RPC rejection or a blocked play()
             — render an inline cue below instead of vanishing (#154). While a
             sample is loading or playing the same button stops it. */}
@@ -82,15 +112,17 @@ export function VoiceField({
         >
           {previewing ? t("cast.voiceStop") : t("campaign.voicePreview")}
         </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          iconStart={<ListMusic size={14} />}
-          onClick={() => setOpen(true)}
-        >
-          {t("cast.voiceBrowse")}
-        </Button>
+        {!pickerOnly && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            iconStart={<ListMusic size={14} />}
+            onClick={() => setOpen(true)}
+          >
+            {t("cast.voiceBrowse")}
+          </Button>
+        )}
       </div>
       {preview.error && (
         <span className="gx-editor__status gx-editor__status--error" role="alert">
