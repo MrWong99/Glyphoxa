@@ -1,49 +1,102 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { toast } from "sonner";
 
 import {
+  AgentSchema,
+  CampaignSchema,
   CampaignService,
-  SessionService,
+  CreateCampaignResponseSchema,
+  GetActiveCampaignResponseSchema,
+  GetCampaignRosterResponseSchema,
+  GetSessionResponseSchema,
+  HighlightSearchHitSchema,
+  ListCampaignsResponseSchema,
   NodeSchema,
   NodeType,
+  SearchHighlightsResponseSchema,
   SearchNodesResponseSchema,
   SearchTranscriptsResponseSchema,
-  SearchHighlightsResponseSchema,
+  SessionService,
+  SetActiveCampaignResponseSchema,
   TranscriptSearchHitSchema,
-  HighlightSearchHitSchema,
+  VoiceSessionSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { MemoryScreenNav, type ScreenLocation } from "@/app/screenNav";
+import { registerUnsavedEditsProbe } from "@/lib/navigationGuard";
 import { makeQueryClient } from "@/lib/queryClient";
+import { CommandPalette, paletteShortcut } from "./CommandPalette";
+import { resetLocalCampaignSwitch } from "./useCampaignSwitch";
 
-// The palette navigates with the router; the shell mocks the same surface in
-// AppShell.test.tsx. navigateMock is module-level so tests can assert the
-// deep-link search params a picked result produced.
-const navigateMock = vi.fn();
-vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => navigateMock,
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), info: vi.fn() }),
 }));
 
-import { CommandPalette } from "./CommandPalette";
+// Ctrl/Cmd+K palette: a navigation layer filtered in the browser ("Go to",
+// "Switch campaign", the cast, two actions) above the campaign search the
+// server ranks (#591). Every move goes through the navigation seam, so these
+// tests mount MemoryScreenNav and read where the palette went — no router.
 
-// Ctrl+K palette (#591): opens on the hotkey, debounce-searches the three
-// campaign sources, renders grouped results with honest degraded/empty states,
-// and deep-links via the ScreenSearch params.
+const citadel = create(CampaignSchema, { id: "c1", name: "The Sunless Citadel", system: "D&D 5e", language: "en" });
+const saltmarsh = create(CampaignSchema, { id: "c2", name: "Tides over Saltmarsh", system: "D&D 5e", language: "en" });
 
-function searchTransport(opts?: {
+type Opts = {
   semantic?: boolean;
   empty?: boolean;
   transcriptsFail?: boolean;
-  calls?: string[];
-}) {
-  const semantic = opts?.semantic ?? true;
-  return createRouterTransport(({ service }) => {
+  live?: boolean;
+  noCampaign?: boolean;
+};
+
+function backend(opts: Opts = {}) {
+  const semantic = opts.semantic ?? true;
+  const state = { calls: [] as string[], active: "c1", created: [] as string[] };
+  const byId = (id: string) => (id === "c2" ? saltmarsh : citadel);
+  const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
+      getActiveCampaign: () => {
+        if (opts.noCampaign) throw new ConnectError("no campaign", Code.NotFound);
+        return create(GetActiveCampaignResponseSchema, { campaign: byId(state.active) });
+      },
+      listCampaigns: () =>
+        create(ListCampaignsResponseSchema, { campaigns: opts.noCampaign ? [] : [citadel, saltmarsh] }),
+      getCampaignRoster: () => {
+        if (opts.noCampaign) throw new ConnectError("no campaign", Code.NotFound);
+        return create(GetCampaignRosterResponseSchema, {
+          campaign: citadel,
+          roster: [
+            create(AgentSchema, { id: "a-butler", role: "butler", name: "Butler", title: "Game assistant" }),
+            create(AgentSchema, {
+              id: "a-flo",
+              role: "character",
+              name: "Flo",
+              title: "Gruff innkeeper",
+              aliases: ["Florentine"],
+            }),
+            create(AgentSchema, { id: "a-zoe", role: "character", name: "Zoë", title: "Harbour master" }),
+          ],
+        });
+      },
+      setActiveCampaign: (req) => {
+        state.calls.push(`setActive:${req.campaignId}`);
+        // Live-first resolution (#222): while a session runs, its campaign
+        // still answers as the resolved Active Campaign.
+        if (!opts.live) state.active = req.campaignId;
+        return create(SetActiveCampaignResponseSchema, { campaign: byId(state.active) });
+      },
+      createCampaign: (req) => {
+        state.created.push(req.name);
+        return create(CreateCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c-new", name: req.name, system: req.system, language: req.language }),
+        });
+      },
       searchNodes: (req) => {
-        opts?.calls?.push(`nodes:${req.query}`);
-        if (opts?.empty) return create(SearchNodesResponseSchema, { nodes: [] });
+        state.calls.push(`nodes:${req.query}`);
+        if (opts.empty) return create(SearchNodesResponseSchema, { nodes: [] });
         return create(SearchNodesResponseSchema, {
           nodes: [
             create(NodeSchema, {
@@ -59,10 +112,15 @@ function searchTransport(opts?: {
       },
     });
     service(SessionService, {
+      getSession: () =>
+        create(GetSessionResponseSchema, {
+          active: opts.live ?? false,
+          session: opts.live ? create(VoiceSessionSchema, { id: "s1" }) : undefined,
+        }),
       searchTranscripts: (req) => {
-        opts?.calls?.push(`transcripts:${req.query}`);
-        if (opts?.transcriptsFail) throw new ConnectError("boom", Code.Internal);
-        if (opts?.empty) return create(SearchTranscriptsResponseSchema, { semantic, hits: [] });
+        state.calls.push(`transcripts:${req.query}`);
+        if (opts.transcriptsFail) throw new ConnectError("boom", Code.Internal);
+        if (opts.empty) return create(SearchTranscriptsResponseSchema, { semantic, hits: [] });
         return create(SearchTranscriptsResponseSchema, {
           semantic,
           hits: [
@@ -78,8 +136,8 @@ function searchTransport(opts?: {
         });
       },
       searchHighlights: (req) => {
-        opts?.calls?.push(`highlights:${req.query}`);
-        if (opts?.empty) return create(SearchHighlightsResponseSchema, { hits: [] });
+        state.calls.push(`highlights:${req.query}`);
+        if (opts.empty) return create(SearchHighlightsResponseSchema, { hits: [] });
         return create(SearchHighlightsResponseSchema, {
           hits: [
             create(HighlightSearchHitSchema, {
@@ -94,41 +152,63 @@ function searchTransport(opts?: {
       },
     });
   });
+  return { transport, state };
 }
 
-function renderPalette(transport = searchTransport()) {
-  return render(
-    <Providers transport={transport} queryClient={makeQueryClient()}>
-      <CommandPalette tenantSlug="acme" />
+function renderPalette(opts: Opts = {}) {
+  const b = backend(opts);
+  const moves: ScreenLocation[] = [];
+  const queryClient = makeQueryClient();
+  render(
+    <Providers transport={b.transport} queryClient={queryClient}>
+      <MemoryScreenNav initial={{ screen: "configuration" }} onNavigate={(next) => moves.push(next)}>
+        <button type="button">somewhere on the page</button>
+        <CommandPalette />
+      </MemoryScreenNav>
     </Providers>,
   );
+  return { ...b, moves, queryClient };
 }
 
 function openPalette() {
   fireEvent.keyDown(document, { key: "k", ctrlKey: true });
 }
 
-async function searchFor(text: string) {
-  openPalette();
-  fireEvent.change(screen.getByPlaceholderText(/search entries, transcripts/i), {
-    target: { value: text },
-  });
+const input = () => screen.getByPlaceholderText("Search or jump to…");
+const palette = () => within(screen.getByTestId("command-palette"));
+const options = () => palette().getAllByRole("option").map((o) => o.textContent);
+
+function type(text: string) {
+  fireEvent.change(input(), { target: { value: text } });
 }
 
+async function searchFor(text: string) {
+  openPalette();
+  type(text);
+}
+
+let stopProbe: (() => void) | undefined;
 beforeEach(() => {
-  navigateMock.mockClear();
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.info).mockClear();
+  resetLocalCampaignSwitch();
+});
+afterEach(() => {
+  stopProbe?.();
+  stopProbe = undefined;
+  vi.unstubAllGlobals();
 });
 
-describe("CommandPalette (#591)", () => {
+describe("CommandPalette shell", () => {
   it("opens on Ctrl+K, closes on Escape, and renders nothing while closed", () => {
     renderPalette();
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
 
     openPalette();
-    expect(screen.getByTestId("command-palette")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/search entries, transcripts/i)).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Search and jump" })).toBeInTheDocument();
+    expect(input()).toHaveFocus();
 
-    fireEvent.keyDown(screen.getByPlaceholderText(/search entries, transcripts/i), { key: "Escape" });
+    fireEvent.keyDown(input(), { key: "Escape" });
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
 
     // Cmd+K (macOS) toggles too.
@@ -144,9 +224,263 @@ describe("CommandPalette (#591)", () => {
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
   });
 
-  it("searches all three sources (debounced) and renders the grouped results", async () => {
-    const calls: string[] = [];
-    renderPalette(searchTransport({ calls }));
+  it("runs no query while closed", async () => {
+    const { queryClient } = renderPalette();
+    // Nothing fetched, nothing cached: a closed palette costs every screen
+    // (and every screen test) nothing.
+    await act(async () => {});
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+  });
+
+  it("gives focus back to where it was when it closes", () => {
+    renderPalette();
+    const origin = screen.getByRole("button", { name: "somewhere on the page" });
+    origin.focus();
+    openPalette();
+    expect(input()).toHaveFocus();
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(origin).toHaveFocus();
+  });
+
+  it("starts every open on an empty field", () => {
+    renderPalette();
+    openPalette();
+    type("wiki");
+    fireEvent.keyDown(input(), { key: "Escape" });
+    openPalette();
+    expect(input()).toHaveValue("");
+  });
+
+  it("shows the keys the list answers to", () => {
+    renderPalette();
+    openPalette();
+    const footer = screen.getByTestId("command-palette").querySelector(".gx-palette__footer") as HTMLElement;
+    expect(footer).toHaveTextContent(/↑\s*↓\s*move/);
+    expect(footer).toHaveTextContent(/↵\s*open/);
+    expect(footer).toHaveTextContent(/Esc\s*close/);
+  });
+
+  it("names its chord for the platform: Ctrl+K, Strg+K in German, ⌘K on a Mac", () => {
+    const en = (key: string) => (key === "palette.keyCtrl" ? "Ctrl" : key);
+    const de = (key: string) => (key === "palette.keyCtrl" ? "Strg" : key);
+    expect(paletteShortcut(en as never)).toBe("Ctrl+K");
+    expect(paletteShortcut(de as never)).toBe("Strg+K");
+    vi.stubGlobal("navigator", { platform: "MacIntel", language: "en-US" });
+    expect(paletteShortcut(en as never)).toBe("⌘K");
+  });
+});
+
+describe("CommandPalette navigation layer", () => {
+  it("lists every destination on an empty query — the palette is a map of the app", async () => {
+    renderPalette();
+    openPalette();
+
+    const goTo = palette().getByRole("group", { name: "Go to" });
+    expect(within(goTo).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Overview",
+      "Cast",
+      "World wiki",
+      "Maps",
+      "Players",
+      "Suggestions",
+      "Planning",
+      "Settings",
+      "Session",
+      "Campaigns",
+      "Setup",
+    ]);
+    // …and says what typing will do. No search has run.
+    expect(palette().getByText(/type to search this campaign/i)).toBeInTheDocument();
+    expect(palette().queryByText("Entries")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["World wiki", { screen: "campaign", view: "knowledge", search: {} }],
+    ["Settings", { screen: "campaign", view: "settings", search: {} }],
+    ["Session", { screen: "session", view: undefined, search: {} }],
+    ["Campaigns", { screen: "campaigns", view: undefined, search: {} }],
+    ["Setup", { screen: "configuration", view: undefined, search: {} }],
+  ])("goes to %s and closes", (label, location) => {
+    const { moves } = renderPalette();
+    openPalette();
+    fireEvent.click(palette().getByRole("option", { name: label }));
+    expect(moves).toEqual([location]);
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+  });
+
+  it("narrows the destinations as the GM types, ignoring case and accents", () => {
+    renderPalette();
+    openPalette();
+    type("WIKI");
+    const goTo = palette().getByRole("group", { name: "Go to" });
+    expect(within(goTo).getAllByRole("option").map((o) => o.textContent)).toEqual(["World wiki"]);
+  });
+
+  it("opens the first match on Enter — type, Enter, there", () => {
+    const { moves } = renderPalette();
+    openPalette();
+    type("maps");
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(moves).toEqual([{ screen: "campaign", view: "maps", search: {} }]);
+  });
+
+  it("offers an NPC by name, alias or accent-less spelling, and opens Cast on that NPC", async () => {
+    const { moves } = renderPalette();
+    openPalette();
+    // The whole roster is not listed on an empty field…
+    expect(palette().queryByRole("group", { name: "Cast" })).not.toBeInTheDocument();
+
+    // …a name finds its NPC, with the role subtitle beside it.
+    type("flo");
+    const cast = await palette().findByRole("group", { name: "Cast" });
+    expect(within(cast).getByRole("option", { name: /Flo.*Gruff innkeeper/ })).toBeInTheDocument();
+
+    // So does an alias, and "zoe" finds Zoë.
+    type("florentine");
+    expect(within(palette().getByRole("group", { name: "Cast" })).getAllByRole("option")).toHaveLength(1);
+    type("zoe");
+    fireEvent.click(palette().getByRole("option", { name: /Zoë/ }));
+
+    expect(moves).toEqual([{ screen: "campaign", view: "cast", search: { agent: "a-zoe" } }]);
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+  });
+
+  it("offers 'Switch campaign' for the other campaigns, never for the one already active", async () => {
+    renderPalette();
+    openPalette();
+    expect(await palette().findByRole("option", { name: /Switch campaign: Tides over Saltmarsh/ })).toBeInTheDocument();
+    expect(palette().queryByRole("option", { name: /Switch campaign: The Sunless Citadel/ })).not.toBeInTheDocument();
+  });
+
+  it("switches campaign through the guarded switch and says what happened", async () => {
+    const { state, moves } = renderPalette();
+    openPalette();
+    fireEvent.click(await palette().findByRole("option", { name: /Switch campaign: Tides over Saltmarsh/ }));
+
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+    await waitFor(() => expect(state.calls).toContain("setActive:c2"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Now working in Tides over Saltmarsh"));
+    // The GM stays on the page they were on; the screen follows the campaign.
+    expect(moves).toEqual([]);
+  });
+
+  it("asks before a campaign switch discards unsaved edits", async () => {
+    stopProbe = registerUnsavedEditsProbe(() => true);
+    const { state } = renderPalette();
+    openPalette();
+    fireEvent.click(await palette().findByRole("option", { name: /Switch campaign: Tides over Saltmarsh/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Discard unsaved changes?");
+    expect(state.calls).not.toContain("setActive:c2");
+
+    // Cancel keeps the edits and the campaign.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(state.calls).not.toContain("setActive:c2");
+
+    // Discard switches.
+    openPalette();
+    fireEvent.click(await palette().findByRole("option", { name: /Switch campaign: Tides over Saltmarsh/ }));
+    fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Discard changes" }),
+    );
+    await waitFor(() => expect(state.calls).toContain("setActive:c2"));
+  });
+
+  it("offers 'Go to live session' only while a Voice Session is live", async () => {
+    const idle = renderPalette();
+    openPalette();
+    await waitFor(() => expect(idle.queryClient.isFetching()).toBe(0));
+    expect(palette().queryByRole("option", { name: "Go to live session" })).not.toBeInTheDocument();
+  });
+
+  it("goes to the live session", async () => {
+    const { moves } = renderPalette({ live: true });
+    openPalette();
+    fireEvent.click(await palette().findByRole("option", { name: "Go to live session" }));
+    expect(moves).toEqual([{ screen: "session", view: undefined, search: {} }]);
+  });
+
+  it("creates a campaign from the 'New campaign' action and lands on its Overview", async () => {
+    const { state, moves } = renderPalette();
+    openPalette();
+    type("new camp");
+    fireEvent.click(palette().getByRole("option", { name: "New campaign" }));
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+
+    const dialog = await screen.findByRole("dialog", { name: "New campaign" });
+    const name = within(dialog).getByRole("textbox", { name: /name/i });
+    await waitFor(() => expect(name).toHaveFocus());
+    fireEvent.change(name, { target: { value: "Curse of the Crimson Throne" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create campaign" }));
+
+    await waitFor(() => expect(state.created).toEqual(["Curse of the Crimson Throne"]));
+    await waitFor(() => expect(state.calls).toContain("setActive:c-new"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New campaign" })).not.toBeInTheDocument());
+    expect(toast.success).toHaveBeenCalledWith("Now working in Curse of the Crimson Throne");
+    expect(moves).toEqual([{ screen: "campaign", view: "overview", search: {} }]);
+  });
+
+  it("does not pretend a campaign created mid-session is active: it says the switch is pending and stays", async () => {
+    const { state, moves, queryClient } = renderPalette({ live: true });
+    openPalette();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    fireEvent.click(palette().getByRole("option", { name: "New campaign" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New campaign" });
+    // The dialog already says so before anything is created.
+    await waitFor(() => expect(dialog).toHaveTextContent(/a voice session is live/i));
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /name/i }), { target: { value: "One-shot" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create campaign" }));
+
+    await waitFor(() => expect(state.created).toEqual(["One-shot"]));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(expect.stringContaining("One-shot")));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(moves).toEqual([]);
+  });
+
+  it("asks before 'New campaign' would discard unsaved edits, and cancelling changes nothing", async () => {
+    stopProbe = registerUnsavedEditsProbe(() => true);
+    renderPalette();
+    openPalette();
+    fireEvent.click(palette().getByRole("option", { name: "New campaign" }));
+
+    const ask = await screen.findByRole("alertdialog");
+    expect(ask).toHaveTextContent("Discard unsaved changes?");
+    expect(screen.queryByRole("dialog", { name: "New campaign" })).not.toBeInTheDocument();
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.queryByRole("dialog", { name: "New campaign" })).not.toBeInTheDocument();
+  });
+
+  it("still lists every destination when the Tenant has no campaign yet", async () => {
+    const { queryClient } = renderPalette({ noCampaign: true });
+    openPalette();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(within(palette().getByRole("group", { name: "Go to" })).getAllByRole("option")).toHaveLength(11);
+    expect(palette().getByRole("option", { name: "New campaign" })).toBeInTheDocument();
+    expect(palette().queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("is localized", () => {
+    localStorage.setItem("gx-lang", "de");
+    try {
+      renderPalette();
+      openPalette();
+      expect(screen.getByRole("dialog", { name: "Suchen und springen" })).toBeInTheDocument();
+      const goTo = palette().getByRole("group", { name: "Gehe zu" });
+      expect(within(goTo).getByRole("option", { name: "Welt-Wiki" })).toBeInTheDocument();
+      expect(palette().getByRole("option", { name: "Neue Kampagne" })).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("gx-lang");
+    }
+  });
+});
+
+describe("CommandPalette campaign search (#591)", () => {
+  it("searches all three sources (debounced) and renders the grouped results under the navigation hits", async () => {
+    const { state } = renderPalette();
     await searchFor("bart");
 
     // All three groups render their hits.
@@ -158,57 +492,41 @@ describe("CommandPalette (#591)", () => {
     expect(screen.getByText("Highlights")).toBeInTheDocument();
 
     // One debounced RPC per source — not one per keystroke.
-    expect(calls.filter((c) => c.startsWith("nodes:"))).toEqual(["nodes:bart"]);
+    expect(state.calls.filter((c) => c.startsWith("nodes:"))).toEqual(["nodes:bart"]);
 
     // Semantic mode shows NO degraded notice.
     expect(screen.queryByTestId("palette-degraded")).not.toBeInTheDocument();
+    // Nothing in the navigation layer is called "bart", so only search hits show.
+    expect(options()).toHaveLength(3);
   });
 
-  it("deep-links a node hit to the knowledge sub-view and closes", async () => {
-    renderPalette();
+  it("deep-links a node hit to the World wiki and closes", async () => {
+    const { moves } = renderPalette();
     await searchFor("bart");
     fireEvent.click(await screen.findByText("Bart"));
 
-    // The Campaign sub-view is a path segment (ADR-0063): entry hits land on
-    // /campaign/knowledge with only the node focus left as a search param.
-    expect(navigateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "/t/$tenantSlug/$screen/$view",
-        params: { tenantSlug: "acme", screen: "campaign", view: "knowledge" },
-        search: { node: "n-bart" },
-      }),
-    );
+    expect(moves).toEqual([{ screen: "campaign", view: "knowledge", search: { node: "n-bart" } }]);
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
   });
 
   it("deep-links a transcript hit with the {session, line} pair", async () => {
-    renderPalette();
+    const { moves } = renderPalette();
     await searchFor("gold");
     fireEvent.click(await screen.findByText("we promised Bart fifty gold"));
 
-    expect(navigateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        params: { tenantSlug: "acme", screen: "session" },
-        search: { session: "vs1", line: "u:3" },
-      }),
-    );
+    expect(moves).toEqual([{ screen: "session", view: undefined, search: { session: "vs1", line: "u:3" } }]);
   });
 
   it("deep-links a highlight hit with {session, highlight}", async () => {
-    renderPalette();
+    const { moves } = renderPalette();
     await searchFor("contract");
     fireEvent.click(await screen.findByText("the barbarian ate the contract"));
 
-    expect(navigateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        params: { tenantSlug: "acme", screen: "session" },
-        search: { session: "vs1", highlight: "hl-1" },
-      }),
-    );
+    expect(moves).toEqual([{ screen: "session", view: undefined, search: { session: "vs1", highlight: "hl-1" } }]);
   });
 
   it("labels keyword transcript mode honestly (semantic=false → degraded notice, speaker shown)", async () => {
-    renderPalette(searchTransport({ semantic: false }));
+    renderPalette({ semantic: false });
     await searchFor("gold");
 
     expect(await screen.findByTestId("palette-degraded")).toBeInTheDocument();
@@ -218,14 +536,23 @@ describe("CommandPalette (#591)", () => {
   });
 
   it("shows the honest empty state when nothing matches anywhere", async () => {
-    renderPalette(searchTransport({ empty: true }));
+    renderPalette({ empty: true });
     await searchFor("nothingmatchesthis");
 
     expect(await screen.findByText(/no results for “nothingmatchesthis”/i)).toBeInTheDocument();
   });
 
+  it("does not say 'no results' while a destination still matches", async () => {
+    const { state } = renderPalette({ empty: true });
+    await searchFor("wiki");
+    await waitFor(() => expect(state.calls).toContain("highlights:wiki"));
+    await act(async () => {});
+    expect(palette().getByRole("option", { name: "World wiki" })).toBeInTheDocument();
+    expect(screen.queryByText(/no results for/i)).not.toBeInTheDocument();
+  });
+
   it("surfaces a failed source inline while the others still answer", async () => {
-    renderPalette(searchTransport({ transcriptsFail: true }));
+    renderPalette({ transcriptsFail: true });
     await searchFor("bart");
 
     // The failing source announces itself…
@@ -234,8 +561,6 @@ describe("CommandPalette (#591)", () => {
     expect(await screen.findByText("Bart")).toBeInTheDocument();
     expect(await screen.findByText("the barbarian ate the contract")).toBeInTheDocument();
     // The all-quiet empty state must NOT show beside an error.
-    await waitFor(() =>
-      expect(screen.queryByText(/no results for/i)).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText(/no results for/i)).not.toBeInTheDocument());
   });
 });

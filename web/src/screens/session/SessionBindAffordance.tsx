@@ -26,10 +26,31 @@ const NEW_TARGET = "__new__";
 // SessionService call, no restart. With #281 the relay picks the change up on the
 // speaker's next Line; this component's job stops at the RPC round-trip.
 
-export function SessionBindAffordance() {
+/** A Discord User to start the form with (the "not linked" notice's pick). */
+export type BindPrefill = { discordUserId: string; name: string };
+
+export function SessionBindAffordance({
+  open: openProp,
+  onOpenChange,
+  prefill = null,
+}: {
+  /** Drive the form from outside; left out, the affordance keeps its own state. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /**
+   * Seeds a NEW Character with this Discord User: the name is their display
+   * name (the GM corrects it to the Character's), the binding is already made.
+   */
+  prefill?: BindPrefill | null;
+} = {}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = openProp ?? ownOpen;
+  const setOpen = (next: boolean) => {
+    setOwnOpen(next);
+    onOpenChange?.(next);
+  };
   // targetId is the existing Character being reassigned, or NEW_TARGET for a new
   // one (Radix Select forbids an empty-string item value). The form is keyed on it
   // so switching target reseeds the fields.
@@ -122,8 +143,21 @@ export function SessionBindAffordance() {
         />
       )}
       <PlayerBindForm
-        key={targetId}
-        initial={target ? { name: target.name, aliases: target.aliases, discordUserId: target.discordUserId } : undefined}
+        // Re-seeded when the target changes, and when another person is picked
+        // from the "not linked" notice while the form is already open.
+        key={`${targetId}:${prefill?.discordUserId ?? ""}`}
+        initial={
+          target
+            ? {
+                name: target.name,
+                aliases: target.aliases,
+                // Reassigning to the picked person is the point of the prefill.
+                discordUserId: prefill?.discordUserId ?? target.discordUserId,
+              }
+            : prefill
+              ? { name: prefill.name, aliases: [], discordUserId: prefill.discordUserId }
+              : undefined
+        }
         members={members}
         submitLabel={target ? t("session.reassign") : t("session.createAndBind")}
         pending={pending}

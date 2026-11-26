@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { LegalFooter } from "@/components/LegalFooter";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { useI18n } from "@/i18n";
+import { useDocumentTitle } from "@/lib/useDocumentTitle";
 
 import "./login.css";
 
@@ -47,24 +48,40 @@ export function Login({
   aupRequired?: boolean;
 }) {
   const { t } = useI18n();
+  useDocumentTitle(t("auth.loginDocTitle"));
   const { data, status } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
   const [accepted, setAccepted] = useState(false);
   const aupId = useId();
+  const reasonId = useId();
   // Open mode = signing up: the acknowledgment gates the OAuth start. While the
   // probe is still IN FLIGHT the start is briefly disabled too — otherwise the
   // first render on an open deployment shows an ungated anchor and a fast click
   // slips past the acknowledgment. An ERRORED probe stays fail-open with the
   // allowlist framing (a flaky probe must not lock a legitimate operator out).
   const blocked = status === "pending" || (open && !accepted);
+  // Why the start is not available yet, read WITH the disabled button
+  // (aria-describedby) rather than left for a visitor to guess from a greyed
+  // control: the box above is not ticked, or the server has not said yet
+  // whether this is a signup.
+  const reason = !blocked
+    ? null
+    : status === "pending"
+      ? t("auth.continueChecking")
+      : t("auth.continueNeedsConsent");
 
   return (
     <div className="gx-login">
       <div className="gx-login__card">
-        <span className="gx-login__sigil">
-          <Dices size={24} />
-        </span>
-        <h1 className="gx-login__wordmark gx-gradient-text">Glyphoxa</h1>
+        {/* The wordmark is the way back to the start page (the landing): a
+            visitor who followed a "Sign in" link can still go and read what
+            this is. The heading stays the page's one h1, inside the link. */}
+        <a className="gx-login__home" href="/" aria-label={t("auth.loginHome")}>
+          <span className="gx-login__sigil" aria-hidden="true">
+            <Dices size={24} />
+          </span>
+          <h1 className="gx-login__wordmark gx-gradient-text">Glyphoxa</h1>
+        </a>
         <p className="gx-login__lede">
           {open ? t("auth.ledeOpen") : t("auth.ledeAllowlist")}
         </p>
@@ -110,7 +127,7 @@ export function Login({
             and the callback records the acceptance time (#518), so the
             checkbox is enforced, not just rendered. */}
         {blocked ? (
-          <Button variant="primary" size="lg" block disabled>
+          <Button variant="primary" size="lg" block disabled aria-describedby={reasonId}>
             {t("auth.continueDiscord")}
           </Button>
         ) : (
@@ -121,6 +138,15 @@ export function Login({
             {t("auth.continueDiscord")}
           </a>
         )}
+        {reason && (
+          <p className="gx-login__reason" id={reasonId}>
+            {reason}
+          </p>
+        )}
+
+        <a className="gx-login__about" href="/">
+          {t("auth.whatIsGlyphoxa")}
+        </a>
       </div>
 
       <LegalFooter />

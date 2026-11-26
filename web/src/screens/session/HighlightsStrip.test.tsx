@@ -5,7 +5,7 @@ import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 
 vi.mock("sonner", () => ({
-  toast: { error: vi.fn(), success: vi.fn() },
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), warning: vi.fn(), dismiss: vi.fn() }),
   Toaster: () => null,
 }));
 
@@ -106,6 +106,9 @@ function renderStrip(
     live?: boolean;
     focusHighlightId?: string | null;
     onFocusHandled?: () => void;
+    sessionEndedMs?: number | null;
+    tapeArmed?: boolean;
+    onOpenSettings?: () => void;
   } = {},
   opts?: {
     failList?: boolean;
@@ -122,6 +125,9 @@ function renderStrip(
         live={props.live ?? false}
         focusHighlightId={props.focusHighlightId}
         onFocusHandled={props.onFocusHandled}
+        sessionEndedMs={props.sessionEndedMs}
+        tapeArmed={props.tapeArmed}
+        onOpenSettings={props.onOpenSettings}
       />
     </Providers>,
   );
@@ -155,17 +161,31 @@ describe("HighlightsStrip (#309)", () => {
     localStorage.clear();
   });
 
-  it("shows a candidate's purge hint badge and a Keep action", async () => {
-    renderStrip([candidate()]);
-    expect(await screen.findByText(/unsaved — deleted in 7 days/i)).toBeInTheDocument();
+  it("shows a candidate's real expiry — seven days after the SESSION ended — and a Keep action", async () => {
+    // The server purges an unkept highlight 7 days after the Voice Session
+    // ended (ADR-0051), not 7 days after the moment and not "in 7 days" forever.
+    const ended = new Date(2026, 10, 14, 23, 30).getTime(); // Sat, Nov 14
+    renderStrip([candidate()], { sessionEndedMs: ended });
+    const expiry = new Date(ended + 7 * 24 * 60 * 60 * 1000).toLocaleDateString("en", {
+      weekday: "short",
+      year: new Date(ended).getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    expect(await screen.findByText(`Unsaved — deleted on ${expiry}`)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^keep$/i })).toBeInTheDocument();
   });
 
+  it("says the seven days have not started while the session still runs", async () => {
+    renderStrip([candidate()], { live: true, sessionEndedMs: null });
+    expect(await screen.findByText("Unsaved — deleted 7 days after the session")).toBeInTheDocument();
+  });
+
   it("shows a promoted highlight's Kept badge and offers no Keep action", async () => {
-    renderStrip([promoted()]);
+    renderStrip([promoted()], { sessionEndedMs: Date.now() });
     expect(await screen.findByText(/^Kept$/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^keep$/i })).not.toBeInTheDocument();
-    expect(screen.queryByText(/unsaved — deleted in 7 days/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/unsaved — deleted/i)).not.toBeInTheDocument();
   });
 
   it("promotes a candidate: fires PromoteHighlight with the id and the invalidated list shows it promoted", async () => {
@@ -212,25 +232,31 @@ describe("HighlightsStrip (#309)", () => {
     expect(images[0]).toHaveAttribute("alt", "Dramatic reveal — party fell silent.");
   });
 
-  it("renders the empty state copy when the session has no highlights", async () => {
-    renderStrip([]);
-    expect(
-      await screen.findByText(/No highlights yet — epic moments appear here/i),
-    ).toBeInTheDocument();
+  it("recording ON and nothing kept: the empty state says nothing reached the bar", async () => {
+    const openSettings = vi.fn();
+    renderStrip([], { tapeArmed: true, onOpenSettings: openSettings });
+    expect(await screen.findByText("No highlights yet")).toBeInTheDocument();
+    expect(screen.getByText(/nothing in this session was epic enough to keep/i)).toBeInTheDocument();
+    // Nothing for the GM to switch on: no settings button to send them hunting.
+    expect(screen.queryByRole("button", { name: "Campaign settings" })).not.toBeInTheDocument();
     expect(document.querySelector("audio")).toBeNull();
   });
 
-  it("points the empty state at the top-bar campaign menu to arm the tape (#412)", async () => {
-    // The Highlight-recording toggle (internally the rollover tape) lives ONLY in
-    // the topbar CampaignSwitcher edit panel, not on the Campaign roster screen —
-    // so the copy names that real location honestly instead of an href to a
-    // screen that lacks the toggle.
-    renderStrip([]);
-    await screen.findByText(/campaign menu in the top bar/i);
-    expect(screen.getByText(/Campaign settings/i)).toBeInTheDocument();
-    expect(screen.getByText(/Highlight recording/i)).toBeInTheDocument();
-    // No misleading link to the roster screen.
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  it("recording ON while live: a moment will appear as soon as one qualifies", async () => {
+    renderStrip([], { tapeArmed: true, live: true });
+    expect(await screen.findByText(/appears here as soon as one is epic enough/i)).toBeInTheDocument();
+  });
+
+  it("recording OFF: the empty state says so and leads to the campaign's settings (#412)", async () => {
+    // "Rollover tape" is internal vocabulary; the GM reads "highlight recording",
+    // the name of the switch on the campaign's Settings view — which is where
+    // the button goes, instead of prose describing a menu to go and find.
+    const openSettings = vi.fn();
+    renderStrip([], { tapeArmed: false, onOpenSettings: openSettings });
+    expect(await screen.findByText("Highlight recording is off")).toBeInTheDocument();
+    expect(screen.queryByText("No highlights yet")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Campaign settings" }));
+    expect(openSettings).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a load failure inline as an error, not the empty state (#270 lesson)", async () => {

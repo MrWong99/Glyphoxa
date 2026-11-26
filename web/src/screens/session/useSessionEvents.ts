@@ -23,9 +23,15 @@ export interface TranscriptLine {
 }
 
 // TypingState is the relay's derived "is speaking" / "listening" indicator.
+// `state` and `who` are its structured form (#695): what the indicator means and,
+// while an Agent speaks, which one — the screen renders its own localized
+// sentence from them. `label` is the relay's English sentence, kept as the
+// fallback for a relay that sends no state.
 export interface TypingState {
   active: boolean;
   label: string;
+  state?: "listening" | "speaking" | (string & {});
+  who?: string;
 }
 
 // ConnectionState is the Voice Session's Discord gateway connection lifecycle as
@@ -67,8 +73,14 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 // needs but the cache must not carry: snapshotFailed is true when the DB-backed
 // snapshot fetch failed with nothing cached, so the screen — a picked past session
 // AND the current/live one — can surface an error instead of masquerading as the
-// empty "start a session" / "Listening…" state (#270).
-type SessionTranscript = Transcript & { snapshotFailed: boolean };
+// empty "start a session" / "Listening…" state (#270). snapshotLoading is the
+// read still being in flight — a skeleton, not "no lines" — and retrySnapshot
+// re-runs a failed one.
+type SessionTranscript = Transcript & {
+  snapshotFailed: boolean;
+  snapshotLoading: boolean;
+  retrySnapshot: () => void;
+};
 
 // Patch is one stream frame's edit to the cached Transcript.
 type Patch = (prev: Transcript | undefined) => Transcript;
@@ -106,7 +118,7 @@ export function useSessionEvents(
   // Snapshot seed: the initial state the live stream then tails (live), or the
   // persisted history (ended). staleTime is Infinity because the EventSource —
   // not refetching — keeps a live session current, and an ended one is immutable.
-  const { data, isError } = useQuery<Transcript>({
+  const { data, isError, refetch } = useQuery<Transcript>({
     queryKey: transcriptKey(sessionId ?? ""),
     enabled: haveSession,
     staleTime: Infinity,
@@ -254,7 +266,20 @@ export function useSessionEvents(
   // never-run state, not a failure — and only when the snapshot NEVER landed (no
   // cached data): a failed resync refetch keeps rendering the retained lines
   // instead of swapping a visible transcript for an error card.
-  return { ...(data ?? EMPTY), snapshotFailed: haveSession && isError && !data };
+  return {
+    ...(data ?? EMPTY),
+    snapshotFailed: haveSession && isError && !data,
+    // A retry of a failed read with nothing cached goes back to "pending", so
+    // this covers both the first load and a retry in flight.
+    snapshotLoading: haveSession && !data && !isError,
+    retrySnapshot: () => void refetch(),
+  };
+}
+
+// formatClockShort renders an RFC3339 instant as zero-padded HH:MM — the stamp
+// that heads a speaker's run in the transcript — or "" when unparseable.
+export function formatClockShort(iso: string): string {
+  return formatClock(iso).slice(0, 5);
 }
 
 // formatClock renders an RFC3339 instant as zero-padded HH:MM:SS (the design's

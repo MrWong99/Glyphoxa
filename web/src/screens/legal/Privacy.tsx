@@ -14,6 +14,7 @@ import { OPERATOR } from "./operator";
 export function Privacy() {
   return (
     <LegalPage
+      doc="privacy"
       title="Datenschutzerklärung"
       lede="Wie diese Instanz personenbezogene Daten verarbeitet — für Spielleitungen, Spielende am Tisch und Besucher:innen."
     >

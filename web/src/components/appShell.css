@@ -271,6 +271,44 @@
   display: block;
 }
 
+/* ── Topbar search: the palette's visible door ──────────────────────────── */
+/* Reads as a search field — icon, "Search or jump to…", the shortcut on a key
+ * cap — so the palette is discoverable without knowing the chord. */
+.gx-shell .gx-topbar__search {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  height: var(--control-md);
+  min-width: 15rem;
+  padding: 0 var(--spacing-sm) 0 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--duration-base) var(--ease-standard),
+    color var(--duration-base) var(--ease-standard);
+}
+.gx-shell .gx-topbar__search:hover {
+  border-color: var(--border-strong);
+  color: var(--text-default);
+}
+.gx-shell .gx-topbar__search > svg {
+  flex: 0 0 auto;
+}
+.gx-shell .gx-topbar__search-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Topbar breadcrumb: "<Campaign> / <View>" ───────────────────────────── */
 .gx-shell .gx-crumbs {
   min-width: 0;
@@ -357,6 +395,33 @@
   .gx-shell .gx-topbar .gx-campaign-switcher {
     flex-shrink: 100000;
   }
+  /* The search button is down to its icon: a square, like the sidebar toggle.
+   * Its words are clipped, not removed — the accessible name stays "Search or
+   * jump to…" — and the key cap goes (the tooltip names the shortcut). */
+  .gx-shell .gx-topbar__search {
+    justify-content: center;
+    width: var(--control-md);
+    min-width: 0;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+  }
+  .gx-shell .gx-topbar__search:hover {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--arcane) 10%, transparent);
+  }
+  .gx-shell .gx-topbar__search-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .gx-shell .gx-topbar__search-kbd {
+    display: none;
+  }
   .gx-shell .gx-live-pill {
     padding: 6px var(--spacing-sm);
   }
@@ -425,12 +490,25 @@
   }
 }
 
+/* A touch screen: the search button is a 40px target like every other control. */
+@media (pointer: coarse) {
+  .gx-shell .gx-topbar__search {
+    height: var(--target-coarse);
+  }
+}
+@media (pointer: coarse) and (max-width: 1100px) {
+  .gx-shell .gx-topbar__search {
+    width: var(--target-coarse);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gx-shell .gx-live-dot::after {
     animation: none;
   }
   .gx-shell .gx-nav__subitem,
-  .gx-shell .gx-live-pill {
+  .gx-shell .gx-live-pill,
+  .gx-shell .gx-topbar__search {
     transition: none;
   }
 }

@@ -97,6 +97,12 @@ func TestEmbeddedIndexReferencesResolve(t *testing.T) {
 			t.Errorf("embedded index.html references %q, which escapes the embedded dist/ tree", ref)
 			continue
 		}
+		// A link to a page of the app is not a file reference at all: the
+		// pre-render block in web/index.html links /login, which Handler
+		// answers with this very index.html.
+		if isClientRoute(p) {
+			continue
+		}
 
 		info, err := fs.Stat(sub, p)
 		if err != nil {
@@ -121,6 +127,35 @@ func attrValue(m []string) string {
 		}
 	}
 	return ""
+}
+
+// isClientRoute reports whether p (dist-relative, cleaned) names a page of the
+// SPA rather than a file of the bundle: it has no file extension and is not
+// under assets/. Handler serves index.html for exactly such paths, so there is
+// nothing in dist/ for the reference to resolve to. Anything with an extension
+// (/favicon.png, /fonts/x.woff2) and everything under assets/ stays a file
+// reference that must exist — which is the whole point of the test above.
+func isClientRoute(p string) bool {
+	return path.Ext(p) == "" && p != "assets" && !strings.HasPrefix(p, "assets/")
+}
+
+// TestIsClientRoute pins which index.html references the resolve check skips.
+func TestIsClientRoute(t *testing.T) {
+	for p, want := range map[string]bool{
+		"login":                   true,
+		"t/default/campaign":      true,
+		"favicon.png":             false,
+		"robots.txt":              false,
+		"fonts/inter.woff2":       false,
+		"assets/index-abc.js":     false,
+		"assets/chunk":            false,
+		"assets":                  false,
+		"shots/session-live.webp": false,
+	} {
+		if got := isClientRoute(p); got != want {
+			t.Errorf("isClientRoute(%q) = %v, want %v", p, got, want)
+		}
+	}
 }
 
 // isSameOrigin reports whether ref addresses the embedded bundle itself, as

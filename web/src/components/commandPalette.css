@@ -1,11 +1,11 @@
-/* CommandPalette (#591) — the Ctrl+K campaign search overlay. Sits on the
-   gx-confirm z-ladder (overlay 90, panel 91) above every popover (60); reuses
-   the overlay/panel surface vocabulary and the combobox search-row shape. */
+/* CommandPalette — the Ctrl/Cmd+K overlay: navigation layer + campaign search
+   (#591). Sits on the modal pair of the layer ladder (tokens.css), reuses the
+   overlay/panel surface vocabulary and the combobox search-row shape. */
 
 .gx-palette__overlay {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: var(--z-overlay);
   background: rgba(0, 0, 0, 0.6);
 }
 
@@ -14,7 +14,7 @@
   top: 12vh;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 91;
+  z-index: var(--z-modal);
   width: min(620px, calc(100vw - 2 * var(--spacing-lg)));
   background: var(--surface-overlay);
   border: 1px solid var(--border-default);
@@ -26,7 +26,7 @@
 .gx-palette__search {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--spacing-sm);
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -38,6 +38,7 @@
 
 .gx-palette__input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -58,7 +59,7 @@
 
 .gx-palette__hint,
 .gx-palette__empty {
-  padding: 18px 12px;
+  padding: 14px 12px;
   color: var(--text-muted);
   font-size: var(--body-sm);
   text-align: center;
@@ -88,7 +89,7 @@
   padding: 8px 8px 4px;
   color: var(--text-subtle);
   font-size: var(--body-xs);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -105,7 +106,7 @@
 }
 
 .gx-palette__item[data-selected="true"] {
-  background: rgba(144, 89, 255, 0.18);
+  background: color-mix(in srgb, var(--arcane) 18%, transparent);
 }
 
 .gx-palette__item[data-disabled="true"] {
@@ -137,6 +138,7 @@
 }
 
 .gx-palette__item-title {
+  min-width: 0;
   color: var(--text-strong);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -156,12 +158,75 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* A long role subtitle gives way to the name beside it. */
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-subtle);
   font-size: var(--body-xs);
-  flex-shrink: 0;
+  flex-shrink: 1;
 }
 
 .gx-palette__private {
   display: inline-flex;
-  color: var(--color-yellow-40, #ffbd4f);
+  color: var(--gold);
+}
+
+/* The keys the list answers to. */
+.gx-palette__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+  padding: var(--spacing-sm) 14px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-subtle);
+  font-size: var(--body-xs);
+}
+
+.gx-palette__footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+/* A key cap: in the footer above, and on the topbar's search button. */
+.gx-palette-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  font-family: var(--font-base);
+  font-size: var(--body-2xs);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* A phone: the panel sits higher (the keyboard takes the lower half) and uses
+   the page gutter; there are no keys to hint at. */
+@media (max-width: 640px) {
+  .gx-palette {
+    top: var(--spacing-md);
+    width: calc(100vw - 2 * var(--spacing-md));
+  }
+  .gx-palette__list {
+    max-height: min(60dvh, 460px);
+  }
+}
+
+@media (pointer: coarse) {
+  .gx-palette__footer {
+    display: none;
+  }
+  .gx-palette__item {
+    min-height: var(--target-coarse);
+  }
 }

@@ -26,6 +26,21 @@ export const en = {
   "shell.live": "Live",
   "shell.openSession": "Open session",
 
+  // ── Account menu (sidebar footer) ────────────────────────────────────────
+  "shell.accountMenu": "Account: {name}",
+  // The server's role 'operator' is, in the product's own words, the GM.
+  "shell.roleGm": "GM",
+  "shell.opensInNewTab": "(opens in a new tab)",
+  "shell.logOutLiveTitle": "Log out while a session is live?",
+  "shell.logOutLiveDesc":
+    "The voice session keeps running — your NPCs stay in the voice channel. Until you sign in again, you can't stop it or mute an NPC from the console.",
+
+  // ── Connection banner (#695) ─────────────────────────────────────────────
+  "shell.connOffline": "You are offline. Glyphoxa reconnects on its own when your connection is back.",
+  "shell.connUnreachable": "Can't reach Glyphoxa — retrying.",
+  "shell.connStillUnreachable": "Still can't reach Glyphoxa — we keep trying in the background.",
+  "shell.connRetry": "Retry now",
+
   // ── Campaign views added with the shell ──────────────────────────────────
   "shell.ledeOverview": "Everything in this campaign, one step away.",
   "shell.ledeCampaignSettings": "Name, game system, language and highlight recording of this campaign.",
@@ -66,6 +81,18 @@ export const de: Record<keyof typeof en, string> = {
   "shell.breadcrumb": "Du bist hier",
   "shell.live": "Live",
   "shell.openSession": "Spielrunde öffnen",
+
+  "shell.accountMenu": "Konto: {name}",
+  "shell.roleGm": "GM",
+  "shell.opensInNewTab": "(öffnet in neuem Tab)",
+  "shell.logOutLiveTitle": "Abmelden, während eine Session läuft?",
+  "shell.logOutLiveDesc":
+    "Die Session läuft weiter — deine NPCs bleiben im Voice-Channel. Bis du dich wieder anmeldest, kannst du sie von hier aus weder beenden noch einen NPC stummschalten.",
+
+  "shell.connOffline": "Du bist offline. Glyphoxa verbindet sich von selbst wieder, sobald deine Verbindung zurück ist.",
+  "shell.connUnreachable": "Glyphoxa ist nicht erreichbar — neuer Versuch läuft.",
+  "shell.connStillUnreachable": "Glyphoxa ist weiterhin nicht erreichbar — wir versuchen es im Hintergrund weiter.",
+  "shell.connRetry": "Jetzt erneut versuchen",
 
   "shell.ledeOverview": "Alles in dieser Kampagne, einen Schritt entfernt.",
   "shell.ledeCampaignSettings": "Name, Spielsystem, Sprache und Highlight-Aufnahme dieser Kampagne.",

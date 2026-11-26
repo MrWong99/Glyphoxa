@@ -1,0 +1,15 @@
+# Glyphoxa — what a crawler may fetch.
+#
+# Public: the landing page (/), /login and the legal documents (/imprint,
+# /privacy, /terms and their German aliases).
+#
+# Not for indexing: everything behind a session, and the machinery around it.
+#   /t/           the app itself (every screen redirects to /login without a session)
+#   /auth/        the Discord OAuth start and callback
+#   /onboarding/  the name-your-table step after a first sign-in
+#   /api/         Connect RPC, the transcript stream, clips and images
+User-agent: *
+Disallow: /t/
+Disallow: /auth/
+Disallow: /onboarding/
+Disallow: /api/

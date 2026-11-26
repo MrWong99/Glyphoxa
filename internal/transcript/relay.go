@@ -112,11 +112,29 @@ type Line struct {
 	SpeakerID string `json:"speaker_id,omitempty"`
 }
 
+// Typing states (#695): what the indicator MEANS, as a stable code the web
+// console translates. The English Label stays beside it as the fallback for a
+// client that predates the field.
+const (
+	// TypingListening is a live session with no Agent mid-reply.
+	TypingListening = "listening"
+	// TypingSpeaking is an Agent mid-reply; Typing.Who names it.
+	TypingSpeaking = "speaking"
+)
+
 // Typing is the "is speaking" / "listening" indicator the SPA renders as the
 // blinking dots + label. Derived server-side so it is unit-testable (ADR-0019).
+//
+// State and Who are the structured form of Label (#695): the web console
+// renders "Listening to the table" / "{who} is speaking" in the GM's display
+// language from them, and falls back to Label when they are absent. Both are
+// empty on the inactive (idle) value, so its wire bytes are unchanged. Who is
+// the speaking Agent's display name — data, never translated.
 type Typing struct {
 	Active bool   `json:"active"`
 	Label  string `json:"label"`
+	State  string `json:"state,omitempty"`
+	Who    string `json:"who,omitempty"`
 }
 
 // status is the payload of a "status" frame and the status half of a snapshot:
@@ -681,7 +699,7 @@ func (r *Relay) finishSession(sid string) {
 
 // liveTyping is the indicator while a session is live but no Agent is mid-reply.
 func (r *Relay) liveTyping() Typing {
-	return Typing{Active: true, Label: listenLabel}
+	return Typing{Active: true, Label: listenLabel, State: TypingListening}
 }
 
 // emitLine upserts the line into the session's display state (replacing a turn's
@@ -694,7 +712,7 @@ func (r *Relay) emitLine(st *sessionState, sid string, l Line) {
 	r.upsertLine(st, sid, l)
 	switch l.Kind {
 	case KindNPC, KindButler:
-		r.setTyping(st, sid, Typing{Active: true, Label: l.Who + " is speaking…"})
+		r.setTyping(st, sid, Typing{Active: true, Label: l.Who + " is speaking…", State: TypingSpeaking, Who: l.Who})
 	default: // KindPlayer / KindGM — a human line means we are back to listening
 		r.setTyping(st, sid, r.liveTyping())
 	}

@@ -9,6 +9,7 @@ import { OPERATOR } from "./operator";
 export function Terms() {
   return (
     <LegalPage
+      doc="terms"
       title="Nutzungsbedingungen"
       lede="Die Spielregeln für diese Instanz — bitte vor der Anmeldung lesen."
     >

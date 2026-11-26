@@ -386,6 +386,75 @@ func TestTypingAndStatus(t *testing.T) {
 	}
 }
 
+// TestTyping_StructuredState pins the wire the web console localizes from
+// (#695): beside the English label, a status frame names WHAT the indicator
+// means ("listening" / "speaking") and, when an Agent speaks, WHO. The label
+// stays as the fallback for a client that predates the fields, and an idle
+// frame carries neither — so its bytes are unchanged.
+func TestTyping_StructuredState(t *testing.T) {
+	bus, r, fs, id := liveRelay(t)
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hi", TurnID: "t1"})
+	if v := r.View(id); v.Typing.State != TypingListening || v.Typing.Who != "" || v.Typing.Label != listenLabel {
+		t.Fatalf("listening typing=%+v", v.Typing)
+	}
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Aye.", TurnID: "t1"})
+	if v := r.View(id); v.Typing.State != TypingSpeaking || v.Typing.Who != "Bart" || v.Typing.Label != "Bart is speaking…" {
+		t.Fatalf("speaking typing=%+v", v.Typing)
+	}
+
+	// The frames carry the same fields under their wire names.
+	var listening, speaking bool
+	for _, f := range r.Frames(id, 0) {
+		if f.Event != "status" {
+			continue
+		}
+		var s struct {
+			Typing struct {
+				State string `json:"state"`
+				Who   string `json:"who"`
+				Label string `json:"label"`
+			} `json:"typing"`
+		}
+		if err := json.Unmarshal(f.Data, &s); err != nil {
+			t.Fatalf("status frame %s: %v", f.Data, err)
+		}
+		switch s.Typing.State {
+		case "listening":
+			listening = s.Typing.Who == "" && s.Typing.Label == listenLabel
+		case "speaking":
+			speaking = s.Typing.Who == "Bart" && s.Typing.Label == "Bart is speaking…"
+		}
+	}
+	if !listening || !speaking {
+		t.Fatalf("status frames: listening=%v speaking=%v, want both with state+who+label", listening, speaking)
+	}
+
+	// Idle: no state, no who — the terminal frame's bytes are what they were.
+	// The replay half of attach is the frames read above; only Finalize's
+	// frame arrives on the channel.
+	sub, _ := r.attach(id, 0)
+	defer r.detach(sub)
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	// The ring is torn down by Finalize, so the frame is read where a client
+	// reads it: on an attached subscriber, past everything already buffered.
+	select {
+	case f := <-sub.ch:
+		if got, want := string(f.Data), `{"status":"idle","typing":{"active":false,"label":""}}`; f.Event != "status" || got != want {
+			t.Fatalf("terminal frame = %s %s, want status %s", f.Event, got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no terminal frame after Finalize")
+	}
+}
+
 // TestReplayAfterLastEventID checks the ring buffer replays only frames after a
 // cursor, in monotonic seq order — the Last-Event-ID reconnect contract.
 func TestReplayAfterLastEventID(t *testing.T) {
