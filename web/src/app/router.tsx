@@ -9,17 +9,19 @@ import {
 
 import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
+import { useCurrentUser } from "@/app/currentUser";
 import { RouterScreenNav } from "@/app/RouterScreenNav";
 import type { ScreenSearch as NavSearch } from "@/app/screenNav";
 import { DEFAULT_CAMPAIGN_VIEW, isCampaignView } from "@/screens/campaign/views";
 import { useI18n } from "@/i18n";
 import { Login } from "@/screens/login/Login";
 import { CreateTenant } from "@/screens/onboarding/CreateTenant";
+import { Join } from "@/screens/join/Join";
 import { Placeholder } from "@/screens/Placeholder";
 import { RootEntry } from "@/screens/landing/RootEntry";
 import { NavigationGuard, RouteError, RouteNotFound, RoutePending } from "@/app/RouteFallbacks";
 
-// Route-level code splitting: the four app screens and the legal documents
+// Route-level code splitting: the app screens and the legal documents
 // are separate chunks, fetched when first visited. The entry bundle keeps what
 // every visit needs before it knows where it is going — the router, the public
 // landing/login pages and the shell. Each import() is named once here so the
@@ -30,6 +32,10 @@ const screenChunks = {
   session: () => import("@/screens/session/Session"),
   campaigns: () => import("@/screens/campaigns/Campaigns"),
 };
+// The Admin screen is its own chunk too, but NOT part of screenChunks: it
+// exists for a Platform Admin only (ADR-0065), so warming it for every GM
+// would be a download nobody uses.
+const Admin = lazy(() => import("@/screens/admin/Admin").then((m) => ({ default: m.Admin })));
 const Configuration = lazy(() => screenChunks.configuration().then((m) => ({ default: m.Configuration })));
 const Campaign = lazy(() => screenChunks.campaign().then((m) => ({ default: m.Campaign })));
 const Session = lazy(() => screenChunks.session().then((m) => ({ default: m.Session })));
@@ -92,6 +98,30 @@ const onboardingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/onboarding/create-tenant",
   component: CreateTenant,
+});
+
+// /join/$token — the public face of an invitation link (ADR-0065), for both
+// kinds: an access invitation (a Platform Admin lets someone onto the
+// instance) and a campaign invitation (a GM lets someone into one Campaign).
+// A top-level sibling of /login, OUTSIDE the tenant shell and the AuthGate: the
+// visitor has no session yet. Three things here are a Go↔TS contract with the
+// OAuth carve-out, pinned by router.test.tsx:
+//   - the path itself, which the server mints links for and bounces back to;
+//   - ?error=invalid (the link no longer works, or is pinned to a different
+//     Discord account) and ?error=aup_required (the acknowledgment was not
+//     given), which the callback appends when it refuses a join;
+//   - the OAuth start the page links to: /auth/discord/login?join=<token>&aup=1.
+const joinRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/join/$token",
+  validateSearch: (search: Record<string, unknown>): { error?: string } => ({
+    error: typeof search.error === "string" ? search.error : undefined,
+  }),
+  component: function JoinScreen() {
+    const { token } = joinRoute.useParams();
+    const { error } = joinRoute.useSearch();
+    return <Join token={token} refused={error === "invalid"} aupRequired={error === "aup_required"} />;
+  },
 });
 
 // The legal documents (#518): Impressum, Datenschutzerklärung and
@@ -233,11 +263,24 @@ function carried(search: ScreenSearch): NavSearch {
   return {};
 }
 
+// AdminScreen is the /admin screen's gate (ADR-0065). Only a Platform Admin
+// has an Admin screen; for everyone else the URL is one that does not exist —
+// the same not-found page a typo gets, and the screen is never mounted, so no
+// AdminService call is made on their behalf. (The server refuses those calls
+// anyway; this keeps a curious GM from seeing a broken page instead.)
+function AdminScreen() {
+  const { t } = useI18n();
+  const user = useCurrentUser();
+  if (!user?.isPlatformAdmin) return <Placeholder title={t("auth.notFoundTitle")} />;
+  return loaded(<Admin />);
+}
+
 // /t/:tenantSlug/:screen — selects the active screen: Setup (configuration),
-// Session and the Campaigns list. The Campaign screen never renders here: its
-// sub-view is a path segment (ADR-0063), so a bare /campaign visit redirects
-// to a sub-view — the one its search params belong on (a legacy ?node= link,
-// #591, or ?agent=), else a legacy ?view= value, else the Overview.
+// Session, the Campaigns list and — for a Platform Admin — Admin. The Campaign
+// screen never renders here: its sub-view is a path segment (ADR-0063), so a
+// bare /campaign visit redirects to a sub-view — the one its search params
+// belong on (a legacy ?node= link, #591, or ?agent=), else a legacy ?view=
+// value, else the Overview.
 const screenRoute = createRoute({
   getParentRoute: () => tenantRoute,
   path: "$screen",
@@ -268,6 +311,8 @@ const screenRoute = createRoute({
         return loaded(<Session />);
       case "campaigns":
         return loaded(<Campaigns />);
+      case "admin":
+        return <AdminScreen />;
       default:
         return <Placeholder title={t("auth.notFoundTitle")} />;
     }
@@ -347,6 +392,7 @@ export const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
   onboardingRoute,
+  joinRoute,
   imprintRoute,
   impressumRoute,
   privacyRoute,

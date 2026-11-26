@@ -55,8 +55,12 @@ export const SCREEN_SEARCH_KEYS = [
   "agent",
 ] as const satisfies readonly (keyof ScreenSearch)[];
 
-/** The top-level screens under /t/:tenantSlug/. */
-export const SCREENS = ["campaign", "session", "campaigns", "configuration"] as const;
+/**
+ * The top-level screens under /t/:tenantSlug/. `admin` exists only for a
+ * Platform Admin (ADR-0065): app/destinations.ts marks it, and the route
+ * renders the not-found page for everyone else.
+ */
+export const SCREENS = ["campaign", "session", "campaigns", "configuration", "admin"] as const;
 export type ScreenName = (typeof SCREENS)[number];
 
 export type ScreenNav = {

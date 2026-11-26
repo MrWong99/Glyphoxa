@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
+import * as access from "./messages/access";
 import * as auth from "./messages/auth";
 import * as campaign from "./messages/campaign";
 import * as campaigns from "./messages/campaigns";
@@ -45,6 +46,7 @@ export const en = {
   ...palette.en,
   ...session.en,
   ...auth.en,
+  ...access.en,
 } as const;
 
 export type MessageKey = keyof typeof en;

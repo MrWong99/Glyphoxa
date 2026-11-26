@@ -1,0 +1,331 @@
+// Web-managed access (ADR-0065): the Admin screen, the public join page and
+// the Guest Right vocabulary. `en` is the key source of truth; `de` must cover
+// every key (compile-checked via Record<keyof typeof en, string>).
+//
+// Vocabulary (CONTEXT.md): Platform Admin, Access Grant, Invitation (always
+// "invitation link" in copy — never a bare "invite", which is Discord's word
+// for a server invite), Campaign Guest, Guest Right, Workspace. A Tenant is
+// "table" in user-facing copy, as everywhere else in the app.
+
+export const en = {
+  // ── Admin screen ─────────────────────────────────────────────────────────
+  "access.adminLede": "Who may use this instance, and whose tables may spend its API keys.",
+  // The header line: the deployment's Admission Mode in plain words.
+  "access.modeInviteOnly":
+    "This instance is invite-only: only people you grant access, or who open an invitation link, can sign in.",
+  "access.modeOpen":
+    "This instance has open sign-up: anyone with a Discord account can sign in and start their own table. Access Grants and invitation links do not gate sign-in here.",
+  "access.loading": "Loading people and invitation links",
+  "access.loadErrorTitle": "Couldn't load who has access",
+
+  // ── People ───────────────────────────────────────────────────────────────
+  "access.peopleTitle": "People",
+  "access.peopleLede": "Everyone this instance knows — one row per table they run.",
+  "access.peopleEmptyTitle": "Nobody here yet",
+  "access.peopleEmptyDesc": "Add a person below, or create an invitation link.",
+  "access.notSignedInYet": "Has not signed in yet",
+  "access.discordId": "Discord ID {id}",
+  "access.you": "You",
+  "access.statusPlatformAdmin": "Platform Admin",
+  "access.statusGranted": "Access granted",
+  "access.statusSignup": "Signed up",
+  "access.statusGuest": "Campaign guest",
+  "access.statusNone": "No access",
+  "access.suspended": "Suspended",
+  "access.workspace": "Workspace",
+  "access.campaignCount": "{count} campaigns",
+  "access.campaignCountOne": "1 campaign",
+  "access.noWorkspace": "No table yet",
+  "access.guestOf": "Guest in {count} campaigns",
+  "access.guestOfOne": "Guest in 1 campaign",
+  "access.lastSeen": "Last seen",
+  "access.never": "Never",
+  "access.platformKeys": "Platform Keys",
+  // The switch's accessible name: one switch per row, so it names whose it is.
+  "access.platformKeysFor": "Platform Keys for {name}",
+  "access.keysOn": "Uses this instance's API keys",
+  "access.keysOff": "Brings their own keys",
+  "access.keysOpenMode": "With open sign-up, the plan decides who uses the platform's keys.",
+  "access.keysNoWorkspace": "No table and no Access Grant to switch this for.",
+  "access.adminReadOnly":
+    "Platform Admins are set in the server environment (GLYPHOXA_OPERATOR_IDS) and can't be changed here.",
+  "access.grant": "Grant access",
+  "access.revoke": "Revoke access",
+  "access.suspend": "Suspend",
+  "access.restore": "Restore",
+  "access.revokeTitle": "Revoke {name}'s access?",
+  "access.revokeDesc":
+    "They are signed out everywhere and can't sign in again. Their table and its data are kept, and you can grant access again at any time.",
+  "access.suspendTitle": "Suspend {name}?",
+  "access.suspendDesc":
+    "They are refused on their next request and at sign-in until you restore them. Nothing is deleted.",
+  "access.toastGranted": "Access granted to {name}",
+  "access.toastRevoked": "Access revoked for {name}",
+  "access.toastSuspended": "{name} is suspended",
+  "access.toastRestored": "{name} is restored",
+  "access.toastKeysOn": "{name} may now use the platform's API keys",
+  "access.toastKeysOff": "{name} no longer uses the platform's API keys",
+  "access.actionFailed": "That didn't work: {message}",
+
+  // ── Add a person ─────────────────────────────────────────────────────────
+  "access.addTitle": "Add a person",
+  "access.addLede": "Grant access by Discord User ID — it works before the person has ever signed in.",
+  "access.discordUserId": "Discord User ID",
+  "access.discordUserIdHint":
+    "In Discord, turn on Developer Mode (Settings → Advanced), then right-click the person and choose Copy User ID.",
+  "access.discordUserIdDigits": "A Discord User ID is digits only.",
+  "access.discordUserIdLength": "A Discord User ID has 17 to 20 digits.",
+  "access.note": "Note (optional)",
+  "access.noteHint": "Only you see it — who this is, or why you let them in.",
+  "access.mayUseKeys": "May use the platform's API keys",
+  "access.mayUseKeysHint":
+    "Off, they bring their own provider keys. On, their sessions and AI features run on this instance's keys — and on its bill.",
+  "access.couldntGrant": "Couldn't grant access",
+
+  // ── Invitation links ─────────────────────────────────────────────────────
+  "access.linksTitle": "Invitation links",
+  "access.linksLede":
+    "A link lets someone in without you knowing their Discord ID. Whoever opens it and signs in gets a table of their own.",
+  "access.newLink": "New invitation link",
+  "access.linksEmptyTitle": "No invitation links yet",
+  "access.linksEmptyDesc": "Create one to let someone join with a single click.",
+  "access.linkLabel": "Label (optional)",
+  "access.linkLabelHint": "Only you see it — who it is for, or where you posted it.",
+  "access.linkUntitled": "Untitled link",
+  "access.linkMaxUses": "Maximum uses",
+  "access.unlimited": "Unlimited",
+  "access.linkMaxUsesHint": "Leave empty for unlimited.",
+  "access.linkMaxUsesInvalid": "Enter a whole number of 1 or more, or leave it empty.",
+  "access.linkExpiry": "Expires after (days)",
+  "access.neverPlaceholder": "Never",
+  "access.linkExpiryHint": "Leave empty and it never expires. At most 365.",
+  "access.linkExpiryInvalid": "Enter 1 to 365 days, or leave it empty.",
+  "access.linkPin": "Only for this Discord User ID (optional)",
+  "access.linkPinHint": "Anyone else who opens the link is turned away.",
+  "access.createLink": "Create link",
+  "access.couldntCreateLink": "Couldn't create the link",
+  "access.linkCreatedTitle": "Invitation link created",
+  "access.linkCreatedOnce": "Copy it now — you will not be able to see this link again.",
+  "access.linkField": "Invitation link",
+  "access.copyLink": "Copy link",
+  "access.done": "Done",
+  "access.linkUses": "{uses} of {max} uses",
+  "access.linkUsesUnlimited": "{uses} uses · unlimited",
+  "access.linkExpires": "Expires {date}",
+  "access.linkNeverExpires": "Never expires",
+  "access.linkPinned": "Only for Discord ID {id}",
+  "access.linkWithKeys": "Includes Platform Keys",
+  "access.linkActive": "Active",
+  "access.linkExpired": "Expired",
+  "access.linkUsedUp": "Used up",
+  "access.linkRevoked": "Revoked",
+  "access.linkInactive": "No longer works",
+  "access.revokeLink": "Revoke",
+  "access.revokeLinkNamed": "Revoke {label}",
+  "access.revokeLinkTitle": "Revoke this invitation link?",
+  "access.revokeLinkDesc":
+    "The link stops working at once. People who already joined through it keep their access.",
+  "access.toastLinkRevoked": "Invitation link revoked",
+
+  // ── Join page (/join/<token>) ────────────────────────────────────────────
+  "access.joinDocTitle": "Invitation",
+  "access.joinAccessTitle": "{inviter} invited you to Glyphoxa",
+  "access.joinAccessTitleAnon": "You're invited to Glyphoxa",
+  "access.joinAccessGet":
+    "You get a workspace of your own: a table for your campaigns, NPCs and Discord server.",
+  "access.joinCampaignTitle": "{inviter} invited you to {campaign}",
+  "access.joinCampaignTitleAnon": "You're invited to {campaign}",
+  "access.joinCampaignHost": "A campaign at {tenant}.",
+  "access.joinRightsTitle": "As a guest of this campaign you can:",
+  "access.joinNoRights": "Nothing in it is shared with guests yet — the GM can add that later.",
+  "access.joinSignInNote": "You sign in with Discord — use the account you play on.",
+  "access.joinAupRequired": "Please accept the Nutzungsbedingungen below before joining.",
+  "access.joinErrorInvalid":
+    "That didn't work: the link no longer works, or it is for a different Discord account.",
+  "access.joinDeadTitle": "This invitation link no longer works",
+  "access.joinDeadDesc": "It may have expired, been used up or revoked. Ask whoever sent it for a new one.",
+  "access.joinDeadOtherAccount":
+    "It no longer works, or it is for a different Discord account. Ask whoever sent it for a new one.",
+  "access.joinHome": "Go to the start page",
+  "access.joinLoadError": "Couldn't check this invitation link.",
+
+  // ── Guest Rights (lib/guestRights.ts) ────────────────────────────────────
+  // One label and one sentence per right, written without "you" or "they" so
+  // the join page (what a guest gets) and the GM's picker (what to grant) can
+  // both use them.
+  "access.rightWikiRead": "Read the world wiki",
+  "access.rightWikiReadDesc": "The public entries. GM-only entries and private notes stay hidden.",
+  "access.rightWikiSecrets": "See GM-only wiki entries",
+  "access.rightWikiSecretsDesc": "Also the entries and notes marked private.",
+  "access.rightWikiEdit": "Edit the world wiki",
+  "access.rightWikiEditDesc": "Create, change and delete entries, relations, tags and boards.",
+  "access.rightMapsRead": "View maps",
+  "access.rightMapsReadDesc": "The campaign's maps and their pins.",
+  "access.rightMapsEdit": "Edit maps",
+  "access.rightMapsEditDesc": "Add, move and delete pins, and move the party marker.",
+  "access.rightTranscriptsRead": "Read session transcripts",
+  "access.rightTranscriptsReadDesc": "What was said in past sessions, with search across them.",
+  "access.rightHighlightsRead": "See session highlights",
+  "access.rightHighlightsReadDesc": "The table's best moments, with their clips and images.",
+  "access.rightPlanningUse": "Use the planning chat",
+  "access.rightPlanningUseDesc":
+    "Questions to the Butler, in separate threads. Answers are paid from the host table's AI budget.",
+} as const;
+
+export const de: Record<keyof typeof en, string> = {
+  "access.adminLede": "Wer diese Instanz nutzen darf — und wessen Tische ihre API-Schlüssel verbrauchen dürfen.",
+  "access.modeInviteOnly":
+    "Diese Instanz ist nur auf Einladung zugänglich: Anmelden kann sich nur, wem du Zugang gibst oder wer einen Einladungslink öffnet.",
+  "access.modeOpen":
+    "Diese Instanz hat offene Registrierung: Jeder mit einem Discord-Account kann sich anmelden und einen eigenen Tisch eröffnen. Zugänge und Einladungslinks regeln die Anmeldung hier nicht.",
+  "access.loading": "Personen und Einladungslinks werden geladen",
+  "access.loadErrorTitle": "Wer Zugang hat, konnte nicht geladen werden",
+
+  "access.peopleTitle": "Personen",
+  "access.peopleLede": "Alle, die diese Instanz kennt — eine Zeile pro Tisch, den sie leiten.",
+  "access.peopleEmptyTitle": "Noch niemand hier",
+  "access.peopleEmptyDesc": "Füge unten eine Person hinzu oder erstelle einen Einladungslink.",
+  "access.notSignedInYet": "Hat sich noch nicht angemeldet",
+  "access.discordId": "Discord-ID {id}",
+  "access.you": "Du",
+  "access.statusPlatformAdmin": "Plattform-Admin",
+  "access.statusGranted": "Zugang erteilt",
+  "access.statusSignup": "Registriert",
+  "access.statusGuest": "Kampagnengast",
+  "access.statusNone": "Kein Zugang",
+  "access.suspended": "Gesperrt",
+  "access.workspace": "Arbeitsbereich",
+  "access.campaignCount": "{count} Kampagnen",
+  "access.campaignCountOne": "1 Kampagne",
+  "access.noWorkspace": "Noch kein Tisch",
+  "access.guestOf": "Gast in {count} Kampagnen",
+  "access.guestOfOne": "Gast in 1 Kampagne",
+  "access.lastSeen": "Zuletzt gesehen",
+  "access.never": "Nie",
+  "access.platformKeys": "Plattform-Schlüssel",
+  "access.platformKeysFor": "Plattform-Schlüssel für {name}",
+  "access.keysOn": "Nutzt die API-Schlüssel dieser Instanz",
+  "access.keysOff": "Bringt eigene Schlüssel mit",
+  "access.keysOpenMode": "Bei offener Registrierung entscheidet der Tarif, wer die Plattform-Schlüssel nutzt.",
+  "access.keysNoWorkspace": "Kein Tisch und kein Zugang, für den sich das umschalten ließe.",
+  "access.adminReadOnly":
+    "Plattform-Admins werden in der Server-Umgebung festgelegt (GLYPHOXA_OPERATOR_IDS) und lassen sich hier nicht ändern.",
+  "access.grant": "Zugang geben",
+  "access.revoke": "Zugang entziehen",
+  "access.suspend": "Sperren",
+  "access.restore": "Entsperren",
+  "access.revokeTitle": "{name} den Zugang entziehen?",
+  "access.revokeDesc":
+    "Die Person wird überall abgemeldet und kann sich nicht mehr anmelden. Ihr Tisch und seine Daten bleiben erhalten, und du kannst den Zugang jederzeit wieder geben.",
+  "access.suspendTitle": "{name} sperren?",
+  "access.suspendDesc":
+    "Die Person wird bei ihrer nächsten Anfrage und bei der Anmeldung abgewiesen, bis du sie entsperrst. Gelöscht wird nichts.",
+  "access.toastGranted": "{name} hat jetzt Zugang",
+  "access.toastRevoked": "Zugang für {name} entzogen",
+  "access.toastSuspended": "{name} ist gesperrt",
+  "access.toastRestored": "{name} ist entsperrt",
+  "access.toastKeysOn": "{name} darf jetzt die API-Schlüssel der Plattform nutzen",
+  "access.toastKeysOff": "{name} nutzt die API-Schlüssel der Plattform nicht mehr",
+  "access.actionFailed": "Das hat nicht geklappt: {message}",
+
+  "access.addTitle": "Person hinzufügen",
+  "access.addLede":
+    "Gib Zugang per Discord-Benutzer-ID — das geht, bevor sich die Person je angemeldet hat.",
+  "access.discordUserId": "Discord-Benutzer-ID",
+  "access.discordUserIdHint":
+    "Aktiviere in Discord den Entwicklermodus (Einstellungen → Erweitert), klicke dann mit rechts auf die Person und wähle „Benutzer-ID kopieren“.",
+  "access.discordUserIdDigits": "Eine Discord-Benutzer-ID besteht nur aus Ziffern.",
+  "access.discordUserIdLength": "Eine Discord-Benutzer-ID hat 17 bis 20 Ziffern.",
+  "access.note": "Notiz (optional)",
+  "access.noteHint": "Nur du siehst sie — wer das ist oder warum du die Person hereingelassen hast.",
+  "access.mayUseKeys": "Darf die API-Schlüssel der Plattform nutzen",
+  "access.mayUseKeysHint":
+    "Aus: Die Person bringt eigene Anbieter-Schlüssel mit. An: Ihre Sessions und KI-Funktionen laufen über die Schlüssel dieser Instanz — und auf deren Rechnung.",
+  "access.couldntGrant": "Zugang konnte nicht gegeben werden",
+
+  "access.linksTitle": "Einladungslinks",
+  "access.linksLede":
+    "Mit einem Link lässt du jemanden herein, ohne die Discord-ID zu kennen. Wer ihn öffnet und sich anmeldet, bekommt einen eigenen Tisch.",
+  "access.newLink": "Neuer Einladungslink",
+  "access.linksEmptyTitle": "Noch keine Einladungslinks",
+  "access.linksEmptyDesc": "Erstelle einen, damit jemand mit einem Klick beitreten kann.",
+  "access.linkLabel": "Bezeichnung (optional)",
+  "access.linkLabelHint": "Nur du siehst sie — für wen der Link ist oder wo du ihn gepostet hast.",
+  "access.linkUntitled": "Link ohne Bezeichnung",
+  "access.linkMaxUses": "Maximale Nutzungen",
+  "access.unlimited": "Unbegrenzt",
+  "access.linkMaxUsesHint": "Leer lassen für unbegrenzt.",
+  "access.linkMaxUsesInvalid": "Gib eine ganze Zahl ab 1 ein oder lass das Feld leer.",
+  "access.linkExpiry": "Läuft ab nach (Tagen)",
+  "access.neverPlaceholder": "Nie",
+  "access.linkExpiryHint": "Leer lassen, dann läuft er nie ab. Höchstens 365.",
+  "access.linkExpiryInvalid": "Gib 1 bis 365 Tage ein oder lass das Feld leer.",
+  "access.linkPin": "Nur für diese Discord-Benutzer-ID (optional)",
+  "access.linkPinHint": "Alle anderen, die den Link öffnen, werden abgewiesen.",
+  "access.createLink": "Link erstellen",
+  "access.couldntCreateLink": "Der Link konnte nicht erstellt werden",
+  "access.linkCreatedTitle": "Einladungslink erstellt",
+  "access.linkCreatedOnce": "Kopiere ihn jetzt — du kannst diesen Link später nicht mehr sehen.",
+  "access.linkField": "Einladungslink",
+  "access.copyLink": "Link kopieren",
+  "access.done": "Fertig",
+  "access.linkUses": "{uses} von {max} Nutzungen",
+  "access.linkUsesUnlimited": "{uses} Nutzungen · unbegrenzt",
+  "access.linkExpires": "Läuft ab am {date}",
+  "access.linkNeverExpires": "Läuft nie ab",
+  "access.linkPinned": "Nur für Discord-ID {id}",
+  "access.linkWithKeys": "Mit Plattform-Schlüsseln",
+  "access.linkActive": "Aktiv",
+  "access.linkExpired": "Abgelaufen",
+  "access.linkUsedUp": "Aufgebraucht",
+  "access.linkRevoked": "Widerrufen",
+  "access.linkInactive": "Funktioniert nicht mehr",
+  "access.revokeLink": "Widerrufen",
+  "access.revokeLinkNamed": "{label} widerrufen",
+  "access.revokeLinkTitle": "Diesen Einladungslink widerrufen?",
+  "access.revokeLinkDesc":
+    "Der Link funktioniert sofort nicht mehr. Wer schon darüber beigetreten ist, behält den Zugang.",
+  "access.toastLinkRevoked": "Einladungslink widerrufen",
+
+  "access.joinDocTitle": "Einladung",
+  "access.joinAccessTitle": "{inviter} hat dich zu Glyphoxa eingeladen",
+  "access.joinAccessTitleAnon": "Du bist zu Glyphoxa eingeladen",
+  "access.joinAccessGet":
+    "Du bekommst einen eigenen Arbeitsbereich: einen Tisch für deine Kampagnen, NPCs und deinen Discord-Server.",
+  "access.joinCampaignTitle": "{inviter} hat dich zu {campaign} eingeladen",
+  "access.joinCampaignTitleAnon": "Du bist zu {campaign} eingeladen",
+  "access.joinCampaignHost": "Eine Kampagne bei {tenant}.",
+  "access.joinRightsTitle": "Als Gast dieser Kampagne kannst du:",
+  "access.joinNoRights":
+    "Noch ist darin nichts für Gäste freigegeben — der GM kann das später ergänzen.",
+  "access.joinSignInNote": "Du meldest dich mit Discord an — nimm den Account, mit dem du spielst.",
+  "access.joinAupRequired": "Bitte akzeptiere unten die Nutzungsbedingungen, bevor du beitrittst.",
+  "access.joinErrorInvalid":
+    "Das hat nicht geklappt: Der Link funktioniert nicht mehr oder ist für einen anderen Discord-Account.",
+  "access.joinDeadTitle": "Dieser Einladungslink funktioniert nicht mehr",
+  "access.joinDeadDesc":
+    "Er ist vielleicht abgelaufen, aufgebraucht oder widerrufen. Bitte die Person, die ihn geschickt hat, um einen neuen.",
+  "access.joinDeadOtherAccount":
+    "Er funktioniert nicht mehr oder ist für einen anderen Discord-Account. Bitte die Person, die ihn geschickt hat, um einen neuen.",
+  "access.joinHome": "Zur Startseite",
+  "access.joinLoadError": "Dieser Einladungslink konnte nicht geprüft werden.",
+
+  "access.rightWikiRead": "Das Welt-Wiki lesen",
+  "access.rightWikiReadDesc":
+    "Die öffentlichen Einträge. Einträge nur für GM und private Notizen bleiben verborgen.",
+  "access.rightWikiSecrets": "Wiki-Einträge nur für GM sehen",
+  "access.rightWikiSecretsDesc": "Auch die Einträge und Notizen, die als privat markiert sind.",
+  "access.rightWikiEdit": "Das Welt-Wiki bearbeiten",
+  "access.rightWikiEditDesc": "Einträge, Beziehungen, Tags und Boards anlegen, ändern und löschen.",
+  "access.rightMapsRead": "Karten ansehen",
+  "access.rightMapsReadDesc": "Die Karten der Kampagne und ihre Pins.",
+  "access.rightMapsEdit": "Karten bearbeiten",
+  "access.rightMapsEditDesc": "Pins setzen, verschieben und löschen und die Gruppenmarkierung bewegen.",
+  "access.rightTranscriptsRead": "Session-Mitschriften lesen",
+  "access.rightTranscriptsReadDesc": "Was in vergangenen Sessions gesagt wurde, mit Suche darüber.",
+  "access.rightHighlightsRead": "Session-Highlights sehen",
+  "access.rightHighlightsReadDesc": "Die besten Momente des Tisches, mit Clips und Bildern.",
+  "access.rightPlanningUse": "Den Planungs-Chat nutzen",
+  "access.rightPlanningUseDesc":
+    "Fragen an den Butler, in eigenen Threads. Die Antworten gehen auf das KI-Budget des gastgebenden Tisches.",
+};

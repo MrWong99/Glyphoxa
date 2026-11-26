@@ -5,7 +5,6 @@ import { Toaster } from "sonner";
 import { Dices, PanelLeft, Search } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipProvider } from "./ui/Tooltip";
@@ -14,11 +13,12 @@ import { LegalFooter } from "./LegalFooter";
 import { CampaignSwitcher } from "./CampaignSwitcher";
 import { CommandPalette, PaletteShortcut, isApplePlatform, paletteShortcut } from "./CommandPalette";
 import { ConnectionBanner } from "./ConnectionBanner";
+import type { CurrentUser } from "@/app/currentUser";
 import {
   CAMPAIGN_DESTINATIONS,
-  SCREEN_DESTINATIONS,
   campaignDestination,
   screenDestination,
+  screenDestinationsFor,
 } from "@/app/destinations";
 import { useI18n } from "@/i18n";
 import { isAtMost, watchBreakpoint, type Breakpoint } from "@/lib/breakpoints";
@@ -41,8 +41,9 @@ import "./appShell.css";
 // The sidebar is campaign-first (ADR-0063 amendment): a section labelled with
 // the Active Campaign's name lists that campaign's views on EVERY screen — not
 // only while the Campaign screen is open — then Session, and, pinned at the
-// bottom, the two Tenant-wide destinations: Campaigns and Setup. The lists
-// themselves are app/destinations.ts.
+// bottom, the Tenant-wide destinations: Campaigns and Setup — and, for a
+// Platform Admin only, Admin (ADR-0065). The lists themselves are
+// app/destinations.ts.
 
 // The desktop sidebar's hidden/shown choice, kept across reloads. It is a
 // per-browser preference like the display language, and only the DESKTOP
@@ -96,7 +97,7 @@ const PROPOSALS_REFETCH_MS = 60_000;
 // just delay the empty state.
 const proposalsRetry = (count: number, err: unknown) => !isNotFound(err) && count < 3;
 
-export function AppShell(props: { tenantSlug: string; user: User }) {
+export function AppShell(props: { tenantSlug: string; user: CurrentUser }) {
   return (
     // One tooltip provider for the chrome: moving between neighbouring topbar
     // icons shows each tooltip at once after the first.
@@ -106,13 +107,16 @@ export function AppShell(props: { tenantSlug: string; user: User }) {
   );
 }
 
-function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
+function Shell({ tenantSlug, user }: { tenantSlug: string; user: CurrentUser }) {
   const { t } = useI18n();
   // Derived by hand rather than via Link activeProps so the mocked-router unit
   // test can observe it, and because the topbar needs the values anyway.
   const { screen, view } = useParams({ strict: false }) as { screen?: string; view?: string };
   const activeView = screen === "campaign" && isCampaignView(view) ? view : undefined;
-  const activeScreen = screenDestination(screen);
+  // Filtered by who is signed in: a non-admin on /admin gets the not-found
+  // page, and the topbar must not title that page "Admin".
+  const screens = screenDestinationsFor(user);
+  const activeScreen = screenDestination(screen, user);
 
   // The Active Campaign names the sidebar section, the breadcrumb and the
   // browser tab. retry:false like every other observer of this shared cache
@@ -350,7 +354,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
 
             <div className="gx-nav__rule" aria-hidden="true" />
 
-            {SCREEN_DESTINATIONS.filter((d) => d.screen === "session").map((d) => {
+            {screens.filter((d) => d.screen === "session").map((d) => {
               const Icon = d.icon;
               return (
                 <Link
@@ -372,7 +376,7 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
 
           {/* Tenant-wide destinations, pinned under the scrolling list. */}
           <div className="gx-nav__foot">
-            {SCREEN_DESTINATIONS.filter((d) => d.screen !== "session").map((d) => {
+            {screens.filter((d) => d.screen !== "session").map((d) => {
               const Icon = d.icon;
               return (
                 <Link
@@ -503,7 +507,11 @@ function Shell({ tenantSlug, user }: { tenantSlug: string; user: User }) {
           authenticated screen and never renders for an unauthenticated visitor
           (the shell sits inside the AuthGate). Closed it renders nothing and
           fires no RPCs, so screen tests stay clean. */}
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        platformAdmin={user.isPlatformAdmin}
+      />
 
       {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
           in Providers, so the screen unit tests that render without the shell get a

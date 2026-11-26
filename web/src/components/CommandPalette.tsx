@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
-import { CAMPAIGN_DESTINATIONS, SCREEN_DESTINATIONS } from "@/app/destinations";
+import { CAMPAIGN_DESTINATIONS, screenDestinationsFor } from "@/app/destinations";
 import { useScreenNav, type ScreenNav } from "@/app/screenNav";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
 import { useCampaignSwitch } from "@/components/useCampaignSwitch";
@@ -142,6 +142,7 @@ const rosterRetry = (count: number, err: unknown) => !isNotFound(err) && count <
 export function CommandPalette({
   open: openProp,
   onOpenChange,
+  platformAdmin = false,
 }: {
   // Optionally controlled (the AppShell pairs it with a visible topbar search
   // button — a keyboard chord alone is undiscoverable and unreachable on
@@ -149,6 +150,10 @@ export function CommandPalette({
   // tests do.
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  // The signed-in user is a Platform Admin (ADR-0065): "Go to" then offers the
+  // Admin screen. Off by default, so the palette never names a screen the
+  // viewer cannot open.
+  platformAdmin?: boolean;
 }) {
   const { t } = useI18n();
   const [openState, setOpenState] = useState(false);
@@ -233,6 +238,7 @@ export function CommandPalette({
     <>
       {open && (
         <PaletteDialog
+          platformAdmin={platformAdmin}
           onClose={() => closeThen()}
           onSwitchCampaign={(campaign) => closeThen(() => campaignSwitch.switchTo(campaign))}
           onNewCampaign={() => closeThen(startCreate)}
@@ -259,10 +265,12 @@ export function CommandPalette({
 // closed palette runs no query and holds no state — and every open starts on
 // an empty field.
 function PaletteDialog({
+  platformAdmin,
   onClose,
   onSwitchCampaign,
   onNewCampaign,
 }: {
+  platformAdmin: boolean;
   onClose: () => void;
   onSwitchCampaign: (campaign: { id: string; name: string }) => void;
   onNewCampaign: () => void;
@@ -330,7 +338,9 @@ function PaletteDialog({
   //    local, so it follows every keystroke) ────────────────────────────────
   const goToLabel = t("palette.groupGoTo");
   const views = CAMPAIGN_DESTINATIONS.filter((d) => matches(q, goToLabel, t(d.label)));
-  const screens = SCREEN_DESTINATIONS.filter((d) => matches(q, goToLabel, t(d.label)));
+  const screens = screenDestinationsFor({ isPlatformAdmin: platformAdmin }).filter((d) =>
+    matches(q, goToLabel, t(d.label)),
+  );
 
   // The cast is offered once something is typed: with an empty field the list
   // is the map of the app, and a campaign's whole roster would bury it.

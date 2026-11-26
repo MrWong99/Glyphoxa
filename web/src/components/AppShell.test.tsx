@@ -12,6 +12,7 @@ import {
   CampaignService,
   SessionService,
   UserSchema,
+  GetCurrentUserResponseSchema,
   CampaignSchema,
   ListCampaignsResponseSchema,
   GetActiveCampaignResponseSchema,
@@ -21,6 +22,7 @@ import {
   VoiceSessionSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
+import { toCurrentUser, type CurrentUser } from "@/app/currentUser";
 import { makeQueryClient } from "@/lib/queryClient";
 
 // The shell is driven by TanStack Router; mock the bits AppShell + SidebarUser
@@ -55,7 +57,14 @@ vi.mock("@tanstack/react-router", () => ({
 import { ProposalsPanel } from "@/screens/campaign/ProposalsPanel";
 import { AppShell } from "./AppShell";
 
-const user = create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" });
+// The signed-in GM as the AuthGate hands them on; `platformAdmin` is the same
+// person on the deployment's Platform Admin list (ADR-0065).
+const user = toCurrentUser(
+  create(GetCurrentUserResponseSchema, {
+    user: create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" }),
+  }),
+) as CurrentUser;
+const platformAdmin: CurrentUser = { ...user, isPlatformAdmin: true };
 
 const campaign = create(CampaignSchema, {
   id: "c1",
@@ -112,12 +121,12 @@ function shellBackend(opts: { live?: boolean; pending?: number; noCampaign?: boo
   return { transport, state };
 }
 
-function renderShell(opts: Parameters<typeof shellBackend>[0] = {}) {
+function renderShell(opts: Parameters<typeof shellBackend>[0] = {}, as: CurrentUser = user) {
   const h = shellBackend(opts);
   const queryClient = makeQueryClient();
   const view = render(
     <Providers transport={h.transport} queryClient={queryClient}>
-      <AppShell tenantSlug="acme" user={user} />
+      <AppShell tenantSlug="acme" user={as} />
     </Providers>,
   );
   return { ...h, queryClient, container: view.container, unmount: view.unmount };
@@ -682,6 +691,63 @@ describe("AppShell sidebar (ADR-0063 amendment)", () => {
       ["Campaigns", "/t/acme/campaigns"],
       ["Setup", "/t/acme/configuration"],
     ]);
+  });
+
+  // The Admin screen exists for a Platform Admin only (ADR-0065). For everyone
+  // else it is not in the sidebar, not in the palette, and not a page title.
+  it("offers Admin to a Platform Admin, pinned after Setup", async () => {
+    const { container } = renderShell({}, platformAdmin);
+    await settled(container);
+    const foot = screen
+      .getByRole("navigation", { name: "Main navigation" })
+      .querySelector(".gx-nav__foot") as HTMLElement;
+    expect(within(foot).getAllByRole("link").map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+      ["Campaigns", "/t/acme/campaigns"],
+      ["Setup", "/t/acme/configuration"],
+      ["Admin", "/t/acme/admin"],
+    ]);
+  });
+
+  it("has no Admin item for anyone who is not a Platform Admin", async () => {
+    const { container } = renderShell();
+    await settled(container);
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(nav).queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+    expect(nav.querySelector('a[href="/t/acme/admin"]')).toBeNull();
+  });
+
+  it("marks Admin as the current page and titles the tab for a Platform Admin on it", async () => {
+    route.screen = "admin";
+    route.view = undefined;
+    const { container } = renderShell({}, platformAdmin);
+    await settled(container);
+    const nav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(nav).getByRole("link", { name: "Admin" })).toHaveAttribute("aria-current", "page");
+    expect(document.title).toBe("Admin · Glyphoxa");
+  });
+
+  it("does not title the not-found page 'Admin' for a non-admin who typed the URL", async () => {
+    route.screen = "admin";
+    route.view = undefined;
+    const { container } = renderShell();
+    await settled(container);
+    expect(document.title).toBe("Glyphoxa");
+    expect(container.querySelector(".gx-topbar__title")).toHaveTextContent("Glyphoxa");
+  });
+
+  it("offers Admin in the palette to a Platform Admin only", async () => {
+    const admin = renderShell({}, platformAdmin);
+    await settled(admin.container);
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    expect(within(screen.getByTestId("command-palette")).getByRole("option", { name: "Admin" })).toBeInTheDocument();
+    admin.unmount();
+
+    const gm = renderShell();
+    await settled(gm.container);
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    expect(
+      within(screen.getByTestId("command-palette")).queryByRole("option", { name: "Admin" }),
+    ).not.toBeInTheDocument();
   });
 
   it("says so in the section label when no campaign exists yet", async () => {
