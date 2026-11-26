@@ -309,10 +309,9 @@ describe("Campaign host", () => {
       next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
       replace: false,
     });
-    // The wiki opens on that entry.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
+    // The wiki opens on that entry's page (read-first: the editor waits for Edit).
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
   });
 
   it("mounts the campaign's settings as a page of their own", async () => {
