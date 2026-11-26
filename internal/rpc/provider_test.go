@@ -38,6 +38,10 @@ type fakeProviderStore struct {
 	// test can assert a refused save reached neither and what a save carried.
 	chatSaves   []storage.ChatLLMChoice
 	chatDeletes int
+
+	// beforeInsert runs inside InsertKeylessProviderConfig before it looks for
+	// an existing row: a test uses it to land a concurrent key save there.
+	beforeInsert func()
 }
 
 func newFakeProviderStore() *fakeProviderStore {
@@ -205,9 +209,56 @@ func (f *fakeProviderStore) ReleaseDiscordGuild(_ context.Context, _ uuid.UUID, 
 		return storage.DeploymentConfig{}, storage.ErrNotFound
 	}
 	f.dep.GuildID = ""
+	f.dep.GuildName = ""
 	f.dep.VoiceChannelID = ""
 	f.dep.UpdatedAt = f.now()
 	return *f.dep, nil
+}
+
+// SaveDiscordGuildName mirrors the storage write: only onto the linked guild.
+func (f *fakeProviderStore) SaveDiscordGuildName(_ context.Context, _ uuid.UUID, guildID, name string) (bool, error) {
+	if f.dep == nil || f.dep.GuildID == "" || f.dep.GuildID != guildID {
+		return false, nil
+	}
+	f.dep.GuildName = name
+	return true, nil
+}
+
+// InsertKeylessProviderConfig mirrors the insert-only write (#712 item 3): a
+// row that exists is returned untouched. beforeInsert, when set, runs first,
+// standing in for a save that lands between the handler's read and this write.
+func (f *fakeProviderStore) InsertKeylessProviderConfig(_ context.Context, c storage.NewProviderConfig) (storage.ProviderConfig, bool, error) {
+	if f.beforeInsert != nil {
+		f.beforeInsert()
+	}
+	key := string(c.Component) + "|" + c.Provider
+	if row, ok := f.configs[key]; ok {
+		return row, false, nil
+	}
+	row := storage.ProviderConfig{
+		ID: uuid.New(), TenantID: c.TenantID, Component: c.Component, Provider: c.Provider, Model: c.Model,
+		CredentialsCiphertext: []byte{}, CredentialsLast4: storage.KeylessLast4, CreatedAt: f.now(),
+	}
+	row.UpdatedAt = f.now()
+	f.configs[key] = row
+	return row, true, nil
+}
+
+// DeleteTenantLLMConfigs mirrors the storage delete of llm rows by provider.
+func (f *fakeProviderStore) DeleteTenantLLMConfigs(_ context.Context, _ uuid.UUID, providers []string) (int64, error) {
+	var n int64
+	for k, cfg := range f.configs {
+		if cfg.Component != storage.ComponentLLM {
+			continue
+		}
+		for _, p := range providers {
+			if cfg.Provider == p {
+				delete(f.configs, k)
+				n++
+			}
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeProviderStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {

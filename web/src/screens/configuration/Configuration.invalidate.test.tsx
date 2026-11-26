@@ -5,6 +5,7 @@ import { create } from "@bufbuild/protobuf";
 import { useQuery } from "@connectrpc/connect-query";
 
 import {
+  AuthService,
   CampaignService,
   ProviderService,
   SessionService,
@@ -27,6 +28,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Configuration } from "./Configuration";
+import { currentUser, usageSummary } from "./testRows";
 
 // W8: saving a key changes what the vendor-backed reads return — provider
 // health, the model catalog, the voice catalog, the guild's voice channels —
@@ -82,7 +84,9 @@ function backend() {
           campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
         }),
     });
+    service(AuthService, { getCurrentUser: currentUser });
     service(ProviderService, {
+      getUsageSummary: usageSummary,
       listProviderConfigs: () =>
         create(ListProviderConfigsResponseSchema, {
           credentials: [
@@ -131,7 +135,7 @@ describe("Configuration saves refresh the reads a key changes (W8)", () => {
     await waitFor(() => expect(calls).toMatchObject({ health: 1, models: 2, voices: 1 }));
 
     fireEvent.change(input, { target: { value: "test-groq-secret-eeee" } });
-    const row = input.closest(".gx-provider-row") as HTMLElement;
+    const row = input.closest(".gx-provider-card") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(calls).toMatchObject({ health: 2, models: 4, voices: 2 }));
@@ -141,11 +145,13 @@ describe("Configuration saves refresh the reads a key changes (W8)", () => {
 
   it("re-reads the guild's voice channels after a Discord save", async () => {
     const { calls } = mount();
+    // The own-bot token is folded away: only a table running its own bot needs it.
+    fireEvent.click(await screen.findByRole("button", { name: /use your own discord bot/i }));
     const token = await screen.findByLabelText(/bot token/i);
     await waitFor(() => expect(calls.channels).toBe(1));
 
     fireEvent.change(token, { target: { value: "test-discord-token-abcd" } });
-    const row = token.closest(".gx-provider-row") as HTMLElement;
+    const row = token.closest(".gx-provider-card") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(calls.channels).toBe(2));

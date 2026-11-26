@@ -117,12 +117,155 @@ export function deriveNextSteps(inputs: ReadinessInputs): NextStep[] {
   ];
 }
 
+/** A step of either checklist: done, not done, or not known yet. */
+type Tristate = { done: boolean | undefined };
+
 /** The steps known to be still open. */
-export function unmetSteps(steps: readonly NextStep[]): NextStep[] {
+export function unmetSteps<S extends Tristate>(steps: readonly S[]): S[] {
   return steps.filter((s) => s.done === false);
 }
 
 /** True only when every step is KNOWN to be done. */
-export function isReady(steps: readonly NextStep[]): boolean {
+export function isReady(steps: readonly Tristate[]): boolean {
   return steps.every((s) => s.done === true);
+}
+
+// ---- Setup checklist ---------------------------------------------------------
+//
+// What the TABLE needs before its first Voice Session, in the order Setup asks
+// for it. Same rules as the campaign steps above: an input that has not
+// answered makes its step unknown, never a to-do and never done.
+
+export type SetupStepKey = "campaign" | "discord" | "voice" | "aiModel";
+export type SetupOptionalKey = "images" | "spendingLimits";
+
+/** One credential slot as ListProviderConfigs reports it. */
+type SlotView = {
+  component: string;
+  provider: string;
+  /** A key of the table's own is stored. */
+  showMasked: boolean;
+  /** The deployment provides the slot for this table (its plan's keys). */
+  providedByPlatform: boolean;
+  /** The voice LLM slot the table's sessions run on. */
+  inEffect: boolean;
+};
+
+export type SetupInputs = {
+  /**
+   * Whether the table has a campaign: true / false once
+   * CampaignService.GetActiveCampaign answered (NotFound is false), undefined
+   * while it has not, or when it failed for another reason.
+   */
+  hasCampaign?: boolean;
+  /** ProviderService.ListProviderConfigs. */
+  providers?: {
+    guildId: string;
+    /** The table's standing Discord client: "failed" is a rejected own bot token (#489). */
+    integrationState?: string;
+    credentials: readonly SlotView[];
+  };
+  /** ProviderService.GetSpendCaps (only the optional item reads it). */
+  spendCaps?: { caps?: { softUsd?: number; hardUsd?: number } };
+};
+
+export type SetupStep<K extends string = SetupStepKey> = {
+  key: K;
+  /** true: done. false: still to do. undefined: its read has not answered. */
+  done: boolean | undefined;
+  label: MessageKey;
+  hint: MessageKey;
+  /** The DOM id of the Setup section where the step is done. */
+  anchor: string;
+};
+
+/** The DOM ids of the Setup sections the checklist links to. */
+export const SETUP_ANCHORS = {
+  campaign: "setup-campaign",
+  discord: "setup-discord",
+  voice: "setup-voice",
+  aiModel: "setup-ai-model",
+  images: "setup-images",
+  spendingLimits: "setup-spending-limits",
+  /** The plan and usage card (the ready banner points there when sessions are paused). */
+  plan: "setup-plan",
+  /** The key list's stand-in while its read is out or failed: a step link lands there. */
+  configStatus: "setup-config-status",
+} as const;
+
+/** A slot runs: the table saved a key, or its plan's keys cover it. */
+const slotRuns = (slot: SlotView | undefined) => Boolean(slot && (slot.showMasked || slot.providedByPlatform));
+
+/**
+ * deriveSetupSteps returns the four required steps, in order: a campaign, a
+ * linked Discord server, voice & speech, and an AI model.
+ */
+export function deriveSetupSteps(inputs: SetupInputs): SetupStep[] {
+  const { hasCampaign, providers } = inputs;
+  const creds = providers?.credentials;
+  const slot = (component: string, provider?: string) =>
+    creds?.find((c) => c.component === component && (provider === undefined || c.provider === provider));
+
+  // The AI model a session would run: the voice LLM slot in effect. A
+  // deployment default with no slot of its own (Gemini) has no row to report
+  // on; it is the operator's configuration, so it counts as running.
+  const inEffect = creds?.find((c) => c.component === "llm" && c.inEffect);
+  const aiModel = creds === undefined ? undefined : inEffect === undefined ? true : slotRuns(inEffect);
+  // A linked server whose bot connection failed cannot carry a session: the
+  // step is open again, and its hint names the cause.
+  const discordFailed = providers?.integrationState === "failed";
+
+  return [
+    {
+      key: "campaign",
+      done: hasCampaign,
+      label: "config.stepCampaign",
+      hint: "config.stepCampaignHint",
+      anchor: SETUP_ANCHORS.campaign,
+    },
+    {
+      key: "discord",
+      done: providers && providers.guildId !== "" && !discordFailed,
+      label: "config.stepDiscord",
+      hint: discordFailed ? "config.stepDiscordFailedHint" : "config.stepDiscordHint",
+      anchor: SETUP_ANCHORS.discord,
+    },
+    {
+      key: "voice",
+      done: creds && slotRuns(slot("tts")),
+      label: "config.stepVoice",
+      hint: "config.stepVoiceHint",
+      anchor: SETUP_ANCHORS.voice,
+    },
+    {
+      key: "aiModel",
+      done: aiModel,
+      label: "config.stepAiModel",
+      hint: "config.stepAiModelHint",
+      anchor: SETUP_ANCHORS.aiModel,
+    },
+  ];
+}
+
+/** deriveOptionalSetupItems returns what Setup offers beyond the four steps. */
+export function deriveOptionalSetupItems(inputs: SetupInputs): SetupStep<SetupOptionalKey>[] {
+  const { providers, spendCaps } = inputs;
+  const image = providers?.credentials.find((c) => c.component === "image");
+  const caps = spendCaps?.caps;
+  return [
+    {
+      key: "images",
+      done: providers && slotRuns(image),
+      label: "config.optionalImages",
+      hint: "config.optionalImagesHint",
+      anchor: SETUP_ANCHORS.images,
+    },
+    {
+      key: "spendingLimits",
+      done: spendCaps && (caps?.softUsd !== undefined || caps?.hardUsd !== undefined),
+      label: "config.optionalSpendingLimits",
+      hint: "config.optionalSpendingLimitsHint",
+      anchor: SETUP_ANCHORS.spendingLimits,
+    },
+  ];
 }

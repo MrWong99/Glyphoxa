@@ -972,7 +972,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
 	// The #504 guild-admin proof is out of scope here: stub it to pass, give the
 	// check-token ladder an env token, and put a saver identity in the context.
-	providerSrv.checkGuildAdmin = func(context.Context, string, string, string) error { return nil }
+	providerSrv.checkGuildAdmin = func(context.Context, string, string, string) (string, error) { return "", nil }
 	providerSrv.voiceChannelInGuild = func(context.Context, string, string, string) (bool, error) { return true, nil }
 	providerSrv.SetEnvBotToken("env-bot-token")
 

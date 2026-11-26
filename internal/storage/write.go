@@ -274,6 +274,85 @@ func (s *Store) DeleteChatLLMConfig(ctx context.Context, tenantID uuid.UUID) err
 	return nil
 }
 
+// InsertKeylessProviderConfig stores a keyless Provider Config — the "ride the
+// Platform Key" choice ([KeylessLast4]) a Tenant makes by activating a slot it
+// never saved a key for (#702) — ONLY when the Tenant has no row for that
+// (component, provider) yet. It never overwrites: a row that appeared after
+// the caller decided to activate (a key saved concurrently, #712 item 3) is
+// returned as it is, with inserted false, instead of being replaced by an
+// empty credential. The model is written only on insert.
+func (s *Store) InsertKeylessProviderConfig(ctx context.Context, c NewProviderConfig) (ProviderConfig, bool, error) {
+	var (
+		out      ProviderConfig
+		inserted bool
+	)
+	err := s.InTx(ctx, func(tx *Store) error {
+		row := tx.db.QueryRow(ctx,
+			`INSERT INTO provider_config
+			   (tenant_id, component, provider, model, credentials_ciphertext, credentials_last4)
+			 VALUES ($1, $2, $3, $4, ''::bytea, $5)
+			 ON CONFLICT (tenant_id, component, provider) DO NOTHING
+			 RETURNING `+providerConfigColumns,
+			c.TenantID, c.Component, c.Provider, c.Model, KeylessLast4)
+		pc, err := scanProviderConfig(row)
+		switch {
+		case err == nil:
+			out, inserted = pc, true
+			return nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("storage: insert keyless provider_config (%s/%s): %w", c.Component, c.Provider, err)
+		}
+		// The row exists: read it back unchanged.
+		pc, err = scanProviderConfig(tx.db.QueryRow(ctx,
+			`SELECT `+providerConfigColumns+` FROM provider_config
+			  WHERE tenant_id = $1 AND component = $2 AND provider = $3`,
+			c.TenantID, c.Component, c.Provider))
+		if err != nil {
+			return fmt.Errorf("storage: read existing provider_config (%s/%s): %w", c.Component, c.Provider, err)
+		}
+		out = pc
+		return nil
+	})
+	if err != nil {
+		return ProviderConfig{}, false, err
+	}
+	return out, inserted, nil
+}
+
+// DeleteTenantLLMConfigs removes the Tenant's voice LLM Provider Configs
+// (component 'llm') for the given providers — a saved key or a keyless
+// platform choice alike — and reports how many rows went (ADR-0004 amendment
+// 2026-11-26). With the Tenant's newest remaining LLM row, or the deployment
+// default when none remains, its sessions then run on what is left. No other
+// Component is touched; an Agent bound to a removed row is unbound by the
+// foreign key (ON DELETE SET NULL). Idempotent: nothing to delete is 0, nil.
+func (s *Store) DeleteTenantLLMConfigs(ctx context.Context, tenantID uuid.UUID, providers []string) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM provider_config
+		  WHERE tenant_id = $1 AND component = $2 AND provider = ANY($3)`,
+		tenantID, ComponentLLM, providers)
+	if err != nil {
+		return 0, fmt.Errorf("storage: delete llm provider_config for tenant %s: %w", tenantID, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SaveDiscordGuildName stores the display name of the Tenant's linked Discord
+// server (migration 00061), read by the guild-admin proof at link time. It
+// writes only while guildID is still the linked server, so a name read for a
+// server that was released or replaced in between is dropped (false, nil).
+func (s *Store) SaveDiscordGuildName(ctx context.Context, tenantID uuid.UUID, guildID, name string) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE deployment_config
+		    SET guild_name = NULLIF($3, '')
+		  WHERE tenant_id = $1 AND guild_id = $2 AND guild_id <> ''`,
+		tenantID, guildID, name)
+	if err != nil {
+		return false, fmt.Errorf("storage: save discord guild name for tenant %s: %w", tenantID, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // NewAgent is the input to CreateAgent. Voice is the opaque JSONB blob the voice
 // domain serializes its tts.Voice into; storage keeps it vendor-neutral.
 // SpeakerColor is NOT an input — it is server-assigned on Character insert.

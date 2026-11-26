@@ -36,11 +36,18 @@ describe("AddBotLink", () => {
     expect(link.getAttribute("rel")).toContain("noopener");
   });
 
-  it("states adding the bot is a separate, prerequisite step", () => {
+  it("states adding the bot is a prerequisite for voice", () => {
     render(<AddBotLink applicationId="123" />);
-    // Copy must distinguish this from saving the Server ID and mark it a prerequisite.
-    expect(screen.getByText(/separate step from saving the server id/i)).toBeInTheDocument();
+    // It is step 1 of the Discord card: the bot must be a member before voice can join.
     expect(screen.getByText(/before a voice session can join/i)).toBeInTheDocument();
+  });
+
+  it("is secondary by default and primary as step 1", () => {
+    const { unmount } = render(<AddBotLink applicationId="123" />);
+    expect(screen.getByRole("link", { name: /add glyphoxa to your server/i })).toHaveClass("gx-btn--secondary");
+    unmount();
+    render(<AddBotLink applicationId="123" variant="primary" />);
+    expect(screen.getByRole("link", { name: /add glyphoxa to your server/i })).toHaveClass("gx-btn--primary");
   });
 
   it("disables the action with a note when no application id is configured", () => {

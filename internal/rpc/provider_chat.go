@@ -147,9 +147,10 @@ func (s *ProviderServer) platformKeyPresent(provider string) bool {
 	return ok && s.lookupEnv(env) != ""
 }
 
-// DeleteProviderConfig removes a stored choice. Only slot "chat" exists in v1:
-// it removes the Tenant's Planning chat model choice, and a chat-only key
-// stored with it, returning the chat to "same as voice". Idempotent.
+// DeleteProviderConfig removes a stored choice. Slot "chat" removes the
+// Tenant's Planning chat model choice, and a chat-only key stored with it,
+// returning the chat to "same as voice"; the voice LLM slots are removed by
+// deleteVoiceLLM (provider.go, ADR-0004 amendment 2026-11-26). Idempotent.
 func (s *ProviderServer) DeleteProviderConfig(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteProviderConfigRequest],
@@ -158,9 +159,13 @@ func (s *ProviderServer) DeleteProviderConfig(
 	if err != nil {
 		return nil, err
 	}
+	if providers, ok := voiceLLMDeleteSlot(req.Msg.GetSlot()); ok {
+		return s.deleteVoiceLLM(ctx, tenantID, providers)
+	}
 	if req.Msg.GetSlot() != chatSlot {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("slot %q cannot be deleted (only %q can)", req.Msg.GetSlot(), chatSlot))
+			fmt.Errorf("slot %q cannot be deleted (only %q, %q, %q or %q can)", req.Msg.GetSlot(),
+				chatSlot, "groq", "anthropic", voiceLLMSlot))
 	}
 	if err := s.store.DeleteChatLLMConfig(ctx, tenantID); err != nil {
 		return nil, internalErr(s.log, "DeleteProviderConfig: delete chat choice failed", err)

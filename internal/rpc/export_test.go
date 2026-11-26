@@ -33,7 +33,9 @@ func (d *DeploymentSharer) SetVoiceListSeamForTest(
 // drive SaveDiscordSettings without dialing Discord, mirroring the resolveInvite
 // seam pattern.
 func (s *ProviderServer) SetGuildProofForTest(fn func(ctx context.Context, token, guildID, userID string) error) {
-	s.checkGuildAdmin = fn
+	s.checkGuildAdmin = func(ctx context.Context, token, guildID, userID string) (string, error) {
+		return "", fn(ctx, token, guildID, userID)
+	}
 }
 
 // SetEnvLookupForTest overrides the deployment env read behind

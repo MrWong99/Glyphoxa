@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
+import { toast } from "sonner";
 
 import {
+  AuthService,
   CampaignService,
   ProviderService,
   VoiceService,
@@ -18,11 +20,17 @@ import {
   ListModelsResponseSchema,
   GetSpendCapsResponseSchema,
   EffectiveLlmSchema,
+  DeleteProviderConfigResponseSchema,
+  GetUsageSummaryResponseSchema,
+  type DeleteProviderConfigRequest,
   type SaveProviderConfigRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Configuration } from "./Configuration";
+import { currentUser, keyRow } from "./testRows";
+
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 // The voice-LLM choice on the Configuration screen (#702): two LLM slots (Groq,
 // Anthropic), one of them in effect — the tenant's own row or the platform
@@ -49,6 +57,13 @@ function backend(opts: {
   // imageSaved gives the Gemini image slot a saved key.
   imageSaved?: boolean;
   saves?: SaveProviderConfigRequest[];
+  // deletes captures every DeleteProviderConfig request; chatModelReset is
+  // what the server answers about the planning chat.
+  deletes?: DeleteProviderConfigRequest[];
+  chatModelReset?: boolean;
+  // usesPlatformKeys is GetUsageSummary's answer: whether the plan has a
+  // platform default to go back to (default yes, the platformDefault above).
+  usesPlatformKeys?: boolean;
 }) {
   const slots: Record<"groq" | "anthropic", Slot> = {
     groq: { ...opts.slots?.groq },
@@ -90,7 +105,10 @@ function backend(opts: {
         }),
       listModels: (req) => create(ListModelsResponseSchema, { models: MODELS[req.provider] ?? [] }),
     });
+    service(AuthService, { getCurrentUser: currentUser });
     service(ProviderService, {
+      getUsageSummary: () =>
+        create(GetUsageSummaryResponseSchema, { usesPlatformKeys: opts.usesPlatformKeys ?? true }),
       listProviderConfigs: () =>
         create(ListProviderConfigsResponseSchema, {
           credentials: [
@@ -118,6 +136,18 @@ function backend(opts: {
         return create(SaveProviderConfigResponseSchema, { credential: cred(provider) });
       },
       getSpendCaps: () => create(GetSpendCapsResponseSchema, {}),
+      // Mirrors the server (ADR-0004 amendment 2026-11-26): the named voice
+      // slots' rows go; the newest remaining row, else the default, is in effect.
+      deleteProviderConfig: (req) => {
+        opts.deletes?.push(req);
+        const gone = req.slot === "voice_llm" ? (["groq", "anthropic"] as const) : [req.slot as "groq" | "anthropic"];
+        for (const p of gone) slots[p] = {};
+        if (newest && (gone as readonly string[]).includes(newest)) {
+          const other = newest === "groq" ? "anthropic" : "groq";
+          newest = slots[other].row ? other : undefined;
+        }
+        return create(DeleteProviderConfigResponseSchema, { chatModelReset: Boolean(opts.chatModelReset) });
+      },
     });
   });
 }
@@ -130,8 +160,11 @@ function renderScreen(transport: ReturnType<typeof backend>) {
   );
 }
 
+// A key row by its slot's name ("Groq key" → the Groq row). Found by name, not
+// by the key field: a slot the plan provides shows no field until the GM asks
+// for one ("Use my own key").
 async function row(keyLabel: string) {
-  return (await screen.findByLabelText(keyLabel)).closest(".gx-provider-row") as HTMLElement;
+  return keyRow(keyLabel.replace(/ key$/, ""));
 }
 
 describe("Configuration voice-LLM choice (#702)", () => {
@@ -171,9 +204,9 @@ describe("Configuration voice-LLM choice (#702)", () => {
     expect(inUse).toHaveTextContent(/your choice/i);
     // The health badge sits on the Anthropic row; the Groq row, which no
     // session calls, claims neither "Working" nor trouble — just "Saved".
-    const anthropic = (await screen.findByLabelText("Anthropic saved")).closest(".gx-provider-row") as HTMLElement;
+    const anthropic = (await screen.findByLabelText("Anthropic saved")).closest(".gx-provider-card") as HTMLElement;
     expect(await within(anthropic).findByText(/^working$/i)).toBeInTheDocument();
-    const groq = screen.getByLabelText("Groq saved").closest(".gx-provider-row") as HTMLElement;
+    const groq = screen.getByLabelText("Groq saved").closest(".gx-provider-card") as HTMLElement;
     expect(within(groq).getByText(/^saved$/i)).toBeInTheDocument();
     expect(within(groq).queryByText(/^working$/i)).not.toBeInTheDocument();
   });
@@ -226,7 +259,7 @@ describe("Configuration voice-LLM choice (#702)", () => {
         saves,
       }),
     );
-    const groq = (await screen.findByLabelText("Groq saved")).closest(".gx-provider-row") as HTMLElement;
+    const groq = (await screen.findByLabelText("Groq saved")).closest(".gx-provider-card") as HTMLElement;
     fireEvent.click(within(groq).getByRole("button", { name: /use for voice/i }));
     await waitFor(() => expect(saves).toHaveLength(1));
     expect(saves[0]).toMatchObject({ provider: "groq", secret: "", model: "openai/gpt-oss-20b", activate: true });
@@ -262,7 +295,7 @@ describe("Configuration voice-LLM choice (#702)", () => {
         ],
       }),
     );
-    const image = (await screen.findByLabelText("Gemini saved")).closest(".gx-provider-row") as HTMLElement;
+    const image = (await screen.findByLabelText("Gemini saved")).closest(".gx-provider-card") as HTMLElement;
     expect(await within(image).findByText(/having trouble/i)).toBeInTheDocument();
     expect(within(image).queryByText(/^working$/i)).not.toBeInTheDocument();
   });
@@ -277,9 +310,9 @@ describe("Configuration voice-LLM choice (#702)", () => {
         health: [{ provider: "groq", component: "llm", status: HealthStatus.DEGRADED }],
       }),
     );
-    const anthropic = (await screen.findByLabelText("Anthropic saved")).closest(".gx-provider-row") as HTMLElement;
+    const anthropic = (await screen.findByLabelText("Anthropic saved")).closest(".gx-provider-card") as HTMLElement;
     expect(await within(anthropic).findByText(/having trouble/i)).toBeInTheDocument();
-    const groq = screen.getByLabelText("Groq saved").closest(".gx-provider-row") as HTMLElement;
+    const groq = screen.getByLabelText("Groq saved").closest(".gx-provider-card") as HTMLElement;
     expect(within(groq).queryByText(/having trouble/i)).not.toBeInTheDocument();
   });
 
@@ -291,7 +324,7 @@ describe("Configuration voice-LLM choice (#702)", () => {
     await screen.findByTestId("llm-in-use");
     expect(within(anthropic).getByText(/saving a key makes Anthropic your voice model/i)).toBeInTheDocument();
     // The slot in use carries no such note.
-    const groq = (await screen.findByLabelText("Groq saved")).closest(".gx-provider-row") as HTMLElement;
+    const groq = (await screen.findByLabelText("Groq saved")).closest(".gx-provider-card") as HTMLElement;
     expect(within(groq).queryByText(/your voice model/i)).not.toBeInTheDocument();
   });
 
@@ -307,5 +340,73 @@ describe("Configuration voice-LLM choice (#702)", () => {
     fireEvent.click(within(anthropic).getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(saves).toHaveLength(1));
     expect(saves[0].model).toBe("");
+  });
+
+  it("removes a voice key behind a confirmation and follows what the server runs next", async () => {
+    const deletes: DeleteProviderConfigRequest[] = [];
+    renderScreen(
+      backend({
+        slots: { anthropic: { last4: "4242", model: "claude-haiku-4-5", row: true }, groq: { platform: true } },
+        newest: "anthropic",
+        deletes,
+        chatModelReset: true,
+      }),
+    );
+    const anthropic = await row("Anthropic key");
+    fireEvent.click(within(anthropic).getByRole("button", { name: "Remove key" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Remove your Anthropic key?");
+    expect(deletes).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove key" }));
+    await waitFor(() => expect(deletes).toEqual([expect.objectContaining({ slot: "anthropic" })]));
+    // effective_llm follows the server: back on the platform default.
+    await waitFor(() => expect(screen.getByTestId("llm-in-use")).toHaveTextContent(/Groq .*platform default/i));
+    expect(toast.success).toHaveBeenCalledWith("Anthropic key removed", {
+      description: expect.stringMatching(/planning chat moved to its default model/i),
+    });
+  });
+
+  it("goes back to the platform default from the voice section, after confirming", async () => {
+    const deletes: DeleteProviderConfigRequest[] = [];
+    renderScreen(
+      backend({
+        slots: { groq: { last4: "1111", row: true }, anthropic: { last4: "4242", row: true } },
+        newest: "anthropic",
+        deletes,
+      }),
+    );
+    expect(await screen.findByTestId("llm-in-use")).toHaveTextContent(/your choice/i);
+    fireEvent.click(screen.getByRole("button", { name: "Back to platform default" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Back to platform default" }));
+
+    await waitFor(() => expect(deletes).toEqual([expect.objectContaining({ slot: "voice_llm" })]));
+    await waitFor(() => expect(screen.getByTestId("llm-in-use")).toHaveTextContent(/platform default/i));
+    // Nothing left to go back from.
+    expect(screen.queryByRole("button", { name: "Back to platform default" })).not.toBeInTheDocument();
+  });
+
+  it("offers no way back on a plan without platform keys: it would leave no AI model", async () => {
+    renderScreen(
+      backend({
+        slots: { groq: { last4: "1111", row: true }, anthropic: { last4: "4242", row: true } },
+        newest: "anthropic",
+        usesPlatformKeys: false,
+      }),
+    );
+    expect(await screen.findByTestId("llm-in-use")).toHaveTextContent(/your choice/i);
+    // Wait for the plan read to answer, then the button is gone; the rows keep Remove key.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Back to platform default" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByRole("button", { name: "Remove key" }).length).toBeGreaterThan(0);
+  });
+
+  it("offers no way back while the table already runs the platform default", async () => {
+    renderScreen(backend({ slots: { groq: { platform: true } } }));
+    await screen.findByTestId("llm-in-use");
+    expect(screen.queryByRole("button", { name: "Back to platform default" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove key" })).not.toBeInTheDocument();
   });
 });

@@ -18,7 +18,7 @@ import { parseDiscordLink } from "@/lib/discordLink";
 //     Guild ID via onFill, and shows the resolved guild name as confirmation.
 // The voice channel is no longer picked here: sessions choose their channel on
 // the Session screen (where the Default Voice Channel is also set), so this
-// field only ever fills the guild. onFill MUST be the Configuration screen's
+// field only ever fills the guild. onFill MUST be the Discord card's
 // dirty-tracking edit path — a raw setState would let a config refetch clobber
 // the fill. A failed resolve leaves the field and any previously-resolved
 // confirmation untouched.
@@ -43,16 +43,25 @@ const RESOLVE_DEBOUNCE_MS = 400;
 
 export function DiscordLinkAutofill({
   onFill,
+  onClear,
 }: {
-  onFill: (guildId: string) => void;
+  /** The server the pasted link names; the name only when an invite resolved it. */
+  onFill: (guildId: string, guildName?: string) => void;
+  /**
+   * The box no longer names a known server: it was cleared, holds no link,
+   * or holds an invite still being resolved. The card's Link button must not
+   * keep offering the server an earlier paste named.
+   */
+  onClear?: () => void;
 }) {
   const { t } = useI18n();
   const [link, setLink] = useState("");
   const [linkError, setLinkError] = useState<ReactNode>(null);
   // The resolved-guild confirmation is held in local state, not read off the
-  // mutation's `data`: a later failed resolve must leave the previous
-  // confirmation standing (ADR-0047), and react-query clears `data` on the next
-  // mutate. onSuccess is the only writer.
+  // mutation's `data` (react-query clears `data` on the next mutate).
+  // onSuccess is the only writer; any newer paste clears it, because the Link
+  // button beside it now waits for that paste (#695: linking is explicit, so
+  // the confirmation must name what Link would link, or nothing).
   const [resolvedGuild, setResolvedGuild] = useState<string | null>(null);
 
   // currentCode is the invite code the input parses to RIGHT NOW — null when it
@@ -71,7 +80,7 @@ export function DiscordLinkAutofill({
   const resolve = useMutation(ProviderService.method.resolveGuildInvite, {
     onSuccess: (res, variables) => {
       if (variables.inviteCode !== currentCode.current) return; // superseded
-      onFill(res.guildId);
+      onFill(res.guildId, res.guildName);
       setResolvedGuild(res.guildName);
       setLinkError(null);
     },
@@ -91,12 +100,15 @@ export function DiscordLinkAutofill({
       setLinkError(null);
       // The link the confirmation described is gone from the box.
       setResolvedGuild(null);
+      onClear?.();
       return;
     }
     const parsed = parseDiscordLink(value);
     if (!parsed) {
       currentCode.current = null;
       setLinkError(t("config.linkUnreadable"));
+      setResolvedGuild(null);
+      onClear?.();
       return;
     }
     if (parsed.kind === "channel") {
@@ -116,6 +128,8 @@ export function DiscordLinkAutofill({
     const code = parsed.code;
     currentCode.current = code;
     setLinkError(null);
+    setResolvedGuild(null);
+    onClear?.();
     debounceTimer.current = setTimeout(
       () => resolve.mutate({ inviteCode: code }),
       RESOLVE_DEBOUNCE_MS,
@@ -139,7 +153,7 @@ export function DiscordLinkAutofill({
       {resolvedGuild && (
         <p className="gx-discord__resolved" data-testid="resolved-guild">
           <Check size={13} aria-hidden="true" />{" "}
-          {t("config.serverIdFilledFrom", { guild: resolvedGuild })}
+          {t("config.inviteFound", { guild: resolvedGuild })}
         </p>
       )}
     </div>

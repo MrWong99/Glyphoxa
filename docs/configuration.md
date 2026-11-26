@@ -304,6 +304,40 @@ the host's libopus. `/etc/glyphoxa/env` is required (no `-`
 prefix on `EnvironmentFile`): a missing file fails the unit up front rather
 than crash-looping the binary on absent secrets.
 
+## The Setup screen (what a GM sees)
+
+Once logged in, the **Setup** screen is where a table finishes its own
+configuration. It opens with a checklist of the four things a first Voice
+Session needs, in order: a campaign, a linked Discord server, voice & speech
+(ElevenLabs), and an AI model. Each item ticks itself from the same reads the
+rest of the page uses; when all four are done the screen says so and offers
+"Go to Session". Images (Gemini) and spending limits are listed as optional.
+
+- **Plan and usage.** The card under the checklist names the table's plan.
+  In `open` Admission Mode, on a plan with `included_usage_usd`, it shows the
+  month-to-date estimate against the allowance and the reset date (the first
+  of the next UTC month), turns amber above 80 % and names the two ways on
+  when the allowance is used up: wait for the reset, or ask the operator to
+  move the table to the bring-your-own-keys plan. A saved own key does not lift
+  the allowance (ADR-0055). In `allowlist` mode no allowance is enforced and
+  none is shown; a table on its own keys reads "billed by the providers".
+- **Discord.** Step 1 adds Glyphoxa to the server (the bot-authorization link
+  built from `DISCORD_OAUTH_CLIENT_ID`), step 2 links it: paste an invite or
+  channel link and press **Link {server}**. Linking runs the guild-admin proof
+  (the GM needs Manage Server on that server, ADR-0058) and stores the server's
+  name with the link (`deployment_config.guild_name`), so Setup names the
+  server afterwards. A table running its own bot pastes its token under
+  "Use your own Discord bot".
+- **Keys.** Each service row says what the service does and links to where a
+  key is created. A slot the deployment provides for the table reads
+  "Included with your plan" until the GM chooses to paste an own key. An AI
+  model key can be removed again ("Remove key"), and "Back to platform
+  default" removes every voice LLM key at once (ADR-0004 amendment
+  2026-11-26); the Planning chat is re-checked so it never lands an unpriced
+  model on the Platform Key.
+- **Your table.** The table can be renamed here. Deleting a table is not
+  self-service: the screen links to the operator (the Impressum contact).
+
 ## Session highlights (rollover tape)
 
 Highlights are GM-curated clips cut from a 120-second rolling audio buffer of

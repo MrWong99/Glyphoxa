@@ -591,7 +591,9 @@ func TestProviderDelete_NonChatSlotRejected(t *testing.T) {
 	store.configs["llm|groq"] = storage.ProviderConfig{Component: storage.ComponentLLM, Provider: "groq", CredentialsLast4: "9876"}
 	client, _ := newProviderClient(t, store, testCipher(t))
 
-	for _, slot := range []string{"", "groq", "anthropic", "llm", "elevenlabs", "discord"} {
+	// "groq", "anthropic" and "voice_llm" are deletable voice LLM slots since
+	// the ADR-0004 amendment of 2026-11-26 (provider_usage_test.go).
+	for _, slot := range []string{"", "llm", "elevenlabs", "gemini", "discord"} {
 		if err := deleteChat(client, slot); connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("slot %q: err = %v, want InvalidArgument", slot, err)
 		}

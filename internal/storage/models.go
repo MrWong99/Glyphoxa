@@ -146,9 +146,12 @@ type DeploymentConfig struct {
 	DiscordBotTokenCiphertext []byte
 	DiscordBotTokenLast4      string
 	GuildID                   string
-	VoiceChannelID            string
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
+	// GuildName is the linked server's display name as read when it was
+	// linked (migration 00061); "" when unknown or no server is linked.
+	GuildName      string
+	VoiceChannelID string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // VoiceSessionStatus is a Voice Session's lifecycle state (#72). A session is
