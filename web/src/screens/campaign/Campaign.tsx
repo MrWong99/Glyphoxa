@@ -18,6 +18,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 import { MapsPanel } from "./MapsPanel";
 import { OverviewPanel } from "./OverviewPanel";
 import { PlanningPanel } from "./PlanningPanel";
+import { stopExchangesOutside } from "./planningStream";
 import { PlayersPanel } from "./PlayersPanel";
 import { ProposalsPanel } from "./ProposalsPanel";
 import { DEFAULT_CAMPAIGN_VIEW, type CampaignView } from "./views";
@@ -74,6 +75,13 @@ export function Campaign({ view = DEFAULT_CAMPAIGN_VIEW }: { view?: CampaignView
   // observer mounts first decides how the fetch retries, and this one does.
   const { data } = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
   const epoch = useCampaignEpoch(data?.campaign?.id);
+
+  // A planning-chat reply keeps streaming while the GM looks at other views
+  // (planningStream.ts) — but not into a campaign they have switched away from.
+  const activeCampaignId = data?.campaign?.id;
+  useEffect(() => {
+    if (activeCampaignId) stopExchangesOutside(activeCampaignId);
+  }, [activeCampaignId]);
 
   // A selection held in the URL (?node=, ?agent=, ?map=, ?thread=) names a row
   // of the PREVIOUS campaign once the Active Campaign has changed: drop it with

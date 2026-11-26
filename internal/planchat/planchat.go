@@ -103,6 +103,15 @@ var ErrAllowanceExhausted = billing.ErrAllowanceExhausted
 // clears it.
 var ErrUnpricedOnPlatformKey = errors.New("planchat: the chat model has no price on record and cannot run on the platform key")
 
+// ErrStopped is returned when the client went away mid-exchange — the GM
+// pressed Stop, or the tab closed. Whatever had already streamed is persisted
+// as the assistant turn and returned in the [Result] (ADR-0062 amendment
+// 2026-11-26); nothing failed, so the RPC layer does not log it as a fault.
+var ErrStopped = errors.New("planchat: the exchange was stopped by the client")
+
+// persistTimeout bounds the detached writes that outlive a cancelled exchange.
+const persistTimeout = 10 * time.Second
+
 // Store is the narrow storage surface the engine needs; *storage.Store
 // satisfies it.
 type Store interface {
@@ -299,10 +308,18 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 
 	// Persist the user message BEFORE the provider call: a crash mid-exchange
 	// keeps the GM's words (ADR-0062's crash-safe posture). A failed exchange
-	// leaves it in the thread — honest history, and the retry is a fresh turn.
-	userMsg, err := e.store.AppendPlanningMessage(ctx, campaign.ID, threadID, storage.PlanningRoleUser, text)
-	if err != nil {
-		return Result{}, fmt.Errorf("planchat: persist user message: %w", err)
+	// leaves it in the thread as a dangling turn (no reply after it); sending
+	// the same text again is the GM's "Try again", which reuses that row
+	// instead of appending a duplicate (ADR-0062 amendment 2026-11-26).
+	var userMsg storage.PlanningMessage
+	if last, ok := danglingTurn(history, text); ok {
+		userMsg = last
+		history = history[:len(history)-1] // buildMessages appends it again
+	} else {
+		userMsg, err = e.store.AppendPlanningMessage(ctx, campaign.ID, threadID, storage.PlanningRoleUser, text)
+		if err != nil {
+			return Result{}, fmt.Errorf("planchat: persist user message: %w", err)
+		}
 	}
 	if thread.Title == "" {
 		if renamed, err := e.store.RenamePlanningThread(ctx, campaign.ID, threadID, autoTitle(text)); err == nil {
@@ -341,7 +358,20 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 	runCtx, cancel := context.WithTimeout(runCtx, exchangeTimeout)
 	defer cancel()
 
-	answer, runErr := loop.RunStream(runCtx, buildMessages(butler, history, text), ev.Text)
+	// shown is the text that actually reached the client — what the GM saw if
+	// they press Stop. sinkErr is set once a send fails: the client is gone.
+	var shown strings.Builder
+	var sinkErr error
+	onText := func(delta string) error {
+		if err := ev.Text(delta); err != nil {
+			sinkErr = err
+			return err
+		}
+		shown.WriteString(delta)
+		return nil
+	}
+
+	answer, runErr := loop.RunStream(runCtx, buildMessages(butler, history, text), onText)
 
 	// Flush + attribute on BOTH paths: usage may have accrued before a failure,
 	// and losing it silently is the one thing the ledger may not do. Close
@@ -361,7 +391,27 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		"ok", runErr == nil,
 	)
 
+	// The reply rows are written on a ctx the client's cancel does not reach:
+	// a Stop (or a disconnect right after the last delta) must not lose what
+	// was already paid for and shown.
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
+	defer persistCancel()
+
 	if runErr != nil {
+		// Client gone (Stop, closed tab): keep the partial reply the GM saw. A
+		// provider failure or the exchange timeout keeps nothing — the user turn
+		// stays dangling, so "Try again" re-runs it cleanly.
+		if sinkErr != nil || ctx.Err() != nil {
+			partial := strings.TrimSpace(shown.String())
+			if partial == "" {
+				return Result{UserMessage: userMsg, Thread: thread}, fmt.Errorf("%w: %w", ErrStopped, runErr)
+			}
+			asstMsg, err := e.store.AppendPlanningMessage(persistCtx, campaign.ID, threadID, storage.PlanningRoleAssistant, partial)
+			if err != nil {
+				return Result{}, fmt.Errorf("planchat: persist stopped reply: %w", err)
+			}
+			return Result{UserMessage: userMsg, AssistantMessage: asstMsg, Thread: thread}, fmt.Errorf("%w: %w", ErrStopped, runErr)
+		}
 		return Result{}, fmt.Errorf("planchat: exchange: %w", runErr)
 	}
 	answer = strings.TrimSpace(answer)
@@ -369,11 +419,25 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		return Result{}, fmt.Errorf("planchat: exchange: %w", errEmptyAnswer)
 	}
 
-	asstMsg, err := e.store.AppendPlanningMessage(ctx, campaign.ID, threadID, storage.PlanningRoleAssistant, answer)
+	asstMsg, err := e.store.AppendPlanningMessage(persistCtx, campaign.ID, threadID, storage.PlanningRoleAssistant, answer)
 	if err != nil {
 		return Result{}, fmt.Errorf("planchat: persist assistant message: %w", err)
 	}
 	return Result{UserMessage: userMsg, AssistantMessage: asstMsg, Thread: thread}, nil
+}
+
+// danglingTurn reports whether history ends in a user turn identical to text
+// that never got a reply — a failed or reply-less exchange the GM is retrying.
+// text is already trimmed; the stored row was trimmed by the same path.
+func danglingTurn(history []storage.PlanningMessage, text string) (storage.PlanningMessage, bool) {
+	if len(history) == 0 {
+		return storage.PlanningMessage{}, false
+	}
+	last := history[len(history)-1]
+	if last.Role != storage.PlanningRoleUser || last.Content != text {
+		return storage.PlanningMessage{}, false
+	}
+	return last, true
 }
 
 // errEmptyAnswer marks a model that returned only whitespace — surfaced as a

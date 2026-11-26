@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { InlineMarkdown, Markdown, stripMarkdown } from "./Markdown";
 
@@ -261,6 +261,137 @@ describe("Markdown (block)", () => {
     const quote = render(<Markdown text={table + "> caveat: a | b differs"} />).container;
     expect(quote.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(quote.querySelector("blockquote")?.textContent).toBe("caveat: a | b differs");
+  });
+});
+
+describe("Markdown lists", () => {
+  it("keeps a loose numbered list with blank lines and indented sub-bullets as one list", () => {
+    const text = [
+      "1. **The smuggler's offer**",
+      "",
+      "   Maren wants the party to move a crate past the watch.",
+      "",
+      "   - she pays in silver",
+      "   - the crate ticks",
+      "",
+      "2. **The missing keeper**",
+      "",
+      "3. **A storm rolls in**",
+    ].join("\n");
+    const { container } = render(<Markdown text={text} />);
+    const lists = container.querySelectorAll(".gx-md > ol");
+    expect(lists).toHaveLength(1);
+    const items = lists[0].querySelectorAll(":scope > li");
+    expect(items).toHaveLength(3);
+    // The continuation paragraph and the sub-bullets stay inside item one.
+    expect(items[0].textContent).toContain("Maren wants the party");
+    expect(items[0].querySelectorAll(":scope > ul > li")).toHaveLength(2);
+    expect(items[0].querySelector("strong")?.textContent).toBe("The smuggler's offer");
+    expect(lists[0].getAttribute("start")).toBeNull();
+  });
+
+  it("nests three levels deep", () => {
+    const { container } = render(<Markdown text={"- act one\n  - the docks\n    - the crate\n- act two"} />);
+    expect(container.querySelector("ul ul ul li")?.textContent).toBe("the crate");
+    expect(container.querySelectorAll(".gx-md > ul > li")).toHaveLength(2);
+  });
+
+  it("keeps numbered sub-items under their item, whatever their number", () => {
+    const { container } = render(<Markdown text={"1. Prep\n   2. maps\n   3. voices\n2. Play"} />);
+    const top = container.querySelectorAll(".gx-md > ol > li");
+    expect(top).toHaveLength(2);
+    expect(top[0].querySelectorAll("ol li")).toHaveLength(2);
+    expect(top[0].querySelector("ol")?.getAttribute("start")).toBe("2");
+  });
+
+  it("does not merge a bullet list and a numbered list separated by a blank line", () => {
+    const { container } = render(<Markdown text={"- a\n- b\n\n1. one"} />);
+    expect(container.querySelectorAll(".gx-md > ul > li")).toHaveLength(2);
+    expect(container.querySelectorAll(".gx-md > ol > li")).toHaveLength(1);
+  });
+
+  it("ends the list at an unindented paragraph after a blank line", () => {
+    const { container } = render(<Markdown text={"- a\n- b\n\nThat is all."} />);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.querySelector(".gx-md > p")?.textContent).toBe("That is all.");
+  });
+
+  it("renders task items as non-interactive checkboxes", () => {
+    const { container } = render(<Markdown text={"- [ ] buy rope\n- [x] hire a guide\n- plain item"} />);
+    const boxes = [...container.querySelectorAll<HTMLInputElement>("input[type=checkbox]")];
+    expect(boxes).toHaveLength(2);
+    expect(boxes.map((b) => b.checked)).toEqual([false, true]);
+    for (const b of boxes) expect(b).toBeDisabled();
+    const items = [...container.querySelectorAll("li")].map((li) => li.textContent);
+    expect(items).toEqual(["buy rope", "hire a guide", "plain item"]);
+    expect(container.querySelectorAll("li.gx-md__task")).toHaveLength(2);
+    // Each box is named by its item, for a screen reader.
+    expect(screen.getByRole("checkbox", { name: "buy rope" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "hire a guide" })).toBeChecked();
+  });
+
+  it("keeps a loose task item's box on its first line", () => {
+    const { container } = render(<Markdown text={"- [ ] ask Maren\n\n  She keeps the ledger.\n\n- [x] pay the guard"} />);
+    const first = container.querySelector("li.gx-md__task")!;
+    const head = first.querySelector("p")!;
+    expect(head.querySelector("input[type=checkbox]")).not.toBeNull();
+    expect(head).toHaveTextContent("ask Maren");
+    expect(screen.getByRole("checkbox", { name: "ask Maren" })).toBeDisabled();
+  });
+
+  it("keeps a fenced block inside its item", () => {
+    const { container } = render(<Markdown text={"1. Run this:\n\n   ```\n   roll 1d20\n   ```\n2. Then this"} />);
+    const items = container.querySelectorAll(".gx-md > ol > li");
+    expect(items).toHaveLength(2);
+    expect(items[0].querySelector("pre")?.textContent).toBe("roll 1d20");
+  });
+
+  it("renders half-arrived streaming input without losing or inventing text", () => {
+    // Each prefix is a moment in a streaming reply: it must render as what has
+    // arrived so far, never throw and never drop characters.
+    const full = "1. **Hook one**\n\n   The keeper lies.\n\n   - [ ] ask Maren\n2. Hook two";
+    for (let end = 1; end <= full.length; end++) {
+      const prefix = full.slice(0, end);
+      const { container, unmount } = render(<Markdown text={prefix} />);
+      const visible = (container.textContent ?? "").replace(/\s+/g, "");
+      // Everything typed so far shows up, minus the markup characters.
+      const expected = prefix.replace(/\*\*(.+?)\*\*/g, "$1").replace(/^\s*(\d+\.|-)\s/gm, "").replace(/\[ \]\s/g, "");
+      for (const word of expected.split(/\s+/).filter((w) => /^[A-Za-z]{3,}$/.test(w))) {
+        expect(visible, `prefix ${JSON.stringify(prefix)}`).toContain(word);
+      }
+      unmount();
+    }
+    const done = render(<Markdown text={full} />).container;
+    expect(done.querySelectorAll(".gx-md > ol > li")).toHaveLength(2);
+    expect(done.querySelector("input[type=checkbox]")).not.toBeNull();
+  });
+
+  it("keeps a blank tail mid-stream from ending the list early", () => {
+    const { container, rerender } = render(<Markdown text={"1. one\n\n"} />);
+    expect(container.querySelectorAll("ol > li")).toHaveLength(1);
+    rerender(<Markdown text={"1. one\n\n2. two"} />);
+    expect(container.querySelectorAll("ol")).toHaveLength(1);
+    expect(container.querySelectorAll("ol > li")).toHaveLength(2);
+  });
+
+  it("flattens nested list content for previews", () => {
+    expect(stripMarkdown("1. one\n\n   more\n   - deep\n2. two")).toBe("one more deep two");
+    expect(stripMarkdown("- [x] done")).toBe("done");
+  });
+});
+
+describe("Markdown copyable code", () => {
+  it("offers a copy button on each code block only when copyable", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const plain = render(<Markdown text={"```\nroll 1d20\n```"} />).container;
+    expect(plain.querySelector("button")).toBeNull();
+
+    render(<Markdown copyable text={"```\nroll 1d20\n```"} />);
+    const button = screen.getByRole("button", { name: "Copy code" });
+    fireEvent.click(button);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("roll 1d20"));
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 });
 

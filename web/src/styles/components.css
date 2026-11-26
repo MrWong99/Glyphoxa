@@ -1477,18 +1477,31 @@ button.gx-select__item:focus-visible {
   text-wrap: pretty;
 }
 /* Model-chosen heading levels scale visually only (no real hN — see the
- * component); levels 3+ share one size so deep outlines stay calm. */
+ * component). Four steps, each clearly apart from body text: 1 and 2 are
+ * section titles with room above them, 3 is a bold run-in, 4 an overline. */
 .gx-md__heading {
-  margin: var(--spacing-sm) 0 var(--spacing-xs);
+  margin: var(--spacing-md) 0 var(--spacing-xs);
   font-weight: var(--weight-semibold);
   color: var(--text-strong);
   line-height: var(--body-line-tight);
+  text-wrap: balance;
 }
 .gx-md__heading[data-level="1"] {
-  font-size: 1.15em;
+  font-family: var(--font-display);
+  font-size: 1.35em;
 }
 .gx-md__heading[data-level="2"] {
-  font-size: 1.08em;
+  font-family: var(--font-display);
+  font-size: 1.18em;
+}
+.gx-md__heading[data-level="3"] {
+  font-size: 1.05em;
+}
+.gx-md__heading[data-level="4"] {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
 }
 .gx-md__list {
   margin: 0 0 var(--spacing-sm);
@@ -1499,6 +1512,72 @@ button.gx-select__item:focus-visible {
 }
 .gx-md__list .gx-md__list {
   margin: 2px 0 0;
+}
+/* Inside a loose list's item the paragraphs keep a smaller rhythm, so an item
+ * reads as one unit and the gap between items stays the larger one. */
+.gx-md__list > li > .gx-md__p {
+  margin-bottom: var(--spacing-xs);
+}
+.gx-md__list > li > :last-child {
+  margin-bottom: 0;
+}
+.gx-md__list > li::marker {
+  color: var(--text-muted);
+}
+/* GFM task items: the checkbox stands in for the bullet. */
+.gx-md__list > .gx-md__task {
+  list-style: none;
+  margin-left: -1.4em;
+}
+.gx-md__check {
+  margin: 0 var(--spacing-xs) 0 0;
+  vertical-align: -0.1em;
+  accent-color: var(--arcane);
+  /* Disabled is the semantics (not tickable), not a dimmed look. */
+  opacity: 1;
+}
+/* A copyable code block: the button sits in the block's top-right corner. */
+.gx-md__codeblock {
+  position: relative;
+  margin: 0 0 var(--spacing-sm);
+}
+.gx-md__codeblock > .gx-md__pre {
+  margin: 0;
+  padding-right: calc(var(--spacing-sm) + 32px);
+}
+.gx-md__copy {
+  position: absolute;
+  top: var(--spacing-xs);
+  right: var(--spacing-xs);
+}
+
+/* CopyButton with a visible label (components/ui/CopyButton.tsx): a quiet
+ * text action under a message — muted until hovered or focused. */
+.gx-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px var(--spacing-xs);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--body-xs);
+  cursor: pointer;
+}
+.gx-copy:hover {
+  color: var(--text-default);
+  background: var(--surface-card-hover);
+}
+.gx-copy[data-copied="true"] {
+  color: var(--status-success);
+}
+@media (pointer: coarse) {
+  .gx-copy {
+    min-height: 40px;
+  }
 }
 .gx-md__code {
   font-family: var(--font-mono);
