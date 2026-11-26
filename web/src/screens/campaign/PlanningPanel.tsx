@@ -1,39 +1,84 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useQuery, useMutation, useTransport } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { createClient, Code, ConnectError } from "@connectrpc/connect";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { toast } from "sonner";
-import { Check, MessageSquarePlus, Pencil, SendHorizontal, Trash2, X } from "lucide-react";
+import {
+  ArrowDown,
+  BookOpen,
+  CalendarClock,
+  Check,
+  History,
+  Lightbulb,
+  ListChecks,
+  MessageSquarePlus,
+  MessagesSquare,
+  MoreHorizontal,
+  NotebookPen,
+  Pencil,
+  Search,
+  SendHorizontal,
+  Square,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 
 import { ChatService, ChatLlmKeySource, ProviderService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { PlanningMessage, PlanningThread } from "@gen/glyphoxa/management/v1/management_pb";
+import { useScreenNav } from "@/app/screenNav";
 import { invalidateMethodQueries } from "@/lib/queryClient";
+import { errorMessage, isNotFound } from "@/lib/connectError";
 import { useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { CopyButton } from "@/components/ui/CopyButton";
+import { Dialog } from "@/components/ui/Dialog";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { IconButton } from "@/components/ui/IconButton";
 import { Markdown } from "@/components/ui/Markdown";
+import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { CHAT_MODEL_ANCHOR } from "@/screens/configuration/chatModelAnchor";
 import { llmProviderLabel } from "@/screens/configuration/llmProviders";
 
 import "./planning.css";
-import { errorMessage, isAllowanceExhausted } from "@/lib/connectError";
+import { loadDraft, saveDraft, messageLength, MESSAGE_COUNTER_FROM, MESSAGE_MAX } from "./planningDrafts";
+import {
+  dismissNotice,
+  exchangeKey,
+  exchangeView,
+  forgetExchange,
+  markDraftReturned,
+  settleExchange,
+  startExchange,
+  stopExchange,
+  stopExchangesOutside,
+  streamingExchange,
+  usePlanningStreams,
+  discardThread,
+  type Exchange,
+  type ExchangeErrorKind,
+  type ToolChip,
+} from "./planningStream";
 
 // The Planning panel (#592, ADR-0062) backs the Campaign screen's "Planning"
-// view: the Butler as a GM-only prep chat over the ChatService RPCs. Threads
-// are persisted per-Campaign (list/create/rename/delete are ordinary unary
-// calls through connect-query); one exchange streams over the server-streaming
-// PlanningExchange RPC, hand-rolled with a Connect client because connect-query
-// hooks model finite reads, not a token stream.
+// view: the Butler as a GM-only prep chat over the ChatService RPCs.
 //
-// The IN-FLIGHT exchange is ephemeral UI state (pending user bubble, streamed
-// reply, tool chips) held in local component state; the done frame carries the
-// PERSISTED rows, at which point the thread + list queries are invalidated and
-// the local stream state clears — the cache is the only durable source.
-
-// MESSAGE_MAX mirrors the server-side bound on one exchange's user message.
-const MESSAGE_MAX = 4000;
+//   - Threads are persisted per Campaign; list/create/rename/delete are
+//     ordinary unary calls through connect-query. The open thread lives in the
+//     URL (?thread=) through useScreenNav, so Back steps through conversations.
+//   - "New conversation" writes nothing: it opens an empty composer with
+//     starter questions, and the thread is created by the first message.
+//   - One exchange streams over the server-streaming PlanningExchange RPC. It
+//     lives in planningStream.ts, outside this component, so switching to the
+//     World wiki and back keeps the reply streaming (ADR-0062 amendment
+//     2026-11-26). Stop ends it; the server keeps what had streamed.
+//   - The composer's text is a draft per campaign and thread
+//     (planningDrafts.ts), and it stays editable while the Butler replies —
+//     only sending waits.
 
 // TITLE_MAX mirrors maxThreadTitleRunes (internal/rpc/chat.go) — the input
 // stops where the server would reject.
@@ -55,10 +100,6 @@ function stamp(ts: Timestamp | undefined, lang: Lang): string | null {
   }
 }
 
-// ToolChip is one executed tool call reported by the stream — name + outcome
-// only, the arguments stay server-side (ADR-0062).
-type ToolChip = { toolName: string; isError: boolean };
-
 // The planning belt's wire names (internal/planchat/tools.go) rendered as
 // friendly labels — "search_transcripts" is internal vocabulary, not GM copy.
 // A tool this map doesn't know (a belt addition that outruns the web tier)
@@ -68,6 +109,7 @@ const TOOL_LABEL_KEYS: Record<string, MessageKey> = {
   find_node: "chat.toolFindNode",
   appearances_of: "chat.toolAppearancesOf",
   propose_knowledge: "chat.toolProposeKnowledge",
+  recap: "chat.toolRecap",
 };
 
 function toolLabel(t: TFunc, toolName: string): string {
@@ -76,77 +118,151 @@ function toolLabel(t: TFunc, toolName: string): string {
 }
 
 // setupChatModelHref is the Setup screen's Planning chat model card, for the
-// footer's "Change" link. The panel is router-free (it renders in tests and
-// sub-views without a router context), so this is a plain link built from the
-// tenant prefix of the current URL — every app route lives under /t/<slug>/ —
-// rather than a router navigation. It costs a page load; a navigation seam for
-// router-free screens can replace it without touching the copy.
+// footer's "Change" link: a real link (it can open in a new tab), built from
+// the tenant prefix of the current URL — every app route lives under
+// /t/<slug>/. The screen-nav seam has no anchors.
 function setupChatModelHref(): string {
   const tenantPrefix = /^\/t\/[^/]+/.exec(window.location.pathname)?.[0] ?? "";
   return `${tenantPrefix}/configuration#${CHAT_MODEL_ANCHOR}`;
 }
 
-// StreamState is the whole in-flight exchange. errorKey null = still streaming;
-// set = the stream failed and the localized notice renders in-chat until the GM
-// dismisses it.
-type StreamState = {
-  threadId: string;
-  userMessage: string;
-  reply: string;
-  tools: ToolChip[];
-  errorKey: MessageKey | null;
+// ── Starters ────────────────────────────────────────────────────────────────
+
+// One per tool on the planning belt. A prefill starter ends in a blank the GM
+// fills: it goes into the composer instead of being sent.
+type Starter = { label: MessageKey; tool: MessageKey; icon: ReactNode; prefill?: MessageKey };
+
+const STARTERS: Starter[] = [
+  { label: "chat.starterRecap", tool: "chat.starterRecapTool", icon: <History size={16} /> },
+  { label: "chat.starterLooseEnds", tool: "chat.starterLooseEndsTool", icon: <ListChecks size={16} /> },
+  { label: "chat.starterKnow", tool: "chat.starterKnowTool", icon: <BookOpen size={16} />, prefill: "chat.starterKnowPrefill" },
+  {
+    label: "chat.starterLastSeen",
+    tool: "chat.starterLastSeenTool",
+    icon: <CalendarClock size={16} />,
+    prefill: "chat.starterLastSeenPrefill",
+  },
+  { label: "chat.starterHooks", tool: "chat.starterHooksTool", icon: <Lightbulb size={16} /> },
+  { label: "chat.starterNote", tool: "chat.starterNoteTool", icon: <NotebookPen size={16} />, prefill: "chat.starterNotePrefill" },
+];
+
+// ── Thread groups ───────────────────────────────────────────────────────────
+
+type GroupKey = "today" | "week" | "earlier";
+const GROUP_LABEL: Record<GroupKey, MessageKey> = {
+  today: "chat.groupToday",
+  week: "chat.groupWeek",
+  earlier: "chat.groupEarlier",
 };
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// groupThreads buckets the list (already newest first) by last activity in the
+// GM's local time: today, within the last seven days, earlier.
+export function groupThreads(threads: PlanningThread[], now: Date): { key: GroupKey; threads: PlanningThread[] }[] {
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const weekAgo = startOfToday - 6 * DAY_MS;
+  const buckets: Record<GroupKey, PlanningThread[]> = { today: [], week: [], earlier: [] };
+  for (const th of threads) {
+    const at = th.updatedAt ? timestampDate(th.updatedAt).getTime() : 0;
+    const key: GroupKey = at >= startOfToday ? "today" : at >= weekAgo ? "week" : "earlier";
+    buckets[key].push(th);
+  }
+  return (["today", "week", "earlier"] as const)
+    .map((key) => ({ key, threads: buckets[key] }))
+    .filter((g) => g.threads.length > 0);
+}
+
+// ── The panel ───────────────────────────────────────────────────────────────
 
 export function PlanningPanel({ campaignId }: { campaignId: string }) {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const transport = useTransport();
+  const nav = useScreenNav();
+  const streams = usePlanningStreams();
+
+  // An exchange of another campaign has no place here (the Active Campaign
+  // changed under it): stop it. Campaign.tsx does the same on the switch
+  // itself; this covers a panel that mounts into a different campaign.
+  useEffect(() => stopExchangesOutside(campaignId), [campaignId]);
 
   const threadsQuery = useQuery(ChatService.method.listPlanningThreads, { campaignId });
   // Most-recently-touched first — the server's order, kept verbatim.
-  const threads = threadsQuery.data?.threads ?? [];
+  const threads = useMemo(() => threadsQuery.data?.threads ?? [], [threadsQuery.data]);
 
   // Which model answers (ADR-0062 amendment): the server's own resolution, the
   // one the chat engine runs. A side read — while it is pending or has failed
-  // the footer simply is not there and the chat works as before, so it never
-  // retries loudly or blocks the composer.
-  const chatLlm = useQuery(ProviderService.method.listProviderConfigs, {}, { retry: false }).data
-    ?.effectiveChatLlm;
+  // the footer simply is not there and the chat works as before.
+  const chatLlm = useQuery(ProviderService.method.listProviderConfigs, {}, { retry: false }).data?.effectiveChatLlm;
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = threads.find((th) => th.id === selectedId) ?? null;
+  // ── Selection: the URL's ?thread, mirrored locally ──────────────────────
+  // Local state is the truth the panel renders from; the URL follows it (and
+  // a URL change from outside — Back, the palette — moves it). Outside a
+  // router the seam is inert and the panel still works on its own state.
+  const urlThread = nav.search.thread;
+  const [selectedId, setSelectedId] = useState<string | null>(urlThread ?? null);
+  const [composingNew, setComposingNew] = useState(false);
+  const lastUrlThread = useRef(urlThread);
+  useEffect(() => {
+    if (urlThread === lastUrlThread.current) return;
+    lastUrlThread.current = urlThread;
+    setSelectedId(urlThread ?? null);
+    if (urlThread) setComposingNew(false);
+  }, [urlThread]);
+  const { setSearch } = nav;
+  const select = (id: string | null, opts?: { replace?: boolean }) => {
+    setSelectedId(id);
+    lastUrlThread.current = id ?? undefined;
+    setSearch({ thread: id ?? undefined }, opts);
+  };
 
   // Ids this session already deleted. The cached list is STALE between a
-  // delete's success and the refetch landing, so both the auto-select below and
-  // the delete handler must never re-pick one of these — selecting a deleted
-  // thread would stick the pane on a NotFound error.
+  // delete's success and the refetch landing, so the auto-select below must
+  // never re-pick one of these.
   const deletedIds = useRef<Set<string>>(new Set());
 
-  // Default to the most recent surviving thread once the list lands; also picks
-  // the successor after a delete cleared the selection.
+  // With nothing selected and no new conversation being composed, open the
+  // conversation a reply is streaming into, else the most recent one.
+  const inFlight = streamingExchange(streams, campaignId);
   useEffect(() => {
-    if (selectedId === null) {
-      const next = threads.find((th) => !deletedIds.current.has(th.id));
-      if (next) setSelectedId(next.id);
-    }
-  }, [selectedId, threads]);
+    if (selectedId !== null || composingNew || threadsQuery.status !== "success") return;
+    const alive = threads.filter((th) => !deletedIds.current.has(th.id));
+    const next = alive.find((th) => th.id === inFlight?.threadId) ?? alive[0];
+    if (next) select(next.id, { replace: true });
+    // select is recreated per render; the inputs that matter are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, composingNew, threads, threadsQuery.status, inFlight?.threadId]);
+
+  const selected = threads.find((th) => th.id === selectedId) ?? null;
 
   const threadQuery = useQuery(
     ChatService.method.getPlanningThread,
     { campaignId, threadId: selectedId ?? "" },
-    { enabled: selectedId !== null },
+    // A conversation that is gone stays gone: no retries before falling back.
+    { enabled: selectedId !== null, retry: (count, err) => !isNotFound(err) && count < 3 },
+  );
+  const messages: PlanningMessage[] = useMemo(
+    () => (selectedId !== null && threadQuery.data ? threadQuery.data.messages : []),
+    [selectedId, threadQuery.data],
   );
 
-  const invalidateThreads = () =>
-    invalidateMethodQueries(queryClient, ChatService.method.listPlanningThreads);
-  const invalidateThread = () =>
-    invalidateMethodQueries(queryClient, ChatService.method.getPlanningThread);
+  const invalidateThreads = () => invalidateMethodQueries(queryClient, ChatService.method.listPlanningThreads);
+  const invalidateThread = () => invalidateMethodQueries(queryClient, ChatService.method.getPlanningThread);
+
+  // A ?thread that no longer exists (deleted in another tab, a stale link):
+  // say so once, re-read the list and fall back to the newest conversation.
+  const threadGone = selectedId !== null && threadQuery.status === "error" && isNotFound(threadQuery.error);
+  useEffect(() => {
+    if (!threadGone || selectedId === null) return;
+    deletedIds.current.add(selectedId);
+    toast.error(t("chat.threadGone"));
+    void invalidateThreads();
+    select(null, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadGone]);
 
   const createThread = useMutation(ChatService.method.createPlanningThread, {
-    onSuccess: (res) => {
-      void invalidateThreads();
-      if (res.thread) setSelectedId(res.thread.id);
-    },
+    onSuccess: () => void invalidateThreads(),
     onError: (err) => toast.error(t("chat.createError", { message: errorMessage(err) })),
   });
   const renameThread = useMutation(ChatService.method.renamePlanningThread, {
@@ -158,17 +274,13 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   });
   const deleteThread = useMutation(ChatService.method.deletePlanningThread, {
     onSuccess: (_res, req) => {
-      // The mutation variables are an init shape, so threadId is optional on
-      // the type; this panel always sends it.
       const deletedId = req.threadId ?? "";
       deletedIds.current.add(deletedId);
-      // Hand the selection straight to the next surviving thread, computed from
-      // the CURRENT (still stale) list minus everything known-deleted — waiting
-      // for the refetch would let the auto-select re-pick the deleted id.
-      setSelectedId((cur) => {
-        if (cur !== deletedId) return cur;
-        return threads.find((th) => !deletedIds.current.has(th.id))?.id ?? null;
-      });
+      saveDraft(campaignId, deletedId, "");
+      if (selectedId === deletedId) {
+        const next = threads.find((th) => !deletedIds.current.has(th.id));
+        select(next?.id ?? null, { replace: true });
+      }
       void invalidateThreads();
     },
     onError: (err) => toast.error(t("chat.deleteError", { message: errorMessage(err) })),
@@ -177,282 +289,295 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   // The thread a delete has been requested for; drives the confirm dialog —
   // no RPC fires until the GM confirms (the #209 pattern).
   const [confirmThread, setConfirmThread] = useState<PlanningThread | null>(null);
+  // The phone layout's conversation sheet.
+  const [railOpen, setRailOpen] = useState(false);
 
-  // ── The in-flight exchange ────────────────────────────────────────────────
-  const [stream, setStream] = useState<StreamState | null>(null);
-  const streaming = stream !== null && stream.errorKey === null;
-  const [draft, setDraft] = useState("");
+  // ── Draft ───────────────────────────────────────────────────────────────
+  // One per conversation (null: the one not yet started). Re-read when the
+  // conversation changes, during render, so a switch never shows one frame of
+  // the previous conversation's draft.
+  const [draftSlot, setDraftSlot] = useState<string | null>(selectedId);
+  const [draft, setDraftState] = useState(() => loadDraft(campaignId, selectedId));
+  if (draftSlot !== selectedId) {
+    setDraftSlot(selectedId);
+    setDraftState(loadDraft(campaignId, selectedId));
+  }
+  const setDraft = (text: string) => {
+    setDraftState(text);
+    saveDraft(campaignId, selectedId, text);
+  };
 
-  // The composer disables while the reply streams, which drops keyboard focus;
-  // hand it back when streaming ends so the GM can keep typing without a click.
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const wasStreaming = useRef(false);
+  // Auto-grow from one row to eight; past that the field scrolls (max-height
+  // in planning.css).
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  }, [draft]);
+
+  // ── The exchange ────────────────────────────────────────────────────────
+  const exchange: Exchange | null = selectedId !== null ? (streams.exchanges[exchangeKey(campaignId, selectedId)] ?? null) : null;
+  const view = exchange ? exchangeView(exchange, messages) : null;
+  const streamingHere = exchange?.status === "streaming";
+  const streamingElsewhere = inFlight !== null && inFlight.threadId !== selectedId ? inFlight : null;
+  const [creating, setCreating] = useState(false);
+
+  // Retire an exchange once the thread's re-read carries all of it.
   useEffect(() => {
-    if (wasStreaming.current && !streaming) composerRef.current?.focus();
-    wasStreaming.current = streaming;
-  }, [streaming]);
+    if (exchange && exchange.status !== "streaming" && selectedId !== null && threadQuery.isSuccess) {
+      settleExchange(campaignId, selectedId, messages);
+    }
+  }, [exchange, messages, campaignId, selectedId, threadQuery.isSuccess]);
 
-  // The in-flight exchange's cancel handle. Leaving the panel (another
-  // sub-view, another campaign, another screen) aborts the stream: without it
-  // the request ran on with no reader — a paid LLM reply streamed into a
-  // component that no longer exists.
-  const exchangeAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => exchangeAbort.current?.abort(), []);
+  // Refusals that persisted nothing hand the message back: an allowance
+  // refusal has no retry, so the words go back into the composer.
+  useEffect(() => {
+    for (const ex of Object.values(streams.exchanges)) {
+      if (ex.campaignId !== campaignId || ex.status !== "failed" || ex.draftReturned) continue;
+      if (ex.error?.kind === "allowance") {
+        if (ex.threadId === selectedId) {
+          if (draft === "") setDraft(ex.userMessage);
+        } else if (loadDraft(campaignId, ex.threadId) === "") {
+          saveDraft(campaignId, ex.threadId, ex.userMessage);
+        }
+        markDraftReturned(campaignId, ex.threadId);
+      } else if (ex.error?.kind === "gone") {
+        // The conversation was deleted while the GM was asking in it.
+        deletedIds.current.add(ex.threadId);
+        forgetExchange(campaignId, ex.threadId);
+        toast.error(t("chat.threadGone"));
+        void invalidateThreads();
+        if (ex.threadId === selectedId) select(null, { replace: true });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streams.exchanges, campaignId, selectedId]);
 
-  const send = async () => {
-    const text = draft.trim();
-    if (text === "" || streaming || createThread.isPending) return;
+  const length = messageLength(draft);
+  const tooLong = length > MESSAGE_MAX;
+  const canSend = length > 0 && !tooLong && inFlight === null && !creating;
 
-    // No thread yet? Create one first — it auto-titles from this very message.
+  const send = async (override?: string) => {
+    const text = (override ?? draft).trim();
+    if (text === "" || messageLength(text) > MESSAGE_MAX || inFlight !== null || creating) return;
+    const fromComposer = override === undefined;
+
+    // No conversation yet: the first message creates it (it auto-titles from
+    // this very message).
     let threadId = selectedId;
+    let persisted = messages;
     if (threadId === null) {
+      setCreating(true);
       try {
         const res = await createThread.mutateAsync({ campaignId, title: "" });
         threadId = res.thread?.id ?? null;
       } catch {
         return; // the mutation's onError toast already spoke
+      } finally {
+        setCreating(false);
       }
       if (threadId === null) return;
+      if (fromComposer) saveDraft(campaignId, null, "");
+      persisted = [];
+      setComposingNew(false);
+      select(threadId, { replace: true });
+    } else if (fromComposer) {
+      setDraft("");
     }
 
-    // The pending user message renders immediately.
-    setDraft("");
-    setStream({ threadId, userMessage: text, reply: "", tools: [], errorKey: null });
+    startExchange({ transport, queryClient, campaignId, threadId, message: text, persisted });
+  };
 
-    const client = createClient(ChatService, transport);
-    const abort = new AbortController();
-    exchangeAbort.current = abort;
-    let done = false;
-    try {
-      for await (const res of client.planningExchange(
-        { campaignId, threadId, message: text },
-        { signal: abort.signal },
-      )) {
-        const frame = res.frame;
-        if (frame.case === "text") {
-          const delta = frame.value.delta;
-          setStream((s) => (s ? { ...s, reply: s.reply + delta } : s));
-        } else if (frame.case === "tool") {
-          const chip = { toolName: frame.value.toolName, isError: frame.value.isError };
-          setStream((s) => (s ? { ...s, tools: [...s.tools, chip] } : s));
-        } else if (frame.case === "done") {
-          done = true;
-        }
+  const retry = (ex: Exchange) =>
+    startExchange({ transport, queryClient, campaignId, threadId: ex.threadId, message: ex.userMessage, persisted: messages });
+
+  const startNew = () => {
+    setComposingNew(true);
+    select(null);
+    setRailOpen(false);
+    composerRef.current?.focus();
+  };
+
+  const pickStarter = (s: Starter) => {
+    if (s.prefill) {
+      const text = t(s.prefill);
+      setDraft(text);
+      const el = composerRef.current;
+      if (el) {
+        el.focus();
+        // Caret after the prefill, where the GM continues typing.
+        requestAnimationFrame(() => el.setSelectionRange(text.length, text.length));
       }
-      if (done) {
-        // Write through: the done frame's rows are persisted, so the thread and
-        // the list (updated_at, auto-filled title) re-read before the ephemeral
-        // stream state clears — no flash of a message-less pane.
-        await Promise.all([invalidateThread(), invalidateThreads()]);
-        setStream(null);
-      } else {
-        // The stream ended without a done frame — treat as a failed exchange.
-        setStream((s) => (s ? { ...s, errorKey: "chat.errGeneric" } : s));
-      }
-    } catch (err) {
-      // Our own cancel (the panel went away) is not a failure to report.
-      if (abort.signal.aborted) return;
-      // The allowance refusal is told apart by its REASON, not by its code:
-      // ResourceExhausted is also what a provider's own 429 arrives as, and
-      // telling the GM their plan is used up when their provider rate-limited
-      // them sends them to the wrong fix.
-      const allowance = isAllowanceExhausted(err);
-      const noKey = ConnectError.from(err).code === Code.FailedPrecondition;
-      const errorKey: MessageKey = allowance ? "chat.errAllowance" : noKey ? "chat.errNoKey" : "chat.errGeneric";
-      // Allowance/no-key refusals reject BEFORE the server persists the user
-      // message (the ADR-0055 gate runs first), so the GM's text would be lost
-      // with the ephemeral state — restore it into the composer for a retry.
-      // On other failures — a provider rate limit included — the message was
-      // persisted first (ADR-0062) and the dismiss-refetch will show it, so
-      // restoring would duplicate it.
-      if (allowance || noKey) {
-        setDraft((d) => (d === "" ? text : d));
-      }
-      setStream((s) => (s ? { ...s, errorKey } : s));
+      return;
     }
+    void send(t(s.label));
   };
 
-  // Dismissing the error clears the ephemeral state and re-reads the thread:
-  // the user message may have been persisted before the exchange failed
-  // (persisted-first, ADR-0062), so the cache decides what actually exists.
-  const dismissError = () => {
-    setStream(null);
-    void invalidateThread();
-    void invalidateThreads();
-  };
-
-  // Only render the stream into the pane it belongs to — switching threads
-  // mid-exchange must not paint the reply into the wrong conversation.
-  const activeStream = stream && stream.threadId === selectedId ? stream : null;
-  const messages: PlanningMessage[] =
-    selectedId !== null && threadQuery.data ? threadQuery.data.messages : [];
-
+  // ── Follow the newest message ───────────────────────────────────────────
   // Keep the newest message in view as deltas append — but ONLY while the GM
-  // is already at (or near) the bottom. Once they scroll up to re-read during
-  // a streaming reply, the pane must stay put; scrolling back down re-arms the
-  // follow. stickRef tracks "was near bottom before this update" via onScroll.
+  // is already at (or near) the bottom. Once they scroll up to re-read, the
+  // pane stays put and a "Jump to latest" pill offers the way back.
   const paneRef = useRef<HTMLOListElement | null>(null);
   const stickRef = useRef(true);
+  const [following, setFollowing] = useState(true);
   const onPaneScroll = () => {
     const pane = paneRef.current;
     if (!pane) return;
-    stickRef.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    stickRef.current = atBottom;
+    setFollowing(atBottom);
+  };
+  const jumpToLatest = () => {
+    const pane = paneRef.current;
+    if (pane) pane.scrollTop = pane.scrollHeight;
+    stickRef.current = true;
+    setFollowing(true);
   };
   // A thread switch is a fresh pane: re-arm the follow before its content lands.
   useEffect(() => {
     stickRef.current = true;
+    setFollowing(true);
   }, [selectedId]);
   useEffect(() => {
     const pane = paneRef.current;
     if (pane && stickRef.current) pane.scrollTop = pane.scrollHeight;
-  }, [messages.length, activeStream?.reply, activeStream?.tools.length, activeStream?.errorKey]);
+  }, [messages.length, exchange?.reply, exchange?.tools.length, exchange?.status]);
+
+  const threadTitle = (id: string) => threads.find((th) => th.id === id)?.title || t("chat.untitledThread");
+
+  const showStarters =
+    !(view?.showUser || view?.showReply || streamingHere) &&
+    (selectedId === null ? threadsQuery.status !== "pending" : threadQuery.isSuccess && messages.length === 0);
+
+  const rail = (
+    <ThreadRail
+      threads={threads}
+      status={threadsQuery.status}
+      error={threadsQuery.error}
+      fetching={threadsQuery.isFetching}
+      onRetry={() => void threadsQuery.refetch()}
+      selectedId={selectedId}
+      streamingId={inFlight?.threadId ?? null}
+      renamingId={renameThread.isPending ? (renameThread.variables?.threadId ?? null) : null}
+      onNew={startNew}
+      onSelect={(id) => {
+        setComposingNew(false);
+        select(id);
+        setRailOpen(false);
+      }}
+      onRename={(id, title) => renameThread.mutate({ campaignId, threadId: id, title })}
+      onDelete={(th) => setConfirmThread(th)}
+    />
+  );
 
   return (
     <div className="gx-planning">
-      {/* Thread rail */}
-      <div className="gx-planning__threads">
-        <Button
-          variant="secondary"
-          size="sm"
-          iconStart={<MessageSquarePlus size={14} />}
-          className="gx-planning__new"
-          disabled={createThread.isPending}
-          onClick={() => createThread.mutate({ campaignId, title: "" })}
-        >
-          {t("chat.newThread")}
-        </Button>
+      {/* The rail: a column beside the chat, a sheet behind a button on a phone. */}
+      <aside className="gx-planning__rail" aria-label={t("chat.threadsAria")}>
+        {rail}
+      </aside>
 
-        {threadsQuery.status === "pending" ? (
-          <div className="gx-skeleton" data-testid="planning-threads-loading" />
-        ) : threadsQuery.status === "error" ? (
-          <p className="gx-campaign__error" role="alert">
-            {t("chat.threadsLoadError", { message: errorMessage(threadsQuery.error) })}
-          </p>
-        ) : threads.length === 0 ? (
-          <p className="gx-planning__empty">{t("chat.threadsEmpty")}</p>
-        ) : (
-          // role="list" wraps ONLY the rows — the create button and the
-          // loading/error states above are not list items.
-          <div className="gx-planning__thread-list" role="list" aria-label={t("chat.threadsAria")}>
-            {threads.map((th) => (
-              <ThreadRow
-                key={th.id}
-                thread={th}
-                active={selected?.id === th.id}
-                renaming={renameThread.isPending && renameThread.variables?.threadId === th.id}
-                onSelect={() => setSelectedId(th.id)}
-                onRename={(title) =>
-                  renameThread.mutate({ campaignId, threadId: th.id, title })
-                }
-                onDelete={() => setConfirmThread(th)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <section className="gx-planning__chat" aria-label={selected?.title || t("chat.newThread")}>
+        <div className="gx-planning__phonebar">
+          <Button
+            variant="secondary"
+            size="sm"
+            iconStart={<MessagesSquare size={14} />}
+            aria-haspopup="dialog"
+            onClick={() => setRailOpen(true)}
+          >
+            {t("chat.threadsButton", { count: String(threads.length) })}
+          </Button>
+          <Button variant="ghost" size="sm" iconStart={<MessageSquarePlus size={14} />} onClick={startNew}>
+            {t("chat.newThread")}
+          </Button>
+        </div>
 
-      {/* Message pane + composer */}
-      <div className="gx-planning__chat">
-        <ol
-          className="gx-planning__messages"
-          aria-label={t("chat.messagesAria")}
-          ref={paneRef}
-          onScroll={onPaneScroll}
-          // A scroll region with no focusable content is unreachable by
-          // keyboard; tabIndex puts the history itself in the tab order.
-          tabIndex={0}
-        >
-          {selectedId !== null && threadQuery.status === "error" && (
-            <li className="gx-planning__notice-item">
-              <p className="gx-campaign__error" role="alert">
-                {t("chat.threadLoadError", { message: errorMessage(threadQuery.error) })}
-              </p>
-            </li>
-          )}
-          {selectedId !== null && threadQuery.isPending && (
-            <li className="gx-planning__notice-item">
-              <div className="gx-skeleton" data-testid="thread-loading" />
-            </li>
-          )}
-          {/* "No messages yet" means the thread IS empty — while it still loads
-              the skeleton speaks instead, so opening a full thread never
-              flashes the empty-state copy. */}
-          {messages.length === 0 &&
-            !activeStream &&
-            (selectedId === null || threadQuery.isSuccess) && (
+        <div className="gx-planning__pane">
+          <ol
+            className="gx-planning__messages"
+            aria-label={t("chat.messagesAria")}
+            aria-busy={streamingHere || undefined}
+            ref={paneRef}
+            onScroll={onPaneScroll}
+            // A scroll region needs to be reachable by keyboard to be scrolled.
+            tabIndex={0}
+          >
+            {selectedId !== null && threadQuery.status === "error" && !threadGone && (
               <li className="gx-planning__notice-item">
-                <p className="gx-planning__empty">{t("chat.emptyThread")}</p>
+                <ErrorState
+                  size="inline"
+                  title={t("chat.threadLoadError")}
+                  message={errorMessage(threadQuery.error)}
+                  onRetry={() => void threadQuery.refetch()}
+                  retrying={threadQuery.isFetching}
+                />
               </li>
             )}
-          {messages.map((m) => {
-            const when = stamp(m.createdAt, lang);
-            return (
-              <li
-                key={m.id}
-                className="gx-planning__msg"
-                data-role={m.role === "user" ? "user" : "assistant"}
-              >
-                {/* Butler replies are markdown and render as such; the GM's own
-                    messages stay verbatim pre-wrapped text — formatting what a
-                    user typed would silently alter their words. */}
-                <div className="gx-planning__bubble">
-                  {m.role === "user" ? m.content : <Markdown text={m.content} />}
-                </div>
-                {when && <span className="gx-planning__when">{when}</span>}
+            {selectedId !== null && threadQuery.isPending && (
+              <li className="gx-planning__notice-item" data-testid="thread-loading">
+                <Skeleton.Row count={3} avatar={false} />
               </li>
-            );
-          })}
-          {activeStream && (
-            <>
-              <li className="gx-planning__msg" data-role="user" data-pending="true">
-                <div className="gx-planning__bubble">{activeStream.userMessage}</div>
+            )}
+            {showStarters && (
+              <li className="gx-planning__notice-item">
+                <Starters disabled={inFlight !== null || creating} onPick={pickStarter} />
               </li>
-              {activeStream.tools.length > 0 && (
-                <li className="gx-planning__notice-item">
-                  <div className="gx-planning__tools">
-                    {activeStream.tools.map((tool, i) => (
-                      <span
-                        key={i}
-                        className="gx-planning__chip"
-                        data-error={tool.isError ? "true" : undefined}
-                      >
-                        {tool.isError
-                          ? t("chat.toolChipError", { tool: toolLabel(t, tool.toolName) })
-                          : t("chat.toolChip", { tool: toolLabel(t, tool.toolName) })}
-                      </span>
-                    ))}
-                  </div>
-                </li>
-              )}
-              {activeStream.reply !== "" ? (
-                <li className="gx-planning__msg" data-role="assistant" data-pending="true">
-                  {/* The streamed reply renders markdown mid-stream too: a
-                      re-parse per delta is cheap at chat size, and a raw-text
-                      flash that reformats on the done frame would be worse. */}
-                  <div className="gx-planning__bubble">
-                    <Markdown text={activeStream.reply} />
-                  </div>
-                </li>
-              ) : activeStream.errorKey === null ? (
-                <li className="gx-planning__notice-item">
-                  <p className="gx-planning__working" aria-live="polite">
-                    {t("chat.working")}
-                  </p>
-                </li>
-              ) : null}
-              {activeStream.errorKey !== null && (
-                <li className="gx-planning__notice-item">
-                  <div className="gx-planning__error" role="alert">
-                    <span>{t(activeStream.errorKey)}</span>
-                    <Button variant="ghost" size="sm" onClick={dismissError}>
-                      {t("common.close")}
-                    </Button>
-                  </div>
-                </li>
-              )}
-            </>
+            )}
+
+            {messages.map((m) =>
+              m.role === "user" ? (
+                <UserMessage key={m.id} content={m.content} when={m.createdAt} />
+              ) : (
+                <AssistantMessage
+                  key={m.id}
+                  content={m.content}
+                  when={m.createdAt}
+                  tools={streams.toolsByMessage[m.id] ?? (view?.persistedReplyId === m.id ? exchange?.tools : undefined)}
+                  stopped={streams.stoppedMessages[m.id] === true || (view?.persistedReplyId === m.id && exchange?.status === "stopped")}
+                  onReview={() => nav.goCampaignView("proposals")}
+                />
+              ),
+            )}
+
+            {exchange && view && (
+              <ExchangeTail
+                exchange={exchange}
+                showUser={view.showUser}
+                showReply={view.showReply}
+                showTools={view.persistedReplyId === null}
+                onReview={() => nav.goCampaignView("proposals")}
+                onRetry={() => retry(exchange)}
+                onOpenSetup={() => nav.goScreen("configuration")}
+                onDismiss={() => dismissNotice(campaignId, exchange.threadId)}
+              />
+            )}
+          </ol>
+          {!following && (
+            <button type="button" className="gx-planning__jump" onClick={jumpToLatest}>
+              <ArrowDown size={14} aria-hidden="true" />
+              {t("chat.jumpLatest")}
+            </button>
           )}
-        </ol>
+        </div>
+
+        {streamingElsewhere && (
+          <p className="gx-planning__elsewhere" role="status">
+            <span>{t("chat.replyingIn", { title: threadTitle(streamingElsewhere.threadId) })}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setComposingNew(false);
+                select(streamingElsewhere.threadId);
+              }}
+            >
+              {t("chat.replyingInOpen")}
+            </Button>
+          </p>
+        )}
 
         {/* No key is reachable for the chat's model: say so BEFORE the GM
             types a message that would only be refused. */}
@@ -462,48 +587,18 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           </p>
         )}
 
-        <form
-          className="gx-planning__composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void send();
-          }}
-        >
-          <textarea
-            className="gx-input gx-textarea gx-planning__input"
-            ref={composerRef}
-            rows={2}
-            maxLength={MESSAGE_MAX}
-            value={draft}
-            aria-label={t("chat.inputAria")}
-            placeholder={t("chat.inputPlaceholder")}
-            disabled={streaming}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter sends; Shift+Enter stays a newline. An Enter that commits
-              // an IME candidate (CJK composition) must NOT send: isComposing
-              // covers the spec path, keyCode 229 the engines that report the
-              // composition keydown after composition already ended.
-              if (
-                e.key === "Enter" &&
-                !e.shiftKey &&
-                !e.nativeEvent.isComposing &&
-                e.keyCode !== 229
-              ) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-          />
-          <Button
-            type="submit"
-            variant="primary"
-            iconStart={<SendHorizontal size={14} />}
-            disabled={streaming || draft.trim() === ""}
-          >
-            {t("chat.send")}
-          </Button>
-        </form>
+        <Composer
+          inputRef={composerRef}
+          value={draft}
+          length={length}
+          tooLong={tooLong}
+          canSend={canSend}
+          streaming={streamingHere}
+          sending={creating}
+          onChange={setDraft}
+          onSend={() => void send()}
+          onStop={() => stopExchange(campaignId, queryClient)}
+        />
         <div className="gx-planning__foot">
           {chatLlm && (
             <span className="gx-planning__model" data-testid="planning-model">
@@ -513,18 +608,27 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
                   model: chatLlm.model,
                 })}
               </span>
-              <a
-                className="gx-planning__model-link"
-                href={setupChatModelHref()}
-                aria-label={t("chat.changeModelAria")}
-              >
+              <a className="gx-planning__model-link" href={setupChatModelHref()} aria-label={t("chat.changeModelAria")}>
                 {t("chat.changeModel")}
               </a>
             </span>
           )}
           <span className="gx-field__hint gx-planning__hint">{t("chat.sendHint")}</span>
         </div>
-      </div>
+      </section>
+
+      {railOpen && (
+        <Dialog
+          open
+          onOpenChange={setRailOpen}
+          variant="sheet"
+          size="sm"
+          title={t("chat.threadsSheetTitle")}
+          className="gx-planning__sheet"
+        >
+          {rail}
+        </Dialog>
+      )}
 
       {confirmThread && (
         <ConfirmDialog
@@ -538,6 +642,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
           description={t("chat.deleteBody")}
           confirmLabel={t("chat.deleteConfirm")}
           onConfirm={() => {
+            discardThread(campaignId, confirmThread.id);
             deleteThread.mutate({ campaignId, threadId: confirmThread.id });
             setConfirmThread(null);
           }}
@@ -547,12 +652,452 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
   );
 }
 
-// ThreadRow is one conversation in the rail: title + last-touched stamp, with
-// inline rename (pencil → text field, Enter/check commits, Esc/x cancels) and a
-// delete that only ARMS the panel's confirm dialog.
+// ── Messages ────────────────────────────────────────────────────────────────
+
+function UserMessage({ content, when, pending, notSent }: { content: string; when?: Timestamp; pending?: boolean; notSent?: boolean }) {
+  const { t, lang } = useI18n();
+  const at = stamp(when, lang);
+  return (
+    <li className="gx-planning__msg" data-role="user" data-pending={pending ? "true" : undefined}>
+      <span className="gx-visually-hidden">{t("chat.roleUser")}</span>
+      {/* The GM's own words stay verbatim, pre-wrapped — formatting what a
+          user typed would silently alter it. */}
+      <div className="gx-planning__bubble">{content}</div>
+      {(at || notSent) && (
+        <span className="gx-planning__when">
+          {notSent ? (
+            <span className="gx-planning__notsent">
+              <TriangleAlert size={12} aria-hidden="true" />
+              {t("chat.notSent")}
+            </span>
+          ) : (
+            at
+          )}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function AssistantMessage({
+  content,
+  when,
+  tools,
+  stopped,
+  onReview,
+}: {
+  content: string;
+  when?: Timestamp;
+  tools?: ToolChip[];
+  stopped?: boolean;
+  onReview: () => void;
+}) {
+  const { t, lang } = useI18n();
+  const at = stamp(when, lang);
+  return (
+    <li className="gx-planning__msg" data-role="assistant">
+      <span className="gx-visually-hidden">{t("chat.roleAssistant")}</span>
+      {tools && tools.length > 0 && <ToolChips tools={tools} onReview={onReview} />}
+      <div className="gx-planning__reply">
+        <Markdown text={content} copyable />
+      </div>
+      {stopped && <p className="gx-planning__partial">{t("chat.stopped")}</p>}
+      <div className="gx-planning__msgfoot">
+        <CopyButton text={content} showLabel label={t("chat.copy")} ariaLabel={t("chat.copyAria")} />
+        {at && <span className="gx-planning__when">{at}</span>}
+      </div>
+    </li>
+  );
+}
+
+// ToolChips are the tools the Butler ran for one reply — name and outcome
+// only, the arguments stay server-side (ADR-0062). A filed wiki suggestion
+// gets a way to the Suggestions inbox, where the GM approves it.
+function ToolChips({ tools, onReview }: { tools: ToolChip[]; onReview: () => void }) {
+  const { t } = useI18n();
+  const filed = tools.some((tool) => tool.toolName === "propose_knowledge" && !tool.isError);
+  return (
+    <div className="gx-planning__tools">
+      <ul className="gx-planning__chips" aria-label={t("chat.toolsAria")}>
+        {tools.map((tool, i) => (
+          <li key={i} className="gx-planning__chip" data-error={tool.isError ? "true" : undefined}>
+            {tool.isError
+              ? t("chat.toolChipError", { tool: toolLabel(t, tool.toolName) })
+              : t("chat.toolChip", { tool: toolLabel(t, tool.toolName) })}
+          </li>
+        ))}
+      </ul>
+      {filed && (
+        <span className="gx-planning__filed">
+          <Check size={14} aria-hidden="true" />
+          {t("chat.suggestionFiled")}
+          <Button variant="ghost" size="sm" aria-label={t("chat.suggestionReviewAria")} onClick={onReview}>
+            {t("chat.suggestionReview")}
+          </Button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+const ERROR_TITLE: Record<ExchangeErrorKind, MessageKey> = {
+  allowance: "chat.errAllowanceTitle",
+  noKey: "chat.errNoKeyTitle",
+  provider: "chat.errProviderTitle",
+  gone: "chat.errGenericTitle",
+  generic: "chat.errGenericTitle",
+};
+
+// ExchangeTail draws what of the exchange the thread's cache does not carry
+// yet: the pending user turn, the tool chips, the streamed reply, the
+// "writing" line, and how it ended.
+function ExchangeTail({
+  exchange,
+  showUser,
+  showReply,
+  showTools,
+  onReview,
+  onRetry,
+  onOpenSetup,
+  onDismiss,
+}: {
+  exchange: Exchange;
+  showUser: boolean;
+  showReply: boolean;
+  showTools: boolean;
+  onReview: () => void;
+  onRetry: () => void;
+  onOpenSetup: () => void;
+  onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  const { status, error } = exchange;
+  const kind = error?.kind ?? null;
+  // Refused before anything was written (ADR-0055 gate, key resolution).
+  const notSent = status === "failed" && (kind === "allowance" || kind === "noKey");
+  const showNotice = status === "failed" && !exchange.noticeDismissed && kind !== "gone";
+  // allowance: our own sentence (the server's is English and says the same);
+  // otherwise the server's sentence, which names the actual cause.
+  const body =
+    kind === "allowance" ? t("chat.errAllowance") : error?.message || (kind === "noKey" ? t("chat.errNoKey") : t("chat.errGeneric"));
+  return (
+    <>
+      {showUser && <UserMessage content={exchange.userMessage} pending notSent={notSent} />}
+      {showTools && exchange.tools.length > 0 && (
+        <li className="gx-planning__notice-item">
+          <ToolChips tools={exchange.tools} onReview={onReview} />
+        </li>
+      )}
+      {showReply && (
+        <li className="gx-planning__msg" data-role="assistant" data-pending="true">
+          <span className="gx-visually-hidden">{t("chat.roleAssistant")}</span>
+          {/* The streamed reply renders markdown mid-stream too: a re-parse per
+              delta is cheap at chat size, and a raw-text flash that reformats
+              on the done frame would be worse. */}
+          <div className="gx-planning__reply">
+            <Markdown text={exchange.reply} copyable={status !== "streaming"} />
+          </div>
+          {status === "stopped" && <p className="gx-planning__partial">{t("chat.stopped")}</p>}
+          {status === "failed" && <p className="gx-planning__partial">{t("chat.incomplete")}</p>}
+        </li>
+      )}
+      {status === "streaming" && exchange.reply === "" && (
+        <li className="gx-planning__notice-item">
+          <p className="gx-planning__working" aria-live="polite">
+            {t("chat.working")}
+          </p>
+        </li>
+      )}
+      {showNotice && kind && (
+        <li className="gx-planning__notice-item">
+          <div className="gx-planning__error" role="alert">
+            <TriangleAlert size={18} aria-hidden="true" className="gx-planning__error-icon" />
+            <div className="gx-planning__error-text">
+              <p className="gx-planning__error-title">{t(ERROR_TITLE[kind])}</p>
+              <p className="gx-planning__error-body">{body}</p>
+              <div className="gx-planning__error-actions">
+                {(kind === "noKey" || kind === "provider") && (
+                  <Button variant="secondary" size="sm" onClick={onOpenSetup}>
+                    {t("chat.openSetup")}
+                  </Button>
+                )}
+                {kind !== "allowance" && (
+                  <Button variant="secondary" size="sm" onClick={onRetry}>
+                    {t("chat.retry")}
+                  </Button>
+                )}
+              </div>
+            </div>
+            <IconButton label={t("common.close")} size="sm" tooltip={false} onClick={onDismiss}>
+              <X size={14} />
+            </IconButton>
+          </div>
+        </li>
+      )}
+    </>
+  );
+}
+
+// Starters say what the Butler can do, one per tool on its belt.
+function Starters({ disabled, onPick }: { disabled: boolean; onPick: (s: Starter) => void }) {
+  const { t } = useI18n();
+  const titleId = useId();
+  return (
+    <div className="gx-planning__starters">
+      <p className="gx-planning__starters-title" id={titleId}>
+        {t("chat.startersTitle")}
+      </p>
+      <p className="gx-planning__starters-lede">{t("chat.startersLede")}</p>
+      <ul className="gx-planning__starter-list" aria-labelledby={titleId}>
+        {STARTERS.map((s) => (
+          <li key={s.label}>
+            <button
+              type="button"
+              className="gx-planning__starter"
+              disabled={disabled}
+              aria-description={s.prefill ? t("chat.starterFills") : undefined}
+              onClick={() => onPick(s)}
+            >
+              <span className="gx-planning__starter-icon" aria-hidden="true">
+                {s.icon}
+              </span>
+              <span className="gx-planning__starter-text">
+                <span className="gx-planning__starter-label">{t(s.label)}</span>
+                <span className="gx-planning__starter-tool">{t(s.tool)}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ── Composer ────────────────────────────────────────────────────────────────
+
+function Composer({
+  inputRef,
+  value,
+  length,
+  tooLong,
+  canSend,
+  streaming,
+  sending,
+  onChange,
+  onSend,
+  onStop,
+}: {
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  length: number;
+  tooLong: boolean;
+  canSend: boolean;
+  streaming: boolean;
+  sending: boolean;
+  onChange: (text: string) => void;
+  onSend: () => void;
+  onStop: () => void;
+}) {
+  const { t } = useI18n();
+  const counterId = useId();
+  const showCounter = length >= MESSAGE_COUNTER_FROM;
+  return (
+    <form
+      className="gx-planning__composer"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSend();
+      }}
+    >
+      <div className="gx-planning__field">
+        <textarea
+          className={tooLong ? "gx-input gx-textarea gx-planning__input gx-input--invalid" : "gx-input gx-textarea gx-planning__input"}
+          ref={inputRef}
+          rows={1}
+          value={value}
+          aria-label={t("chat.inputAria")}
+          aria-invalid={tooLong || undefined}
+          aria-describedby={showCounter ? counterId : undefined}
+          placeholder={t("chat.inputPlaceholder")}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter stays a newline. An Enter that commits
+            // an IME candidate (CJK composition) must NOT send: isComposing
+            // covers the spec path, keyCode 229 the engines that report the
+            // composition keydown after composition already ended.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+              e.preventDefault();
+              if (canSend) onSend();
+            }
+          }}
+        />
+        {showCounter && (
+          <span id={counterId} className="gx-planning__counter" data-over={tooLong ? "true" : undefined}>
+            {t("chat.counter", { count: String(length), max: String(MESSAGE_MAX) })}
+            {tooLong && (
+              <span className="gx-planning__counter-error">
+                {" "}
+                {t("chat.tooLong", { over: String(length - MESSAGE_MAX), max: String(MESSAGE_MAX) })}
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+      {streaming ? (
+        <Button type="button" variant="secondary" iconStart={<Square size={14} />} aria-label={t("chat.stopAria")} onClick={onStop}>
+          {t("chat.stop")}
+        </Button>
+      ) : (
+        <Button type="submit" variant="primary" iconStart={<SendHorizontal size={14} />} disabled={!canSend} loading={sending}>
+          {t("chat.send")}
+        </Button>
+      )}
+    </form>
+  );
+}
+
+// ── Thread rail ─────────────────────────────────────────────────────────────
+
+function ThreadRail({
+  threads,
+  status,
+  error,
+  fetching,
+  onRetry,
+  selectedId,
+  streamingId,
+  renamingId,
+  onNew,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  threads: PlanningThread[];
+  status: "pending" | "error" | "success";
+  error: unknown;
+  fetching: boolean;
+  onRetry: () => void;
+  selectedId: string | null;
+  streamingId: string | null;
+  renamingId: string | null;
+  onNew: () => void;
+  onSelect: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onDelete: (thread: PlanningThread) => void;
+}) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const searchId = useId();
+  const needle = query.trim().toLocaleLowerCase();
+  const shown = needle === "" ? threads : threads.filter((th) => (th.title || t("chat.untitledThread")).toLocaleLowerCase().includes(needle));
+  const groups = groupThreads(shown, new Date());
+
+  return (
+    <div className="gx-planning__threads">
+      <Button variant="secondary" size="sm" iconStart={<MessageSquarePlus size={14} />} className="gx-planning__new" onClick={onNew}>
+        {t("chat.newThread")}
+      </Button>
+
+      {status === "pending" ? (
+        <div data-testid="planning-threads-loading">
+          <Skeleton.Row count={4} avatar={false} />
+        </div>
+      ) : status === "error" ? (
+        <ErrorState size="inline" title={t("chat.threadsLoadError")} message={errorMessage(error)} onRetry={onRetry} retrying={fetching} />
+      ) : threads.length === 0 ? (
+        <EmptyState size="inline" icon={<MessagesSquare size={16} />} title={t("chat.threadsEmpty")} />
+      ) : (
+        <>
+          <div className="gx-planning__search">
+            <label htmlFor={searchId} className="gx-visually-hidden">
+              {t("chat.threadSearchLabel")}
+            </label>
+            <Search size={14} aria-hidden="true" className="gx-planning__search-icon" />
+            <input
+              id={searchId}
+              type="search"
+              className="gx-input gx-planning__search-input"
+              placeholder={t("chat.threadSearchPlaceholder")}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          {groups.length === 0 ? (
+            <p className="gx-planning__empty">{t("chat.threadSearchEmpty", { query: query.trim() })}</p>
+          ) : (
+            <div className="gx-planning__groups">
+              {groups.map((g) => (
+                <ThreadGroup
+                  key={g.key}
+                  label={t(GROUP_LABEL[g.key])}
+                  threads={g.threads}
+                  selectedId={selectedId}
+                  streamingId={streamingId}
+                  renamingId={renamingId}
+                  onSelect={onSelect}
+                  onRename={onRename}
+                  onDelete={onDelete}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ThreadGroup({
+  label,
+  threads,
+  selectedId,
+  streamingId,
+  renamingId,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  label: string;
+  threads: PlanningThread[];
+  selectedId: string | null;
+  streamingId: string | null;
+  renamingId: string | null;
+  onSelect: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onDelete: (thread: PlanningThread) => void;
+}) {
+  const headingId = useId();
+  return (
+    <section className="gx-planning__group" aria-labelledby={headingId}>
+      <h3 className="gx-planning__group-title" id={headingId}>
+        {label}
+      </h3>
+      <ul className="gx-planning__thread-list">
+        {threads.map((th) => (
+          <ThreadRow
+            key={th.id}
+            thread={th}
+            active={th.id === selectedId}
+            streaming={th.id === streamingId}
+            renaming={th.id === renamingId}
+            onSelect={() => onSelect(th.id)}
+            onRename={(title) => onRename(th.id, title)}
+            onDelete={() => onDelete(th)}
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ThreadRow is one conversation in the rail: title + last-touched stamp, and an
+// overflow menu with Rename (the row turns into a text field: Enter or the
+// check commits, Escape or the cross cancels) and Delete (arms the panel's
+// confirm dialog).
 function ThreadRow({
   thread,
   active,
+  streaming,
   renaming,
   onSelect,
   onRename,
@@ -560,6 +1105,7 @@ function ThreadRow({
 }: {
   thread: PlanningThread;
   active: boolean;
+  streaming: boolean;
   renaming: boolean;
   onSelect: () => void;
   onRename: (title: string) => void;
@@ -571,10 +1117,6 @@ function ThreadRow({
   const displayName = thread.title || t("chat.untitledThread");
   const when = stamp(thread.updatedAt, lang);
 
-  const startEdit = () => {
-    setTitle(thread.title);
-    setEditing(true);
-  };
   const commit = () => {
     const next = title.trim();
     setEditing(false);
@@ -586,7 +1128,7 @@ function ThreadRow({
 
   if (editing) {
     return (
-      <div className="gx-planning__thread" data-active={active ? "true" : undefined} role="listitem">
+      <li className="gx-planning__thread" data-active={active ? "true" : undefined}>
         <input
           className="gx-input gx-planning__rename"
           aria-label={t("chat.renameInputAria")}
@@ -600,57 +1142,58 @@ function ThreadRow({
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
+              // Inside the phone sheet, Escape cancels the rename, not the sheet.
+              e.preventDefault();
+              e.stopPropagation();
               setEditing(false);
             }
           }}
         />
         <div className="gx-planning__thread-actions">
-          <button
-            type="button"
-            className="gx-kg-iconbtn"
-            aria-label={t("chat.renameSaveAria")}
-            disabled={renaming}
-            onClick={commit}
-          >
+          <IconButton label={t("chat.renameSaveAria")} size="sm" tooltip={false} disabled={renaming} onClick={commit}>
             <Check size={14} />
-          </button>
-          <button
-            type="button"
-            className="gx-kg-iconbtn"
-            aria-label={t("chat.renameCancelAria")}
-            onClick={() => setEditing(false)}
-          >
+          </IconButton>
+          <IconButton label={t("chat.renameCancelAria")} size="sm" tooltip={false} onClick={() => setEditing(false)}>
             <X size={14} />
-          </button>
+          </IconButton>
         </div>
-      </div>
+      </li>
     );
   }
 
   return (
-    <div className="gx-planning__thread" data-active={active ? "true" : undefined} role="listitem">
-      <button type="button" className="gx-planning__thread-open" onClick={onSelect}>
+    <li
+      className="gx-planning__thread"
+      data-active={active ? "true" : undefined}
+      data-streaming={streaming ? "true" : undefined}
+    >
+      <button type="button" className="gx-planning__thread-open" aria-current={active ? "true" : undefined} onClick={onSelect}>
         <span className="gx-planning__thread-title">{displayName}</span>
-        {when && <span className="gx-planning__thread-when">{when}</span>}
+        <span className="gx-planning__thread-when">
+          {streaming ? <span className="gx-planning__thread-live">{t("chat.working")}</span> : when}
+        </span>
       </button>
-      <div className="gx-planning__thread-actions">
-        <button
-          type="button"
-          className="gx-kg-iconbtn"
-          aria-label={t("chat.renameAria", { name: displayName })}
-          onClick={startEdit}
+      <Menu
+        trigger={
+          <IconButton label={t("chat.threadActionsAria", { name: displayName })} size="sm" tooltip={false}>
+            <MoreHorizontal size={14} />
+          </IconButton>
+        }
+      >
+        <MenuItem
+          icon={<Pencil size={14} />}
+          onSelect={() => {
+            setTitle(thread.title);
+            setEditing(true);
+          }}
         >
-          <Pencil size={14} />
-        </button>
-        <button
-          type="button"
-          className="gx-kg-iconbtn gx-kg-iconbtn--danger"
-          aria-label={t("chat.deleteAria", { name: displayName })}
-          onClick={onDelete}
-        >
-          <Trash2 size={14} />
-        </button>
-      </div>
-    </div>
+          {t("chat.renameAction")}
+        </MenuItem>
+        <MenuSeparator />
+        <MenuItem tone="danger" icon={<Trash2 size={14} />} onSelect={onDelete}>
+          {t("chat.deleteAction")}
+        </MenuItem>
+      </Menu>
+    </li>
   );
 }
