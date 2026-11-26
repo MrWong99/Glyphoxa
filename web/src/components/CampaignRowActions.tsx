@@ -1,288 +1,82 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { useMutation } from "@connectrpc/connect-query";
-import { useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { Archive, ArchiveRestore, Download, MoreHorizontal, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Copy, Download, MoreHorizontal, Settings, Trash2 } from "lucide-react";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
-import { errorMessage } from "@/lib/connectError";
-import { invalidateMethodQueries } from "@/lib/queryClient";
+import type { Campaign } from "@gen/glyphoxa/management/v1/management_pb";
+import { IconButton } from "@/components/ui/IconButton";
+import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
+import type { CampaignLifecycle } from "@/components/useCampaignLifecycle";
 import { useI18n } from "@/i18n";
-import { fetchCampaignExport, downloadBlob } from "@/lib/download";
-import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
-import "./campaignRowActions.css";
-
-// CampaignRowActions — the per-row lifecycle menu in the campaign switcher's
-// archive-management view (#269, placement #266). An ACTIVE row offers "Archive";
-// an ARCHIVED row offers "Unarchive" and "Delete…". Archive is the primary flow;
-// hard delete is only reachable on an already-archived campaign and is gated
-// behind a re-typed campaign name in a ConfirmDialog (irreversible — it cascades
-// to the campaign's Agents, Knowledge Graph, transcripts, and Voice Sessions).
+// CampaignRowActions — the menu on a campaign's card: Settings, Export,
+// Duplicate, Archive or Unarchive, Delete. Every action is offered on every
+// campaign, archived or not:
 //
-// Every mutation, on success, refreshes the campaign list (all include_archived
-// inputs) so the row moves between the active/archived groups, and runs the
-// Active-Campaign sweep so a screen scoped to a just-archived/deleted campaign
-// follows resolution without a reload. Failures surface as a toast; the live
-// Voice Session's campaign is refused SERVER-SIDE (CodeFailedPrecondition), shown
-// via that toast.
-
-type CampaignRow = { id: string; name: string; archived: boolean };
-
-// MenuPos anchors the portalled menu to the trigger in the viewport. right/left
-// pin its horizontal edge to the trigger's right edge; the menu opens below by
-// default and flips above when it would overflow the viewport bottom (#338).
-type MenuPos = { top: number; right: number; flipUp: boolean };
-
-// A conservative menu-height estimate for the flip decision, taken before the
-// menu has laid out. Every variant now leads with Export, so the tallest
-// (archived: Export + Unarchive + Delete…) is ~3 rows plus padding;
-// overestimating only flips slightly earlier, which is safe.
-const MENU_HEIGHT_ESTIMATE = 128;
-
-export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
+//   - a bundle is what a GM wants of an archived campaign before deleting it;
+//   - Delete is reachable without a detour through Archive (it used to be
+//     offered only on an already archived campaign, behind a "Show archived"
+//     toggle — a GM looking for Delete found nothing);
+//   - Settings works on a campaign that is not the active one.
+//
+// The actions themselves — the dialogs, the RPCs, what is said afterwards —
+// belong to the page's useCampaignLifecycle; this is only the menu.
+//
+// It is the shared Menu primitive: opens on Enter, Space or ArrowDown, arrows
+// and first letters move, Escape closes and returns focus to the trigger, and a
+// dialog an item opens hands focus back to the trigger when it closes.
+export function CampaignRowActions({
+  campaign,
+  lifecycle,
+  isActive = false,
+}: {
+  campaign: Campaign;
+  lifecycle: CampaignLifecycle;
+  /** This is the Active Campaign: archiving it asks first. */
+  isActive?: boolean;
+}) {
   const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [pos, setPos] = useState<MenuPos | null>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  // The menu portals to document.body to escape the switcher list's overflow, so
-  // it lives outside wrapRef — menuRef is passed as the extra "inside" element so
-  // clicking a menu item doesn't read as an outside click (#338).
-  usePopoverDismiss(wrapRef, menuOpen, () => setMenuOpen(false), menuRef);
-
-  // Anchor the portalled menu to the trigger each time it opens: right-align its
-  // edge to the trigger's, drop below, and flip above near the viewport bottom so
-  // a row low in the list can't push the menu off-screen (#338). useLayoutEffect
-  // so the position is set before paint — no first-frame flash at (0,0).
-  useLayoutEffect(() => {
-    if (!menuOpen) return;
-    const anchor = triggerRef.current;
-    if (!anchor) return;
-    const measure = () => {
-      const rect = anchor.getBoundingClientRect();
-      const flipUp = rect.bottom + MENU_HEIGHT_ESTIMATE > window.innerHeight;
-      setPos({
-        top: flipUp ? rect.top - 2 : rect.bottom + 2,
-        // clientWidth (not innerWidth) excludes a vertical scrollbar, so the
-        // right-anchored menu doesn't drift under one.
-        right: document.documentElement.clientWidth - rect.right,
-        flipUp,
-      });
-    };
-    measure();
-    // A fixed menu can't follow its anchor when the switcher list (or the page)
-    // scrolls — the anchor would slide out of the list's 320px clip while the menu
-    // floats over unrelated UI (#338). Close on scroll rather than chase it; a
-    // resize just re-anchors.
-    const close = () => setMenuOpen(false);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", measure);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", measure);
-    };
-  }, [menuOpen]);
-
-  // The menu portals to document.body, at the END of the tab order — Tab from the
-  // trigger would skip it entirely. Move focus into the first enabled item on
-  // open, and restore it to the trigger on close (including Escape), so the menu
-  // is keyboard-reachable and dismissal returns the caret where it started (#338).
-  const wasOpen = useRef(false);
-  useEffect(() => {
-    if (menuOpen) {
-      menuRef.current
-        ?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')
-        ?.focus();
-    } else if (wasOpen.current) {
-      triggerRef.current?.focus();
-    }
-    wasOpen.current = menuOpen;
-  }, [menuOpen]);
-
-  // Invalidate the campaign list across every include_archived input (the key is
-  // omitted so React Query matches all listCampaigns entries by prefix), plus the
-  // Active-Campaign scoped sweep so a screen on the affected campaign re-resolves.
-  const refreshAfterChange = () => {
-    void invalidateMethodQueries(queryClient, CampaignService.method.listCampaigns);
-    void invalidateActiveCampaignScopedQueries(queryClient);
-  };
-
-  // Export streams the campaign's bundle over the plain-net/http endpoint (not a
-  // Connect RPC — bundles are gzip, ADR-0015/0053) and saves it via a transient
-  // download anchor. Available on EVERY row, archived included: a bundle is a
-  // backup, and an archived campaign is exactly what an operator wants to snapshot
-  // before a hard delete. A failure toasts and never triggers a download.
-  const runExport = async () => {
-    setExporting(true);
-    try {
-      const { blob, filename } = await fetchCampaignExport(campaign.id);
-      downloadBlob(blob, filename);
-      setMenuOpen(false);
-    } catch (err) {
-      toast.error(t("components.couldntExportCampaign", { message: errorMessage(err) }));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const archive = useMutation(CampaignService.method.archiveCampaign, {
-    onSuccess: () => {
-      setMenuOpen(false);
-      refreshAfterChange();
-    },
-    onError: (err) => toast.error(t("components.couldntArchiveCampaign", { message: errorMessage(err) })),
-  });
-
-  const unarchive = useMutation(CampaignService.method.unarchiveCampaign, {
-    onSuccess: () => {
-      setMenuOpen(false);
-      refreshAfterChange();
-    },
-    onError: (err) =>
-      toast.error(t("components.couldntUnarchiveCampaign", { message: errorMessage(err) })),
-  });
-
-  const del = useMutation(CampaignService.method.deleteCampaign, {
-    onSuccess: () => {
-      setConfirmOpen(false);
-      setMenuOpen(false);
-      refreshAfterChange();
-    },
-    onError: (err) => toast.error(t("components.couldntDeleteCampaign", { message: errorMessage(err) })),
-  });
+  const archived = campaign.archivedAt !== undefined;
+  // A flow already running on this campaign (archive, delete, duplicate): the
+  // actions that would collide with it wait. Settings and Export do not touch
+  // what it is doing.
+  const busy = lifecycle.busy.has(campaign.id);
+  // Archive and Delete also wait for the Active Campaign to be known: whether
+  // they ask first, and what they say becomes active, depends on it.
+  const settling = !lifecycle.ready;
 
   return (
-    <div className="gx-campaign-row-actions" ref={wrapRef}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="gx-campaign-row-actions__trigger"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        // The label is name-free so it never collides with the sibling switch
-        // button's accessible name (which carries the campaign name); the campaign
-        // is identified by the row it sits in, and by the menu items + confirm
-        // dialog once opened.
-        aria-label={t("components.campaignActions")}
-        title={t("components.campaignActionsFor", { name: campaign.name })}
-        onClick={() => setMenuOpen((o) => !o)}
-      >
-        <MoreHorizontal size={15} />
-      </button>
-
-      {menuOpen &&
-        createPortal(
-          <div
-            ref={menuRef}
-            className="gx-select__content gx-campaign-row-actions__menu"
-            role="menu"
-            // The menu keyboard model (WAI-ARIA menu pattern): arrows cycle the
-            // enabled items, Home/End jump, and Tab closes — the menu portals
-            // to document.body, so an escaping Tab would land at the page's end
-            // with the menu still painted open.
-            onKeyDown={(e) => {
-              const items = Array.from(
-                menuRef.current?.querySelectorAll<HTMLButtonElement>(
-                  '[role="menuitem"]:not(:disabled)',
-                ) ?? [],
-              );
-              if (items.length === 0) return;
-              const at = items.findIndex((el) => el === document.activeElement);
-              if (e.key === "ArrowDown") {
-                e.preventDefault();
-                items[(at + 1) % items.length].focus();
-              } else if (e.key === "ArrowUp") {
-                e.preventDefault();
-                items[(at - 1 + items.length) % items.length].focus();
-              } else if (e.key === "Home") {
-                e.preventDefault();
-                items[0].focus();
-              } else if (e.key === "End") {
-                e.preventDefault();
-                items[items.length - 1].focus();
-              } else if (e.key === "Tab") {
-                e.preventDefault();
-                setMenuOpen(false); // the close effect restores trigger focus
-              }
-            }}
-            style={
-              pos
-                ? {
-                    top: pos.top,
-                    right: pos.right,
-                    // Anchor the flipped menu by its bottom edge so it grows
-                    // upward from the trigger rather than overlapping it.
-                    transform: pos.flipUp ? "translateY(-100%)" : undefined,
-                  }
-                : undefined
-            }
-          >
-            <button
-              type="button"
-              role="menuitem"
-              className="gx-select__item"
-              disabled={exporting}
-              onClick={() => void runExport()}
-            >
-              <Download size={14} /> {exporting ? t("components.exporting") : t("components.exportCampaign")}
-            </button>
-            {campaign.archived ? (
-              <>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="gx-select__item"
-                  disabled={unarchive.isPending}
-                  onClick={() => unarchive.mutate({ id: campaign.id })}
-                >
-                  <ArchiveRestore size={14} /> {t("components.unarchive")}
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="gx-select__item gx-select__item--danger"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setConfirmOpen(true);
-                  }}
-                >
-                  <Trash2 size={14} /> {t("components.deleteEllipsis")}
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                role="menuitem"
-                className="gx-select__item"
-                disabled={archive.isPending}
-                onClick={() => archive.mutate({ id: campaign.id })}
-              >
-                <Archive size={14} /> {t("components.archive")}
-              </button>
-            )}
-          </div>,
-          document.body,
-        )}
-
-      <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title={t("components.deleteCampaignTitle", { name: campaign.name })}
-        description={t("components.deleteCampaignDescription")}
-        confirmLabel={t("components.deleteCampaignConfirm")}
-        confirmText={campaign.name}
-        confirmTextLabel={t("components.typeCampaignNameToConfirm")}
-        confirmDisabled={del.isPending}
-        onConfirm={() => del.mutate({ id: campaign.id })}
-      />
-    </div>
+    <Menu
+      trigger={
+        // The label names the campaign: a page of cards is a page of these
+        // buttons, and a screen reader must hear which one this is.
+        <IconButton label={t("components.campaignActionsFor", { name: campaign.name })}>
+          <MoreHorizontal size={18} />
+        </IconButton>
+      }
+    >
+      <MenuItem icon={<Settings />} onSelect={() => lifecycle.openSettings(campaign)}>
+        {t("campaigns.menuSettings")}
+      </MenuItem>
+      <MenuItem icon={<Download />} onSelect={() => lifecycle.exportBundle(campaign)}>
+        {t("campaigns.menuExport")}
+      </MenuItem>
+      <MenuItem icon={<Copy />} disabled={busy} onSelect={() => lifecycle.duplicate(campaign)}>
+        {t("campaigns.menuDuplicate")}
+      </MenuItem>
+      {archived ? (
+        <MenuItem icon={<ArchiveRestore />} disabled={busy} onSelect={() => lifecycle.unarchive(campaign)}>
+          {t("components.unarchive")}
+        </MenuItem>
+      ) : (
+        <MenuItem icon={<Archive />} disabled={busy || settling} onSelect={() => lifecycle.archive(campaign)}>
+          {/* The ellipsis is the "this asks first" convention: archiving the
+              Active Campaign does, archiving any other is immediate (and
+              undoable). */}
+          {isActive ? t("campaigns.menuArchiveAsk") : t("components.archive")}
+        </MenuItem>
+      )}
+      <MenuSeparator />
+      <MenuItem tone="danger" icon={<Trash2 />} disabled={busy || settling} onSelect={() => lifecycle.remove(campaign)}>
+        {t("components.deleteEllipsis")}
+      </MenuItem>
+    </Menu>
   );
 }

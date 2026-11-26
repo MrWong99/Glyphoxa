@@ -17,8 +17,13 @@ import { ImportCampaignButton } from "./ImportCampaignButton";
 
 // The bundle upload rides the plain-fetch helper; mock it so the import flow is
 // observable without a network/multipart round-trip.
-vi.mock("@/lib/download", () => ({ importCampaignBundle: vi.fn() }));
-import { importCampaignBundle, type ImportSummary } from "@/lib/download";
+// Only the upload is mocked: the error classification (isBundleBusy and the
+// BundleRequestError it reads) stays real, so the 503 hint is tested end to end.
+vi.mock("@/lib/download", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/download")>()),
+  importCampaignBundle: vi.fn(),
+}));
+import { BundleRequestError, importCampaignBundle, type ImportSummary } from "@/lib/download";
 const mockImport = vi.mocked(importCampaignBundle);
 
 // Toasts are the unmount-proof feedback channel (they render outside the panel),
@@ -197,6 +202,20 @@ describe("ImportCampaignButton", () => {
     fireEvent.click(within(confirm).getByRole("button", { name: /^Import$/ }));
 
     expect(await screen.findByText(/bundle too large/)).toBeInTheDocument();
+  });
+
+  it("turns a 503 (another bundle in progress) into a retry hint", async () => {
+    mockImport.mockRejectedValue(
+      new BundleRequestError("another import or export is in progress", 503),
+    );
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/then try again/i);
+    expect(alert).not.toHaveTextContent(/another import or export is in progress/);
   });
 
   it("refreshes the campaign list on import even when the switch is declined", async () => {

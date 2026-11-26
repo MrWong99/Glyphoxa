@@ -74,6 +74,27 @@ export function invalidateActiveCampaignScopedQueries(queryClient: QueryClient):
   });
 }
 
+// resetActiveCampaignScopedQueries is the sweep for the case where the Active
+// Campaign has GONE (archived or deleted): the same reads, but RESET — dropped
+// back to "no data yet" and refetched — instead of marked stale.
+//
+// The difference shows when nothing takes the campaign's place. A refetch that
+// fails keeps the last successful data on the cache entry (TanStack Query never
+// discards data on an error), so after the last campaign was archived every
+// invalidated read answered CodeNotFound while still handing its screen the
+// archived campaign's name, roster and wiki — the sidebar kept naming a
+// campaign that no longer resolves, and the first-campaign card (which waits
+// for "no data AND NotFound") never appeared. Resetting removes what there is
+// nothing left to be stale ABOUT.
+export function resetActiveCampaignScopedQueries(queryClient: QueryClient): Promise<void> {
+  return queryClient.resetQueries({
+    predicate: (query) => {
+      const id = keyMethodId(query.queryKey);
+      return id !== null && !INVARIANT_IDS.has(id);
+    },
+  });
+}
+
 const GET_SESSION_ID = methodId(SessionService.method.getSession);
 
 // watchVoiceSessionEnd runs the sweep when the live Voice Session ends. A switch

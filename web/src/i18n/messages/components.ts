@@ -2,7 +2,7 @@
 // `de` must cover every key (compile-checked).
 
 export const en = {
-  // — CampaignSwitcher (topbar trigger + panel, #266/#267) —
+  // — CampaignSwitcher (topbar quick switcher, #266/#267) —
   "components.campaignOverline": "Campaign",
   "components.createFirstCampaign": "Create your first campaign",
   "components.selectCampaign": "Select campaign",
@@ -11,9 +11,6 @@ export const en = {
   "components.campaignsGroupLabel": "Campaigns",
   "components.archivedBadge": "Archived",
   "components.newCampaign": "New campaign",
-  "components.campaignSettings": "Campaign settings",
-  "components.showArchived": "Show archived",
-  "components.hideArchived": "Hide archived",
   "components.couldntLoadCampaigns": "Couldn't load campaigns: {message}",
   "components.couldntSwitchCampaign": "Couldn't switch campaign: {message}",
   "components.sessionLiveNotice":
@@ -21,11 +18,8 @@ export const en = {
   "components.sessionCheckFailedNotice":
     "Couldn't check for a live voice session — a switch may take effect only after it ends.",
 
-  // — CampaignRowActions (per-row lifecycle menu, #269) —
-  "components.campaignActions": "Campaign actions",
+  // — Campaign lifecycle actions (card menu and dialogs, #269) —
   "components.campaignActionsFor": "Actions for {name}",
-  "components.exportCampaign": "Export (backup file)",
-  "components.exporting": "Exporting…",
   "components.archive": "Archive",
   "components.unarchive": "Unarchive",
   "components.deleteEllipsis": "Delete…",
@@ -35,7 +29,7 @@ export const en = {
   "components.couldntDeleteCampaign": "Couldn't delete campaign: {message}",
   "components.deleteCampaignTitle": "Delete “{name}”?",
   "components.deleteCampaignDescription":
-    "This permanently deletes the campaign and everything in it — NPCs, world wiki, transcripts, and voice sessions. This cannot be undone.",
+    "This permanently deletes the campaign and everything in it — NPCs, world wiki, maps, players, planning chats, transcripts and voice sessions. This cannot be undone.",
   "components.deleteCampaignConfirm": "Delete campaign",
   "components.typeCampaignNameToConfirm": "Type the campaign name to confirm",
 
@@ -73,9 +67,9 @@ export const en = {
     "Tuning only acts while highlight recording is on, and applies from the next session.",
 
   // — ImportCampaignButton (bundle restore, #294) —
-  "components.importCampaign": "Import campaign",
+  "components.importCampaign": "Import bundle",
   "components.importing": "Importing…",
-  "components.importConfirmTitle": "Import campaign?",
+  "components.importConfirmTitle": "Import this bundle?",
   "components.importConfirmBefore": "Create a new campaign from ",
   "components.importConfirmAfter": ". Nothing existing is overwritten.",
   "components.importConfirmAction": "Import",
@@ -133,9 +127,6 @@ export const de: Record<keyof typeof en, string> = {
   "components.campaignsGroupLabel": "Kampagnen",
   "components.archivedBadge": "Archiviert",
   "components.newCampaign": "Neue Kampagne",
-  "components.campaignSettings": "Kampagnen-Einstellungen",
-  "components.showArchived": "Archivierte anzeigen",
-  "components.hideArchived": "Archivierte ausblenden",
   "components.couldntLoadCampaigns": "Kampagnen konnten nicht geladen werden: {message}",
   "components.couldntSwitchCampaign": "Kampagne konnte nicht gewechselt werden: {message}",
   "components.sessionLiveNotice":
@@ -144,10 +135,7 @@ export const de: Record<keyof typeof en, string> = {
     "Konnte nicht prüfen, ob gerade eine Session läuft — ein Wechsel gilt eventuell erst nach ihrem Ende.",
 
   // — CampaignRowActions —
-  "components.campaignActions": "Kampagnen-Aktionen",
   "components.campaignActionsFor": "Aktionen für {name}",
-  "components.exportCampaign": "Exportieren (Backup-Datei)",
-  "components.exporting": "Wird exportiert…",
   "components.archive": "Archivieren",
   "components.unarchive": "Wiederherstellen",
   "components.deleteEllipsis": "Löschen…",
@@ -157,7 +145,7 @@ export const de: Record<keyof typeof en, string> = {
   "components.couldntDeleteCampaign": "Löschen fehlgeschlagen: {message}",
   "components.deleteCampaignTitle": "„{name}“ löschen?",
   "components.deleteCampaignDescription":
-    "Das löscht die Kampagne endgültig — mit allen NPCs, dem Welt-Wiki, Mitschriften und Sessions. Das kann nicht rückgängig gemacht werden.",
+    "Das löscht die Kampagne endgültig — mit allen NPCs, dem Welt-Wiki, Karten, Spielern, Planungs-Chats, Mitschriften und Sessions. Das kann nicht rückgängig gemacht werden.",
   "components.deleteCampaignConfirm": "Kampagne löschen",
   "components.typeCampaignNameToConfirm": "Gib den Kampagnennamen ein, um zu bestätigen",
 
@@ -200,9 +188,9 @@ export const de: Record<keyof typeof en, string> = {
     "Die Feineinstellung wirkt nur bei aktiver Highlight-Aufnahme und gilt ab der nächsten Session.",
 
   // — ImportCampaignButton —
-  "components.importCampaign": "Kampagne importieren",
+  "components.importCampaign": "Bundle importieren",
   "components.importing": "Wird importiert…",
-  "components.importConfirmTitle": "Kampagne importieren?",
+  "components.importConfirmTitle": "Dieses Bundle importieren?",
   "components.importConfirmBefore": "Erstellt eine neue Kampagne aus ",
   "components.importConfirmAfter": ". Bestehendes wird nicht überschrieben.",
   "components.importConfirmAction": "Importieren",
