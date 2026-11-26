@@ -217,7 +217,12 @@ func TestMigration00056_PurgesExpiredSessions(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 	for token, ttl := range map[string]time.Duration{"live-before": time.Hour, "expired-before": -time.Hour} {
-		if _, err := st.CreateSession(ctx, storage.NewSession{UserID: u.ID, Token: token, ExpiresAt: time.Now().Add(ttl)}); err != nil {
+		// Raw SQL, not CreateSession: the store writes columns later
+		// migrations add (sessions.guest_campaign_id, 00063), which do not
+		// exist at schema 00055.
+		sum := sha256.Sum256([]byte(token))
+		if _, err := pool.Exec(ctx, `INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3)`,
+			u.ID, base64.RawURLEncoding.EncodeToString(sum[:]), time.Now().Add(ttl)); err != nil {
 			t.Fatalf("seed pre-migration session %q: %v", token, err)
 		}
 	}
