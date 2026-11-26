@@ -446,6 +446,34 @@ service CampaignService {
   rpc ListDiscordVoiceMembers(ListDiscordVoiceMembersRequest) returns (ListDiscordVoiceMembersResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // ── Campaign Guests (ADR-0065) ─────────────────────────────────────────────
+  // The six procedures below manage who else may open the Active Campaign and
+  // what they may do there. They are GM-only: a Campaign Guest can never call
+  // them, whatever rights they hold.
+
+  // ListCampaignAccess returns the Active Campaign's Campaign Guests and its
+  // CAMPAIGN invitation links.
+  rpc ListCampaignAccess(ListCampaignAccessRequest) returns (ListCampaignAccessResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // AddCampaignGuest makes a Discord User a Campaign Guest directly, by
+  // snowflake — no link needed; they see the Campaign the next time they sign
+  // in. Adding an existing guest replaces their rights. The Tenant's own
+  // operator cannot be added as a guest (CodeInvalidArgument).
+  rpc AddCampaignGuest(AddCampaignGuestRequest) returns (AddCampaignGuestResponse);
+  // UpdateCampaignGuest replaces a guest's rights. An empty set is allowed: the
+  // guest keeps the Campaign in their list but can open nothing in it.
+  rpc UpdateCampaignGuest(UpdateCampaignGuestRequest) returns (UpdateCampaignGuestResponse);
+  // RemoveCampaignGuest ends a guest's access; it takes effect on their next
+  // request.
+  rpc RemoveCampaignGuest(RemoveCampaignGuestRequest) returns (RemoveCampaignGuestResponse);
+  // CreateCampaignInvitation mints a CAMPAIGN invitation link for the Active
+  // Campaign and returns its token — the only time the token is readable.
+  rpc CreateCampaignInvitation(CreateCampaignInvitationRequest) returns (CreateCampaignInvitationResponse);
+  // RevokeCampaignInvitation stops one of the Active Campaign's links from
+  // working. Guests it already admitted stay.
+  rpc RevokeCampaignInvitation(RevokeCampaignInvitationRequest) returns (RevokeCampaignInvitationResponse);
 }
 
 // ToolGrant is one built-in Tool's availability and grant state for a single
@@ -1723,6 +1751,20 @@ service AuthService {
   // State-changing, so the auth + CSRF interceptors guard it; fails with
   // CodeFailedPrecondition when no Tenant is bound to the caller yet.
   rpc RenameTenant(RenameTenantRequest) returns (RenameTenantResponse);
+  // GetInvitation previews a `/join/<token>` invitation link (ADR-0065) for the
+  // join page: what it grants and whether it still works. Reachable
+  // unauthenticated — the visitor has no session yet — and deliberately thin:
+  // an unknown token and a dead link both answer `valid = false`, never
+  // CodeNotFound, so the response cannot be used to probe which links exist.
+  rpc GetInvitation(GetInvitationRequest) returns (GetInvitationResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SwitchWorkspace selects what this browser session acts as (ADR-0065): the
+  // caller's own Tenant (empty campaign_id), or a Campaign they are a Campaign
+  // Guest of. The choice is stored on the server-side session row and resolved
+  // on every request; a campaign the caller is not a guest of is
+  // CodeNotFound. State-changing, so the auth + CSRF interceptors guard it.
+  rpc SwitchWorkspace(SwitchWorkspaceRequest) returns (SwitchWorkspaceResponse);
 }
 
 // AdmissionMode mirrors the ADR-0055 deployment admission posture.
@@ -1784,7 +1826,338 @@ message GetCurrentUserResponse {
   // tenant_name is the bound Tenant's display name — empty when no Tenant is
   // bound yet.
   string tenant_name = 3;
+  // is_platform_admin is true when the caller is on the deployment's Platform
+  // Admin list (GLYPHOXA_OPERATOR_IDS, ADR-0065) — the SPA shows the Admin
+  // screen only then. The AdminService re-checks it on every call.
+  bool is_platform_admin = 4;
+  // guest is set when this session is acting as a Campaign Guest (ADR-0065):
+  // tenant_id/tenant_name then name the HOST Tenant, and the SPA renders the
+  // guest shell limited to guest.rights. Unset for a Tenant's own operator.
+  GuestWorkspace guest = 5;
+  // has_own_tenant is true when the caller operates a Tenant of their own
+  // (whether or not this session currently acts in it).
+  bool has_own_tenant = 6;
+  // guest_workspaces lists every Campaign the caller is a Campaign Guest of —
+  // the workspace switcher's "shared with me" entries.
+  repeated GuestWorkspace guest_workspaces = 7;
 }
+
+// GuestRight is one capability a GM grants a Campaign Guest on one Campaign
+// (ADR-0065). Rights are additive; three of them imply others, and the server
+// stores the normalized set:
+//   WIKI_EDIT    implies WIKI_READ + WIKI_SECRETS (an editor that could not
+//                see private Aspects would erase them on save)
+//   MAPS_EDIT    implies MAPS_READ
+//   PLANNING_USE implies WIKI_READ + WIKI_SECRETS (the Butler answers from the
+//                whole Knowledge Graph, so the right cannot honestly be
+//                narrower than what it can reveal)
+enum GuestRight {
+  GUEST_RIGHT_UNSPECIFIED = 0;
+  // Read the world wiki — public material only: gm_private Nodes and private
+  // Aspects are withheld, as are Edges that touch a withheld Node.
+  GUEST_RIGHT_WIKI_READ = 1;
+  // Also read gm_private Nodes and private Aspects.
+  GUEST_RIGHT_WIKI_SECRETS = 2;
+  // Create, edit and delete wiki entries, Edges, tags and boards.
+  GUEST_RIGHT_WIKI_EDIT = 3;
+  // View maps and their pins.
+  GUEST_RIGHT_MAPS_READ = 4;
+  // Add, move and delete pins and move the Party Marker.
+  GUEST_RIGHT_MAPS_EDIT = 5;
+  // Read past sessions' transcripts and search them.
+  GUEST_RIGHT_TRANSCRIPTS_READ = 6;
+  // See promoted Session Highlights, with their clips and images. Never
+  // Highlight Candidates.
+  GUEST_RIGHT_HIGHLIGHTS_READ = 7;
+  // Use the Butler planning chat, in threads of their own. Spends the HOST
+  // Tenant's LLM budget.
+  GUEST_RIGHT_PLANNING_USE = 8;
+}
+
+// GuestWorkspace is one Campaign the caller is a Campaign Guest of.
+message GuestWorkspace {
+  string campaign_id = 1;
+  string campaign_name = 2;
+  // tenant_name is the host Tenant's display name ("whose table this is").
+  string tenant_name = 3;
+  // rights is the normalized set the GM granted.
+  repeated GuestRight rights = 4;
+}
+
+// InvitationKind says what a `/join/<token>` link grants (ADR-0065).
+enum InvitationKind {
+  INVITATION_KIND_UNSPECIFIED = 0;
+  // Access to the instance: the redeemer gets a Tenant of their own.
+  INVITATION_KIND_ACCESS = 1;
+  // Campaign Guest access to one Campaign.
+  INVITATION_KIND_CAMPAIGN = 2;
+}
+
+// GetInvitationRequest carries the token from the `/join/<token>` path.
+message GetInvitationRequest {
+  string token = 1;
+}
+
+// GetInvitationResponse is the join page's preview. When valid is false every
+// other field is empty.
+message GetInvitationResponse {
+  bool valid = 1;
+  InvitationKind kind = 2;
+  // inviter_name is the display name of whoever minted the link.
+  string inviter_name = 3;
+  // campaign_name / tenant_name / rights describe a CAMPAIGN invitation.
+  string campaign_name = 4;
+  string tenant_name = 5;
+  repeated GuestRight rights = 6;
+}
+
+// SwitchWorkspaceRequest selects the session's workspace: empty campaign_id =
+// the caller's own Tenant.
+message SwitchWorkspaceRequest {
+  string campaign_id = 1;
+}
+
+// SwitchWorkspaceResponse is empty; the SPA re-reads GetCurrentUser.
+message SwitchWorkspaceResponse {}
+
+// Invitation is a `/join/<token>` link as its minter sees it. It never carries
+// the token — that is returned exactly once, by the Create* RPC.
+message Invitation {
+  string id = 1;
+  InvitationKind kind = 2;
+  string label = 3;
+  // rights is a CAMPAIGN invitation's grant.
+  repeated GuestRight rights = 4;
+  // platform_keys is an ACCESS invitation's grant: whether the Tenant it
+  // founds may spend the deployment's Platform Keys.
+  bool platform_keys = 5;
+  // discord_user_id, when set, pins the link to that one Discord User.
+  string discord_user_id = 6;
+  // max_uses 0 = unlimited.
+  int32 max_uses = 7;
+  int32 uses = 8;
+  // expires_at unset = never expires.
+  google.protobuf.Timestamp expires_at = 9;
+  google.protobuf.Timestamp created_at = 10;
+  // revoked_at set = the link was revoked.
+  google.protobuf.Timestamp revoked_at = 11;
+  // live is the server's verdict: not revoked, not expired, uses left.
+  bool live = 12;
+}
+
+// AdminService is the Platform Admin console (ADR-0065): who may use this
+// instance, and what each Tenant may spend. EVERY procedure requires the
+// caller to be a Platform Admin — a Discord User on GLYPHOXA_OPERATOR_IDS —
+// and answers CodePermissionDenied otherwise. It is deployment-scoped and
+// ignores the caller's workspace. Platform Admins themselves are configured in
+// the environment only and cannot be granted, revoked or suspended from here.
+service AdminService {
+  // GetAccessOverview returns everything the Admin screen renders in one read.
+  rpc GetAccessOverview(GetAccessOverviewRequest) returns (GetAccessOverviewResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // GrantAccess admits a Discord User by snowflake (an Access Grant). Granting
+  // again updates the note and the Platform Keys choice. The snowflake must be
+  // decimal digits (CodeInvalidArgument).
+  rpc GrantAccess(GrantAccessRequest) returns (GrantAccessResponse);
+  // RevokeAccess removes a Discord User's Access Grant and signs them out
+  // everywhere. Their Tenant and its data are kept. A Platform Admin's access
+  // cannot be revoked (CodeFailedPrecondition).
+  rpc RevokeAccess(RevokeAccessRequest) returns (RevokeAccessResponse);
+  // CreateAccessInvitation mints an ACCESS invitation link and returns its
+  // token — the only time the token is ever readable.
+  rpc CreateAccessInvitation(CreateAccessInvitationRequest) returns (CreateAccessInvitationResponse);
+  // RevokeAccessInvitation stops an ACCESS invitation link from working. Grants
+  // it already created are untouched.
+  rpc RevokeAccessInvitation(RevokeAccessInvitationRequest) returns (RevokeAccessInvitationResponse);
+  // SetUserSuspended suspends or restores a user (ADR-0055 Suspension): a
+  // suspended user is refused on their next request and at sign-in, in every
+  // Admission Mode. A Platform Admin cannot be suspended
+  // (CodeFailedPrecondition).
+  rpc SetUserSuspended(SetUserSuspendedRequest) returns (SetUserSuspendedResponse);
+  // SetTenantPlatformKeys decides whether a Tenant may spend the deployment's
+  // Platform Keys (`allowlist` Admission Mode; in `open` mode the Plan decides
+  // and this is CodeFailedPrecondition).
+  rpc SetTenantPlatformKeys(SetTenantPlatformKeysRequest) returns (SetTenantPlatformKeysResponse);
+}
+
+// AccessStatus is how a person on the Admin screen is admitted.
+enum AccessStatus {
+  ACCESS_STATUS_UNSPECIFIED = 0;
+  // On the Platform Admin list (environment). Read-only here.
+  ACCESS_STATUS_PLATFORM_ADMIN = 1;
+  // Holds an Access Grant.
+  ACCESS_STATUS_GRANTED = 2;
+  // Admitted by `open` Admission Mode self-signup.
+  ACCESS_STATUS_SIGNUP = 3;
+  // Signs in only as a Campaign Guest: no Tenant of their own.
+  ACCESS_STATUS_GUEST = 4;
+  // Known to the instance but currently not admitted (an `allowlist`
+  // deployment, no grant, not a guest) — e.g. access was revoked.
+  ACCESS_STATUS_NONE = 5;
+}
+
+// AccessPerson is one row of the Admin screen's people list. A person who
+// operates several Tenants appears once per Tenant.
+message AccessPerson {
+  string discord_user_id = 1;
+  // name / avatar are empty until the person has signed in once.
+  string name = 2;
+  string avatar = 3;
+  AccessStatus status = 4;
+  bool suspended = 5;
+  // has_signed_in is false for a grant nobody has used yet.
+  bool has_signed_in = 6;
+  // note is the Access Grant's note (or the label of the invitation link that
+  // created it).
+  string note = 7;
+  google.protobuf.Timestamp joined_at = 8;
+  google.protobuf.Timestamp last_seen_at = 9;
+  // tenant_* describe the Tenant the person operates; tenant_id is empty when
+  // they operate none.
+  string tenant_id = 10;
+  string tenant_name = 11;
+  int32 campaign_count = 12;
+  // platform_keys: may this person's Tenant spend the deployment's Platform
+  // Keys. Before their first sign-in it shows what the grant will give them.
+  bool platform_keys = 13;
+  // guest_campaign_count is how many Campaigns the person is a Campaign Guest of.
+  int32 guest_campaign_count = 14;
+  // is_self marks the caller's own row.
+  bool is_self = 15;
+}
+
+message GetAccessOverviewRequest {}
+
+message GetAccessOverviewResponse {
+  // admission_mode is the deployment's effective Admission Mode. Access Grants
+  // and ACCESS invitations only gate sign-in in ALLOWLIST mode; the screen
+  // says so in OPEN mode.
+  AdmissionMode admission_mode = 1;
+  repeated AccessPerson people = 2;
+  // invitations are the ACCESS invitation links, newest first.
+  repeated Invitation invitations = 3;
+}
+
+message GrantAccessRequest {
+  string discord_user_id = 1;
+  string note = 2;
+  bool platform_keys = 3;
+}
+
+message GrantAccessResponse {}
+
+message RevokeAccessRequest {
+  string discord_user_id = 1;
+}
+
+message RevokeAccessResponse {}
+
+message CreateAccessInvitationRequest {
+  string label = 1;
+  // max_uses 0 = unlimited.
+  int32 max_uses = 2;
+  // expires_in_days 0 = never expires; at most 365.
+  int32 expires_in_days = 3;
+  bool platform_keys = 4;
+  // discord_user_id optionally pins the link to one Discord User.
+  string discord_user_id = 5;
+}
+
+message CreateAccessInvitationResponse {
+  Invitation invitation = 1;
+  // token is the secret path segment of the link: `/join/<token>`. Shown once.
+  string token = 2;
+}
+
+message RevokeAccessInvitationRequest {
+  string id = 1;
+}
+
+message RevokeAccessInvitationResponse {}
+
+message SetUserSuspendedRequest {
+  string discord_user_id = 1;
+  bool suspended = 2;
+}
+
+message SetUserSuspendedResponse {}
+
+message SetTenantPlatformKeysRequest {
+  string tenant_id = 1;
+  bool enabled = 2;
+}
+
+message SetTenantPlatformKeysResponse {}
+
+// CampaignGuest is one Campaign Guest of the Active Campaign as its GM sees it.
+message CampaignGuest {
+  // user_id is the internal user UUID — the handle Update/Remove take.
+  string user_id = 1;
+  string discord_user_id = 2;
+  // name / avatar are empty until the guest has signed in once (a guest added
+  // by snowflake).
+  string name = 3;
+  string avatar = 4;
+  repeated GuestRight rights = 5;
+  google.protobuf.Timestamp added_at = 6;
+  bool has_signed_in = 7;
+}
+
+message ListCampaignAccessRequest {}
+
+message ListCampaignAccessResponse {
+  repeated CampaignGuest guests = 1;
+  // invitations are the Active Campaign's CAMPAIGN invitation links, newest first.
+  repeated Invitation invitations = 2;
+}
+
+message AddCampaignGuestRequest {
+  string discord_user_id = 1;
+  repeated GuestRight rights = 2;
+}
+
+message AddCampaignGuestResponse {
+  CampaignGuest guest = 1;
+}
+
+message UpdateCampaignGuestRequest {
+  string user_id = 1;
+  repeated GuestRight rights = 2;
+}
+
+message UpdateCampaignGuestResponse {
+  CampaignGuest guest = 1;
+}
+
+message RemoveCampaignGuestRequest {
+  string user_id = 1;
+}
+
+message RemoveCampaignGuestResponse {}
+
+message CreateCampaignInvitationRequest {
+  string label = 1;
+  repeated GuestRight rights = 2;
+  // max_uses 0 = unlimited.
+  int32 max_uses = 3;
+  // expires_in_days 0 = never expires; at most 365.
+  int32 expires_in_days = 4;
+  // discord_user_id optionally pins the link to one Discord User.
+  string discord_user_id = 5;
+}
+
+message CreateCampaignInvitationResponse {
+  Invitation invitation = 1;
+  // token is the secret path segment of the link: `/join/<token>`. Shown once.
+  string token = 2;
+}
+
+message RevokeCampaignInvitationRequest {
+  string id = 1;
+}
+
+message RevokeCampaignInvitationResponse {}
 
 // LogoutRequest is the (empty) request for Logout; the session to delete is
 // resolved server-side from the session cookie.
