@@ -114,3 +114,44 @@ ADR-0062 (amendment of the same date) is the record; what changes here:
   Key: the engine checks the rule again on every exchange.
 - **Priced models only on the Platform Key** applies to the chat choice too,
   when the choice is saved and again when the chat runs.
+
+## Amendment: removing a key, the way back to the platform default, and the usage summary (2026-11-26, #712 items 2 and 3)
+
+Setup became an ordered checklist with a plan and usage card (the
+`setup-checklist` package of the UX programme). What changes here:
+
+- **A voice LLM key can be removed.** `DeleteProviderConfig` also accepts
+  slot `groq` and slot `anthropic` (that slot's row, a saved key or a keyless
+  platform choice alike) and slot `voice_llm` (both rows: "Back to platform
+  default"). The Tenant then runs its newest remaining LLM row, else the
+  deployment default; `effective_llm` follows on the next read. The removal
+  busts the provider-health cache. ElevenLabs and Gemini keys keep Replace
+  only: removing them would unbind every Agent's voice Provider Config (`ON
+  DELETE SET NULL`), which is a decision of its own.
+- **The planning chat is re-validated on removal.** A chat choice may name an
+  unpriced model only because it ran on the Tenant's own key for that
+  provider. When that key goes and the chat would fall to the Platform Key,
+  the chat's model is reset to its provider's chat default (priced by test),
+  and the response says so (`chat_model_reset`) so the screen can tell the GM.
+  A chat-only key, or a priced model, is left alone.
+- **Activating a platform slot is insert-only (#712 item 3).** The keyless
+  "ride the Platform Key" row is written with `ON CONFLICT DO NOTHING`: a key
+  saved between the handler's read and its write is never replaced by an empty
+  credential. A key save always activates its slot, so the concurrent save
+  already did what the activation asked for.
+- **The linked server is stored by name.** The guild-admin proof already reads
+  `GET /guilds/{id}`; the name it returns is stored with the link
+  (`deployment_config.guild_name`, migration 00061), kept while the same
+  server is re-linked, cleared when the link changes or is released, and
+  returned as `guild_name` on `ListProviderConfigs`. Display data only: nothing
+  routes on it.
+- **`GetUsageSummary`** reports the plan (slug, display name), whether the
+  Tenant rides the Platform Keys (the same entitlement every key resolution
+  consults) and, where the allowance gate applies (open Admission Mode, a plan
+  with `included_usage_usd`), the month-to-date estimate, the allowance and
+  the reset instant (the next UTC calendar month, the window of
+  `spend.PlanAllowance`). Allowlist mode wires no allowance, so none is
+  reported: Setup never shows a meter that nothing enforces.
+
+The explicit active-LLM marker (#712 item 1, saving a key no longer switching
+the voice model) stays open: it needs a schema change and its own decision.
