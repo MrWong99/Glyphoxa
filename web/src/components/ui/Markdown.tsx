@@ -1,5 +1,8 @@
 import { Fragment, type ReactNode } from "react";
 
+import { useI18n } from "@/i18n";
+import { CopyButton } from "./CopyButton";
+
 // Markdown rendering for LLM-authored prose (the planning chat's Butler
 // replies, recaps, and Agent transcript lines). Hand-rolled rather than a
 // react-markdown/remark dependency: the corpus is chat-sized model output, the
@@ -96,9 +99,14 @@ function renderInline(text: string, depth = 0): ReactNode[] {
 
 // ── Block grammar ───────────────────────────────────────────────────────────
 
-type ListEntry = { indent: number; ordered: boolean; start: number; text: string };
-type ListItem = { text: string; child: List | null };
-type List = { ordered: boolean; start: number; items: ListItem[] };
+// contentIndent is where the item's text starts on its marker line: the
+// column continuation lines are measured against ("1. foo" → 3, "- foo" → 2).
+type ListEntry = { indent: number; contentIndent: number; ordered: boolean; start: number; text: string };
+// task: null for a plain item, else whether its [ ] / [x] box is ticked.
+type ListItem = { blocks: Block[]; task: boolean | null };
+// loose: a blank line separates items or paragraphs inside one, so each
+// paragraph renders as its own <p>; a tight list keeps items to one line each.
+type List = { ordered: boolean; start: number; loose: boolean; items: ListItem[] };
 
 type Align = "left" | "center" | "right" | null;
 
@@ -128,6 +136,7 @@ function listEntry(line: string): ListEntry | null {
   if (!m) return null;
   return {
     indent: m[1].length,
+    contentIndent: line.length - m[4].length,
     ordered: m[3] !== undefined,
     start: m[3] !== undefined ? parseInt(m[3], 10) : 1,
     text: m[4],
@@ -143,24 +152,81 @@ function listInterrupts(line: string): boolean {
   return e !== null && (!e.ordered || e.start === 1);
 }
 
-// buildList shapes a run of raw list entries into at most two levels: entries
-// indented ≥2 spaces past the run's first entry nest under the preceding
-// top-level item. Deeper indentation flattens into that child list — LLM chat
-// output essentially never goes three deep, and a flattened third level reads
-// fine where it does.
-function buildList(entries: ListEntry[]): List {
-  const base = entries[0].indent;
-  const list: List = { ordered: entries[0].ordered, start: entries[0].start, items: [] };
-  for (const e of entries) {
-    const parent = list.items[list.items.length - 1];
-    if (e.indent >= base + 2 && parent) {
-      if (!parent.child) parent.child = { ordered: e.ordered, start: e.start, items: [] };
-      parent.child.items.push({ text: e.text, child: null });
-    } else {
-      list.items.push({ text: e.text, child: null });
+const indentOf = (line: string) => line.length - line.trimStart().length;
+
+// TASK marks a GFM task item: "[ ] open", "[x] done".
+const TASK = /^\[([ xX])\]\s+(.*)$/;
+
+// isSibling: an entry that continues the list opened by `first` — same kind
+// (a bullet run and a numbered run are two lists, as in CommonMark) at the
+// list's own indentation, give or take one space.
+function isSibling(e: ListEntry | null, line: string, first: ListEntry): e is ListEntry {
+  return e !== null && !HR.test(line) && e.ordered === first.ordered && e.indent >= first.indent && e.indent < first.indent + 2;
+}
+
+// parseList consumes one list starting at lines[i]. Each item owns its marker
+// line plus every following line indented past the list's own indentation
+// (by two or more spaces), blank lines included when more indented content or
+// a sibling item follows them. That body is parsed as blocks of its own, so a
+// continuation paragraph, a fenced block or a nested list (any depth, up to
+// maxDepth) stays inside its item, and a blank line between items keeps one
+// loose list instead of a run of one-item lists — the shape chat models write
+// numbered plans in. A list ends at a line that is none of these: an
+// unindented paragraph, a list of the other kind, a rule.
+function parseList(lines: string[], start: number, depth: number): { list: List; next: number } {
+  const first = listEntry(lines[start])!;
+  const list: List = { ordered: first.ordered, start: first.start, loose: false, items: [] };
+  let i = start;
+  while (i < lines.length) {
+    const entry = listEntry(lines[i]);
+    if (!isSibling(entry, lines[i], first)) break;
+    i++;
+    const body: string[] = [entry.text];
+    let ended = false;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.trim() === "") {
+        let j = i;
+        while (j < lines.length && lines[j].trim() === "") j++;
+        // A blank tail (a streaming reply paused after a blank line) ends
+        // nothing yet: the next delta decides.
+        if (j >= lines.length) {
+          i = j;
+          break;
+        }
+        if (indentOf(lines[j]) >= first.indent + 2) {
+          for (let k = i; k < j; k++) body.push("");
+          list.loose = true;
+          i = j;
+          continue;
+        }
+        if (isSibling(listEntry(lines[j]), lines[j], first)) {
+          list.loose = true;
+          i = j;
+          break;
+        }
+        ended = true;
+        break;
+      }
+      if (indentOf(line) >= first.indent + 2) {
+        // Strip the item's content indentation (no more than the line has).
+        body.push(line.slice(Math.min(indentOf(line), entry.contentIndent)));
+        i++;
+        continue;
+      }
+      if (!isSibling(listEntry(line), line, first)) ended = true;
+      break;
     }
+    const task = TASK.exec(body[0]);
+    if (task) body[0] = task[2];
+    const blocks =
+      depth < maxDepth
+        ? parseBlocks(body.join("\n"), depth + 1, true)
+        : [{ kind: "p" as const, lines: body.map((l) => l.trim()).filter((l) => l !== "") }];
+    list.items.push({ blocks, task: task ? task[1] !== " " : null });
+    if (ended) break;
   }
-  return list;
+  return { list, next: i };
 }
 
 // splitRow splits one pipe-delimited table row into trimmed cells. Edge pipes
@@ -216,8 +282,11 @@ function tableStart(header: string, delim: string | undefined): { header: string
 // parseBlocks is a line-based single pass: each iteration consumes one whole
 // block. Paragraphs run until a blank line or the start of any other block, so
 // a list glued directly under a prose line (no blank between — chat models do
-// this constantly) still parses as a list.
-function parseBlocks(text: string, depth = 0): Block[] {
+// this constantly) still parses as a list. inItem: this is a list item's body,
+// where a sub-list of any number may follow the item's text directly ("1. Prep"
+// then "   2. maps"); outside an item only "1." may break a paragraph.
+function parseBlocks(text: string, depth = 0, inItem = false): Block[] {
+  const breaksParagraph = inItem ? (l: string) => LIST.test(l) : listInterrupts;
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const blocks: Block[] = [];
   let i = 0;
@@ -262,17 +331,11 @@ function parseBlocks(text: string, depth = 0): Block[] {
       continue;
     }
     if (LIST.test(line)) {
-      const entries: ListEntry[] = [];
-      while (i < lines.length) {
-        // A rule line ("- - -") inside the run ends the list — HR outranks the
-        // list pattern here exactly as it does at block start.
-        if (HR.test(lines[i])) break;
-        const e = listEntry(lines[i]);
-        if (!e) break;
-        entries.push(e);
-        i++;
-      }
-      blocks.push({ kind: "list", list: buildList(entries) });
+      // A rule line ("- - -") inside the run ends the list — HR outranks the
+      // list pattern there exactly as it does at block start (isSibling).
+      const { list, next } = parseList(lines, i, depth);
+      blocks.push({ kind: "list", list });
+      i = next;
       continue;
     }
     const table = tableStart(line, lines[i + 1]);
@@ -317,7 +380,7 @@ function parseBlocks(text: string, depth = 0): Block[] {
       !HEADING.test(lines[i]) &&
       !HR.test(lines[i]) &&
       !QUOTE.test(lines[i]) &&
-      !listInterrupts(lines[i]) &&
+      !breaksParagraph(lines[i]) &&
       tableStart(lines[i], lines[i + 1]) === null
     ) {
       para.push(lines[i]);
@@ -330,13 +393,42 @@ function parseBlocks(text: string, depth = 0): Block[] {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-function renderList(list: List, keyBase: number): ReactNode {
-  const items = list.items.map((item, i) => (
-    <li key={i}>
-      {renderInline(item.text)}
-      {item.child && renderList(item.child, i)}
-    </li>
+type RenderOptions = { copyable: boolean; copyLabel: string };
+
+function renderLines(lines: string[]): ReactNode[] {
+  return lines.map((line, j) => (
+    <Fragment key={j}>
+      {j > 0 && <br />}
+      {renderInline(line)}
+    </Fragment>
   ));
+}
+
+function renderList(list: List, keyBase: number, opts: RenderOptions): ReactNode {
+  const items = list.items.map((item, i) => {
+    // A tight item's text sits in the <li> itself, no paragraph margin; a
+    // loose list gives every paragraph its own <p>.
+    const [head, ...rest] = item.blocks;
+    const inlineHead = !list.loose && head?.kind === "p";
+    return (
+      <li key={i} className={item.task !== null ? "gx-md__task" : undefined}>
+        {item.task !== null && (
+          // Non-interactive by design: a reply's checklist is the Butler's
+          // text, not state anyone can tick. Disabled keeps it out of the tab
+          // order while a screen reader still hears checked / not checked.
+          <input type="checkbox" className="gx-md__check" checked={item.task} disabled readOnly />
+        )}
+        {inlineHead ? (
+          <>
+            {renderLines(head.lines)}
+            {renderBlocks(rest, opts)}
+          </>
+        ) : (
+          renderBlocks(item.blocks, opts)
+        )}
+      </li>
+    );
+  });
   // An ordered list keeps the model's numbering: "3." renders as 3 via the
   // start attribute, not silently renumbered from 1.
   return list.ordered ? (
@@ -350,7 +442,7 @@ function renderList(list: List, keyBase: number): ReactNode {
   );
 }
 
-function renderBlocks(blocks: Block[]): ReactNode[] {
+function renderBlocks(blocks: Block[], opts: RenderOptions): ReactNode[] {
   return blocks.map((b, i) => {
     switch (b.kind) {
       case "heading":
@@ -363,20 +455,28 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
             {renderInline(b.text)}
           </p>
         );
-      case "fence":
-        return (
+      case "fence": {
+        const pre = (
           <pre key={i} className="gx-md__pre" data-lang={b.lang || undefined}>
             <code>{b.code}</code>
           </pre>
         );
+        if (!opts.copyable) return pre;
+        return (
+          <div key={i} className="gx-md__codeblock">
+            {pre}
+            <CopyButton text={b.code} label={opts.copyLabel} className="gx-md__copy" />
+          </div>
+        );
+      }
       case "quote":
         return (
           <blockquote key={i} className="gx-md__quote">
-            {renderBlocks(b.blocks)}
+            {renderBlocks(b.blocks, opts)}
           </blockquote>
         );
       case "list":
-        return renderList(b.list, i);
+        return renderList(b.list, i, opts);
       case "table":
         // The wrapper div owns horizontal overflow: a wide table scrolls
         // inside the bubble instead of stretching it. data-align mirrors the
@@ -413,12 +513,7 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
       case "p":
         return (
           <p key={i} className="gx-md__p">
-            {b.lines.map((line, j) => (
-              <Fragment key={j}>
-                {j > 0 && <br />}
-                {renderInline(line)}
-              </Fragment>
-            ))}
+            {renderLines(b.lines)}
           </p>
         );
     }
@@ -427,14 +522,17 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
 
 /**
  * Markdown renders LLM-authored prose with block structure — the planning
- * chat's Butler bubbles and the recap card. The wrapper div resets
+ * chat's Butler replies and the recap card. The wrapper div resets
  * white-space to normal so it can sit inside containers that pre-wrap plain
  * text (the chat bubble), while fenced code keeps its own wrapping.
+ *
+ * copyable puts a "Copy code" button on every fenced code block.
  */
-export function Markdown({ text, className }: { text: string; className?: string }) {
+export function Markdown({ text, className, copyable = false }: { text: string; className?: string; copyable?: boolean }) {
+  const { t } = useI18n();
   return (
     <div className={className ? `gx-md ${className}` : "gx-md"}>
-      {renderBlocks(parseBlocks(text))}
+      {renderBlocks(parseBlocks(text), { copyable, copyLabel: t("chat.copyCode") })}
     </div>
   );
 }
@@ -471,11 +569,7 @@ function blockPlain(b: Block): string {
     case "quote":
       return b.blocks.map(blockPlain).join(" ");
     case "list":
-      return b.list.items
-        .map((it) =>
-          [inlinePlain(it.text), ...(it.child?.items.map((c) => inlinePlain(c.text)) ?? [])].join(" "),
-        )
-        .join(" ");
+      return b.list.items.map((it) => it.blocks.map(blockPlain).join(" ")).join(" ");
     case "table":
       return [b.header, ...b.rows]
         .map((row) => row.filter((c) => c !== "").map((c) => inlinePlain(c)).join(" "))
