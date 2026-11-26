@@ -1046,6 +1046,20 @@ describe("Configuration invite autofill (#105)", () => {
     expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
   });
 
+  it("stops offering a pasted server once the paste changes", async () => {
+    renderScreen(mockBackend({ inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] } }));
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, { target: { value: "discord.gg/abc123" } });
+    expect(await screen.findByRole("button", { name: "Link The Keep" })).toBeEnabled();
+
+    fireEvent.change(paste, { target: { value: "not a link" } });
+    expect(screen.queryByTestId("resolved-guild")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
+
+    fireEvent.change(paste, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Link server" })).toBeDisabled();
+  });
+
   it("offers the link even when the resolved server has no voice channels", async () => {
     renderScreen(mockBackend({ inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] } }));
     fireEvent.change(await screen.findByLabelText(/paste a discord link/i), { target: { value: "discord.gg/abc123" } });

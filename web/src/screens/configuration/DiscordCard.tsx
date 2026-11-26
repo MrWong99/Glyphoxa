@@ -35,7 +35,7 @@ import { SecretRow } from "./SecretRow";
 // at link time, ADR-0004 amendment 2026-11-26), with Change and Unlink.
 
 /** The server the form would link: from a pasted link, or typed by hand. */
-type Candidate = { id: string; name?: string };
+type Candidate = { id: string; name?: string; from: "paste" | "manual" };
 
 export function DiscordCard({
   config,
@@ -211,8 +211,10 @@ function LinkForm({
             <DiscordLinkAutofill
               onFill={(guildId, guildName) => {
                 link.reset();
-                setCandidate({ id: guildId, name: guildName });
+                setCandidate({ id: guildId, name: guildName, from: "paste" });
               }}
+              // A typed Server ID stands; only a pasted server goes with its paste.
+              onClear={() => setCandidate((c) => (c?.from === "paste" ? null : c))}
             />
 
             <button
@@ -240,7 +242,7 @@ function LinkForm({
                     const v = e.target.value.trim();
                     setManual(e.target.value);
                     link.reset();
-                    setCandidate(v === "" ? null : { id: v });
+                    setCandidate(v === "" ? null : { id: v, from: "manual" });
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
