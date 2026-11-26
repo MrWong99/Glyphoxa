@@ -1,4 +1,5 @@
 import { useId } from "react";
+import type { Ref } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { ArrowLeft, ArrowRight, EyeOff, Link as LinkIcon, Pencil, X } from "lucide-react";
 
@@ -38,6 +39,7 @@ export function EntryView({
   onClose,
   onOpenNode,
   onOpenLine,
+  editRef,
 }: {
   node: Node;
   /** The entry's free-form tags, already resolved by the panel. */
@@ -48,6 +50,8 @@ export function EntryView({
   onOpenNode: (nodeID: string) => void;
   /** Jump to one Transcript Line on the Session screen (mentions, #545). */
   onOpenLine?: (sessionID: string, lineID: string) => void;
+  /** The Edit button, which takes focus back when the editor closes. */
+  editRef?: Ref<HTMLButtonElement>;
 }) {
   const { t, lang } = useI18n();
   const { roster, openAgent } = useCampaignScreen();
@@ -114,7 +118,7 @@ export function EntryView({
           </div>
         </div>
         <div className="gx-wiki-pane__actions">
-          <Button variant="secondary" size="sm" iconStart={<Pencil size={14} />} onClick={onEdit}>
+          <Button ref={editRef} variant="secondary" size="sm" iconStart={<Pencil size={14} />} onClick={onEdit}>
             {t("knowledge.editEntry")}
           </Button>
           <IconButton size="sm" label={t("knowledge.closeEntry")} onClick={onClose}>
@@ -192,7 +196,7 @@ export function EntryView({
 
         <EntryConnections node={node} onOpenNode={onOpenNode} />
 
-        <NodeAppearances nodeID={node.id} onOpenLine={onOpenLine} />
+        <NodeAppearances nodeID={node.id} onOpenLine={onOpenLine} as="section" />
 
         {changed && (
           <p className="gx-wiki-view__stamp">

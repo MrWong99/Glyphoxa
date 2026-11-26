@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -22,7 +22,7 @@ import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { invalidateKnowledgeReads } from "./knowledgeCache";
 import { KnowledgePanel } from "./KnowledgePanel";
-import { WikiNav, makeWikiHistory } from "./wikiTestKit";
+import { WikiNav, makeWikiHistory, pickNewEntry } from "./wikiTestKit";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 
@@ -246,6 +246,36 @@ describe("KnowledgePanel entry editor: saving", () => {
     expect(content).toHaveFocus();
   });
 
+  it("Ctrl+S from inside a fact holds the fact still without taking focus from it", async () => {
+    const { updateCalls, release } = mount({ holdUpdates: true });
+    await openEditor("Oakhurst");
+    const fact = screen.getByLabelText("Fact 1 text") as HTMLTextAreaElement;
+    act(() => fact.focus());
+    fireEvent.change(fact, { target: { value: "Sleepy, then smoke" } });
+    act(() => {
+      fact.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    await waitFor(() => expect(updateCalls).toHaveLength(1));
+
+    // While the save is in flight the row cannot change (its id is paired by
+    // position when the save lands), but it is read-only, not disabled: a
+    // disabled control drops focus to <body> in a real browser. jsdom does not
+    // run that blur, so what is asserted is the attribute that causes it.
+    expect(fact).not.toBeDisabled();
+    expect(fact).toHaveAttribute("readonly");
+    const remove = screen.getByRole("button", { name: "Remove fact 1" });
+    expect(remove).not.toBeDisabled();
+    expect(remove).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(remove);
+    expect(screen.getByLabelText("Fact 1 text")).toBe(fact);
+
+    await release();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(fact).toHaveFocus();
+    expect(fact).not.toHaveAttribute("readonly");
+    expect(remove).not.toHaveAttribute("aria-disabled");
+  });
+
   it("shows a failed save in the editor, which stays open with the typing", async () => {
     mount({ failUpdateFor: "n1" });
     const editor = await openEditor("Oakhurst");
@@ -375,6 +405,52 @@ describe("KnowledgePanel entry editor: the live row and the guard", () => {
     expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument();
   });
 
+  it("the Edit pencil on the card of the entry being edited asks nothing and keeps the guard", async () => {
+    mount();
+    await openEditor("Oakhurst");
+    fireEvent.change(nameField(), { target: { value: "Oakhurst (burned)" } });
+    fireEvent.click(screen.getByRole("button", { name: "Edit Oakhurst" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(nameField().value).toBe("Oakhurst (burned)");
+
+    // The guard is still up: the next move away asks.
+    fireEvent.click(screen.getByRole("button", { name: "The Citadel" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Discard unsaved changes?");
+    expect(nameField().value).toBe("Oakhurst (burned)");
+  });
+
+  it("New entry with the type already being created asks nothing and keeps the guard", async () => {
+    mount();
+    await screen.findByRole("button", { name: "Oakhurst" });
+    pickNewEntry("Location");
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "The mill" } });
+
+    pickNewEntry("Location");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(nameField().value).toBe("The mill");
+
+    fireEvent.click(screen.getByRole("button", { name: "Oakhurst" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Discard unsaved changes?");
+  });
+
+  it("an editor left on another entry does not reopen when the URL comes back to it", async () => {
+    const { history } = mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Oakhurst" }));
+    await openEditor("The Citadel");
+    expect(history.current()).toEqual({ node: "n2" });
+
+    history.back();
+    await waitFor(() =>
+      expect(within(screen.getByTestId("entry-view")).getByRole("heading", { name: "Oakhurst" })).toBeInTheDocument(),
+    );
+    // Forward (or any jump) back to it lands on its page, not in its editor.
+    history.go({ node: "n2" });
+    await waitFor(() =>
+      expect(within(screen.getByTestId("entry-view")).getByRole("heading", { name: "The Citadel" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("entry-editor")).not.toBeInTheDocument();
+  });
+
   it("a click on the card of the entry being edited does not throw the edit away", async () => {
     mount();
     await openEditor("Oakhurst");
@@ -441,5 +517,107 @@ describe("KnowledgePanel entry editor: tags", () => {
     fireEvent.click(within(suggestions).getByRole("button", { name: "Add tag act one" }));
     await waitFor(() => expect(tagCalls).toEqual([["act one"]]));
     expect(await screen.findByRole("button", { name: "Remove act one" })).toBeInTheDocument();
+  });
+});
+
+describe("KnowledgePanel entry editor: focus", () => {
+  it("Edit puts the caret in the name, and Done hands focus back to Edit", async () => {
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Oakhurst" }));
+    const edit = within(await screen.findByTestId("entry-view")).getByRole("button", { name: "Edit" });
+    act(() => edit.focus());
+    fireEvent.click(edit);
+    await screen.findByTestId("entry-editor");
+    expect(nameField()).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("button", { name: "Edit" })).toHaveFocus();
+  });
+
+  it("Cancel after typing also hands focus back to Edit", async () => {
+    mount();
+    await openEditor("Oakhurst");
+    fireEvent.change(nameField(), { target: { value: "Oakhurst (burned)" } });
+    fireEvent.click(within(screen.getByTestId("entry-editor")).getByRole("button", { name: "Cancel" }));
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("button", { name: "Edit" })).toHaveFocus();
+  });
+
+  it("closing the entry beside the list returns focus to its card", async () => {
+    mount();
+    const card = await screen.findByRole("button", { name: "Oakhurst" });
+    fireEvent.click(card);
+    const close = within(await screen.findByTestId("entry-view")).getByRole("button", { name: "Close entry" });
+    act(() => close.focus());
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByTestId("entry-view")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Oakhurst" })).toHaveFocus();
+  });
+});
+
+describe("KnowledgePanel entry editor: crossing the 1100px breakpoint", () => {
+  // A matchMedia whose "stack" query the test flips, as a rotated tablet or a
+  // resized window does.
+  const realMatchMedia = window.matchMedia;
+  let narrow = false;
+  const listeners = new Set<(e: { matches: boolean }) => void>();
+  const flip = (to: boolean) => {
+    narrow = to;
+    act(() => listeners.forEach((l) => l({ matches: to })));
+  };
+  beforeEach(() => {
+    listeners.clear();
+    window.matchMedia = ((query: string) => ({
+      get matches() {
+        return query === "(max-width: 1100px)" && narrow;
+      },
+      media: query,
+      addEventListener: (_: string, l: (e: { matches: boolean }) => void) => {
+        if (query === "(max-width: 1100px)") listeners.add(l);
+      },
+      removeEventListener: (_: string, l: (e: { matches: boolean }) => void) => listeners.delete(l),
+    })) as unknown as typeof window.matchMedia;
+  });
+  afterEach(() => {
+    window.matchMedia = realMatchMedia;
+  });
+
+  it("keeps the typing when the window narrows mid-edit, and moves to the sheet once the editor closes", async () => {
+    narrow = false;
+    mount();
+    const editor = await openEditor("Oakhurst");
+    fireEvent.change(nameField(), { target: { value: "Oakhurst (burned)" } });
+    expect(screen.getByRole("complementary", { name: "Selected entry" })).toBeInTheDocument();
+
+    flip(true);
+    // The same editor, not a new one seeded from the saved row.
+    expect(screen.getByTestId("entry-editor")).toBe(editor);
+    expect(nameField().value).toBe("Oakhurst (burned)");
+    expect(within(editor).getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+
+    // The guard is still up.
+    fireEvent.click(screen.getByRole("button", { name: "The Citadel" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+
+    // Leaving the editor lets the pane follow the window.
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    const sheet = await screen.findByRole("dialog", { name: "Oakhurst" });
+    expect(within(sheet).getByTestId("entry-view")).toBeInTheDocument();
+  });
+
+  it("keeps the typing when the window widens mid-edit in the sheet", async () => {
+    narrow = true;
+    mount();
+    const editor = await openEditor("Oakhurst");
+    expect(screen.getByRole("dialog", { name: "Oakhurst" })).toContainElement(editor);
+    fireEvent.change(screen.getByLabelText("Content"), { target: { value: "A village, now ash." } });
+
+    flip(false);
+    expect(screen.getByTestId("entry-editor")).toBe(editor);
+    expect((screen.getByLabelText("Content") as HTMLTextAreaElement).value).toBe("A village, now ash.");
+    expect(within(editor).getByText("Unsaved changes")).toBeInTheDocument();
   });
 });

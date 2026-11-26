@@ -434,6 +434,9 @@ describe("KnowledgePanel filters", () => {
     expect(hit).toHaveAttribute("data-match", "hit");
     // Nothing is removed from the picture: a search on a map answers "where".
     expect(screen.getByLabelText("Saltmarsh (Location)")).toHaveAttribute("data-match", "miss");
+    // So the count is of what is drawn, not of the matches.
+    expect(screen.getByText("3 entries")).toBeInTheDocument();
+    expect(screen.queryByText("1 of 3 entries")).not.toBeInTheDocument();
   });
 
   it("surfaces a failed search instead of silently showing the full list", async () => {
@@ -513,6 +516,48 @@ describe("KnowledgePanel filters", () => {
       expect(within(dialog).queryByRole("button", { name: "Rename tag harbor" })).not.toBeInTheDocument(),
     );
     expect(renameCalls).toHaveLength(1);
+  });
+
+  it("a rename that differs only in spacing is still a merge, as the server sees it", async () => {
+    const { renameCalls } = renderPanel([note("n1", "Mast"), note("n2", "Anchor")], {
+      tags: [
+        { nodeId: "n1", tag: "act two" },
+        { nodeId: "n2", tag: "harbor" },
+      ],
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Manage tags" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage tags" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename tag harbor" }));
+    fireEvent.change(within(dialog).getByLabelText("New name for tag harbor"), {
+      target: { value: " act   two " },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Merge “harbor” into “act two”?");
+    expect(renameCalls).toHaveLength(0);
+  });
+
+  it("an open editor's tag chips follow a rename made in Manage tags", async () => {
+    const { renameCalls } = renderPanel([note("n1", "Mast")], { tags: [{ nodeId: "n1", tag: "harbor" }] });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Mast" }));
+    const input = await screen.findByLabelText("Tags");
+    await screen.findByRole("button", { name: "Remove harbor" });
+    // A chip edit first, so the editor holds its own list.
+    fireEvent.change(input, { target: { value: "rumour" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByRole("button", { name: "Remove rumour" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage tags" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage tags" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Rename tag harbor" }));
+    fireEvent.change(within(dialog).getByLabelText("New name for tag harbor"), { target: { value: "docks" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(renameCalls).toHaveLength(1));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Renamed “harbor” to “docks”"));
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Manage tags" })).not.toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove docks" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Remove harbor" })).not.toBeInTheDocument();
   });
 
   it("a plain rename does not ask", async () => {
@@ -618,6 +663,44 @@ describe("KnowledgePanel entry page", () => {
     expect(screen.queryByTestId("entry-view")).not.toBeInTheDocument();
   });
 
+  it("looks a ?node the cached list does not know up once more before calling it missing", async () => {
+    const { nodes, history } = renderPanel(world());
+    await screen.findByRole("button", { name: "Bart" });
+    // Made since the list was read: on another tab, or a proposal approved on
+    // a phone. The palette's server-side search can already find it.
+    nodes.push(create(NodeSchema, { id: "late", nodeType: NodeType.NOTE, name: "The late letter" }));
+    history.go({ node: "late" });
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("entry-view")).getByRole("heading", { name: "The late letter" }),
+      ).toBeInTheDocument(),
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(history.current()).toEqual({ node: "late" });
+  });
+
+  it("the same dead link followed twice is reported and cleared both times", async () => {
+    const { history } = renderPanel(world());
+    await screen.findByRole("button", { name: "Bart" });
+    history.go({ node: "gone" });
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(history.current()).toEqual({}));
+
+    history.go({ node: "gone" });
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(history.current()).toEqual({}));
+  });
+
+  it("an entry opened inside a folded type group unfolds it and marks its card", async () => {
+    const { history } = renderPanel(world());
+    const group = await screen.findByRole("region", { name: "Location" });
+    fireEvent.click(within(group).getByRole("button", { name: "Location 1" }));
+    expect(within(group).queryByRole("button", { name: "Saltmarsh" })).not.toBeInTheDocument();
+
+    history.go({ node: "town" });
+    expect(await within(group).findByRole("button", { name: "Saltmarsh" })).toHaveAttribute("aria-current", "true");
+  });
+
   it("clicking a map node opens the same entry page the list opens (#534)", async () => {
     renderPanel(world(), { edges: worldEdges() });
     fireEvent.click(await screen.findByRole("button", { name: /Relationship map/ }));
@@ -680,6 +763,10 @@ describe("KnowledgePanel create", () => {
     await waitFor(() => expect(history.current()).toEqual({ node: "n2" }));
     const editor = await screen.findByTestId("entry-editor");
     expect(within(editor).getByRole("heading", { name: "The old harbor" })).toBeInTheDocument();
+    // The form became the entry's editor, with the caret at its name: focus
+    // did not fall to <body> when the create form went away.
+    expect(within(editor).getByText("Edit entry")).toBeInTheDocument();
+    expect(within(editor).getByLabelText("Name")).toHaveFocus();
     expect(await within(editor).findByLabelText("Tags")).toBeInTheDocument();
     expect(within(editor).getByRole("button", { name: "Add connection" })).toBeInTheDocument();
     expect(toast.success).toHaveBeenCalledWith("Created “The old harbor”");
@@ -952,7 +1039,7 @@ describe("KnowledgePanel below 1100px", () => {
     const sheet = await screen.findByRole("dialog", { name: "Bart" });
     expect(sheet).toHaveAttribute("data-variant", "sheet");
     expect(within(sheet).getByTestId("entry-view")).toBeInTheDocument();
-    expect(screen.queryByRole("complementary", { name: "Open entry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Selected entry" })).not.toBeInTheDocument();
 
     // Closing the sheet closes the entry: the URL lets go of it.
     fireEvent.click(within(sheet).getByRole("button", { name: "Close entry" }));

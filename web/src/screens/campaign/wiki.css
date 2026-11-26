@@ -39,6 +39,12 @@
   gap: var(--spacing-md);
   min-width: 0;
 }
+/* It takes focus only as a landing place after the entry pane closes (the
+ * next Tab moves into the list); a ring around the whole list would read as
+ * a selection. */
+.gx-wiki__content:focus {
+  outline: none;
+}
 
 /* The pane stays in view while the list scrolls under it, and scrolls inside
  * itself when the entry is longer than the window. 60px is the topbar
@@ -273,7 +279,8 @@
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  /* The card's radius (.gx-card): the button itself has none to inherit. */
+  border-radius: var(--radius-md);
 }
 /* The ring is drawn around the card, where the hit area is. */
 .gx-wiki-card__open:focus-visible {
@@ -898,7 +905,9 @@
 .gx-kg-graph__node[data-match="miss"] {
   opacity: 0.25;
 }
-.gx-kg-graph__node[data-match="hit"] circle {
+/* The node's own disc only: not the lens's dashed over-budget ring, and not
+ * the selected node, whose heavier stroke must win whatever the bundle order. */
+.gx-kg-graph__node[data-match="hit"]:not([data-selected]) > circle:first-of-type {
   stroke-width: 2.5;
 }
 

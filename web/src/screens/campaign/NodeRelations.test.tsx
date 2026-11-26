@@ -218,8 +218,8 @@ describe("NodeRelations", () => {
       ],
     });
     fireEvent.click(await screen.findByRole("button", { name: "Delete connection from Cyra: knows" }));
-    // The question names the relation from the side it is asserted on.
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Cyra → knows");
+    // The question names the whole relation, this entry included.
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Removes the Cyra knows Aldric connection.");
     expect(deleteCalls).toHaveLength(0);
 
     await confirmInDialog();

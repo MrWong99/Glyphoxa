@@ -63,7 +63,10 @@ export function TagManager({
 
   const submit = () => {
     if (!editing || rename.isPending) return;
-    const to = editing.draft.trim();
+    // The server's own normalisation (normalizeTag): trimmed, inner runs of
+    // whitespace collapsed. Without it "act  two" slipped past the merge check
+    // below and was merged into "act two" without the question.
+    const to = editing.draft.trim().split(/\s+/).join(" ");
     if (to === "" || to === editing.tag) {
       setEditing(null);
       return;

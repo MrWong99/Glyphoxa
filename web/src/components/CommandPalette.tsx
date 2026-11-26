@@ -165,7 +165,9 @@ export function CommandPalette({
   };
 
   // Entry hits land on the World-wiki sub-view directly — the Campaign view is
-  // a path segment now (ADR-0063) — with ?node= as the consume-then-strip focus.
+  // a path segment now (ADR-0063) — with ?node= naming the entry to open. The
+  // wiki keeps the param as its selection, so the entry stays linkable and
+  // Back returns to whatever was open before the jump.
   const goNode = (nodeId: string) => {
     close();
     void navigate({

@@ -76,6 +76,16 @@ export function NodeTags({ nodeID }: { nodeID: string }) {
     () => all.filter((e) => e.nodeId === nodeID).map((e) => e.tag),
     [all, nodeID],
   );
+  // A new server list while no save of ours is in flight is the truth again.
+  // Every edit here is sent at once, so `shown` never holds anything unsaved;
+  // left in place it would hide a change made elsewhere (a rename or merge in
+  // "Manage tags"), and the next chip edit, replace-in-full, would write the
+  // old spelling back onto this entry.
+  useEffect(() => {
+    if (inFlight.current) return;
+    confirmed.current = null;
+    setShown(null);
+  }, [fromServer]);
   const mine = shown ?? fromServer;
 
   // The campaign's other tags, most used first: one click instead of retyping,

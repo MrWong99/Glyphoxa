@@ -366,9 +366,11 @@ export function NodeRelations({
             <>
               {t("knowledge.deleteConnectionBefore")}
               <strong>
+                {/* The whole sentence, both ends named, as the entry page reads
+                    it: "Cyra knows Bart", never half of it. */}
                 {confirmEdge.direction === "out"
-                  ? `${edgeLabel(t, confirmEdge.edge.edgeType)} → ${confirmEdge.edge.toNodeName}`
-                  : `${confirmEdge.edge.fromNodeName} → ${edgeLabel(t, confirmEdge.edge.edgeType)}`}
+                  ? `${node.name} ${edgeLabel(t, confirmEdge.edge.edgeType)} ${confirmEdge.edge.toNodeName}`
+                  : `${confirmEdge.edge.fromNodeName} ${edgeLabel(t, confirmEdge.edge.edgeType)} ${node.name}`}
               </strong>
               {t("knowledge.deleteConnectionAfter")}
             </>

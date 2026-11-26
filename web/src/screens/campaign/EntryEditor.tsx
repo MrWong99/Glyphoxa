@@ -270,11 +270,13 @@ export function EntryEditor({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={t("knowledge.namePlaceholder")}
-            // A new entry starts at its name: the GM chose "New entry" to type one.
-            autoFocus={!isEdit}
+            // The editor starts at the name: the GM chose "New entry" or "Edit"
+            // to type. It also keeps focus off <body> when Edit swaps the page
+            // (and its focused button) for this editor.
+            autoFocus
           />
 
-          <EntryFacts rows={aspects} onChange={setAspects} disabled={pending} nodeType={nodeType} />
+          <EntryFacts rows={aspects} onChange={setAspects} busy={pending} nodeType={nodeType} />
 
           <div className="gx-wiki-content">
             <div className="gx-wiki-content__bar">

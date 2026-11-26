@@ -85,16 +85,26 @@ type FocusTarget = { uid: number; field: "key" | "value" };
 export function EntryFacts({
   rows,
   onChange,
-  disabled,
+  busy,
   nodeType,
 }: {
   rows: AspectRow[];
   onChange: (rows: AspectRow[]) => void;
-  disabled: boolean;
+  /**
+   * A save is in flight: the rows are held still until it lands, because the
+   * ids it returns are paired with them by position (reseedAspectRows).
+   *
+   * Held, not `disabled`. A focused control that becomes disabled loses focus,
+   * so a Ctrl+S pressed in a fact used to leave the caret on <body>. The
+   * fields go read-only and the buttons aria-disabled (their clicks ignored),
+   * which blocks the same edits and keeps focus where it was.
+   */
+  busy: boolean;
   /** Picks the suggested fact labels. */
   nodeType: NodeType;
 }) {
   const { t } = useI18n();
+  const held = busy || undefined;
   const list = useRef<HTMLUListElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   // Where the caret should be after the rows next change: a row that moves in
@@ -113,10 +123,13 @@ export function EntryFacts({
       ?.focus();
   }, [rows]);
 
-  const patch = (uid: number, next: Partial<AspectRow>) =>
+  const patch = (uid: number, next: Partial<AspectRow>) => {
+    if (busy) return;
     onChange(rows.map((r) => (r.uid === uid ? { ...r, ...next } : r)));
+  };
 
   const remove = (index: number, refocus: boolean) => {
+    if (busy) return;
     if (refocus) {
       const neighbour = rows[index - 1] ?? rows[index + 1];
       wantFocus.current = neighbour
@@ -127,6 +140,7 @@ export function EntryFacts({
   };
 
   const move = (index: number, delta: number, field?: FocusTarget["field"]) => {
+    if (busy) return;
     const to = index + delta;
     if (to < 0 || to >= rows.length) return;
     const next = [...rows];
@@ -136,6 +150,7 @@ export function EntryFacts({
   };
 
   const insertAfter = (index: number, seed: Partial<Omit<AspectRow, "uid">> = {}) => {
+    if (busy) return;
     const row = newAspectRow(seed);
     // A suggested label is already filled in, so the caret belongs in the fact.
     wantFocus.current = { uid: row.uid, field: seed.key ? "value" : "key" };
@@ -148,7 +163,7 @@ export function EntryFacts({
     field: FocusTarget["field"],
   ) => {
     // An IME confirms a composition with Enter; that is not "next row".
-    if (event.nativeEvent.isComposing || disabled) return;
+    if (event.nativeEvent.isComposing || busy) return;
     const row = rows[index];
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -179,7 +194,12 @@ export function EntryFacts({
     .filter((s) => !used.has(s.label.toLowerCase()));
 
   return (
-    <div className="gx-field gx-wiki-facts" role="group" aria-label={t("knowledge.factsLabel")}>
+    <div
+      className="gx-field gx-wiki-facts"
+      role="group"
+      aria-label={t("knowledge.factsLabel")}
+      aria-busy={held}
+    >
       <span className="gx-field__label">{t("knowledge.factsLabel")}</span>
       <span className="gx-field__hint">{t("knowledge.factsHint")}</span>
       {rows.length > 0 && (
@@ -192,7 +212,7 @@ export function EntryFacts({
                   placeholder={t("knowledge.factKeyPlaceholder")}
                   className="gx-wiki-fact__key"
                   value={row.key}
-                  disabled={disabled}
+                  readOnly={busy}
                   data-fact-uid={row.uid}
                   data-fact-field="key"
                   onChange={(e) => patch(row.uid, { key: e.target.value })}
@@ -206,7 +226,7 @@ export function EntryFacts({
                   rows={1}
                   maxRows={8}
                   value={row.value}
-                  disabled={disabled}
+                  readOnly={busy}
                   data-fact-uid={row.uid}
                   data-fact-field="value"
                   onChange={(e) => patch(row.uid, { value: e.target.value })}
@@ -221,7 +241,7 @@ export function EntryFacts({
                   type="button"
                   className="gx-wiki-vis"
                   data-private={row.gmPrivate || undefined}
-                  disabled={disabled}
+                  aria-disabled={held}
                   aria-label={
                     row.gmPrivate
                       ? t("knowledge.factIsGmOnlyAria", { n: i + 1 })
@@ -235,7 +255,8 @@ export function EntryFacts({
                 <IconButton
                   size="sm"
                   label={t("knowledge.factMoveUpAria", { n: i + 1 })}
-                  disabled={disabled || i === 0}
+                  disabled={i === 0}
+                  aria-disabled={held}
                   onClick={() => move(i, -1)}
                 >
                   <ChevronUp size={14} />
@@ -243,7 +264,8 @@ export function EntryFacts({
                 <IconButton
                   size="sm"
                   label={t("knowledge.factMoveDownAria", { n: i + 1 })}
-                  disabled={disabled || i === rows.length - 1}
+                  disabled={i === rows.length - 1}
+                  aria-disabled={held}
                   onClick={() => move(i, 1)}
                 >
                   <ChevronDown size={14} />
@@ -252,7 +274,7 @@ export function EntryFacts({
                   size="sm"
                   tone="danger"
                   label={t("knowledge.factRemoveAria", { n: i + 1 })}
-                  disabled={disabled}
+                  aria-disabled={held}
                   onClick={() => remove(i, false)}
                 >
                   <X size={14} />
@@ -268,7 +290,7 @@ export function EntryFacts({
           variant="ghost"
           size="sm"
           iconStart={<Plus size={13} />}
-          disabled={disabled}
+          aria-disabled={held}
           onClick={() => insertAfter(rows.length - 1)}
         >
           {t("knowledge.addFact")}
@@ -280,7 +302,7 @@ export function EntryFacts({
                 <button
                   type="button"
                   className="gx-wiki-suggest"
-                  disabled={disabled}
+                  aria-disabled={held}
                   aria-label={
                     s.gmPrivate
                       ? t("knowledge.addSuggestedGmOnlyFactAria", { label: s.label })

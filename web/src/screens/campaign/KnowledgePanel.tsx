@@ -136,6 +136,15 @@ export function KnowledgePanel({
   const [saved, setSaved] = useState<{ id: string; seq: number; node: Node } | null>(null);
   const saveSeq = useRef(0);
 
+  // The layout the pane is drawn in: beside the list, or as a sheet. It is held
+  // while an editor is open. The two are different elements, so a switch would
+  // remount the editor and lose everything typed in it, without a question
+  // (rotating a tablet, or snapping a window across 1100px, mid-sentence). The
+  // pane follows the window again as soon as the editor closes.
+  const editorOpen = creating !== null || (editFor !== null && editFor === selectedId);
+  const [layoutStacked, setLayoutStacked] = useState(stacked);
+  if (!editorOpen && layoutStacked !== stacked) setLayoutStacked(stacked);
+
   const [mode, setMode] = useCampaignPanelState<ViewMode>("wiki.mode", "list");
   const [sort, setSort] = useCampaignPanelState<SortKey>("wiki.sort", "name");
   const [collapsed, setCollapsed] = useCampaignPanelState<readonly NodeType[]>("wiki.collapsed", []);
@@ -255,6 +264,15 @@ export function KnowledgePanel({
   );
 
   const filtersActive = search.trim() !== "" || types.size > 0 || liveTags.size > 0;
+  // What the count counts. The map draws every entry the type and tag chips
+  // keep and only dims the search's misses, so there the count is of what is
+  // drawn: "1 of 40 entries" for a search would claim 39 were taken away.
+  const mapDrawn = useMemo(
+    () => allNodes.filter((n) => matchesTags(n.id) && (types.size === 0 || types.has(n.nodeType))).length,
+    [allNodes, matchesTags, types],
+  );
+  const countNarrowed = mode === "graph" ? types.size > 0 || liveTags.size > 0 : filtersActive;
+  const countShown = mode === "graph" ? mapDrawn : visible.length;
   const clearFilters = () => {
     setSearch("");
     setDebounced("");
@@ -294,14 +312,35 @@ export function KnowledgePanel({
   // Entries this panel deleted: their id leaving the list is not a broken link.
   const deleted = useRef(new Set<string>());
 
+  // ── Where keyboard focus goes when the pane changes under it ──────────────
+  // Swapping the page for the editor, or closing the pane, removes the control
+  // that had focus; left alone, focus falls to <body> and the next Tab starts
+  // at the top of the app. Each swap names where focus belongs instead, and the
+  // effect below puts it there once that element is on screen.
+  //
+  //   edit  the page's Edit button, after Done or Cancel in the editor
+  //   card  the open entry's card in the list, after the pane closed
+  //   list  the list itself, when that card is not there to take it
+  type FocusTarget = { to: "edit" } | { to: "card"; id: string } | { to: "list" };
+  const focusNext = useRef<FocusTarget | null>(null);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // In the sheet the dialog hands focus back to what opened it; only the
+  // side pane, which has no focus scope of its own, needs it placed.
+  const closeFocus = (id: string | null): FocusTarget | null =>
+    layoutStacked ? null : id ? { to: "card", id } : { to: "list" };
+
   // openEntry is the ONE way the panel moves to an entry: a card, a map node,
   // a checkup finding, a board chip, a connection's name.
   const openEntry = (id: string, as: "view" | "edit" = "view") => {
-    // Already open and being edited: a click on its own card is not a request
-    // to throw the edit away.
-    if (creating === null && id === selectedId && as === "view" && editFor === id) return;
+    // Already open in the editor: neither its card's name nor its own Edit
+    // pencil is a request to throw the edit away. Running the guard here would
+    // ask "Discard?", discard nothing (the editor keeps its key and its
+    // typing) and leave the guard lifted over an editor that is still dirty.
+    if (creating === null && id === selectedId && editFor === id) return;
     edits.guard(() => {
       resetMutations();
+      focusNext.current = null;
       setCreating(null);
       setEditFor(as === "edit" ? id : null);
       if (id !== selectedRef.current) nav.setSearch({ node: id });
@@ -311,24 +350,46 @@ export function KnowledgePanel({
     edits.guard(() => {
       resetMutations();
       setEditFor(null);
+      focusNext.current = closeFocus(selectedRef.current);
       if (selectedRef.current) nav.setSearch({ node: undefined });
     });
-  const startCreate = (type: NodeType) =>
+  const startCreate = (type: NodeType) => {
+    // The form for this type is already open: the same choice again is not a
+    // request to start over (and, like the pencil above, would lift the guard
+    // over a form that keeps its typing).
+    if (creating === type) return;
     edits.guard(() => {
       resetMutations();
       setEditFor(null);
       setCreating(type);
     });
+  };
   const leaveCreate = () => edits.guard(() => setCreating(null));
 
   // The URL moved to another entry (Back, Forward, a jump from elsewhere): the
-  // "new entry" form was over the old one and goes with it.
+  // "new entry" form was over the old one and goes with it, and so does an
+  // editor left open on another entry (or Forward would reopen that entry in
+  // its editor instead of on its page). The editor a move itself asked for
+  // (the pencil, a create) was set for the entry the URL now names, and stays.
   const lastSelected = useRef(selectedId);
   useEffect(() => {
     if (lastSelected.current === selectedId) return;
     lastSelected.current = selectedId;
     setCreating(null);
+    setEditFor((prev) => (prev === selectedId ? prev : null));
+    // A close still waiting to place focus is moot once another entry opened.
+    if (selectedId && focusNext.current?.to !== "edit") focusNext.current = null;
   }, [selectedId]);
+
+  // An entry opened from the map, a board or the palette whose type group is
+  // folded away would have no card to mark or scroll to: its group opens.
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+  const selectedType = selected?.nodeType;
+  useEffect(() => {
+    if (selectedType === undefined || !collapsedRef.current.includes(selectedType)) return;
+    setCollapsed(collapsedRef.current.filter((x) => x !== selectedType));
+  }, [selectedId, selectedType, setCollapsed]);
 
   // A ?node= that names nothing in this campaign (a stale bookmark, a link
   // from another campaign) says so once and is dropped, instead of leaving a
@@ -344,19 +405,48 @@ export function KnowledgePanel({
   // switched underneath the screen. The pane just closes; "not in this
   // campaign" would be noise on top of the switch, and before the roster
   // catches up it would even name the wrong campaign.
+  //
+  // A list that is settled can still be OLD: it is cached for a while, and an
+  // entry made since on another tab or device (a proposal approved on a phone)
+  // is not in it, though the palette's server-side search just found it. So
+  // an id the list does not know is looked up once more before it is called
+  // missing.
   const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
   const campaignName = rosterQuery.data?.campaign?.name;
   const rosterSettled = !rosterQuery.isPending;
   const reported = useRef<string | null>(null);
+  // The id a second look was started for, and the id it has come back for.
+  // The answer is the refetch's own settling: one that returns the same rows
+  // changes nothing else the effect could see.
+  const refetchedFor = useRef<string | null>(null);
+  const [lookedUp, setLookedUp] = useState<string | null>(null);
   const resolvedOnce = useRef(new Set<string>());
   const { setSearch: setRouteSearch } = nav;
+  const { refetch: refetchList } = listQuery;
   useEffect(() => {
-    if (!selectedId || !listQuery.isSuccess || listQuery.isFetching) return;
+    if (!selectedId) {
+      // The dead link was dropped (or the GM moved on): following the same one
+      // again is a new attempt, and is looked up and reported again.
+      reported.current = null;
+      refetchedFor.current = null;
+      setLookedUp(null);
+      return;
+    }
+    if (!listQuery.isSuccess || listQuery.isFetching) return;
     if (allNodes.some((n) => n.id === selectedId)) {
       resolvedOnce.current.add(selectedId);
       return;
     }
     const wasHere = resolvedOnce.current.has(selectedId) || deleted.current.has(selectedId);
+    if (!wasHere) {
+      if (refetchedFor.current !== selectedId) {
+        refetchedFor.current = selectedId;
+        const id = selectedId;
+        void refetchList().then(() => setLookedUp(id));
+        return;
+      }
+      if (lookedUp !== selectedId) return;
+    }
     if (!wasHere && !rosterSettled) return;
     if (reported.current === selectedId) return;
     reported.current = selectedId;
@@ -375,6 +465,8 @@ export function KnowledgePanel({
     allNodes,
     campaignName,
     rosterSettled,
+    lookedUp,
+    refetchList,
     setRouteSearch,
     t,
   ]);
@@ -390,6 +482,8 @@ export function KnowledgePanel({
             // The editor it was open in is gone with it; nothing is left to guard.
             edits.markDirty(false);
             setEditFor(null);
+            // Its card is gone too: focus goes to the list.
+            focusNext.current = closeFocus(null);
             nav.setSearch({ node: undefined }, { replace: true });
           }
           invalidate();
@@ -422,9 +516,13 @@ export function KnowledgePanel({
           // The new entry opens in the editor, where its tags, boards,
           // portrait and connections are now available. The list has not
           // refetched yet, so the row is written into it first.
+          //
+          // The create form stays up until the URL names the new entry (the
+          // selection effect above then takes it down): clearing it here, a
+          // beat before an asynchronous navigation lands, left a frame with
+          // no pane at all, which replayed the sheet's opening animation.
           writeNodeToList(queryClient, node);
           edits.markDirty(false);
-          setCreating(null);
           setEditFor(node.id);
           nav.setSearch({ node: node.id });
           toast.success(t("knowledge.entryCreated", { name: node.name }));
@@ -472,6 +570,8 @@ export function KnowledgePanel({
           // Cancel IS the explicit discard: no second question.
           edits.markDirty(false);
           createNode.reset();
+          // Back to the entry the form was over, if there is one.
+          if (selected) focusNext.current = { to: "edit" };
           setCreating(null);
         }}
         onDirtyChange={edits.markDirty}
@@ -490,6 +590,7 @@ export function KnowledgePanel({
         onCancel={() => {
           edits.markDirty(false);
           updateNode.reset();
+          focusNext.current = { to: "edit" };
           setEditFor(null);
         }}
         onDirtyChange={edits.markDirty}
@@ -502,6 +603,7 @@ export function KnowledgePanel({
         key={selected.id}
         node={selected}
         tags={tagIndex.byNode.get(selected.id) ?? []}
+        editRef={editButton}
         onEdit={() => {
           resetMutations();
           setEditFor(selected.id);
@@ -513,6 +615,29 @@ export function KnowledgePanel({
     );
   }
   const dismissDetail = creating !== null ? leaveCreate : closeEntry;
+
+  // Runs after every render, and does nothing unless a swap above named a
+  // target. A close waits for the pane to be gone, so focus is not placed and
+  // then pulled back out of a pane that is still closing.
+  useEffect(() => {
+    const want = focusNext.current;
+    if (!want) return;
+    if (want.to === "edit") {
+      focusNext.current = null;
+      editButton.current?.focus();
+      return;
+    }
+    if (detail) return;
+    focusNext.current = null;
+    const card =
+      want.to === "card"
+        ? [...(contentRef.current?.querySelectorAll<HTMLElement>("[data-entry-id]") ?? [])].find(
+            (el) => el.dataset.entryId === want.id,
+          )
+        : undefined;
+    const target = card?.querySelector<HTMLElement>(".gx-wiki-card__open") ?? contentRef.current;
+    target?.focus();
+  });
 
   // ── The list ──────────────────────────────────────────────────────────────
   const cardFor = (n: Node, grouped: boolean) => (
@@ -667,7 +792,7 @@ export function KnowledgePanel({
   const typeChips = TYPE_ORDER.filter((type) => (typeCounts.get(type) ?? 0) > 0 || types.has(type));
 
   return (
-    <div className="gx-wiki" data-mode={mode} data-detail={detail && !stacked ? "open" : undefined}>
+    <div className="gx-wiki" data-mode={mode} data-detail={detail && !layoutStacked ? "open" : undefined}>
       <QueryBoundary
         query={listQuery}
         skeleton={<Skeleton.Row count={5} />}
@@ -816,8 +941,8 @@ export function KnowledgePanel({
                 <div className="gx-wiki-toolbar__count">
                   {/* Announced, so a screen-reader user hears a filter take effect. */}
                   <span role="status">
-                    {filtersActive
-                      ? t("knowledge.countFiltered", { n: visible.length, m: allNodes.length })
+                    {countNarrowed
+                      ? t("knowledge.countFiltered", { n: countShown, m: allNodes.length })
                       : allNodes.length === 1
                         ? t("knowledge.countOne")
                         : t("knowledge.countAll", { n: allNodes.length })}
@@ -847,11 +972,15 @@ export function KnowledgePanel({
             />
           )}
 
-          <div className="gx-wiki__content">{modeContent}</div>
+          {/* tabIndex -1: the place focus lands when a closed entry's card is
+              not on screen (a folded group, the map, a deleted entry). */}
+          <div className="gx-wiki__content" ref={contentRef} tabIndex={-1}>
+            {modeContent}
+          </div>
         </div>
 
         {detail &&
-          (stacked ? (
+          (layoutStacked ? (
             // No room beside the list: the same pane, as a sheet. The pane
             // brings its own header (title, actions, close), so the dialog's
             // title is kept for assistive tech only and its own X is left off.
@@ -1020,7 +1149,7 @@ function EntryCard({
   }, [selected]);
 
   return (
-    <li ref={card} className="gx-card gx-wiki-card" data-selected={selected || undefined}>
+    <li ref={card} className="gx-card gx-wiki-card" data-entry-id={node.id} data-selected={selected || undefined}>
       {/* The portrait replaces the type-icon tile when one exists (#590). alt is
           empty: the name is right beside it. lazy/async: each portrait is an
           authenticated blob read, and off-screen rows must not stampede. */}
