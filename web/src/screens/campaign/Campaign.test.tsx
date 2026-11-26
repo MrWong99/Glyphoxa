@@ -1,11 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { toast } from "sonner";
 
 import {
   CampaignService,
+  ChatService,
+  ProviderService,
+  SessionService,
   VoiceService,
   AgentSchema,
   CampaignSchema,
@@ -14,16 +18,25 @@ import {
   GetCampaignRosterResponseSchema,
   GetCampaignTagsResponseSchema,
   GetKnowledgeGraphResponseSchema,
+  GetProviderHealthResponseSchema,
   GetRosterReadinessResponseSchema,
+  GetSessionResponseSchema,
   ListCharactersResponseSchema,
   ListDiscordVoiceMembersResponseSchema,
   ListKnowledgeProposalsResponseSchema,
+  ListMapsResponseSchema,
   ListNodeAppearancesResponseSchema,
   ListNodesResponseSchema,
+  ListPlanningThreadsResponseSchema,
+  ListProviderConfigsResponseSchema,
+  ListSessionsResponseSchema,
   ListSupportedLanguagesResponseSchema,
   ListVoicesResponseSchema,
+  KnowledgeProposalSchema,
   NodeSchema,
   NodeType,
+  ProposedFactSchema,
+  type KnowledgeProposal,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { MemoryScreenNav, useScreenNav, type ScreenLocation } from "@/app/screenNav";
@@ -39,7 +52,7 @@ import { CAMPAIGN_VIEWS, type CampaignView } from "./views";
 
 // One campaign with a Butler and one NPC, plus just enough of every panel's
 // reads for each view to mount.
-function mockTransport() {
+function mockTransport(opts: { proposals?: KnowledgeProposal[] } = {}) {
   const campaign = create(CampaignSchema, {
     id: "c1",
     name: "The Sunless Citadel",
@@ -64,8 +77,24 @@ function mockTransport() {
     voice: "rachel",
   });
   return createRouterTransport(({ service }) => {
-    service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+    service(VoiceService, {
+      listVoices: () => create(ListVoicesResponseSchema, { voices: [] }),
+      getProviderHealth: () => create(GetProviderHealthResponseSchema, {}),
+    });
+    // The Overview's reads beside the campaign's own (its blocks are covered in
+    // OverviewPanel.test.tsx; here they only have to answer).
+    service(ProviderService, {
+      listProviderConfigs: () => create(ListProviderConfigsResponseSchema, { guildId: "123456789012345678" }),
+    });
+    service(SessionService, {
+      listSessions: () => create(ListSessionsResponseSchema, {}),
+      getSession: () => create(GetSessionResponseSchema, {}),
+    });
+    service(ChatService, {
+      listPlanningThreads: () => create(ListPlanningThreadsResponseSchema, {}),
+    });
     service(CampaignService, {
+      listMaps: () => create(ListMapsResponseSchema, {}),
       getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, bart] }),
       getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign }),
       listSupportedLanguages: () => create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] }),
@@ -76,7 +105,7 @@ function mockTransport() {
         }),
       listDiscordVoiceMembers: () => create(ListDiscordVoiceMembersResponseSchema, {}),
       // Suggestions view (#300).
-      listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: [] }),
+      listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: opts.proposals ?? [] }),
       // World wiki: Bart's entry, linked to the NPC but still empty.
       listNodes: () =>
         create(ListNodesResponseSchema, {
@@ -131,10 +160,13 @@ type Move = { next: ScreenLocation; replace: boolean };
 // The harness stands in for the route layer: MemoryScreenNav holds the location
 // and applies the router's rules, and the screen is rendered for whatever view
 // that location names — exactly what subviewRoute does with the path param.
-function renderScreen(initial: { view?: CampaignView; search?: ScreenLocation["search"] } = {}) {
+function renderScreen(
+  initial: { view?: CampaignView; search?: ScreenLocation["search"] } = {},
+  opts: { proposals?: KnowledgeProposal[] } = {},
+) {
   const moves: Move[] = [];
   const view = render(
-    <Providers transport={mockTransport()} queryClient={makeQueryClient()}>
+    <Providers transport={mockTransport(opts)} queryClient={makeQueryClient()}>
       <MemoryScreenNav
         initial={{ screen: "campaign", view: initial.view ?? "cast", search: initial.search }}
         onNavigate={(next, opts) => moves.push({ next, replace: opts.replace })}
@@ -180,7 +212,7 @@ describe("Campaign host", () => {
     expect(screen.getByText(/link each discord user/i)).toBeInTheDocument();
   });
 
-  it("defaults to the Overview: a tile for every other view, each taking the GM there", async () => {
+  it("defaults to the Overview: one header, and a tile for every other view of the campaign", async () => {
     render(
       <Providers transport={mockTransport()} queryClient={makeQueryClient()}>
         <Campaign />
@@ -188,20 +220,45 @@ describe("Campaign host", () => {
     );
     // No view named → the Overview, with no router and no provider at all.
     const tiles = await screen.findByRole("list", { name: "Sections of this campaign" });
-    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning", "Settings"]) {
-      expect(within(tiles).getByRole("button", { name: new RegExp(`^${label}`) })).toBeInTheDocument();
+    for (const label of ["Cast", "World wiki", "Maps", "Players", "Suggestions", "Planning"]) {
+      expect(within(tiles).getByRole("button", { name: new RegExp(`^${label}:`) })).toBeInTheDocument();
     }
-    // The Overview does not link to itself.
+    // The Overview does not link to itself, and Settings is a header action.
     expect(within(tiles).queryByRole("button", { name: /^Overview/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Campaign settings" })).toBeInTheDocument();
+    // The Overview brings its own header; the host does not render a second.
+    expect(await screen.findAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    expect(screen.getByText("D&D 5e · English")).toBeInTheDocument();
   });
 
   it("goes to a view from its Overview tile", async () => {
     const { moves } = renderScreen({ view: "overview" });
     const tiles = await screen.findByRole("list", { name: "Sections of this campaign" });
-    fireEvent.click(within(tiles).getByRole("button", { name: /^Players/ }));
+    fireEvent.click(await within(tiles).findByRole("button", { name: "Players: 1 player" }));
 
     expect(await screen.findByText("Kira")).toBeInTheDocument();
     expect(moves).toEqual([{ next: { screen: "campaign", view: "players", search: {} }, replace: false }]);
+  });
+
+  it("jumps from the Overview's attention band to the NPC that is not ready", async () => {
+    // Bart's entry is linked but empty, so he is not session-ready.
+    const { moves } = renderScreen({ view: "overview" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Bart in Cast" }));
+    // The host turns the panel's jump into a navigation carrying the Agent…
+    expect(moves[0]).toEqual({
+      next: { screen: "campaign", view: "cast", search: { agent: "npc-1" } },
+      replace: false,
+    });
+    // …and Cast opens on him.
+    await waitFor(() => expect(persona().value).toBe("Grumbles."));
+  });
+
+  it("goes to the Session and Setup screens from the Overview", async () => {
+    const { moves } = renderScreen({ view: "overview" });
+    fireEvent.click(await screen.findByRole("button", { name: "Start a session" }));
+    expect(moves).toEqual([{ next: { screen: "session", view: undefined, search: {} }, replace: false }]);
+    expect(await screen.findByTestId("other-screen")).toHaveTextContent("session");
   });
 
   it("mounts the Players panel on its view and leaves Cast unchanged (#279)", async () => {
@@ -228,6 +285,35 @@ describe("Campaign host", () => {
     expect(screen.queryByText("Bart")).not.toBeInTheDocument();
   });
 
+  it("opens the wiki on the entry a suggestion is about, from its name in the inbox", async () => {
+    const { moves } = renderScreen(
+      { view: "proposals" },
+      {
+        proposals: [
+          create(KnowledgeProposalSchema, {
+            id: "p1",
+            authoringAgentName: "Glyphoxa",
+            write: {
+              case: "fact",
+              value: create(ProposedFactSchema, { subject: "Bart of the Tankard", fact: "He waters the ale." }),
+            },
+          }),
+        ],
+      },
+    );
+    // The subject resolves to the wiki's entry, so its name is a way there.
+    const names = await screen.findAllByRole("button", { name: "Open Bart of the Tankard in the World wiki" });
+    fireEvent.click(names[0]);
+
+    expect(moves[0]).toEqual({
+      next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
+      replace: false,
+    });
+    // The wiki opens on that entry's page (read-first: the editor waits for Edit).
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
+  });
+
   it("mounts the campaign's settings as a page of their own", async () => {
     renderScreen({ view: "settings" });
     // The form is seeded from the Active Campaign.
@@ -251,12 +337,13 @@ describe("Campaign host", () => {
     switchView("cast");
     await waitFor(() => expect(persona().value).toBe("Grumbles."));
 
-    // Same for the mode within Cast.
-    fireEvent.click(screen.getByRole("button", { name: "Session prep" }));
+    // Same for the mode within Cast. (The segment's name carries the count of
+    // NPCs that are not ready once the readiness reads land: "Readiness 1".)
+    fireEvent.click(screen.getByRole("button", { name: /^Readiness/ }));
     switchView("players");
     await screen.findByText("Kira");
     switchView("cast");
-    expect(await screen.findByRole("button", { name: "Session prep" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByRole("button", { name: /^Readiness/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("offers the first-campaign card on every view while no campaign exists (#267)", async () => {
@@ -277,35 +364,121 @@ describe("Campaign host", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(container.querySelector(".gx-campaign-screen")).toHaveAttribute("data-view", "overview");
   });
+
+  it("sits every view on the shared page container", async () => {
+    const { container } = renderScreen({ view: "players" });
+    await screen.findByText("Kira");
+    // One root: the Page primitive, still carrying the hooks views style by.
+    const root = container.querySelector(".gx-campaign-screen");
+    expect(root).toHaveClass("gx-page");
+    expect(container.querySelectorAll(".gx-page")).toHaveLength(1);
+    // A view with a list and a detail pane takes the wide page…
+    expect(root).not.toHaveClass("gx-page--narrow");
+
+    // …and one that is read line by line (the inbox, the settings form) the
+    // narrow one, so its header and content share a centred column.
+    switchView("proposals");
+    await waitFor(() => expect(container.querySelector(".gx-campaign-screen")).toHaveClass("gx-page--narrow"));
+    switchView("settings");
+    await waitFor(() =>
+      expect(container.querySelector(".gx-campaign-screen")).toHaveAttribute("data-view", "settings"),
+    );
+    expect(container.querySelector(".gx-campaign-screen")).toHaveClass("gx-page--narrow");
+  });
+});
+
+describe("Campaign host load states", () => {
+  // Planning is the one view the host cannot mount before the campaign is
+  // known: its reads are keyed by campaign id (ADR-0062).
+  type Roster = ReturnType<typeof create<typeof GetCampaignRosterResponseSchema>>;
+  function renderPlanning(roster: () => Roster | Promise<Roster>) {
+    const transport = createRouterTransport(({ service }) => {
+      service(CampaignService, { getCampaignRoster: roster });
+      service(ChatService, { listPlanningThreads: () => create(ListPlanningThreadsResponseSchema, {}) });
+      service(ProviderService, { listProviderConfigs: () => create(ListProviderConfigsResponseSchema, {}) });
+    });
+    const queryClient = makeQueryClient();
+    // The roster read retries a transient failure; without the backoff the
+    // test reaches the settled error at once.
+    queryClient.setDefaultOptions({ queries: { retryDelay: 0, staleTime: 30_000 } });
+    return render(
+      <Providers transport={transport} queryClient={queryClient}>
+        <Campaign view="planning" />
+      </Providers>,
+    );
+  }
+
+  it("shows a loading placeholder for Planning until the campaign is known", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderPlanning(async () => {
+      await gate;
+      return create(GetCampaignRosterResponseSchema, {
+        campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+      });
+    });
+    // A named status region, not a bare shimmer bar.
+    expect(await screen.findByRole("status", { name: "Loading…" })).toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading…" })).not.toBeInTheDocument());
+  });
+
+  it("says the campaign could not be loaded and retries on request", async () => {
+    let healthy = false;
+    let calls = 0;
+    renderPlanning(() => {
+      calls++;
+      if (!healthy) throw new ConnectError("database is restarting", Code.Unavailable);
+      return create(GetCampaignRosterResponseSchema, {
+        campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+      });
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't load the campaign");
+    // The server's own sentence is there for whoever is asked what it said.
+    expect(alert).toHaveTextContent("database is restarting");
+
+    healthy = true;
+    const before = calls;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "The Sunless Citadel" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(calls).toBeGreaterThan(before);
+  });
 });
 
 describe("Campaign cross-view jumps", () => {
-  it("opens the wiki on the entry the route's ?node= names, then strips the param (#591)", async () => {
+  it("opens the wiki on the entry the route's ?node= names, and keeps it in the URL (#591)", async () => {
     const { moves } = renderScreen({ view: "knowledge", search: { node: "node-bart" } });
-    // The editor opens ON that entry once the wiki's list has loaded it — the
-    // focus is the URL's, the host keeps no copy of it.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
-    // Then — and only then — the param goes, by REPLACE: the URL does not pin
-    // the entry and Back does not step through the deep link.
-    await waitFor(() =>
-      expect(moves).toEqual([{ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true }]),
-    );
-  });
-
-  it("keeps ?node= while the entry it names has not been found", async () => {
-    const { moves } = renderScreen({ view: "knowledge", search: { node: "no-such-entry" } });
-    // The wiki renders its list; the unknown id opens nothing…
-    expect(await screen.findByRole("button", { name: "Edit Bart of the Tankard" })).toBeInTheDocument();
-    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("");
-    // …and the host does not strip a focus the panel never honoured.
+    // The entry's page opens once the wiki's list has loaded it: the open
+    // entry IS the URL's ?node, the host keeps no copy of it.
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
+    // The param is the selection, so it stays: the entry is linkable and Back
+    // steps through the entries the GM opened.
     expect(moves).toEqual([]);
   });
 
-  it("jumps from a Session-prep mark to the NPC's wiki entry", async () => {
+  it("says so and clears ?node= when the entry it names is not in this campaign", async () => {
+    const said = vi.spyOn(toast, "error");
+    const { moves } = renderScreen({ view: "knowledge", search: { node: "no-such-entry" } });
+    // The wiki renders its list; the unknown id opens nothing…
+    expect(await screen.findByRole("button", { name: "Edit Bart of the Tankard" })).toBeInTheDocument();
+    // …says why, naming the campaign the host resolved…
+    await waitFor(() => expect(said).toHaveBeenCalledWith("That entry is not in The Sunless Citadel."));
+    // …and drops the dead link by REPLACE (Back must not return to it).
+    expect(moves).toEqual([{ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true }]);
+    expect(screen.queryByTestId("entry-view")).not.toBeInTheDocument();
+    said.mockRestore();
+  });
+
+  it("jumps from a Readiness mark to the NPC's wiki entry", async () => {
     const { moves } = renderScreen({ view: "cast" });
-    fireEvent.click(await screen.findByRole("button", { name: "Session prep" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Readiness/ }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Bart: Entry has content — missing, fix it" }),
     );
@@ -316,12 +489,10 @@ describe("Campaign cross-view jumps", () => {
       next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
       replace: false,
     });
-    // …where the entry opens and the param is consumed.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
-    await waitFor(() => expect(moves).toHaveLength(2));
-    expect(moves[1]).toEqual({ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true });
+    // …where the entry's page opens and the param stays as the selection.
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
+    expect(moves).toHaveLength(1);
   });
 
   it("opens Cast on the NPC a ?agent= jump names", async () => {
@@ -332,11 +503,14 @@ describe("Campaign cross-view jumps", () => {
 
   it("jumps from a wiki entry's mention to that Transcript Line on the Session screen (#545)", async () => {
     const { moves } = renderScreen({ view: "knowledge" });
-    fireEvent.click(await screen.findByRole("button", { name: "Edit Bart of the Tankard" }));
+    // Opening the entry is itself a navigation (the wiki's selection is ?node)…
+    fireEvent.click(await screen.findByRole("button", { name: "Bart of the Tankard" }));
     fireEvent.click(await screen.findByRole("button", { name: /we should ask Bart/ }));
 
-    // The session+line pair — never the line alone: line ids restart per session.
+    // …and the jump carries the session+line pair and nothing of the wiki's:
+    // never the line alone (line ids restart per session), never the ?node.
     expect(moves).toEqual([
+      { next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } }, replace: false },
       { next: { screen: "session", view: undefined, search: { session: "s1", line: "u:7" } }, replace: false },
     ]);
     expect(await screen.findByTestId("other-screen")).toHaveTextContent("session");

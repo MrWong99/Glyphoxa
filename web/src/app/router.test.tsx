@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { RouterProvider, createRouter, createMemoryHistory } from "@tanstack/react-router";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { RouterProvider, createBrowserHistory, createRouter, createMemoryHistory } from "@tanstack/react-router";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -189,27 +189,59 @@ describe("campaign view path (ADR-0063)", () => {
 
   it("a hand-edited ?node= on another view redirects to knowledge", async () => {
     // ?node= only means something on the knowledge view; subviewRoute's
-    // beforeLoad owns the correction so the screen's deep-link handling stays
-    // a single consume-then-strip.
+    // beforeLoad owns the correction. The param rides along: on the wiki it IS
+    // the open entry (the panel's controlled selection), so it stays.
     const router = renderAt("/t/acme/campaign/cast?node=n-bart");
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge"),
     );
-    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(router.state.location.search).toEqual({ node: "n-bart" });
   });
 
-  it("a legacy ?node= link lands on knowledge, opens the entry, and the param is stripped", async () => {
+  it("a legacy ?node= link lands on knowledge and opens that entry's page, keeping the param", async () => {
     const router = renderAt("/t/acme/campaign?node=n-bart");
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge"),
     );
-    // The redirect carries ?node= along; the wiki opens that entry once its
-    // list has loaded, and only then is the URL stripped (the panel decides —
-    // see ScreenSearch). This is the whole chain through the real route layer.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
-    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    // The redirect carries ?node= along and the wiki opens that entry's read
+    // page from it. The URL keeps naming the entry, so the link is shareable
+    // and Back steps through the entries the GM followed. This is the whole
+    // chain through the real route layer.
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { level: 2, name: "Bart of the Tankard" })).toBeInTheDocument();
+    expect(router.state.location.search).toEqual({ node: "n-bart" });
+  });
+
+  // The wiki registers ?node= as guarded selection state: browser Back that
+  // would replace an editor holding unsaved typing asks first, through the
+  // real route layer, and Cancel keeps both the entry and the typing. Back is a
+  // real popstate here (browser history): TanStack's memory history consults
+  // blockers only on push/replace, so it cannot stand in for the Back button.
+  it("browser Back away from an entry with unsaved edits asks first", async () => {
+    window.history.replaceState(null, "", "/t/acme/campaign/knowledge");
+    const router = createRouter({ routeTree, history: createBrowserHistory() });
+    try {
+      render(
+        <Providers transport={testTransport()} queryClient={makeQueryClient()}>
+          <RouterProvider router={router} />
+        </Providers>,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Bart of the Tankard" }));
+      await waitFor(() => expect(router.state.location.search).toEqual({ node: "n-bart" }));
+      const page = await screen.findByTestId("entry-view");
+      fireEvent.click(within(page).getByRole("button", { name: "Edit" }));
+      fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Bart the Bold" } });
+
+      act(() => window.history.back());
+      expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).not.toBeInTheDocument());
+      expect(router.state.location.search).toEqual({ node: "n-bart" });
+      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart the Bold");
+    } finally {
+      router.history.destroy();
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   it("?agent= belongs on Cast: any other view redirects there, and Cast consumes it", async () => {
@@ -225,15 +257,16 @@ describe("campaign view path (ADR-0063)", () => {
 
   it("a URL carrying both ?node= and ?agent= stays on the wiki: the losing ?agent= is dropped, not followed later", async () => {
     // ?node= wins the view. Were ?agent= left in the URL, it would resurface
-    // the moment the wiki strips ?node= — beforeLoad would then see only
-    // ?agent= and bounce the GM off the entry they just opened, onto Cast.
+    // the moment the GM closes the entry (which clears ?node=): beforeLoad
+    // would then see only ?agent= and bounce them off the wiki, onto Cast.
     const router = renderAt("/t/acme/campaign/knowledge?node=n-bart&agent=npc-1");
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { level: 2, name: "Bart of the Tankard" })).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.search).toEqual({ node: "n-bart" }));
+
+    fireEvent.click(within(page).getByRole("button", { name: "Close entry" }));
     await waitFor(() => expect(router.state.location.search).toEqual({}));
     expect(router.state.location.pathname).toBe("/t/acme/campaign/knowledge");
-    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard");
   });
 
   it("a bare /campaign?agent= link goes straight to Cast", async () => {

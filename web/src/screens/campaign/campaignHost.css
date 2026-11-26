@@ -1,0 +1,15 @@
+/* Campaign host (Campaign.tsx): the page container every view sits in.
+ *
+ * The root carries both .gx-page (the shared Page primitive) and
+ * .gx-campaign-screen (the hook views style the screen by, which campaign.css
+ * also gives a max-width). The compound selectors here outrank both
+ * single-class rules, so the result does not depend on which stylesheet loads
+ * last. */
+
+/* Views that are read or filled in line by line — the Suggestions inbox, the
+ * campaign's settings — get the narrow page: their header and their content
+ * share one centred column instead of a short column pinned to the left of a
+ * wide one. */
+.gx-page.gx-campaign-screen.gx-page--narrow {
+  max-width: var(--page-width-narrow);
+}

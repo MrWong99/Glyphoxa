@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { errorMessage, failedPreconditionMessage } from "@/lib/connectError";
+import type { ResolvedWrite } from "./graph/proposalGhosts";
 import { DISPOSITION_LABEL, edgeLabel, metaOf } from "./knowledgeVocab";
 
 // The pieces of a Knowledge Proposal review — a "suggestion" in the GM-facing
@@ -54,10 +55,62 @@ export function KindBadge({ proposal }: { proposal: KnowledgeProposal }) {
   );
 }
 
-/** ProposalWrite renders the human form of the proposed write per kind. */
-export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
+/**
+ * An entry's name inside a proposed write. It is plain emphasis unless the
+ * caller both resolved the name to an existing entry and can open one: then it
+ * is a button to that entry, so the GM can read what the wiki already says
+ * before deciding.
+ */
+function EntryName({
+  name,
+  nodeID,
+  onOpenNode,
+}: {
+  name: string;
+  nodeID?: string;
+  onOpenNode?: (nodeID: string) => void;
+}) {
+  const { t } = useI18n();
+  if (!nodeID || !onOpenNode) return <strong>{name}</strong>;
+  return (
+    <button
+      type="button"
+      className="gx-proposal-card__entry"
+      aria-label={t("inbox.openEntry", { name })}
+      onClick={() => onOpenNode(nodeID)}
+    >
+      {name}
+    </button>
+  );
+}
+
+/**
+ * ProposalWrite renders the human form of the proposed write per kind.
+ *
+ * `resolved` (the same proposal run through resolveProposals) and `onOpenNode`
+ * are optional and go together: with both, the subject and target names that
+ * resolve to an existing entry open it. Without them the names are text, as
+ * they have always been.
+ */
+export function ProposalWrite({
+  proposal,
+  resolved,
+  onOpenNode,
+}: {
+  proposal: KnowledgeProposal;
+  resolved?: ResolvedWrite;
+  onOpenNode?: (nodeID: string) => void;
+}) {
   const { t } = useI18n();
   const w = proposal.write;
+  // The id an endpoint resolved to, when it resolved to an existing entry.
+  const subjectID =
+    resolved?.kind === "fact" && resolved.anchor.at === "node"
+      ? resolved.anchor.id
+      : resolved?.kind === "edge" && resolved.from.at === "node"
+        ? resolved.from.id
+        : undefined;
+  const targetID = resolved?.kind === "edge" && resolved.to.at === "node" ? resolved.to.id : undefined;
   switch (w.case) {
     case "fact":
       // The aspect label is shown because approving files the fact UNDER it as a
@@ -65,7 +118,7 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
       // whether the sentence is true.
       return (
         <span>
-          <strong>{w.value.subject}</strong> —{" "}
+          <EntryName name={w.value.subject} nodeID={subjectID} onOpenNode={onOpenNode} /> —{" "}
           {w.value.aspectKey && <em>{w.value.aspectKey}: </em>}
           {w.value.fact}
         </span>
@@ -78,8 +131,9 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
       // content, which is the one thing the review queue exists to prevent (#546).
       return (
         <span>
-          <strong>{w.value.subject}</strong> —{edgeLabel(t, w.value.relation)}→{" "}
-          <strong>{w.value.target}</strong>
+          <EntryName name={w.value.subject} nodeID={subjectID} onOpenNode={onOpenNode} /> —
+          {edgeLabel(t, w.value.relation)}→{" "}
+          <EntryName name={w.value.target} nodeID={targetID} onOpenNode={onOpenNode} />
           {(w.value.note || w.value.disposition !== 0) && (
             <span className="gx-proposal-card__body">
               {" — "}
@@ -112,8 +166,17 @@ export function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
  * SimilarHint lazily fetches the existing entries most similar to a proposal's
  * subject (the ADR-0011 vector hint) so the GM can merge or reject rather than
  * duplicate. A skeleton shows while loading; "No similar entries." when none.
+ *
+ * With `onOpenNode` each similar entry's name opens that entry; without it the
+ * names are text.
  */
-export function SimilarHint({ proposalId }: { proposalId: string }) {
+export function SimilarHint({
+  proposalId,
+  onOpenNode,
+}: {
+  proposalId: string;
+  onOpenNode?: (nodeID: string) => void;
+}) {
   const { t } = useI18n();
   // Truly lazy: the similarity RPC embeds the subject (a provider call), so it
   // fires ONLY after the GM opts in — never on mount for every card (that would
@@ -153,7 +216,11 @@ export function SimilarHint({ proposalId }: { proposalId: string }) {
         <ul className="gx-proposal-card__similar-list">
           {nodes.map((n) => (
             <li key={n.id}>
-              <span className="gx-proposal-card__similar-name">{n.name}</span>
+              {onOpenNode ? (
+                <EntryName name={n.name} nodeID={n.id} onOpenNode={onOpenNode} />
+              ) : (
+                <span className="gx-proposal-card__similar-name">{n.name}</span>
+              )}
               <Badge size="sm" variant="neutral">
                 {nodeTypeLabel(t, n.nodeType)}
               </Badge>

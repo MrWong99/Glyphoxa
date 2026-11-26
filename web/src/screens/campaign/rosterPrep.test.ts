@@ -8,7 +8,7 @@ import {
   GraphNodeSchema,
   NodeType,
 } from "@gen/glyphoxa/management/v1/management_pb";
-import { UNPLACED_TITLE, rosterPrep, type Readiness } from "./rosterPrep";
+import { UNPLACED_TITLE, prepSummary, rosterEntries, rosterPrep, type Readiness } from "./rosterPrep";
 
 const ready = (o: Partial<Readiness> = {}): Readiness => ({
   linked: true,
@@ -184,5 +184,117 @@ describe("rosterPrep", () => {
       content: "entry",
       facts: "entry",
     });
+  });
+});
+
+// The de-duplicated view behind the roster markers, the editor callout and the
+// "X of Y NPCs ready" headline.
+describe("rosterEntries", () => {
+  const town = node({ id: "town", nodeType: NodeType.LOCATION, name: "Saltmarsh" });
+  const guild = node({ id: "guild", nodeType: NodeType.FACTION, name: "Smugglers" });
+
+  it("lists an NPC once, however many places it belongs to", () => {
+    const roster = [agent({ id: "a1", name: "Bart", persona: "p", voice: "v" })];
+    const nodes = [node({ id: "bart", name: "Bart", agentId: "a1", bodyLen: 5 }), town, guild];
+    const edges = [edge("bart", "town", EdgeType.RESIDES_IN), edge("bart", "guild", EdgeType.MEMBER_OF)];
+    const facts = new Map([["a1", ready()]]);
+
+    // The grouped view repeats Bart under both places…
+    expect(rosterPrep(roster, nodes, edges, facts).flatMap((g) => g.entries)).toHaveLength(2);
+    // …the graded roster has him exactly once.
+    expect(rosterEntries(roster, nodes, facts).map((e) => e.agent.name)).toEqual(["Bart"]);
+  });
+
+  it("keeps roster order, the Butler first and ungraded", () => {
+    const entries = rosterEntries(
+      [
+        create(AgentSchema, { id: "b1", name: "Glyphoxa", role: "butler" }),
+        agent({ id: "a2", name: "Mira" }),
+        agent({ id: "a1", name: "Bart" }),
+      ],
+      [],
+    );
+    expect(entries.map((e) => e.agent.name)).toEqual(["Glyphoxa", "Mira", "Bart"]);
+    expect(entries[0].exempt).toBe(true);
+    expect(entries[0].ready).toBe(true);
+  });
+
+  // Before the graph and readiness reads have landed the roster can only speak
+  // for what its own payload says: it must not claim "no wiki entry" yet.
+  it("grades only personality and voice while the world is unknown", () => {
+    const [blank] = rosterEntries([agent({ id: "a1", name: "Blank" })], [], new Map(), { world: false });
+    expect(blank.checks.map((c) => c.key)).toEqual(["persona", "voice"]);
+    expect(blank.ready).toBe(false);
+
+    const [set] = rosterEntries([agent({ id: "a1", name: "Set", persona: "p", voice: "v" })], [], new Map(), {
+      world: false,
+    });
+    expect(set.ready).toBe(true);
+  });
+
+  it("words every check as what is missing, for the marker and the callout", () => {
+    const [blank] = rosterEntries([agent({ id: "a1", name: "Blank" })], []);
+    expect(Object.fromEntries(blank.checks.map((c) => [c.key, c.missingKey]))).toEqual({
+      persona: "cast.missingPersona",
+      voice: "cast.missingVoice",
+      link: "cast.missingLink",
+      content: "cast.missingContent",
+      facts: "cast.missingFacts",
+    });
+  });
+
+  // A failing link check should open an entry, not the bare list: the unlinked
+  // NPC entry carrying the agent's name is the one the GM means to link.
+  it("offers the unlinked NPC entry with the agent's name as the one to link", () => {
+    const [mira] = rosterEntries(
+      [agent({ id: "a1", name: "Mira" })],
+      [
+        node({ id: "place", nodeType: NodeType.LOCATION, name: "Mira" }),
+        node({ id: "taken", name: "mira", agentId: "someone-else" }),
+        node({ id: "free", name: " mira " }),
+      ],
+    );
+    expect(mira.node).toBeNull();
+    expect(mira.linkCandidate?.id).toBe("free");
+  });
+
+  it("offers no candidate once the NPC is linked, or when nothing carries its name", () => {
+    const [linked, lonely] = rosterEntries(
+      [agent({ id: "a1", name: "Bart" }), agent({ id: "a2", name: "Mira" })],
+      [node({ id: "bart", name: "Bart", agentId: "a1" }), node({ id: "other", name: "Bart" })],
+    );
+    expect(linked.linkCandidate).toBeNull();
+    expect(lonely.linkCandidate).toBeNull();
+  });
+});
+
+describe("prepSummary", () => {
+  it("counts unique NPCs, the Butler exempt, and names the ones that are not ready", () => {
+    const entries = rosterEntries(
+      [
+        create(AgentSchema, { id: "b1", name: "Glyphoxa", role: "butler" }),
+        agent({ id: "a1", name: "Bart", persona: "p", voice: "v" }),
+        agent({ id: "a2", name: "Mira", persona: "p" }),
+      ],
+      [
+        node({ id: "bart", name: "Bart", agentId: "a1", bodyLen: 5 }),
+        node({ id: "mira", name: "Mira", agentId: "a2", bodyLen: 5 }),
+      ],
+      new Map([
+        ["a1", ready()],
+        ["a2", ready()],
+      ]),
+    );
+    const summary = prepSummary(entries);
+    expect(summary.total).toBe(2);
+    expect(summary.ready).toBe(1);
+    expect(summary.attention.map((e) => e.agent.name)).toEqual(["Mira"]);
+  });
+
+  it("is all zeros for a roster of just the Butler", () => {
+    const summary = prepSummary(
+      rosterEntries([create(AgentSchema, { id: "b1", name: "Glyphoxa", role: "butler" })], []),
+    );
+    expect(summary).toEqual({ total: 0, ready: 0, attention: [] });
   });
 });

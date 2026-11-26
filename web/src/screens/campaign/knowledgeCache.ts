@@ -1,7 +1,35 @@
+import { createConnectQueryKey } from "@connectrpc/connect-query";
 import type { QueryClient } from "@tanstack/react-query";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
+import type { ListNodesResponse, Node } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateMethodQueries } from "@/lib/queryClient";
+
+/**
+ * writeNodeToList puts a Node the server just returned (from CreateNode or
+ * UpdateNode) into every cached ListNodes result, replacing its row or
+ * appending it.
+ *
+ * The wiki keeps the entry it just saved OPEN, and it selects an entry the
+ * moment it is created. Both read the row from the list, and the list refetch
+ * that invalidateKnowledgeReads starts takes a round trip to land. In that gap
+ * the editor would be looking at the row from BEFORE the save (facts without
+ * the ids the save assigned, so a second save would insert them again), and a
+ * just-created entry would not be in the list at all and would read as
+ * "not in this campaign". The mutation's own response closes the gap; the
+ * refetch then confirms it.
+ */
+export function writeNodeToList(queryClient: QueryClient, node: Node): void {
+  queryClient.setQueriesData<ListNodesResponse>(
+    { queryKey: createConnectQueryKey({ schema: CampaignService.method.listNodes, cardinality: "finite" }) },
+    (cached) => {
+      if (!cached) return cached;
+      const at = cached.nodes.findIndex((n) => n.id === node.id);
+      const nodes = at >= 0 ? cached.nodes.map((n, i) => (i === at ? node : n)) : [...cached.nodes, node];
+      return { ...cached, nodes };
+    },
+  );
+}
 
 // One invalidation for every read of the Knowledge Graph (#534).
 //

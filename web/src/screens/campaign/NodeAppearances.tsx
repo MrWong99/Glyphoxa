@@ -1,9 +1,12 @@
+import { useId } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@connectrpc/connect-query";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { MessageSquare } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useI18n, type Lang } from "@/i18n";
+import { Button } from "@/components/ui/Button";
 import { stripMarkdown } from "@/components/ui/Markdown";
 
 // Where an entry was mentioned in play (#545, ADR-0008 amendment).
@@ -25,32 +28,72 @@ function fmtWhen(at: Date, lang: Lang): string {
   return at.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
 }
 
-export function NodeAppearances({
-  nodeID,
-  onOpenLine,
-}: {
-  nodeID: string;
-  /** Deep-link to the exact Transcript Line on the Session screen. */
-  onOpenLine?: (sessionID: string, lineID: string) => void;
-}) {
-  const { t, lang } = useI18n();
-  const { data, status } = useQuery(CampaignService.method.listNodeAppearances, { nodeId: nodeID });
-
-  if (status === "pending") {
-    return <div className="gx-skeleton gx-kg-appearances__skel" data-testid="appearances-loading" />;
+// Frame is the block's heading and wrapper. In the editor it is one more
+// labelled field among the Linked ones; on the entry page it is a section with
+// the same overline heading as Facts, Tags and Connections beside it.
+function Frame({ as, children }: { as: "field" | "section"; children: ReactNode }) {
+  const { t } = useI18n();
+  const headingId = useId();
+  if (as === "section") {
+    return (
+      <section className="gx-wiki-section gx-kg-appearances" aria-labelledby={headingId}>
+        <h3 className="gx-wiki-section__title" id={headingId}>
+          {t("knowledge.mentionedLabel")}
+        </h3>
+        {children}
+      </section>
+    );
   }
-  if (status === "error") {
-    // Best-effort: a failed retrieval list is not worth a scary error on an entry
-    // the GM is editing. The entry itself is unaffected.
-    return null;
-  }
-
-  const rows = data.appearances;
   return (
     <div className="gx-field gx-kg-appearances">
       <span className="gx-field__label">
         <MessageSquare size={12} /> {t("knowledge.mentionedLabel")}
       </span>
+      {children}
+    </div>
+  );
+}
+
+export function NodeAppearances({
+  nodeID,
+  onOpenLine,
+  as = "field",
+}: {
+  nodeID: string;
+  /** Deep-link to the exact Transcript Line on the Session screen. */
+  onOpenLine?: (sessionID: string, lineID: string) => void;
+  /** How it is headed: a form field (the editor) or a page section (the entry page). */
+  as?: "field" | "section";
+}) {
+  const { t, lang } = useI18n();
+  const { data, status, refetch, isFetching } = useQuery(
+    CampaignService.method.listNodeAppearances,
+    { nodeId: nodeID },
+  );
+
+  if (status === "pending") {
+    return <div className="gx-skeleton gx-kg-appearances__skel" data-testid="appearances-loading" />;
+  }
+  if (status === "error") {
+    // A quiet line, not an error panel: a failed retrieval list is not worth a
+    // scary error on an entry the GM is reading, and the entry itself is
+    // unaffected. But it is a line and not nothing. Rendering nothing told the
+    // GM "never mentioned" about an entry that may have come up every session.
+    return (
+      <Frame as={as}>
+        <span className="gx-kg-appearances__retry">
+          <span className="gx-field__hint">{t("knowledge.mentionedLoadError")}</span>
+          <Button variant="ghost" size="sm" disabled={isFetching} onClick={() => void refetch()}>
+            {t("common.retry")}
+          </Button>
+        </span>
+      </Frame>
+    );
+  }
+
+  const rows = data.appearances;
+  return (
+    <Frame as={as}>
       {rows.length === 0 ? (
         <span className="gx-field__hint">{t("knowledge.mentionedEmpty")}</span>
       ) : (
@@ -84,6 +127,6 @@ export function NodeAppearances({
           })}
         </ul>
       )}
-    </div>
+    </Frame>
   );
 }
