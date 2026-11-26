@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { toast } from "sonner";
 
 import {
   CampaignService,
@@ -308,10 +309,9 @@ describe("Campaign host", () => {
       next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
       replace: false,
     });
-    // The wiki opens on that entry.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
+    // The wiki opens on that entry's page (read-first: the editor waits for Edit).
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
   });
 
   it("mounts the campaign's settings as a page of their own", async () => {
@@ -452,27 +452,28 @@ describe("Campaign host load states", () => {
 });
 
 describe("Campaign cross-view jumps", () => {
-  it("opens the wiki on the entry the route's ?node= names, then strips the param (#591)", async () => {
+  it("opens the wiki on the entry the route's ?node= names, and keeps it in the URL (#591)", async () => {
     const { moves } = renderScreen({ view: "knowledge", search: { node: "node-bart" } });
-    // The editor opens ON that entry once the wiki's list has loaded it — the
-    // focus is the URL's, the host keeps no copy of it.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
-    // Then — and only then — the param goes, by REPLACE: the URL does not pin
-    // the entry and Back does not step through the deep link.
-    await waitFor(() =>
-      expect(moves).toEqual([{ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true }]),
-    );
+    // The entry's page opens once the wiki's list has loaded it: the open
+    // entry IS the URL's ?node, the host keeps no copy of it.
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
+    // The param is the selection, so it stays: the entry is linkable and Back
+    // steps through the entries the GM opened.
+    expect(moves).toEqual([]);
   });
 
-  it("keeps ?node= while the entry it names has not been found", async () => {
+  it("says so and clears ?node= when the entry it names is not in this campaign", async () => {
+    const said = vi.spyOn(toast, "error");
     const { moves } = renderScreen({ view: "knowledge", search: { node: "no-such-entry" } });
     // The wiki renders its list; the unknown id opens nothing…
     expect(await screen.findByRole("button", { name: "Edit Bart of the Tankard" })).toBeInTheDocument();
-    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("");
-    // …and the host does not strip a focus the panel never honoured.
-    expect(moves).toEqual([]);
+    // …says why, naming the campaign the host resolved…
+    await waitFor(() => expect(said).toHaveBeenCalledWith("That entry is not in The Sunless Citadel."));
+    // …and drops the dead link by REPLACE (Back must not return to it).
+    expect(moves).toEqual([{ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true }]);
+    expect(screen.queryByTestId("entry-view")).not.toBeInTheDocument();
+    said.mockRestore();
   });
 
   it("jumps from a Readiness mark to the NPC's wiki entry", async () => {
@@ -488,12 +489,10 @@ describe("Campaign cross-view jumps", () => {
       next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } },
       replace: false,
     });
-    // …where the entry opens and the param is consumed.
-    await waitFor(() =>
-      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Bart of the Tankard"),
-    );
-    await waitFor(() => expect(moves).toHaveLength(2));
-    expect(moves[1]).toEqual({ next: { screen: "campaign", view: "knowledge", search: {} }, replace: true });
+    // …where the entry's page opens and the param stays as the selection.
+    const page = await screen.findByTestId("entry-view");
+    expect(within(page).getByRole("heading", { name: "Bart of the Tankard" })).toBeInTheDocument();
+    expect(moves).toHaveLength(1);
   });
 
   it("opens Cast on the NPC a ?agent= jump names", async () => {
@@ -504,11 +503,14 @@ describe("Campaign cross-view jumps", () => {
 
   it("jumps from a wiki entry's mention to that Transcript Line on the Session screen (#545)", async () => {
     const { moves } = renderScreen({ view: "knowledge" });
-    fireEvent.click(await screen.findByRole("button", { name: "Edit Bart of the Tankard" }));
+    // Opening the entry is itself a navigation (the wiki's selection is ?node)…
+    fireEvent.click(await screen.findByRole("button", { name: "Bart of the Tankard" }));
     fireEvent.click(await screen.findByRole("button", { name: /we should ask Bart/ }));
 
-    // The session+line pair — never the line alone: line ids restart per session.
+    // …and the jump carries the session+line pair and nothing of the wiki's:
+    // never the line alone (line ids restart per session), never the ?node.
     expect(moves).toEqual([
+      { next: { screen: "campaign", view: "knowledge", search: { node: "node-bart" } }, replace: false },
       { next: { screen: "session", view: undefined, search: { session: "s1", line: "u:7" } }, replace: false },
     ]);
     expect(await screen.findByTestId("other-screen")).toHaveTextContent("session");
