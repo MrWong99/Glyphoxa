@@ -21,7 +21,7 @@ import (
 func WriteDenial(w http.ResponseWriter, d Denial) {
 	status := http.StatusUnauthorized
 	switch d {
-	case DenyCSRF:
+	case DenyCSRF, DenyGuest:
 		status = http.StatusForbidden
 	case DenyUnavailable:
 		status = http.StatusServiceUnavailable

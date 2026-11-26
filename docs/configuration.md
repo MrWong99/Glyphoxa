@@ -196,6 +196,27 @@ before voice, recaps or image generation work. Tenants that existed before this
 switch (yours included) keep it on. In `open` Admission Mode the switch is not
 used — the Tenant's Plan decides ([deploy/saas-operations.md](deploy/saas-operations.md)).
 
+**Campaign Guests.** A GM shares a single Campaign from the Campaign screen —
+see *Sharing — Campaign Guests* in the
+[GM quickstart](quickstart-gm.md#4c-sharing--campaign-guests) for the rights and
+what each reveals. Three things about them matter to whoever runs the instance:
+
+- **Guests are admitted in every Admission Mode.** Someone invited to a
+  Campaign signs in even on an `allowlist` deployment where you granted them
+  nothing. They get no Tenant, cannot save provider keys, and spend nothing
+  except through the planning chat — on their host GM's Tenant, if that GM
+  ticked the right. They show on the Admin screen with status *Guest*, and
+  *Suspend* locks them out.
+- **A guest never founds a Tenant.** On an `open` deployment, signing in
+  normally founds a Tenant; someone who is a Campaign Guest and operates none
+  signs in as that guest instead. (Becoming a GM of their own later is not
+  built yet.)
+- **Revoking a GM who is also somebody's guest** still takes their own Tenant
+  away: on an `allowlist` deployment the own-Tenant workspace needs a Platform
+  Admin or a live Access Grant on *every request*, not just at sign-in. They
+  can still sign in — as a guest of the Campaign they were invited to — and the
+  Admin screen lists them as *Guest*, no longer *Granted*.
+
 **Restarts.** The boot-time session sweep signs out everyone who is no longer
 admitted. Platform Admins, Access Grant holders and Campaign Guests all stay
 signed in across a restart.

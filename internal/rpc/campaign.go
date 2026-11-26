@@ -54,6 +54,7 @@ type CampaignServer struct {
 	*knowledgeProposals
 	*toolGrants
 	*campaignAssist
+	*campaignAccess
 }
 
 // CampaignStores groups the per-feature store slices CampaignServer composes
@@ -65,6 +66,12 @@ type CampaignStores struct {
 	// Active backs the shared live-first Active-Campaign resolution (#222)
 	// every scoped handler walks before touching its feature slice.
 	Active activeCampaignResolver
+	// Secrets lists a Campaign's gm_private Nodes, for the reads that withhold
+	// them from a Campaign Guest without wiki.secrets (ADR-0065). A unit test
+	// that never sends a guest leaves it nil.
+	Secrets privateNodeReader
+	// Access backs the Campaign Guest management surface (ADR-0065).
+	Access campaignAccessStore
 	// Campaigns backs the campaign management surface: list/create/update and
 	// the durable /glyphoxa use selection (#264).
 	Campaigns campaignManagementStore
@@ -113,6 +120,8 @@ type CampaignStores struct {
 func NewCampaignServer(s *storage.Store) *CampaignServer {
 	return NewCampaignServerWith(CampaignStores{
 		Active:        s,
+		Secrets:       s,
+		Access:        s,
 		Campaigns:     s,
 		Archive:       s,
 		Agents:        s,
@@ -136,9 +145,10 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 // while faking only that feature's slice. A nil slice leaves that feature's
 // handlers panicking on first use — fill exactly what the test exercises.
 func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
-	active := &activeCampaignSource{store: stores.Active}
+	active := &activeCampaignSource{store: stores.Active, secrets: stores.Secrets}
 	return &CampaignServer{
 		active:             active,
+		campaignAccess:     newCampaignAccess(stores.Access, active),
 		campaignManagement: &campaignManagement{store: stores.Campaigns, active: active},
 		campaignArchive:    &campaignArchive{store: stores.Archive, active: active},
 		agentRoster:        &agentRoster{store: stores.Agents, active: active},

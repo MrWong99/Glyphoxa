@@ -291,8 +291,11 @@ type Relay struct {
 	store    LineStore       // persists projected lines (#74); nil disables persistence
 	resolver SpeakerResolver // resolves SpeakerID → name/GM (#281); nil = anonymous lane
 	scope    TenantScope     // tenant-ownership gate for the HTTP mounts (#439); nil = unscoped
-	metrics  SSEMetrics      // SSE lag/subscriber observability (#612); never nil after NewRelay
-	log      *slog.Logger
+	// campaignScope is the Campaign Guest ownership gate (ADR-0065); nil = a
+	// guest is served nothing.
+	campaignScope CampaignScope
+	metrics       SSEMetrics // SSE lag/subscriber observability (#612); never nil after NewRelay
+	log           *slog.Logger
 
 	// proj is the shared projection scaffold (#447/#487): it attributes every
 	// stamped bus event to its Voice Session under r.mu, creates/tears down each
@@ -450,6 +453,28 @@ func (r *Relay) tenantScope() TenantScope {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.scope
+}
+
+// CampaignScope reports whether the Voice Session belongs to the Campaign —
+// [TenantScope] one level narrower, for a Campaign Guest (ADR-0065), whose
+// request carries the HOST Tenant: a session of another Campaign of that
+// Tenant must 404 for them. *storage.Store's VoiceSessionInCampaign satisfies
+// it.
+type CampaignScope func(ctx context.Context, campaignID, sessionID uuid.UUID) (bool, error)
+
+// SetCampaignScope wires the guest ownership check. Unlike the tenant scope,
+// leaving it unset does NOT leave guests unscoped: without it a guest is
+// served nothing.
+func (r *Relay) SetCampaignScope(scope CampaignScope) {
+	r.mu.Lock()
+	r.campaignScope = scope
+	r.mu.Unlock()
+}
+
+func (r *Relay) guestScope() CampaignScope {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.campaignScope
 }
 
 // fold applies one attributed event to the transcript — the relay's projection

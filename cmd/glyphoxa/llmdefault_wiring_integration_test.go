@@ -57,8 +57,13 @@ func TestManagementMounts_DeploymentDefaultReachesTheRPCs(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 
 	sessions := session.NewIntentControl(store, log, session.IntentControlConfig{})
+	// Requests below arrive through the dev middleware as the synthetic dev
+	// operator, so the mount table is built as runWeb builds it on a dev
+	// instance: Dev makes that operator a Platform Admin, which is what lets
+	// their own Tenant resolve as a workspace on an allowlist deployment
+	// (ADR-0065).
 	mounts := managementMounts(store, nil, nil, nil, log,
-		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, auth.PlatformAdmins{}, "", nil,
+		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, auth.PlatformAdmins{Dev: true}, "", nil,
 		newOffSessionMetering(auth.AdmissionAllowlist, store, log), wiringDefault(t))
 	mux := http.NewServeMux()
 	for _, m := range mounts {

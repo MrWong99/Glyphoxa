@@ -96,6 +96,13 @@ func (s *ImageServer) ServeImage(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// A gm_private Map does not exist for a Campaign Guest without wiki.secrets
+	// (ADR-0065): its image 404s exactly like a Map of another Campaign.
+	if m.GMPrivate && auth.GuestLacks(req.Context(), auth.RightWikiSecrets) {
+		http.NotFound(w, req)
+		return
+	}
+
 	// A Map with no key has no picture — an imageless bundle import produces exactly
 	// this row (internal/bundle/import.go). It is a 404 like any other missing
 	// image, and it must be caught HERE: blob.Get("") is ErrInvalidKey, not

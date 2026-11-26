@@ -171,7 +171,11 @@ func (s *AdminServer) accessStatus(p storage.AccessPerson) managementv1.AccessSt
 		return managementv1.AccessStatus_ACCESS_STATUS_GRANTED
 	case p.TenantID != nil && s.mode == auth.AdmissionOpen:
 		return managementv1.AccessStatus_ACCESS_STATUS_SIGNUP
-	case p.TenantID == nil && p.GuestCampaignCount > 0:
+	case p.GuestCampaignCount > 0:
+		// Signs in only as a Campaign Guest. That includes someone on an
+		// allowlist deployment who still operates a Tenant but holds no grant
+		// for it (their access was revoked): the guest Campaigns are all they
+		// can open, so GUEST — not NONE — is what admits them.
 		return managementv1.AccessStatus_ACCESS_STATUS_GUEST
 	default:
 		return managementv1.AccessStatus_ACCESS_STATUS_NONE
@@ -225,6 +229,7 @@ func invitationPB(inv storage.Invitation, now time.Time) *managementv1.Invitatio
 		Id:            inv.ID.String(),
 		Kind:          managementv1.InvitationKind_INVITATION_KIND_ACCESS,
 		Label:         inv.Label,
+		Rights:        auth.GuestRightsToProto(auth.GuestRightsFromStrings(inv.Rights)),
 		PlatformKeys:  inv.PlatformKeys,
 		DiscordUserId: inv.DiscordUserID,
 		Uses:          int32(inv.Uses),

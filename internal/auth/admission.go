@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -16,6 +18,10 @@ import (
 //   - open:      any Discord User completing OAuth is admitted; a stranger's
 //     signup founds a fresh Tenant (create-only). The allowlist survives as
 //     the platform-administration list, not as the admission gate.
+//
+// Campaign Guests (ADR-0065 lane 2) are admitted in BOTH modes: by redeeming a
+// campaign invitation link, or because they already are a guest somewhere.
+// Neither ever founds a Tenant.
 //
 // Distinct from Mode, the process role (-mode voice|web|all). GLYPHOXA_DEV_MODE
 // preempts Admission Mode entirely (the dev boot never consults it).
@@ -62,6 +68,16 @@ type AccessStore interface {
 	GetUserByDiscordID(ctx context.Context, discordUserID string) (storage.User, error)
 }
 
+// GuestAdmissionStore is the persistence Campaign Guest admission needs
+// (ADR-0065 lane 2): what kind of invitation a join token names, the atomic
+// redemption of a campaign invitation into a guest row, and whether a Discord
+// User already is a guest somewhere. *storage.Store satisfies it.
+type GuestAdmissionStore interface {
+	GetInvitationByToken(ctx context.Context, token string) (storage.Invitation, error)
+	RedeemCampaignInvitation(ctx context.Context, token string, p storage.CampaignRedemption) (storage.CampaignRedeemed, error)
+	GuestStandingOf(ctx context.Context, discordUserID string) (storage.GuestStanding, error)
+}
+
 // Admission is the OAuth callback's admission policy (ADR-0055 / ADR-0065).
 // The zero value fails closed: allowlist posture with an empty Platform Admin
 // list and no way to admit anyone else. In AdmissionOpen, Signup and
@@ -69,7 +85,8 @@ type AccessStore interface {
 // to a live plan); a nil Signup falls back to rejecting strangers with a loud
 // log rather than admitting people it cannot provision. In AdmissionAllowlist,
 // Access and Signup together admit Access Grant holders — a nil of either
-// admits Platform Admins only, exactly ADR-0041.
+// admits Platform Admins only, exactly ADR-0041. Guests admits Campaign Guests
+// in both modes; nil admits none.
 type Admission struct {
 	Mode AdmissionMode
 	// Allowlist is the Platform Admin list (GLYPHOXA_OPERATOR_IDS).
@@ -77,6 +94,7 @@ type Admission struct {
 	SignupPlanSlug string
 	Signup         SignupProvisioner
 	Access         AccessStore
+	Guests         GuestAdmissionStore
 }
 
 // open reports whether this policy actually admits strangers: open mode with a
@@ -107,6 +125,15 @@ const (
 	// admitGranted is an Access Grant holder (ADR-0065): create-only, no Plan,
 	// the Tenant's Platform Keys switch taken from the grant.
 	admitGranted
+	// admitCampaignJoin is a join whose token names a CAMPAIGN invitation
+	// (ADR-0065 lane 2). The callback redeems it — the redemption needs the
+	// Discord identity, and writes the user and the guest row in one
+	// transaction — and never founds a Tenant, whoever the redeemer is.
+	admitCampaignJoin
+	// admitGuest is a Discord User who already is a Campaign Guest and came
+	// with nothing else that admits them: a session acting in guestCampaign,
+	// no Tenant founded.
+	admitGuest
 )
 
 // rejection says why a Discord User was not admitted, so the callback can
@@ -128,6 +155,8 @@ type admissionDecision struct {
 	route admissionRoute
 	// platformKeys is the Access Grant's choice (admitGranted only).
 	platformKeys bool
+	// guestCampaign is the Campaign the session starts in (admitGuest only).
+	guestCampaign uuid.UUID
 	// why is set when route is admitNobody.
 	why rejection
 }
@@ -135,11 +164,24 @@ type admissionDecision struct {
 // decide is the callback's admission decision (ADR-0065), an ordered walk in
 // which the first step that claims the Discord User wins:
 //
-//  1. a Platform Admin — in every Admission Mode, whatever link they opened;
-//  2. `open` mode: self-signup (grants and access invitations are not consulted);
+//  0. a join whose token names a CAMPAIGN invitation — in every Admission
+//     Mode and for everybody, a Platform Admin included: they opened a link to
+//     someone's Campaign, so that is where they go. This step is terminal: if
+//     the link does not admit them the join fails, it never falls through to
+//     a step that would found a Tenant;
+//  1. a Platform Admin — in every Admission Mode;
+//  2. `open` mode: someone who is a Campaign Guest and operates no Tenant
+//     signs in as that guest; everyone else self-signs-up (grants and access
+//     invitations are not consulted);
 //  3. the holder of an Access Grant;
 //  4. someone redeeming a live ACCESS invitation, which creates their grant;
-//  5. nobody else.
+//  5. someone who already is a Campaign Guest;
+//  6. nobody else.
+//
+// Step 2's guest rule is deliberate: on an `open` deployment a returning guest
+// would otherwise found a Tenant the moment they signed in, which is not what
+// "open the campaign I was invited to" means. A guest founding their own
+// Tenant later is not built (ADR-0065).
 //
 // joinToken is the invitation token the join cookie carried ("" for an
 // ordinary login) and aupAccepted whether this round trip acknowledged the
@@ -148,54 +190,86 @@ type admissionDecision struct {
 //
 // An error is a store failure: the caller answers 500 and admits nobody.
 func (a Admission) decide(ctx context.Context, discordUserID, joinToken string, aupAccepted bool) (admissionDecision, error) {
+	if joinToken != "" && a.Guests != nil {
+		switch inv, err := a.Guests.GetInvitationByToken(ctx, joinToken); {
+		case err == nil && inv.Kind == storage.InvitationCampaign:
+			if !aupAccepted {
+				return admissionDecision{why: rejectAUPRequired}, nil
+			}
+			return admissionDecision{route: admitCampaignJoin}, nil
+		case err != nil && !errors.Is(err, storage.ErrNotFound):
+			return admissionDecision{}, fmt.Errorf("auth: admission: read invitation: %w", err)
+		}
+	}
 	if a.Allowlist.Contains(discordUserID) {
 		return admissionDecision{route: admitPlatformAdmin}, nil
 	}
 	if a.open() {
+		standing, isGuest, err := a.guestStanding(ctx, discordUserID)
+		if err != nil {
+			return admissionDecision{}, err
+		}
+		if isGuest && !standing.OperatesTenant {
+			return admissionDecision{route: admitGuest, guestCampaign: standing.CampaignID}, nil
+		}
 		return admissionDecision{route: admitOpenSignup}, nil
 	}
-	if !a.grants() {
-		return admissionDecision{}, nil
-	}
 
-	switch g, err := a.Access.GetAccessGrant(ctx, discordUserID); {
-	case err == nil:
-		return admissionDecision{route: admitGranted, platformKeys: g.PlatformKeys}, nil
-	case !errors.Is(err, storage.ErrNotFound):
-		return admissionDecision{}, fmt.Errorf("auth: admission: read access grant: %w", err)
-	}
-
-	if joinToken != "" {
-		if !aupAccepted {
-			return admissionDecision{why: rejectAUPRequired}, nil
-		}
-		// A suspended user is refused before the redemption, not after it by
-		// the provisioning transaction: otherwise their attempt would burn a
-		// use of the link and leave them a grant.
-		switch u, err := a.Access.GetUserByDiscordID(ctx, discordUserID); {
-		case err == nil && u.SuspendedAt != nil:
-			return admissionDecision{why: rejectSuspended}, nil
-		case err != nil && !errors.Is(err, storage.ErrNotFound):
-			return admissionDecision{}, fmt.Errorf("auth: admission: read user: %w", err)
-		}
-		switch g, err := a.Access.RedeemAccessInvitation(ctx, joinToken, discordUserID); {
+	if a.grants() {
+		switch g, err := a.Access.GetAccessGrant(ctx, discordUserID); {
 		case err == nil:
 			return admissionDecision{route: admitGranted, platformKeys: g.PlatformKeys}, nil
-		case !errors.Is(err, storage.ErrInvitationInvalid):
-			return admissionDecision{}, fmt.Errorf("auth: admission: redeem access invitation: %w", err)
+		case !errors.Is(err, storage.ErrNotFound):
+			return admissionDecision{}, fmt.Errorf("auth: admission: read access grant: %w", err)
+		}
+
+		if joinToken != "" {
+			if !aupAccepted {
+				return admissionDecision{why: rejectAUPRequired}, nil
+			}
+			// A suspended user is refused before the redemption, not after it by
+			// the provisioning transaction: otherwise their attempt would burn a
+			// use of the link and leave them a grant.
+			switch u, err := a.Access.GetUserByDiscordID(ctx, discordUserID); {
+			case err == nil && u.SuspendedAt != nil:
+				return admissionDecision{why: rejectSuspended}, nil
+			case err != nil && !errors.Is(err, storage.ErrNotFound):
+				return admissionDecision{}, fmt.Errorf("auth: admission: read user: %w", err)
+			}
+			switch g, err := a.Access.RedeemAccessInvitation(ctx, joinToken, discordUserID); {
+			case err == nil:
+				return admissionDecision{route: admitGranted, platformKeys: g.PlatformKeys}, nil
+			case !errors.Is(err, storage.ErrInvitationInvalid):
+				return admissionDecision{}, fmt.Errorf("auth: admission: redeem access invitation: %w", err)
+			}
 		}
 	}
 
-	// ── ADR-0065 lane 2 seam ────────────────────────────────────────────────
-	// Campaign Guests are admitted here, in this order, each as one more step
-	// returning its own route:
-	//   - joinToken redeems as a CAMPAIGN invitation (same aupAccepted /
-	//     suspended preconditions as step 4) → the redeemer becomes a guest;
-	//   - the Discord User already is a Campaign Guest of some Campaign.
-	// Both apply on every deployment, so in `open` mode the campaign-invitation
-	// step must also run BEFORE step 2, or the redeemer founds a Tenant
-	// instead. Until they exist, a CAMPAIGN token is simply a join that failed
-	// (TestAdmissionDecide pins that).
-
+	// An existing Campaign Guest, whatever else they are. Someone who also
+	// operates a Tenant but holds no grant for it lands in the guest
+	// workspace: [Workspaces] refuses them their own Tenant on every request.
+	standing, isGuest, err := a.guestStanding(ctx, discordUserID)
+	if err != nil {
+		return admissionDecision{}, err
+	}
+	if isGuest {
+		return admissionDecision{route: admitGuest, guestCampaign: standing.CampaignID}, nil
+	}
 	return admissionDecision{}, nil
+}
+
+// guestStanding reads whether the Discord User is a Campaign Guest anywhere.
+// No Guests store means nobody is.
+func (a Admission) guestStanding(ctx context.Context, discordUserID string) (storage.GuestStanding, bool, error) {
+	if a.Guests == nil {
+		return storage.GuestStanding{}, false, nil
+	}
+	switch st, err := a.Guests.GuestStandingOf(ctx, discordUserID); {
+	case err == nil:
+		return st, true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return storage.GuestStanding{}, false, nil
+	default:
+		return storage.GuestStanding{}, false, fmt.Errorf("auth: admission: read guest standing: %w", err)
+	}
 }

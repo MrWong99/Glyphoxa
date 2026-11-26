@@ -41,6 +41,12 @@ type kgNodeStore interface {
 	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) (portraitBlobKey string, err error)
 	// SearchNodes is the ranked fulltext wiki search (#131).
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+	// SearchPublicNodes is the same search over PUBLIC material only: private
+	// Nodes cannot match, the query runs against the vector without private
+	// Aspect text, and private Aspects are not returned. It serves a Campaign
+	// Guest without wiki.secrets (ADR-0065) — filtering SearchNodes' results
+	// afterwards would still leak a secret through the fact of the hit.
+	SearchPublicNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 	// CreateNodeWithAspects and UpdateNodeWithAspects save a Node and its Aspects
 	// ATOMICALLY (#542) — a half-applied save would leave the GM unable to tell
 	// whether a retry duplicates the entry.
@@ -146,7 +152,8 @@ func (s *kgNodes) CreateNode(
 
 // ListNodes returns the active campaign's Knowledge Graph Nodes in the storage
 // display order (type, then case-insensitive name). No campaign is CodeNotFound;
-// a storage failure is CodeInternal.
+// a storage failure is CodeInternal. A Campaign Guest without wiki.secrets gets
+// neither gm_private Nodes nor the private Aspects of the rest (ADR-0065).
 func (s *kgNodes) ListNodes(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListNodesRequest],
@@ -162,7 +169,7 @@ func (s *kgNodes) ListNodes(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := mapSlice(nodes, toProtoNode)
+	out := mapSlice(redactNodes(ctx, nodes), toProtoNode)
 	return connect.NewResponse(&managementv1.ListNodesResponse{Nodes: out}), nil
 }
 
@@ -268,7 +275,8 @@ const searchNodesLimit = 50
 
 // SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
 // body match the query, ranked by relevance (#131, ADR-0008 v1.0). gm_private
-// Nodes are INCLUDED (GM-facing search). An empty/whitespace query is
+// Nodes are INCLUDED for a GM (and a Campaign Guest holding wiki.secrets); a
+// guest without it searches public material only. An empty/whitespace query is
 // CodeInvalidArgument; no campaign is CodeNotFound; a storage failure is
 // CodeInternal.
 func (s *kgNodes) SearchNodes(
@@ -284,13 +292,19 @@ func (s *kgNodes) SearchNodes(
 		return nil, err
 	}
 
-	nodes, err := s.store.SearchNodes(ctx, c.ID, req.Msg.GetQuery(), searchNodesLimit)
+	search := s.store.SearchNodes
+	if !seesSecrets(ctx) {
+		search = s.store.SearchPublicNodes
+	}
+	nodes, err := search(ctx, c.ID, req.Msg.GetQuery(), searchNodesLimit)
 	if err != nil {
 		s.active.logger().Error("SearchNodes: store search failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := mapSlice(nodes, toProtoNode)
+	// redactNodes is belt and braces over SearchPublicNodes: whatever the store
+	// returned, nothing private leaves this handler for a guest without secrets.
+	out := mapSlice(redactNodes(ctx, nodes), toProtoNode)
 	return connect.NewResponse(&managementv1.SearchNodesResponse{Nodes: out}), nil
 }
 

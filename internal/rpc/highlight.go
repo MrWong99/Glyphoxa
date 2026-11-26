@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
@@ -168,7 +169,12 @@ func (s *SessionServer) ListHighlights(
 		s.log.Error("ListHighlights: store list failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	out := mapSlice(rows, toProtoHighlight)
+	out := make([]*managementv1.Highlight, 0, len(rows))
+	for _, h := range rows {
+		if pb := highlightFor(ctx, h); pb != nil {
+			out = append(out, pb)
+		}
+	}
 	return connect.NewResponse(&managementv1.ListHighlightsResponse{Highlights: out}), nil
 }
 
@@ -206,7 +212,11 @@ func (s *SessionServer) GetHighlight(
 	if h.CampaignID != campaignID {
 		return nil, errNoSuchHighlight() // cross-campaign: never leak that it exists
 	}
-	return connect.NewResponse(&managementv1.GetHighlightResponse{Highlight: toProtoHighlight(h)}), nil
+	pb := highlightFor(ctx, h)
+	if pb == nil {
+		return nil, errNoSuchHighlight() // a candidate does not exist for a guest
+	}
+	return connect.NewResponse(&managementv1.GetHighlightResponse{Highlight: pb}), nil
 }
 
 // PromoteHighlight flips a candidate Highlight to 'promoted' within the tenant and
@@ -485,6 +495,26 @@ func (s *SessionServer) SetHighlightSound(
 // toProtoHighlight maps a storage.Highlight onto its wire view (#308). clip_key
 // is deliberately omitted (an internal blob-seam detail); promoted_at is set only
 // once the row is promoted.
+// highlightFor renders a Highlight for the caller, or nil when they must not
+// see it. A GM sees every row. A Campaign Guest (ADR-0065) sees PROMOTED
+// Highlights only — a Highlight Candidate is the GM's private curation
+// (ADR-0051) and does not exist for them — and without the speakers' Discord
+// ids and the classifier's score, which are the GM's working data. The
+// excerpt stays: it is the caption of the clip highlights.read lets them play,
+// the same words spoken.
+func highlightFor(ctx context.Context, h storage.Highlight) *managementv1.Highlight {
+	if _, guest := auth.Guest(ctx); !guest {
+		return toProtoHighlight(h)
+	}
+	if h.Status != storage.HighlightPromoted {
+		return nil
+	}
+	pb := toProtoHighlight(h)
+	pb.SpeakerIds = nil
+	pb.Score = 0
+	return pb
+}
+
 func toProtoHighlight(h storage.Highlight) *managementv1.Highlight {
 	pb := &managementv1.Highlight{
 		Id:              h.ID.String(),

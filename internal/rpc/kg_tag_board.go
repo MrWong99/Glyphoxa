@@ -55,8 +55,17 @@ func (s *kgOrganize) GetCampaignTags(
 	if err != nil {
 		return nil, internalErr(s.active.logger(), "GetCampaignTags: store read failed", err, "campaign_id", c.ID)
 	}
+	// A Campaign Guest without wiki.secrets (ADR-0065) must not learn that a
+	// withheld entry exists, let alone what it is filed under.
+	withheld, err := s.active.withheldFor(ctx, "GetCampaignTags", c.ID)
+	if err != nil {
+		return nil, err
+	}
 	out := &managementv1.GetCampaignTagsResponse{Entries: make([]*managementv1.TaggedEntry, 0, len(pairs))}
 	for _, p := range pairs {
+		if isWithheld(withheld, p.NodeID) {
+			continue
+		}
 		out.Entries = append(out.Entries, &managementv1.TaggedEntry{
 			NodeId: p.NodeID.String(), Tag: p.Tag,
 		})
@@ -133,8 +142,23 @@ func (s *kgOrganize) ListBoards(
 	if err != nil {
 		return nil, internalErr(s.active.logger(), "ListBoards: store read failed", err, "campaign_id", c.ID)
 	}
+	// A board keeps its name for a Campaign Guest without wiki.secrets
+	// (ADR-0065) but lists only the entries they may see.
+	withheld, err := s.active.withheldFor(ctx, "ListBoards", c.ID)
+	if err != nil {
+		return nil, err
+	}
 	out := &managementv1.ListBoardsResponse{Boards: make([]*managementv1.Board, 0, len(boards))}
 	for _, b := range boards {
+		if len(withheld) > 0 {
+			visible := make([]uuid.UUID, 0, len(b.NodeIDs))
+			for _, id := range b.NodeIDs {
+				if !isWithheld(withheld, id) {
+					visible = append(visible, id)
+				}
+			}
+			b.NodeIDs = visible
+		}
 		out.Boards = append(out.Boards, toProtoBoard(b))
 	}
 	return connect.NewResponse(out), nil

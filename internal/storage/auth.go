@@ -254,6 +254,11 @@ type NewSession struct {
 	ExpiresAt time.Time
 	IP        string
 	UA        string
+	// GuestCampaignID, when set, starts the session acting as a Campaign Guest
+	// of that Campaign (ADR-0065, sessions.guest_campaign_id). It is only a
+	// selection: [Store.ResolveWorkspace] re-authorizes it on every request, so
+	// a value the user is not a guest of simply does not resolve.
+	GuestCampaignID *uuid.UUID
 }
 
 // sessionTokenHash is what the sessions.token column holds: the SHA-256 of the
@@ -271,10 +276,10 @@ func sessionTokenHash(token string) string {
 // Session.Token is the stored digest, never the cookie secret.
 func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, token, expires_at, ip, ua)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO sessions (user_id, token, expires_at, ip, ua, guest_campaign_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, user_id, token, created_at, last_seen_at, expires_at, ip, ua`,
-		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA)
+		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA, n.GuestCampaignID)
 	var sess Session
 	err := row.Scan(
 		&sess.ID, &sess.UserID, &sess.Token, &sess.CreatedAt,

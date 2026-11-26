@@ -39,9 +39,13 @@ type kgGraphStore interface {
 // ListNodeEdges round trips is not a plan, and a campaign is hundreds of Nodes,
 // so there is no pagination and no server-side layout.
 //
-// It is GM-facing: gm_private Nodes are INCLUDED (the graph is the GM's map of
-// their own world) and the client chooses how to draw them. Prompt assembly cannot
-// reach this path — it holds only PromptKGView (#450).
+// For a GM, gm_private Nodes are INCLUDED (the graph is the GM's map of their
+// own world) and the client chooses how to draw them. Prompt assembly cannot
+// reach this path — it holds only PromptKGView (#450). A Campaign Guest without
+// wiki.secrets (ADR-0065) gets the public graph: no gm_private Node, no Edge
+// with a withheld endpoint (an Edge names both its ends), and an aspect count
+// that counts public Aspects only, so it does not betray how many secrets an
+// entry holds.
 //
 // No campaign is CodeNotFound; a storage failure is CodeInternal.
 func (s *kgGraph) GetKnowledgeGraph(
@@ -68,7 +72,16 @@ func (s *kgGraph) GetKnowledgeGraph(
 		Nodes: make([]*managementv1.GraphNode, 0, len(nodes)),
 		Edges: make([]*managementv1.GraphEdge, 0, len(edges)),
 	}
+	secrets := seesSecrets(ctx)
+	withheld := make(map[uuid.UUID]struct{})
 	for _, n := range nodes {
+		if !secrets {
+			if n.GMPrivate {
+				withheld[n.ID] = struct{}{}
+				continue
+			}
+			n.AspectCount = n.PublicAspectCount
+		}
 		gn := &managementv1.GraphNode{
 			Id:                n.ID.String(),
 			NodeType:          toProtoNodeType(n.Type),
@@ -84,6 +97,9 @@ func (s *kgGraph) GetKnowledgeGraph(
 		out.Nodes = append(out.Nodes, gn)
 	}
 	for _, e := range edges {
+		if isWithheld(withheld, e.FromNodeID) || isWithheld(withheld, e.ToNodeID) {
+			continue
+		}
 		out.Edges = append(out.Edges, &managementv1.GraphEdge{
 			Id:          e.ID.String(),
 			FromNodeId:  e.FromNodeID.String(),

@@ -141,3 +141,48 @@ is a Platform Admin so the Admin screen is reachable on a dev instance.
 - **ADR-0039 / #446** — the policy seam now resolves a workspace, not just a
   Tenant, and owns the guest gate.
 - **ADR-0062** — planning threads gain an owner.
+
+## Implementation notes (lane 2, 2026-11-27)
+
+Decisions the build had to make that the text above implies but does not
+spell out. None changes what was decided; each says how it holds.
+
+- **The own-Tenant workspace is re-authorized per request too.** Lane 1
+  enforced "operating a Tenant on an `allowlist` deployment needs a Platform
+  Admin or an Access Grant" at the OAuth callback only — enough while a revoked
+  GM could not sign in at all. Guests are admitted on every deployment, so a
+  revoked GM who is somebody's guest CAN sign in, and a session that then fell
+  back to "their own Tenant" would undo the revocation. `auth.Workspaces`
+  therefore applies the same rule on every workspace resolution
+  (`storage.ResolveWorkspace(…, ownTenantNeedsGrant)`); `open` mode is
+  unaffected. For the same reason the bundle import mount became
+  `TenantRequired` and imports into the Tenant the policy authorized: it used
+  to look up "the Tenant this user operates" by itself, which a revoked GM
+  still has.
+- **A join whose token names a campaign invitation is terminal.** It is
+  decided before the Platform Admin and self-signup steps and never falls
+  through to them: the redeemer becomes a guest or the join fails, so a dead
+  campaign link cannot found a Tenant on an `open` deployment. A Platform Admin
+  or grant holder who opens one becomes a guest for that session and reaches
+  their own Tenant from the workspace switcher.
+- **In `open` mode a Campaign Guest who operates no Tenant signs in as that
+  guest**, not as a self-signup — otherwise returning to the Campaign they were
+  invited to would found a Tenant.
+- **The Tenant's own operator cannot be a guest of its Campaigns** — refused
+  on add, on redemption (as an invalid link) and ignored at resolution.
+- **An archived Campaign is not reachable for its guests**; the guest rows are
+  kept and unarchiving restores them.
+- **`ListSessions` needs `transcripts.read` OR `highlights.read`.** It carries
+  session metadata only, and Highlights are listed per session.
+- **`planning.use` does not reveal the spoken record.** Without
+  `transcripts.read` the exchange runs with no transcript-reading tool
+  (`search_transcripts`, `appearances_of`, `recap`). Its one write,
+  `propose_knowledge`, lands in the GM's Proposals queue.
+- **A Highlight's excerpt stays visible with `highlights.read`**: it captions
+  the clip that right lets the guest play. The speakers' Discord ids and the
+  classifier score do not.
+- **Pins show their entry's name and type to a `maps.read`-only guest**; the
+  unpinned-entries tray carries entry bodies and needs `wiki.read`.
+- **The Party Marker has no RPC**, so `maps.edit` is the three Pin writes.
+- **The live SSE transcript relay is GM-only**; a guest reads a session, live
+  or finished, through the snapshot.

@@ -384,8 +384,9 @@ func TestOAuthCallback_Allowlist_Rejections(t *testing.T) {
 			round: accessRound{du: granted, aup: true, join: "dead-link"}, access: &fakeAccess{},
 			wantLoc: "/join/dead-link?error=invalid",
 		},
-		// The lane 2 seam: a CAMPAIGN invitation does not redeem as an ACCESS
-		// one, so until the Campaign Guest branch exists it is a failed join.
+		// A CAMPAIGN invitation never redeems as an ACCESS one. This policy has
+		// no Guests store wired, so the token is simply a join that failed
+		// (TestOAuthCallback_CampaignJoin_* cover the wired case).
 		"campaign link": {
 			round: accessRound{du: granted, aup: true, join: "campaign-link"}, access: &fakeAccess{},
 			wantLoc: "/join/campaign-link?error=invalid",
@@ -577,7 +578,22 @@ func TestOAuthCallback_MalformedJoinCookieIsNoJoin(t *testing.T) {
 type fakeInvitations struct {
 	byToken map[string]storage.Invitation
 	users   map[uuid.UUID]storage.User
-	err     error
+	// campaigns names what a CAMPAIGN invitation opens; a campaign missing
+	// here reads as archived/gone.
+	campaigns   map[uuid.UUID]storage.InvitationTarget
+	campaignErr error
+	err         error
+}
+
+func (f fakeInvitations) GetInvitationCampaign(_ context.Context, id uuid.UUID) (storage.InvitationTarget, error) {
+	if f.campaignErr != nil {
+		return storage.InvitationTarget{}, f.campaignErr
+	}
+	target, ok := f.campaigns[id]
+	if !ok {
+		return storage.InvitationTarget{}, storage.ErrNotFound
+	}
+	return target, nil
 }
 
 func (f fakeInvitations) GetInvitationByToken(_ context.Context, token string) (storage.Invitation, error) {
@@ -661,7 +677,9 @@ func TestGetInvitation(t *testing.T) {
 		}
 	}
 
-	// Unknown, dead and not-yet-previewed kinds are indistinguishable.
+	// Unknown and dead links are indistinguishable — including "campaign", a
+	// link to a Campaign this fake does not know, i.e. an archived or deleted
+	// one (TestGetInvitation_Campaign covers the live case).
 	for _, token := range []string{"never-minted", "", "revoked", "expired", "spent", "campaign", "not a token!"} {
 		got := preview(token)
 		if got.GetValid() || got.GetKind() != managementv1.InvitationKind_INVITATION_KIND_UNSPECIFIED ||

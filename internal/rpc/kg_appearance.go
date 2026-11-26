@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -35,10 +36,15 @@ type kgAppearanceStore interface {
 
 // ListNodeAppearances returns an entry's most recent mentions.
 //
-// gm_private entries are NOT filtered: this is the operator's own retrieval over
-// their own campaign (ADR-0039/0041), and hiding a GM's own secret from their own
-// search would make the index lie about their world. Nothing here is player- or
-// prompt-facing.
+// For a GM, gm_private entries are NOT filtered: this is the operator's own
+// retrieval over their own campaign (ADR-0039/0041), and hiding a GM's own secret
+// from their own search would make the index lie about their world. Nothing here
+// is prompt-facing.
+//
+// A Campaign Guest (ADR-0065) gets appearances only when they hold
+// transcripts.read as well as the wiki.read that let them call this — every
+// appearance quotes a transcript line — and never for an entry withheld from
+// them. Both cases answer the same empty list an entry nobody mentioned would.
 func (s *kgAppearances) ListNodeAppearances(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListNodeAppearancesRequest],
@@ -50,6 +56,17 @@ func (s *kgAppearances) ListNodeAppearances(
 	c, err := s.active.campaignFor(ctx, "ListNodeAppearances")
 	if err != nil {
 		return nil, err
+	}
+	none := connect.NewResponse(&managementv1.ListNodeAppearancesResponse{})
+	if auth.GuestLacks(ctx, auth.RightTranscriptsRead) {
+		return none, nil
+	}
+	withheld, err := s.active.withheldFor(ctx, "ListNodeAppearances", c.ID)
+	if err != nil {
+		return nil, err
+	}
+	if isWithheld(withheld, nodeID) {
+		return none, nil
 	}
 	hits, err := s.store.ListNodeAppearances(ctx, c.ID, nodeID, storage.MaxAppearances)
 	if err != nil {

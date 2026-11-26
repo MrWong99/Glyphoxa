@@ -21,6 +21,7 @@ type fakeMapStore struct {
 	campaignID uuid.UUID
 	id         uuid.UUID
 	blobKey    string // empty = a Map with no picture (an imageless bundle import)
+	gmPrivate  bool   // the Map is gm_private
 }
 
 func (f *fakeMapStore) GetMap(_ context.Context, campaignID, id uuid.UUID) (storage.CampaignMap, error) {
@@ -30,6 +31,7 @@ func (f *fakeMapStore) GetMap(_ context.Context, campaignID, id uuid.UUID) (stor
 	return storage.CampaignMap{
 		ID: f.id, CampaignID: f.campaignID, Name: "Saltmarsh", BlobKey: f.blobKey,
 		WidthPx: 800, HeightPx: 600, UpdatedAt: time.Unix(1_700_000_000, 0),
+		GMPrivate: f.gmPrivate,
 	}, nil
 }
 

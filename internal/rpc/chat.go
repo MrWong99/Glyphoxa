@@ -45,6 +45,27 @@ type chatStore interface {
 	CreatePlanningThread(ctx context.Context, campaignID uuid.UUID, title string) (storage.PlanningThread, error)
 	RenamePlanningThread(ctx context.Context, campaignID, id uuid.UUID, title string) (storage.PlanningThread, error)
 	DeletePlanningThread(ctx context.Context, campaignID, id uuid.UUID) error
+	// The creator-scoped twins (ADR-0065). CreatePlanningThreadBy records who
+	// started a thread; the other four are what a Campaign Guest's requests
+	// run through, so a guest reads and changes only threads they started.
+	CreatePlanningThreadBy(ctx context.Context, campaignID uuid.UUID, title string, createdBy uuid.UUID) (storage.PlanningThread, error)
+	GetPlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID) (storage.PlanningThread, error)
+	ListPlanningThreadsBy(ctx context.Context, campaignID, createdBy uuid.UUID) ([]storage.PlanningThread, error)
+	RenamePlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID, title string) (storage.PlanningThread, error)
+	DeletePlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID) error
+}
+
+// guestThreadOwner returns the user a Campaign Guest's thread access is
+// confined to (ADR-0065), and false for a GM, who sees every thread of the
+// Campaign — guests' included. A guest request with no user in its context
+// cannot happen behind the policy; if it did, uuid.Nil owns no thread, so it
+// would see nothing.
+func guestThreadOwner(ctx context.Context) (uuid.UUID, bool) {
+	if _, guest := auth.Guest(ctx); !guest {
+		return uuid.Nil, false
+	}
+	u, _ := auth.CurrentUser(ctx)
+	return u.ID, true
 }
 
 // ChatEngine is the exchange surface [planchat.Engine] provides; the seam a
@@ -92,6 +113,13 @@ func (s *ChatServer) chatCampaign(ctx context.Context, rawCampaignID string) (st
 	if err != nil {
 		return storage.Campaign{}, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
+	// The campaign id is client input. For a Campaign Guest the context's
+	// Tenant is the HOST Tenant, so the tenant scope below would happily
+	// resolve any of the host's other Campaigns: a guest may name their own
+	// Campaign and nothing else (ADR-0065).
+	if guestCampaignMismatch(ctx, id) {
+		return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
+	}
 	c, err := s.store.GetCampaignInTenant(ctx, tenantID, id)
 	if errors.Is(err, storage.ErrNotFound) {
 		return storage.Campaign{}, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
@@ -122,7 +150,13 @@ func (s *ChatServer) ListPlanningThreads(
 	if cerr != nil {
 		return nil, cerr
 	}
-	threads, err := s.store.ListPlanningThreads(ctx, c.ID)
+	var threads []storage.PlanningThread
+	var err error
+	if owner, guest := guestThreadOwner(ctx); guest {
+		threads, err = s.store.ListPlanningThreadsBy(ctx, c.ID, owner)
+	} else {
+		threads, err = s.store.ListPlanningThreads(ctx, c.ID)
+	}
 	if err != nil {
 		s.log.Error("ListPlanningThreads: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -144,7 +178,7 @@ func (s *ChatServer) GetPlanningThread(
 	if terr != nil {
 		return nil, terr
 	}
-	thread, err := s.store.GetPlanningThread(ctx, c.ID, threadID)
+	thread, err := s.threadFor(ctx, c.ID, threadID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("thread not found"))
 	}
@@ -166,6 +200,16 @@ func (s *ChatServer) GetPlanningThread(
 
 // CreatePlanningThread creates an empty thread; title may be empty (the first
 // exchange auto-fills it).
+// threadFor loads a thread as the caller may see it: any thread of the
+// Campaign for a GM, only one they started for a Campaign Guest. A thread that
+// is not theirs is storage.ErrNotFound, like one that does not exist.
+func (s *ChatServer) threadFor(ctx context.Context, campaignID, threadID uuid.UUID) (storage.PlanningThread, error) {
+	if owner, guest := guestThreadOwner(ctx); guest {
+		return s.store.GetPlanningThreadBy(ctx, campaignID, threadID, owner)
+	}
+	return s.store.GetPlanningThread(ctx, campaignID, threadID)
+}
+
 func (s *ChatServer) CreatePlanningThread(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreatePlanningThreadRequest],
@@ -178,7 +222,15 @@ func (s *ChatServer) CreatePlanningThread(
 	if utf8.RuneCountInString(title) > maxThreadTitleRunes {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title is too long"))
 	}
-	thread, err := s.store.CreatePlanningThread(ctx, c.ID, title)
+	// Every thread records who started it (ADR-0065) — a GM's too, so the
+	// column means the same for every row written from here on.
+	var thread storage.PlanningThread
+	var err error
+	if u, ok := auth.CurrentUser(ctx); ok {
+		thread, err = s.store.CreatePlanningThreadBy(ctx, c.ID, title, u.ID)
+	} else {
+		thread, err = s.store.CreatePlanningThread(ctx, c.ID, title)
+	}
 	if err != nil {
 		s.log.Error("CreatePlanningThread: store create failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -206,7 +258,13 @@ func (s *ChatServer) RenamePlanningThread(
 	if utf8.RuneCountInString(title) > maxThreadTitleRunes {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title is too long"))
 	}
-	thread, err := s.store.RenamePlanningThread(ctx, c.ID, threadID, title)
+	var thread storage.PlanningThread
+	var err error
+	if owner, guest := guestThreadOwner(ctx); guest {
+		thread, err = s.store.RenamePlanningThreadBy(ctx, c.ID, threadID, owner, title)
+	} else {
+		thread, err = s.store.RenamePlanningThread(ctx, c.ID, threadID, title)
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("thread not found"))
 	}
@@ -230,7 +288,12 @@ func (s *ChatServer) DeletePlanningThread(
 	if terr != nil {
 		return nil, terr
 	}
-	err := s.store.DeletePlanningThread(ctx, c.ID, threadID)
+	var err error
+	if owner, guest := guestThreadOwner(ctx); guest {
+		err = s.store.DeletePlanningThreadBy(ctx, c.ID, threadID, owner)
+	} else {
+		err = s.store.DeletePlanningThread(ctx, c.ID, threadID)
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("thread not found"))
 	}
@@ -302,6 +365,25 @@ func (s *ChatServer) PlanningExchange(
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("message is too long"))
 	}
 	tenantID, _ := auth.TenantID(ctx) // present: chatCampaign already required it
+
+	// A Campaign Guest (ADR-0065) may only talk in a thread they started: the
+	// engine loads the thread by campaign alone, and its history is the whole
+	// earlier conversation. Checked here, before anything is persisted or spent.
+	if _, guest := guestThreadOwner(ctx); guest {
+		if _, err := s.threadFor(ctx, c.ID, threadID); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return connect.NewError(connect.CodeNotFound, errors.New("thread not found"))
+			}
+			s.log.Error("PlanningExchange: load thread failed", "thread_id", threadID, "err", err)
+			return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+	// planning.use reveals the wiki, secrets included — that is in the right's
+	// definition. It does not reveal the spoken record: without
+	// transcripts.read the exchange runs with no tool that reads it.
+	if auth.GuestLacks(ctx, auth.RightTranscriptsRead) {
+		ctx = planchat.WithoutTranscripts(ctx)
+	}
 
 	res, err := s.engine.Exchange(ctx, tenantID, c, threadID, text, streamEvents{ctx: ctx, stream: stream})
 	if err != nil {

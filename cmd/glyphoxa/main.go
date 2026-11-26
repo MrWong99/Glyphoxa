@@ -1189,6 +1189,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// SSE stream opens. The guarded mount table below declares TenantRequired
 	// to inject the tenant this check reads. Web-only: the worker mounts no SSE.
 	relay.SetTenantScope(store.VoiceSessionInTenant)
+	// A Campaign Guest is checked against their one Campaign instead
+	// (ADR-0065): their request carries the host Tenant.
+	relay.SetCampaignScope(store.VoiceSessionInCampaign)
 
 	// Seed the backlog gauge from the DB at boot so it reads the true count before
 	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
@@ -1590,9 +1593,39 @@ var plainMountPolicy = map[string]auth.TenantMode{
 	"GET /api/v1/maps/{id}/image":               auth.TenantRequired,
 	"GET /api/v1/knowledge/nodes/{id}/portrait": auth.TenantRequired,
 	"GET /api/v1/campaigns/{id}/export":         auth.TenantRequired,
-	// TenantNone: ServeImport resolves the tenant off the session itself
-	// (#291); the POST method already makes the guard demand the CSRF pair.
-	importMountPattern: auth.TenantNone,
+	// TenantRequired since ADR-0065 (it was TenantNone: ServeImport resolved
+	// the tenant off the session itself, #291). "The Tenant this user operates"
+	// is no longer the same as "the Tenant this session may act in" — on an
+	// allowlist deployment the latter needs a live Access Grant — so the
+	// import takes the Tenant the policy authorized for THIS request, and a
+	// session with no workspace is refused before a byte of the upload is
+	// read. The POST method already makes the guard demand the CSRF pair.
+	importMountPattern: auth.TenantRequired,
+}
+
+// plainMountGuestPolicy is the guest half of the plain-mount table (ADR-0065):
+// what each mount requires of a Campaign Guest. A pattern ABSENT from it is
+// GM-only — the zero auth.GuestPosture denies — so a new mount is closed to
+// guests until someone adds a row here, and the two that are deliberately
+// closed need no entry:
+//
+//   - the live SSE relay (GET /api/v1/sessions/{id}/events) is the GM console's
+//     live view; a guest reads a session through the snapshot;
+//   - the bundle export and import carry or replace a whole Campaign.
+//
+// Every handler listed scopes to the guest Campaign itself and withholds what
+// the guest's rights do not cover; the posture only decides who may knock.
+// TestPlainMountGuestPolicy pins the table.
+var plainMountGuestPolicy = map[string]auth.GuestPosture{
+	// The transcript of one session of the guest Campaign, finished or live.
+	"GET /api/v1/sessions/{id}": auth.GuestWith(auth.RightTranscriptsRead),
+	// Promoted Highlights' assets; the handler 404s a candidate.
+	"GET /api/v1/highlights/{id}/clip":  auth.GuestWith(auth.RightHighlightsRead),
+	"GET /api/v1/highlights/{id}/image": auth.GuestWith(auth.RightHighlightsRead),
+	"GET /api/v1/highlights/{id}/sound": auth.GuestWith(auth.RightHighlightsRead),
+	"GET /api/v1/maps/{id}/image":       auth.GuestWith(auth.RightMapsRead),
+	// A wiki entry's portrait; the handler 404s a gm_private entry's.
+	"GET /api/v1/knowledge/nodes/{id}/portrait": auth.GuestWith(auth.RightWikiRead),
 }
 
 // importMountPattern is the campaign bundle import route — named because two
@@ -1675,11 +1708,18 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		SignupPlanSlug: signupPlanSlug,
 		Signup:         store,
 		Access:         store,
+		// Campaign Guests are admitted in both modes (ADR-0065 lane 2).
+		Guests: store,
 	}, edge, log)
+	// What a session acts as — its own Tenant or a guest Campaign — is
+	// resolved per request by ONE value, shared by the policy below and the
+	// AuthServer, so "has a workspace of their own" cannot mean two things.
+	workspaces := auth.Workspaces{Store: store, Admins: admins, Mode: admission}
 	authServer := auth.NewAuthServer(store, store, store, admission, edge, log)
 	authServer.SetPlatformAdmins(admins)
 	authServer.SetOwnTenants(store)
 	authServer.SetInvitations(store)
+	authServer.SetWorkspaces(workspaces, store)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
@@ -1687,7 +1727,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// adapters over the same auth.Policy, so the session/CSRF/tenant gate
 	// cannot drift between them again (#408). The public procedures are listed
 	// in [publicProcedures].
-	policy := auth.NewPolicy(store, store)
+	//
+	// WithWorkspaces is what makes Campaign Guests exist (ADR-0065): the
+	// policy resolves a workspace per request and, for a guest, runs the guest
+	// gate — default-deny on both transports. The Connect half of the gate is
+	// auth's procedure table; the plain-mount half is plainMountGuestPolicy.
+	policy := auth.NewPolicy(store, store).WithWorkspaces(workspaces)
 	stack := policy.Stack(publicProcedures...)
 
 	// The Platform Admin console (ADR-0065). Behind the same interceptor stack
@@ -1943,6 +1988,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		row := auth.GuardedMount{
 			Pattern: pattern,
 			Tenant:  plainMountPolicy[pattern],
+			// A pattern missing from plainMountGuestPolicy yields the zero
+			// posture: GM-only.
+			Guest:   plainMountGuestPolicy[pattern],
 			Handler: plainHandlers[pattern],
 		}
 		// The bundle import is the one plain mount that receives a large body

@@ -392,6 +392,77 @@ disabled while the count is in flight. If the count *fails*, the button enables
 anyway and the dialog says the relationships couldn't be counted — the delete
 still cascades server-side.
 
+### 4c. Sharing — Campaign Guests
+
+You can let other people open **one Campaign** without giving them your Tenant:
+they become **Campaign Guests** of it
+([ADR-0065](adr/0065-web-managed-access-platform-admins-grants-campaign-guests.md)).
+A guest sees that Campaign and nothing else of yours — not your other Campaigns,
+not Configuration, not your provider keys — and can do exactly what the **Guest
+Rights** you ticked allow. Sharing is per Campaign: the same person can hold
+different rights on two of your Campaigns, or be a guest of one and not know the
+other exists.
+
+**Two ways to add someone**, both on the Campaign you currently have open:
+
+- **By Discord User ID.** Paste their snowflake (Discord → Settings → Advanced →
+  Developer Mode, then right-click the user → *Copy User ID*). They need not
+  have signed in before; the Campaign is there the next time they do. Adding
+  someone who already is a guest replaces their rights.
+- **With an invitation link.** You get a `/join/…` link, shown **once** — copy
+  it then, it cannot be read back later. Optional: a label, a maximum number of
+  uses, an expiry of up to 365 days, and a Discord User ID the link is pinned
+  to. Whoever opens it acknowledges the Terms and Privacy Policy, signs in with
+  Discord and lands in your Campaign. Opening a link again uses nothing up, and
+  someone who is already a guest keeps what they had **plus** what the link
+  grants — a link never takes a right away.
+
+**The rights, and what each one reveals:**
+
+| Right | Lets the guest | Does *not* include |
+|---|---|---|
+| Read the wiki (`wiki.read`) | Read Knowledge Graph entries, their relationships, tags and boards, and search them | Anything you marked GM-private: private entries, private Aspects, relationships that touch a private entry, and a private entry's tags, board places and portrait are all withheld — as if they did not exist |
+| See GM secrets (`wiki.secrets`) | Also see everything you marked GM-private, on the wiki *and* on maps (private maps and pins) | — |
+| Edit the wiki (`wiki.edit`) | Create, edit and delete entries, relationships, tags and boards | Generating knowledge, personas or portraits (those spend your budget), reviewing Proposals, and choosing who voices an NPC |
+| See maps (`maps.read`) | Open your maps and their pins, with each pinned entry's name | Private maps, private pins and pins on private entries (unless they also see GM secrets); the entries themselves (that is *Read the wiki*) |
+| Edit pins (`maps.edit`) | Add, move and delete pins | Creating, replacing, generating or deleting a map |
+| Read transcripts (`transcripts.read`) | Read past sessions' transcripts and search them | Starting or controlling a session; recaps |
+| See highlights (`highlights.read`) | See and play **promoted** Session Highlights, with their image and sound | Highlight candidates you have not promoted — those stay your private curation |
+| Use the planning chat (`planning.use`) | Talk to the Butler in threads of their own | Your threads or another guest's; recaps and transcript lookups unless they can also read transcripts |
+
+The screen may word the rights slightly differently; the identifiers in
+brackets are what is stored. Three rights carry others with them, and the list
+you saved shows it: `wiki.edit` includes `wiki.read` *and* `wiki.secrets` (an
+editor who could not see a private Aspect would erase it on save); `maps.edit`
+includes `maps.read`; `planning.use` includes `wiki.read` and `wiki.secrets`,
+because the Butler answers from your whole Knowledge Graph and the right cannot
+honestly be narrower than what it can tell them.
+
+Two things worth knowing before you tick a box:
+
+- **The planning chat spends your budget.** A guest's exchanges run on your
+  Tenant's LLM provider and count against your usage, exactly like your own. A
+  guest cannot change the wiki through the chat — what the Butler notes down
+  lands in your Proposals queue for you to approve.
+- **Highlights are audio.** A promoted Highlight's clip is the table's own
+  voices. Seeing highlights without reading transcripts still plays those few
+  seconds and shows their caption (`highlights.read` without
+  `transcripts.read`).
+
+**Changing and removing.** Change a guest's rights at any time; an empty set
+keeps the Campaign in their list with nothing they can open. **Remove** ends
+their access. Both take effect on the guest's **very next request** — there is
+nothing to wait for and no need for them to sign out. Removing a guest does not
+delete what they wrote: wiki edits stay, and their planning threads stay with
+the Campaign for you to read or delete. Revoking an invitation link stops the
+link; people it already let in stay until you remove them.
+
+A guest is never a GM on Discord: they cannot use the Slash Commands that need
+one, and the Butler does not treat them as you. An **archived** Campaign is not
+reachable for its guests; unarchiving brings every guest back as they were.
+Whoever runs the instance can see every guest on the Admin screen and can
+suspend any of them.
+
 ---
 
 ## 5. Run a Voice Session

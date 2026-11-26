@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +121,14 @@ type fakeMapStore struct {
 	createPinErr error
 	unpinned     []storage.KGNode
 	pinned       int
+
+	// The Campaign Guest tests (ADR-0065) script these: the Map's Pins and
+	// ancestors, and what the Pin writes received.
+	pins        []storage.MapPin
+	ancestors   []storage.CampaignMap
+	pinsCreated []storage.NewMapPin
+	pinsUpdated []storage.MapPinUpdate
+	pinsDeleted []uuid.UUID
 }
 
 func newFakeMapStore() *fakeMapStore {
@@ -140,7 +149,21 @@ func (f *fakeMapStore) CreateMap(_ context.Context, m storage.NewCampaignMap) (s
 }
 
 func (f *fakeMapStore) ListMaps(context.Context, uuid.UUID) ([]storage.CampaignMap, error) {
-	return nil, nil
+	out := make([]storage.CampaignMap, 0, len(f.maps))
+	for _, m := range f.maps {
+		out = append(out, m)
+	}
+	slices.SortFunc(out, func(a, b storage.CampaignMap) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+func (f *fakeMapStore) GetPin(_ context.Context, _, id uuid.UUID) (storage.MapPin, error) {
+	for _, p := range f.pins {
+		if p.ID == id {
+			return p, nil
+		}
+	}
+	return storage.MapPin{}, storage.ErrNotFound
 }
 
 func (f *fakeMapStore) GetMap(_ context.Context, _, id uuid.UUID) (storage.CampaignMap, error) {
@@ -189,7 +212,7 @@ func (f *fakeMapStore) DeleteMap(_ context.Context, _, id uuid.UUID) (string, er
 }
 
 func (f *fakeMapStore) MapAncestors(context.Context, uuid.UUID, uuid.UUID) ([]storage.CampaignMap, error) {
-	return nil, nil
+	return f.ancestors, nil
 }
 
 func (f *fakeMapStore) CreatePin(_ context.Context, n storage.NewMapPin) (storage.MapPin, error) {
@@ -197,18 +220,23 @@ func (f *fakeMapStore) CreatePin(_ context.Context, n storage.NewMapPin) (storag
 	if f.createPinErr != nil {
 		return storage.MapPin{}, f.createPinErr
 	}
+	f.pinsCreated = append(f.pinsCreated, n)
 	return storage.MapPin{ID: uuid.New(), MapID: n.MapID, NodeID: n.NodeID, X: n.X, Y: n.Y}, nil
 }
 
 func (f *fakeMapStore) ListPins(context.Context, uuid.UUID, uuid.UUID) ([]storage.MapPin, error) {
-	return nil, nil
+	return f.pins, nil
 }
 
 func (f *fakeMapStore) UpdatePin(_ context.Context, u storage.MapPinUpdate) (storage.MapPin, error) {
+	f.pinsUpdated = append(f.pinsUpdated, u)
 	return storage.MapPin{ID: u.ID, X: u.X, Y: u.Y}, nil
 }
 
-func (f *fakeMapStore) DeletePin(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (f *fakeMapStore) DeletePin(_ context.Context, _, id uuid.UUID) error {
+	f.pinsDeleted = append(f.pinsDeleted, id)
+	return nil
+}
 
 func (f *fakeMapStore) UnpinnedNodes(context.Context, uuid.UUID, uuid.UUID) ([]storage.KGNode, error) {
 	return f.unpinned, nil

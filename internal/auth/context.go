@@ -22,6 +22,7 @@ type ctxKey int
 const (
 	userKey ctxKey = iota
 	tenantKey
+	guestKey
 )
 
 // WithUser returns a copy of ctx carrying the authenticated operator. The auth
@@ -51,4 +52,35 @@ func WithTenant(ctx context.Context, id uuid.UUID) context.Context {
 func TenantID(ctx context.Context) (uuid.UUID, bool) {
 	id, ok := ctx.Value(tenantKey).(uuid.UUID)
 	return id, ok
+}
+
+// GuestScope is what a request acting as a Campaign Guest is confined to
+// (ADR-0065): ONE Campaign of the host Tenant, and the Guest Rights its GM
+// granted. While it is present, [TenantID] is the HOST Tenant — so every
+// handler a guest can reach must scope to CampaignID, never to the Tenant.
+type GuestScope struct {
+	CampaignID uuid.UUID
+	Rights     RightSet
+}
+
+// WithGuest returns a copy of ctx marked as acting as a Campaign Guest. The
+// policy calls it after re-authorizing the guest row for this request; tests
+// use it to inject a guest principal without standing up the interceptor.
+func WithGuest(ctx context.Context, g GuestScope) context.Context {
+	return context.WithValue(ctx, guestKey, g)
+}
+
+// Guest returns the request's guest scope, and false for a Tenant's own
+// operator — the ordinary case, for which nothing about a handler changes.
+func Guest(ctx context.Context) (GuestScope, bool) {
+	g, ok := ctx.Value(guestKey).(GuestScope)
+	return g, ok
+}
+
+// GuestLacks reports whether the request is a Campaign Guest WITHOUT the
+// right — the test a guest-reachable handler makes before returning something
+// only that right covers. False for a non-guest: a GM lacks nothing.
+func GuestLacks(ctx context.Context, r GuestRight) bool {
+	g, ok := Guest(ctx)
+	return ok && !g.Rights.Has(r)
 }

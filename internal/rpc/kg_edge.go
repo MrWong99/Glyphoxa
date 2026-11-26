@@ -171,6 +171,16 @@ func (s *kgEdges) ListNodeEdges(
 	if err != nil {
 		return nil, err
 	}
+	// A Campaign Guest without wiki.secrets (ADR-0065): a gm_private Node does
+	// not exist for them, and neither does an Edge whose other end is one —
+	// the Edge carries that Node's name.
+	withheld, err := s.active.withheldFor(ctx, "ListNodeEdges", c.ID)
+	if err != nil {
+		return nil, err
+	}
+	if isWithheld(withheld, nodeID) {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
+	}
 	outgoing, incoming, err := s.store.NodeEdges(ctx, c.ID, nodeID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -180,8 +190,8 @@ func (s *kgEdges) ListNodeEdges(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 	return connect.NewResponse(&managementv1.ListNodeEdgesResponse{
-		Outgoing: toProtoEdges(outgoing),
-		Incoming: toProtoEdges(incoming),
+		Outgoing: toProtoEdges(visibleEdges(outgoing, withheld)),
+		Incoming: toProtoEdges(visibleEdges(incoming, withheld)),
 	}), nil
 }
 
@@ -235,6 +245,21 @@ func (s *kgEdges) SetNodeAgent(
 }
 
 // toProtoEdges maps a slice of joined Edges onto the wire type.
+// visibleEdges drops every Edge with a withheld endpoint (nil set = keep all).
+func visibleEdges(edges []storage.KGEdgeWithNodes, withheld map[uuid.UUID]struct{}) []storage.KGEdgeWithNodes {
+	if len(withheld) == 0 {
+		return edges
+	}
+	out := make([]storage.KGEdgeWithNodes, 0, len(edges))
+	for _, e := range edges {
+		if isWithheld(withheld, e.FromNodeID) || isWithheld(withheld, e.ToNodeID) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 func toProtoEdges(edges []storage.KGEdgeWithNodes) []*managementv1.Edge {
 	return mapSlice(edges, toProtoEdgeWithNodes)
 }

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/search"
 )
 
@@ -77,7 +78,7 @@ func (s *SessionServer) SearchTranscripts(
 		return connect.NewResponse(&managementv1.SearchTranscriptsResponse{}), nil
 	}
 
-	res, err := s.search.SearchTranscripts(ctx, campaignID, search.AccessOperator, req.Msg.GetQuery(), searchPaletteLimit)
+	res, err := s.search.SearchTranscripts(ctx, campaignID, guestSearchAccess(ctx), req.Msg.GetQuery(), searchPaletteLimit)
 	if err != nil {
 		s.log.Error("SearchTranscripts: engine search failed", "campaign_id", campaignID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -122,7 +123,13 @@ func (s *SessionServer) SearchHighlights(
 		return connect.NewResponse(&managementv1.SearchHighlightsResponse{}), nil
 	}
 
-	rows, serr := s.search.SearchHighlights(ctx, tenantID, campaignID, search.AccessOperator, req.Msg.GetQuery(), searchPaletteLimit)
+	access := guestSearchAccess(ctx)
+	if auth.GuestLacks(ctx, auth.RightHighlightsRead) {
+		// Transcripts access alone does not open Highlights (ADR-0065: each
+		// right is granted on its own).
+		access = search.AccessOwnCharacter
+	}
+	rows, serr := s.search.SearchHighlights(ctx, tenantID, campaignID, access, req.Msg.GetQuery(), searchPaletteLimit)
 	if serr != nil {
 		s.log.Error("SearchHighlights: engine search failed", "campaign_id", campaignID, "err", serr)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))

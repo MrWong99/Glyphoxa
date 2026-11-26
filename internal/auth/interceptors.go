@@ -63,6 +63,10 @@ func (i policyInterceptor) evaluate(ctx context.Context, procedure string, heade
 		Public: isPublic,
 		CSRF:   idem != connect.IdempotencyNoSideEffects,
 		Tenant: TenantOptional,
+		// The guest gate (ADR-0065): GM-only unless the procedure is in the
+		// guest table. Looked up by procedure name, so every service mounted
+		// on the stack is covered without declaring anything at the mount.
+		Guest: GuestProcedurePosture(procedure),
 	})
 }
 
@@ -102,7 +106,7 @@ func (i policyInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFun
 // interceptor-side mirror of middleware.go's [WriteDenial].
 func connectCode(d Denial) connect.Code {
 	switch d {
-	case DenyCSRF:
+	case DenyCSRF, DenyGuest:
 		return connect.CodePermissionDenied
 	case DenyUnavailable:
 		return connect.CodeUnavailable

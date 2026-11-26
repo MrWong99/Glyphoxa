@@ -259,6 +259,10 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		o.signup(w, r, du, aupAccepted)
 	case admitGranted:
 		o.admitGranted(w, r, du, decision.platformKeys, aupAccepted)
+	case admitCampaignJoin:
+		o.joinCampaign(w, r, du, joinToken, aupAccepted)
+	case admitGuest:
+		o.loginGuest(w, r, du, decision.guestCampaign)
 	default:
 		o.reject(w, r, du, joinToken, decision.why)
 	}
@@ -287,6 +291,106 @@ func (o *OAuth) reject(w http.ResponseWriter, r *http.Request, du DiscordUser, j
 		o.log.Warn("oauth callback: rejected Discord user who is neither a Platform Admin nor admitted", "discord_user_id", du.ID)
 		http.Redirect(w, r, notAuthorizedRedirect, http.StatusFound)
 	}
+}
+
+// joinCampaign redeems a CAMPAIGN invitation for the Discord User and signs
+// them in as that Campaign's guest (ADR-0065 lane 2). The redemption is ONE
+// transaction that writes the user row and the guest row and nothing else:
+// this path never founds a Tenant and never runs signup provisioning, in any
+// Admission Mode and whoever the redeemer is. Someone who already operates a
+// Tenant simply gains the guest row; their session starts in the Campaign they
+// were invited to and they switch back from the workspace switcher.
+//
+// decide has already required the acknowledgment; its time is recorded with
+// the redemption. A suspended redeemer is refused inside the transaction,
+// before anything is written or a use is counted.
+func (o *OAuth) joinCampaign(w http.ResponseWriter, r *http.Request, du DiscordUser, joinToken string, aupAccepted bool) {
+	p := storage.CampaignRedemption{User: storage.UpsertUserParams{
+		DiscordUserID: du.ID,
+		Name:          du.DisplayName(),
+		Avatar:        du.AvatarURL,
+	}}
+	if aupAccepted {
+		p.AUPAcceptedAt = o.now()
+	}
+	red, err := o.adm.Guests.RedeemCampaignInvitation(r.Context(), joinToken, p)
+	switch {
+	case errors.Is(err, storage.ErrUserSuspended):
+		o.reject(w, r, du, joinToken, rejectSuspended)
+		return
+	case errors.Is(err, storage.ErrInvitationInvalid):
+		o.reject(w, r, du, joinToken, rejectNotAuthorized)
+		return
+	case err != nil:
+		o.log.Error("oauth campaign join: redeem", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	o.issueSession(w, r, "oauth campaign join", red.User.ID, &red.CampaignID)
+}
+
+// loginGuest signs in a Discord User who already is a Campaign Guest and
+// presented nothing else that admits them (ADR-0065 lane 2): refresh the user
+// row from Discord — for a guest added by snowflake this is what fills in
+// their name — and mint a session acting in guestCampaign. No Tenant is
+// founded or claimed. Nothing is recorded about the acknowledgment here: the
+// join that made them a guest recorded it, and a guest a GM added by snowflake
+// signs in through the ordinary login screen, which on an allowlist
+// deployment does not ask (the Access Grant holder's posture). A suspended
+// guest is bounced like everyone else.
+func (o *OAuth) loginGuest(w http.ResponseWriter, r *http.Request, du DiscordUser, guestCampaign uuid.UUID) {
+	ctx := r.Context()
+	user, err := o.store.UpsertUser(ctx, storage.UpsertUserParams{
+		DiscordUserID: du.ID,
+		Name:          du.DisplayName(),
+		Avatar:        du.AvatarURL,
+	})
+	if err != nil {
+		o.log.Error("oauth guest login: upsert user", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if user.SuspendedAt != nil {
+		o.reject(w, r, du, "", rejectSuspended)
+		return
+	}
+	o.issueSession(w, r, "oauth guest login", user.ID, &guestCampaign)
+}
+
+// issueSession mints the session + CSRF pair for an admitted user, stores the
+// session — acting as a guest of guestCampaign when set — sets the cookies and
+// redirects into the app. what prefixes the log lines.
+func (o *OAuth) issueSession(w http.ResponseWriter, r *http.Request, what string, userID uuid.UUID, guestCampaign *uuid.UUID) {
+	sessionToken, err := newToken()
+	if err != nil {
+		o.log.Error(what+": mint session token", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	csrfToken, err := newToken()
+	if err != nil {
+		o.log.Error(what+": mint csrf token", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	expires := o.now().Add(o.ttl)
+	if _, err := o.store.CreateSession(r.Context(), storage.NewSession{
+		UserID:          userID,
+		Token:           sessionToken,
+		ExpiresAt:       expires,
+		IP:              o.edge.clientIP(r),
+		UA:              r.UserAgent(),
+		GuestCampaignID: guestCampaign,
+	}); err != nil {
+		o.log.Error(what+": create session", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	secure := o.edge.SecureCookies
+	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
+	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
+	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
+	http.Redirect(w, r, o.redirect, http.StatusFound)
 }
 
 // loginPlatformAdmin is the ADR-0041 claim-or-create login of a Discord User

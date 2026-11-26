@@ -21,6 +21,14 @@ type fakePortraitStore struct {
 	campaignID uuid.UUID
 	id         uuid.UUID
 	blobKey    string // empty = a Node with no portrait (the ordinary default)
+	gmPrivate  bool   // the Node is gm_private: absent from the public read
+}
+
+func (f *fakePortraitStore) PublicNodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID) (string, time.Time, error) {
+	if f.gmPrivate {
+		return "", time.Time{}, storage.ErrNotFound
+	}
+	return f.NodePortrait(ctx, campaignID, nodeID)
 }
 
 func (f *fakePortraitStore) NodePortrait(_ context.Context, campaignID, nodeID uuid.UUID) (string, time.Time, error) {

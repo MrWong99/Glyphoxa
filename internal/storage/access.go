@@ -339,8 +339,9 @@ func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID
 // once per Tenant.
 type AccessPerson struct {
 	DiscordUserID string
-	// Known is false for a grant whose Discord User has never signed in: there
-	// is no users row yet, so no name or avatar.
+	// Known is false for someone who has never signed in: a grant with no
+	// users row yet, or a Campaign Guest added by snowflake whose users row is
+	// still the nameless placeholder (ADR-0065). Either way, no name or avatar.
 	Known       bool
 	Name        string
 	Avatar      string
@@ -358,8 +359,9 @@ type AccessPerson struct {
 	TenantName         string
 	TenantPlatformKeys bool
 	CampaignCount      int
-	// GuestCampaignCount is how many Campaigns the person is a Campaign Guest
-	// of (always 0 for a grant nobody has used yet).
+	// GuestCampaignCount is how many Campaigns the person can open as a
+	// Campaign Guest — archived Campaigns do not count, they are not reachable
+	// for guests (always 0 for a grant nobody has used yet).
 	GuestCampaignCount int
 }
 
@@ -369,14 +371,15 @@ type AccessPerson struct {
 func (s *Store) ListAccessPeople(ctx context.Context, includeDev bool) ([]AccessPerson, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT COALESCE(u.discord_user_id, g.discord_user_id),
-		        u.id IS NOT NULL, COALESCE(u.name, ''), COALESCE(u.avatar, ''),
+		        u.id IS NOT NULL AND `+userHasSignedIn+`, COALESCE(u.name, ''), COALESCE(u.avatar, ''),
 		        u.suspended_at, u.created_at,
 		        (SELECT max(se.last_seen_at) FROM sessions se WHERE se.user_id = u.id),
 		        g.id IS NOT NULL, COALESCE(g.note, ''), COALESCE(g.platform_keys, false), g.created_at,
 		        COALESCE(i.label, ''),
 		        t.id, COALESCE(t.name, ''), COALESCE(t.platform_keys, false),
 		        (SELECT count(*) FROM campaign c WHERE c.tenant_id = t.id),
-		        (SELECT count(*) FROM campaign_guest cg WHERE cg.user_id = u.id)
+		        (SELECT count(*) FROM campaign_guest cg JOIN campaign gc ON gc.id = cg.campaign_id
+		          WHERE cg.user_id = u.id AND gc.archived_at IS NULL)
 		   FROM users u
 		   FULL OUTER JOIN access_grant g ON g.discord_user_id = u.discord_user_id
 		   LEFT JOIN invitation i ON i.id = g.invitation_id

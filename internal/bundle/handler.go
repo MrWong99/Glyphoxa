@@ -225,11 +225,19 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "import failed", http.StatusInternalServerError)
 		return
 	}
-	tenantID, err := h.Store.TenantForUser(r.Context(), u.ID)
-	if err != nil {
-		h.logError("resolve tenant for import", err)
-		http.Error(w, "import failed", http.StatusInternalServerError)
-		return
+	// The Tenant the policy authorized for this request (the guarded mount is
+	// TenantRequired) wins: since ADR-0065 it is not always the Tenant the user
+	// operates — a GM whose Access Grant was revoked still operates one and
+	// may not act in it. The lookup remains for a composition that mounts the
+	// handler behind a session check alone.
+	tenantID, ok := auth.TenantID(r.Context())
+	if !ok {
+		var err error
+		if tenantID, err = h.Store.TenantForUser(r.Context(), u.ID); err != nil {
+			h.logError("resolve tenant for import", err)
+			http.Error(w, "import failed", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	res, err := Import(r.Context(), h.pg(), tenantID, b)
