@@ -250,8 +250,8 @@ func (s *VoiceServer) SetSessions(src voiceLiveSource) {
 // SetKeyEntitlement wires the platform-key entitlement every provider-key
 // resolution consults before riding the env fallback (ADR-0054 seam (a),
 // ADR-0055). Called once at boot before the server serves, so no lock is
-// needed; nil (the default) grants everything — the allowlist/self-host
-// posture. The Discord Bot token paths are deployment infrastructure and stay
+// needed; nil (the default) grants everything — tests only, the composition
+// root always wires one. The Discord Bot token paths are deployment infrastructure and stay
 // outside the entitlement.
 func (s *VoiceServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
 	s.keyEnt = ent
@@ -926,9 +926,10 @@ func (s *VoiceServer) healthKey(ctx context.Context, tenantID uuid.UUID, compone
 // The env fallback spends the deployment's Platform Keys (health pings,
 // catalogs, TTS preview), so it runs through llmbuild.ResolveKeyGated: the
 // PlatformKeyEntitlement wired via [SetKeyEntitlement] refuses it for an
-// unentitled tenant in `open` Admission Mode (ADR-0054 seam (a), ADR-0055 —
-// the former PHASE-B GAP, closed). A nil entitlement grants everything (the
-// allowlist/self-host posture). A refusal is CodeFailedPrecondition with the
+// unentitled tenant (ADR-0054 seam (a), ADR-0055 — the former PHASE-B GAP,
+// closed): no platform Plan in `open` Admission Mode, the Platform Keys switch
+// off in `allowlist` mode (ADR-0065). A nil entitlement grants everything
+// (tests only; the composition root always wires one). A refusal is CodeFailedPrecondition with the
 // seam's deliberately user-actionable message; every other failure keeps the
 // RPC tier's redaction posture (logged detail, generic wire error).
 func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUID, component storage.Component) (string, error) {

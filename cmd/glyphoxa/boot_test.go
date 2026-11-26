@@ -445,16 +445,94 @@ func TestSweepAllowlistSessions(t *testing.T) {
 	})
 }
 
+// scriptedKeyStore is a keyEntitlementStore whose two reads are scripted
+// independently, so a test can tell which one a posture consulted.
+type scriptedKeyStore struct {
+	flag, sub       bool
+	flagErr, subErr error
+	flagCalls       []uuid.UUID
+	subCalls        []uuid.UUID
+}
+
+func (s *scriptedKeyStore) TenantPlatformKeys(_ context.Context, id uuid.UUID) (bool, error) {
+	s.flagCalls = append(s.flagCalls, id)
+	return s.flag, s.flagErr
+}
+
+func (s *scriptedKeyStore) TenantHasPlatformKeySource(_ context.Context, id uuid.UUID) (bool, error) {
+	s.subCalls = append(s.subCalls, id)
+	return s.sub, s.subErr
+}
+
+// TestEntitlementForMode_PlatformKeysGate pins the ADR-0065 Platform Keys
+// gate end to end through the resolver every consumer uses: on an allowlist
+// deployment the env fallback follows tenant.platform_keys — and ONLY that —
+// and a read error fails closed.
+// Open mode keeps consulting the subscription and never the flag.
+func TestEntitlementForMode_PlatformKeysGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tenant := uuid.New()
+	// A nil config resolves to the env fallback — the path the gate protects.
+	resolve := func(ent llmbuild.PlatformKeyEntitlement) error {
+		_, err := llmbuild.ResolveKeyGated(ctx, ent, tenant, nil, nil, storage.ComponentLLM)
+		return err
+	}
+
+	t.Run("allowlist: switch on grants", func(t *testing.T) {
+		st := &scriptedKeyStore{flag: true}
+		if err := resolve(entitlementForMode(auth.AdmissionAllowlist, st)); err != nil {
+			t.Fatalf("resolve = %v, want the env fallback granted", err)
+		}
+		if len(st.flagCalls) != 1 || st.flagCalls[0] != tenant || len(st.subCalls) != 0 {
+			t.Errorf("flag reads = %v, subscription reads = %v; want one flag read for the tenant and no subscription read", st.flagCalls, st.subCalls)
+		}
+	})
+	t.Run("allowlist: switch off refuses", func(t *testing.T) {
+		// A subscription must not rescue it: allowlist deployments have none,
+		// and a stale row from an earlier `open` period must not reopen the wallet.
+		st := &scriptedKeyStore{flag: false, sub: true}
+		if err := resolve(entitlementForMode(auth.AdmissionAllowlist, st)); !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+			t.Fatalf("resolve = %v, want ErrNoPlatformKeyEntitlement", err)
+		}
+	})
+	t.Run("allowlist: a read error fails closed", func(t *testing.T) {
+		st := &scriptedKeyStore{flag: true, flagErr: errors.New("db down")}
+		err := resolve(entitlementForMode(auth.AdmissionAllowlist, st))
+		if err == nil {
+			t.Fatal("resolve = nil on a failed flag read, want the gate closed")
+		}
+		if errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+			t.Errorf("a read failure must not masquerade as a refusal: %v", err)
+		}
+	})
+	t.Run("open: the subscription decides, the switch is ignored", func(t *testing.T) {
+		st := &scriptedKeyStore{flag: true, sub: false}
+		if err := resolve(entitlementForMode(auth.AdmissionOpen, st)); !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+			t.Fatalf("resolve = %v, want ErrNoPlatformKeyEntitlement (no platform subscription)", err)
+		}
+		st = &scriptedKeyStore{flag: false, sub: true}
+		if err := resolve(entitlementForMode(auth.AdmissionOpen, st)); err != nil {
+			t.Fatalf("resolve = %v, want granted by the subscription", err)
+		}
+		if len(st.flagCalls) != 0 {
+			t.Errorf("open mode read tenant.platform_keys %d times, want 0", len(st.flagCalls))
+		}
+	})
+}
+
 // TestPostureWiringHelpers pins the two posture-driven constructions the
-// composition root uses (ADR-0054 seam (a) / ADR-0055 gate (b)): allowlist =
-// EnvFallbackAllowed + nil allowance (self-host no-ops); open =
+// composition root uses (ADR-0054 seam (a) / ADR-0055 gate (b) / ADR-0065):
+// allowlist = TenantFlagKeyGate over the store (the per-Tenant Platform Keys
+// switch — NOT a blanket grant any more) + nil allowance; open =
 // SubscriptionKeyGate + PlanAllowance over the store.
 func TestPostureWiringHelpers(t *testing.T) {
 	t.Parallel()
 	st := &storage.Store{}
 
-	if _, ok := entitlementForMode(auth.AdmissionAllowlist, st).(llmbuild.EnvFallbackAllowed); !ok {
-		t.Error("allowlist mode must grant the env fallback (EnvFallbackAllowed)")
+	flag, ok := entitlementForMode(auth.AdmissionAllowlist, st).(llmbuild.TenantFlagKeyGate)
+	if !ok || flag.Flags != llmbuild.PlatformKeysFlagReader(st) {
+		t.Error("allowlist mode must gate the env fallback on the store-backed tenant.platform_keys switch (ADR-0065)")
 	}
 	gate, ok := entitlementForMode(auth.AdmissionOpen, st).(llmbuild.SubscriptionKeyGate)
 	if !ok || gate.Subs != llmbuild.PlatformSubscriptionChecker(st) {

@@ -485,9 +485,11 @@ type Config struct {
 	// resolution landing on "" (no Provider Config row, or the seeded "env"
 	// placeholder) is refused for a tenant the entitlement does not grant,
 	// instead of silently spending the deployment's *_API_KEY Platform Keys.
-	// nil (default) and the composition root's `allowlist`-Admission-Mode
-	// EnvFallbackAllowed wiring grant everything — the ADR-0039 hybrid policy
-	// unchanged; `open` Admission Mode wires llmbuild.SubscriptionKeyGate.
+	// nil (default — the legacy standalone voice node and tests) grants
+	// everything, the ungated ADR-0039 hybrid policy. The composition root
+	// wires llmbuild.TenantFlagKeyGate in `allowlist` Admission Mode (the
+	// per-Tenant Platform Keys switch, ADR-0065) and
+	// llmbuild.SubscriptionKeyGate in `open` mode.
 	KeyEntitlement llmbuild.PlatformKeyEntitlement
 
 	// LLMDefault is the deployment-default LLM (GLYPHOXA_LLM_DEFAULT_PROVIDER /

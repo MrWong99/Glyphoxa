@@ -211,33 +211,47 @@ type sessionSweeper interface {
 // sweepAllowlistSessions is the boot-time session sweep DECISION (ADR-0041
 // amendment #184, split by Admission Mode per ADR-0055), extracted so the
 // posture logic is unit-testable: the sweep runs only on a non-dev
-// `allowlist`-posture boot. In `open` mode it must not run — it would log out
-// every signup on every restart; revocation there is suspension-based. Dev
-// mode has no allowlist and skips it. A sweep failure is a FATAL boot error
-// (unchanged); revocations log a Warn.
+// `allowlist`-posture boot. It evicts everyone who is no longer admitted —
+// not a Platform Admin, no Access Grant, not a Campaign Guest (ADR-0065; the
+// store applies the last two, since they live in the database). In `open`
+// mode it must not run — it would log out every signup on every restart;
+// revocation there is suspension-based. Dev mode has no allowlist and skips
+// it. A sweep failure is a FATAL boot error (unchanged); revocations log a
+// Warn.
 func sweepAllowlistSessions(ctx context.Context, store sessionSweeper, dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist, log *slog.Logger) error {
 	if dev || admission != auth.AdmissionAllowlist {
 		return nil
 	}
 	revoked, err := store.RevokeSessionsOutsideAllowlist(ctx, allow.IDs())
 	if err != nil {
-		return fmt.Errorf("web: revoke sessions outside the operator allowlist: %w", err)
+		return fmt.Errorf("web: revoke sessions of users who are no longer admitted: %w", err)
 	}
 	if revoked > 0 {
-		log.Warn("revoked sessions of users not on the operator allowlist (ADR-0041)", "count", revoked)
+		log.Warn("revoked sessions of users who are neither a Platform Admin, an Access Grant holder nor a Campaign Guest (ADR-0041 / ADR-0065)", "count", revoked)
 	}
 	return nil
 }
 
+// keyEntitlementStore is what [entitlementForMode] reads the entitlement from:
+// the subscription check (`open`) and the per-Tenant Platform Keys switch
+// (`allowlist`). *storage.Store satisfies it.
+type keyEntitlementStore interface {
+	llmbuild.PlatformSubscriptionChecker
+	llmbuild.PlatformKeysFlagReader
+}
+
 // entitlementForMode picks the platform-key entitlement for the posture
-// (ADR-0054 seam (a), ADR-0055): allowlist grants every tenant the env
-// fallback (the ADR-0039 hybrid policy unchanged); open gates it on an active
-// platform-key-source subscription.
-func entitlementForMode(admission auth.AdmissionMode, subs llmbuild.PlatformSubscriptionChecker) llmbuild.PlatformKeyEntitlement {
+// (ADR-0054 seam (a), ADR-0055, ADR-0065): allowlist gates the env fallback on
+// the Tenant's Platform Keys switch (tenant.platform_keys — on for every
+// Tenant that predates it, the grant's choice for one founded through an
+// Access Grant); open gates it on an active platform-key-source subscription.
+// Neither mode grants every Tenant any more: with web-managed access an
+// allowlist deployment is no longer one operator alone with their own keys.
+func entitlementForMode(admission auth.AdmissionMode, store keyEntitlementStore) llmbuild.PlatformKeyEntitlement {
 	if admission == auth.AdmissionOpen {
-		return llmbuild.SubscriptionKeyGate{Subs: subs}
+		return llmbuild.SubscriptionKeyGate{Subs: store}
 	}
-	return llmbuild.EnvFallbackAllowed{}
+	return llmbuild.TenantFlagKeyGate{Flags: store}
 }
 
 // allowanceForMode picks the monthly plan-allowance gate for the posture

@@ -120,7 +120,7 @@ func effectiveComponentConfig(ctx context.Context, st *storage.Store, tenantID u
 // component's effective Provider Config (Agent-bound, else the Tenant's
 // per-Component row — see [effectiveComponentConfig]) and resolves all three
 // keys against cipher, behind the tenant's platform-key entitlement
-// (Config.KeyEntitlement; nil = the allowlist posture). A missing config is
+// (Config.KeyEntitlement; nil = ungated). A missing config is
 // treated as an env fallback, not an error. ElevenLabs STT shares the TTS key
 // in the demo seed, but the bind is read per-Component for correctness.
 //

@@ -212,7 +212,56 @@ func TestResolveKeyGated(t *testing.T) {
 	}
 }
 
-// TestEnvFallbackAllowed pins the allowlist-posture entitlement: every tenant may
+// scriptedFlags is a scripted PlatformKeysFlagReader.
+type scriptedFlags struct {
+	on  bool
+	err error
+	got uuid.UUID
+}
+
+func (f *scriptedFlags) TenantPlatformKeys(_ context.Context, id uuid.UUID) (bool, error) {
+	f.got = id
+	return f.on, f.err
+}
+
+// TestTenantFlagKeyGate pins the allowlist-posture entitlement (ADR-0065): the
+// env fallback follows the Tenant's Platform Keys switch, and a failed read or
+// a gate with no reader closes it.
+func TestTenantFlagKeyGate(t *testing.T) {
+	ctx := context.Background()
+	tenant := uuid.New()
+
+	on := &scriptedFlags{on: true}
+	if ok, err := (TenantFlagKeyGate{Flags: on}).PlatformKeyAllowed(ctx, tenant); !ok || err != nil {
+		t.Errorf("switch on = (%v, %v), want (true, nil)", ok, err)
+	}
+	if on.got != tenant {
+		t.Errorf("gate read tenant %s, want %s", on.got, tenant)
+	}
+	if ok, err := (TenantFlagKeyGate{Flags: &scriptedFlags{}}).PlatformKeyAllowed(ctx, tenant); ok || err != nil {
+		t.Errorf("switch off = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	for name, gate := range map[string]TenantFlagKeyGate{
+		"read error": {Flags: &scriptedFlags{on: true, err: errors.New("db down")}},
+		"no reader":  {},
+	} {
+		key, err := ResolveKeyGated(ctx, gate, tenant, nil, nil, storage.ComponentLLM)
+		if err == nil || key != "" {
+			t.Errorf("%s: ResolveKeyGated = (%q, %v), want the gate closed with an error", name, key, err)
+		}
+		if errors.Is(err, ErrNoPlatformKeyEntitlement) {
+			t.Errorf("%s: a broken gate must not read as an ordinary refusal: %v", name, err)
+		}
+	}
+
+	_, err := ResolveKeyGated(ctx, TenantFlagKeyGate{Flags: &scriptedFlags{}}, tenant, nil, nil, storage.ComponentLLM)
+	if !errors.Is(err, ErrNoPlatformKeyEntitlement) {
+		t.Errorf("switch off: ResolveKeyGated err = %v, want ErrNoPlatformKeyEntitlement", err)
+	}
+}
+
+// TestEnvFallbackAllowed pins the ungated entitlement: every tenant may
 // ride the env fallback (ADR-0039 hybrid policy, self-host).
 func TestEnvFallbackAllowed(t *testing.T) {
 	ok, err := EnvFallbackAllowed{}.PlatformKeyAllowed(context.Background(), uuid.New())

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
@@ -46,6 +47,14 @@ type AuthServer struct {
 	mode     AdmissionMode
 	secure   bool // clear cookies with the Secure attribute ([EdgeConfig.SecureCookies])
 	log      *slog.Logger
+
+	// ADR-0065 seams, wired post-construction by the composition root. Each
+	// zero value fails closed: nobody is a Platform Admin, no invitation
+	// previews as valid.
+	admins      PlatformAdmins
+	ownTenants  TenantResolver
+	invitations InvitationReader
+	now         func() time.Time
 }
 
 var _ managementv1connect.AuthServiceHandler = (*AuthServer)(nil)
@@ -60,12 +69,28 @@ func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, renamer TenantR
 	if log == nil {
 		log = slog.Default()
 	}
-	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, secure: edge.SecureCookies, log: log}
+	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, secure: edge.SecureCookies, log: log, now: time.Now}
 }
 
+// SetPlatformAdmins wires the deployment's Platform Admin identity (ADR-0065)
+// — GetCurrentUser reports is_platform_admin from it. Unset, nobody is one.
+func (s *AuthServer) SetPlatformAdmins(admins PlatformAdmins) { s.admins = admins }
+
+// SetOwnTenants wires the lookup behind GetCurrentUser.has_own_tenant: the
+// Tenant the caller OPERATES, read directly rather than off the request's
+// resolved Tenant, which names a host Tenant while a session acts as a
+// Campaign Guest (ADR-0065). *storage.Store satisfies it via TenantForUser.
+// Unset, the request's resolved Tenant stands in.
+func (s *AuthServer) SetOwnTenants(tr TenantResolver) { s.ownTenants = tr }
+
+// SetInvitations wires the store behind GetInvitation. Unset, every token
+// previews as invalid.
+func (s *AuthServer) SetInvitations(r InvitationReader) { s.invitations = r }
+
 // GetCurrentUser returns the signed-in operator's identity — display fields,
-// the internal user id, and the resolved bound Tenant's id/name (ADR-0055; the
-// tenant interceptor already resolved the id server-side, ADR-0039). The auth
+// the internal user id, the resolved bound Tenant's id/name (ADR-0055; the
+// tenant interceptor already resolved the id server-side, ADR-0039), whether
+// they are a Platform Admin and whether they operate a Tenant (ADR-0065). The auth
 // interceptor leaves this procedure reachable unauthenticated (it is in the
 // public set), so a missing/expired session reaches here with no operator in the
 // context and yields CodeUnauthenticated — the SPA's 401 → /login signal. An
@@ -86,6 +111,13 @@ func (s *AuthServer) GetCurrentUser(
 			Avatar: u.Avatar,
 		},
 	}
+	resp.IsPlatformAdmin = s.admins.Is(u)
+	hasOwn, err := s.hasOwnTenant(ctx, u)
+	if err != nil {
+		s.log.Error("get current user: resolve own tenant", "user_id", u.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	resp.HasOwnTenant = hasOwn
 	if tid, ok := TenantID(ctx); ok {
 		resp.TenantId = tid.String()
 		switch tn, err := s.tenants.GetTenant(ctx, tid); {
@@ -100,6 +132,22 @@ func (s *AuthServer) GetCurrentUser(
 		}
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// hasOwnTenant reports whether the user operates a Tenant of their own.
+func (s *AuthServer) hasOwnTenant(ctx context.Context, u storage.User) (bool, error) {
+	if s.ownTenants == nil {
+		_, ok := TenantID(ctx)
+		return ok, nil
+	}
+	switch _, err := s.ownTenants.TenantForUser(ctx, u.ID); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // Logout deletes the server-side session row and clears the session + CSRF

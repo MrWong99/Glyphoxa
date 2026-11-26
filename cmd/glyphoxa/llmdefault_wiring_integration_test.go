@@ -58,7 +58,7 @@ func TestManagementMounts_DeploymentDefaultReachesTheRPCs(t *testing.T) {
 
 	sessions := session.NewIntentControl(store, log, session.IntentControlConfig{})
 	mounts := managementMounts(store, nil, nil, nil, log,
-		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, "", nil,
+		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, auth.PlatformAdmins{}, "", nil,
 		newOffSessionMetering(auth.AdmissionAllowlist, store, log), wiringDefault(t))
 	mux := http.NewServeMux()
 	for _, m := range mounts {

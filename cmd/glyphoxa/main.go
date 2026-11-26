@@ -967,18 +967,28 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			"billing CLI parity and lock-down still work, but no web identity is platform-privileged (ADR-0055)")
 	}
 
-	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
-	// gates only NEW logins at the OAuth callback, so sessions issued before the
-	// gate existed — or before a snowflake was removed — would stay valid for up
-	// to 30 days. The allowlist is parsed at boot, so a restart is exactly when
-	// a grant change takes effect: revoke every session whose owner is no longer
-	// allowlisted (including leftover GLYPHOXA_DEV_MODE sessions). Dev mode has
-	// no allowlist and skips the sweep. The sweep SPLITS by Admission Mode
-	// (ADR-0055): in `open` mode it must not run — it would log out every
-	// signup on every restart — and revocation is suspension-based instead
-	// (users.suspended_at, enforced per-request by AuthenticateSession).
-	// Flipping open -> allowlist plus a restart therefore evicts every signup:
-	// the deliberate lock-down escape hatch.
+	// Platform Admin identity (ADR-0065): built ONCE here and handed to
+	// everything that asks "is this person a Platform Admin" — the OAuth
+	// callback, GetCurrentUser and the AdminService — so they cannot disagree.
+	// The env list is its only source; on a dev instance the synthetic dev
+	// operator counts too, so the Admin screen is reachable there.
+	admins := auth.PlatformAdmins{Allowlist: allow, Dev: dev}
+
+	// Boot-time session sweep (ADR-0041 amendment, issue #184): the Platform
+	// Admin list gates only NEW logins at the OAuth callback, so sessions
+	// issued before the gate existed — or before a snowflake was removed —
+	// would stay valid for up to 30 days. The list is parsed at boot, so a
+	// restart is exactly when a change to it takes effect: revoke every session
+	// whose owner is no longer admitted (including leftover GLYPHOXA_DEV_MODE
+	// sessions). "Admitted" also means holding an Access Grant or being a
+	// Campaign Guest (ADR-0065): those are managed from the web and revoked
+	// there immediately, so the sweep spares them. Dev mode has no allowlist
+	// and skips the sweep. The sweep SPLITS by Admission Mode (ADR-0055): in
+	// `open` mode it must not run — it would log out every signup on every
+	// restart — and revocation is suspension-based instead (users.suspended_at,
+	// enforced per-request by AuthenticateSession). Flipping open -> allowlist
+	// plus a restart therefore evicts every signup without a grant: the
+	// deliberate lock-down escape hatch.
 	if err := sweepAllowlistSessions(ctx, store, dev, admission, allow, log); err != nil {
 		return err
 	}
@@ -1014,12 +1024,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("web: loading tenant-operator GM bindings failed; GM identity falls back to GLYPHOXA_OPERATOR_IDS alone until the next refresh", "err", err)
 	}
 
-	// Platform-key entitlement (ADR-0054 seam (a), ADR-0055): the ONE
+	// Platform-key entitlement (ADR-0054 seam (a), ADR-0055, ADR-0065): the ONE
 	// construction point every tenant-facing key resolution shares (voice
 	// sessions, recap, image enrichment, and the RPC tier's provider-key
-	// resolution via managementMounts). `allowlist` Admission Mode grants every
-	// tenant the env fallback — the ADR-0039 hybrid policy unchanged. `open`
-	// mode swaps in the subscription gate: only a tenant with an active
+	// resolution via managementMounts). `allowlist` Admission Mode gates the env
+	// fallback on the Tenant's Platform Keys switch (on for every Tenant that
+	// predates it; a Platform Admin decides for everyone they admit). `open`
+	// mode gates it on the subscription: only a tenant with an active
 	// platform-key-source subscription may spend the deployment's env keys.
 	keyEnt := entitlementForMode(admission, store)
 	cfg.KeyEntitlement = keyEnt
@@ -1449,7 +1460,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return clients.VoiceChannelMembers(ctx, tenantID, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, signupPlanSlug, keyEnt, offSession, cfg.LLMDefault)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, sessionCtl, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, integrationStatus, memberLister, embedProvider, embedModel, admission, admins, signupPlanSlug, keyEnt, offSession, cfg.LLMDefault)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1627,7 +1638,7 @@ func newPlanningChatEngine(store *storage.Store, cipher *crypto.Cipher, searchEn
 		planchat.WithKeyEntitlement(keyEnt), planchat.WithLLMDefault(llmDefault))
 }
 
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession, llmDefault llmbuild.DeploymentDefault) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr sessionControl, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(tenantID uuid.UUID), integrationStatus func(tenantID uuid.UUID) (string, string), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, embedModel string, admission auth.AdmissionMode, admins auth.PlatformAdmins, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement, offSession *billing.OffSession, llmDefault llmbuild.DeploymentDefault) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1651,34 +1662,39 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		SecureCookies:  auth.SecureCookies(oauthRedirectURL),
 		ClientIPHeader: strings.TrimSpace(os.Getenv("GLYPHOXA_TRUSTED_CLIENT_IP_HEADER")),
 	}
-	// The OAuth callback's admission policy (ADR-0041 / ADR-0055). In allowlist
-	// mode the GLYPHOXA_OPERATOR_IDS allowlist is the single authorization gate:
-	// a Discord User whose snowflake is absent is denied a session before any
-	// Tenant write. In `open` mode a stranger is instead admitted through the
-	// create-only signup transaction (the boot preflighted the plan slug);
-	// allowlisted Users keep claim-or-create in both modes.
-	allowlist := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+	// The OAuth callback's admission policy (ADR-0041 / ADR-0055 / ADR-0065).
+	// A Platform Admin (GLYPHOXA_OPERATOR_IDS) keeps claim-or-create in both
+	// modes. In allowlist mode everyone else needs an Access Grant, or a live
+	// access invitation that creates one — read through Access — and is
+	// otherwise denied a session before any Tenant write. In `open` mode a
+	// stranger is instead admitted through the create-only signup transaction
+	// (the boot preflighted the plan slug). Both of those run through Signup.
 	oauth := auth.NewOAuth(store, discord, "/", auth.Admission{
 		Mode:           admission,
-		Allowlist:      allowlist,
+		Allowlist:      admins.Allowlist,
 		SignupPlanSlug: signupPlanSlug,
 		Signup:         store,
+		Access:         store,
 	}, edge, log)
 	authServer := auth.NewAuthServer(store, store, store, admission, edge, log)
+	authServer.SetPlatformAdmins(admins)
+	authServer.SetOwnTenants(store)
+	authServer.SetInvitations(store)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
 	// the Connect interceptor stack and the plain-mount table below are thin
 	// adapters over the same auth.Policy, so the session/CSRF/tenant gate
-	// cannot drift between them again (#408). GetCurrentUser and
-	// GetAdmissionMode are the only public procedures — the SPA's boot probe
-	// and the login screen's posture probe (ADR-0055), both sessionless by
-	// nature.
+	// cannot drift between them again (#408). The public procedures are listed
+	// in [publicProcedures].
 	policy := auth.NewPolicy(store, store)
-	stack := policy.Stack(
-		managementv1connect.AuthServiceGetCurrentUserProcedure,
-		managementv1connect.AuthServiceGetAdmissionModeProcedure,
-	)
+	stack := policy.Stack(publicProcedures...)
+
+	// The Platform Admin console (ADR-0065). Behind the same interceptor stack
+	// as every other service — session, CSRF, tenant — and every one of its
+	// handlers additionally requires a Platform Admin.
+	adminSrv := rpc.NewAdminServer(store, admins, admission, log)
+	adminPath, adminHandler := stack.Handler(adminSrv.Handler)
 
 	campaignSrv := rpc.NewCampaignServer(store)
 	campaignSrv.SetLogger(log)
@@ -1947,6 +1963,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		web.APIMount(voicePath, voiceHandler),
 		web.APIMount(sessionPath, sessionHandler),
 		web.APIMount(chatPath, chatHandler),
+		web.APIMount(adminPath, adminHandler),
 	}
 	for _, g := range guarded {
 		mounts = append(mounts, web.Mount{Path: g.Pattern, Handler: g.Handler})
@@ -1957,6 +1974,19 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		web.Mount{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		web.Mount{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	)
+}
+
+// publicProcedures is the interceptor stack's public set: the ONLY Connect
+// procedures reachable without a session. Each is sessionless by nature and
+// carries nothing a stranger should not see — the SPA's boot probe
+// (GetCurrentUser answers CodeUnauthenticated itself), the login screen's
+// posture probe (ADR-0055), and the join page's invitation preview (ADR-0065),
+// which a visitor reads before they have signed in.
+// TestPublicProcedures pins the list: adding to it must be deliberate.
+var publicProcedures = []string{
+	managementv1connect.AuthServiceGetCurrentUserProcedure,
+	managementv1connect.AuthServiceGetAdmissionModeProcedure,
+	managementv1connect.AuthServiceGetInvitationProcedure,
 }
 
 // runWebTier starts the web API server on ctx and blocks until it has fully shut

@@ -223,19 +223,27 @@ func (s *Store) GrantAccess(ctx context.Context, discordUserID, note string, pla
 		if g, err = scanAccessGrant(row); err != nil {
 			return fmt.Errorf("storage: grant access to %q: %w", discordUserID, err)
 		}
-		if _, err := tx.db.Exec(ctx,
-			`UPDATE tenant t SET platform_keys = $2, updated_at = now()
-			   FROM users u
-			  WHERE u.discord_user_id = $1 AND t.operator_user_id = u.id
-			    AND t.platform_keys <> $2`, discordUserID, platformKeys); err != nil {
-			return fmt.Errorf("storage: sync tenant platform keys for %q: %w", discordUserID, err)
-		}
-		return nil
+		return tx.syncOperatorPlatformKeys(ctx, discordUserID, platformKeys)
 	})
 	if err != nil {
 		return AccessGrant{}, err
 	}
 	return g, nil
+}
+
+// syncOperatorPlatformKeys makes every Tenant the Discord User already
+// operates follow a freshly written Access Grant. A no-op for someone who has
+// never signed in — the Tenant they found later takes the grant's value at
+// founding (ProvisionSignup).
+func (s *Store) syncOperatorPlatformKeys(ctx context.Context, discordUserID string, platformKeys bool) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE tenant t SET platform_keys = $2, updated_at = now()
+		   FROM users u
+		  WHERE u.discord_user_id = $1 AND t.operator_user_id = u.id
+		    AND t.platform_keys <> $2`, discordUserID, platformKeys); err != nil {
+		return fmt.Errorf("storage: sync tenant platform keys for %q: %w", discordUserID, err)
+	}
+	return nil
 }
 
 // RevokeAccess removes a Discord User's Access Grant and deletes their
@@ -266,7 +274,9 @@ func (s *Store) RevokeAccess(ctx context.Context, discordUserID string) error {
 // transaction as the grant insert, so two redeemers can never share the last
 // use. A user who already holds a grant redeems nothing and consumes no use —
 // opening the link twice, or a link for someone already admitted, is harmless.
-// Every refusal is ErrInvitationInvalid.
+// A redeemer who already operates a Tenant (their earlier access was revoked)
+// has it follow the new grant's Platform Keys choice, exactly as GrantAccess
+// does. Every refusal is ErrInvitationInvalid.
 func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID string) (AccessGrant, error) {
 	var g AccessGrant
 	err := s.InTx(ctx, func(tx *Store) error {
@@ -293,18 +303,29 @@ func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID
 			return err
 		}
 
+		// ON CONFLICT DO NOTHING covers the one race the invitation lock does
+		// not: the same person redeeming two DIFFERENT links at once (or being
+		// granted by a Platform Admin mid-redeem). The loser waits on the
+		// winner's unique-index entry, inserts nothing, and is then exactly
+		// the "already holds a grant" case above — no use counted.
 		row = tx.db.QueryRow(ctx,
 			`INSERT INTO access_grant (discord_user_id, note, platform_keys, granted_by, invitation_id)
 			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (discord_user_id) DO NOTHING
 			 RETURNING `+accessGrantColumns,
 			discordUserID, inv.Label, inv.PlatformKeys, inv.CreatedBy, inv.ID)
-		if g, err = scanAccessGrant(row); err != nil {
+		g, err = scanAccessGrant(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			g, err = tx.GetAccessGrant(ctx, discordUserID)
+			return err
+		}
+		if err != nil {
 			return fmt.Errorf("storage: create grant from invitation: %w", err)
 		}
 		if _, err := tx.db.Exec(ctx, `UPDATE invitation SET uses = uses + 1 WHERE id = $1`, inv.ID); err != nil {
 			return fmt.Errorf("storage: count invitation use: %w", err)
 		}
-		return nil
+		return tx.syncOperatorPlatformKeys(ctx, discordUserID, inv.PlatformKeys)
 	})
 	if err != nil {
 		return AccessGrant{}, err
@@ -337,6 +358,9 @@ type AccessPerson struct {
 	TenantName         string
 	TenantPlatformKeys bool
 	CampaignCount      int
+	// GuestCampaignCount is how many Campaigns the person is a Campaign Guest
+	// of (always 0 for a grant nobody has used yet).
+	GuestCampaignCount int
 }
 
 // ListAccessPeople returns the Platform Admin's cross-tenant people list. The
@@ -351,7 +375,8 @@ func (s *Store) ListAccessPeople(ctx context.Context, includeDev bool) ([]Access
 		        g.id IS NOT NULL, COALESCE(g.note, ''), COALESCE(g.platform_keys, false), g.created_at,
 		        COALESCE(i.label, ''),
 		        t.id, COALESCE(t.name, ''), COALESCE(t.platform_keys, false),
-		        (SELECT count(*) FROM campaign c WHERE c.tenant_id = t.id)
+		        (SELECT count(*) FROM campaign c WHERE c.tenant_id = t.id),
+		        (SELECT count(*) FROM campaign_guest cg WHERE cg.user_id = u.id)
 		   FROM users u
 		   FULL OUTER JOIN access_grant g ON g.discord_user_id = u.discord_user_id
 		   LEFT JOIN invitation i ON i.id = g.invitation_id
@@ -370,7 +395,8 @@ func (s *Store) ListAccessPeople(ctx context.Context, includeDev bool) ([]Access
 			&p.SuspendedAt, &p.JoinedAt, &p.LastSeenAt,
 			&p.HasGrant, &p.GrantNote, &p.GrantPlatformKeys, &p.GrantedAt,
 			&p.InvitationLabel,
-			&p.TenantID, &p.TenantName, &p.TenantPlatformKeys, &p.CampaignCount); err != nil {
+			&p.TenantID, &p.TenantName, &p.TenantPlatformKeys, &p.CampaignCount,
+			&p.GuestCampaignCount); err != nil {
 			return nil, fmt.Errorf("storage: scan access person: %w", err)
 		}
 		out = append(out, p)

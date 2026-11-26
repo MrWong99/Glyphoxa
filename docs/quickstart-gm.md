@@ -88,6 +88,12 @@ also runs a **session revocation sweep**: sessions belonging to a Discord User n
 longer on the allowlist are deleted at startup. Removing a snowflake and
 restarting therefore ends that person's access immediately.
 
+The allowlist is for **you** — everyone on it is a Platform Admin. To let
+another GM run their own table on your instance, admit them from the **Admin**
+screen instead (an Access Grant or an invitation link; see
+[configuration.md, *Managing access*](configuration.md#managing-access)); the
+sweep leaves people admitted that way signed in.
+
 Open `http://127.0.0.1:8080`, click **Continue with Discord**, approve the
 consent screen. You land on the **Configuration** screen (titled *Providers*).
 
@@ -536,7 +542,7 @@ commands.
 
 | Symptom | Likely cause |
 |---|---|
-| Login bounces to *not on the operator allowlist* | Your snowflake isn't in `GLYPHOXA_OPERATOR_IDS`. There is no self-enrolment. |
+| Login bounces to *not on the operator allowlist* | Your snowflake isn't in `GLYPHOXA_OPERATOR_IDS`, and no Platform Admin has granted you access. There is no self-enrolment. |
 | The console is a blank page | The web bundle wasn't built before `make build-live` (configuration.md §3). |
 | Session goes **Failed** at once, boot log shows `stub voice build` | The binary was built with `make build` / plain `go build`. Rebuild with `make build-live` (configuration.md §1). |
 | No `/glyphoxa` commands in Discord | Running `-mode web` (it registers none); or no Bot token saved; or no Guild ID saved; or the Bot was authorized without `applications.commands`. Re-save Discord settings to retrigger registration. |

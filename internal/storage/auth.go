@@ -80,8 +80,22 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 	return u, nil
 }
 
+// GetUserByID loads a user by internal id, or ErrNotFound.
+func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
+	row := s.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, id)
+	u, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("storage: get user %s: %w", id, err)
+	}
+	return u, nil
+}
+
 // SetUserSuspended stamps or clears users.suspended_at by Discord snowflake —
-// the open-mode revocation mechanism (ADR-0055). Suspension is enforced by
+// Suspension (ADR-0055), which since ADR-0065 a Platform Admin applies from
+// the web in every Admission Mode. Suspension is enforced by
 // AuthenticateSession's per-request re-check, so it takes effect immediately
 // without deleting sessions; clearing it restores access with the same tokens.
 // Idempotent per direction; ErrNotFound for an unknown user.
@@ -352,19 +366,23 @@ func (s *Store) PurgeExpiredSessions(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// RevokeSessionsOutsideAllowlist deletes every session whose owning user's
-// discord_user_id is not on the operator allowlist (ADR-0041 amendment, issue
-// #184). The allowlist gates only NEW logins at the OAuth callback; this sweep
-// is the revocation half, run at every non-dev ALLOWLIST-Admission-Mode web/all
-// boot — which is exactly when a grant change takes effect, since the env var
+// RevokeSessionsOutsideAllowlist deletes every session whose owning user is
+// no longer admitted to an `allowlist` deployment: not a Platform Admin (their
+// discord_user_id is not on the operator allowlist, ADR-0041 amendment, issue
+// #184), holds no Access Grant, and is no Campaign Guest (ADR-0065 — both are
+// managed from the web and revoked there, immediately, so the sweep must not
+// log their holders out on every restart). The allowlist gates only NEW
+// Platform Admin logins at the OAuth callback; this sweep is the revocation
+// half for the env list, run at every non-dev ALLOWLIST-Admission-Mode web/all
+// boot — which is exactly when a change to it takes effect, since the env var
 // is parsed at boot. The sweep splits by Admission Mode (ADR-0055): an `open`
 // boot must never run it (it would log out every signup each restart —
 // revocation there is suspension-based), and flipping open -> allowlist plus a
-// restart evicts every signup, the deliberate lock-down. It also clears
-// leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is never
-// allowlisted). An empty allowlist is refused defensively: it would revoke
-// every session, and in allowlist mode the boot preflight guarantees a
-// non-empty list at the only call site (sweepAllowlistSessions).
+// restart evicts every signup without a grant, the deliberate lock-down. It
+// also clears leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is
+// never allowlisted). An empty allowlist is refused defensively: in allowlist
+// mode the boot preflight guarantees a non-empty list at the only call site
+// (sweepAllowlistSessions), so an empty one is a caller bug.
 func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserIDs []string) (int64, error) {
 	if len(discordUserIDs) == 0 {
 		return 0, errors.New("storage: refusing to revoke sessions against an empty allowlist")
@@ -372,7 +390,9 @@ func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserI
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM sessions USING users
 		  WHERE sessions.user_id = users.id
-		    AND users.discord_user_id <> ALL($1)`, discordUserIDs)
+		    AND users.discord_user_id <> ALL($1)
+		    AND NOT EXISTS (SELECT 1 FROM access_grant g WHERE g.discord_user_id = users.discord_user_id)
+		    AND NOT EXISTS (SELECT 1 FROM campaign_guest cg WHERE cg.user_id = users.id)`, discordUserIDs)
 	if err != nil {
 		return 0, fmt.Errorf("storage: revoke sessions outside allowlist: %w", err)
 	}

@@ -117,3 +117,5 @@ its hardening epic.
 - **ADR-0002** — Member Role enum untouched.
 - **ADR-0054** — `plan.limits` first consumer; Subscriptions and the revenue
   record are never touched by Player linking.
+
+*Superseded in part by ADR-0065 (2026-11-26): Player Access Levels become Guest Rights, the share-transcripts toggle and the per-Tenant invitation-admission opt-in are dropped, "Player Invitation" becomes a campaign invitation, and `max_linked_players` is not consumed. The redemption-security decisions and the `/join/<token>` path stand and are implemented there — first for access invitations.*

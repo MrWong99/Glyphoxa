@@ -17,10 +17,12 @@ import (
 // cross-tenant hole the moment strangers can sign up. [ResolveKeyGated] refuses
 // the fallback — INCLUDING the no-config-row path, which resolves to "" exactly
 // like the seeded "env" placeholder — for a tenant the entitlement does not
-// grant. In `allowlist` Admission Mode the hybrid policy (ADR-0039) is
-// untouched: the composition root wires [EnvFallbackAllowed] (or nil); in
-// `open` Admission Mode it swaps in [SubscriptionKeyGate] (cmd/glyphoxa runWeb,
-// the one construction point).
+// grant. Which tenants it grants depends on the Admission Mode, decided at the
+// one construction point (cmd/glyphoxa entitlementForMode): `allowlist` wires
+// [TenantFlagKeyGate] — the per-Tenant switch a Platform Admin sets
+// (ADR-0065); `open` wires [SubscriptionKeyGate]. [EnvFallbackAllowed] (or
+// nil) is the ungated ADR-0039 hybrid policy, left for the legacy standalone
+// voice node and tests.
 //
 // Gated everywhere on the web/all path (the phase-B inventory is closed): the
 // live voice session (wirenpc resolveSessionKeys), the Recap engine, the
@@ -30,9 +32,11 @@ import (
 // construction: its only caller resolves the Discord Bot token, which is
 // deployment infrastructure and deliberately outside the entitlement (as are
 // VoiceServer.resolveDiscordToken and the presence/highlight token paths).
-// The STANDALONE voice node (-mode voice) wires no entitlement by design: it
-// is the single-operator self-host posture (deployment-scoped keys, tenant-
-// free reads) and is not part of an open-admission SaaS deployment.
+// The claim-plane voice worker (-mode voice without a static target) builds
+// the same entitlement from the posture the web tier recorded. Only the LEGACY
+// standalone voice node (-mode voice -guild/-channel) wires none, by design:
+// the operator launched it by hand against one target with their own keys, and
+// no web-admitted person can make it run.
 
 // ErrNoPlatformKeyEntitlement marks an env-fallback key resolution refused
 // because the tenant has no platform-key entitlement (ADR-0054 gate (a)): a
@@ -47,9 +51,11 @@ type PlatformKeyEntitlement interface {
 	PlatformKeyAllowed(ctx context.Context, tenantID uuid.UUID) (bool, error)
 }
 
-// EnvFallbackAllowed grants every tenant the env fallback — the `allowlist`
-// Admission Mode posture (ADR-0055), where the hybrid BYOK policy (ADR-0039)
-// stands unchanged and self-hosts run with zero subscription rows.
+// EnvFallbackAllowed grants every tenant the env fallback — the ungated hybrid
+// BYOK policy (ADR-0039). It was the whole `allowlist` posture until ADR-0065:
+// fine while the operator was the only person on the instance, an open wallet
+// the moment a second one is admitted, so `allowlist` mode now wires
+// [TenantFlagKeyGate] instead.
 type EnvFallbackAllowed struct{}
 
 // PlatformKeyAllowed always grants.
@@ -74,6 +80,33 @@ type SubscriptionKeyGate struct {
 // PlatformKeyAllowed defers to the subscription read.
 func (g SubscriptionKeyGate) PlatformKeyAllowed(ctx context.Context, tenantID uuid.UUID) (bool, error) {
 	return g.Subs.TenantHasPlatformKeySource(ctx, tenantID)
+}
+
+// PlatformKeysFlagReader reads a tenant's Platform Keys switch
+// (tenant.platform_keys). *storage.Store satisfies it via TenantPlatformKeys.
+type PlatformKeysFlagReader interface {
+	TenantPlatformKeys(ctx context.Context, tenantID uuid.UUID) (bool, error)
+}
+
+// TenantFlagKeyGate is the `allowlist`-mode entitlement (ADR-0065): a tenant
+// may ride the env fallback only while its Platform Keys switch is on. The
+// switch defaults on, so every Tenant that existed before it is unchanged; a
+// Tenant founded through an Access Grant takes the grant's choice, and a
+// Platform Admin can flip it from the Admin screen. The read is per
+// resolution, never cached: switching a Tenant off must stop the very next
+// call, not the next boot.
+type TenantFlagKeyGate struct {
+	Flags PlatformKeysFlagReader
+}
+
+// PlatformKeyAllowed defers to the tenant's switch. A gate built without a
+// reader refuses with an error rather than granting — [ResolveKeyGated] turns
+// any error into a closed gate.
+func (g TenantFlagKeyGate) PlatformKeyAllowed(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	if g.Flags == nil {
+		return false, errors.New("llmbuild: platform keys gate has no flag reader")
+	}
+	return g.Flags.TenantPlatformKeys(ctx, tenantID)
 }
 
 // ResolveKeyGated is [ResolveKey] behind the entitlement seam: a resolution

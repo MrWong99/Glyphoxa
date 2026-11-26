@@ -190,8 +190,8 @@ type ProviderServer struct {
 	// keyEnt is the platform-key entitlement (ADR-0054 seam (a), ADR-0055) the
 	// call-time key resolution consults before riding the env fallback; the
 	// Configuration read consults the SAME gate (via llmbuild.ResolveKeyGated)
-	// to report a slot as provided by the platform (W9). nil grants everything —
-	// the allowlist/self-host posture, as on VoiceServer.
+	// to report a slot as provided by the platform (W9). nil grants everything
+	// (tests only), as on VoiceServer.
 	keyEnt llmbuild.PlatformKeyEntitlement
 	// lookupEnv reads a deployment env var (os.Getenv in prod); a seam so tests
 	// pin the "platform key present" half of provided_by_platform.

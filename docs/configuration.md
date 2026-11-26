@@ -127,9 +127,11 @@ soon", disabled). Register one app:
 
 ## 6. Find your Discord snowflake and set the allowlist
 
-The allowlist is the single gate (ADR-0041): only a listed Discord User can
-complete login. There is **no first-login/trust-on-first-use** claim (issue #107
-is wontfix), so you must list yourself up front.
+The allowlist names the instance's **Platform Admins** (ADR-0041, ADR-0065):
+the people who can admit everyone else. There is **no
+first-login/trust-on-first-use** claim (issue #107 is wontfix), so you must
+list yourself up front. Everybody else is let in from the web, by you — see
+[Managing access](#managing-access) below.
 
 1. Discord → **Settings → Advanced → Developer Mode: ON**.
 2. Right-click your own user → **Copy User ID** (a 17–19 digit snowflake).
@@ -140,9 +142,63 @@ is wontfix), so you must list yourself up front.
    ```
 
 Comma or whitespace separates multiple entries. **Single entry is the intended
-use.** Multiple is a documented edge (e.g. a second test account): each entry
-claims-or-creates its **own** isolated Tenant — the first to log in claims the
-seeded one, later ones get fresh empty Tenants. It is not shared-Tenant access.
+use.** Each entry is a full Platform Admin and claims-or-creates its **own**
+isolated Tenant — the first to log in claims the seeded one, later ones get
+fresh empty Tenants. It is not shared-Tenant access, and it is not how you let
+a friend run their own table: that is an Access Grant (below).
+
+### Managing access
+
+Three levels, configured in three places ([ADR-0065](adr/0065-web-managed-access-platform-admins-grants-campaign-guests.md)):
+
+| Who | Configured | What they get |
+|---|---|---|
+| **Platform Admin** | `GLYPHOXA_OPERATOR_IDS` — the environment only, plus a restart | Their own Tenant, and the **Admin** screen |
+| **GM with an Access Grant** | by a Platform Admin, on the Admin screen | A Tenant of their own; nothing of anyone else's |
+| **Campaign Guest** | by a Campaign's GM, in that Campaign | The Guest Rights the GM ticked, on that one Campaign |
+
+Platform Admins cannot be added, removed or suspended from the web on purpose:
+the one credential that can admit everyone else must not be editable by a
+stolen browser session.
+
+**Letting someone in (`allowlist` Admission Mode).** On the Admin screen,
+either:
+
+- **Grant access by Discord User ID.** Paste their snowflake (they find it the
+  way you found yours, above). The grant exists before they have ever signed
+  in; they then use the ordinary **Sign in with Discord** button.
+- **Create an invitation link.** You get a `/join/…` link, shown **once** —
+  copy it then; only a digest is stored, so nobody (including you) can read it
+  back later. Optional: a label, a maximum number of uses, an expiry of up to
+  365 days, and a Discord User ID the link is pinned to. Whoever opens it
+  acknowledges the Terms and Privacy Policy, signs in with Discord, and holds
+  an Access Grant from then on. Opening the link again, or opening it when you
+  are already admitted, uses nothing up.
+
+Either way the person's first sign-in **founds a new, empty Tenant of their
+own** and asks them to name it. They never land in yours, and never claim the
+seeded Tenant.
+
+**Taking access away.** *Revoke* deletes the grant and signs the person out
+everywhere at once — no restart. Their Tenant and everything in it is kept, so
+granting again restores it. *Revoke* on an invitation link stops the link;
+people it already admitted stay. *Suspend* locks a user out without touching
+their grant, and is the tool for someone you did not grant: a self-signup on an
+`open` deployment, or a Campaign Guest some GM invited.
+
+**The Platform Keys switch.** Each Tenant has a switch deciding whether it may
+run on the deployment's own provider keys (the `*_API_KEY` env vars — your
+money) when it has not saved keys of its own. You choose it when granting
+access or minting a link, and can flip it per Tenant on the Admin screen at any
+time; it takes effect on the next call. It is **off by default for everyone you
+admit**: with it off, a Tenant must save its own provider keys in Configuration
+before voice, recaps or image generation work. Tenants that existed before this
+switch (yours included) keep it on. In `open` Admission Mode the switch is not
+used — the Tenant's Plan decides ([deploy/saas-operations.md](deploy/saas-operations.md)).
+
+**Restarts.** The boot-time session sweep signs out everyone who is no longer
+admitted. Platform Admins, Access Grant holders and Campaign Guests all stay
+signed in across a restart.
 
 ## 7. Run in `web`/`all` Mode and log in
 
@@ -153,8 +209,9 @@ source .env
 
 Open `http://127.0.0.1:8080`, click **Sign in with Discord**, approve the
 consent screen. On success you land in the operator console. A Discord User
-**not** on `GLYPHOXA_OPERATOR_IDS` is rejected *before* any session or Tenant
-write and bounced back to the login screen with a `not_authorized` signal.
+who is neither on `GLYPHOXA_OPERATOR_IDS` nor admitted from the Admin screen
+(§6, *Managing access*) is rejected *before* any session or Tenant write and
+bounced back to the login screen with a `not_authorized` signal.
 
 ## 8. Boot posture: loud fail, and the dev escape hatch
 
@@ -398,8 +455,8 @@ CPU-starved pod cannot meet, degrading recall to no-memory on timeout.
 | `DISCORD_OAUTH_CLIENT_ID` | `web`/`all` | OAuth app client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | `web`/`all` | OAuth app client secret. |
 | `DISCORD_OAUTH_REDIRECT_URL` | `web`/`all` | Must equal the app's registered redirect exactly. Its scheme also decides the session cookies' `Secure` attribute: `https://…` ⇒ `Secure` cookies, `http://…` ⇒ plain (local dev). |
-| `GLYPHOXA_OPERATOR_IDS` | `web`/`all` (`allowlist` mode) | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). In `allowlist` Admission Mode the sole login gate: empty, separators-only, or non-numeric entries ⇒ fatal. In `open` mode it is the platform-admin list and may be empty. Also a deployment-wide GM override for Slash Commands and the Butler voice gate. |
-| `GLYPHOXA_ADMISSION_MODE` | optional | Who may complete the Discord login ([ADR-0055](adr/0055-self-signup-admission-modes.md)): `allowlist` (only `GLYPHOXA_OPERATOR_IDS`) or `open` (any Discord User; each signup founds its own Tenant). Unset ⇒ the posture recorded in the database, `allowlist` on a fresh one. Any other value ⇒ fatal. Flipping `open` → `allowlist` and restarting evicts every signup. |
+| `GLYPHOXA_OPERATOR_IDS` | `web`/`all` (`allowlist` mode) | The Platform Admins: Discord snowflakes (comma/whitespace-separated, digits only) who may always sign in and who admit everyone else from the Admin screen (§6, *Managing access*). In `allowlist` Admission Mode it is required: empty, separators-only, or non-numeric entries ⇒ fatal. In `open` mode it may be empty. Also a deployment-wide GM override for Slash Commands and the Butler voice gate. |
+| `GLYPHOXA_ADMISSION_MODE` | optional | Who may complete the Discord login ([ADR-0055](adr/0055-self-signup-admission-modes.md)): `allowlist` (Platform Admins on `GLYPHOXA_OPERATOR_IDS`, plus whoever they admit from the Admin screen) or `open` (any Discord User; each signup founds its own Tenant). Unset ⇒ the posture recorded in the database, `allowlist` on a fresh one. Any other value ⇒ fatal. Flipping `open` → `allowlist` and restarting evicts every signup who holds no Access Grant. |
 | `GLYPHOXA_SIGNUP_PLAN_SLUG` | `open` mode | The Plan every open-mode signup is bound to. In `open` mode the boot fails unless it names a synced, non-archived Plan (`glyphoxa billing plans-sync`, [deploy/saas-operations.md](deploy/saas-operations.md)). Ignored in `allowlist` mode. |
 | `GLYPHOXA_MAX_VOICE_SESSIONS` | optional | Process-wide cap on concurrent live Voice Sessions (one per Tenant); default `1`, values < 1 ⇒ 1. A start beyond it is refused with a user-visible error. Raising it is soak-gated for DAVE/central-token deployments (#493). |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |

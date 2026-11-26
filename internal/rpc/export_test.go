@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 )
@@ -52,3 +53,7 @@ func (s *ProviderServer) SetVoiceChannelCheckForTest(fn func(ctx context.Context
 
 // GMText exposes the GM-facing sentinel-text rewrite.
 var GMText = gmText
+
+// SetClockForTest pins the AdminServer's clock so invitation expiry and
+// liveness are asserted against a known instant.
+func (s *AdminServer) SetClockForTest(now func() time.Time) { s.now = now }

@@ -390,10 +390,12 @@ burning; the durable per-Tenant ledger is the billing-grade view
 
 ## 10. Security posture for an internet-facing home lab
 
-- The operator allowlist (ADR-0041) is your admission control — in the default
-  `allowlist` Admission Mode: nobody outside `GLYPHOXA_OPERATOR_IDS` can
-  complete a login, even with the console reachable from the internet. Keep it
-  tight. Setting `GLYPHOXA_ADMISSION_MODE=open` (chart: `web.admissionMode`,
+- Admission is closed by default — the `allowlist` Admission Mode: with the
+  console reachable from the internet, the only people who can complete a
+  login are the Platform Admins on `GLYPHOXA_OPERATOR_IDS` (ADR-0041) and
+  whoever they admitted from the Admin screen (ADR-0065;
+  [configuration.md, *Managing access*](../configuration.md#managing-access)).
+  Keep the env list to yourself: everyone on it can admit anyone. Setting `GLYPHOXA_ADMISSION_MODE=open` (chart: `web.admissionMode`,
   ADR-0055) enables self-signup instead — any Discord User may found a Tenant —
   and re-scopes the allowlist to the platform-admin list; only flip it once you
   mean to host strangers.
