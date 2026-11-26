@@ -98,7 +98,7 @@ function CampaignHost({ view }: { view: CampaignView }) {
   // in the path and the thing to open rides as a search param the target panel
   // consumes (?node= on the wiki, ?agent= on Cast). Nothing is copied into
   // local state on the way, so Back returns to where the jump came from.
-  const { goCampaignView, goScreen, setSearch } = nav;
+  const { goCampaignView, goScreen } = nav;
   const screen = useMemo<CampaignScreen>(
     () => ({
       campaign,
@@ -110,16 +110,9 @@ function CampaignHost({ view }: { view: CampaignView }) {
     [campaign, roster, goCampaignView],
   );
 
-  // The wiki's focus IS the route's ?node — there is no local copy to drift
-  // from the URL. The panel decides when the focus has been honoured (once the
-  // entry's row has loaded) and reports it; only then is the param stripped
-  // (replace, no history entry), so a deep link survives a slow or retried
-  // list load, and a later jump to the same entry fires again.
-  const focusNodeID = nav.search.node ?? null;
-  const stripNode = useCallback(
-    () => setSearch({ node: undefined }, { replace: true }),
-    [setSearch],
-  );
+  // The wiki's open entry IS the route's ?node: the panel reads and writes it
+  // through useScreenNav() itself, so the host hands it nothing and Back steps
+  // through the entries the GM opened.
   // An appearances row jumps to the exact Transcript Line on the Session screen
   // — the session+line pair the palette uses (#591).
   const openTranscriptLine = useCallback(
@@ -170,8 +163,6 @@ function CampaignHost({ view }: { view: CampaignView }) {
           <CastPanel />
         ) : view === "knowledge" ? (
           <KnowledgePanel
-            focusNodeID={focusNodeID}
-            onFocusHandled={stripNode}
             onOpenCast={screen.openAgent}
             onOpenLine={openTranscriptLine}
           />

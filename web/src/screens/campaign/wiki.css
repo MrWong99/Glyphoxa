@@ -1,0 +1,954 @@
+/* World wiki (KnowledgePanel and the files beside it): co-located CSS
+ * (ADR-0017). The rules the wiki shares with other views (the .gx-kg-chip
+ * vocabulary the boards and the map use, the relations rows, the map itself)
+ * stay in campaign.css; everything introduced with the read-first wiki lives
+ * here under .gx-wiki*.
+ */
+
+/* ── Layout: the list, and the entry pane beside it ──────────────────────── */
+
+.gx-wiki {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+/* With an entry open the list becomes the navigation column and the entry
+ * gets the larger share: it is what is being read. The map is the exception,
+ * it needs its width to stay a map. */
+.gx-wiki[data-detail="open"] {
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+}
+.gx-wiki[data-detail="open"][data-mode="graph"] {
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+}
+
+.gx-wiki__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  /* Grid items default to min-width:auto, so one long unwrappable snippet
+   * would widen this column past its track and push row controls off-screen. */
+  min-width: 0;
+}
+
+.gx-wiki__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+/* The pane stays in view while the list scrolls under it, and scrolls inside
+ * itself when the entry is longer than the window. 60px is the topbar
+ * (.gx-topbar); the content area below it is the scroll container. */
+.gx-wiki__detail {
+  position: sticky;
+  top: 0;
+  display: flex;
+  min-width: 0;
+  max-height: calc(100dvh - 60px - 2 * var(--page-gutter));
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+
+.gx-wiki-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-wiki-toolbar__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+/* The search takes the row; the sort select keeps its natural width. */
+.gx-wiki-toolbar__row > .gx-field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.gx-wiki-toolbar__row > .gx-select-field {
+  flex: 0 0 auto;
+}
+
+.gx-wiki-toolbar__count {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-height: var(--control-sm);
+  font-size: var(--body-sm);
+  color: var(--text-muted);
+}
+
+.gx-wiki-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+/* A filter chip. Unlike .gx-kg-chip (where "not pressed" means "hidden from
+ * the map" and is dimmed), these NARROW: a chip that is not pressed is simply
+ * a filter that is not applied, so it stays at full strength. */
+.gx-wiki-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  line-height: var(--body-line-tight);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+.gx-wiki-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+.gx-wiki-chip[aria-pressed="true"] {
+  border-color: currentColor;
+  font-weight: var(--weight-semibold);
+}
+.gx-wiki-chip[data-tag] {
+  border-style: dashed;
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+}
+.gx-wiki-chip[data-tag][aria-pressed="true"] {
+  border-style: solid;
+  background: color-mix(in srgb, var(--arcane) 22%, transparent);
+  color: var(--text-strong);
+}
+.gx-wiki-chip--fold {
+  border-color: transparent;
+  color: var(--text-muted);
+  padding-left: var(--spacing-xs);
+}
+.gx-wiki-chip__count {
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* ── List: type groups and cards ─────────────────────────────────────────── */
+
+.gx-wiki-typegroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-wiki-typegroup__head {
+  margin: 0;
+  font-size: inherit;
+}
+
+.gx-wiki-typegroup__toggle {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-sm);
+  padding: 0 var(--spacing-xs) 0 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.gx-wiki-typegroup__toggle:hover {
+  color: var(--text-strong);
+}
+.gx-wiki-typegroup__count {
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.gx-wiki-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+/* The gx-card base is a column; this card is an icon | text | actions row.
+ * Row direction is also what lets __meta shrink and the snippet ellipsize
+ * instead of pushing the card wider than the list. The compound selector
+ * outranks the base rule, which the bundle emits after this file. */
+.gx-card.gx-wiki-card {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+.gx-card.gx-wiki-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-card-hover);
+}
+.gx-card.gx-wiki-card[data-selected] {
+  border-color: var(--arcane-hover);
+  background: color-mix(in srgb, var(--arcane) 14%, var(--surface-card));
+}
+
+.gx-wiki-card__icon,
+.gx-wiki-card__portrait {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
+}
+.gx-wiki-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.gx-wiki-card__portrait {
+  object-fit: cover;
+  background: var(--surface-inset);
+}
+
+.gx-wiki-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.gx-wiki-card__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+
+/* The name is the card's one control. Its ::after stretches the hit area over
+ * the whole card; the icon actions are lifted above it. */
+.gx-wiki-card__open {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--body-line-tight);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.gx-wiki-card__open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+/* The ring is drawn around the card, where the hit area is. */
+.gx-wiki-card__open:focus-visible {
+  outline: none;
+}
+.gx-wiki-card__open:focus-visible::after {
+  outline: var(--focus-outline-width) solid var(--focus-outline-color);
+  outline-offset: var(--focus-outline-offset);
+}
+
+.gx-wiki-card__snippet {
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gx-wiki-card__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+.gx-wiki-card__when {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.gx-wiki-card__more {
+  color: var(--text-muted);
+}
+
+.gx-wiki-card__lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--gold);
+  font-size: var(--body-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.gx-wiki-card__actions {
+  /* Positioned, and later in the DOM than the name button's stretched
+   * ::after, so the two icon actions paint above it and stay clickable. */
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* A free-form tag, read-only. Dashed and mono like the tag filter chips, so a
+ * tag looks like a tag wherever it shows up. */
+.gx-wiki-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--mono-xs);
+  overflow-wrap: anywhere;
+}
+
+/* ── The entry pane: shared by the page and the editor ───────────────────── */
+
+.gx-wiki-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The header never scrolls away: the entry's name and its actions (Edit, or
+ * Save / Cancel / Delete) stay reachable however long the entry is. */
+.gx-wiki-pane__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.gx-wiki-pane__heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+  flex: 1 1 12ch;
+}
+
+.gx-wiki-pane__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  line-height: var(--body-line-tight);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.gx-wiki-pane__state:empty {
+  display: none;
+}
+
+.gx-wiki-pane__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.gx-wiki-pane__error {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+.gx-wiki-pane__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-lg);
+}
+
+/* Below 1100px the pane is a sheet (ui/Dialog). The pane brings its own
+ * header, so the dialog's title is kept for assistive tech only, and the pane
+ * does the scrolling so its header stays put. */
+.gx-wiki-sheet .gx-dialog__header {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.gx-wiki-sheet .gx-dialog__body {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ── The entry page (EntryView) ──────────────────────────────────────────── */
+
+.gx-wiki-view__identity {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  min-width: 0;
+  flex: 1 1 16ch;
+}
+
+.gx-wiki-view__portrait,
+.gx-wiki-view__icon {
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+}
+.gx-wiki-view__portrait {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  background: var(--surface-inset);
+}
+.gx-wiki-view__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+}
+
+.gx-wiki-view__badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+/* "Voiced by Bart": a badge that is also the way to that NPC on Cast. */
+.gx-wiki-voiced {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px var(--spacing-sm);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  color: var(--gold);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+.gx-wiki-voiced:hover {
+  background: color-mix(in srgb, var(--gold) 24%, transparent);
+}
+
+.gx-wiki-view__private-note {
+  margin: 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-left: 2px solid var(--gold);
+  background: var(--status-warning-bg);
+  border-radius: var(--radius-sm);
+  font-size: var(--body-sm);
+  color: var(--text-default);
+}
+
+/* Reading width and rhythm for the entry's prose. */
+.gx-wiki-view__prose {
+  font-size: var(--body-md);
+  line-height: var(--body-line);
+  color: var(--text-default);
+  max-width: 72ch;
+}
+
+.gx-wiki-view__stamp {
+  margin: 0;
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+.gx-wiki-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-wiki-section__title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--overline-size);
+  font-weight: var(--overline-weight);
+  letter-spacing: var(--overline-tracking);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.gx-wiki-section__note {
+  font-weight: var(--weight-regular);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--gold);
+}
+.gx-wiki-section__empty {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+/* Facts as a definition list: label left, fact right; stacked when narrow. */
+.gx-wiki-dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-wiki-dl__row {
+  display: grid;
+  grid-template-columns: minmax(8ch, 14ch) minmax(0, 1fr);
+  gap: var(--spacing-xs) var(--spacing-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+}
+.gx-wiki-dl__row:nth-child(odd) {
+  background: color-mix(in srgb, var(--surface-inset) 60%, transparent);
+}
+/* A GM-only fact is marked on the row itself, so the one line that never
+ * reaches the table is obvious while scanning a public entry. */
+.gx-wiki-dl__row[data-private] {
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+.gx-wiki-dl dt {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.gx-wiki-dl dd {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-default);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gx-wiki-private {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: var(--spacing-sm);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--gold);
+  white-space: nowrap;
+}
+
+.gx-wiki-taglist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+/* Connections as links. */
+.gx-wiki-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gx-wiki-links__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+  padding: var(--spacing-xs) 0;
+  font-size: var(--body-sm);
+}
+.gx-wiki-links__dir {
+  flex: 0 0 auto;
+  color: var(--text-subtle);
+}
+.gx-wiki-links__relation {
+  color: var(--text-muted);
+}
+.gx-wiki-links__self {
+  color: var(--text-subtle);
+}
+.gx-wiki-links__feeling {
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+}
+.gx-wiki-links__feeling[data-disposition^="-"] {
+  color: var(--status-danger);
+}
+.gx-wiki-links__feeling[data-disposition="1"],
+.gx-wiki-links__feeling[data-disposition="2"] {
+  color: var(--status-success);
+}
+.gx-wiki-links__note {
+  flex: 1 0 100%;
+  padding-left: calc(13px + var(--spacing-sm));
+  font-size: var(--body-xs);
+  font-style: italic;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* An entry's name as a link to that entry. */
+.gx-wiki-link {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-link);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.gx-wiki-link:hover {
+  color: var(--text-link-hover);
+  text-decoration-color: currentColor;
+}
+
+/* ── The editor (EntryEditor) ────────────────────────────────────────────── */
+
+.gx-wiki-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+.gx-wiki-group + .gx-wiki-group {
+  padding-top: var(--spacing-lg);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.gx-wiki-group__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+.gx-wiki-group__title {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+}
+/* How this group is saved: the one thing the two groups differ in. */
+.gx-wiki-group__how {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+}
+
+.gx-wiki-typeline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.gx-wiki-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-wiki-content__bar {
+  display: flex;
+  justify-content: flex-end;
+}
+.gx-wiki-content__preview {
+  min-height: 7.5em;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  font-size: var(--body-sm);
+}
+
+.gx-wiki-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+/* Facts editor (#542): one row per fact, each with its own privacy. */
+.gx-wiki-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+.gx-wiki-facts__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+/* Label above, fact below, the row's controls on their own line under both:
+ * the pane is narrow, and side by side the FACT (the field that matters) was
+ * about eight characters wide. */
+.gx-wiki-fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.gx-wiki-fact[data-private] {
+  border-color: color-mix(in srgb, var(--gold) 45%, transparent);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+.gx-wiki-fact__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+/* The label is a short filing key; the fact is prose. */
+.gx-wiki-fact__key {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+}
+.gx-wiki-fact__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.gx-wiki-fact__actions .gx-wiki-vis {
+  margin-right: auto;
+}
+
+/* Public / GM only. A labelled pill, not a bare eye: whether a fact reaches
+ * the table must never be a guess. */
+.gx-wiki-vis {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--control-sm);
+  padding: 0 var(--spacing-sm);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+.gx-wiki-vis:hover {
+  border-color: var(--border-strong);
+}
+.gx-wiki-vis[data-private] {
+  border-color: color-mix(in srgb, var(--gold) 55%, transparent);
+  background: var(--status-warning-bg);
+  color: var(--gold);
+}
+.gx-wiki-vis:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gx-wiki-facts__add {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+.gx-wiki-facts__suggest {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+/* "+ Role", "+ act two": one click instead of typing a label that already
+ * has a usual name. */
+.gx-wiki-suggest {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px var(--spacing-sm);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-base);
+  font-size: var(--body-xs);
+  cursor: pointer;
+}
+.gx-wiki-suggest[data-tag] {
+  font-family: var(--font-mono);
+  font-size: var(--mono-xs);
+}
+.gx-wiki-suggest:hover {
+  border-color: var(--border-strong);
+  border-style: solid;
+  color: var(--text-strong);
+}
+.gx-wiki-suggest:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Manage tags ─────────────────────────────────────────────────────────── */
+
+.gx-wiki-tagmgr {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.gx-wiki-tagmgr__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gx-wiki-tagmgr__row:last-child {
+  border-bottom: 0;
+}
+.gx-wiki-tagmgr__count {
+  margin-left: auto;
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.gx-wiki-tagmgr__form {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+.gx-wiki-tagmgr__actions {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+/* ── Search on the map: matches stand out, the rest recede ───────────────── */
+
+.gx-kg-graph__node[data-match="miss"] {
+  opacity: 0.25;
+}
+.gx-kg-graph__node[data-match="hit"] circle {
+  stroke-width: 2.5;
+}
+
+/* ── Mentions: the quiet retry line ──────────────────────────────────────── */
+
+.gx-kg-appearances__retry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+/* ── Phone ───────────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .gx-wiki-pane__header {
+    padding: var(--spacing-md);
+  }
+  .gx-wiki-pane__body {
+    padding: var(--spacing-md);
+  }
+  .gx-wiki-dl__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .gx-wiki-view__portrait {
+    width: 64px;
+    height: 64px;
+  }
+  /* The mode switch scrolls sideways instead of wrapping four tabs onto two
+   * lines or overflowing the page. */
+  .gx-wiki-toolbar__row > .gx-seg {
+    overflow-x: auto;
+  }
+  /* The items keep their width: shrunk (the primitive gives them min-width 0)
+   * they would squash and overlap their labels instead of scrolling. */
+  .gx-wiki-toolbar__row > .gx-seg .gx-seg__item {
+    flex-shrink: 0;
+  }
+  .gx-wiki-card__when {
+    margin-left: 0;
+  }
+}
+
+/* A touch screen gets full-size targets for the small inline controls. */
+@media (pointer: coarse) {
+  .gx-wiki-chip,
+  .gx-wiki-vis,
+  .gx-wiki-suggest,
+  .gx-wiki-typegroup__toggle {
+    min-height: var(--target-coarse);
+  }
+}

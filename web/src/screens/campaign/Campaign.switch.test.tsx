@@ -36,6 +36,7 @@ import { hasUnsavedEdits } from "@/lib/navigationGuard";
 import { makeQueryClient } from "@/lib/queryClient";
 import { Campaign } from "./Campaign";
 import type { CampaignView } from "./views";
+import { pickNewEntry } from "./wikiTestKit";
 
 // The toast is the switch's feedback; the shell's <Toaster> is not mounted here.
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
@@ -119,7 +120,11 @@ function mount(view: CampaignView) {
   const queryClient = makeQueryClient();
   render(
     <Providers transport={h.transport} queryClient={queryClient}>
-      <Campaign view={view} />
+      {/* The wiki's open entry is the route's ?node, so the screen needs a
+          navigation seam that really moves. */}
+      <MemoryScreenNav initial={{ screen: "campaign", view }}>
+        <Campaign view={view} />
+      </MemoryScreenNav>
     </Providers>,
   );
   // What CampaignSwitcher's SetActiveCampaign onSuccess does.
@@ -137,7 +142,8 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     const { applied, switchTo } = mount("knowledge");
     await screen.findByRole("heading", { name: "The Sunless Citadel" });
 
-    fireEvent.click(await screen.findByRole("button", { name: /generate entries with ai/i }));
+    await screen.findByRole("button", { name: "New entry" });
+    pickNewEntry(/generate entries with ai/i);
     fireEvent.change(screen.getByLabelText("What should be drafted?"), {
       target: { value: "a kobold" },
     });
@@ -152,7 +158,7 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     // The Citadel's draft is gone: nothing can apply it into Saltmarsh.
     expect(screen.queryByRole("button", { name: "Add 1 entry" })).not.toBeInTheDocument();
     expect(screen.queryByText("Meepo")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /generate entries with ai/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("What should be drafted?")).not.toBeInTheDocument();
     expect(applied).toEqual([]);
   });
 
@@ -166,10 +172,13 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     await switchTo("c2");
     await screen.findByText("Saltmarsh");
 
-    // Back to the blank "new entry" editor — not the Citadel's node, whose id
-    // an UpdateNode from here would no longer resolve in this campaign.
-    await waitFor(() => expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(""));
+    // No editor is left open: not the Citadel's node, whose id an UpdateNode
+    // from here would no longer resolve in this campaign.
+    await waitFor(() => expect(screen.queryByTestId("entry-editor")).not.toBeInTheDocument());
     expect(screen.queryByDisplayValue("Oakhurst (burned)")).not.toBeInTheDocument();
+    // The switch itself is the explanation; the wiki does not add a "that
+    // entry is not in this campaign" on top of it.
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("re-selects a planning thread of the new campaign", async () => {
@@ -185,7 +194,8 @@ describe("Campaign across an Active Campaign switch (W3)", () => {
     mount("knowledge");
     // Open the generator BEFORE anything else settles, then let every query
     // land: the card must still be open (undefined → id is a load, not a switch).
-    fireEvent.click(await screen.findByRole("button", { name: /generate entries with ai/i }));
+    await screen.findByRole("button", { name: "New entry" });
+    pickNewEntry(/generate entries with ai/i);
     await screen.findByRole("heading", { name: "The Sunless Citadel" });
     expect(screen.getByLabelText("What should be drafted?")).toBeInTheDocument();
   });
