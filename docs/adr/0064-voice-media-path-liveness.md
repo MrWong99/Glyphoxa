@@ -60,9 +60,26 @@ above it can ever notice. This ADR decides the three-layer fix.
     user's first transmission — which is exactly why this tier is secondary
     and the echo tier exists.
 
-  A genuinely quiet table trips neither: quiet stops RTP, never the echoes,
-  and produces no Speaking announcements — Idle Close remains that table's
-  only policy. On a verdict the watchdog cancels the cycle with the
+  Both tiers read counters that only move while disgo's receiver reads, and it
+  does not read while the DAVE session is not ready. So while DAVE is not ready
+  the two tiers are skipped, and the gated time is not charged to them once
+  reading resumes (#688). Not ready means one of two things, told apart by
+  whether anyone else is in the channel (the voice gateway's
+  clients_connect/client_disconnect, counted on the DAVE session wrapper; a
+  remote Speaking announcement during the spell counts too):
+  - *With another member present* it is an MLS handshake. One still pending a
+    full window after that member was first seen (doubled for a connection
+    that was never ready) is its own verdict, `dave_not_ready`, checked first.
+  - *With the Bot alone* it is no handshake: Discord establishes the DAVE group
+    only once a second member is present, so a Voice Session started in an
+    empty channel (the ADR-0061 case) is legitimately not ready until someone
+    joins. No verdict, however long it lasts — a rebuild would only rejoin the
+    same empty channel.
+
+  A genuinely quiet table trips none of them: quiet stops RTP, never the
+  echoes, and produces no Speaking announcements; an empty channel has no
+  member to handshake with — Idle Close remains that table's only policy. On
+  a verdict the watchdog cancels the cycle with the
   `errMediaStall` cause, and `runWithReconnect` rebuilds the whole connection;
   every rebuild still counts toward the ADR-0061 churn ceiling.
 - **Idle Close stops lying about dead transports.** The watchdog also flags the
@@ -73,7 +90,9 @@ above it can ever notice. This ADR decides the three-layer fix.
   again clears the flag on the next sweep, and churn still outranks both.
 - **A media blackout can never again be a log blackout.** The watchdog emits
   one INFO `voice media liveness` line per minute (packet and keepalive deltas,
-  last-packet and last-speaking ages) whenever a session is open — even with
+  last-packet and last-speaking ages, and `dave_ready` / `dave_peers` — not
+  ready means the receiver is gated and the deltas are frozen; with zero peers
+  that is the Bot waiting alone, not a fault) whenever a session is open — even with
   the verdict disabled — plus a WARN at the moment of a stall verdict. New
   series, unlabelled per ADR-0032: `glyphoxa_voice_udp_keepalives_total`
   (~0.2/s per open connection; flat while `glyphoxa_voice_sessions > 0` is

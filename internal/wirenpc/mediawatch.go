@@ -10,6 +10,17 @@
 // cycle so runWithReconnect rebuilds the whole voice connection on its existing
 // backoff. It also owns the once-a-minute liveness log line, so a media
 // blackout can never again be a log blackout.
+//
+// Both of those tiers read counters that only move while disgo's receiver
+// reads, and it does not read while the DAVE session is not ready (#688).
+// While that stands the two tiers are skipped rather than left to blame the
+// socket for a gate. Not ready has two meanings, though. With another member
+// in the channel it is an MLS handshake, and one that outlasts the window is
+// its own verdict, tier 0 "dave_not_ready". With the Bot ALONE in an E2EE
+// channel it is no handshake at all: Discord establishes the DAVE group only
+// once a second member is present, so a Voice Session started in an empty
+// channel is legitimately not ready until someone joins. That is a quiet
+// table — the watchdog stays silent and Idle Close remains its only policy.
 
 package wirenpc
 
@@ -27,7 +38,7 @@ import (
 // know it, so runWithReconnect treats it as transient and rebuilds — exactly
 // the intent. (One sentinel across the whole seam: connectAndServe compares
 // context.Cause against this very value, never a second errors.New.)
-var errMediaStall = errors.New("wirenpc: inbound media path stalled: remote speaking observed but no RTP arrived; rebuilding the voice connection")
+var errMediaStall = errors.New("wirenpc: inbound media path stalled; rebuilding the voice connection")
 
 const (
 	// defaultMediaStallWindow is how long inbound RTP may be absent WHILE remote
@@ -82,6 +93,18 @@ type mediaWatchdog struct {
 	// the stall window is a dead socket regardless of anyone speaking.
 	lastAny     uint64
 	lastAnyMove time.Time
+	// notReadySince is when the current DAVE-not-ready spell was first seen
+	// (zero while ready); readySince is when the last such spell ended. The
+	// receiver reads nothing during a spell, so tiers 1 and 2 measure their
+	// stall from readySince when it is later than their own last move.
+	notReadySince time.Time
+	readySince    time.Time
+	everReady     bool
+	// handshakeSince is since when the current spell has had evidence of
+	// another member in the channel — i.e. since when it is a handshake that
+	// ought to complete rather than the Bot waiting alone. Zero while ready,
+	// and while not ready with nobody there. It is tier 0's clock.
+	handshakeSince time.Time
 
 	lastLog       time.Time
 	logPackets    uint64
@@ -150,6 +173,28 @@ func (w *mediaWatchdog) check(now time.Time) {
 		w.lastAny = any
 		w.lastAnyMove = now
 	}
+	if ml.DaveReady {
+		w.everReady = true
+		if !w.notReadySince.IsZero() {
+			w.readySince = now
+			w.notReadySince = time.Time{}
+		}
+		w.handshakeSince = time.Time{}
+	} else {
+		if w.notReadySince.IsZero() {
+			w.notReadySince = now
+		}
+		// Someone else is there when the voice gateway says so, or — belt and
+		// braces, should a clients_connect ever go missing — when a remote
+		// participant announced speech during this spell (Speaking travels on
+		// the websocket, not through the gated receiver).
+		switch peer := ml.DavePeers > 0 || ml.LastSpeaking.After(w.notReadySince); {
+		case !peer:
+			w.handshakeSince = time.Time{}
+		case w.handshakeSince.IsZero():
+			w.handshakeSince = now
+		}
+	}
 
 	if now.Sub(w.lastLog) >= mediaLivenessLogEvery {
 		w.log.Info("voice media liveness",
@@ -159,6 +204,8 @@ func (w *mediaWatchdog) check(now time.Time) {
 			"keepalives_delta", counterDelta(ml.Keepalives, w.logKeepalives),
 			"last_packet_ago", agoOrNever(now, w.lastMove, w.everMoved),
 			"speaking_ago", agoOrNever(now, ml.LastSpeaking, !ml.LastSpeaking.IsZero()),
+			"dave_ready", ml.DaveReady,
+			"dave_peers", ml.DavePeers,
 		)
 		w.lastLog = now
 		w.logPackets = ml.Packets
@@ -170,15 +217,54 @@ func (w *mediaWatchdog) check(now time.Time) {
 		return
 	}
 
+	// Verdict tier 0 — DAVE not ready. disgo's receiver reads nothing off the
+	// socket while the DAVE session is not ready, so packets and echoes are
+	// frozen by the gate, not by the path: the tiers below cannot judge it and
+	// are skipped. Whether the gate itself is a fault depends on company:
+	//
+	//   - Alone (no peer announced, no remote Speaking this spell) there is no
+	//     group to establish and nothing to wait for. A Bot that joined an
+	//     empty channel, or was left alone across a reconnect, sits here until
+	//     someone arrives; rebuilding would only rejoin the same empty channel.
+	//     No verdict, however long it lasts.
+	//   - With someone there it is a handshake, and one still pending a full
+	//     window after that member was first seen is the verdict, named for
+	//     what it is. A connection that has never been ready gets double, the
+	//     never-moved rule below applied to a first handshake. The clock starts
+	//     at the peer, not at the spell: a player joining a Bot that waited
+	//     alone for ten minutes gets a whole window for the group to form.
+	//
+	// Two accepted limits. A handshake that flaps (not ready, ready for a tick,
+	// not ready again) restarts this clock each time and moves readySince too,
+	// so no tier convicts it — but each ready tick is a receiver that read, and
+	// a path that then stays silent is tiers 1 and 2's to judge. And the peer
+	// count can run stale after an in-place gateway reconnect, which costs at
+	// most one needless rebuild: the rebuilt connection counts afresh.
+	if !ml.DaveReady {
+		if w.handshakeSince.IsZero() {
+			return
+		}
+		window := w.window
+		if !w.everReady {
+			window *= 2
+		}
+		if pending := now.Sub(w.handshakeSince); pending >= window {
+			w.fire(now, ml, "dave_not_ready", pending, window)
+		}
+		return
+	}
+
 	// Verdict tier 1 — echo cessation. Once the socket has proven the voice
 	// server echoes our keepalives (echoArmCount on THIS socket), a full stall
 	// window with NOTHING inbound — no RTP, no echoes, while keepalives go out
 	// every 5s — is a dead socket, whether or not anyone is speaking. This is
 	// the tier that does not depend on Discord relaying per-utterance Speaking
 	// events, and a quiet table cannot trip it: quiet only stops RTP, never the
-	// echoes.
-	if ml.Echoes >= echoArmCount && now.Sub(w.lastAnyMove) >= w.window {
-		w.fire(now, ml, "echo_cessation", now.Sub(w.lastAnyMove), w.window)
+	// echoes. Time spent gated behind a not-ready DAVE session is not stall:
+	// the clock starts no earlier than the moment the receiver was reading
+	// again.
+	if anyBase := laterOf(w.lastAnyMove, w.readySince); ml.Echoes >= echoArmCount && now.Sub(anyBase) >= w.window {
+		w.fire(now, ml, "echo_cessation", now.Sub(anyBase), w.window)
 		return
 	}
 
@@ -191,16 +277,18 @@ func (w *mediaWatchdog) check(now time.Time) {
 	// Close remains its only policy.
 	window := w.window
 	if !w.everMoved {
-		// The receiver reads nothing while the DAVE/MLS handshake runs, so a
-		// young connection legitimately shows zero packets. A path that never
-		// carried a single packet gets double the window before a verdict.
+		// A young connection legitimately shows zero packets (nobody has
+		// spoken yet, or the receiver only just came out of the DAVE gate). A
+		// path that never carried a single packet gets double the window
+		// before a verdict.
 		window *= 2
 	}
-	stall := now.Sub(w.lastMove)
+	base := laterOf(w.lastMove, w.readySince)
+	stall := now.Sub(base)
 	if stall < window {
 		return
 	}
-	if ml.LastSpeaking.IsZero() || !ml.LastSpeaking.After(w.lastMove.Add(mediaWatchTick)) {
+	if ml.LastSpeaking.IsZero() || !ml.LastSpeaking.After(base.Add(mediaWatchTick)) {
 		return
 	}
 	w.fire(now, ml, "speaking_without_audio", stall, window)
@@ -212,7 +300,8 @@ func (w *mediaWatchdog) fire(now time.Time, ml gxvoice.MediaLiveness, evidence s
 	w.log.Warn("inbound media path stalled; ending cycle to rebuild the voice connection",
 		"guild", w.guild, "evidence", evidence, "stall", stall, "window", window,
 		"speaking_ago", agoOrNever(now, ml.LastSpeaking, !ml.LastSpeaking.IsZero()),
-		"packets", ml.Packets, "echoes", ml.Echoes, "keepalives", ml.Keepalives)
+		"packets", ml.Packets, "echoes", ml.Echoes, "keepalives", ml.Keepalives,
+		"dave_ready", ml.DaveReady, "dave_peers", ml.DavePeers)
 	if w.metrics != nil {
 		w.metrics.MediaStallRebuild(w.guild)
 	}
@@ -220,6 +309,14 @@ func (w *mediaWatchdog) fire(now time.Time, ml gxvoice.MediaLiveness, evidence s
 		w.suspect()
 	}
 	w.cancel(errMediaStall)
+}
+
+// laterOf returns the later of two instants.
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // counterDelta is cur-prev, tolerating a counter reset (transport re-open) by

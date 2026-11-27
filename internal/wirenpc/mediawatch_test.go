@@ -80,7 +80,14 @@ func newWatchHarness(t *testing.T, window time.Duration) *watchHarness {
 	return h
 }
 
+// set installs a snapshot from a connection whose DAVE session is ready — the
+// state every tier-1/tier-2 test is about. setRaw leaves DaveReady as given.
 func (h *watchHarness) set(ml gxvoice.MediaLiveness, ok bool) {
+	ml.DaveReady = true
+	h.setRaw(ml, ok)
+}
+
+func (h *watchHarness) setRaw(ml gxvoice.MediaLiveness, ok bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.liveness = ml
@@ -208,6 +215,21 @@ func TestMediaWatchdogDisabledWindowLogsButNeverFires(t *testing.T) {
 	}
 }
 
+func TestMediaWatchdogDisabledWindowNeverFiresOnDaveNotReady(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, -1)
+	h.setRaw(gxvoice.MediaLiveness{Echoes: 5, Keepalives: 20, DavePeers: 1}, true)
+	for range 30 { // 5 minutes of a stuck handshake
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatal("fired although the verdict is disabled")
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("dave_ready=false")) {
+		t.Fatalf("liveness line does not say the receiver is gated: %s", h.logs)
+	}
+}
+
 func TestMediaWatchdogNoTransportMonitorStaysInert(t *testing.T) {
 	t.Parallel()
 	h := newWatchHarness(t, 45*time.Second)
@@ -299,6 +321,199 @@ func TestMediaWatchdogUnprovenEchoesNeverArmTheEchoTier(t *testing.T) {
 	}
 }
 
+func TestMediaWatchdogAloneInEmptyChannelNeverFires(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	// A Voice Session started before any player joined: Discord establishes
+	// the DAVE group only with a second member, so the Bot is not ready for as
+	// long as it sits alone. Nothing is wrong and a rebuild would only rejoin
+	// the same empty channel — Idle Close is this table's only policy.
+	keepalives := uint64(0)
+	for range 120 { // 20 minutes, past a whole Idle Close Window
+		keepalives += 2
+		h.setRaw(gxvoice.MediaLiveness{Keepalives: keepalives}, true)
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatalf("a Bot waiting alone in an empty channel was convicted: %s", h.logs)
+	}
+	if h.suspectCount() != 0 || h.metrics.count() != 0 {
+		t.Fatalf("suspect/metric = %d/%d, want 0/0", h.suspectCount(), h.metrics.count())
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("dave_ready=false dave_peers=0")) {
+		t.Fatalf("liveness line does not show the Bot waiting alone: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogLeftAloneAfterBeingReadyNeverFires(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	h.set(gxvoice.MediaLiveness{Packets: 100, Echoes: 5, Keepalives: 20, DavePeers: 1}, true)
+	h.advance(10 * time.Second)
+	// Everyone left and the voice connection re-negotiated in place: the group
+	// is unestablished again and the Bot is alone. Being ready once does not
+	// make this a stuck handshake.
+	h.setRaw(gxvoice.MediaLiveness{Packets: 100, Echoes: 5, Keepalives: 24}, true)
+	for range 60 {
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatalf("a Bot left alone was convicted: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogPeerJoiningALoneBotGetsAFullWindow(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3}, true)
+	for range 30 { // five minutes alone
+		h.advance(10 * time.Second)
+	}
+	// A player joins. The time spent alone is not handshake time: the group
+	// gets the whole (doubled, never-ready) window from here.
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3, DavePeers: 1}, true)
+	h.advance(10 * time.Second) // peer observed at base+310s
+	for range 8 {               // 80s of handshake, under the doubled 90s
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatalf("the wait alone was charged to the handshake: %s", h.logs)
+	}
+	// The player leaves again before the window is out: back to waiting.
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3}, true)
+	for range 30 {
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatalf("fired after the only peer left: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogNeverReadyWithSpeakingPeerFiresDaveNotReady(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3}, true)
+	h.advance(10 * time.Second) // not-ready observed at base+10s
+	// No peer was ever announced, but a remote participant announced speech
+	// during the spell: someone is there, so this is a handshake.
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3, LastSpeaking: watchBase.Add(15 * time.Second)}, true)
+	h.advance(10 * time.Second) // evidence observed at base+20s
+	h.advance(80 * time.Second) // 80s of handshake
+	if h.w.fired {
+		t.Fatal("fired inside a first handshake's doubled grace window")
+	}
+	h.advance(10 * time.Second) // 90s
+	if !h.w.fired {
+		t.Fatal("a handshake that never completed while someone spoke was never convicted")
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("evidence=dave_not_ready")) {
+		t.Fatalf("verdict not labelled dave_not_ready: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogDaveNeverReadyWithPeerFiresDaveNotReady(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	// A first handshake that never completes although another member is in
+	// the channel: the receiver never reads, so no echo ever arms tier 1 and
+	// nobody has to announce speech for tier 2.
+	h.setRaw(gxvoice.MediaLiveness{Keepalives: 3, DavePeers: 1}, true)
+	h.advance(10 * time.Second) // handshake observed at base+10s
+	for range 8 {               // base+90s: 80s gated, under the doubled 90s
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatal("fired inside a first handshake's doubled grace window")
+	}
+	h.advance(10 * time.Second) // 90s gated
+	if !h.w.fired {
+		t.Fatal("a handshake that never completed was never convicted")
+	}
+	if cause := context.Cause(h.ctx); !errors.Is(cause, errMediaStall) {
+		t.Fatalf("cycle cause = %v, want errMediaStall", cause)
+	}
+	if h.suspectCount() != 1 || h.metrics.count() != 1 {
+		t.Fatalf("suspect/metric = %d/%d, want 1/1", h.suspectCount(), h.metrics.count())
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("evidence=dave_not_ready")) {
+		t.Fatalf("verdict not labelled dave_not_ready: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogStuckHandshakeOnArmedSocketIsNotEchoCessation(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	h.set(gxvoice.MediaLiveness{Packets: 100, Echoes: 5, Keepalives: 20}, true)
+	h.advance(10 * time.Second)
+	h.advance(10 * time.Second)
+
+	// A re-handshake sticks: the receiver stops reading, so both counters
+	// freeze exactly as they would on a dead socket.
+	h.setRaw(gxvoice.MediaLiveness{Packets: 100, Echoes: 5, Keepalives: 24, DavePeers: 1}, true)
+	h.advance(10 * time.Second) // not-ready observed at base+30s
+	h.advance(40 * time.Second) // 40s gated: under the window
+	if h.w.fired {
+		t.Fatal("fired before the stall window")
+	}
+	h.advance(10 * time.Second) // 50s gated; ready before, so no doubling
+	if !h.w.fired {
+		t.Fatal("a stuck handshake on a once-ready connection was not convicted after one window")
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("evidence=dave_not_ready")) {
+		t.Fatalf("verdict not labelled dave_not_ready: %s", h.logs)
+	}
+	if bytes.Contains(h.logs.Bytes(), []byte("echo_cessation")) {
+		t.Fatalf("a gated receiver was blamed on the socket: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogHandshakeWindowIsNotChargedToOtherTiers(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	armed := gxvoice.MediaLiveness{Packets: 100, Echoes: 5, Keepalives: 20, DavePeers: 1}
+	h.set(armed, true)
+	h.advance(10 * time.Second) // counters seen moving at base+10s
+
+	h.setRaw(armed, true)
+	h.advance(10 * time.Second) // not-ready observed at base+20s
+	h.advance(30 * time.Second) // base+50s: 30s gated, under the window
+
+	// The handshake completes, the counters are still where the gate froze
+	// them, and someone is talking. The gated time must not count as stall.
+	armed.LastSpeaking = watchBase.Add(55 * time.Second)
+	h.set(armed, true)
+	h.advance(10 * time.Second) // base+60s: ready again
+	h.advance(10 * time.Second)
+	h.advance(20 * time.Second) // base+90s: 30s since readiness returned
+	if h.w.fired {
+		t.Fatalf("the handshake window was charged as a stall: %s", h.logs)
+	}
+	h.advance(20 * time.Second) // base+110s: 50s of real silence since ready
+	if !h.w.fired {
+		t.Fatal("a socket that stayed dead after the handshake was never convicted")
+	}
+	if !bytes.Contains(h.logs.Bytes(), []byte("evidence=echo_cessation")) {
+		t.Fatalf("verdict after readiness returned should be echo_cessation: %s", h.logs)
+	}
+}
+
+func TestMediaWatchdogShortHandshakeNeverFires(t *testing.T) {
+	t.Parallel()
+	h := newWatchHarness(t, 45*time.Second)
+	h.setRaw(gxvoice.MediaLiveness{DavePeers: 1}, true)
+	h.advance(10 * time.Second)
+	h.advance(10 * time.Second) // an ordinary handshake
+	echoes := uint64(0)
+	for range 30 { // 5 minutes of a healthy, quiet socket
+		echoes += 2
+		h.set(gxvoice.MediaLiveness{Echoes: echoes, Keepalives: echoes, DavePeers: 1}, true)
+		h.advance(10 * time.Second)
+	}
+	if h.w.fired {
+		t.Fatalf("fired after an ordinary handshake: %s", h.logs)
+	}
+}
+
 func TestMediaWatchdogCounterResetRestartsTheGrace(t *testing.T) {
 	t.Parallel()
 	h := newWatchHarness(t, 45*time.Second)
@@ -342,7 +557,7 @@ func TestMediaWatchdogRunLifecycle(t *testing.T) {
 	reads := 0                        // clock reads the watchdog has made
 	readSig := make(chan struct{}, 1) // wakes awaitReads; one token is enough
 	w := newMediaWatchdog(func() (gxvoice.MediaLiveness, bool) {
-		return gxvoice.MediaLiveness{Packets: 1, Echoes: 5}, true
+		return gxvoice.MediaLiveness{Packets: 1, Echoes: 5, DaveReady: true}, true
 	}, cancel, nil, nil, slog.New(slog.DiscardHandler), "g1", 45*time.Second)
 	w.now = func() time.Time {
 		mu.Lock()
@@ -417,7 +632,7 @@ func TestMediaWatchdogRunLifecycle(t *testing.T) {
 func TestMediaWatchdogRunExitsOnCycleEnd(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancelCause(context.Background())
-	w := newMediaWatchdog(func() (gxvoice.MediaLiveness, bool) { return gxvoice.MediaLiveness{}, true },
+	w := newMediaWatchdog(func() (gxvoice.MediaLiveness, bool) { return gxvoice.MediaLiveness{DaveReady: true}, true },
 		cancel, nil, nil, slog.New(slog.DiscardHandler), "g1", 45*time.Second)
 	w.ticks = make(chan time.Time) // never fired
 
