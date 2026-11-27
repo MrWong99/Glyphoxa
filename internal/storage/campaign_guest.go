@@ -348,7 +348,9 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 			suspendedAt *time.Time
 		)
 		err = tx.db.QueryRow(ctx,
-			`SELECT id, suspended_at FROM users WHERE discord_user_id = $1`, p.User.DiscordUserID).
+			// FOR NO KEY UPDATE: take the users row before the guest row, the
+			// order AddCampaignGuest uses, so the two cannot deadlock.
+			`SELECT id, suspended_at FROM users WHERE discord_user_id = $1 FOR NO KEY UPDATE`, p.User.DiscordUserID).
 			Scan(&existingID, &suspendedAt)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("storage: redeem campaign invitation: load user: %w", err)

@@ -199,8 +199,10 @@ What *Revoke* on a person does beyond the web sign-out, and what it does not:
   in their own server too.
 - **It does not stop a Voice Session that is already running.** A session
   resolves its keys once, at start, and keeps going until it is ended or goes
-  idle. If one is live when you revoke, end it (`/glyphoxa end` in that
-  server — Platform Admins are GM everywhere) or wait for Idle Close.
+  idle. If one is live when you revoke, wait for Idle Close, or end it with
+  `/glyphoxa end` in that server. That command needs the voice process to
+  know you are a Platform Admin: on a split deployment (separate voice
+  workers) set `GLYPHOXA_OPERATOR_IDS` on the workers too.
 - **They cannot come back through any link that existed when they were
   revoked.** A revoked person who opens an invitation link created before the
   revoke is refused — whichever link it is, and whether they were admitted
