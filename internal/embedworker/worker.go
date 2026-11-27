@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -126,20 +127,80 @@ type Worker struct {
 	gauge    BacklogGauge
 	log      *slog.Logger
 	cfg      Config
+
+	// chunkBatch and nodeBatch are the batch sizes the two phases currently
+	// claim: cfg.BatchSize while the provider keeps up, shrunk after a failed
+	// provider call and grown back after clean ones (see [batcher]). Only Run's goroutine touches them.
+	chunkBatch, nodeBatch batcher
 }
 
 // New builds a Worker. model is the embedding model stamped onto each row (the
 // provider must produce vectors for it); gauge may be nil to disable the backlog
 // metric. Config zero values take the package defaults.
 func New(store Store, provider embeddings.Provider, model string, gauge BacklogGauge, log *slog.Logger, cfg Config) *Worker {
+	cfg = cfg.withDefaults()
 	return &Worker{
 		store:    store,
 		provider: provider,
 		model:    model,
 		gauge:    gauge,
 		log:      log,
-		cfg:      cfg.withDefaults(),
+		cfg:      cfg,
+		// Both phases start at the configured size.
+		chunkBatch: newBatcher(cfg.BatchSize),
+		nodeBatch:  newBatcher(cfg.BatchSize),
 	}
+}
+
+// batcher picks the batch size a phase claims on its next pass. A provider that
+// cannot finish a batch inside its timeout would otherwise be handed the same
+// batch forever: on a CPU-only Ollama sixteen long wiki entries take longer
+// than the HTTP header timeout, so every pass burned the CPU for the full
+// timeout, wrote nothing and came back ten seconds later (prod, 2026-11-27).
+//
+// A failed call halves the size (down to one row) and remembers the size that
+// failed as a ceiling; a clean call doubles it back but stays below that
+// ceiling, so the worker settles on a size that fits instead of bouncing into
+// the failing one every other pass. After ceilingProbeAfter clean calls in a
+// row the ceiling is lifted and the larger size is tried once more: a single
+// slow moment (a cold model load) must not cap the worker for good.
+type batcher struct {
+	cur, limit int
+	ceiling    int // smallest size known to fail; 0 = none
+	clean      int // clean calls since the last failure
+}
+
+const ceilingProbeAfter = 20
+
+func newBatcher(limit int) batcher { return batcher{cur: limit, limit: limit} }
+
+// done records the outcome of a call made with size n.
+func (b *batcher) done(n int, ok bool) {
+	if !ok {
+		b.ceiling, b.clean = n, 0
+		b.cur = max(1, n/2)
+		return
+	}
+	b.clean++
+	if b.clean >= ceilingProbeAfter {
+		b.ceiling, b.clean = 0, 0
+	}
+	next := min(b.limit, b.cur*2)
+	if b.ceiling > 0 && next >= b.ceiling {
+		next = max(b.cur, b.ceiling-1)
+	}
+	b.cur = next
+}
+
+// isTimeout reports whether a provider call failed by running out of time: the
+// worker's own per-call deadline, or the HTTP client's (a net.Error timeout,
+// e.g. "timeout awaiting response headers").
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // Run drives the backfill loop until ctx is cancelled, then returns. Each
@@ -192,7 +253,8 @@ func (w *Worker) pass(ctx context.Context) (more bool) {
 // short or aborted phase leaves it as the last pass set it. It reports true when
 // a FULL batch was written cleanly (more is likely waiting).
 func (w *Worker) passChunks(ctx context.Context) (more bool) {
-	chunks, err := w.store.ListUnembeddedChunks(ctx, w.cfg.BatchSize)
+	limit := w.chunkBatch.cur
+	chunks, err := w.store.ListUnembeddedChunks(ctx, limit)
 	if err != nil {
 		w.log.Warn("embed backfill: list unembedded chunks failed; retrying next pass", "err", err)
 		return false
@@ -206,7 +268,7 @@ func (w *Worker) passChunks(ctx context.Context) (more bool) {
 		texts[i] = c.Content
 	}
 
-	vecs, ok := w.embedBatch(ctx, "chunks", texts)
+	vecs, ok := w.embedBatch(ctx, "chunks", texts, &w.chunkBatch)
 	if !ok {
 		return false
 	}
@@ -224,7 +286,7 @@ func (w *Worker) passChunks(ctx context.Context) (more bool) {
 
 	// A full batch means the queue probably holds more: tell Run to come straight
 	// back. Decided before the recount, so a failed gauge read cannot stall a drain.
-	more = len(chunks) == w.cfg.BatchSize
+	more = len(chunks) == limit
 
 	n, err := w.store.CountUnembeddedChunks(ctx)
 	if err != nil {
@@ -246,7 +308,8 @@ func (w *Worker) passChunks(ctx context.Context) (more bool) {
 // or aspect edit resets the row's embedding (storage.UpdateNode /
 // storage.ReplaceNodeAspects), so it is re-claimed here.
 func (w *Worker) passNodes(ctx context.Context) (more bool) {
-	nodes, err := w.store.ListUnembeddedNodes(ctx, w.cfg.BatchSize)
+	limit := w.nodeBatch.cur
+	nodes, err := w.store.ListUnembeddedNodes(ctx, limit)
 	if err != nil {
 		w.log.Warn("embed backfill: list unembedded nodes failed; retrying next pass", "err", err)
 		return false
@@ -261,7 +324,7 @@ func (w *Worker) passNodes(ctx context.Context) (more bool) {
 		texts[i] = strings.TrimSpace(strings.Join(append(parts, n.Body), "\n\n"))
 	}
 
-	vecs, ok := w.embedBatch(ctx, "nodes", texts)
+	vecs, ok := w.embedBatch(ctx, "nodes", texts, &w.nodeBatch)
 	if !ok {
 		return false
 	}
@@ -277,7 +340,7 @@ func (w *Worker) passNodes(ctx context.Context) (more bool) {
 		}
 	}
 
-	more = len(nodes) == w.cfg.BatchSize
+	more = len(nodes) == limit
 
 	count, err := w.store.CountUnembeddedNodes(ctx)
 	if err != nil {
@@ -295,15 +358,21 @@ func (w *Worker) passNodes(ctx context.Context) (more bool) {
 // BEFORE any write. ok=false means the batch is unusable and the phase must abandon
 // this pass (nothing written), leaving the rows NULL for the next pass. kind is the
 // phase label for logs.
-func (w *Worker) embedBatch(ctx context.Context, kind string, texts []string) ([][]float32, bool) {
+func (w *Worker) embedBatch(ctx context.Context, kind string, texts []string, b *batcher) ([][]float32, bool) {
 	callCtx, cancel := context.WithTimeout(ctx, w.cfg.CallTimeout)
 	defer cancel()
 	vecs, err := w.provider.Embed(callCtx, texts)
 	if err != nil {
+		// Only a call that ran out of time says the batch was too big; any
+		// other failure (provider down, bad config) is retried at full size.
+		if isTimeout(err) {
+			b.done(len(texts), false)
+		}
 		w.log.Warn("embed backfill: provider embed failed; rows stay NULL, retrying next pass",
-			"kind", kind, "batch", len(texts), "err", err)
+			"kind", kind, "batch", len(texts), "next_batch", b.cur, "err", err)
 		return nil, false
 	}
+	b.done(len(texts), true)
 	if len(vecs) != len(texts) {
 		w.log.Warn("embed backfill: provider returned wrong vector count; abandoning pass",
 			"kind", kind, "want", len(texts), "got", len(vecs))
