@@ -36,6 +36,7 @@ import { SessionHistory } from "./SessionHistory";
 import { formatDay, formatDuration, formatStamp, formatTime, formatUsd, sessionDurationMs, tsMs } from "./sessionFormat";
 import { ShareHighlightDialog } from "./ShareHighlightDialog";
 import { speakingAgentName } from "./speakers";
+import { sessionActionErrorMessage } from "./startStopError";
 import { transcriptFilename, transcriptMarkdown } from "./transcriptMarkdown";
 import { TranscriptPane } from "./TranscriptPane";
 import { TranscriptSearch } from "./TranscriptSearch";
@@ -189,10 +190,11 @@ export function Session() {
   // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
   // sonner) and invalidate — a Stop that hits "no active session" means the
   // loop already died server-side, and the refetch snaps the badge off Live.
-  // The server's message stays verbatim, interpolated into the localized template.
+  // The reasons the server marks are translated (startStopError.ts); any other
+  // message stays verbatim, interpolated into the localized template.
   const guildIdRef = useRef("");
   const onError = (key: MessageKey) => (err: Error) => {
-    toast.error(t(key, { message: errorMessage(err) }));
+    toast.error(t(key, { message: sessionActionErrorMessage(err, t) }));
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {

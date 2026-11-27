@@ -32,12 +32,34 @@ const (
 	// reasonAllowanceExhausted is the [errorReasonHeader] value for a spent
 	// monthly plan allowance. The web matches on it: do not reword.
 	reasonAllowanceExhausted = "allowance_exhausted"
+
+	// The StartSession / StopSession refusals (session.go, #695). Their
+	// messages are English sentences, so the Session screen translates on
+	// these instead (web/src/screens/session/startStopError.ts). The web
+	// matches on them: do not reword.
+	reasonSessionActive         = "session_active"
+	reasonDiscordNotConfigured  = "discord_not_configured"
+	reasonBotTokenMissing       = "bot_token_missing"
+	reasonBotTokenUndecryptable = "bot_token_undecryptable"
+	reasonVoiceUnavailable      = "voice_unavailable"
+	reasonSessionLimit          = "session_limit"
+	reasonShuttingDown          = "shutting_down"
+	reasonWorkerPending         = "worker_pending"
+	reasonStartCancelled        = "start_cancelled"
+	reasonNoActiveSession       = "no_active_session"
+	reasonStopPending           = "stop_pending"
 )
+
+// reasonErr builds a refusal that carries reason in [errorReasonHeader] next
+// to its code and English message.
+func reasonErr(code connect.Code, reason, msg string) *connect.Error {
+	err := connect.NewError(code, errors.New(msg))
+	err.Meta().Set(errorReasonHeader, reason)
+	return err
+}
 
 // allowanceExhaustedErr is the refusal for billing.ErrAllowanceExhausted.
 func allowanceExhaustedErr() *connect.Error {
-	err := connect.NewError(connect.CodeResourceExhausted,
-		errors.New("this month's included usage is used up — AI features are paused until next month or a plan change"))
-	err.Meta().Set(errorReasonHeader, reasonAllowanceExhausted)
-	return err
+	return reasonErr(connect.CodeResourceExhausted, reasonAllowanceExhausted,
+		"this month's included usage is used up — AI features are paused until next month or a plan change")
 }

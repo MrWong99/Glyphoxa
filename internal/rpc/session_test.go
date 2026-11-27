@@ -3,6 +3,7 @@ package rpc_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -860,6 +861,72 @@ func TestSessionStopNoActive(t *testing.T) {
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("stop-no-active code = %v, want FailedPrecondition", connect.CodeOf(err))
 	}
+}
+
+// TestSessionStartStopRefusalsCarryReason pins the machine-readable reason every
+// classified Start/Stop refusal carries next to its (unchanged) code (#695).
+// The Session screen translates on the reason, since the message is English
+// only — and the two ResourceExhausted refusals (session cap, plan allowance)
+// are told apart by nothing else.
+func TestSessionStartStopRefusalsCarryReason(t *testing.T) {
+	t.Parallel()
+	wrapped := func(err error) error { return fmt.Errorf("session: %w", err) }
+	cases := []struct {
+		name       string
+		mgr        *fakeSessionManager
+		wantCode   connect.Code
+		wantReason string
+	}{
+		{"session active", &fakeSessionManager{startErr: session.ErrSessionActive}, connect.CodeAlreadyExists, "session_active"},
+		{"discord not configured", &fakeSessionManager{startErr: session.ErrDiscordNotConfigured}, connect.CodeFailedPrecondition, "discord_not_configured"},
+		{"bot token missing", &fakeSessionManager{startErr: session.ErrDiscordTokenMissing}, connect.CodeFailedPrecondition, "bot_token_missing"},
+		{"bot token undecryptable", &fakeSessionManager{startErr: wrapped(session.ErrDiscordTokenUndecryptable)}, connect.CodeFailedPrecondition, "bot_token_undecryptable"},
+		{"voice unavailable", &fakeSessionManager{startErr: session.ErrVoiceUnavailable}, connect.CodeFailedPrecondition, "voice_unavailable"},
+		{"allowance exhausted", &fakeSessionManager{startErr: wrapped(session.ErrAllowanceExhausted)}, connect.CodeResourceExhausted, "allowance_exhausted"},
+		{"session limit", &fakeSessionManager{startErr: session.ErrSessionLimit}, connect.CodeResourceExhausted, "session_limit"},
+		{"shutting down", &fakeSessionManager{startErr: session.ErrManagerClosed}, connect.CodeUnavailable, "shutting_down"},
+		{"worker pending", &fakeSessionManager{startErr: session.ErrIntentPending}, connect.CodeUnavailable, "worker_pending"},
+		{"start cancelled", &fakeSessionManager{startErr: session.ErrIntentCancelled}, connect.CodeAborted, "start_cancelled"},
+		{"no active session", &fakeSessionManager{stopErr: session.ErrNoActiveSession}, connect.CodeFailedPrecondition, "no_active_session"},
+		{"stop pending", &fakeSessionManager{stopErr: session.ErrStopPending}, connect.CodeUnavailable, "stop_pending"},
+		// An unclassified failure stays an opaque Internal with no reason.
+		{"unclassified start", &fakeSessionManager{startErr: errors.New("boom")}, connect.CodeInternal, ""},
+		{"unclassified stop", &fakeSessionManager{stopErr: errors.New("boom")}, connect.CodeInternal, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := newSessionClient(t, tc.mgr, activeStore())
+			var err error
+			if tc.mgr.stopErr != nil {
+				_, err = client.StopSession(context.Background(), connect.NewRequest(&managementv1.StopSessionRequest{}))
+			} else {
+				_, err = client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+			}
+			if got := connect.CodeOf(err); got != tc.wantCode {
+				t.Fatalf("code = %v (%v), want %v", got, err, tc.wantCode)
+			}
+			var ce *connect.Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("not a connect error: %v", err)
+			}
+			if got := ce.Meta().Get("Glyphoxa-Error-Reason"); got != tc.wantReason {
+				t.Errorf("error reason metadata = %q, want %q (the web matches on it)", got, tc.wantReason)
+			}
+			if ce.Message() == "" {
+				t.Error("message is empty, want the English sentence kept for clients that do not read the reason")
+			}
+		})
+	}
+}
+
+// TestSessionStartAllowanceExhausted is ADR-0055 gate (b) on Start: the same
+// refusal, reason and sentence every other paid surface returns (#658).
+func TestSessionStartAllowanceExhausted(t *testing.T) {
+	t.Parallel()
+	client := newSessionClient(t, &fakeSessionManager{startErr: session.ErrAllowanceExhausted}, activeStore())
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	requireAllowanceRefusal(t, err)
 }
 
 // TestSessionGetIdleReturnsLastSession returns the most recent ended session when

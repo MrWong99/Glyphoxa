@@ -301,48 +301,50 @@ func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, er
 
 // startError maps a manager Start failure onto a Connect status code: the
 // single-active guard is AlreadyExists, the configuration/mode preconditions are
-// FailedPrecondition, anything else is a logged Internal.
+// FailedPrecondition, anything else is a logged Internal. Every classified
+// refusal also carries a stable reason (allowance_error.go) the Session screen
+// translates on, since the message is English only (#695).
 func (s *SessionServer) startError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrSessionActive):
-		return connect.NewError(connect.CodeAlreadyExists, errors.New("a voice session is already active"))
+		return reasonErr(connect.CodeAlreadyExists, reasonSessionActive, "a voice session is already active")
 	case errors.Is(err, session.ErrDiscordNotConfigured):
-		return connect.NewError(connect.CodeFailedPrecondition, errors.New("no Discord voice channel resolved — link a Discord server in Configuration, then pick a voice channel"))
+		return reasonErr(connect.CodeFailedPrecondition, reasonDiscordNotConfigured,
+			"no Discord voice channel resolved — link a Discord server in Configuration, then pick a voice channel")
 	case errors.Is(err, session.ErrDiscordTokenMissing):
-		return connect.NewError(connect.CodeFailedPrecondition, errors.New("no Discord bot token is configured"))
+		return reasonErr(connect.CodeFailedPrecondition, reasonBotTokenMissing, "no Discord bot token is configured")
 	case errors.Is(err, session.ErrDiscordTokenUndecryptable):
 		// The full decrypt detail stays in the manager/server log; the client gets a
 		// static, actionable hint (no underlying error echoed).
 		s.log.Error("StartSession: saved Discord bot token could not be decrypted", "err", err)
-		return connect.NewError(connect.CodeFailedPrecondition,
-			errors.New("the saved Discord bot token could not be decrypted; ensure the server $GLYPHOXA_SECRET is set correctly (ADR-0004)"))
+		return reasonErr(connect.CodeFailedPrecondition, reasonBotTokenUndecryptable,
+			"the saved Discord bot token could not be decrypted; ensure the server $GLYPHOXA_SECRET is set correctly (ADR-0004)")
 	case errors.Is(err, session.ErrVoiceUnavailable):
-		return connect.NewError(connect.CodeFailedPrecondition, errors.New("voice is not available in this mode"))
+		return reasonErr(connect.CodeFailedPrecondition, reasonVoiceUnavailable, "voice is not available in this mode")
 	case errors.Is(err, session.ErrAllowanceExhausted):
-		// ADR-0055 gate (b): a deliberate policy refusal with an actionable
-		// message — the estimate resets with the next calendar month.
-		return connect.NewError(connect.CodeResourceExhausted,
-			errors.New("the plan's monthly usage allowance is exhausted; it resets next month (estimates, ADR-0046)"))
+		// ADR-0055 gate (b): a deliberate policy refusal — the same one, with the
+		// same reason, every off-session paid surface returns (#658).
+		return allowanceExhaustedErr()
 	case errors.Is(err, session.ErrSessionLimit):
 		// #488: the process is at its concurrent-session cap
 		// (GLYPHOXA_MAX_VOICE_SESSIONS). Distinct, user-visible, and retryable once a
 		// running session ends — the ErrAllowanceExhausted ResourceExhausted precedent.
-		return connect.NewError(connect.CodeResourceExhausted,
-			errors.New("the server is already running the maximum number of concurrent voice sessions; try again once one ends"))
+		return reasonErr(connect.CodeResourceExhausted, reasonSessionLimit,
+			"the server is already running the maximum number of concurrent voice sessions; try again once one ends")
 	case errors.Is(err, session.ErrManagerClosed):
 		// The manager is in its terminal closed state (#157): the process is
 		// shutting down. Unavailable, so the client retries the restarted process.
-		return connect.NewError(connect.CodeUnavailable, errors.New("the server is shutting down; try again shortly"))
+		return reasonErr(connect.CodeUnavailable, reasonShuttingDown, "the server is shutting down; try again shortly")
 	case errors.Is(err, session.ErrIntentPending):
 		// Split mode (#491): the intent was written but no -mode voice worker claimed
 		// and drove it live within the Start budget, so IntentControl CANCELLED the
 		// pending row before returning. Unavailable, so the operator's retry starts a
 		// fresh intent rather than colliding — the worker picks it up on its next poll.
-		return connect.NewError(connect.CodeUnavailable, errors.New("voice worker has not claimed the session yet; try again shortly"))
+		return reasonErr(connect.CodeUnavailable, reasonWorkerPending, "voice worker has not claimed the session yet; try again shortly")
 	case errors.Is(err, session.ErrIntentCancelled):
 		// Split mode (#491): the queued start was stopped before any worker claimed
 		// it — a distinct cancelled outcome, not a fault and not still-pending.
-		return connect.NewError(connect.CodeAborted, errors.New("the voice session start was cancelled before it began"))
+		return reasonErr(connect.CodeAborted, reasonStartCancelled, "the voice session start was cancelled before it began")
 	default:
 		s.log.Error("StartSession: manager start failed", "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -360,13 +362,13 @@ func (s *SessionServer) StopSession(
 	}
 	vs, err := s.mgr.Stop(ctx, tenantID)
 	if errors.Is(err, session.ErrNoActiveSession) {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
+		return nil, reasonErr(connect.CodeFailedPrecondition, reasonNoActiveSession, "no active voice session")
 	}
 	if errors.Is(err, session.ErrStopPending) {
 		// Split mode (#491): the worker has not confirmed the wind-down within the
 		// Stop budget. Unavailable so the operator retries — never a false success
 		// carrying a still-'running' row.
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("the voice worker has not confirmed the stop yet; try again shortly"))
+		return nil, reasonErr(connect.CodeUnavailable, reasonStopPending, "the voice worker has not confirmed the stop yet; try again shortly")
 	}
 	if err != nil {
 		s.log.Error("StopSession: manager stop failed", "err", err)
