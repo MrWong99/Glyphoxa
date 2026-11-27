@@ -239,8 +239,8 @@ request, and no request carries it. What this adds is how the SPA *names* it.
 
 ## Review hardening (2026-11-27)
 
-Three holes found reviewing the build, and how each was closed. None changes
-the model above; each makes a sentence in it true.
+Holes found reviewing the build, and how each was closed. None changes the
+model above; each makes a sentence in it true.
 
 1. **`open` mode: being added as a guest no longer blocks self-signup.** A GM
    adds a guest by Discord User ID without that person's consent, possibly
@@ -251,7 +251,11 @@ the model above; each makes a sentence in it true.
    row of theirs came through a campaign invitation link. Someone merely added
    self-signs-up like everyone else and finds the shared Campaign in the
    workspace switcher. `allowlist` deployments are unchanged: there the guest
-   row is the only thing that admits them.
+   row is the only thing that admits them. A guest who was added by ID and
+   later opens a link of that Campaign that would have admitted them (live,
+   not pinned to someone else, not refused to them) has joined from then on:
+   the row is linked to that invitation, with no use counted and their rights
+   untouched.
 2. **Revoking a grant is complete.** "Revocation is immediate" held for the
    web session only. Now, on an `allowlist` deployment:
    - revoking switches **Platform Keys off** on every Tenant the person
@@ -270,23 +274,41 @@ the model above; each makes a sentence in it true.
      un-suspending restores every guest. A Tenant with no operator is
      unaffected.
 
-   The rule reaches storage as a per-process policy set at boot from the same
-   Admission Mode and Platform Admin list as the boot sweep; `open` mode and
-   `GLYPHOXA_DEV_MODE` require nothing. Voice workers are not given
-   `GLYPHOXA_OPERATOR_IDS`, so the web tier records the list at boot
-   (`deployment_settings.platform_admin_ids`) as a read-only copy for them —
-   the environment stays the only place Platform Admins are configured. Until
-   a web boot has recorded one, a worker requires nothing rather than dropping
-   the deployment's own admin.
-3. **A removal cannot be undone through the link that admitted.** A multi-use
-   link stays live for the people it has yet to admit, so a revoked GM or a
-   removed guest could simply open it again. Revoking a grant, or removing a
-   guest, that came through a link now records a refusal for that (link,
-   person) (`invitation_refusal`); redemption refuses the pair and counts no
-   use. A new link still admits them, and so does an explicit grant or add by
-   Discord User ID, which also clears their refusals for that scope — the
-   person who removed them may change their mind, the removed person cannot
-   change it for them. Separately, redeeming a campaign link as someone who
+   The Admin people list counts a person's guest Campaigns by the same
+   predicate, so it never shows someone as admitted by a Campaign that does
+   not admit them.
+
+   On the web tier the rule reaches storage as a per-process policy set at
+   boot from the same Admission Mode and Platform Admin list as the boot
+   sweep; `open` mode and `GLYPHOXA_DEV_MODE` require nothing. Voice workers
+   (and a standalone voice node) are given neither `GLYPHOXA_OPERATOR_IDS` nor
+   `GLYPHOXA_ADMISSION_MODE`, and are not restarted when the web tier's values
+   change. They therefore latch nothing at boot: the web tier records its
+   effective Admission Mode and a read-only copy of the Platform Admin list at
+   every boot (`deployment_settings.admission_mode`, `.platform_admin_ids`),
+   and a worker reads both live, in the query. A recorded `open` binds every
+   operator; a recorded `allowlist` binds Platform Admins and grant holders;
+   a flip in either direction reaches the worker with its next GM refresh (a
+   minute). The environment stays the only place either is configured. Until
+   a web boot has recorded an admin list, a worker requires nothing rather
+   than dropping the deployment's own admin — or every GM.
+3. **A removal cannot be undone through any link that existed at the time.**
+   A multi-use link stays live for the people it has yet to admit, so a
+   revoked GM or a removed guest could simply open one. Revoking a grant now
+   records a refusal (`invitation_refusal`, one row per link and person) for
+   **every** access invitation existing at that moment, and removing a guest
+   for every invitation of that Campaign — whichever way the grant or guest
+   row was made, by link or by Discord User ID. Redemption refuses such a
+   pair and counts no use; the links keep working for everyone else. What
+   lets the person back in is a decision made after the removal: a link
+   created afterwards, or an explicit grant / add by Discord User ID.
+   Refusals are never cleared — they are inert while the person holds a grant
+   or is a guest, and clearing them on a re-grant or re-add would re-open
+   every old link at the next removal. The person who removed them may change
+   their mind; the removed person cannot change it for them. (Redemption
+   locks the invitation `FOR NO KEY UPDATE`, so the refusal insert of a
+   concurrent removal does not deadlock against it.) Separately, redeeming a
+   campaign link as someone who
    already is a guest of that Campaign is now only a sign-in: it never widens
    or resets the rights their GM last set, and counts no use. (The original
    build merged the link's rights in, which let a narrowed guest restore

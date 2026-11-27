@@ -85,9 +85,9 @@ func nonNilRights(rights []string) []string {
 // Tenant is refused with [ErrGuestIsOperator]; an unknown campaign is
 // ErrNotFound.
 //
-// It is the GM's explicit decision, so it also clears any invitation refusal
-// (see recordInvitationRefusal) this person carries for the Campaign's links:
-// someone removed and then added back may use those links again.
+// Invitation refusals the person carries from an earlier removal are left
+// alone (see refuseInvitations): they are inert while this guest row exists,
+// and must hold again if the guest is removed.
 func (s *Store) AddCampaignGuest(ctx context.Context, campaignID uuid.UUID, discordUserID string, rights []string, addedBy uuid.UUID) (CampaignGuest, error) {
 	discordUserID = strings.TrimSpace(discordUserID)
 	if discordUserID == "" {
@@ -124,12 +124,6 @@ func (s *Store) AddCampaignGuest(ctx context.Context, campaignID uuid.UUID, disc
 			   SET rights = EXCLUDED.rights, updated_at = now()`,
 			campaignID, userID, nonNilRights(rights), addedBy); err != nil {
 			return fmt.Errorf("storage: add campaign guest: %w", err)
-		}
-		if _, err := tx.db.Exec(ctx,
-			`DELETE FROM invitation_refusal r USING invitation i
-			  WHERE i.id = r.invitation_id AND i.campaign_id = $1 AND r.discord_user_id = $2`,
-			campaignID, discordUserID); err != nil {
-			return fmt.Errorf("storage: add campaign guest: clear invitation refusals: %w", err)
 		}
 		g, err = tx.GetCampaignGuest(ctx, campaignID, userID)
 		return err
@@ -205,32 +199,28 @@ func (s *Store) UpdateCampaignGuest(ctx context.Context, campaignID, userID uuid
 // carrying a dead pointer. ErrNotFound when the user is not a guest of THIS
 // Campaign.
 //
-// A guest who came in through an invitation link is additionally REFUSED that
-// link from now on (recordInvitationRefusal): a multi-use link stays live for
-// everyone else, and without the refusal the removed person would undo the
-// removal by opening it again. A new link, or adding them by Discord User ID,
-// still lets them back in.
+// The removed person is additionally REFUSED every invitation link of this
+// Campaign that exists at this moment (refuseInvitations), however they became
+// a guest: a multi-use link stays live for everyone else, and without the
+// refusal the removed person would undo the removal by opening it — with the
+// link's rights, which may be wider than what the GM gave them. A link created
+// afterwards, or adding them by Discord User ID, still lets them back in.
 func (s *Store) RemoveCampaignGuest(ctx context.Context, campaignID, userID uuid.UUID) error {
 	return s.InTx(ctx, func(tx *Store) error {
-		var (
-			invitationID  uuid.NullUUID
-			discordUserID string
-		)
+		var discordUserID string
 		err := tx.db.QueryRow(ctx,
 			`DELETE FROM campaign_guest cg USING users u
 			  WHERE cg.campaign_id = $1 AND cg.user_id = $2 AND u.id = cg.user_id
-			 RETURNING cg.invitation_id, u.discord_user_id`, campaignID, userID).
-			Scan(&invitationID, &discordUserID)
+			 RETURNING u.discord_user_id`, campaignID, userID).
+			Scan(&discordUserID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("storage: remove campaign guest: %w", err)
 		}
-		if invitationID.Valid {
-			if err := tx.recordInvitationRefusal(ctx, invitationID.UUID, discordUserID); err != nil {
-				return err
-			}
+		if err := tx.refuseInvitations(ctx, discordUserID, &campaignID); err != nil {
+			return err
 		}
 		if _, err := tx.db.Exec(ctx,
 			`UPDATE sessions SET guest_campaign_id = NULL
@@ -315,7 +305,12 @@ type CampaignRedeemed struct {
 // link that has since been spent, expired or revoked — they are reopening the
 // link that let them in. It never widens or resets their rights: what a guest
 // holds is whatever their GM last decided (UpdateCampaignGuest), and a link
-// they can still reach must not be a way to undo a narrowing.
+// they can still reach must not be a way to undo a narrowing. The one thing it
+// may write: a guest whose row was made by the GM adding their Discord User ID
+// and who opens a link that WOULD have admitted them (live, not pinned to
+// someone else, not refused to them) has the row linked to that invitation —
+// they have now chosen to be a guest ([GuestStanding] Joined), which the add
+// alone could not tell.
 //
 // Refusals, none of which writes anything:
 //   - [ErrUserSuspended] for a suspended redeemer;
@@ -324,14 +319,20 @@ type CampaignRedeemed struct {
 //     Campaign whose host lost their standing (hostStandingClause), the
 //     redeemer being the operator of the Campaign's own Tenant (who gains
 //     nothing from a guest row, and must not be admitted through one), or a
-//     redeemer this link was refused to because their GM removed them after
-//     they came in through it (recordInvitationRefusal).
+//     redeemer this link was refused to because their GM removed them while
+//     the link existed (refuseInvitations).
+//
+// The invitation is locked FOR NO KEY UPDATE for the reason given at
+// [Store.RedeemAccessInvitation]: [Store.RemoveCampaignGuest] deletes the
+// guest row and then inserts refusals referencing the Campaign's invitations,
+// which under FOR UPDATE deadlocks against a redemption holding the invitation
+// and waiting for that guest row.
 func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p CampaignRedemption) (CampaignRedeemed, error) {
 	var res CampaignRedeemed
 	err := s.InTx(ctx, func(tx *Store) error {
 		row := tx.db.QueryRow(ctx,
 			`SELECT `+invitationColumns+` FROM invitation
-			  WHERE token_hash = $1 AND kind = 'campaign' FOR UPDATE`, sessionTokenHash(token))
+			  WHERE token_hash = $1 AND kind = 'campaign' FOR NO KEY UPDATE`, sessionTokenHash(token))
 		inv, err := scanInvitation(row)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && inv.CampaignID == nil) {
 			return ErrInvitationInvalid
@@ -392,18 +393,20 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 				return fmt.Errorf("storage: redeem campaign invitation: load guest: %w", err)
 			}
 		}
-		if !isGuest {
-			if !inv.Live(time.Now()) ||
-				(inv.DiscordUserID != "" && inv.DiscordUserID != p.User.DiscordUserID) {
-				return ErrInvitationInvalid
-			}
+		// admits: would this link admit this person, were they not a guest
+		// already? A newcomer needs it; for an existing guest it only decides
+		// whether opening the link counts as having joined.
+		admits := inv.Live(time.Now()) &&
+			(inv.DiscordUserID == "" || inv.DiscordUserID == p.User.DiscordUserID)
+		if admits {
 			refused, err := tx.invitationRefused(ctx, inv.ID, p.User.DiscordUserID)
 			if err != nil {
 				return err
 			}
-			if refused {
-				return ErrInvitationInvalid
-			}
+			admits = !refused
+		}
+		if !isGuest && !admits {
+			return ErrInvitationInvalid
 		}
 
 		u, err := tx.UpsertUser(ctx, p.User)
@@ -420,6 +423,14 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 		}
 		res = CampaignRedeemed{User: u, CampaignID: campaignID, Rights: nonNilRights(oldRights)}
 		if isGuest {
+			if admits {
+				if _, err := tx.db.Exec(ctx,
+					`UPDATE campaign_guest SET invitation_id = $3
+					  WHERE campaign_id = $1 AND user_id = $2 AND invitation_id IS NULL`,
+					campaignID, u.ID, inv.ID); err != nil {
+					return fmt.Errorf("storage: redeem campaign invitation: link added guest: %w", err)
+				}
+			}
 			return nil
 		}
 

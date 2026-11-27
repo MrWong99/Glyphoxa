@@ -358,7 +358,7 @@ describe("Admin: People", () => {
 
     const dialog = await screen.findByRole("alertdialog", { name: "Revoke Mira's access?" });
     expect(dialog).toHaveTextContent(
-      "They are signed out everywhere and can't sign in again. Their table and its data are kept, and you can grant access again at any time.",
+      "They are signed out everywhere and can't sign in again — not through any invitation link that exists now either. Their table and its data are kept. A link you create afterwards, or granting access again, lets them back in.",
     );
     expect(state.revokes).toEqual([]);
 

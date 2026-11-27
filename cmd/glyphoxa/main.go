@@ -350,16 +350,9 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// where the old nil gate let it through.
 	// On an `allowlist` deployment only an ADMITTED operator is GM (ADR-0065).
 	// Like the voice worker this node reads the posture and the Platform Admin
-	// list the web tier records; a posture it cannot read is treated as
-	// allowlist, the same default the worker's gates take.
-	standaloneAdmission := auth.AdmissionAllowlist
-	if res, aerr := resolveAdmissionMode(ctx, st, os.Getenv); aerr != nil {
-		log.Warn("voice: resolve admission mode; defaulting to allowlist GM identity", "err", aerr)
-	} else {
-		standaloneAdmission = res.Effective
-	}
-	st.SetAccessPolicy(accessPolicyFor(devMode(os.Getenv), standaloneAdmission,
-		auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS")), true))
+	// list the web tier records — live, not once at boot — and requires
+	// nothing while neither was recorded ([workerAccessPolicy]).
+	installWorkerAccessPolicy(st, devMode(os.Getenv), os.Getenv)
 	cfg.GMSpeaker = armVoiceGMGate(ctx, st, os.Getenv, log)
 
 	// Standalone voice mode wires no knowledge-Tool sources (cfg.ToolDeps stays
@@ -485,7 +478,8 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 
 	// Effective Admission Mode (ADR-0055) drives the plan-allowance + platform-key
 	// entitlement gates the session Manager applies at Start — the worker READS the
-	// posture the web tier records; it does not record it.
+	// posture the web tier records; it does not record it. GM identity below does
+	// NOT hang off this boot-time value ([workerAccessPolicy]).
 	admission := auth.AdmissionAllowlist
 	if res, aerr := resolveAdmissionMode(ctx, store, os.Getenv); aerr != nil {
 		log.Warn("voice worker: resolve admission mode; defaulting to allowlist gates", "err", aerr)
@@ -497,10 +491,10 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// GM labels. A failed load degrades to the env allowlist alone, never a boot
 	// failure. On an `allowlist` deployment only ADMITTED operators are GM
 	// (ADR-0065): the worker usually has no GLYPHOXA_OPERATOR_IDS, so the Platform
-	// Admins come from the list the web tier records. Set before the store is
-	// shared with anything concurrent.
-	allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
-	store.SetAccessPolicy(accessPolicyFor(false, admission, allow, true))
+	// Admins — and the Admission Mode that decides whether a grant is needed at
+	// all — come from what the web tier records, read live. Set before the store
+	// is shared with anything concurrent.
+	allow := installWorkerAccessPolicy(store, false, os.Getenv)
 	gmID := auth.NewGMIdentity(store, allow, log)
 	if err := gmID.Refresh(ctx); err != nil {
 		log.Warn("voice worker: loading tenant-operator GM bindings failed; falling back to the allowlist", "err", err)
@@ -993,7 +987,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// rather than off a browser session — GM identity on Discord and the host
 	// standing of a Campaign's guests (storage.AccessPolicy). Set before the
 	// store is shared with anything concurrent.
-	store.SetAccessPolicy(accessPolicyFor(dev, admission, allow, false))
+	installWebAccessPolicy(store, dev, admission, allow)
 
 	// Boot-time session sweep (ADR-0041 amendment, issue #184): the Platform
 	// Admin list gates only NEW logins at the OAuth callback, so sessions
@@ -1029,15 +1023,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Record the posture only now — AFTER the open-mode preflights — so a flip
 	// to `open` that refuses to boot never becomes the deployment's recorded
 	// state (a config revert then restores service without a manual override).
-	if !dev {
-		if err := admissionRes.record(ctx, store, log); err != nil {
-			return err
-		}
-		// A copy of the Platform Admin list for the voice workers, which are
-		// not given GLYPHOXA_OPERATOR_IDS (storage.AccessPolicy.RecordedAdmins).
-		if err := store.RecordPlatformAdmins(ctx, string(admission), allow.IDs()); err != nil {
-			return fmt.Errorf("web: %w", err)
-		}
+	// With it goes a copy of the Platform Admin list: the voice workers are
+	// given neither and read both from here (storage.AccessPolicy.RecordedAdmins).
+	if err := recordWebAccessPosture(ctx, store, dev, admissionRes, allow, log); err != nil {
+		return err
 	}
 
 	// GM identity (ADR-0055, amending ADR-0050's allowlist-membership clause):

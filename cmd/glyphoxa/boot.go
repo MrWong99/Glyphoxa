@@ -202,20 +202,87 @@ func (r admissionResolution) record(ctx context.Context, settings admissionSetti
 	return nil
 }
 
-// accessPolicyFor builds the store's operator-standing rule (ADR-0065,
+// webAccessPolicy builds the web tier's operator-standing rule (ADR-0065,
 // [storage.AccessPolicy]) from the same facts the boot sweep is given: on an
 // `allowlist` deployment a Tenant's operator must be a Platform Admin or hold
 // an Access Grant to keep GM standing on Discord and to keep their Campaigns
 // reachable for guests. `open` mode requires nothing (suspension revokes
 // there), and neither does GLYPHOXA_DEV_MODE, which preempts Admission Mode
-// entirely. recordedAdmins is for a process that is not given the env list (a
-// voice worker): it additionally trusts the list the web tier recorded.
-func accessPolicyFor(dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist, recordedAdmins bool) storage.AccessPolicy {
+// entirely. An unknown mode is treated as allowlist: it fails closed.
+func webAccessPolicy(dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist) storage.AccessPolicy {
 	return storage.AccessPolicy{
 		OperatorsNeedGrant: !dev && admission != auth.AdmissionOpen,
 		PlatformAdmins:     allow.IDs(),
-		RecordedAdmins:     recordedAdmins,
 	}
+}
+
+// workerAccessPolicy is the same rule for a process the deployment's access
+// posture is not configured on — a voice worker or a standalone voice node,
+// which get neither GLYPHOXA_ADMISSION_MODE nor (usually) GLYPHOXA_OPERATOR_IDS
+// and are not restarted when the web tier's values change. It deliberately takes NO
+// Admission Mode: a mode latched at boot would keep dropping every self-signup
+// GM after an allowlist -> open flip (or keep binding revoked operators after
+// a lock-down) until the worker happened to restart, and a posture the worker
+// could not read at boot would do the same. Instead the store reads the
+// recorded posture and Platform Admin list live ([storage.AccessPolicy]
+// RecordedAdmins) — and requires nothing while the web tier has recorded
+// neither. Any GLYPHOXA_OPERATOR_IDS the process does have count on top.
+func workerAccessPolicy(dev bool, allow auth.OperatorAllowlist) storage.AccessPolicy {
+	return storage.AccessPolicy{
+		OperatorsNeedGrant: !dev,
+		PlatformAdmins:     allow.IDs(),
+		RecordedAdmins:     true,
+	}
+}
+
+// accessPolicyStore is where the boot installs the [storage.AccessPolicy].
+// *storage.Store satisfies it.
+type accessPolicyStore interface {
+	SetAccessPolicy(p storage.AccessPolicy)
+}
+
+// installWebAccessPolicy hands the web tier's store its operator-standing
+// rule. Extracted from runWeb (like [armVoiceGMGate]) so the wiring itself is
+// under test: the zero policy requires nothing, so a boot that forgot this
+// call would fail open — revoked operators stay GM, their guests stay in —
+// with every storage test still green.
+func installWebAccessPolicy(store accessPolicyStore, dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist) {
+	store.SetAccessPolicy(webAccessPolicy(dev, admission, allow))
+}
+
+// installWorkerAccessPolicy does the same for a voice worker / standalone
+// voice node, and returns the process's own GLYPHOXA_OPERATOR_IDS (usually
+// empty there) for the GM identity built next.
+func installWorkerAccessPolicy(store accessPolicyStore, dev bool, getenv func(string) string) auth.OperatorAllowlist {
+	allow := auth.ParseOperatorAllowlist(getenv("GLYPHOXA_OPERATOR_IDS"))
+	store.SetAccessPolicy(workerAccessPolicy(dev, allow))
+	return allow
+}
+
+// accessPostureRecorder is the write surface [recordWebAccessPosture] needs.
+// *storage.Store satisfies it.
+type accessPostureRecorder interface {
+	admissionSettings
+	RecordPlatformAdmins(ctx context.Context, mode string, discordUserIDs []string) error
+}
+
+// recordWebAccessPosture persists what the web tier booted with for the
+// processes that are not configured with it ([workerAccessPolicy]): the
+// effective Admission Mode ([admissionResolution.record]) and a copy of the
+// Platform Admin list. Called AFTER the open-mode preflights, so a flip that
+// refuses to boot is never recorded. A dev instance records nothing —
+// GLYPHOXA_DEV_MODE preempts Admission Mode and has no Platform Admin list.
+func recordWebAccessPosture(ctx context.Context, store accessPostureRecorder, dev bool, res admissionResolution, allow auth.OperatorAllowlist, log *slog.Logger) error {
+	if dev {
+		return nil
+	}
+	if err := res.record(ctx, store, log); err != nil {
+		return err
+	}
+	if err := store.RecordPlatformAdmins(ctx, string(res.Effective), allow.IDs()); err != nil {
+		return fmt.Errorf("web: %w", err)
+	}
+	return nil
 }
 
 // sessionSweeper is the revocation write [sweepAllowlistSessions] needs.

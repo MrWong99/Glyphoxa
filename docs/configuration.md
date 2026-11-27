@@ -190,7 +190,10 @@ What *Revoke* on a person does beyond the web sign-out, and what it does not:
 
 - **It switches their Tenant's Platform Keys off**, so nothing of theirs runs
   on the deployment's provider keys any more. If you grant access again later,
-  check the switch on their row: it stays off unless you turn it on.
+  their Tenant's switch follows that grant's Platform Keys choice: *Grant
+  access* on their row keeps what the row shows (off after a revoke), a link
+  they redeem sets what the link says. Check the switch on their row
+  afterwards.
 - **They stop being GM on Discord within about a minute.** The bot refreshes
   who is GM once a minute; after that their `/glyphoxa` commands are refused
   in their own server too.
@@ -198,12 +201,16 @@ What *Revoke* on a person does beyond the web sign-out, and what it does not:
   resolves its keys once, at start, and keeps going until it is ended or goes
   idle. If one is live when you revoke, end it (`/glyphoxa end` in that
   server — Platform Admins are GM everywhere) or wait for Idle Close.
-- **They cannot come back through the link that let them in.** A revoked
-  person who opens the same invitation link again is refused, even while the
-  link still works for others. The same holds for a Campaign Guest a GM
-  removed and the campaign link they joined through. To let someone back in,
-  grant access explicitly (or, for a guest, add them again in *Sharing*), or
-  hand them a **new** link.
+- **They cannot come back through any link that existed when they were
+  revoked.** A revoked person who opens an invitation link created before the
+  revoke is refused — whichever link it is, and whether they were admitted
+  through a link or by Discord User ID — while those links keep working for
+  everyone else. A link created afterwards, or granting them by Discord User
+  ID, lets them back in. Granting them again does not re-open the old links:
+  if you revoke once more, they are still refused. The same holds for a
+  Campaign Guest a GM removed and the invitation links of that Campaign: a
+  link created after the removal, or adding them again in *Sharing*, lets
+  them back in.
 
 **The Platform Keys switch.** Each Tenant has a switch deciding whether it may
 run on the deployment's own provider keys (the `*_API_KEY` env vars — your

@@ -523,6 +523,44 @@ func TestRedeemCampaignInvitation_Races(t *testing.T) {
 	if uses := invitationUses(t, w.st, "link-a") + invitationUses(t, w.st, "link-b"); uses != 1 {
 		t.Errorf("the two raced links counted %d uses, want 1: the loser redeemed as an existing guest", uses)
 	}
+
+	// A GM removing a guest while that guest reopens their link. The removal
+	// writes a refusal row referencing the invitation the redemption has
+	// locked, and the redemption wants the guest row the removal is deleting:
+	// with a full row lock on the invitation that is a deadlock (SQLSTATE
+	// 40P01). Both must finish; the removal always wins in the end.
+	for round := range 12 {
+		link := fmt.Sprintf("reopen-%d", round)
+		who := fmt.Sprintf("22000000000000%04d", round)
+		w.mintCampaign(t, w.alpha, link, func(n *storage.NewInvitation) { n.Rights = []string{"wiki.read"} })
+		joined, err := w.st.RedeemCampaignInvitation(ctx, link, redemption(who, "Reopener"))
+		if err != nil {
+			t.Fatalf("round %d: join: %v", round, err)
+		}
+		var redeemErr, removeErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, redeemErr = w.st.RedeemCampaignInvitation(ctx, link, redemption(who, "Reopener"))
+		}()
+		go func() {
+			defer wg.Done()
+			removeErr = w.st.RemoveCampaignGuest(ctx, w.alpha, joined.User.ID)
+		}()
+		wg.Wait()
+		if removeErr != nil {
+			t.Fatalf("round %d: RemoveCampaignGuest racing a redemption: %v", round, removeErr)
+		}
+		if redeemErr != nil && !errors.Is(redeemErr, storage.ErrInvitationInvalid) {
+			t.Fatalf("round %d: redemption racing a removal: %v, want success or ErrInvitationInvalid", round, redeemErr)
+		}
+		if _, err := w.st.GetCampaignGuest(ctx, w.alpha, joined.User.ID); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("round %d: guest row after the race = %v, want removed", round, err)
+		}
+		if _, err := w.st.RedeemCampaignInvitation(ctx, link, redemption(who, "Reopener")); !errors.Is(err, storage.ErrInvitationInvalid) {
+			t.Fatalf("round %d: reopening the link after the removal = %v, want ErrInvitationInvalid", round, err)
+		}
+	}
 }
 
 // TestResolveWorkspace walks the one-query resolution: the selection when the

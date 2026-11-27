@@ -7,10 +7,12 @@
 -- and would otherwise let the removed person straight back in. Redemption
 -- refuses a (link, person) pair found here and counts no use.
 --
--- Per link on purpose: a NEW link admits them again, and so does an explicit
--- grant / add by Discord User ID, which clears the person's rows for that
--- scope. Keyed by snowflake like access_grant, so it does not depend on a
--- users row. Rows go with their invitation.
+-- Per link on purpose: a revoke / removal writes a row for every link of that
+-- scope existing at the time, so a link created AFTERWARDS admits them again,
+-- and so does an explicit grant / add by Discord User ID. Rows are never
+-- cleared (they are inert while the person is admitted). Keyed by snowflake
+-- like access_grant, so it does not depend on a users row. Rows go with their
+-- invitation.
 CREATE TABLE invitation_refusal (
     invitation_id   uuid NOT NULL REFERENCES invitation (id) ON DELETE CASCADE,
     discord_user_id text NOT NULL,

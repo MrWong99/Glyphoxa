@@ -1676,33 +1676,38 @@ func TestDeploymentLLMDefault_WarnsOnUnpricedModel(t *testing.T) {
 	}
 }
 
-// TestAccessPolicyFor pins the operator-standing rule each process hands its
-// store (ADR-0065): only an allowlist deployment requires a Tenant's operator
-// to be admitted, dev mode preempts the Admission Mode, and only a process
-// without the env list trusts the recorded Platform Admin list.
-func TestAccessPolicyFor(t *testing.T) {
+// TestAccessPolicies pins the operator-standing rule each process hands its
+// store (ADR-0065). Web: only an allowlist deployment requires a Tenant's
+// operator to be admitted, and dev mode preempts the Admission Mode. Worker:
+// no Admission Mode at all — it always asks the store to read the recorded
+// posture and Platform Admin list live.
+func TestAccessPolicies(t *testing.T) {
 	t.Parallel()
 	allow := auth.ParseOperatorAllowlist("111,222")
 	for _, tc := range []struct {
 		name      string
 		dev       bool
 		admission auth.AdmissionMode
-		recorded  bool
 		wantNeed  bool
 	}{
-		{"allowlist web", false, auth.AdmissionAllowlist, false, true},
-		{"allowlist voice worker", false, auth.AdmissionAllowlist, true, true},
-		{"open", false, auth.AdmissionOpen, false, false},
-		{"dev mode preempts the admission mode", true, auth.AdmissionAllowlist, false, false},
+		{"allowlist", false, auth.AdmissionAllowlist, true},
+		{"open", false, auth.AdmissionOpen, false},
+		{"dev mode preempts the admission mode", true, auth.AdmissionAllowlist, false},
 		// An unknown posture is treated as allowlist: it fails closed.
-		{"unset mode", false, auth.AdmissionMode(""), false, true},
+		{"unset mode", false, auth.AdmissionMode(""), true},
 	} {
-		got := accessPolicyFor(tc.dev, tc.admission, allow, tc.recorded)
-		if got.OperatorsNeedGrant != tc.wantNeed || got.RecordedAdmins != tc.recorded {
-			t.Errorf("%s: policy = %+v, want OperatorsNeedGrant=%v RecordedAdmins=%v", tc.name, got, tc.wantNeed, tc.recorded)
+		got := webAccessPolicy(tc.dev, tc.admission, allow)
+		if got.OperatorsNeedGrant != tc.wantNeed || got.RecordedAdmins {
+			t.Errorf("web, %s: policy = %+v, want OperatorsNeedGrant=%v and no recorded state", tc.name, got, tc.wantNeed)
 		}
 		if !slices.Equal(got.PlatformAdmins, []string{"111", "222"}) {
-			t.Errorf("%s: PlatformAdmins = %v, want the env list", tc.name, got.PlatformAdmins)
+			t.Errorf("web, %s: PlatformAdmins = %v, want the env list", tc.name, got.PlatformAdmins)
+		}
+	}
+	for _, dev := range []bool{false, true} {
+		got := workerAccessPolicy(dev, allow)
+		if got.OperatorsNeedGrant == dev || !got.RecordedAdmins || !slices.Equal(got.PlatformAdmins, []string{"111", "222"}) {
+			t.Errorf("worker, dev=%v: policy = %+v, want OperatorsNeedGrant=%v, RecordedAdmins and the env list", dev, got, !dev)
 		}
 	}
 }

@@ -55,7 +55,7 @@ export const en = {
   "access.restore": "Restore",
   "access.revokeTitle": "Revoke {name}'s access?",
   "access.revokeDesc":
-    "They are signed out everywhere and can't sign in again. Their table and its data are kept, and you can grant access again at any time.",
+    "They are signed out everywhere and can't sign in again — not through any invitation link that exists now either. Their table and its data are kept. A link you create afterwards, or granting access again, lets them back in.",
   "access.suspendTitle": "Suspend {name}?",
   "access.suspendDesc":
     "They are refused on their next request and at sign-in until you restore them. Nothing is deleted.",
@@ -201,7 +201,7 @@ export const en = {
   "access.removeGuestNamed": "Remove {name}",
   "access.removeGuestTitle": "Remove {name} from this campaign?",
   "access.removeGuestDesc":
-    "It takes effect immediately: their next click is refused and the campaign disappears from their list. Nothing they wrote is deleted, and you can add them again at any time.",
+    "It takes effect immediately: their next click is refused and the campaign disappears from their list, and this campaign's existing invitation links no longer work for them. Nothing they wrote is deleted. A link you create afterwards, or adding them again, lets them back in.",
   "access.toastGuestRemoved": "{name} can no longer open this campaign",
   "access.addGuestTitle": "Add someone",
   "access.addGuestLede":
@@ -333,7 +333,7 @@ export const de: Record<keyof typeof en, string> = {
   "access.restore": "Entsperren",
   "access.revokeTitle": "{name} den Zugang entziehen?",
   "access.revokeDesc":
-    "Die Person wird überall abgemeldet und kann sich nicht mehr anmelden. Ihr Tisch und seine Daten bleiben erhalten, und du kannst den Zugang jederzeit wieder geben.",
+    "Die Person wird überall abgemeldet und kann sich nicht mehr anmelden — auch nicht über einen Einladungslink, den es jetzt schon gibt. Ihr Tisch und seine Daten bleiben erhalten. Ein Link, den du danach erstellst, oder ein erneut gegebener Zugang lässt sie wieder herein.",
   "access.suspendTitle": "{name} sperren?",
   "access.suspendDesc":
     "Die Person wird bei ihrer nächsten Anfrage und bei der Anmeldung abgewiesen, bis du sie entsperrst. Gelöscht wird nichts.",
@@ -477,7 +477,7 @@ export const de: Record<keyof typeof en, string> = {
   "access.removeGuestNamed": "{name} entfernen",
   "access.removeGuestTitle": "{name} aus dieser Kampagne entfernen?",
   "access.removeGuestDesc":
-    "Das gilt sofort: Ihr nächster Klick wird abgewiesen und die Kampagne verschwindet aus ihrer Liste. Nichts, was sie geschrieben haben, wird gelöscht, und du kannst sie jederzeit wieder hinzufügen.",
+    "Das gilt sofort: Ihr nächster Klick wird abgewiesen und die Kampagne verschwindet aus ihrer Liste, und die bestehenden Einladungslinks dieser Kampagne funktionieren für sie nicht mehr. Nichts, was sie geschrieben haben, wird gelöscht. Ein Link, den du danach erstellst, oder erneutes Hinzufügen lässt sie wieder herein.",
   "access.toastGuestRemoved": "{name} kann diese Kampagne nicht mehr öffnen",
   "access.addGuestTitle": "Jemanden hinzufügen",
   "access.addGuestLede":

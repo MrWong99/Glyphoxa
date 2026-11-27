@@ -26,9 +26,10 @@ import (
 //
 // The zero value requires nothing, which is `open` Admission Mode (there,
 // self-signup admits and suspension revokes) and GLYPHOXA_DEV_MODE. The
-// composition root sets it once with [Store.SetAccessPolicy], from the same
-// effective Admission Mode and Platform Admin list the boot sweep
-// ([Store.RevokeSessionsOutsideAllowlist]) is given.
+// composition root sets it once with [Store.SetAccessPolicy]: on the web tier
+// from the same effective Admission Mode and Platform Admin list the boot
+// sweep ([Store.RevokeSessionsOutsideAllowlist]) is given; on a process that
+// is configured with neither, see RecordedAdmins.
 //
 // Suspension is independent of all this: a suspended operator has no standing
 // in any Admission Mode.
@@ -38,14 +39,28 @@ type AccessPolicy struct {
 	// PlatformAdmins are the Discord snowflakes admitted without a grant
 	// (GLYPHOXA_OPERATOR_IDS), as this process was configured with them.
 	PlatformAdmins []string
-	// RecordedAdmins additionally trusts the Platform Admin list the web tier
-	// recorded at its last boot ([Store.RecordPlatformAdmins]). It is for a
-	// process that is NOT given GLYPHOXA_OPERATOR_IDS — a voice worker — and
-	// so cannot name the Platform Admins itself. While no list has ever been
-	// recorded such a process requires nothing: it has no way to tell a
-	// Platform Admin from a revoked operator, and dropping the deployment's
-	// own admin from GM standing is the worse failure. The web tier knows the
-	// list first-hand and leaves this false.
+	// RecordedAdmins is for a process that is NOT configured with the
+	// deployment's access posture — a voice worker, which is given neither
+	// GLYPHOXA_OPERATOR_IDS nor GLYPHOXA_ADMISSION_MODE and is not restarted
+	// when the web tier's values change. Such a process reads both LIVE, on
+	// every query, from what the web tier recorded at its last boot
+	// (deployment_settings: [Store.RecordAdmissionPosture],
+	// [Store.RecordPlatformAdmins]):
+	//
+	//   - the recorded Platform Admin list counts in addition to
+	//     PlatformAdmins;
+	//   - a recorded Admission Mode of `open` requires nothing, whatever
+	//     OperatorsNeedGrant says. A worker therefore sets OperatorsNeedGrant
+	//     unconditionally and lets the row decide: it follows a flip in either
+	//     direction within one read instead of latching the mode it booted
+	//     under;
+	//   - while no admin list has ever been recorded (no row, or a row from
+	//     before the column existed) it requires nothing: the process cannot
+	//     tell a Platform Admin from a revoked operator, and dropping the
+	//     deployment's own admin — or every GM — from GM standing is the
+	//     worse failure.
+	//
+	// The web tier knows both first-hand and leaves this false.
 	RecordedAdmins bool
 }
 
@@ -75,7 +90,8 @@ func (s *Store) accessArgs() (needGrant bool, admins []string, recorded bool) {
 // operatorAdmittedClause is the SQL test "the users row aliased userAlias is
 // admitted to operate a Tenant under the deployment's [AccessPolicy]": no
 // grant is required, or they are a Platform Admin, or they hold an Access
-// Grant. The three [Store.accessArgs] values sit at positions arg, arg+1 and
+// Grant. For a RecordedAdmins process the recorded posture is read here, live
+// (see the field). The three [Store.accessArgs] values sit at positions arg, arg+1 and
 // arg+2 of the query. Suspension is NOT part of it — callers add that.
 func operatorAdmittedClause(userAlias string, arg int) string {
 	need, admins, recorded := "$"+strconv.Itoa(arg), "$"+strconv.Itoa(arg+1), "$"+strconv.Itoa(arg+2)
@@ -84,6 +100,7 @@ func operatorAdmittedClause(userAlias string, arg int) string {
 		OR ` + id + ` = ANY(` + admins + `::text[])
 		OR (` + recorded + `::boolean AND (
 		      NOT EXISTS (SELECT 1 FROM deployment_settings ds WHERE ds.id AND ds.platform_admin_ids IS NOT NULL)
+		      OR EXISTS (SELECT 1 FROM deployment_settings ds WHERE ds.id AND ds.admission_mode = 'open')
 		      OR EXISTS (SELECT 1 FROM deployment_settings ds WHERE ds.id AND ` + id + ` = ANY(ds.platform_admin_ids))))
 		OR EXISTS (SELECT 1 FROM access_grant ag WHERE ag.discord_user_id = ` + id + `))`
 }

@@ -36,6 +36,13 @@ const bootPGImage = "pgvector/pgvector:pg17"
 
 func bootMigratedStore(t *testing.T) *storage.Store {
 	t.Helper()
+	return storage.New(bootMigratedPool(t))
+}
+
+// bootMigratedPool is [bootMigratedStore]'s database as a bare pool, for a
+// test that needs two Stores — two processes — over one database.
+func bootMigratedPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 	ctx := context.Background()
 	container, err := tcpostgres.Run(ctx, bootPGImage,
 		tcpostgres.WithDatabase("glyphoxa_test"),
@@ -66,7 +73,7 @@ func bootMigratedStore(t *testing.T) *storage.Store {
 		t.Fatalf("pgxpool.New: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return storage.New(pool)
+	return pool
 }
 
 // TestDevModeAutoAuthEndToEnd drives the whole GLYPHOXA_DEV_MODE path against a
