@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // diceHardeningInstructions hold the instruction appended to the system prompt
@@ -76,7 +77,8 @@ var numberWordValues = map[string]int{
 // boundaries — the numeric shape a narrated die result takes ("a 19", "17! You
 // hit.", "Meine Initiative ist 15"). The guard only runs on dice-ARMED turns where
 // no dice was executed, so recall matters more than precision: every such integer
-// counts, except one directly followed by a unit noun ([unitAfterNumber]).
+// counts, except one directly followed by a unit noun ([unitAfterNumber]) the
+// user did not ask a roll of ([userNamesUnit]).
 //
 // Residual: the 1..100 cap misses a 3-digit invented result ("Ergebnis: 120") —
 // a false NEGATIVE, deliberate (d100 is the largest standard die; years and big
@@ -86,31 +88,62 @@ var claimRollNumber = regexp.MustCompile(`\b([1-9][0-9]?|100)\b`)
 
 // unitAfterNumber is a currency, time or distance noun (EN/DE, lowercased word
 // prefix) right after a number: "5 Kupferstücke", "20 Goldstücke", "vor 3 Tagen",
-// "40 years", "30 Fuß". Such a number is a quantity, not a die result (O5). It is
-// a prefix match so German compounds and plurals are covered.
+// "40 years", "30 Fuß". Such a number is a quantity, not a die result (O5) —
+// UNLESS the armed user utterance asked for a roll of that same unit (a quantity
+// roll, #690; see [userNamesUnit]). It is a prefix match so German compounds and
+// plurals are covered.
 var unitAfterNumber = regexp.MustCompile(`^\s*(gold|silber|silver|kupfer|copper|platin|münz|muenz|taler|krone|dukat|heller|groschen|coin|gp\b|sp\b|cp\b|pp\b|gm\b|piece|tag\b|tage\b|tagen|stunde|minute|sekunde|woche|monat|jahr|nacht|nächte|naechte|uhr\b|day|hour|second|week|month|year|night|o'clock|meile|mile|meter|fuß|fuss|feet|foot|schritt|pace|yard)`)
 
 // claimsRollResult reports whether text reads as a narrated die result (#399,
 // Option C): explicit die notation ("d20", "2w6", "d%") is stripped first — those
 // are the request, not a result — and what remains is checked for a 1..100
 // integer that is not a quantity ([unitAfterNumber]) or a spelled-out number word
-// in a roll-claim context (#438). Language-free and recall-biased: a false
-// positive only costs one regeneration on a turn where the dice Tool was already
-// armed, whereas a false negative would ship an invented number.
-func claimsRollResult(text string) bool {
-	return len(claimedRollValues(text)) > 0
+// in a roll-claim context (#438). userText is the armed user utterance: a
+// unit-suffixed number stays a claim when the user asked for a roll of that unit
+// (#690). Language-free and recall-biased: a false positive only costs one
+// regeneration on a turn where the dice Tool was already armed, whereas a false
+// negative would ship an invented number.
+func claimsRollResult(text, userText string) bool {
+	return len(claimedRollValues(text, userText)) > 0
+}
+
+// userNamesUnit reports whether the lowercased user utterance contains a word
+// STARTING with unit, the lowercased [unitAfterNumber] prefix found after a
+// number in the reply (#690): "Würfel, wie viel Gold wir finden" names the "gold"
+// of "12 Goldstücke", so that number is the requested roll's result, not an
+// incidental quantity. Word-start, not substring, so "tag" is not found in
+// "Montag". An empty utterance names nothing.
+//
+// Residual: the match is on the SAME unit alternative, so an inflection landing
+// on another alternative ("Tage" asked, "3 Tagen" answered) and cross-unit or
+// cross-language pairs ("Gold" asked, "12 Münzen" answered) stay carved out — a
+// false NEGATIVE, the pre-#690 behaviour.
+func userNamesUnit(userLower, unit string) bool {
+	if userLower == "" || unit == "" {
+		return false
+	}
+	for _, w := range strings.FieldsFunc(userLower, func(r rune) bool { return !unicode.IsLetter(r) }) {
+		if strings.HasPrefix(w, unit) {
+			return true
+		}
+	}
+	return false
 }
 
 // claimedRollValues extracts the roll values text claims (#438): every 1..100
-// integer not followed by a unit noun (after die notation is stripped), then
-// every spelled-out number word in a roll-claim context, mapped to its integer.
-// The values feed the regen-consistency check ([rollClaimConsistent]); an empty
+// integer not followed by a unit noun (after die notation is stripped) — or
+// followed by one the armed user utterance userText names itself, a quantity roll
+// (#690, [userNamesUnit]; an empty userText carves every unit out) — then every
+// spelled-out number word in a roll-claim context, mapped to its integer. The
+// values feed the regen-consistency check ([rollClaimConsistent]); an empty
 // result means text makes no roll claim.
-func claimedRollValues(text string) []int {
+func claimedRollValues(text, userText string) []int {
 	stripped := diceNotation.ReplaceAllString(text, " ")
+	userLower := strings.ToLower(userText)
 	var vals []int
 	for _, loc := range claimRollNumber.FindAllStringIndex(stripped, -1) {
-		if unitAfterNumber.MatchString(strings.ToLower(stripped[loc[1]:])) {
+		unit := strings.TrimSpace(unitAfterNumber.FindString(strings.ToLower(stripped[loc[1]:])))
+		if unit != "" && !userNamesUnit(userLower, unit) {
 			continue
 		}
 		if n, err := strconv.Atoi(stripped[loc[0]:loc[1]]); err == nil {
@@ -142,8 +175,10 @@ var integerToken = regexp.MustCompile(`\d+`)
 // (modifiers, totals), and a false contradiction would burn the one bounded retry
 // — while the flagship failure (Tool rolled 7, reply claims 20 and never mentions
 // the 7) can never pass. A claim with NO Tool result at all always contradicts.
-func rollClaimConsistent(text string, results []string) bool {
-	claims := claimedRollValues(text)
+// userText is the armed user utterance, so a quantity roll's "N Goldstücke" is
+// held to the rolled value too (#690).
+func rollClaimConsistent(text, userText string, results []string) bool {
+	claims := claimedRollValues(text, userText)
 	if len(claims) == 0 {
 		return true
 	}

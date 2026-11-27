@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -105,22 +106,62 @@ type EdgeConfig struct {
 //     first entry — which this used to return — is whatever the client put
 //     in the header.
 //   - Otherwise the socket peer.
+//
+// Whichever source wins, the result is bounded by [auditIP].
 func (e EdgeConfig) clientIP(r *http.Request) string {
 	if e.ClientIPHeader != "" {
 		if ip := strings.TrimSpace(r.Header.Get(e.ClientIPHeader)); ip != "" {
-			return ip
+			return auditIP(ip)
 		}
 	}
 	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
 		hops := strings.Split(xff[len(xff)-1], ",")
 		if last := strings.TrimSpace(hops[len(hops)-1]); last != "" {
-			return last
+			return auditIP(last)
 		}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+		return auditIP(host)
 	}
-	return r.RemoteAddr
+	return auditIP(r.RemoteAddr)
+}
+
+// Bounds on the two request-derived strings every session row stores
+// (sessions.ip, sessions.ua). Both columns are unbounded text and net/http
+// admits a header of up to 1 MiB, so without a bound each login could park a
+// megabyte of client-chosen text in the database until the session expires.
+const (
+	// maxSessionIPLen fits any IPv4/IPv6 literal (45 bytes at most) with room
+	// for a short zone.
+	maxSessionIPLen = 64
+	// maxSessionUALen is well past any real browser's User-Agent.
+	maxSessionUALen = 512
+)
+
+// auditIP bounds a client address for the session audit row. An address that
+// parses is stored in its canonical form; anything else — a misconfigured
+// header, a proxy's "unknown" — is still recorded, since it is what the edge
+// reported, but cut to [maxSessionIPLen].
+func auditIP(s string) string {
+	if addr, err := netip.ParseAddr(s); err == nil {
+		s = addr.String()
+	}
+	return clampAudit(s, maxSessionIPLen)
+}
+
+// auditUA is the request's User-Agent bounded for the session audit row.
+func auditUA(r *http.Request) string {
+	return clampAudit(r.UserAgent(), maxSessionUALen)
+}
+
+// clampAudit cuts s to at most limit bytes of valid UTF-8. Header values are
+// bytes, not text: dropping the invalid ones (including a rune the cut split)
+// keeps Postgres from refusing the session insert, which would fail the login.
+func clampAudit(s string, limit int) string {
+	if len(s) > limit {
+		s = s[:limit]
+	}
+	return strings.ToValidUTF8(s, "")
 }
 
 // sessionCookie builds the HttpOnly session cookie (ADR-0016: HttpOnly, Secure,

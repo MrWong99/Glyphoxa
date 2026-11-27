@@ -3,7 +3,11 @@ package providererr
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // TestHTTPError_ErrorFormat pins the rendered message byte-for-byte: the doc
@@ -41,6 +45,95 @@ func TestHTTPError_AsThroughWrap(t *testing.T) {
 		t.Fatalf("errors.As returned a different value than the wrapped one")
 	}
 }
+
+// errorResponse is a hand-built non-2xx response with the given body reader.
+func errorResponse(code int, status string, body io.Reader) *http.Response {
+	return &http.Response{StatusCode: code, Status: status, Body: io.NopCloser(body)}
+}
+
+// TestFromResponse_ErrorFormat pins that the shared constructor renders the same
+// literal [TestHTTPError_ErrorFormat] does — the adapters' message must not move
+// now that they all build it here — with the body snippet trimmed.
+func TestFromResponse_ErrorFormat(t *testing.T) {
+	resp := errorResponse(429, "429 Too Many Requests", strings.NewReader("  rate limited\n"))
+	err := FromResponse(resp, "elevenlabs.Transcribe")
+
+	want := "elevenlabs.Transcribe: HTTP 429 429 Too Many Requests: rate limited"
+	if got := err.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+
+	var httpErr *HTTPError
+	if !errors.As(fmt.Errorf("start: %w", err), &httpErr) {
+		t.Fatalf("errors.As failed to find *HTTPError through a wrap")
+	}
+	if httpErr.Op != "elevenlabs.Transcribe" || httpErr.StatusCode != 429 || httpErr.Status != "429 Too Many Requests" {
+		t.Fatalf("HTTPError = %+v, want Op/StatusCode/Status carried from the response", httpErr)
+	}
+}
+
+// TestFromResponse_BodySnippet pins the snippet contract [HTTPError] documents:
+// at most 512 bytes of the body, and an empty body is an empty snippet.
+func TestFromResponse_BodySnippet(t *testing.T) {
+	long := strings.Repeat("x", 2000)
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"truncated to the cap", long, long[:errorSnippetBytes]},
+		{"exactly the cap", long[:errorSnippetBytes], long[:errorSnippetBytes]},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := FromResponse(errorResponse(500, "500 Internal Server Error", strings.NewReader(tt.body)), "anthropic.Complete")
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) {
+				t.Fatalf("FromResponse returned %T, want *HTTPError", err)
+			}
+			if httpErr.Body != tt.want {
+				t.Fatalf("Body is %d bytes, want %d", len(httpErr.Body), len(tt.want))
+			}
+		})
+	}
+}
+
+// TestFromResponse_BodyReadError pins that a body failing mid-read still yields
+// the typed error with the status intact and whatever was read before the
+// failure: retry classification needs the status code, not the snippet.
+func TestFromResponse_BodyReadError(t *testing.T) {
+	body := io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(errors.New("connection reset")))
+	err := FromResponse(errorResponse(503, "503 Service Unavailable", body), "elevenlabs.Synthesize")
+
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("FromResponse returned %T, want *HTTPError", err)
+	}
+	if httpErr.StatusCode != 503 || httpErr.Status != "503 Service Unavailable" {
+		t.Fatalf("status = %d %q, want 503 %q", httpErr.StatusCode, httpErr.Status, "503 Service Unavailable")
+	}
+	if httpErr.Body != "partial" {
+		t.Fatalf("Body = %q, want the bytes read before the failure %q", httpErr.Body, "partial")
+	}
+}
+
+// TestFromResponse_LeavesBodyOpen pins that closing stays with the caller: the
+// adapters defer resp.Body.Close() themselves.
+func TestFromResponse_LeavesBodyOpen(t *testing.T) {
+	body := &closeSpy{Reader: strings.NewReader("nope")}
+	_ = FromResponse(&http.Response{StatusCode: 400, Status: "400 Bad Request", Body: body}, "elevenlabs.ListVoices")
+	if body.closed {
+		t.Fatalf("FromResponse closed resp.Body; the caller owns the close")
+	}
+}
+
+type closeSpy struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeSpy) Close() error { c.closed = true; return nil }
 
 // TestToolSyntaxError_MsgVerbatim pins the byte-preserved provider text: logs and
 // downstream substring checks must see exactly what the vendor returned.

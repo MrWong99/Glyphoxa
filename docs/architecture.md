@@ -11,9 +11,12 @@ runbook is [docs/configuration.md](configuration.md).
 
 > **Audit status (2026-11-20, against v0.16.0).** §1, §2.2–§2.6, §3, §5, the
 > CI paragraph in §8 and the two closing tables were re-checked against the
-> tree. §4.1–§4.4 still describe the single-Operator MVP web tier (ADR-0039);
-> self-signup (ADR-0055), Player Invitations (ADR-0056) and the per-Tenant
-> presence registry (§5) have since widened it — read those ADRs alongside §4.
+> tree. §4.1 (screens), §4.2 and §4.4 were re-checked on 2026-11-27 after
+> web-managed access (ADR-0065) landed. §4.3 and the rest of §4.1 were not:
+> they predate the per-Tenant presence registry (§5) and Workspaces
+> (ADR-0065), and §4 does not cover Campaign Guests and Guest Rights in any
+> detail — read ADR-0065 (which supersedes ADR-0056's Player Invitations)
+> alongside §4.
 
 **How to read this doc.** ADRs record *decisions*; the tree records what
 *shipped*. Where the two disagree, this doc follows the tree and says so in the
@@ -462,7 +465,10 @@ so it runs inline.
 > ADR-0018 ([TanStack Router + Query + connect-query](adr/0018-tanstack-router-and-query.md)) ·
 > ADR-0017 ([Radix + plain CSS tokens](adr/0017-radix-plus-plain-css-tokens.md)) ·
 > ADR-0039 ([single-operator web tier](adr/0039-mvp-ui-backend-single-operator-web-tier.md)) ·
-> ADR-0041 ([operator allowlist](adr/0041-operator-allowlist-access-policy.md))
+> ADR-0041 ([operator allowlist](adr/0041-operator-allowlist-access-policy.md)) ·
+> ADR-0055 ([self-signup, Admission Modes](adr/0055-self-signup-admission-modes.md)) ·
+> ADR-0063 ([Campaign sub-views in the sidebar](adr/0063-campaign-subnav-in-sidebar.md)) ·
+> ADR-0065 ([web-managed access](adr/0065-web-managed-access-platform-admins-grants-campaign-guests.md))
 
 ### 4.1 Shape
 
@@ -474,10 +480,13 @@ shape survives. The screens (`web/src/screens/`):
 |--------|---------|
 | `landing`, `legal` | public landing page; Impressum, privacy policy, terms |
 | `login` | Discord OAuth entry |
+| `join` | public face of a `/join/<token>` Invitation, access or campaign (ADR-0065) |
 | `onboarding` | create a Tenant after an open-admission signup (ADR-0055) |
 | `configuration` | Provider Configs (BYOK), Discord settings, bot-authorization link, spend caps |
+| `campaigns` | Campaign management: one card per Campaign, archived ones apart; open, settings, export, duplicate, archive, delete, new, import |
 | `campaign` | sub-views in the sidebar, addressed by path (ADR-0063): cast/Agents + Tool Grants, the Knowledge Graph wiki and graph view, Maps, Players |
 | `session` | Start/Stop the Voice Session, live Transcript feed, NPC roster + mute, Highlights |
+| `admin` | Platform Admins only (ADR-0065): people and Access Grants, access Invitation links, suspension, per-Tenant Platform Keys |
 
 There is no separate transcripts screen — the live Transcript feed and its search
 live inside `session`. The Campaign screen has no alias editor, so an Agent's
@@ -497,8 +506,9 @@ One `.proto` source of truth (`proto/glyphoxa/management/v1/management.proto`)
 serves both Go (`connect-go`) and TypeScript. Shipped services, all under
 `glyphoxa.management.v1` and all implemented in `internal/rpc`:
 
-- `CampaignService` — Campaigns, Active Campaign, Agents, KG Nodes/Edges, Tool Grants
-- `AuthService` — `GetCurrentUser` (the one unauthenticated procedure), `Logout`
+- `CampaignService` — Campaigns, Active Campaign, Agents, KG Nodes/Edges, Tool Grants, Campaign Guests and campaign Invitations
+- `AuthService` — `GetCurrentUser`, `GetAdmissionMode` and `GetInvitation` (the unauthenticated procedures), `Logout`, `RenameTenant`, `SwitchWorkspace`
+- `AdminService` — Platform-Admin-only (ADR-0065): access overview, Access Grants, access Invitations, user suspension, the per-Tenant Platform Keys switch
 - `ProviderService` — Provider Configs, Discord settings, invite resolution, spend caps
 - `SessionService` — session snapshot, Start/Stop, mute, transcript search
 - `VoiceService` — ElevenLabs voice catalog + preview, Groq model catalog, provider health
@@ -506,9 +516,10 @@ serves both Go (`connect-go`) and TypeScript. Shipped services, all under
 
 **Tree vs ADR.** ADR-0015 also lists `TenantService` and a
 `glyphoxa.voice.v1.VoiceControlService` (`claim_session` / `release_session` /
-`push_event`). Neither is in `proto/`. Multi-tenant membership is deferred
-(ADR-0039), and `all` Mode drives sessions in-process rather than through a
-control RPC.
+`push_event`). Neither is in `proto/`. Tenants are provisioned by OAuth signup
+(ADR-0055) or an Access Grant (ADR-0065) rather than through an RPC, and
+cross-process session control is the Postgres claim plane (ADR-0057, §1), not
+a control RPC.
 
 ### 4.3 Real-time: SSE, not WebSocket
 
@@ -537,27 +548,38 @@ no bidirectional need on the Session screen, so WebSocket was rejected. SSE fram
 call `queryClient.setQueryData(...)` to amend the cached snapshot rather than
 maintaining a second React state tree (ADR-0018).
 
-### 4.4 Access: single Operator, mandatory allowlist
+### 4.4 Access: Platform Admins, Admission Modes, mandatory allowlist by default
 
-ADR-0039 scopes the web tier to **one Operator on a self-host box**. Discord OAuth
-plus an opaque `glyphoxa_session` cookie (HttpOnly, Secure, SameSite=Lax) gate the
-app (ADR-0016); one Tenant is auto-seeded and claimed by the first allowlisted
-Operator. The `X-Tenant-Id` interceptor and `/t/:slug` prefix stay as thin
-pass-throughs so the multi-tenant surface fills in later without a rewrite.
+ADR-0039 scoped the web tier to **one Operator on a self-host box**, and its
+login path is still the Platform Admin's: Discord OAuth plus an opaque
+`glyphoxa_session` cookie (HttpOnly, Secure, SameSite=Lax) gate the app
+(ADR-0016), and a Platform Admin's first login claims the earliest unclaimed
+Tenant (the seed's) or founds one. ADR-0055 and ADR-0065 widened who else gets
+in: the **Admission Mode** is `allowlist` (the default) or `open` (self-signup
+founds a fresh Tenant), and a browser session acts in one **Workspace** — the
+user's own
+Tenant or one Campaign they are a Campaign Guest of. The Tenant is resolved
+server-side from the session, never from a client header; the `/t/:slug`
+prefix names the Workspace for bookmarkable URLs and authorizes nothing.
 
-Authorization is ADR-0041's **mandatory operator allowlist**:
+Authorization starts from ADR-0041's **mandatory operator allowlist**:
 
-- `GLYPHOXA_OPERATOR_IDS` — Discord User snowflakes, checked at the OAuth callback
-  *before* any session issuance or Tenant write. There is **no** trust-on-first-use.
+- `GLYPHOXA_OPERATOR_IDS` — Discord User snowflakes. Admission is decided at
+  the OAuth callback *before* any session issuance or Tenant write. There is
+  **no** trust-on-first-use.
 - A `web`/`all` Instance **refuses to boot** unless all three `DISCORD_OAUTH_*`
-  variables and a non-empty allowlist are set — or `GLYPHOXA_DEV_MODE` is.
+  variables and a non-empty allowlist are set — or `GLYPHOXA_DEV_MODE` is. That
+  is `allowlist` Admission Mode; `open` mode (ADR-0055) relaxes only the
+  allowlist requirement — an empty list is then a deployment with no Platform
+  Admins, warned at boot — while a malformed non-empty list still refuses.
 - The allowlist names the **Platform Admins**. Everyone else on an `allowlist`
   deployment is admitted from the web (ADR-0065): an **Access Grant**
   (`access_grant`, by snowflake or through a `/join/<token>` invitation link)
   lets its holder found a Tenant of their own; the per-Tenant
   `tenant.platform_keys` switch decides whether that Tenant may spend the
   deployment's Platform Keys. The Platform-Admin-only `AdminService` manages
-  both.
+  both. A GM lets a **Campaign Guest** into one Campaign the same two ways
+  (by snowflake or a campaign Invitation); becoming a guest founds no Tenant.
 - Every non-dev `allowlist` boot sweeps sessions whose owner is no longer
   admitted — off the allowlist, no Access Grant, not a Campaign Guest
   (`storage.RevokeSessionsOutsideAllowlist`) — so a restart applies an
@@ -872,7 +894,7 @@ disagreement is documented rather than discovered.
 | ADR says | The tree does | Why / where |
 |----------|---------------|-------------|
 | ADR-0005: `voice_sessions` claim table with `voice_instance_id` / heartbeat / `LISTEN/NOTIFY` | a separate, polled `voice_session_intents` claim plane | ADR-0057 superseded the mechanism (§1) |
-| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | six services, all `management.v1` | Tenants are provisioned by OAuth signup (ADR-0055); cross-process session control is the Postgres claim plane, not an RPC |
+| ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | seven services, all `management.v1` | Tenants are provisioned by OAuth signup (ADR-0055); cross-process session control is the Postgres claim plane, not an RPC |
 | ADR-0010: permissions from `tenant_members.role` | operator allowlist membership | `tenant_members` does not exist (ADR-0010 #102 amendment, ADR-0041) |
 | ADR-0010: the Butler answers reasoning commands | no Slash Command reaches the Butler; it answers GM voice-address and the console planning chat | `/roll` runs the `dice` Tool directly (§3, §5) |
 | ADR-0027: per-Agent barge-in confirm window | `bargeConfirmWindow` package const, 250 ms, armed per speaker | `internal/wirenpc/wirenpc.go` (§2.4) |
@@ -884,7 +906,7 @@ disagreement is documented rather than discovered.
 ## See also
 
 - [CONTEXT.md](../CONTEXT.md) — the domain glossary. Terms in bold here are defined there.
-- [docs/README.md](README.md#architecture-decision-records) — the index of all 64 ADRs.
+- [docs/README.md](README.md#architecture-decision-records) — the index of every ADR.
 - [docs/configuration.md](configuration.md) — environment variables and the self-host setup runbook.
 - [docs/agents/live-npc-run.md](agents/live-npc-run.md) — running a live NPC in `voice` Mode.
 - [docs/devs/voice-tests.md](devs/voice-tests.md) — voice test conventions, cassettes, clips.

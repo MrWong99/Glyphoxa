@@ -148,6 +148,15 @@ func speakSTT(t *testing.T, cfg Config, scribe *fakeScribe) (batches, dials []st
 // speakSTTLogged is [speakSTT] with the session's logger supplied.
 func speakSTTLogged(t *testing.T, cfg Config, scribe *fakeScribe, log *slog.Logger) (batches, dials []sttRequest) {
 	t.Helper()
+	return speakSTTUntil(t, cfg, scribe, log, func(_, _ []sttRequest) bool { return true })
+}
+
+// speakSTTUntil is [speakSTTLogged] that keeps speaking until settled also holds
+// for what the provider has seen. The lanes dial concurrently, so a test whose
+// claim is about where the session ends up — not about every request — waits for
+// that state instead of reading it off whichever dial happened to land last.
+func speakSTTUntil(t *testing.T, cfg Config, scribe *fakeScribe, log *slog.Logger, settled func(batches, dials []sttRequest) bool) (batches, dials []sttRequest) {
+	t.Helper()
 	pointSTTAt(t, scribe.Server)
 	cfg = sessionConfig(cfg, log)
 	bus := voiceevent.NewBus()
@@ -185,14 +194,23 @@ func speakSTTLogged(t *testing.T, cfg Config, scribe *fakeScribe, log *slog.Logg
 			t.Fatalf("Flush: %v", err)
 		}
 		b, d, commits := scribe.snapshot()
-		if len(b) > 0 && len(d) >= wantDials && (commits > 0 || !cfg.STTStreaming) {
+		if len(b) > 0 && len(d) >= wantDials && (commits > 0 || !cfg.STTStreaming) && settled(b, d) {
 			return b, d
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the provider saw %d batch requests, %d dials, %d streamed commits; want all three", len(b), len(d), commits)
+			t.Fatalf("the provider saw %d batch requests, %d dials, %d streamed commits and never settled; last batch %+v, last dial %+v",
+				len(b), len(d), commits, lastRequest(b), lastRequest(d))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// lastRequest is the newest request in rs, or the zero request when there is none.
+func lastRequest(rs []sttRequest) sttRequest {
+	if len(rs) == 0 {
+		return sttRequest{}
+	}
+	return rs[len(rs)-1]
 }
 
 // TestSTTHints_ReachBothTransportsOfOneSession is the wiring proof for #701: with
@@ -233,10 +251,17 @@ func TestSTTHints_ProviderRefusesTheList_SessionKeepsHearing(t *testing.T) {
 	scribe := newFakeScribe(t)
 	scribe.refuseKeyterms = true
 	logs := &safeBuffer{}
-	// speakSTTLogged returns only once a batch request AND a streamed commit were
-	// answered, which a refused list would prevent on both transports.
-	batches, dials := speakSTTLogged(t, cfg, scribe,
-		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	// speakSTTUntil returns only once a batch request AND a streamed commit were
+	// answered, which a refused list would prevent on both transports — and once
+	// the newest request on each transport no longer offers the list. The two
+	// lanes dial concurrently, so one lane's first (refused) dial can land after
+	// the other lane's keyterm-free redial; that lane then redials too. A session
+	// that kept offering the list would never get here and fails at the deadline.
+	batches, dials := speakSTTUntil(t, cfg, scribe,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		func(b, d []sttRequest) bool {
+			return len(lastRequest(b).keyterms) == 0 && len(lastRequest(d).keyterms) == 0
+		})
 
 	offered := false
 	for _, r := range append(batches, dials...) {

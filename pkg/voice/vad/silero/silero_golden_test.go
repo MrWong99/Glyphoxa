@@ -137,6 +137,50 @@ func TestPerFrameLatencyBudget(t *testing.T) {
 	}
 }
 
+// TestProcessFrame_NoAllocs pins the zero-allocation claim for the whole
+// per-frame path — PCM→float32 conversion, forward pass and state machine —
+// that every live speaker pays once per 32 ms frame (#638). audio.Frame hands
+// out its sample slice without copying, so the expectation is exactly zero.
+// Skipped under the race detector, whose instrumentation allocates on its own.
+func TestProcessFrame_NoAllocs(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under the race detector")
+	}
+	eng, err := silero.New()
+	if err != nil {
+		t.Fatalf("silero.New: %v", err)
+	}
+	for _, rate := range []int{16000, 8000} {
+		cfg := vad.Config{SampleRate: rate, FrameSizeMs: 32, SpeechThreshold: 0.5, SilenceThreshold: 0.35}
+		sess, err := eng.NewSession(cfg)
+		if err != nil {
+			t.Fatalf("NewSession(%d Hz): %v", rate, err)
+		}
+		t.Cleanup(func() { _ = sess.Close() })
+
+		pcm := make([]int16, rate*cfg.FrameSizeMs/1000)
+		for i := range pcm {
+			pcm[i] = int16((i * 7919) % 2000) // deterministic non-silent signal
+		}
+		frame, err := audio.NewFrame(pcm, cfg.SampleRate, cfg.FrameSizeMs)
+		if err != nil {
+			t.Fatalf("audio.NewFrame: %v", err)
+		}
+		// Warm-up: the first frame sizes the session's scratch buffer.
+		if _, err := sess.ProcessFrame(frame); err != nil {
+			t.Fatalf("%d Hz: ProcessFrame: %v", rate, err)
+		}
+		allocs := testing.AllocsPerRun(100, func() {
+			if _, err := sess.ProcessFrame(frame); err != nil {
+				t.Fatalf("%d Hz: ProcessFrame: %v", rate, err)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("%d Hz: ProcessFrame allocates %v times per frame, want 0", rate, allocs)
+		}
+	}
+}
+
 // runClip replays a corpus clip through a fresh engine session and returns
 // the per-frame speech probabilities. For 8 kHz goldens the 16 kHz corpus
 // clip is decimated 2:1, matching scripts/gen-silero-golden.py.

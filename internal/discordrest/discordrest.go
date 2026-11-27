@@ -1,8 +1,9 @@
 // Package discordrest is the small shared core of Glyphoxa's hand-rolled
 // Discord REST callers (internal/discordguild, discordinvite, discordtag,
 // discordshare): the API root, the User-Agent Discord requires of bots, the
-// shared HTTP clients, and the authenticated "Bot token GET → JSON" helper each
-// of them used to redeclare.
+// shared HTTP clients (on a transport of their own, not http.DefaultTransport),
+// and the authenticated "Bot token GET → JSON" helper each of them used to
+// redeclare.
 //
 // The calls are plain net/http, deliberately NOT disgo's rest.NewClient: that
 // client's rate limiter starts a cleanup goroutine (`for range ticker.C`) its
@@ -24,14 +25,33 @@ const LiveAPIBaseURL = "https://discord.com/api/v10"
 // UserAgent is the DiscordBot form Discord requires of bot REST callers.
 const UserAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)"
 
+// transport is the clients' own connection pool, deliberately not
+// http.DefaultTransport: anything in the process may call CloseIdleConnections
+// on the default (every httptest.Server.Close does), which breaks a Discord
+// call caught reusing a keep-alive connection with "http: CloseIdleConnections
+// called" (#602).
+var transport = newTransport()
+
+// newTransport clones http.DefaultTransport, keeping its proxy-from-env,
+// dial/TLS timeouts, HTTP/2 and idle-pool defaults. If something replaced the
+// default with another RoundTripper there is nothing to clone, so that one is
+// used as is.
+func newTransport() http.RoundTripper {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return http.DefaultTransport
+}
+
 // Client is shared across the read calls (http.Client is safe for concurrent
 // use); its Timeout is a belt on top of the caller's ctx deadline so a call made
 // without one still cannot hang.
-var Client = &http.Client{Timeout: 15 * time.Second}
+var Client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
 
 // UploadClient is [Client] with a looser belt for file uploads, which can be
-// much larger than a read.
-var UploadClient = &http.Client{Timeout: 30 * time.Second}
+// much larger than a read. Both ride the same transport, so one pool of
+// connections to Discord.
+var UploadClient = &http.Client{Transport: transport, Timeout: 30 * time.Second}
 
 // BaseURL resolves a caller's base-URL test seam: "" means the live API.
 func BaseURL(base string) string {

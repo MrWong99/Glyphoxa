@@ -58,7 +58,9 @@ var parsedModel = sync.OnceValues(func() (*onnxModel, error) {
 type inferencer interface {
 	// infer runs one frame of audio samples and returns its speech
 	// probability. The recurrent LSTM state and audio context live inside the
-	// inferencer and carry over to the next call.
+	// inferencer and carry over to the next call. The samples slice is only
+	// valid for the duration of the call — the session reuses it for the next
+	// frame — so implementations must copy what they need to keep.
 	infer(samples []float32) (prob float32, err error)
 	// reset clears the inferencer's recurrent state (LSTM state and audio
 	// context) so the next frame starts from a clean slate.
@@ -251,6 +253,11 @@ type session struct {
 	speechCount  int // consecutive frames above SpeechThreshold
 	silenceCount int // consecutive frames below SilenceThreshold
 
+	// scratch is the reused PCM→float32 conversion buffer, so ProcessFrame
+	// does not allocate per frame. Guarded by mu; inferencers must not retain
+	// the slice past infer.
+	scratch []float32
+
 	closed bool
 }
 
@@ -284,9 +291,9 @@ func (s *session) ProcessFrame(frame audio.Frame) (vad.VADEvent, error) {
 		)
 	}
 
-	samples := samplesToFloat32(frame.Samples())
+	s.scratch = samplesToFloat32(s.scratch, frame.Samples())
 
-	prob, err := s.inf.infer(samples)
+	prob, err := s.inf.infer(s.scratch)
 	if err != nil {
 		return vad.VADEvent{}, fmt.Errorf("silero: inference: %w", err)
 	}
@@ -373,9 +380,11 @@ func (s *session) Close() error {
 }
 
 // samplesToFloat32 scales signed 16-bit PCM samples to float32 in the range
-// [-1.0, 1.0], as expected by the Silero VAD v5 model.
-func samplesToFloat32(samples []int16) []float32 {
-	out := make([]float32, len(samples))
+// [-1.0, 1.0], as expected by the Silero VAD v5 model. The result is written
+// into dst, which is grown only when its capacity is too small, and returned
+// with length len(samples); pass nil to allocate a fresh slice.
+func samplesToFloat32(dst []float32, samples []int16) []float32 {
+	out := slices.Grow(dst[:0], len(samples))[:len(samples)]
 	const scale = 1.0 / float32(math.MaxInt16+1) // 1.0 / 32768.0
 	for i, s := range samples {
 		out[i] = float32(s) * scale

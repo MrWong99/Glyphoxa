@@ -24,6 +24,7 @@ jobs:
   record:
     name: live record + replay
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Belt-and-braces: skip silently on forks that don't have the secret
     # configured. Avoids surfacing as a failed run on every PR sync from a
     # fork. The actual key gate happens at job start; this just keeps the

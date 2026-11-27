@@ -608,11 +608,27 @@ describe("Configuration", () => {
       }),
     );
     expect(await screen.findByText("Discord connection failed")).toBeInTheDocument();
-    // The detail renders VISIBLY under the badge.
-    expect(screen.getByText(/invalid_bot_token/)).toBeInTheDocument();
+    // The cause renders VISIBLY under the badge, as a sentence in the GM's
+    // language — never the server's "<code>: <gateway error>" log line (#695).
+    expect(screen.getByText(/discord rejected the bot token\. paste a current token/i)).toBeInTheDocument();
+    expect(screen.queryByText(/invalid_bot_token/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/close 4004/)).not.toBeInTheDocument();
     // A linked server no session can join is not a done step: it names the cause.
     expect(screen.getByText(/the discord connection failed\. check the bot token/i)).toBeInTheDocument();
     expect(screen.queryByText("Linked to The Keep")).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed integration's detail verbatim when it has no known code (#695)", async () => {
+    renderScreen(
+      mockBackend({
+        integrationState: "failed",
+        integrationDetail: "something_new: boom",
+        boundGuild: { guildId: "472093001100", guildName: "The Keep" },
+      }),
+    );
+    expect(await screen.findByText("Discord connection failed")).toBeInTheDocument();
+    // An unknown cause must stay readable, exactly as the server wrote it.
+    expect(screen.getByText("something_new: boom")).toBeInTheDocument();
   });
 
   it("shows a reconnecting Discord integration as a warning, not connected (#642)", async () => {

@@ -2,7 +2,7 @@ import { en, type MsgParams, type TFunc } from "@/i18n";
 import { de as sessionDe } from "@/i18n/messages/session";
 
 // Test-only: plain translate functions for the Session screen's pure helpers
-// (failureText, speakers, transcriptMarkdown), which take `t` as an argument
+// (failureText, speakers, startStopError, transcriptMarkdown), which take `t` as an argument
 // rather than reading it from React. tDe covers the session catalog — the only
 // one those helpers use — and falls back to English like the app does.
 

@@ -538,6 +538,19 @@ func applyVoiceEnv(cfg *wirenpc.Config, getenv func(string) string, log *slog.Lo
 	cfg.TTSTransport = transport
 }
 
+// applyLLMDefault puts the deployment-default LLM (#702) onto the session
+// Config the process starts its Voice Sessions from, and from which runWeb
+// hands it to the off-session engines and the Configuration RPCs. A bad value
+// is [deploymentLLMDefault]'s error, unchanged, and leaves the Config alone.
+func applyLLMDefault(cfg *wirenpc.Config, getenv func(string) string, log *slog.Logger) error {
+	d, err := deploymentLLMDefault(getenv, log)
+	if err != nil {
+		return err
+	}
+	cfg.LLMDefault = d
+	return nil
+}
+
 // deploymentLLMDefault reads the deployment-default LLM (#702, ADR-0036
 // amendment 2026-11-22) from GLYPHOXA_LLM_DEFAULT_PROVIDER and
 // GLYPHOXA_LLM_DEFAULT_MODEL, once, for every Mode: the provider and model a

@@ -137,7 +137,8 @@ describe("fetchCampaignExport", () => {
   });
 
   it("falls back to a default filename when Content-Disposition is absent", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new Blob(["x"]), { status: 200 })));
+    // A string body, as above: Node 22's undici cannot consume a jsdom Blob.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("x", { status: 200 })));
     const out = await fetchCampaignExport("camp-1");
     expect(out.filename).toBe("campaign.glyphoxa.json.gz");
     vi.unstubAllGlobals();

@@ -151,6 +151,32 @@ func TestLoopWholeMessagePseudoCall(t *testing.T) {
 	}
 }
 
+// TestLoopStripsLoneOrphanCloser is #423 item 4 at the Loop: an assistant text
+// whose only pseudo-call syntax is an orphan `</function>` is still scrubbed —
+// the marker is absent from the final text — and metered once, unrecovered.
+func TestLoopStripsLoneOrphanCloser(t *testing.T) {
+	rec := &pseudoRecorder{}
+	p := &scriptedProvider{
+		t: t,
+		steps: []scriptStep{
+			{reply: AssistantMessage{Text: "Done. </function> Anything else?"}},
+		},
+	}
+	loop := diceLoop(t, p)
+	loop.OnPseudoCall = rec.hook
+
+	final, err := loop.Run(context.Background(), []Message{{Role: RoleUser, Text: "hi"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final != "Done. Anything else?" {
+		t.Errorf("final = %q, want the closer stripped", final)
+	}
+	if len(rec.names) != 1 || rec.names[0] != "" || rec.recovered[0] {
+		t.Errorf("OnPseudoCall = %+v/%+v, want one (\"\",false)", rec.names, rec.recovered)
+	}
+}
+
 // TestLoopStripsUngrantedPseudoCall — AC "ungranted → stripped, logged, turn
 // still delivers remaining text". An ungranted tool name is scrubbed but NOT
 // executed; the turn delivers the remaining prose in a single round.

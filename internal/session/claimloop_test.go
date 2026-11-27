@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -878,12 +879,14 @@ func TestClaimLoop_DrainHeartbeatSupersededStopsBeating(t *testing.T) {
 }
 
 // reapExpiry and reapHold scale the live-reaper drain tests (#505, #509): the
-// fake reaps rows whose heartbeat is staler than Expiry on the wall clock, and
-// the drain beats every 2ms. Expiry is the margin a starved beat goroutine has
-// before a reap tick sees its row stale, so it is sized for an overloaded CI
-// host, not for the beat interval (#708 stress run: at 20ms, 8 parallel race
-// runs reaped a healthy drain 'dead'). The hold still spans several Expiry
-// windows, which is what the tests are about.
+// fake reaps rows whose heartbeat is staler than Expiry, and the drain beats
+// every 2ms. Both tests run in a synctest bubble, so these are durations on the
+// bubble's fake clock, which only advances once every goroutine is blocked: a
+// due beat always lands long before a reap tick can see its row stale, however
+// badly the process is starved. On the wall clock no Expiry was a safe margin
+// (#708 stress run: at 20ms, 8 parallel race runs reaped a healthy drain
+// 'dead'; at 150ms any process stall longer than that still did). The hold
+// still spans several Expiry windows, which is what the tests are about.
 const (
 	reapExpiry = 150 * time.Millisecond
 	reapHold   = 4 * reapExpiry
@@ -897,6 +900,10 @@ const (
 // in-flight, so neither ReconcileWorkerOrphanedVoiceSessions arm (both require
 // a terminal/absent intent) can race the Close; then it finishes 'done'.
 func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
+	synctest.Test(t, testReaperNeverKillsCleanDrain)
+}
+
+func testReaperNeverKillsCleanDrain(t *testing.T) {
 	mstore := newFakeStore()
 	closeGate := make(chan struct{})
 	mstore.closeGate = closeGate
@@ -932,6 +939,11 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 			}
 		}
 	}()
+	// A failed assertion must still unwind the bubble (synctest panics on
+	// goroutines that outlive it): open the gate, stop the reaper, drain.
+	openGate := sync.OnceFunc(func() { close(closeGate) })
+	stopReap := sync.OnceFunc(func() { close(reapStop); <-reapDone })
+	t.Cleanup(func() { openGate(); stopReap(); loop.DrainForTest() })
 
 	// Hold the drain open for several Expiry windows: the intent must stay live
 	// throughout — never 'dead' (AC1), never terminal while Close is in-flight (AC2).
@@ -943,10 +955,9 @@ func TestClaimLoop_ReaperNeverKillsCleanDrain(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	close(closeGate)
+	openGate()
 	waitFor(t, 10*time.Second, func() bool { return istore.get(intent.ID).Status == storage.VoiceIntentDone })
-	close(reapStop)
-	<-reapDone
+	stopReap()
 	loop.DrainForTest()
 }
 
@@ -1018,6 +1029,10 @@ func (s *markLiveFailStore) MarkVoiceSessionIntentLive(context.Context, uuid.UUI
 // wind-down held open for reapHold (4x Expiry), the row stays 'claimed' the whole time
 // and then finishes 'failed' carrying the mark-live error — never 'dead'.
 func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
+	synctest.Test(t, testDrainHeartbeatDuringMarkLiveFailure)
+}
+
+func testDrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	mstore := newFakeStore()
 	closeGate := make(chan struct{})
 	mstore.closeGate = closeGate // parks CloseVoiceSession → the slow wind-down
@@ -1034,6 +1049,10 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	// goroutine, like the reaper ticks below run concurrently against it.
 	tickDone := make(chan struct{})
 	go func() { loop.TickForTest(context.Background()); close(tickDone) }()
+	// A failed assertion must still unwind the bubble (synctest panics on
+	// goroutines that outlive it): open the gate and join the tick.
+	openGate := sync.OnceFunc(func() { close(closeGate) })
+	t.Cleanup(func() { openGate(); <-tickDone })
 	<-runner.started
 	waitFor(t, time.Second, func() bool { return mgr.Finalizing(tenantID) })
 
@@ -1058,6 +1077,8 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 			}
 		}
 	}()
+	stopReap := sync.OnceFunc(func() { close(reapStop); <-reapDone })
+	t.Cleanup(stopReap)
 	deadline := time.Now().Add(reapHold)
 	for time.Now().Before(deadline) {
 		if got := istore.get(intent.ID).Status; got != storage.VoiceIntentClaimed {
@@ -1067,14 +1088,13 @@ func TestClaimLoop_DrainHeartbeatDuringMarkLiveFailure(t *testing.T) {
 	}
 
 	// Release the finalizer: the true failure lands on the row.
-	close(closeGate)
+	openGate()
 	select {
 	case <-tickDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("tick did not return after the finalizer released")
 	}
-	close(reapStop)
-	<-reapDone
+	stopReap()
 	got := istore.get(intent.ID)
 	if got.Status != storage.VoiceIntentFailed {
 		t.Fatalf("intent status = %q, want failed carrying the mark-live error", got.Status)

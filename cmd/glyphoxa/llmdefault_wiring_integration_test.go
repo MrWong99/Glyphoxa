@@ -107,7 +107,9 @@ func TestManagementMounts_DeploymentDefaultReachesTheRPCs(t *testing.T) {
 }
 
 // TestPlanningChatEngine_RowlessTenantRunsTheDeploymentDefault pins the chat
-// half of the composition root (#712 item 4, for chat): the engine the
+// half of the composition root (#712 item 4, for chat; assist and the voice
+// session Config are pinned without Postgres in llmdefault_wiring_test.go and
+// boot_test.go): the engine the
 // ChatService serves — built by newPlanningChatEngine, the function
 // managementMounts calls — resolves a row-less Tenant to the deployment
 // default, the provider and model effective_chat_llm names for it (asserted on

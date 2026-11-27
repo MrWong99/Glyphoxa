@@ -315,8 +315,8 @@ func TestRecall_SpeculationHit_ReusesPrefetch_CountsHit(t *testing.T) {
 
 // TestRecall_RecordsDurationWithOutcome pins the budget-headroom signal (#604):
 // every counted recall carries how long it took, on BOTH the inline-miss path and
-// the speculation-hit path — the two whose distance from the hard 250ms budget
-// (ADR-0042) is the thing the histogram exists to show.
+// the speculation-hit path — the two whose distance from the hard recall budget
+// (500ms by default, ADR-0042) is the thing the histogram exists to show.
 func TestRecall_RecordsDurationWithOutcome(t *testing.T) {
 	// Miss: no speculation, so the full embed + both ANN searches run inline.
 	emb := &fakeEmbedder{vec: fixedVec()}

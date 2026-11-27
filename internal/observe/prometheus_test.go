@@ -385,8 +385,8 @@ func TestSessionGaugeTracksOpenClose(t *testing.T) {
 
 // TestDBQueryHistogram pins the Postgres query-latency family (#605, ADR-0032):
 // the metric name, the bounded `query` family label, and the sub-second bucket
-// layout that makes an ANN p95 readable against the 250ms recall budget
-// (ADR-0042).
+// layout that makes an ANN p95 readable against the recall budget (500ms by
+// default, ADR-0042).
 func TestDBQueryHistogram(t *testing.T) {
 	rec := NewPrometheusRecorder()
 
@@ -425,7 +425,8 @@ func TestNoUnboundedLabels(t *testing.T) {
 // TestMemoryRecallDurationHistogram pins the budgeted memory-recall duration
 // series (#604, ADR-0042): one recall records BOTH the outcome counter and a
 // duration observation on glyphoxa_voice_memory_recall_seconds, so a hit or miss
-// drifting toward the hard 250ms budget is visible before it becomes a skip rate.
+// drifting toward the recall budget (500ms by default) is visible before it
+// becomes a skip rate.
 func TestMemoryRecallDurationHistogram(t *testing.T) {
 	rec := NewPrometheusRecorder()
 
@@ -446,6 +447,53 @@ func TestMemoryRecallDurationHistogram(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("scrape missing %q", want)
 		}
+	}
+}
+
+// TestMemoryRecallHistogramBracketsBudget pins the bucket layout and the exported
+// help text against the recall budget as it is now (#691): 500ms by default and
+// configurable (GLYPHOXA_RECALL_BUDGET, ADR-0042 amendment). A skip that burned
+// the whole default budget must land in a finite bin past it — in +Inf it cannot
+// be told from any slower recall, and histogram_quantile clamps to the top
+// boundary — and an inline miss paying a CPU-only embed (~340ms) must read apart
+// from one at 250ms.
+func TestMemoryRecallHistogramBracketsBudget(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.MemoryRecall(RecallSkip, 500*time.Millisecond+10*time.Millisecond)
+	rec.MemoryRecall(RecallMiss, 340*time.Millisecond)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="skip",le="0.5"} 0`,
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="skip",le="0.75"} 1`,
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="miss",le="0.25"} 0`,
+		`glyphoxa_voice_memory_recall_seconds_bucket{outcome="miss",le="0.35"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+
+	var help string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "# HELP glyphoxa_voice_memory_recall_seconds ") {
+			help = line
+			break
+		}
+	}
+	if help == "" {
+		t.Fatal("scrape has no HELP line for glyphoxa_voice_memory_recall_seconds")
+	}
+	for _, want := range []string{"500ms", "/ 0.5", "sum by (le)"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("HELP missing %q: %s", want, help)
+		}
+	}
+	if strings.Contains(help, "250ms") {
+		t.Errorf("HELP still names the old 250ms budget: %s", help)
 	}
 }
 

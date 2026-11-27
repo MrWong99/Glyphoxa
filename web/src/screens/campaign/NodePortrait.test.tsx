@@ -149,6 +149,23 @@ describe("NodePortrait", () => {
     expect(t.setCalls[0].contentType).toBe("image/png");
   });
 
+  it("says so when the picked file cannot be read, and writes nothing", async () => {
+    const t = renderPortrait();
+
+    // The file changed or vanished on disk between the picker and the read.
+    const file = new File([DRAFT_BYTES], "bart.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: () => Promise.reject(new Error("gone")),
+    });
+    fireEvent.change(screen.getByLabelText("Upload a portrait image"), {
+      target: { files: [file] },
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("gone");
+    expect(t.setCalls).toHaveLength(0);
+  });
+
   it("shows the saved portrait with a remove affordance and clears it", async () => {
     const t = renderPortrait(bart({ hasPortrait: true }));
 

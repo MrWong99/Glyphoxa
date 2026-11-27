@@ -136,6 +136,9 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Ad
 // Mode: whoever redeems an invitation becomes a new account holder however
 // the deployment admits.
 func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
 	aup := r.URL.Query().Get("aup") == "1"
 	join := r.URL.Query().Get("join")
 	if join != "" {
@@ -184,6 +187,20 @@ func (o *OAuth) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, o.discord.AuthCodeURL(state), http.StatusFound)
 }
 
+// requireGet refuses anything but GET/HEAD with 405 and reports whether the
+// request may proceed. The OAuth routes are plain browser redirects mounted
+// without a session or CSRF gate, so a request body here is only ever a
+// stranger's: it is refused unread rather than parsed.
+func requireGet(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	abandonBody(w, r)
+	w.Header().Set("Allow", "GET, HEAD")
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return false
+}
+
 // hasCookie reports whether the request carries the named cookie.
 func hasCookie(r *http.Request, name string) bool {
 	_, err := r.Cookie(name)
@@ -213,9 +230,15 @@ func (o *OAuth) takeJoinToken(w http.ResponseWriter, r *http.Request) string {
 // the SPA. The Discord exchange is behind the DiscordOAuth interface so CI uses
 // a fake — no live Discord call.
 func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
 	joinToken := o.takeJoinToken(w, r)
 
-	state := r.FormValue("state")
+	// Discord redirects back with `state` and `code` in the query string. Read
+	// them from there only — never r.FormValue, which would parse a body.
+	query := r.URL.Query()
+	state := query.Get("state")
 	stateCookie, err := r.Cookie(stateCookieName)
 	if err != nil || state == "" {
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
@@ -228,7 +251,7 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
-	code := r.FormValue("code")
+	code := query.Get("code")
 	if code == "" {
 		http.Error(w, "missing OAuth code", http.StatusBadRequest)
 		return
@@ -379,7 +402,7 @@ func (o *OAuth) issueSession(w http.ResponseWriter, r *http.Request, what string
 		Token:           sessionToken,
 		ExpiresAt:       expires,
 		IP:              o.edge.clientIP(r),
-		UA:              r.UserAgent(),
+		UA:              auditUA(r),
 		GuestCampaignID: guestCampaign,
 	}); err != nil {
 		o.log.Error(what+": create session", "err", err)
@@ -443,7 +466,7 @@ func (o *OAuth) loginPlatformAdmin(w http.ResponseWriter, r *http.Request, du Di
 		Token:     sessionToken,
 		ExpiresAt: expires,
 		IP:        o.edge.clientIP(r),
-		UA:        r.UserAgent(),
+		UA:        auditUA(r),
 	}); err != nil {
 		o.log.Error("oauth callback: create session", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -530,7 +553,7 @@ func (o *OAuth) provision(w http.ResponseWriter, r *http.Request, du DiscordUser
 		Token:     sessionToken,
 		ExpiresAt: expires,
 		IP:        o.edge.clientIP(r),
-		UA:        r.UserAgent(),
+		UA:        auditUA(r),
 	}
 	res, err := o.adm.Signup.ProvisionSignup(r.Context(), p)
 	if errors.Is(err, storage.ErrUserSuspended) {

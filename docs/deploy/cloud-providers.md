@@ -86,7 +86,9 @@ chmod +x update.sh && ./update.sh          # latest release + schema migration
 State lands in `/etc/glyphoxa/` (values file `0600`, install state, backup
 manifest); re-running the installer reuses it — secrets, notably
 `appSecret`, are never rotated on a re-run (ADR-0004: rotating it strands
-every sealed BYOK credential).
+every sealed BYOK credential). The values file may be hand-edited, but both
+scripts refuse one that repeats a top-level key (YAML keeps only one of the
+blocks); merge them and re-run.
 
 ### 2. netcup (or similar EU VPS: Contabo, IONOS) — cheapest raw compute
 

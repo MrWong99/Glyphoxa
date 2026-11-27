@@ -84,6 +84,22 @@ type MediaLiveness struct {
 	// talking into a quiet room would look like evidence that inbound audio
 	// should be flowing.
 	LastSpeaking time.Time
+	// DaveReady is whether disgo's receiver is currently allowed to read: the
+	// DAVE session's Ready(), which through reapableDaveSession is also true on
+	// a never-E2EE channel and after Close. While it is false NOTHING is read
+	// off the socket, so Packets and Echoes are frozen and their standing still
+	// is not evidence of a dead path. False is either a pending MLS handshake
+	// or — just as legitimately, and for as long as it lasts — the Bot sitting
+	// alone in an E2EE channel whose group Discord has not established yet;
+	// DavePeers tells the two apart.
+	DaveReady bool
+	// DavePeers is how many OTHER members the voice gateway has announced in
+	// the channel (clients_connect minus client_disconnect), counted by
+	// reapableDaveSession. Zero also when the DAVE session does not track them
+	// (the noop session, which is always ready anyway). It can run stale across
+	// an in-place gateway reconnect that swallowed a disconnect; a rebuilt
+	// connection starts from a fresh count.
+	DavePeers int
 }
 
 // MediaLiveness reports transport-level liveness for this Session's voice
@@ -104,11 +120,20 @@ func (s *Session) MediaLiveness() (MediaLiveness, bool) {
 	if !ok {
 		return MediaLiveness{}, false
 	}
+	// daveSession is set once at construction and never reassigned, and both
+	// reads are safe from this goroutine: dave-go's Ready() takes its session
+	// read lock, the wrapper's own state is an atomic and a mutex.
+	peers := 0
+	if pc, ok := ku.daveSession.(davePeerCounter); ok {
+		peers = pc.peerCount()
+	}
 	return MediaLiveness{
 		Packets:      ku.packets.Load(),
 		Echoes:       ku.echoes.Load(),
 		Keepalives:   ku.keepalives.Load(),
 		LastSpeaking: speakingEvents.last(tc.Gateway()),
+		DaveReady:    ku.daveSession.Ready(),
+		DavePeers:    peers,
 	}, true
 }
 

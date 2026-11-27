@@ -2,6 +2,7 @@ package voice
 
 import (
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"github.com/disgoorg/godave"
@@ -59,9 +60,58 @@ type frameHolder interface {
 // reports false — frames must be held there — so both goroutines idle at the
 // gate for the duration of a live handshake. That wait is bounded by the
 // handshake; the unbounded, session-outliving one is what this wrapper removes.
+// (The same false is reported, legitimately and without bound, while the Bot
+// is the first and only member of an E2EE channel: see the peer count below.)
+//
+// It also keeps the one fact the media watchdog needs to read a not-ready
+// session (#688): who else is in the channel. A member that joins an EMPTY
+// E2EE channel has no group to establish — Discord completes the DAVE group
+// only once a second member is present — so Ready() is false there for as long
+// as the Bot sits alone, with no handshake in progress and nothing wrong.
+// disgo feeds every voice-gateway clients_connect / client_disconnect through
+// AddUser / RemoveUser, so the wrapper counts the members that are not us.
 type reapableDaveSession struct {
 	godave.Session
 	closed atomic.Bool
+
+	self   godave.UserID
+	peerMu sync.Mutex
+	peers  map[godave.UserID]struct{}
+}
+
+// davePeerCounter is the optional surface [Session.MediaLiveness] reads the
+// peer count through; only [reapableDaveSession] carries it.
+type davePeerCounter interface {
+	peerCount() int
+}
+
+// AddUser implements godave.Session, remembering every member but ourselves.
+func (s *reapableDaveSession) AddUser(userID godave.UserID) {
+	if userID != s.self {
+		s.peerMu.Lock()
+		if s.peers == nil {
+			s.peers = map[godave.UserID]struct{}{}
+		}
+		s.peers[userID] = struct{}{}
+		s.peerMu.Unlock()
+	}
+	s.Session.AddUser(userID)
+}
+
+// RemoveUser implements godave.Session.
+func (s *reapableDaveSession) RemoveUser(userID godave.UserID) {
+	s.peerMu.Lock()
+	delete(s.peers, userID)
+	s.peerMu.Unlock()
+	s.Session.RemoveUser(userID)
+}
+
+// peerCount is how many OTHER members the voice gateway has announced in the
+// channel and not yet announced gone.
+func (s *reapableDaveSession) peerCount() int {
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
+	return len(s.peers)
 }
 
 // WrapDaveSessionCreate wraps a DAVE session factory so every session it
@@ -70,7 +120,7 @@ type reapableDaveSession struct {
 // unit-testable in the default build.
 func WrapDaveSessionCreate(create godave.SessionCreateFunc) godave.SessionCreateFunc {
 	return func(logger *slog.Logger, userID godave.UserID, callbacks godave.Callbacks) godave.Session {
-		return &reapableDaveSession{Session: create(logger, userID, callbacks)}
+		return &reapableDaveSession{Session: create(logger, userID, callbacks), self: userID}
 	}
 }
 

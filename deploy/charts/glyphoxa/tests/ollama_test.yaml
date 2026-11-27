@@ -157,7 +157,7 @@ tests:
           path: spec.template.spec.containers[0].resources
 
   - it: renders the resources block when ollama.resources is set
-    # ADR-0042's 250ms recall budget needs a CPU request on the pod (#624) —
+    # ADR-0042's recall budget (500ms by default) needs a CPU request on the pod (#624) —
     # this proves the commented values.yaml example actually renders.
     set:
       ollama:

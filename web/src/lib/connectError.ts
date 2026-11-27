@@ -43,13 +43,20 @@ export function errorMessage(err: unknown): string {
 // needs a different sentence.
 const ERROR_REASON_HEADER = "Glyphoxa-Error-Reason";
 
+// errorReason returns the refusal's machine-readable reason, or "" when the
+// error carries none (an unclassified failure, a non-Connect error). Match on
+// it, never on the English message, so the server can reword freely.
+export function errorReason(error: unknown): string {
+  return ConnectError.from(error).metadata.get(ERROR_REASON_HEADER) ?? "";
+}
+
 // isAllowanceExhausted reports the server's "this month's plan allowance is
 // spent" refusal (ADR-0055 gate (b)), which every AI feature that spends
 // provider money can return (#658). It matches the reason, never the English
 // message, so the server can reword without breaking this.
 export function isAllowanceExhausted(error: unknown): boolean {
   const ce = ConnectError.from(error);
-  return ce.code === Code.ResourceExhausted && ce.metadata.get(ERROR_REASON_HEADER) === "allowance_exhausted";
+  return ce.code === Code.ResourceExhausted && errorReason(ce) === "allowance_exhausted";
 }
 
 // apiErrorMessage is errorMessage for the surfaces in front of a paid AI call:

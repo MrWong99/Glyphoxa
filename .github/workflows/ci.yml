@@ -23,6 +23,7 @@ jobs:
   buf:
     name: buf (lint + breaking + push)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write # buf-action posts a PR summary comment
@@ -46,6 +47,7 @@ jobs:
   proto:
     name: proto (generate)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -90,6 +92,7 @@ jobs:
     name: web (vite build + vitest)
     needs: [proto]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -151,6 +154,7 @@ jobs:
     name: build + vet + test
     needs: [proto]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -217,6 +221,8 @@ jobs:
     name: integration (Postgres / testcontainers)
     needs: [proto]
     runs-on: ubuntu-latest
+    # Above the go test step's own -timeout 20m, plus setup and image pulls.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -263,6 +269,7 @@ jobs:
     name: audio (opus + bench)
     needs: [proto]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -334,6 +341,7 @@ jobs:
     name: bench (microbenchmark allocs gate)
     needs: [proto]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -414,6 +422,7 @@ jobs:
     # image embeds the committed placeholder index.html (#114, ADR-0034).
     needs: [proto, web]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -473,6 +482,7 @@ jobs:
   helm:
     name: helm chart (lint + unittest + kubeconform)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -551,6 +561,10 @@ jobs:
     # real console, so it downloads the `spa-dist` artifact too (#114).
     needs: [image, proto, web]
     runs-on: ubuntu-latest
+    # Bounded: on 2026-11-20 the teardown step hung for 90 minutes after a
+    # failed smoke test and hid the failure (#693). Every job declares a
+    # timeout-minutes; internal/ci's workflow-invariant test enforces it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -629,13 +643,17 @@ jobs:
           TIMEOUT: 300s
 
       - name: Delete k3d cluster
+        # Step-level bound: a wedged teardown is cut after 5 minutes so the job
+        # result still reflects the smoke step above (#693).
         if: always()
+        timeout-minutes: 5
         run: k3d cluster delete glyphoxa-e2e || true
 
   lint:
     name: golangci-lint
     needs: [proto]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 

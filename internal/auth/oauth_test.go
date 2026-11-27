@@ -1,13 +1,17 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -356,4 +360,212 @@ func TestOAuthCallback_SessionAuditIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countingBody counts the request-body bytes a handler pulls, so a test can
+// assert an unauthenticated body was refused unread.
+type countingBody struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// The OAuth carve-out is reachable without a session or CSRF token, so it must
+// never parse a request body: a multipart POST to the callback is refused with
+// 405 before a single body byte is read (no in-memory form, no temp-file
+// spill).
+func TestOAuthCallback_PostMultipart_RefusedUnread(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{}
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("state", "st-1")
+	_ = mw.WriteField("code", "the-code")
+	part, err := mw.CreateFormFile("blob", "blob.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := &countingBody{r: &buf}
+	req := httptest.NewRequest(http.MethodPost, "/auth/discord/callback", body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+	}
+	if got := rec.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection = %q, want close (do not drain the refused body)", got)
+	}
+	if body.n != 0 {
+		t.Errorf("read %d body bytes, want 0", body.n)
+	}
+	if req.MultipartForm != nil || req.PostForm != nil {
+		t.Error("request body was parsed as a form")
+	}
+	if disc.gotCode != "" {
+		t.Errorf("exchanged code %q from a POST body", disc.gotCode)
+	}
+}
+
+// `state` and `code` are honoured from the query string only: a urlencoded
+// POST body carrying a state that matches the cookie must not reach the
+// Discord exchange or create a session.
+func TestOAuthCallback_PostBodyParams_NotHonoured(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77"}}
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, auth.EdgeConfig{}, nil)
+
+	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/auth/discord/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if disc.gotCode != "" {
+		t.Errorf("exchanged code %q from a POST body", disc.gotCode)
+	}
+	if store.upsertCalls != 0 || store.createCalls != 0 {
+		t.Errorf("store written on a refused POST: upsert=%d create=%d", store.upsertCalls, store.createCalls)
+	}
+	if got := rec.Result().Cookies(); len(got) != 0 {
+		t.Errorf("cookies set on a refused POST: %v", got)
+	}
+}
+
+// Login is GET-only too: a POST neither mints a state cookie nor redirects to
+// Discord.
+func TestOAuthLogin_Post_Refused(t *testing.T) {
+	t.Parallel()
+	o := auth.NewOAuth(&fakeOAuthStore{}, &fakeDiscord{authBase: "https://discord/authorize"}, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
+
+	rec := httptest.NewRecorder()
+	o.Login(rec, httptest.NewRequest(http.MethodPost, "/auth/discord/login", strings.NewReader("x=1")))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+	}
+	if got := rec.Result().Cookies(); len(got) != 0 {
+		t.Errorf("cookies set on a refused POST: %v", got)
+	}
+}
+
+// callbackSession drives one admitted OAuth callback carrying the given request
+// headers and returns the session row it stored.
+func callbackSession(t *testing.T, edge auth.EdgeConfig, header http.Header) storage.NewSession {
+	t.Helper()
+	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, edge, nil)
+
+	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+	}
+	return store.created
+}
+
+// TestOAuthCallback_SessionAuditIPBounded pins that the audit address is
+// bounded whatever the header carried: net/http admits a header of up to 1 MiB,
+// and sessions.ip is an unbounded text column written on every login. A real
+// address is stored in its canonical form; anything else is still recorded
+// (it is what the proxy — or a misconfigured header — said) but cut short.
+func TestOAuthCallback_SessionAuditIPBounded(t *testing.T) {
+	t.Parallel()
+	const maxIP = 64
+	huge := strings.Repeat("9", 100<<10)
+	for _, tc := range []struct {
+		name    string
+		trusted string
+		header  http.Header
+		want    string // "" = only the bound is asserted
+	}{
+		{"IPv4 unchanged", "", http.Header{"X-Forwarded-For": {"203.0.113.7"}}, "203.0.113.7"},
+		{"IPv6 unchanged", "", http.Header{"X-Forwarded-For": {"6.6.6.6, 2001:db8::1"}}, "2001:db8::1"},
+		{"IPv6 canonicalised", "", http.Header{"X-Forwarded-For": {"2001:DB8:0:0:0:0:0:1"}}, "2001:db8::1"},
+		{"short non-address is kept as sent", "", http.Header{"X-Forwarded-For": {"unknown"}}, "unknown"},
+		{"oversized forwarded-for hop", "", http.Header{"X-Forwarded-For": {"6.6.6.6, " + huge}}, ""},
+		{"oversized configured header", "CF-Connecting-IP", http.Header{"Cf-Connecting-Ip": {huge}}, ""},
+		{"oversized IPv6 zone", "", http.Header{"X-Forwarded-For": {"fe80::1%" + huge}}, ""},
+		{"invalid UTF-8 is dropped", "", http.Header{"X-Forwarded-For": {"bad\xffhop"}}, "badhop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := callbackSession(t, auth.EdgeConfig{ClientIPHeader: tc.trusted}, tc.header).IP
+			if tc.want != "" && got != tc.want {
+				t.Errorf("session IP = %q, want %q", got, tc.want)
+			}
+			if got == "" || len(got) > maxIP || !utf8.ValidString(got) {
+				t.Errorf("session IP is %d bytes (valid UTF-8: %t), want 1..%d valid bytes", len(got), utf8.ValidString(got), maxIP)
+			}
+		})
+	}
+}
+
+// TestOAuthCallback_SessionAuditUA pins the User-Agent the session row records:
+// an ordinary one verbatim, an oversized one cut to a bound, and never bytes
+// Postgres would refuse as text (which would fail the login outright).
+func TestOAuthCallback_SessionAuditUA(t *testing.T) {
+	t.Parallel()
+	const maxUA = 512
+	const firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+
+	t.Run("ordinary User-Agent is stored verbatim", func(t *testing.T) {
+		t.Parallel()
+		if got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {firefox}}).UA; got != firefox {
+			t.Errorf("session UA = %q, want %q", got, firefox)
+		}
+	})
+	t.Run("oversized User-Agent is cut on a rune boundary", func(t *testing.T) {
+		t.Parallel()
+		// One ASCII byte then 3-byte runes: byte 512 falls inside a rune.
+		ua := "x" + strings.Repeat("€", 100<<10/3)
+		got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {ua}}).UA
+		if len(got) > maxUA || len(got) <= maxUA-utf8.UTFMax || !utf8.ValidString(got) || !strings.HasPrefix(ua, got) {
+			t.Errorf("session UA is %d bytes (valid UTF-8: %t), want a valid prefix of at most %d", len(got), utf8.ValidString(got), maxUA)
+		}
+	})
+	t.Run("invalid UTF-8 is dropped", func(t *testing.T) {
+		t.Parallel()
+		if got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {"curl\xff/8"}}).UA; got != "curl/8" {
+			t.Errorf("session UA = %q, want %q", got, "curl/8")
+		}
+	})
 }

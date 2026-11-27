@@ -154,12 +154,10 @@ func main() {
 	// The deployment-default LLM (#702), read once for every Mode: the session
 	// Config carries it to the voice loop, and runWeb hands the same value to the
 	// off-session engines and the Configuration RPCs.
-	llmDefault, err := deploymentLLMDefault(os.Getenv, log)
-	if err != nil {
+	if err := applyLLMDefault(&cfg, os.Getenv, log); err != nil {
 		log.Error("invalid deployment-default LLM", "err", err)
 		os.Exit(1)
 	}
-	cfg.LLMDefault = llmDefault
 	// The privacy-policy page the Bot links from its Voice Session transcription
 	// disclosure (#519). Shared by voice/web/all — the Manager copies it onto every
 	// session Config it starts. Unset posts the disclosure without a link.
@@ -1197,7 +1195,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// chat — is gated and ledgered through this ONE seam (#658, ADR-0054
 	// amendment 2026-11-20).
 	offSession := vd.offSession
-	assistEngine := assist.NewEngine(store, cipher, offSession, metrics, log, assist.WithKeyEntitlement(keyEnt), assist.WithLLMDefault(cfg.LLMDefault))
+	assistEngine := newAssistEngine(store, cipher, offSession, metrics, log, keyEnt, cfg.LLMDefault)
 
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
@@ -1671,6 +1669,17 @@ type sessionControl interface {
 	// (per-start selection may differ from the stored Default Voice Channel);
 	// ok=false falls back to the deployment config's stored default.
 	ActiveVoiceChannelID(tenantID uuid.UUID) (string, bool)
+}
+
+// newAssistEngine builds the campaign-creation assist Engine runWeb serves. It
+// is its own function so the composition-root test can hold the engine and pin
+// that it resolves a row-less Tenant to the deployment default: dropping
+// assist.WithLLMDefault here leaves every package test green while the
+// Configuration screen names Anthropic and the drafts are written by Groq. The
+// store is the engine's own read surface, so that test needs no database.
+func newAssistEngine(store assist.Store, cipher *crypto.Cipher, offSession *billing.OffSession, metrics observe.StageRecorder, log *slog.Logger, keyEnt llmbuild.PlatformKeyEntitlement, llmDefault llmbuild.DeploymentDefault) *assist.Engine {
+	return assist.NewEngine(store, cipher, offSession, metrics, log,
+		assist.WithKeyEntitlement(keyEnt), assist.WithLLMDefault(llmDefault))
 }
 
 // newPlanningChatEngine builds the Planning chat engine the ChatService

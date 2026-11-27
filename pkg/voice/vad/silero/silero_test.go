@@ -2,6 +2,7 @@ package silero
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -414,7 +415,7 @@ func TestNewSession_InitialState(t *testing.T) {
 func TestSamplesToFloat32_Empty(t *testing.T) {
 	t.Parallel()
 
-	got := samplesToFloat32(nil)
+	got := samplesToFloat32(nil, nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty result for nil input, got len %d", len(got))
 	}
@@ -423,7 +424,7 @@ func TestSamplesToFloat32_Empty(t *testing.T) {
 func TestSamplesToFloat32_MultiSample(t *testing.T) {
 	t.Parallel()
 
-	got := samplesToFloat32([]int16{0, 16384})
+	got := samplesToFloat32(nil, []int16{0, 16384})
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
@@ -434,6 +435,37 @@ func TestSamplesToFloat32_MultiSample(t *testing.T) {
 	want := float32(16384.0 / 32768.0)
 	if diff := got[1] - want; diff < -eps || diff > eps {
 		t.Errorf("got[1] = %v, want %v", got[1], want)
+	}
+}
+
+// TestSamplesToFloat32_ReusesDst covers the into-buffer contract the session's
+// scratch buffer relies on: a too-small dst is grown, a large-enough dst is
+// reused in place, and the result never carries a stale tail from a longer
+// previous frame.
+func TestSamplesToFloat32_ReusesDst(t *testing.T) {
+	t.Parallel()
+
+	// Too small: grown to fit.
+	small := make([]float32, 1)
+	got := samplesToFloat32(small, []int16{16384, -16384, 0})
+	if want := []float32{0.5, -0.5, 0}; !slices.Equal(got, want) {
+		t.Fatalf("grown dst = %v, want %v", got, want)
+	}
+
+	// Large enough: same backing array, shorter input fully overwrites and
+	// truncates — nothing of the previous frame is visible.
+	buf := got
+	got = samplesToFloat32(buf, []int16{-32768, 8192})
+	if want := []float32{-1, 0.25}; !slices.Equal(got, want) {
+		t.Fatalf("reused dst = %v, want %v", got, want)
+	}
+	if &got[0] != &buf[0] {
+		t.Error("dst with sufficient capacity was reallocated, want it reused")
+	}
+
+	// Longer dst than input, including the empty input.
+	if got = samplesToFloat32(buf, nil); len(got) != 0 {
+		t.Errorf("empty input into non-empty dst: len = %d, want 0", len(got))
 	}
 }
 
@@ -900,7 +932,7 @@ func TestPCMConversion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := samplesToFloat32(tc.input)
+			got := samplesToFloat32(nil, tc.input)
 
 			if len(got) != tc.wantLen {
 				t.Fatalf("len = %d, want %d", len(got), tc.wantLen)

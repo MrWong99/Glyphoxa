@@ -13,18 +13,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// workflow mirrors just enough of the GitHub Actions schema to inspect steps.
+// workflow mirrors just enough of the GitHub Actions schema to inspect steps
+// and timeouts.
 type workflow struct {
 	Jobs map[string]struct {
-		Steps []step `yaml:"steps"`
+		TimeoutMinutes int    `yaml:"timeout-minutes"`
+		Steps          []step `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 
 type step struct {
-	Name string         `yaml:"name"`
-	Uses string         `yaml:"uses"`
-	Run  string         `yaml:"run"`
-	With map[string]any `yaml:"with"`
+	Name           string         `yaml:"name"`
+	Uses           string         `yaml:"uses"`
+	Run            string         `yaml:"run"`
+	With           map[string]any `yaml:"with"`
+	TimeoutMinutes int            `yaml:"timeout-minutes"`
 }
 
 // TestDockerBuildJobsProvisionGeneratedStubs enforces the build-context
@@ -76,10 +79,78 @@ func TestDockerBuildJobsEmbedRealSPA(t *testing.T) {
 	})
 }
 
+// maxJobTimeoutMinutes is the ceiling for a job's timeout-minutes. The slowest
+// job (integration) runs its go test with -timeout 20m; an hour leaves room
+// for setup without letting a hang run for most of GitHub's 360-minute default.
+const maxJobTimeoutMinutes = 60
+
+// TestEveryJobDeclaresATimeout enforces that every job in every workflow bounds
+// itself with timeout-minutes. Without one a job falls back to GitHub's
+// 360-minute default, and a hung step does more than waste runner time: on
+// 2026-11-20 the e2e job's "Delete k3d cluster" step hung for 90 minutes after
+// a failed smoke test and hid the failure (#693).
+func TestEveryJobDeclaresATimeout(t *testing.T) {
+	eachWorkflow(t, func(file string, wf workflow) {
+		for jobName, job := range wf.Jobs {
+			if job.TimeoutMinutes <= 0 || job.TimeoutMinutes > maxJobTimeoutMinutes {
+				t.Errorf(
+					"%s: job %q has timeout-minutes %d, want 1..%d; an unbounded job runs up to GitHub's "+
+						"360-minute default, and a hung job hides the real failure behind it (#693)",
+					file, jobName, job.TimeoutMinutes, maxJobTimeoutMinutes,
+				)
+			}
+		}
+	})
+}
+
+// TestK3dTeardownStepsAreBounded enforces that every step deleting a k3d
+// cluster carries its own short step-level timeout-minutes. Teardown runs under
+// `if: always()` after the smoke test, so it is the step that hung in #693; the
+// job-level bound alone would still leave the failed smoke result waiting
+// behind it for the rest of the job's budget.
+func TestK3dTeardownStepsAreBounded(t *testing.T) {
+	found := false
+	eachWorkflow(t, func(file string, wf workflow) {
+		for jobName, job := range wf.Jobs {
+			for _, s := range job.Steps {
+				if !strings.Contains(s.Run, "k3d cluster delete") {
+					continue
+				}
+				found = true
+				if s.TimeoutMinutes < 1 || s.TimeoutMinutes > 10 {
+					t.Errorf(
+						"%s: job %q step %q deletes a k3d cluster with step timeout-minutes %d, want 1..10; "+
+							"a wedged teardown must be cut quickly so the job reports the failed smoke test (#693)",
+						file, jobName, s.Name, s.TimeoutMinutes,
+					)
+				}
+			}
+		}
+	})
+	if !found {
+		t.Error("no `k3d cluster delete` step found in any workflow — did the e2e teardown move or get renamed?")
+	}
+}
+
 // eachDockerBuildJob parses every workflow file and invokes fn for each job that
 // runs a docker/build-push-action step, passing that step's index so callers can
 // assert on the steps that precede it.
 func eachDockerBuildJob(t *testing.T, fn func(t *testing.T, file, jobName string, steps []step, build int)) {
+	t.Helper()
+	eachWorkflow(t, func(file string, wf workflow) {
+		for jobName, job := range wf.Jobs {
+			build := dockerBuildIndex(job.Steps)
+			if build < 0 {
+				continue
+			}
+			fn(t, file, jobName, job.Steps, build)
+		}
+	})
+}
+
+// eachWorkflow parses every workflow file and invokes fn with its base name and
+// parsed contents.
+func eachWorkflow(t *testing.T, fn func(file string, wf workflow)) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join("..", "..", ".github", "workflows", "*.yml"))
 	if err != nil {
@@ -103,14 +174,7 @@ func eachDockerBuildJob(t *testing.T, fn func(t *testing.T, file, jobName string
 		if err := yaml.Unmarshal(raw, &wf); err != nil {
 			t.Fatalf("%s: %v", file, err)
 		}
-
-		for jobName, job := range wf.Jobs {
-			build := dockerBuildIndex(job.Steps)
-			if build < 0 {
-				continue
-			}
-			fn(t, filepath.Base(file), jobName, job.Steps, build)
-		}
+		fn(filepath.Base(file), wf)
 	}
 }
 

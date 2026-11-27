@@ -2,10 +2,12 @@ package voice
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/godave"
 	"github.com/disgoorg/snowflake/v2"
 )
 
@@ -105,6 +107,13 @@ func (c *livenessConn) Close(context.Context)                                {}
 func (c *livenessConn) UDP() voice.UDPConn                                   { return c.udp }
 func (c *livenessConn) Gateway() voice.Gateway                               { return c.gw }
 
+// pendingDave is a DAVE session that is not ready — a pending handshake, or a
+// group Discord has not established yet: everything is the noop session except
+// Ready.
+type pendingDave struct{ godave.Session }
+
+func (pendingDave) Ready() bool { return false }
+
 func TestSessionMediaLiveness(t *testing.T) {
 	// No transport monitor (a stock or mock conn): explicitly NOT ok, so the
 	// watchdog stays inert instead of reading zeros as a dead path.
@@ -130,6 +139,41 @@ func TestSessionMediaLiveness(t *testing.T) {
 	}
 	if ml.LastSpeaking.IsZero() {
 		t.Fatal("LastSpeaking not surfaced from the speaking log")
+	}
+	if !ml.DaveReady {
+		t.Fatal("DaveReady false over a ready DAVE session")
+	}
+
+	// A not-ready DAVE session gates disgo's receiver, so the frozen counters
+	// must come labelled as such. A session that does not track peers reports
+	// none.
+	pending := &Session{conn: &livenessConn{udp: newKeepaliveUDPConn(pendingDave{noopDave()}, nil, discardLogger(), DiscardMetrics{}), gw: gw}}
+	if ml, ok := pending.MediaLiveness(); !ok || ml.DaveReady || ml.DavePeers != 0 {
+		t.Fatalf("not-ready session: ok=%v DaveReady=%v DavePeers=%d, want true/false/0", ok, ml.DaveReady, ml.DavePeers)
+	}
+
+	// The production wrapper counts the other members the voice gateway
+	// announced — never the Bot itself — which is what tells a pending
+	// handshake from sitting alone in an unestablished group.
+	wrapped := WrapDaveSessionCreate(func(*slog.Logger, godave.UserID, godave.Callbacks) godave.Session {
+		return pendingDave{noopDave()}
+	})(discardLogger(), "bot", nil)
+	alone := &Session{conn: &livenessConn{udp: newKeepaliveUDPConn(wrapped, nil, discardLogger(), DiscardMetrics{}), gw: gw}}
+	wrapped.AddUser("bot")
+	if ml, _ := alone.MediaLiveness(); ml.DaveReady || ml.DavePeers != 0 {
+		t.Fatalf("alone: DaveReady=%v DavePeers=%d, want false/0", ml.DaveReady, ml.DavePeers)
+	}
+	wrapped.AddUser("alice")
+	wrapped.AddUser("alice")
+	wrapped.AddUser("bob")
+	if ml, _ := alone.MediaLiveness(); ml.DavePeers != 2 {
+		t.Fatalf("DavePeers = %d after two members joined, want 2", ml.DavePeers)
+	}
+	wrapped.RemoveUser("alice")
+	wrapped.RemoveUser("bob")
+	wrapped.RemoveUser("carol") // never announced: a no-op, not a negative count
+	if ml, _ := alone.MediaLiveness(); ml.DavePeers != 0 {
+		t.Fatalf("DavePeers = %d after everyone left, want 0", ml.DavePeers)
 	}
 
 	// The transport option installed but a foreign UDPConn behind it (a future

@@ -84,8 +84,39 @@ func TestClaimsRollResult(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := claimsRollResult(tc.text); got != tc.want {
+			if got := claimsRollResult(tc.text, ""); got != tc.want {
 				t.Errorf("claimsRollResult(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClaimsRollResult_QuantityRoll pins #690: the unit-noun carve-out (O5) holds
+// for an incidental quantity, but NOT when the armed user utterance asked for a
+// roll of that same unit — then "12 Goldstücke" is the roll's result. The unit is
+// matched at a word start in the utterance, and only the same unit unlocks.
+func TestClaimsRollResult_QuantityRoll(t *testing.T) {
+	const goldDE = "Würfel, wie viel Gold wir finden"
+	cases := []struct {
+		name string
+		text string
+		user string
+		want bool
+	}{
+		{"price asked without a roll", "Das macht 5 Kupferstücke", "Was kostet das Bier?", false},
+		{"price on an armed but unrelated utterance", "Das macht 5 Kupferstücke", "Würfel bitte Initiative", false},
+		{"de quantity roll", "Du findest 12 Goldstücke", goldDE, true},
+		{"en quantity roll", "You find 12 gold pieces", "Roll for how much gold we find", true},
+		{"user unit in a compound", "Du findest 12 Goldstücke", "Würfel, wie viele Goldmünzen wir finden", true},
+		{"en time roll", "It takes 3 days", "Roll how many days the journey takes", true},
+		{"unit mismatch stays carved out", "Nach 3 Tagen findet ihr es", goldDE, false},
+		{"word start, not substring", "Es dauert 3 Tage", "Lass uns am Montag würfeln", false},
+		{"non-unit number still claims", "Meine Initiative ist 15.", goldDE, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claimsRollResult(tc.text, tc.user); got != tc.want {
+				t.Errorf("claimsRollResult(%q, %q) = %v, want %v", tc.text, tc.user, got, tc.want)
 			}
 		})
 	}
@@ -98,18 +129,23 @@ func TestClaimsRollResult(t *testing.T) {
 func TestClaimedRollValues(t *testing.T) {
 	cases := []struct {
 		text string
+		user string
 		want []int
 	}{
-		{"Ah, eine 19!", []int{19}},
-		{"You rolled a natural twenty!", []int{20}},
-		{"Du hast eine Dreißig gewürfelt.", []int{30}},
-		{"I roll the d20... a 7! With +3 that's 10.", []int{7, 3, 10}},
-		{"Let me roll a d20 for you.", nil},
-		{"The bones are silent.", nil},
+		{"Ah, eine 19!", "", []int{19}},
+		{"You rolled a natural twenty!", "", []int{20}},
+		{"Du hast eine Dreißig gewürfelt.", "", []int{30}},
+		{"I roll the d20... a 7! With +3 that's 10.", "", []int{7, 3, 10}},
+		{"Let me roll a d20 for you.", "", nil},
+		{"The bones are silent.", "", nil},
+		// #690: a quantity the user asked a roll of is a claimed value.
+		{"Du findest 12 Goldstücke", "", nil},
+		{"Du findest 12 Goldstücke", "Würfel, wie viel Gold wir finden", []int{12}},
+		{"Nach 3 Tagen findet ihr 12 Goldstücke", "Würfel, wie viel Gold wir finden", []int{12}},
 	}
 	for _, tc := range cases {
-		if got := claimedRollValues(tc.text); !slices.Equal(got, tc.want) {
-			t.Errorf("claimedRollValues(%q) = %v, want %v", tc.text, got, tc.want)
+		if got := claimedRollValues(tc.text, tc.user); !slices.Equal(got, tc.want) {
+			t.Errorf("claimedRollValues(%q, %q) = %v, want %v", tc.text, tc.user, got, tc.want)
 		}
 	}
 }
@@ -123,28 +159,33 @@ func TestRollClaimConsistent(t *testing.T) {
 	cases := []struct {
 		name    string
 		text    string
+		user    string
 		results []string
 		want    bool
 	}{
-		{"claim matches the single roll", "The bones show a 16, traveler.", []string{"Rolled 1d20: 16."}, true},
-		{"claim contradicts the roll", "A perfect 20!", []string{"Rolled 1d20: 7."}, false},
-		{"spelled claim contradicts", "You rolled a natural twenty!", []string{"Rolled 1d20: 7."}, false},
-		{"spelled claim matches", "You rolled a natural twenty!", []string{"Rolled 1d20: 20."}, true},
-		{"claim with no tool result at all", "Trust me, a solid 17.", nil, false},
-		{"no claim is trivially consistent", "The fates stay silent tonight.", nil, true},
-		{"derived total counts as consistent", "That's 3 and 4 — 7 total!", []string{"Rolled 2d6: [3 4] (total 7)."}, true},
-		{"notation in the result never legitimizes", "A 20, I swear!", []string{"Rolled 1d20: 7."}, false},
+		{"claim matches the single roll", "The bones show a 16, traveler.", "", []string{"Rolled 1d20: 16."}, true},
+		{"claim contradicts the roll", "A perfect 20!", "", []string{"Rolled 1d20: 7."}, false},
+		{"spelled claim contradicts", "You rolled a natural twenty!", "", []string{"Rolled 1d20: 7."}, false},
+		{"spelled claim matches", "You rolled a natural twenty!", "", []string{"Rolled 1d20: 20."}, true},
+		{"claim with no tool result at all", "Trust me, a solid 17.", "", nil, false},
+		{"no claim is trivially consistent", "The fates stay silent tonight.", "", nil, true},
+		{"derived total counts as consistent", "That's 3 and 4 — 7 total!", "", []string{"Rolled 2d6: [3 4] (total 7)."}, true},
+		{"notation in the result never legitimizes", "A 20, I swear!", "", []string{"Rolled 1d20: 7."}, false},
 		// A forced regen contradicting the roll in a cue-less shape must NOT pass
 		// as "no claim" (O5 review).
-		{"cue-less contradiction", "Kritischer Treffer, 20!", []string{"Rolled 1d20: 7."}, false},
-		{"cue-less contradiction en", "17! You hit.", []string{"Rolled 1d20: 4."}, false},
-		{"cue-less match", "Ich komme auf 23.", []string{"Rolled 1d20+5: 18 (total 23)."}, true},
-		{"price beside the real roll", "A 7. That'll be 5 gold.", []string{"Rolled 1d20: 7."}, true},
+		{"cue-less contradiction", "Kritischer Treffer, 20!", "", []string{"Rolled 1d20: 7."}, false},
+		{"cue-less contradiction en", "17! You hit.", "", []string{"Rolled 1d20: 4."}, false},
+		{"cue-less match", "Ich komme auf 23.", "", []string{"Rolled 1d20+5: 18 (total 23)."}, true},
+		{"price beside the real roll", "A 7. That'll be 5 gold.", "", []string{"Rolled 1d20: 7."}, true},
+		// #690: on a quantity roll the unit-suffixed number is the claim.
+		{"quantity roll contradicts", "Du findest 12 Goldstücke", "Würfel, wie viel Gold wir finden", []string{"Rolled 1d20: 7."}, false},
+		{"quantity roll matches", "Du findest 12 Goldstücke", "Würfel, wie viel Gold wir finden", []string{"Rolled 1d20: 12."}, true},
+		{"quantity without the user naming it", "Du findest 12 Goldstücke", "", []string{"Rolled 1d20: 7."}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rollClaimConsistent(tc.text, tc.results); got != tc.want {
-				t.Errorf("rollClaimConsistent(%q, %v) = %v, want %v", tc.text, tc.results, got, tc.want)
+			if got := rollClaimConsistent(tc.text, tc.user, tc.results); got != tc.want {
+				t.Errorf("rollClaimConsistent(%q, %q, %v) = %v, want %v", tc.text, tc.user, tc.results, got, tc.want)
 			}
 		})
 	}

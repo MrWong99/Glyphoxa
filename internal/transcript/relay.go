@@ -265,7 +265,7 @@ type turn struct {
 // Keyed by session id in Relay.states, created by startSession and torn down by
 // finishSession, so concurrent sessions never share a buffer.
 type sessionState struct {
-	buf        []Frame
+	buf        frameRing
 	lines      []Line
 	typing     Typing
 	connection string // latest gateway connection state (#123); "" until the first transition
@@ -865,10 +865,7 @@ func (r *Relay) setTyping(st *sessionState, sid string, t Typing) {
 func (r *Relay) emit(st *sessionState, sid string, f Frame) {
 	st.nextSeq++
 	f.Seq = st.nextSeq
-	st.buf = append(st.buf, f)
-	if len(st.buf) > ringCap {
-		st.buf = append([]Frame(nil), st.buf[len(st.buf)-ringCap:]...)
-	}
+	st.buf.push(f)
 	r.push(sid, f)
 }
 
@@ -952,13 +949,7 @@ func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 	if st == nil {
 		return nil
 	}
-	var out []Frame
-	for _, f := range st.buf {
-		if f.Seq > afterSeq {
-			out = append(out, f)
-		}
-	}
-	return out
+	return st.buf.after(afterSeq)
 }
 
 // resolveHuman maps a human utterance's SpeakerID to its rendered who + Kind

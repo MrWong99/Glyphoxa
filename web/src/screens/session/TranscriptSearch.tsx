@@ -183,7 +183,10 @@ export function TranscriptSearch({
             ))}
           </div>
         ) : (
-          !searchQuery.isPending && (
+          // Only once the server has answered for THIS query: the kept answer
+          // of the previous one (placeholder) says nothing about the new one.
+          !searchQuery.isPending &&
+          !searchQuery.isPlaceholderData && (
             <p className="gx-tsearch__empty">{t("session.noLinesMatch", { query: trimmed })}</p>
           )
         ))}

@@ -93,7 +93,18 @@ export function NodePortrait({ node }: { node: Node }) {
   };
 
   const onUpload = async (file: File) => {
-    await applyBytes(new Uint8Array(await file.arrayBuffer()), file.type);
+    setError(null);
+    // Reading the file can fail (it changed or vanished on disk since it was
+    // picked), and onUpload runs unawaited — unguarded, that was an unhandled
+    // rejection with nothing said under the portrait (MapDialogs' submit).
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer());
+    } catch (e) {
+      setError(t("knowledge.portraitError", { message: errorMessage(e) }));
+      return;
+    }
+    await applyBytes(bytes, file.type);
   };
 
   const remove = async () => {

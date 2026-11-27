@@ -3,7 +3,6 @@ package observe
 import (
 	"net/http/httptest"
 	"runtime"
-	"runtime/pprof"
 	"testing"
 	"time"
 )
@@ -54,16 +53,29 @@ func TestSetProfileRatesIgnoresGarbage(t *testing.T) {
 	}
 }
 
+// blockEvents sums the sampled blocking events across every record of the
+// block profile. The profile's Count() is no substitute: it counts distinct
+// stacks, so a repeat block at an already-recorded stack leaves it unchanged.
+func blockEvents() int64 {
+	var recs []runtime.BlockProfileRecord
+	n, ok := runtime.BlockProfile(nil)
+	for !ok {
+		recs = make([]runtime.BlockProfileRecord, n+8)
+		n, ok = runtime.BlockProfile(recs)
+	}
+	var events int64
+	for _, r := range recs[:n] {
+		events += r.Count
+	}
+	return events
+}
+
 // TestSetProfileRatesArmsBlockProfile proves the block knob end to end: with
 // the rate armed, a real blocked channel receive shows up in the block
 // profile. There is no read-back API for the block rate, so the profile
-// gaining a record is the only honest assertion.
+// gaining an event is the only honest assertion.
 func TestSetProfileRatesArmsBlockProfile(t *testing.T) {
-	p := pprof.Lookup("block")
-	if p == nil {
-		t.Fatal("block profile missing")
-	}
-	before := p.Count()
+	before := blockEvents()
 
 	setProfileRates(fakeEnv(map[string]string{"GLYPHOXA_PPROF_BLOCK_RATE": "1"}))
 	t.Cleanup(func() { runtime.SetBlockProfileRate(0) })
@@ -74,9 +86,9 @@ func TestSetProfileRatesArmsBlockProfile(t *testing.T) {
 	// and the receive never blocks at all. So keep generating candidate
 	// blocks, with a growing sleep, until one of them registers.
 	deadline := time.Now().Add(10 * time.Second)
-	for wait := time.Millisecond; p.Count() <= before; wait *= 2 {
+	for wait := time.Millisecond; blockEvents() <= before; wait *= 2 {
 		if time.Now().After(deadline) {
-			t.Fatalf("block profile never gained a record (count still %d)", p.Count())
+			t.Fatalf("block profile never gained an event (still %d)", blockEvents())
 		}
 		ch := make(chan struct{})
 		go func(d time.Duration) {

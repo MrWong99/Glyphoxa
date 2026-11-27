@@ -88,7 +88,7 @@ func TestQueryTracerRecordsHotFamiliesThroughPool(t *testing.T) {
 		t.Fatalf("CreateVoiceSession: %v", err)
 	}
 
-	// search_chunks — the ANN read inside the 250ms recall budget (ADR-0042).
+	// search_chunks — the ANN read inside the recall budget (500ms by default, ADR-0042).
 	rec.reset()
 	if _, err := st.SearchChunksByCampaign(ctx, campaignID, vec768(1, 0), 3); err != nil {
 		t.Fatalf("SearchChunksByCampaign: %v", err)

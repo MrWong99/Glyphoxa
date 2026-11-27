@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/base64"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/gorilla/websocket"
 )
 
 // GatewayBudgetRecorder classifies Discord gateway session establishments so the
@@ -29,28 +32,44 @@ type GatewayBudgetRecorder interface {
 // gateway session establishments for the IDENTIFY-budget metrics (#486):
 //
 //   - an identify rate-limiter wrapper that counts each IDENTIFY at SEND time
-//     (when disgo admits the identify, before any Ready), so a connect that burns
-//     the 1000/token/24h budget but never reaches Ready — an InvalidSession reply,
-//     a pre-dispatch close, a reconnect loop that keeps re-identifying — is still
-//     counted and can trip the alarm. Discord spends the budget on the IDENTIFY it
-//     receives, not on the session we establish, so this is where the count belongs.
+//     (when disgo has admitted the identify and the socket to the gateway is
+//     open, before any Ready), so a connect that burns the 1000/token/24h budget
+//     but never reaches Ready — an InvalidSession reply, a pre-dispatch close, a
+//     reconnect loop that keeps re-identifying — is still counted and can trip
+//     the alarm. Discord spends the budget on the IDENTIFY it receives, not on
+//     the session we establish, so this is where the count belongs. An open
+//     whose network dial failed sent nothing and is not counted (#686).
 //   - a Resumed event listener that counts each budget-free RESUME.
 //
 // The identify wrapper also enforces the hard per-application IDENTIFY pacing
-// (see identifyPacer). That is not observability and does not depend on b:
-// with a nil b the wrapper is still installed, counting into a discard
-// recorder, and only the Resumed listener is left out.
+// (see [IdentifyPacer]), and comes with a gateway dialer that settles each
+// admitted IDENTIFY: counted when the dial succeeds, its pacer token handed
+// back when the dial fails (see identifyCounter.dialer). Neither is
+// observability and neither depends on b: with a nil b both are still
+// installed, counting into a discard recorder, and only the Resumed listener
+// is left out.
 func GatewayBudgetClientOpts(token string, b GatewayBudgetRecorder) []bot.ConfigOpt {
 	appID := applicationIDFromToken(token)
 	if b == nil {
-		return []bot.ConfigOpt{
-			bot.WithGatewayConfigOpts(gateway.WithIdentifyRateLimiter(newIdentifyCounter(appID, discardGatewayBudget{}))),
-		}
+		return []bot.ConfigOpt{identifyCounterOpt(newIdentifyCounter(appID, discardGatewayBudget{}))}
 	}
 	return []bot.ConfigOpt{
-		bot.WithGatewayConfigOpts(gateway.WithIdentifyRateLimiter(newIdentifyCounter(appID, b))),
+		identifyCounterOpt(newIdentifyCounter(appID, b)),
 		bot.WithEventListeners(resumeListener(b)),
 	}
+}
+
+// identifyCounterOpt installs one counter as both the gateway's identify
+// rate-limiter and its dialer: the two must be the same counter, the dialer
+// settles what that limiter's Wait charged. It replaces a dialer set by an
+// earlier gateway option (there is none today), and a later option that
+// replaces this one only loses the refund: Unlock then counts the IDENTIFY and
+// the pacer keeps its token.
+func identifyCounterOpt(c *identifyCounter) bot.ConfigOpt {
+	return bot.WithGatewayConfigOpts(
+		gateway.WithIdentifyRateLimiter(c),
+		gateway.WithDialer(c.dialer((&net.Dialer{}).DialContext)),
+	)
 }
 
 // discardGatewayBudget is the recorder behind a client built without budget
@@ -68,39 +87,123 @@ func resumeListener(b GatewayBudgetRecorder) bot.EventListener {
 	})
 }
 
-// identifyCounter wraps a gateway.IdentifyRateLimiter and counts one IDENTIFY each
-// time the wrapped limiter admits a send (Wait returns nil). The inner limiter is
-// disgo's Noop by default, so wrapping it counts without changing the identify
-// pacing — the reconnect behavior (backoff) is unchanged.
+// identifyCounter wraps a gateway.IdentifyRateLimiter, charges the
+// application's [IdentifyPacer] for each IDENTIFY the wrapped limiter admits,
+// and counts the ones that may have gone out. The inner limiter is disgo's Noop
+// by default, so wrapping it adds the pacer's hold and nothing else to the
+// reconnect behavior (backoff).
+//
+// disgo calls Wait BEFORE it dials, so an admitted IDENTIFY is settled later,
+// exactly once, one of two ways:
+//
+//   - sent (as far as this process can tell): counted in the budget metric,
+//     pacer token kept. Decided when the gateway dial succeeds, or at Unlock
+//     if the dial never came through this counter's dialer.
+//   - provably never sent: not counted, pacer token refunded. A cancelled wait
+//     (#671, in the pacer itself) and a failed dial (#686, see dialer).
+//
+// Counted and charged always go together. The pacer is what holds a runaway
+// loop to 484 IDENTIFYs a day, so the metric and the rolling-24h warning stay
+// under that bound too — an outage of failed dials neither spends the pacer
+// nor raises a token-reset alarm for IDENTIFYs Discord never saw.
+//
+// One counter serves one gateway.
 type identifyCounter struct {
 	inner  gateway.IdentifyRateLimiter
 	appID  string
 	budget GatewayBudgetRecorder
+	pacer  *IdentifyPacer
+	// pending is true from a Wait the pacer admitted until that IDENTIFY is
+	// settled: counted (dial succeeded, or Unlock) or refunded (dial failed).
+	pending atomic.Bool
 }
 
-func newIdentifyCounter(appID string, b GatewayBudgetRecorder) gateway.IdentifyRateLimiter {
+func newIdentifyCounter(appID string, b GatewayBudgetRecorder) *identifyCounter {
 	return &identifyCounter{
 		inner:  gateway.NewNoopIdentifyRateLimiter(),
 		appID:  appID,
 		budget: b,
+		pacer:  identifyPacerFor(appID),
 	}
 }
 
 func (c *identifyCounter) Close(ctx context.Context) { c.inner.Close(ctx) }
 
-// Wait counts an IDENTIFY only when the inner limiter admits the send: on a
-// context-cancelled Wait no identify is sent, so nothing is counted.
+// Wait charges the pacer for an IDENTIFY the inner limiter admits and leaves
+// it pending. Nothing is counted here: disgo dials after Wait, and only the
+// dial tells whether an IDENTIFY can have gone out. On a context-cancelled
+// Wait no identify is sent, so nothing is charged or counted.
 func (c *identifyCounter) Wait(ctx context.Context, shardID int) error {
 	if err := c.inner.Wait(ctx, shardID); err != nil {
 		return err
 	}
 	// The hard cap comes BEFORE the count: an IDENTIFY that is still waiting
 	// for its turn has not been sent.
-	if err := identifyPacerFor(c.appID).Wait(ctx); err != nil {
+	if err := c.pacer.Wait(ctx); err != nil {
 		return err
 	}
-	c.budget.RecordIdentify(c.appID)
+	c.pending.Store(true)
 	return nil
+}
+
+// Unlock ends the open. An IDENTIFY still pending here never saw its dial
+// (another dialer was installed over this counter's, or the open failed before
+// dialing): it stays charged, so it is counted — the conservative direction.
+func (c *identifyCounter) Unlock(shardID int) {
+	c.settleSent()
+	c.inner.Unlock(shardID)
+}
+
+// settleSent counts the pending IDENTIFY, once; its pacer token stays spent.
+func (c *identifyCounter) settleSent() {
+	if c.pending.CompareAndSwap(true, false) {
+		c.budget.RecordIdentify(c.appID)
+	}
+}
+
+// settleUnsent gives the pending IDENTIFY's pacer token back, once, and does
+// not count it.
+func (c *identifyCounter) settleUnsent() {
+	if c.pending.CompareAndSwap(true, false) {
+		c.pacer.Refund()
+	}
+}
+
+// dialer is the gateway dialer that settles the pending IDENTIFY on the
+// outcome of the network dial. disgo calls Wait BEFORE it dials and retries a
+// failed open every ten seconds at most, so without the refund every failed
+// dial of a network outage spent 3 minutes of budget on an IDENTIFY that never
+// left the process and the hold grew without end (#686; the same shape #671
+// fixed for cancelled waits). And counted at Wait, those refunded attempts ran
+// the metric up at disgo's retry rate with nothing left to bound it.
+//
+// Only the network dial is covered — DNS and TCP, to Discord or to the proxy
+// in front of it: with no socket nothing was sent. Once a socket exists the
+// IDENTIFY is counted and stays charged whatever fails afterwards (proxy
+// CONNECT, TLS, the HTTP upgrade, the handshake), the conservative direction.
+//
+// The dial finds its Wait through pending: disgo holds the gateway's conn
+// lock from Wait through the dial, so those two never interleave with another
+// open of the same gateway, and an open that RESUMEs never calls Wait, so its
+// dial settles nothing. The limiter's Unlock runs only after disgo has let
+// that lock go; an open that got in between could have its IDENTIFY settled
+// as sent by the earlier open's Unlock and miss a refund. That errs to the
+// charged-and-counted side, never to a token or a count given away.
+//
+// dial is what gorilla would use by itself, (&net.Dialer{}).DialContext; the
+// rest is its DefaultDialer (proxy from the environment, handshake timeout).
+func (c *identifyCounter) dialer(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *websocket.Dialer {
+	d := *websocket.DefaultDialer
+	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			c.settleUnsent()
+			return nil, err
+		}
+		c.settleSent()
+		return conn, nil
+	}
+	return &d
 }
 
 // IDENTIFY pacing: the last line of defence for the Bot token.
@@ -116,6 +219,12 @@ func (c *identifyCounter) Wait(ctx context.Context, shardID int) error {
 // burst for boot and ordinary reconnects, then a slow refill. A runaway loop
 // is held to [identifyBurst] + 24h/[identifyRefill] = 484 a day whatever its
 // cause; a healthy process never notices.
+//
+// The bucket is charged before the IDENTIFY goes out, so an attempt that
+// provably sent none gets its token back: a wait that was cancelled (#671) and
+// a gateway dial that failed (#686). Everything else stays charged, and only
+// what stays charged is counted in the IDENTIFY metric, so the metric shares
+// the bound.
 const (
 	// identifyBurst is how many IDENTIFYs may go out back to back.
 	identifyBurst = 4
@@ -217,8 +326,6 @@ func (p *IdentifyPacer) Wait(ctx context.Context) error {
 		return nil
 	}
 }
-
-func (c *identifyCounter) Unlock(shardID int) { c.inner.Unlock(shardID) }
 
 // applicationIDFromToken derives the public application id from a Discord bot
 // token's first dot-segment (base64 of the snowflake id), mirroring disgo's own

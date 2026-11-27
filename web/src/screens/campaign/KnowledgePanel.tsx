@@ -246,6 +246,10 @@ export function KnowledgePanel({
   // still holds a query, so an unfiltered list would look filtered and the GM
   // could act on the wrong entry.
   const searchFailed = searching && searchQuery.isError;
+  // The kept matches of the PREVIOUS query (placeholder) are worth showing
+  // while the next one is in flight, but an empty set of them is no answer to
+  // the query now in the box: "no matches" waits for the server.
+  const searchStale = searching && searchQuery.isPlaceholderData;
 
   // While searching, the matches in the server's relevance order; before the
   // FIRST result lands (nothing to keep) the full list, so the view never
@@ -737,7 +741,7 @@ export function KnowledgePanel({
         }
       />
     ) : searchFailed ? null : visible.length === 0 ? (
-      noMatches
+      searchStale ? null : noMatches
     ) : searching ? (
       // Search results are ONE ranked list. Grouping by type would bury the
       // best match under whichever type happens to sort first.

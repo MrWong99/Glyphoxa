@@ -30,7 +30,9 @@ afterEach(() => {
 });
 
 function ok() {
-  return new Response(new Blob(["gz"]), {
+  // A plain string body, not a jsdom Blob: jsdom's Blob has no stream(), which
+  // Node 22's undici needs to build a Response from one.
+  return new Response("gz", {
     status: 200,
     headers: { "Content-Disposition": 'attachment; filename="Citadel.glyphoxa.json.gz"' },
   });
@@ -58,7 +60,14 @@ describe("CampaignExportDialog", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     expect(requestedUrl()).toBe("/api/v1/campaigns/c1/export?include_history=true&include_images=true");
-    await waitFor(() => expect(mockDownload).toHaveBeenCalledWith(expect.any(Blob), "Citadel.glyphoxa.json.gz"));
+    // Matched by size, not `expect.any(Blob)`: which realm's Blob `res.blob()`
+    // returns depends on the Node version (Node 22 Node's, Node 24 jsdom's).
+    await waitFor(() =>
+      expect(mockDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ size: "gz".length }),
+        "Citadel.glyphoxa.json.gz",
+      ),
+    );
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 

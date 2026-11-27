@@ -876,12 +876,14 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 	// rounds' provider failures flow into the #398 policy (no new retry). The
 	// discarded draft is NEVER delivered — on a regeneration error the turn fails
 	// rather than speak the invented number (ADR-0030: a discarded draft must not
-	// surface).
-	if len(called.resultsFor(diceToolName)) == 0 && claimsRollResult(text) {
+	// surface). The armed user utterance rides along so a quantity the user asked
+	// a roll of ("wie viel Gold") is not waved through as a unit noun (#690).
+	userText := stripSpeakerPrefix(latestUserText(messages))
+	if len(called.resultsFor(diceToolName)) == 0 && claimsRollResult(text, userText) {
 		e.rec.MalformedToolGen(e.provName, observe.MalformedRollClaim)
 		slog.Warn("agenttool: dice armed but model narrated an unrolled result; regenerating with forced dice tool",
 			"provider", string(e.provName), "dice_requested", called.has(diceToolName))
-		regen, rerr := e.regenWithForcedDice(ctx, msgs)
+		regen, rerr := e.regenWithForcedDice(ctx, msgs, userText)
 		if rerr != nil {
 			return "", rerr
 		}
@@ -912,8 +914,9 @@ const maxForcedRegens = 2
 // draft must never surface). A claim-free regen, or one whose claim matches the
 // rolled result, is returned unchanged. Each attempt runs with a fresh
 // [calledTools] recorder so the consistency check sees only THAT attempt's rolls,
-// and each mismatch is counted on the bounded regen_mismatch label.
-func (e *Engine) regenWithForcedDice(ctx context.Context, msgs []tool.Message) (string, error) {
+// and each mismatch is counted on the bounded regen_mismatch label. userText is
+// the armed user utterance the claim extraction needs for quantity rolls (#690).
+func (e *Engine) regenWithForcedDice(ctx context.Context, msgs []tool.Message, userText string) (string, error) {
 	for attempt := 1; ; attempt++ {
 		called := newCalledTools()
 		forced := withForcedToolChoice(withCalledTools(withRoundCounter(ctx), called),
@@ -922,7 +925,7 @@ func (e *Engine) regenWithForcedDice(ctx context.Context, msgs []tool.Message) (
 		if err != nil {
 			return "", err
 		}
-		if rollClaimConsistent(regen, called.resultsFor(diceToolName)) {
+		if rollClaimConsistent(regen, userText, called.resultsFor(diceToolName)) {
 			return regen, nil
 		}
 		e.rec.MalformedToolGen(e.provName, observe.MalformedRegenMismatch)

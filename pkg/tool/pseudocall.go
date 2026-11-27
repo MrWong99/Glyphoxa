@@ -55,14 +55,18 @@ type PseudoCall struct {
 //     (unrecoverable: the args are incomplete); an opener whose name cannot be
 //     read but which IS closed later is stripped only through its closer;
 //   - orphan `</function>` closers left behind when a JSON string arg itself
-//     contained the literal `</function>` — stripped so no garbage is spoken.
+//     contained the literal `</function>` — stripped so no garbage is spoken; a
+//     text whose ONLY find is an orphan closer reports it as one unnamed,
+//     unrecoverable PseudoCall, so the caller still applies the clean text.
 //
 // It also strips — never recovers — the leak shapes of other model families
 // (see leaktags.go): each of those is reported with nil Args.
 //
 // Text with none of these is returned byte-identical with a nil slice. Excision
-// joints are whitespace-collapsed locally (so "Los! <call>" → "Los!") while
-// untouched prose — including newlines in Butler markdown — stays byte-identical.
+// joints are whitespace-collapsed locally (so "Los! <call>" → "Los!"; a joint
+// that held a line break keeps one, so a call on its own line does not weld two
+// list items together) while untouched prose — including newlines in Butler
+// markdown — stays byte-identical.
 // A whole-message pseudo-call yields clean == "".
 func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 	locs := pseudoCallRE.FindAllStringSubmatchIndex(text, -1)
@@ -106,8 +110,17 @@ func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 		calls = append(calls, PseudoCall{Name: name, Args: nil})
 	}
 
-	// Orphan closers left by an inner literal </function> in a JSON string arg.
-	clean = strings.ReplaceAll(clean, pseudoClose, "")
+	// Orphan closers left by an inner literal </function> in a JSON string arg
+	// (the call itself is already reported above) or standing alone, their
+	// opener cut off or sitting in an earlier round. A lone one is reported as
+	// an empty call, as stripLeakElements does for its closers: without it the
+	// caller would see nothing to scrub and keep the original text (#423).
+	if strings.Contains(clean, pseudoClose) {
+		clean = joinAtSeams(strings.Split(clean, pseudoClose))
+		if len(calls) == 0 {
+			calls = append(calls, PseudoCall{})
+		}
+	}
 
 	// The other families' leak shapes (Claude's tool-call block, tool_use /
 	// tool_call wrappers, reasoning blocks): strip-only, see leaktags.go (#702).
@@ -122,9 +135,11 @@ func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 }
 
 // joinAtSeams concatenates prose segments, trimming whitespace on both sides of
-// each seam (where a pseudo-call was excised) and inserting a single space when
-// both sides are non-empty. Interior bytes of each segment — including newlines —
-// are preserved exactly.
+// each seam (where a pseudo-call was excised) and, when both sides are non-empty,
+// inserting a single separator: a space, a newline when the trimmed whitespace
+// held a line break, or a blank line when either side held one (so a call on its
+// own line or paragraph leaves the markdown structure around it intact).
+// Interior bytes of each segment — including newlines — are preserved exactly.
 func joinAtSeams(segs []string) string {
 	clean := segs[0]
 	for _, seg := range segs[1:] {
@@ -136,7 +151,15 @@ func joinAtSeams(segs []string) string {
 		case r == "":
 			clean = l
 		default:
-			clean = l + " " + r
+			sep := " "
+			lws, rws := clean[len(l):], seg[:len(seg)-len(r)]
+			switch ln, rn := strings.Count(lws, "\n"), strings.Count(rws, "\n"); {
+			case ln > 1 || rn > 1:
+				sep = "\n\n"
+			case ln+rn > 0:
+				sep = "\n"
+			}
+			clean = l + sep + r
 		}
 	}
 	return clean

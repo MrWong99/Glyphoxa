@@ -368,20 +368,9 @@ func toWireTools(defs []llm.ToolDef) []wireTool {
 	return tools
 }
 
-// readErrorResponse reads up to 512 bytes of a non-2xx response body for
-// diagnostic context and returns it as a typed [*providererr.HTTPError] so the
-// retry helper can classify the call by status code via errors.As (#124),
-// matching the elevenlabs adapters' error shape. Its Error() text is
-// byte-identical to the former fmt.Errorf literal, so grep-based harnesses and
-// logs are unchanged.
+// readErrorResponse is [providererr.FromResponse] with the adapter's "anthropic." Op prefix.
 func readErrorResponse(resp *http.Response, op string) error {
-	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return &providererr.HTTPError{
-		Op:         "anthropic." + op,
-		StatusCode: resp.StatusCode,
-		Status:     resp.Status,
-		Body:       strings.TrimSpace(string(snippet)),
-	}
+	return providererr.FromResponse(resp, "anthropic."+op)
 }
 
 // streamEvents reads the Anthropic SSE response from r, decodes each event, and

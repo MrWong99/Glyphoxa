@@ -28,6 +28,23 @@ export const en = {
   "session.hintSaveBotTokenFirst": "Save a Discord Bot token first.",
   "session.couldntStart": "Couldn't start the session: {message}",
   "session.couldntStop": "Couldn't stop the session: {message}",
+  // The Start/Stop refusals the server marks with a reason
+  // (internal/rpc/session.go; startStopError.ts maps reason to key). Each is
+  // the {message} of couldntStart / couldntStop, so a whole sentence.
+  "session.errSessionActive": "A Voice Session is already running.",
+  "session.errDiscordNotConfigured":
+    "No voice channel is set. Link a Discord server under Setup, then pick a voice channel.",
+  "session.errBotTokenMissing": "No Discord Bot token is saved. Add one under Setup.",
+  "session.errBotTokenUndecryptable":
+    "The saved Discord Bot token could not be read. The server's GLYPHOXA_SECRET has probably changed; restore it, or paste the token again under Setup.",
+  "session.errVoiceUnavailable": "This server does not run Voice Sessions.",
+  "session.errSessionLimit":
+    "The server is already running as many Voice Sessions as it allows. Try again once one of them ends.",
+  "session.errShuttingDown": "The server is shutting down. Try again in a moment.",
+  "session.errWorkerPending": "No voice worker picked the session up in time. Try again in a moment.",
+  "session.errStartCancelled": "The start was cancelled before the session began.",
+  "session.errNoActiveSession": "No Voice Session is running.",
+  "session.errStopPending": "The voice worker has not confirmed the stop yet. Try again in a moment.",
   "session.couldntSaveDefaultChannel": "Couldn't save the default channel: {message}",
   "session.couldntSetMute": "Couldn't change the mute: {message}",
   "session.connectionFailed": "Voice connection failed.",
@@ -331,6 +348,22 @@ export const de: Record<keyof typeof en, string> = {
   "session.hintSaveBotTokenFirst": "Speichere zuerst einen Discord-Bot-Token.",
   "session.couldntStart": "Session konnte nicht gestartet werden: {message}",
   "session.couldntStop": "Session konnte nicht beendet werden: {message}",
+  "session.errSessionActive": "Es läuft bereits eine Voice Session.",
+  "session.errDiscordNotConfigured":
+    "Es ist kein Sprachkanal festgelegt. Verknüpfe unter Einrichtung einen Discord-Server und wähle dann einen Sprachkanal.",
+  "session.errBotTokenMissing": "Es ist kein Discord-Bot-Token gespeichert. Hinterlege einen unter Einrichtung.",
+  "session.errBotTokenUndecryptable":
+    "Der gespeicherte Discord-Bot-Token konnte nicht gelesen werden. Vermutlich hat sich das GLYPHOXA_SECRET des Servers geändert; stelle es wieder her oder füge den Token unter Einrichtung erneut ein.",
+  "session.errVoiceUnavailable": "Dieser Server führt keine Voice Sessions aus.",
+  "session.errSessionLimit":
+    "Auf dem Server laufen bereits so viele Voice Sessions, wie er zulässt. Versuche es erneut, sobald eine davon endet.",
+  "session.errShuttingDown": "Der Server wird gerade heruntergefahren. Versuche es gleich noch einmal.",
+  "session.errWorkerPending":
+    "Kein Voice-Worker hat die Session rechtzeitig übernommen. Versuche es gleich noch einmal.",
+  "session.errStartCancelled": "Der Start wurde abgebrochen, bevor die Session begonnen hat.",
+  "session.errNoActiveSession": "Es läuft keine Voice Session.",
+  "session.errStopPending":
+    "Der Voice-Worker hat das Beenden noch nicht bestätigt. Versuche es gleich noch einmal.",
   "session.couldntSaveDefaultChannel": "Standardkanal konnte nicht gespeichert werden: {message}",
   "session.couldntSetMute": "Stummschalten fehlgeschlagen: {message}",
   "session.connectionFailed": "Sprachverbindung fehlgeschlagen.",

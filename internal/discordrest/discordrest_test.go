@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/discordrest"
 )
@@ -59,5 +61,60 @@ func TestStatusError(t *testing.T) {
 	}
 	if discordrest.BaseURL("") != discordrest.LiveAPIBaseURL || discordrest.BaseURL("http://x") != "http://x" {
 		t.Errorf("BaseURL seam broken")
+	}
+}
+
+// TestClientsDoNotShareDefaultTransport pins the private transport (#602):
+// every httptest.Server.Close calls CloseIdleConnections on
+// http.DefaultTransport, so clients riding it lose their keep-alive
+// connections whenever an unrelated parallel test finishes, and a request
+// caught reusing one dies with "http: CloseIdleConnections called".
+func TestClientsDoNotShareDefaultTransport(t *testing.T) {
+	t.Parallel()
+	if tr := discordrest.Client.Transport; tr == nil || tr == http.DefaultTransport {
+		t.Fatalf("Client.Transport = %v, want a private transport", tr)
+	}
+	if discordrest.UploadClient.Transport != discordrest.Client.Transport {
+		t.Fatalf("UploadClient must share Client's transport (one pool to Discord)")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"42"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// The trace makes the check deterministic: wait until the first call's
+	// connection is back in the idle pool, then see whether the second call
+	// still gets it after an unrelated server closed.
+	idle := make(chan struct{}, 2)
+	var reused bool
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn:     func(info httptrace.GotConnInfo) { reused = info.Reused },
+		PutIdleConn: func(error) { idle <- struct{}{} },
+	})
+	get := func() {
+		t.Helper()
+		var out struct {
+			ID string `json:"id"`
+		}
+		status, err := discordrest.GetJSON(ctx, "tok", srv.URL+"/ok", &out)
+		if err != nil || status != http.StatusOK || out.ID != "42" {
+			t.Fatalf("GetJSON = %d %v %+v", status, err, out)
+		}
+	}
+
+	get()
+	select {
+	case <-idle:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first call's connection never returned to the idle pool")
+	}
+
+	other := httptest.NewServer(http.NotFoundHandler())
+	other.Close() // CloseIdleConnections on http.DefaultTransport
+
+	get()
+	if !reused {
+		t.Fatal("an unrelated httptest.Server.Close dropped the idle Discord connection")
 	}
 }

@@ -20,6 +20,7 @@ import { errorMessage } from "@/lib/connectError";
 import { useI18n } from "@/i18n";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
+import { integrationFailureText } from "./integrationDetail";
 import { SecretRow } from "./SecretRow";
 
 // The Discord connection, in the order a GM does it (#695): step 1 adds
@@ -313,15 +314,21 @@ function LinkForm({
 // "failed" (the token was rejected terminally), the last two with a detail.
 // Empty state (web-only mode) and any state this build does not know render
 // nothing — only an explicit "ok" may claim the Bot is connected.
+//
+// A "failed" detail is "<code>: <raw gateway error>", so it renders as a
+// localized sentence (integrationDetail.ts, #695). A "reconnecting" detail is
+// server prose with a countdown and no code; it stays verbatim until the
+// server sends something stable to translate.
 function IntegrationBadge({ state, detail }: { state: string; detail: string }) {
   const { t } = useI18n();
   if (state === "reconnecting" || state === "failed") {
+    const text = state === "failed" ? integrationFailureText(detail, t) : detail;
     return (
       <span className="gx-health">
         <Badge variant={state === "failed" ? "danger" : "warning"} dot size="sm">
           {t(state === "failed" ? "config.discordIntegrationFailed" : "config.discordIntegrationReconnecting")}
         </Badge>
-        {detail && <span className="gx-health__detail">{detail}</span>}
+        {text && <span className="gx-health__detail">{text}</span>}
       </span>
     );
   }

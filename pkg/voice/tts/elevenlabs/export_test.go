@@ -40,6 +40,16 @@ func WithWSCapBackoff(d time.Duration) Option {
 	}
 }
 
+// WithWSClock replaces the clock the pool measures the cap hold on, so a test
+// decides when the hold runs out. It must come after WithTransport(TransportWS).
+func WithWSClock(now func() time.Time) Option {
+	return func(c *Client) {
+		if c.ws != nil {
+			c.ws.tune.now = now
+		}
+	}
+}
+
 // WithWSWarmFor overrides how long after its last sentence Warm keeps a voice's
 // socket lined up. It must come after WithTransport(TransportWS).
 func WithWSWarmFor(d time.Duration) Option {

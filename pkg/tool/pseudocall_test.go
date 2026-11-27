@@ -173,12 +173,67 @@ func TestExtractPseudoCallsUnterminatedWholeMessage(t *testing.T) {
 // orphan `</function>` fragment behind. It must not survive into spoken text.
 func TestExtractPseudoCallsInnerLiteralCloser(t *testing.T) {
 	in := `Note this <function=note {"text":"a </function> tag"}</function> done`
-	clean, _ := ExtractPseudoCalls(in)
+	clean, calls := ExtractPseudoCalls(in)
 	if strings.Contains(clean, "</function>") {
 		t.Errorf("orphan closer leaked into clean text: %q", clean)
 	}
 	if strings.Contains(clean, "<function") {
 		t.Errorf("opener leaked into clean text: %q", clean)
+	}
+	if strings.Contains(clean, "  ") {
+		t.Errorf("orphan-closer seam left a double space: %q", clean)
+	}
+	// The orphan belongs to the note call already reported — not a second call.
+	if len(calls) != 1 || calls[0].Name != "note" {
+		t.Errorf("calls = %+v, want only the note call", calls)
+	}
+}
+
+// TestExtractPseudoCallsLoneOrphanCloser is #423 item 4: a `</function>` with no
+// opener at all (the opener sat in an earlier round, or was never emitted) is
+// stripped like the stream scrubber drops it, and reported as one unnamed,
+// unrecoverable call — without that report the clean text is never applied and
+// the marker is persisted into the Transcript Line.
+func TestExtractPseudoCallsLoneOrphanCloser(t *testing.T) {
+	in := "stray </function> closer here"
+	clean, calls := ExtractPseudoCalls(in)
+	if clean != "stray closer here" {
+		t.Errorf("clean = %q, want %q", clean, "stray closer here")
+	}
+	if len(calls) != 1 || calls[0].Name != "" || calls[0].Args != nil {
+		t.Fatalf("calls = %+v, want one unrecoverable no-name call", calls)
+	}
+	var streamed strings.Builder
+	sc := &streamScrubber{out: func(s string) error { streamed.WriteString(s); return nil }}
+	_ = sc.Write(in)
+	_ = sc.Flush()
+	if got := strings.Join(strings.Fields(streamed.String()), " "); got != clean {
+		t.Errorf("stream spoke %q, batch kept %q", got, clean)
+	}
+}
+
+// TestExtractPseudoCallsSeamKeepsLineBreak is #423 item 4: a call excised from
+// between two lines must not weld them into one — a markdown list stays a list,
+// a blank line stays a paragraph break. A seam without a newline still collapses
+// to a single space.
+func TestExtractPseudoCallsSeamKeepsLineBreak(t *testing.T) {
+	const call = `<function=dice {"count":1,"sides":6}</function>`
+	cases := []struct{ name, in, want string }{
+		{"mid-list", "- one\n" + call + "\n- two", "- one\n- two"},
+		{"end of line", "- one " + call + "\n- two", "- one\n- two"},
+		{"paragraph break", "Erster Absatz.\n\n" + call + "\n\nZweiter Absatz.", "Erster Absatz.\n\nZweiter Absatz."},
+		{"same line", "Los! " + call + " weiter", "Los! weiter"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clean, calls := ExtractPseudoCalls(tc.in)
+			if clean != tc.want {
+				t.Errorf("clean = %q, want %q", clean, tc.want)
+			}
+			if len(calls) != 1 || calls[0].Name != "dice" {
+				t.Errorf("calls = %+v, want one dice call", calls)
+			}
+		})
 	}
 }
 

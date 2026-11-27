@@ -67,11 +67,7 @@ func (r *Relay) attach(id string, lastID uint64) (*subscriber, []Frame) {
 	defer r.mu.Unlock()
 	var replay []Frame
 	if st := r.states[id]; st != nil {
-		for _, f := range st.buf {
-			if f.Seq > lastID {
-				replay = append(replay, f)
-			}
-		}
+		replay = st.buf.after(lastID)
 	}
 	s := &subscriber{id: id, ch: make(chan Frame, subBuffer), lagged: make(chan struct{})}
 	r.subs[s] = struct{}{}
