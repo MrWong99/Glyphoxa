@@ -167,12 +167,19 @@ func TestFlightRecorderCoalescesBurst(t *testing.T) {
 	}
 }
 
+// ignoreDeliberateLeak exempts the one goroutine this package's tests leak on
+// purpose: leakBlockedForever (leakprofile_test.go) parks it for the life of
+// the binary so the goroutineleak profile has something to report. Without the
+// exemption the goleak guards below only pass while they happen to run before
+// that test — a second -count iteration would blame them for it.
+var ignoreDeliberateLeak = goleak.IgnoreAnyFunction("github.com/MrWong99/Glyphoxa/internal/observe.leakBlockedForever.func1")
+
 // TestFlightRecorderCloseIsIdempotentAndStopsWriter: Close sits behind a
 // `defer` next to error returns in the voice entrypoints, so a second call
 // must be harmless — and the writer goroutine must actually die, or an armed
 // voice node leaks one per restart of the loop.
 func TestFlightRecorderCloseIsIdempotentAndStopsWriter(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	defer goleak.VerifyNone(t, ignoreDeliberateLeak)
 
 	dir := t.TempDir()
 	stops := 0
@@ -194,7 +201,7 @@ func TestFlightRecorderCloseIsIdempotentAndStopsWriter(t *testing.T) {
 // hook install and the deferred Close (ADR-0032's opt-in posture, as with
 // GLYPHOXA_PPROF).
 func TestStartFlightRecorderOffByDefault(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	defer goleak.VerifyNone(t, ignoreDeliberateLeak)
 
 	if f := StartFlightRecorder(func(string) string { return "" }, slog.New(slog.DiscardHandler)); f != nil {
 		f.Close()
@@ -206,7 +213,7 @@ func TestStartFlightRecorderOffByDefault(t *testing.T) {
 // runs against the real runtime tracer and the snapshot directory exists before
 // the first breach — a missing dir must not turn into a lost trace mid-incident.
 func TestStartFlightRecorderArmsAndCreatesDir(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	defer goleak.VerifyNone(t, ignoreDeliberateLeak)
 
 	dir := filepath.Join(t.TempDir(), "snapshots")
 	env := map[string]string{

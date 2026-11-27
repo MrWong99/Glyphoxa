@@ -63,9 +63,10 @@ func TestPprofGateServesGoroutineLeakProfile(t *testing.T) {
 // leakBlockedForever spawns the canonical leak the goroutineleak profile is
 // built to catch: a goroutine parked on a channel receive whose channel goes
 // unreachable the moment this function returns, so no send can ever wake it.
-// The goroutine survives for the rest of the test binary — deliberate, and
-// safe here because this package's tests don't assert a quiet goroutine
-// baseline the way the goleak-guarded packages do.
+// The goroutine survives for the rest of the test binary — deliberate: making
+// it releasable would keep the channel reachable, and the profile would stop
+// reporting it. The goleak-guarded flight-recorder tests exempt it by function
+// name (ignoreDeliberateLeak in flight_test.go), so keep the two in sync.
 //
 //go:noinline
 func leakBlockedForever() {
