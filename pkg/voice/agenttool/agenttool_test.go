@@ -1730,6 +1730,48 @@ func TestEngine_NotArmed_GuardNeverFires(t *testing.T) {
 	}
 }
 
+// TestEngine_InventedQuantityRoll_Regenerates is the #690 quantity-roll gap: the
+// user asks for a roll of a QUANTITY ("Würfel, wie viel Gold wir finden") and the
+// model invents "12 Goldstücke" without calling the dice Tool. The unit-noun
+// carve-out must not hide that number — the armed utterance names the same unit —
+// so the draft is discarded and regenerated with the dice Tool forced. The first
+// regen rolls the seeded 16 but still narrates 12 Goldstücke (a contradiction the
+// consistency check must see too); the bounded retry narrates its actual roll.
+func TestEngine_InventedQuantityRoll_Regenerates(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Du findest 12 Goldstücke.", stop: "end_turn"}, // run 1: invented quantity
+		// Regen 1: calls dice (rolls 16)... then narrates 12 Goldstücke anyway.
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "Du findest 12 Goldstücke.", stop: "end_turn"},
+		// Regen 2: rolls again (13) and narrates it faithfully.
+		{calls: []llm.ToolCall{{ID: "t2", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "Ihr findet 13 Goldstücke.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithLanguage("de"), agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleSystem, Text: "Du bist Bart."},
+		{Role: llm.RoleUser, Text: "Mira: Würfel, wie viel Gold wir finden."},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "Ihr findet 13 Goldstücke." {
+		t.Errorf("delivered = %q, want the retry's faithful narration (the invented 12 must not ship)", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 2 ||
+		paths[0] != observe.MalformedRollClaim || paths[1] != observe.MalformedRegenMismatch {
+		t.Errorf("MalformedToolGen paths = %v, want [roll_claim regen_mismatch]", paths)
+	}
+	if reqs := prov.requests(); len(reqs) != 5 {
+		t.Errorf("Complete calls = %d, want 5 (buffered run + two forced regen round-trips)", len(reqs))
+	} else if reqs[1].ToolChoice.Mode != llm.ToolChoiceTool || reqs[1].ToolChoice.Tool != "dice" {
+		t.Errorf("regen tool_choice = %+v, want the dice Tool forced", reqs[1].ToolChoice)
+	}
+}
+
 // TestEngine_RegenMismatch_RetriesOnceThenDelivers is #438 AC "regen narrating a
 // value ≠ actual Tool result does not ship as-is": the first forced regen claims a
 // 17 without the dice Tool ever running, so it contradicts (no Tool result at all)
