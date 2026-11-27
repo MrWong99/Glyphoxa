@@ -81,6 +81,10 @@ export const en = {
   "access.mayUseKeysHint":
     "Off, they bring their own provider keys. On, their sessions and AI features run on this instance's keys — and on its bill.",
   "access.couldntGrant": "Couldn't grant access",
+  "access.alreadyGranted":
+    "{name} already has access. Change their Platform Keys, or revoke access, on their row in the list above.",
+  "access.alreadyAdmin":
+    "{name} is a Platform Admin. Platform Admins are set in the server environment (GLYPHOXA_OPERATOR_IDS) and always have access.",
 
   // ── Invitation links ─────────────────────────────────────────────────────
   "access.linksTitle": "Invitation links",
@@ -244,6 +248,8 @@ export const en = {
   "access.sharedWithMe": "Shared with me",
   "access.myWorkspace": "My workspace",
   "access.myWorkspaceHint": "Your own table",
+  "access.setUpTable": "Set up my table",
+  "access.setUpTableHint": "Sign in again to open a table of your own",
   "access.switchWorkspace": "Switch workspace",
   "access.sharedCampaign": "{campaign} · {tenant}",
   "access.exitsLabel": "Other workspaces",
@@ -269,8 +275,15 @@ export const en = {
   "access.switchNoEffectBody": "The switch didn't take effect. Try again, or open another workspace.",
   "access.wikiEmptyGuest": "The GM hasn't written anything you can see yet.",
   "access.mapsEmptyGuest": "The GM hasn't added a map you can see yet.",
+  "access.highlightsEmptyGuest": "No highlights from this session have been kept.",
   "access.archiveTitle": "Sessions",
   "access.archiveLede": "What this table has played so far.",
+  // The guest's wording of a Campaign view's lede (app/destinations.ts): the
+  // GM's speaks of "your NPCs" and "your world", which are not a guest's.
+  "access.ledeWikiGuest": "What the world knows — the entries this campaign's GM shares with you.",
+  "access.ledeMapsGuest": "Maps of this campaign's world, with wiki entries pinned where they belong.",
+  "access.ledePlanningGuest":
+    "Plan with this campaign's Butler. Your conversations stay saved with the campaign.",
   "access.archiveLoadError": "Couldn't load the sessions",
   "access.archiveEmptyTitle": "No sessions yet",
   "access.archiveEmptyDesc": "Once the table has played, its sessions appear here.",
@@ -346,6 +359,10 @@ export const de: Record<keyof typeof en, string> = {
   "access.mayUseKeysHint":
     "Aus: Die Person bringt eigene Anbieter-Schlüssel mit. An: Ihre Sessions und KI-Funktionen laufen über die Schlüssel dieser Instanz — und auf deren Rechnung.",
   "access.couldntGrant": "Zugang konnte nicht gegeben werden",
+  "access.alreadyGranted":
+    "{name} hat bereits Zugang. Ändere die Plattform-Schlüssel oder entziehe den Zugang in der Zeile der Person in der Liste oben.",
+  "access.alreadyAdmin":
+    "{name} ist Plattform-Admin. Plattform-Admins werden in der Server-Umgebung festgelegt (GLYPHOXA_OPERATOR_IDS) und haben immer Zugang.",
 
   "access.linksTitle": "Einladungslinks",
   "access.linksLede":
@@ -507,6 +524,8 @@ export const de: Record<keyof typeof en, string> = {
   "access.sharedWithMe": "Mit mir geteilt",
   "access.myWorkspace": "Mein Arbeitsbereich",
   "access.myWorkspaceHint": "Dein eigener Tisch",
+  "access.setUpTable": "Meinen Tisch einrichten",
+  "access.setUpTableHint": "Melde dich erneut an, um einen eigenen Tisch zu eröffnen",
   "access.switchWorkspace": "Arbeitsbereich wechseln",
   "access.sharedCampaign": "{campaign} · {tenant}",
   "access.exitsLabel": "Andere Arbeitsbereiche",
@@ -533,8 +552,13 @@ export const de: Record<keyof typeof en, string> = {
     "Der Wechsel hat nicht gegriffen. Versuche es noch einmal oder öffne einen anderen Arbeitsbereich.",
   "access.wikiEmptyGuest": "Der GM hat noch nichts geschrieben, das du sehen kannst.",
   "access.mapsEmptyGuest": "Der GM hat noch keine Karte hinzugefügt, die du sehen kannst.",
+  "access.highlightsEmptyGuest": "Aus dieser Session wurden keine Highlights behalten.",
   "access.archiveTitle": "Sessions",
   "access.archiveLede": "Was an diesem Tisch bisher gespielt wurde.",
+  "access.ledeWikiGuest": "Was die Welt weiß — die Einträge, die der GM dieser Kampagne mit dir teilt.",
+  "access.ledeMapsGuest": "Karten der Welt dieser Kampagne, mit Wiki-Einträgen als Pins dort, wo sie hingehören.",
+  "access.ledePlanningGuest":
+    "Plane mit dem Butler dieser Kampagne. Deine Unterhaltungen bleiben bei der Kampagne gespeichert.",
   "access.archiveLoadError": "Die Sessions konnten nicht geladen werden",
   "access.archiveEmptyTitle": "Noch keine Sessions",
   "access.archiveEmptyDesc": "Sobald am Tisch gespielt wurde, erscheinen die Sessions hier.",

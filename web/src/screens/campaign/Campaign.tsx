@@ -5,7 +5,7 @@ import { useQuery } from "@connectrpc/connect-query";
 import { CampaignSchema, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { useCan } from "@/app/capabilities";
 import { useCurrentUser } from "@/app/currentUser";
-import { campaignDestination } from "@/app/destinations";
+import { campaignLede } from "@/app/destinations";
 import { useScreenNav } from "@/app/screenNav";
 import { Card } from "@/components/ui/Card";
 import { Page, PageHeader } from "@/components/ui/Page";
@@ -193,7 +193,7 @@ function CampaignHost({ view }: { view: CampaignView }) {
           <PageHeader
             eyebrow={campaign?.system || undefined}
             title={campaign?.name ?? t("campaign.fallbackTitle")}
-            description={t(campaignDestination(view).lede)}
+            description={t(campaignLede(view, can.guest))}
           />
         )}
 

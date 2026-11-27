@@ -179,7 +179,15 @@ export function HighlightsStrip({
           <EmptyState
             icon={<Sparkles size={22} />}
             title={t("session.highlightsNoneTitle")}
-            description={live ? t("session.highlightsNoneLiveDesc") : t("session.highlightsNoneDesc")}
+            // A guest sees promoted highlights only, and cannot know whether
+            // recording was on: say what is true for them.
+            description={
+              !manage
+                ? t("access.highlightsEmptyGuest")
+                : live
+                  ? t("session.highlightsNoneLiveDesc")
+                  : t("session.highlightsNoneDesc")
+            }
           />
         )}
       </>

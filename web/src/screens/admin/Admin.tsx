@@ -65,7 +65,7 @@ function AccessOverview({ data }: { data: GetAccessOverviewResponse }) {
       </Alert>
 
       <PeopleSection people={data.people} open={open} />
-      <AddPersonCard open={open} />
+      <AddPersonCard open={open} people={data.people} />
       <InvitationLinks invitations={data.invitations} open={open} />
     </>
   );

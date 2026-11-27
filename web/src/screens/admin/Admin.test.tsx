@@ -519,6 +519,49 @@ describe("Admin: Add a person", () => {
     expect(state.grants[0]).toMatchObject({ platformKeys: true });
   });
 
+  // GrantAccess is an upsert: re-adding a grant holder would blank their note
+  // and force Platform Keys to this form's default on their live table.
+  it("refuses an ID that already holds a grant, pointing at their row instead of overwriting it", async () => {
+    const { state } = await renderAdmin();
+    fireEvent.change(idField(), { target: { value: ` ${MIRA} ` } });
+    expect(idField()).toBeInvalid();
+    expect(idField()).toHaveAccessibleDescription(
+      "Mira already has access. Change their Platform Keys, or revoke access, on their row in the list above.",
+    );
+    expect(submit()).toBeDisabled();
+    fireEvent.submit(submit().closest("form") as HTMLFormElement);
+    expect(state.grants).toEqual([]);
+
+    // A grant nobody has used yet has no name: it is called by its ID.
+    fireEvent.change(idField(), { target: { value: PENDING } });
+    expect(idField()).toHaveAccessibleDescription(new RegExp(`^${PENDING} already has access\\.`));
+    expect(submit()).toBeDisabled();
+  });
+
+  it("refuses a Platform Admin's ID and says where Platform Admins are set", async () => {
+    const { state } = await renderAdmin();
+    fireEvent.change(idField(), { target: { value: SORA } });
+    expect(idField()).toBeInvalid();
+    expect(idField()).toHaveAccessibleDescription(
+      "Sora Vance is a Platform Admin. Platform Admins are set in the server environment (GLYPHOXA_OPERATOR_IDS) and always have access.",
+    );
+    expect(submit()).toBeDisabled();
+    fireEvent.submit(submit().closest("form") as HTMLFormElement);
+    expect(state.grants).toEqual([]);
+  });
+
+  it("still adds someone the list knows but who holds no grant: revoked, a guest, a self-signup", async () => {
+    const { state } = await renderAdmin();
+    for (const id of [ODO, GWEN, RIN]) {
+      fireEvent.change(idField(), { target: { value: id } });
+      expect(idField()).not.toBeInvalid();
+      expect(submit()).toBeEnabled();
+    }
+    fireEvent.click(submit());
+    await waitFor(() => expect(state.grants).toHaveLength(1));
+    expect(state.grants[0]).toMatchObject({ discordUserId: RIN });
+  });
+
   it("shows a refused grant in the form and keeps what was typed", async () => {
     await renderAdmin({ writeError: "discord_user_id must be decimal digits" });
     fireEvent.change(idField(), { target: { value: "100000000000000042" } });

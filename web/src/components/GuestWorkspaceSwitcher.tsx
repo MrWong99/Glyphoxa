@@ -22,8 +22,11 @@ import "./campaignSwitcher.css";
 //                           table>" over the campaign's name, on every screen.
 //                           It offers the other shared campaigns and — for a
 //                           user who has a table of their own — the way back
-//                           to "My workspace". Nothing else: a guest has no
-//                           campaigns to manage and none to create.
+//                           to "My workspace". A Platform Admin who has no
+//                           table yet (they first signed in through a
+//                           campaign link) is offered "Set up my table"
+//                           instead: SetUpOwnTable. Nothing else: a guest has
+//                           no campaigns to manage and none to create.
 //
 // Picking one only navigates (nav.goWorkspace): the path names the Workspace,
 // and the WorkspaceGate switches the session and empties the cache before the
@@ -73,6 +76,22 @@ export function SharedWithMe({
     </div>
   );
 }
+
+/**
+ * True when the user has no Tenant of their own but would be given one by an
+ * ordinary sign-in: a Platform Admin whose session began on a campaign
+ * invitation link, which signs in as a guest and founds nothing (ADR-0065).
+ */
+export function canSetUpOwnTable(user: Pick<CurrentUser, "hasOwnTenant" | "isPlatformAdmin">): boolean {
+  return !user.hasOwnTenant && user.isPlatformAdmin;
+}
+
+/**
+ * Where "Set up my table" goes: the login screen, as a full page load. Signing
+ * in there without an invitation link is what founds the table; the screen
+ * also asks for the terms acknowledgment an open deployment requires.
+ */
+export const SET_UP_OWN_TABLE_HREF = "/login";
 
 export function GuestWorkspaceSwitcher({ user }: { user: CurrentUser }) {
   const { t } = useI18n();
@@ -136,6 +155,19 @@ export function GuestWorkspaceSwitcher({ user }: { user: CurrentUser }) {
                     <span className="gx-campaign-switcher__item-system">{t("access.myWorkspaceHint")}</span>
                   </span>
                 </button>
+              </li>
+            </ul>
+          )}
+          {canSetUpOwnTable(user) && (
+            <ul className="gx-campaign-switcher__list" role="group" aria-label={t("access.myWorkspace")}>
+              <li className="gx-campaign-switcher__row">
+                <a className="gx-select__item gx-campaign-switcher__item" href={SET_UP_OWN_TABLE_HREF}>
+                  <House size={15} aria-hidden />
+                  <span className="gx-campaign-switcher__item-meta">
+                    <span className="gx-campaign-switcher__item-name">{t("access.setUpTable")}</span>
+                    <span className="gx-campaign-switcher__item-system">{t("access.setUpTableHint")}</span>
+                  </span>
+                </a>
               </li>
             </ul>
           )}

@@ -186,6 +186,25 @@ people it already admitted stay. *Suspend* locks a user out without touching
 their grant, and is the tool for someone you did not grant: a self-signup on an
 `open` deployment, or a Campaign Guest some GM invited.
 
+What *Revoke* on a person does beyond the web sign-out, and what it does not:
+
+- **It switches their Tenant's Platform Keys off**, so nothing of theirs runs
+  on the deployment's provider keys any more. If you grant access again later,
+  check the switch on their row: it stays off unless you turn it on.
+- **They stop being GM on Discord within about a minute.** The bot refreshes
+  who is GM once a minute; after that their `/glyphoxa` commands are refused
+  in their own server too.
+- **It does not stop a Voice Session that is already running.** A session
+  resolves its keys once, at start, and keeps going until it is ended or goes
+  idle. If one is live when you revoke, end it (`/glyphoxa end` in that
+  server — Platform Admins are GM everywhere) or wait for Idle Close.
+- **They cannot come back through the link that let them in.** A revoked
+  person who opens the same invitation link again is refused, even while the
+  link still works for others. The same holds for a Campaign Guest a GM
+  removed and the campaign link they joined through. To let someone back in,
+  grant access explicitly (or, for a guest, add them again in *Sharing*), or
+  hand them a **new** link.
+
 **The Platform Keys switch.** Each Tenant has a switch deciding whether it may
 run on the deployment's own provider keys (the `*_API_KEY` env vars — your
 money) when it has not saved keys of its own. You choose it when granting
@@ -195,6 +214,15 @@ admit**: with it off, a Tenant must save its own provider keys in Configuration
 before voice, recaps or image generation work. Tenants that existed before this
 switch (yours included) keep it on. In `open` Admission Mode the switch is not
 used — the Tenant's Plan decides ([deploy/saas-operations.md](deploy/saas-operations.md)).
+
+**Switching a deployment from `open` to `allowlist`.** Every Tenant that
+signed up while the deployment was open still has its Platform Keys switch
+**on** — the switch was not consulted in `open` mode, and the flip does not
+touch it. Those people can no longer sign in to the web until you grant them
+access, but the switch on their Tenant stays as it is until you change it:
+after the flip, go through the Admin screen and turn Platform Keys off for
+every Tenant that should not run on your keys, before (or instead of) granting
+its GM access.
 
 **Campaign Guests.** A GM shares a single Campaign from the Campaign screen —
 see *Sharing — Campaign Guests* in the

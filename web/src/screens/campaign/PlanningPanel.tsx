@@ -600,7 +600,7 @@ export function PlanningPanel({ campaignId }: { campaignId: string }) {
             )}
             {showStarters && (
               <li className="gx-planning__notice-item">
-                <Starters disabled={busy || creating} onPick={pickStarter} />
+                <Starters disabled={busy || creating} guest={can.guest} onPick={pickStarter} />
               </li>
             )}
 
@@ -930,7 +930,17 @@ function ExchangeTail({
 }
 
 // Starters say what the Butler can do, one per tool on its belt.
-function Starters({ disabled, onPick }: { disabled: boolean; onPick: (s: Starter) => void }) {
+// The lede is the GM's by default ("your transcripts", "suggestions for you to
+// approve"); a Campaign Guest reads one that claims neither.
+function Starters({
+  disabled,
+  guest = false,
+  onPick,
+}: {
+  disabled: boolean;
+  guest?: boolean;
+  onPick: (s: Starter) => void;
+}) {
   const { t } = useI18n();
   const titleId = useId();
   return (
@@ -938,7 +948,7 @@ function Starters({ disabled, onPick }: { disabled: boolean; onPick: (s: Starter
       <p className="gx-planning__starters-title" id={titleId}>
         {t("chat.startersTitle")}
       </p>
-      <p className="gx-planning__starters-lede">{t("chat.startersLede")}</p>
+      <p className="gx-planning__starters-lede">{t(guest ? "chat.startersLedeGuest" : "chat.startersLede")}</p>
       <ul className="gx-planning__starter-list" aria-labelledby={titleId}>
         {STARTERS.map((s) => (
           <li key={s.label}>

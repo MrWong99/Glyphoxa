@@ -18,11 +18,13 @@
 #        DISCORD_OAUTH_CLIENT_ID=...
 #        DISCORD_OAUTH_CLIENT_SECRET=...
 #        DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
-#        GLYPHOXA_OPERATOR_IDS=000000000000000000
-#      Optional self-signup (ADR-0055; the default posture is the allowlist):
+#        GLYPHOXA_OPERATOR_IDS=000000000000000000   # the Platform Admins (you);
+#                                              # everyone else is admitted from
+#                                              # the Admin screen (ADR-0065)
+#      Optional self-signup (ADR-0055; the default posture is invite-only):
 #        GLYPHOXA_ADMISSION_MODE=open          # any Discord User may sign up and
-#                                              # found a Tenant; the allowlist
-#                                              # becomes the platform-admin list
+#                                              # found a Tenant; the list above
+#                                              # stays the Platform Admin list
 #        GLYPHOXA_SIGNUP_PLAN_SLUG=byok-free   # required in open mode: a synced,
 #                                              # non-archived plan every signup
 #                                              # binds to (fatal boot preflight)

@@ -172,10 +172,11 @@ message instead — mirroring the snowflake guard's fail-fast philosophy.
 {{- end }}
 
 {{/*
-Validate the Admission Mode (ADR-0055). `allowlist` is exactly ADR-0041: only
-the operator allowlist may complete a login. `open` admits any Discord User who
-completes OAuth — each signup founds a fresh Tenant, and the allowlist becomes
-the platform-administration list rather than the admission gate. The binary
+Validate the Admission Mode (ADR-0055). `allowlist` is invite-only: the
+Platform Admins (operatorIds) and whoever they admit from the Admin screen, plus
+Campaign Guests, may complete a login (ADR-0065). `open` admits any Discord User
+who completes OAuth — each signup founds a fresh Tenant; operatorIds stays the
+Platform Admin list and is not needed to sign in. The binary
 refuses to boot on an unparsable GLYPHOXA_ADMISSION_MODE, so — like
 [glyphoxa.web.mode] — reject a bad value at render time with an actionable
 message instead of deploying a pod that dies on its boot preflight.
@@ -184,7 +185,7 @@ message instead of deploying a pod that dies on its boot preflight.
 {{- if or (eq . "allowlist") (eq . "open") -}}
 {{- . -}}
 {{- else -}}
-{{- fail (printf "web.admissionMode must be \"allowlist\" or \"open\", got %q — \"allowlist\" admits only the web.operatorIds snowflakes (ADR-0041); \"open\" admits any Discord User who completes OAuth (self-signup, ADR-0055)." .) -}}
+{{- fail (printf "web.admissionMode must be \"allowlist\" or \"open\", got %q — \"allowlist\" is invite-only: the web.operatorIds Platform Admins and whoever they admit from the Admin screen (ADR-0065); \"open\" admits any Discord User who completes OAuth (self-signup, ADR-0055)." .) -}}
 {{- end -}}
 {{- end }}
 

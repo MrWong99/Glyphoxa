@@ -20,6 +20,7 @@ import {
   NodeType,
   SessionService,
   VoiceSessionSchema,
+  type VoiceSession,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { MemoryScreenNav } from "@/app/screenNav";
@@ -114,6 +115,8 @@ describe("World wiki", () => {
 
     await waitFor(() => expect(calls).toContain("ListNodeEdges"));
     expect(calls).not.toContain("GetCampaignRoster");
+    // The server refuses a read-only guest the prep boards.
+    expect(calls).not.toContain("ListBoards");
   });
 
   it("a guest with wiki.edit edits entries and boards, but AI drafting and the checkup stay the GM's", async () => {
@@ -212,11 +215,11 @@ const ENDED = create(VoiceSessionSchema, {
   lineCount: 40,
 });
 
-function sessions(statuses: ("promoted" | "candidate")[] = ["promoted"]) {
+function sessions(statuses: ("promoted" | "candidate")[] = ["promoted"], list: VoiceSession[] = [ENDED]) {
   const rec = recorder();
   const transport = createRouterTransport(({ service }) => {
     service(SessionService, {
-      listSessions: () => create(ListSessionsResponseSchema, { sessions: [ENDED] }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions: list }),
       listHighlights: () =>
         create(ListHighlightsResponseSchema, {
           highlights: statuses.map((status, i) =>
@@ -257,6 +260,19 @@ describe("Session Highlights", () => {
   });
 });
 
+describe("Session Highlights with nothing to show", () => {
+  it("tells the GM what the recording did", async () => {
+    mount(sessions([]).transport, <HighlightsStrip sessionId="vs1" live={false} />);
+    expect(await screen.findByText(/Highlight recording is on, but nothing in this session/)).toBeInTheDocument();
+  });
+
+  it("tells a guest only what is true for them: none were kept", async () => {
+    mount(sessions([]).transport, <HighlightsStrip sessionId="vs1" live={false} />, [R.HIGHLIGHTS_READ]);
+    expect(await screen.findByText("No highlights from this session have been kept.")).toBeInTheDocument();
+    expect(screen.queryByText(/Highlight recording is on/)).not.toBeInTheDocument();
+  });
+});
+
 describe("Session archive (a guest's Session screen)", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => {
@@ -292,6 +308,36 @@ describe("Session archive (a guest's Session screen)", () => {
     expect(screen.queryByRole("region", { name: "Highlights" })).not.toBeInTheDocument();
     expect(calls).not.toContain("ListHighlights");
     expect(calls).not.toContain("GetSession");
+  });
+
+  // The server withholds a session's end reason from a guest (it is the host's
+  // operational detail): the row keeps its status and says nothing more.
+  it("lists a failed and a self-ended session whose reason is withheld: the status, no reason line", async () => {
+    const at = (day: number, hour: number) => timestampFromDate(new Date(`2026-07-1${day}T${hour}:00:00Z`));
+    const failed = create(VoiceSessionSchema, {
+      id: "vs-failed",
+      status: "failed",
+      startedAt: at(2, 19),
+      endedAt: at(2, 20),
+      lineCount: 12,
+    });
+    const ended = create(VoiceSessionSchema, {
+      id: "vs-ended",
+      status: "ended",
+      startedAt: at(3, 19),
+      endedAt: at(3, 21),
+      lineCount: 30,
+    });
+    mount(sessions([], [failed, ended]).transport, <SessionArchive />, [R.HIGHLIGHTS_READ]);
+
+    fireEvent.click(await screen.findByTestId("session-history-open"));
+    const picker = await screen.findByTestId("session-picker");
+    expect(within(picker).getByText("Failed")).toBeInTheDocument();
+    expect(within(picker).getByText(/12 lines/)).toBeInTheDocument();
+    expect(within(picker).getByText(/30 lines/)).toBeInTheDocument();
+    expect(picker.querySelectorAll(".gx-session-history__reason")).toHaveLength(0);
+    // No reason, so nothing claims the session stopped by itself.
+    expect(within(picker).queryByText("Ended by itself")).not.toBeInTheDocument();
   });
 
   it("says so when the table has not played yet", async () => {

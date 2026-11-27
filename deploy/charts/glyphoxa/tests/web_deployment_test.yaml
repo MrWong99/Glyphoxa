@@ -222,8 +222,8 @@ tests:
                 key: discord-oauth-redirect-url
 
   - it: sources the mandatory operator allowlist from the Secret
-    # GLYPHOXA_OPERATOR_IDS is the single authorization gate (ADR-0041); without
-    # it the Web Instance refuses to boot.
+    # GLYPHOXA_OPERATOR_IDS is the Platform Admin list (ADR-0041/0065); without
+    # it an `allowlist` Web Instance refuses to boot.
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env

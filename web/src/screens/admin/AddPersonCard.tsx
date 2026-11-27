@@ -2,7 +2,7 @@ import { useId, useState, type FormEvent } from "react";
 import { useMutation } from "@connectrpc/connect-query";
 import { toast } from "sonner";
 
-import { AdminService } from "@gen/glyphoxa/management/v1/management_pb";
+import { AccessStatus, AdminService, type AccessPerson } from "@gen/glyphoxa/management/v1/management_pb";
 import { SNOWFLAKE_ERRORS } from "@/components/access/invitationParts";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -21,8 +21,26 @@ import { useRefreshOverview } from "./refreshOverview";
 // "May use the platform's API keys" starts OFF: an admitted person brings their
 // own provider keys unless the admin decides the instance pays for them. The
 // sentence under the switch says what turning it on costs.
+//
+// The form only ever ADDS. GrantAccess is an upsert: sent for someone who
+// already holds a grant it would replace their note and set Platform Keys to
+// whatever this form shows (OFF by default) on their live table, under a plain
+// "access granted" toast. So an ID that is already in the People list as
+// granted — or as a Platform Admin, whom a grant cannot change — is refused
+// here with a sentence pointing at their row, where those things are changed
+// on purpose.
 
-export function AddPersonCard({ open }: { open: boolean }) {
+/** Why this Discord User ID cannot be added: who already holds it, or null. */
+function alreadyIn(people: readonly AccessPerson[], id: string): { person: AccessPerson; admin: boolean } | null {
+  if (id === "") return null;
+  const rows = people.filter((p) => p.discordUserId === id);
+  const admin = rows.find((p) => p.status === AccessStatus.PLATFORM_ADMIN);
+  if (admin) return { person: admin, admin: true };
+  const granted = rows.find((p) => p.status === AccessStatus.GRANTED);
+  return granted ? { person: granted, admin: false } : null;
+}
+
+export function AddPersonCard({ open, people }: { open: boolean; people: readonly AccessPerson[] }) {
   const { t } = useI18n();
   const titleId = useId();
   const keysHintId = useId();
@@ -44,7 +62,13 @@ export function AddPersonCard({ open }: { open: boolean }) {
 
   const id = discordUserId.trim();
   const problem = snowflakeProblem(id);
-  const canSubmit = id !== "" && problem === null;
+  const existing = problem === null ? alreadyIn(people, id) : null;
+  const existingMessage = existing
+    ? t(existing.admin ? "access.alreadyAdmin" : "access.alreadyGranted", {
+        name: existing.person.name || existing.person.discordUserId,
+      })
+    : null;
+  const canSubmit = id !== "" && problem === null && existing === null;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -63,7 +87,7 @@ export function AddPersonCard({ open }: { open: boolean }) {
           <Input
             label={t("access.discordUserId")}
             hint={t("access.discordUserIdHint")}
-            error={problem ? t(SNOWFLAKE_ERRORS[problem]) : null}
+            error={problem ? t(SNOWFLAKE_ERRORS[problem]) : existingMessage}
             inputMode="numeric"
             autoComplete="off"
             value={discordUserId}

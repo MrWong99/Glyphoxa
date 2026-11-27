@@ -44,6 +44,10 @@ export const en = {
   "chat.startersTitle": "What can the Butler do?",
   "chat.startersLede":
     "It looks things up in your session transcripts and World wiki before it answers, and files wiki suggestions for you to approve. Start with one of these, or ask anything.",
+  // What a Campaign Guest reads instead: the campaign is not theirs, and wiki
+  // suggestions go to its GM.
+  "chat.startersLedeGuest":
+    "It looks things up in this campaign before it answers. Start with one of these, or ask anything.",
   "chat.starterRecap": "Recap the last session",
   "chat.starterRecapTool": "Session recap",
   "chat.starterLooseEnds": "What loose ends are still open?",
@@ -194,6 +198,8 @@ export const de: Record<keyof typeof en, string> = {
   "chat.startersTitle": "Was kann der Butler?",
   "chat.startersLede":
     "Er schlägt in deinen Session-Mitschriften und im Welt-Wiki nach, bevor er antwortet, und reicht Wiki-Vorschläge ein, die du freigibst. Fang mit einer dieser Fragen an oder frag einfach.",
+  "chat.startersLedeGuest":
+    "Er schlägt in dieser Kampagne nach, bevor er antwortet. Fang mit einer dieser Fragen an oder frag einfach.",
   "chat.starterRecap": "Fass die letzte Session zusammen",
   "chat.starterRecapTool": "Session-Recap",
   "chat.starterLooseEnds": "Welche offenen Fäden gibt es noch?",

@@ -8,6 +8,7 @@ import { LogOut } from "lucide-react";
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { CurrentUser } from "@/app/currentUser";
 import { OWN_WORKSPACE_SLUG, guestWorkspaceSlug } from "@/app/workspace";
+import { SET_UP_OWN_TABLE_HREF, canSetUpOwnTable } from "@/components/GuestWorkspaceSwitcher";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { useI18n } from "@/i18n";
@@ -83,13 +84,21 @@ export function WorkspaceExits({
 
   return (
     <div className="gx-workspace-notice__exits">
-      {(user.hasOwnTenant && except !== "") || shared.length > 0 ? (
+      {(user.hasOwnTenant && except !== "") || canSetUpOwnTable(user) || shared.length > 0 ? (
         <ul className="gx-workspace-notice__list" aria-label={t("access.exitsLabel")}>
           {user.hasOwnTenant && except !== "" && (
             <li>
               <Button variant="secondary" size="sm" onClick={() => onOpen(OWN_WORKSPACE_SLUG)}>
                 {t("access.myWorkspace")}
               </Button>
+            </li>
+          )}
+          {canSetUpOwnTable(user) && (
+            <li>
+              {/* A full page load: signing in again is what founds the table. */}
+              <a className="gx-btn gx-btn--secondary gx-btn--sm gx-workspace-notice__link" href={SET_UP_OWN_TABLE_HREF}>
+                {t("access.setUpTable")}
+              </a>
             </li>
           )}
           {shared.map((w) => (

@@ -41,3 +41,8 @@
   padding: 0;
   list-style: none;
 }
+
+/* "Set up my table": a link dressed as the buttons beside it (a full page load). */
+.gx-workspace-notice__link {
+  text-decoration: none;
+}

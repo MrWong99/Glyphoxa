@@ -45,6 +45,11 @@ export type CampaignDestination = {
   label: MessageKey;
   /** One sentence on what the view is for — the Campaign header's lede. */
   lede: MessageKey;
+  /**
+   * The same sentence as a Campaign Guest reads it. The GM's speaks of "your
+   * NPCs" and "your world"; a guest is reading someone else's.
+   */
+  guestLede?: MessageKey;
   icon: LucideIcon;
   /**
    * The capability that opens this view to a Campaign Guest. A view without
@@ -62,16 +67,25 @@ export const CAMPAIGN_DESTINATIONS: readonly CampaignDestination[] = [
     view: "knowledge",
     label: "campaign.tabWiki",
     lede: "campaign.ledeWiki",
+    guestLede: "access.ledeWikiGuest",
     icon: BookOpen,
     guestNeeds: "wikiRead",
   },
-  { view: "maps", label: "campaign.tabMaps", lede: "campaign.ledeMaps", icon: MapIcon, guestNeeds: "mapsRead" },
+  {
+    view: "maps",
+    label: "campaign.tabMaps",
+    lede: "campaign.ledeMaps",
+    guestLede: "access.ledeMapsGuest",
+    icon: MapIcon,
+    guestNeeds: "mapsRead",
+  },
   { view: "players", label: "campaign.tabPlayers", lede: "campaign.ledePlayers", icon: UsersRound },
   { view: "proposals", label: "campaign.tabSuggestions", lede: "campaign.ledeSuggestions", icon: Lightbulb },
   {
     view: "planning",
     label: "chat.tabPlanning",
     lede: "chat.ledePlanning",
+    guestLede: "access.ledePlanningGuest",
     icon: MessagesSquare,
     guestNeeds: "planningUse",
   },
@@ -82,6 +96,12 @@ export const CAMPAIGN_DESTINATIONS: readonly CampaignDestination[] = [
 export function campaignDestination(view: CampaignView): CampaignDestination {
   // CAMPAIGN_DESTINATIONS covers every CampaignView (pinned by destinations.test.ts).
   return CAMPAIGN_DESTINATIONS.find((d) => d.view === view) ?? CAMPAIGN_DESTINATIONS[0];
+}
+
+/** The lede of a Campaign view, in the words of whoever is reading it. */
+export function campaignLede(view: CampaignView, guest: boolean): MessageKey {
+  const d = campaignDestination(view);
+  return guest ? (d.guestLede ?? d.lede) : d.lede;
 }
 
 export type ScreenDestination = {
@@ -144,16 +164,20 @@ export function campaignDestinationsFor(viewer: DestinationViewer | undefined): 
  * The screens this viewer is offered — the one filter the sidebar, the command
  * palette, the topbar title and the not-found page share, so a screen cannot
  * be hidden in one of them and named in another. While a session acts as a
- * Campaign Guest the shell is that Campaign's and nothing else: Campaigns,
- * Setup and — whoever holds it — Admin belong to the user's own Workspace,
- * one switch away.
+ * Campaign Guest the shell is that Campaign's and nothing else: Campaigns and
+ * Setup belong to the user's own Workspace, one switch away. Admin is the one
+ * exception: it is about the deployment, not a Workspace (AdminService ignores
+ * the Workspace a session acts as), so a Platform Admin keeps it while acting
+ * as a guest — otherwise an admin whose only session is a guest one could not
+ * reach it at all.
  */
 export function screenDestinationsFor(viewer: DestinationViewer | undefined): readonly ScreenDestination[] {
   if (viewer?.guest) {
     const can = capabilitiesFor(viewer.guest);
-    return SCREEN_DESTINATIONS.filter((d) => d.guestNeedsAny?.some((need) => can[need])).map((d) =>
-      d.guestLabel ? { ...d, label: d.guestLabel, title: d.guestLabel } : d,
-    );
+    const isAdmin = viewer.isPlatformAdmin === true;
+    return SCREEN_DESTINATIONS.filter(
+      (d) => (d.platformAdminOnly && isAdmin) || d.guestNeedsAny?.some((need) => can[need]),
+    ).map((d) => (d.guestLabel ? { ...d, label: d.guestLabel, title: d.guestLabel } : d));
   }
   return SCREEN_DESTINATIONS.filter((d) => !d.platformAdminOnly || viewer?.isPlatformAdmin === true);
 }
@@ -171,11 +195,13 @@ export type Landing = { screen: "campaign"; view: CampaignView } | { screen: Scr
 /**
  * Where this viewer lands when nothing more specific is asked for: the first
  * Campaign view they are offered, else the first screen — or null for a guest
- * nothing is shared with yet.
+ * nothing is shared with yet. Admin is never where a guest Campaign opens: it
+ * is not part of the Campaign, so a Platform Admin with nothing shared is told
+ * "nothing is shared with you yet" like anyone else (with Admin in the sidebar).
  */
 export function landingFor(viewer: DestinationViewer | undefined): Landing | null {
   const view = campaignDestinationsFor(viewer)[0];
   if (view) return { screen: "campaign", view: view.view };
-  const screen = screenDestinationsFor(viewer)[0];
+  const screen = screenDestinationsFor(viewer).find((d) => !viewer?.guest || !d.platformAdminOnly);
   return screen ? { screen: screen.screen } : null;
 }

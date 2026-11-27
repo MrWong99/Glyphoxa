@@ -146,6 +146,10 @@
   cursor: pointer;
   color: var(--text-default);
 }
+/* "Set up my table" is a link (a full page load), not a button. */
+a.gx-campaign-switcher__item {
+  text-decoration: none;
+}
 .gx-campaign-switcher__item:hover:not([aria-disabled="true"]) {
   background: color-mix(in srgb, var(--arcane) 12%, transparent);
 }

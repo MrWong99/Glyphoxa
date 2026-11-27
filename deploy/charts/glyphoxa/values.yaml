@@ -601,8 +601,9 @@ voice:
 web:
   # Enable/disable the Web Instance (Deployment + Service). ON by default so a
   # bare `helm install` serves the operator console — which means it requires the
-  # three Discord OAuth credentials AND a non-empty operator allowlist below
-  # (ADR-0041): a Web Instance REFUSES TO BOOT without a usable login, so those
+  # three Discord OAuth credentials AND a non-empty Platform Admin list
+  # (operatorIds) below (ADR-0041/0065): a Web Instance REFUSES TO BOOT without
+  # a usable login, so those
   # four values are `required` when web.enabled and the render fails fast with an
   # actionable message if any is empty (mirroring voice's required guild/channel).
   # For a DB-prep-only or voice-only install, set this false.
@@ -618,15 +619,24 @@ web:
   # any other value fails the render.
   mode: web
 
-  # Discord OAuth application credentials (ADR-0016/0039) and the mandatory
-  # operator allowlist (ADR-0041). clientId, clientSecret and operatorIds are
-  # REQUIRED when web.enabled — a Web Instance refuses to boot without a usable
-  # login, so the render fails fast if any is empty. `operatorIds` is a
-  # comma/whitespace-separated list of Discord User snowflakes (Developer Mode →
-  # Copy ID); a Discord User whose snowflake is absent is rejected before any
-  # session is issued or Tenant written. Intended use is a single entry; multiple
-  # entries are a documented edge (e.g. a second test account). For real deploys,
-  # prefer templating these from an external Secret over committing them to values.
+  # Discord OAuth application credentials (ADR-0016/0039) and the Platform
+  # Admin list (ADR-0041, re-scoped by ADR-0065). clientId, clientSecret and
+  # operatorIds are REQUIRED when web.enabled — a Web Instance refuses to boot
+  # without a usable login, so the render fails fast if any is empty.
+  #
+  # `operatorIds` is a comma/whitespace-separated list of Discord User
+  # snowflakes (Developer Mode → Copy ID). These are the deployment's PLATFORM
+  # ADMINS, not the list of people who may sign in: every entry can always sign
+  # in, is GM in every Tenant's Discord commands, and gets the Admin screen —
+  # where they admit everyone else. So list only the people who run this
+  # deployment (normally one entry). Do NOT add a friend or a second GM here to
+  # let them in: that makes them an admin of the whole instance. Admit them
+  # from the Admin screen instead (an Access Grant by Discord User ID, or an
+  # invitation link); a GM lets players into one Campaign from that Campaign's
+  # Sharing view (Campaign Guests). A Discord User who is none of these is
+  # rejected before any session is issued or Tenant written.
+  # For real deploys, prefer templating these from an external Secret over
+  # committing them to values.
   oauth:
     clientId: ""
     clientSecret: ""
@@ -639,13 +649,16 @@ web:
     redirectUrl: ""
   operatorIds: ""
 
-  # Admission Mode (ADR-0055): who may complete the Discord OAuth login.
-  # `allowlist` (the default) is exactly ADR-0041 — only the operatorIds
-  # snowflakes above are admitted, and a non-empty list is required. `open`
+  # Admission Mode (ADR-0055, ADR-0065): who may complete the Discord OAuth
+  # login. `allowlist` (the default) is invite-only: the Platform Admins in
+  # operatorIds above (a non-empty list is required), plus everyone they admit
+  # from the Admin screen — holders of an Access Grant and people who open an
+  # access invitation link — plus the Campaign Guests a GM lets into a
+  # Campaign from its Sharing view. Nobody else can sign in. `open`
   # admits ANY Discord User who completes OAuth: each signup founds a fresh
   # Tenant (create-only — a stranger can never claim the operator's seeded
-  # Tenant), and the allowlist above is RE-SCOPED to the deployment's
-  # platform-administration list rather than the admission gate, so it may then
+  # Tenant). operatorIds is the Platform Admin list in BOTH modes; in `open`
+  # mode it is not needed to sign in, so it may then
   # be empty (the pod boots with a loud "no platform admins" warning). The
   # OAuth credentials above stay REQUIRED in both modes — OAuth is the signup
   # mechanism. Must be `allowlist` or `open`; any other value fails the render

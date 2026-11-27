@@ -6,6 +6,7 @@ import {
   CAMPAIGN_DESTINATIONS,
   SCREEN_DESTINATIONS,
   campaignDestinationsFor,
+  campaignLede,
   landingFor,
   screenDestination,
   screenDestinationsFor,
@@ -74,12 +75,37 @@ describe("a guest's destinations, right by right", () => {
     const all = Object.values(R).filter((v): v is R => typeof v === "number");
     expect(views(...all)).toEqual(["knowledge", "maps", "planning"]);
     expect(screens(...all)).toEqual(["session"]);
-    // …not even the Admin screen to a Platform Admin who is acting as a guest.
-    expect(
-      screenDestinationsFor({ isPlatformAdmin: true, guest: { rights: all } }).map((d) => d.screen),
-    ).toEqual(["session"]);
     expect(screenDestination("configuration", viewer(...all))).toBeUndefined();
     expect(screenDestination("campaigns", viewer(...all))).toBeUndefined();
+    expect(screenDestination("admin", viewer(...all))).toBeUndefined();
+  });
+
+  // Admin is about the deployment, not a Workspace: an admin whose session is a
+  // guest one (they signed in through a campaign link) must still reach it.
+  it("keeps Admin for a Platform Admin who is acting as a guest — and only Admin", () => {
+    const all = Object.values(R).filter((v): v is R => typeof v === "number");
+    const admin = (...rights: R[]) => ({ isPlatformAdmin: true, guest: { rights } });
+    expect(screenDestinationsFor(admin(...all)).map((d) => d.screen)).toEqual(["session", "admin"]);
+    expect(screenDestinationsFor(admin()).map((d) => d.screen)).toEqual(["admin"]);
+    expect(screenDestination("admin", admin())?.label).toBe("shell.navAdmin");
+    expect(screenDestination("configuration", admin(...all))).toBeUndefined();
+    expect(screenDestination("campaigns", admin(...all))).toBeUndefined();
+    // Admin is not part of the Campaign, so it is never where a guest Campaign opens.
+    expect(landingFor(admin())).toBeNull();
+    expect(landingFor(admin(R.HIGHLIGHTS_READ))).toEqual({ screen: "session" });
+  });
+
+  it("words a view's lede for whoever reads it: the GM's own, or a guest's", () => {
+    expect(campaignLede("knowledge", false)).toBe("campaign.ledeWiki");
+    expect(campaignLede("knowledge", true)).toBe("access.ledeWikiGuest");
+    expect(campaignLede("maps", true)).toBe("access.ledeMapsGuest");
+    expect(campaignLede("planning", true)).toBe("access.ledePlanningGuest");
+    // Every view a guest can be offered has a guest wording.
+    for (const d of CAMPAIGN_DESTINATIONS) {
+      if (d.guestNeeds) expect(d.guestLede, d.view).toBeDefined();
+    }
+    // A view no guest reaches keeps the one it has.
+    expect(campaignLede("cast", true)).toBe("campaign.ledeCast");
   });
 
   it("calls a guest's Session screen what it is: past sessions", () => {

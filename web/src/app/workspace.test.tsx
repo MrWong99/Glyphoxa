@@ -6,6 +6,9 @@ import { createConnectQueryKey } from "@connectrpc/connect-query";
 import { create } from "@bufbuild/protobuf";
 
 import {
+  AdminService,
+  AdmissionMode,
+  GetAccessOverviewResponseSchema,
   AuthService,
   CampaignSchema,
   CampaignService,
@@ -62,12 +65,17 @@ const GUEST_TABLE: Record<string, readonly R[] | "any"> = {
   SwitchWorkspace: "any",
   GetAdmissionMode: "any",
   GetActiveCampaign: "any",
+  // AdminService ignores the Workspace; its handlers require a Platform Admin
+  // themselves (the fake's does too).
+  GetAccessOverview: "any",
   ListNodes: [R.WIKI_READ],
   SearchNodes: [R.WIKI_READ],
   ListNodeEdges: [R.WIKI_READ],
   GetKnowledgeGraph: [R.WIKI_READ],
   GetCampaignTags: [R.WIKI_READ],
-  ListBoards: [R.WIKI_READ],
+  // Prep boards are the GM's organization: only a guest who may edit the wiki
+  // is shown them, so only they may list them.
+  ListBoards: [R.WIKI_EDIT],
   ListMaps: [R.MAPS_READ],
   GetMapView: [R.MAPS_READ],
   ListSessions: [R.TRANSCRIPTS_READ, R.HIGHLIGHTS_READ],
@@ -151,6 +159,12 @@ function testTransport(world: World) {
           return create(SwitchWorkspaceResponseSchema, {});
         },
         logout: () => create(LogoutResponseSchema, {}),
+      });
+      service(AdminService, {
+        getAccessOverview: () => {
+          if (!world.platformAdmin) throw new ConnectError("platform admins only", Code.PermissionDenied);
+          return create(GetAccessOverviewResponseSchema, { admissionMode: AdmissionMode.ALLOWLIST });
+        },
       });
       service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
       service(SessionService, {
@@ -285,6 +299,36 @@ describe("switching to a Campaign shared with me", () => {
     expect(within(group).getByRole("button", { name: /The Sunless Citadel/ })).toHaveAttribute("aria-current", "true");
     expect(within(group).getByRole("button", { name: /Saltmarsh/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /My workspace/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Set up my table/ })).not.toBeInTheDocument();
+  });
+
+  // A Platform Admin who first signed in through a campaign link has a guest
+  // session and no table yet; an ordinary sign-in is what founds it.
+  it("offers a Platform Admin with no table yet 'Set up my table', a full page load to the sign-in", async () => {
+    const { world } = renderAt("/t/guest-c9/campaign/knowledge", {
+      acting: CITADEL,
+      hasOwnTenant: false,
+      platformAdmin: true,
+      shared: [shared([R.WIKI_READ])],
+    });
+    fireEvent.click(await guestTrigger());
+    const setUp = await screen.findByRole("link", { name: /Set up my table/ });
+    expect(setUp).toHaveAttribute("href", "/login");
+    expect(setUp).toHaveTextContent("Sign in again to open a table of your own");
+    // Not the switch: the server would refuse it ("no workspace of your own").
+    expect(screen.queryByRole("button", { name: /My workspace/ })).not.toBeInTheDocument();
+    expect(world.switches).toEqual([]);
+  });
+
+  it("offers a Platform Admin who has a table 'My workspace', not 'Set up my table'", async () => {
+    renderAt("/t/guest-c9/campaign/knowledge", {
+      acting: CITADEL,
+      platformAdmin: true,
+      shared: [shared([R.WIKI_READ])],
+    });
+    fireEvent.click(await guestTrigger());
+    expect(await screen.findByRole("button", { name: /My workspace/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Set up my table/ })).not.toBeInTheDocument();
   });
 
   it("says so when the switch fails, and tries again on request", async () => {
@@ -335,7 +379,6 @@ describe("the guest shell shows only what the rights allow", () => {
   it("offers a guest none of the GM's chrome: no Setup, Campaigns, Admin, session marker or create CTA", async () => {
     const { world } = renderAt("/t/guest-c9/campaign/knowledge", {
       acting: CITADEL,
-      platformAdmin: true,
       shared: [shared([R.WIKI_READ, R.WIKI_SECRETS, R.WIKI_EDIT, R.MAPS_READ, R.MAPS_EDIT, R.PLANNING_USE])],
     });
     expect(await screen.findByText("The Citadel Gate")).toBeInTheDocument();
@@ -344,6 +387,57 @@ describe("the guest shell shows only what the rights allow", () => {
     }
     expect(screen.queryByTestId("campaign-switcher-trigger")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /new campaign/i })).not.toBeInTheDocument();
+    expect(world.denied).toEqual([]);
+  });
+
+  // Admin is the deployment's, not a Workspace's: a Platform Admin whose session
+  // is a guest one must not have to sign out to administer the instance.
+  it("keeps Admin for a Platform Admin acting as a guest, and the screen opens in the guest shell", async () => {
+    const { world, path } = renderAt("/t/guest-c9/campaign/knowledge", {
+      acting: CITADEL,
+      platformAdmin: true,
+      shared: [shared([R.WIKI_READ])],
+    });
+    expect(await screen.findByText("The Citadel Gate")).toBeInTheDocument();
+    expect(sidebarLinks()).toEqual(["World wiki", "Admin"]);
+    for (const gone of ["Campaigns", "Setup", "Session", "Cast"]) expect(sidebarLinks()).not.toContain(gone);
+
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Main navigation" })).getByRole("link", { name: "Admin" }));
+    await waitFor(() => expect(path()).toBe("/t/guest-c9/admin"));
+    expect(await screen.findByRole("heading", { name: "Add a person" })).toBeInTheDocument();
+    expect(world.calls).toContain("guest:GetAccessOverview");
+    // Still the guest shell: the session did not move.
+    expect(screen.getByTestId("workspace-switcher-trigger")).toBeInTheDocument();
+    expect(world.switches).toEqual([]);
+    expect(world.denied).toEqual([]);
+  });
+
+  it("a Platform Admin acting as a guest still gets the not-found page on Setup and Campaigns", async () => {
+    const { world } = renderAt("/t/guest-c9/configuration", {
+      acting: CITADEL,
+      platformAdmin: true,
+      shared: [shared([R.WIKI_READ])],
+    });
+    expect(await screen.findByRole("heading", { name: "This isn't shared with you" })).toBeInTheDocument();
+    const offered = screen.getByRole("navigation", { name: "Go somewhere that exists" });
+    expect(within(offered).getAllByRole("link").map((a) => a.textContent)).toEqual(["World wiki", "Admin"]);
+    expect(world.denied).toEqual([]);
+  });
+
+  it("words the campaign header for a guest, not for the GM whose world it is", async () => {
+    renderAt("/t/guest-c9/campaign/knowledge", { acting: CITADEL, shared: [shared([R.WIKI_READ])] });
+    expect(await screen.findByText("The Citadel Gate")).toBeInTheDocument();
+    expect(
+      screen.getByText("What the world knows — the entries this campaign's GM shares with you."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/feed your NPCs/)).not.toBeInTheDocument();
+  });
+
+  it("a guest who may only read the wiki never asks for the prep boards", async () => {
+    const { world } = renderAt("/t/guest-c9/campaign/knowledge", { acting: CITADEL, shared: [shared([R.WIKI_READ])] });
+    expect(await screen.findByText("The Citadel Gate")).toBeInTheDocument();
+    await waitFor(() => expect(world.calls).toContain("guest:GetCampaignTags"));
+    expect(world.calls).not.toContain("guest:ListBoards");
     expect(world.denied).toEqual([]);
   });
 
@@ -373,10 +467,10 @@ describe("the guest shell shows only what the rights allow", () => {
     ["the Sharing view", "/t/guest-c9/campaign/sharing"],
     ["Setup", "/t/guest-c9/configuration"],
     ["Campaigns", "/t/guest-c9/campaigns"],
-    ["Admin, even for a Platform Admin", "/t/guest-c9/admin"],
+    ["Admin, for someone who is no Platform Admin", "/t/guest-c9/admin"],
     ["Session, without a session right", "/t/guest-c9/session"],
   ])("a deep link to %s is not mounted: it says what IS shared", async (_name, url) => {
-    const { world, path } = renderAt(url, { acting: CITADEL, platformAdmin: true, shared: [shared([R.WIKI_READ])] });
+    const { world, path } = renderAt(url, { acting: CITADEL, shared: [shared([R.WIKI_READ])] });
     expect(await screen.findByRole("heading", { name: "This isn't shared with you" })).toBeInTheDocument();
     const offered = screen.getByRole("navigation", { name: "Go somewhere that exists" });
     expect(within(offered).getAllByRole("link").map((a) => a.textContent)).toEqual(["World wiki"]);
@@ -436,6 +530,19 @@ describe("the tenant slug names the Workspace", () => {
     fireEvent.click(within(exits).getByRole("button", { name: "My workspace" }));
     await waitFor(() => expect(path()).toBe("/t/default/campaign/overview"));
   });
+
+  it("offers a Platform Admin with no table yet 'Set up my table' among the ways out", async () => {
+    renderAt("/t/guest-nope/campaign/knowledge", {
+      acting: CITADEL,
+      hasOwnTenant: false,
+      platformAdmin: true,
+      shared: [shared([R.WIKI_READ])],
+    });
+    expect(await screen.findByRole("heading", { name: "This campaign isn't shared with you" })).toBeInTheDocument();
+    const exits = screen.getByRole("list", { name: "Other workspaces" });
+    expect(within(exits).getByRole("link", { name: "Set up my table" })).toHaveAttribute("href", "/login");
+    expect(within(exits).queryByRole("button", { name: "My workspace" })).not.toBeInTheDocument();
+  });
 });
 
 describe("a second tab in another Workspace", () => {
@@ -478,6 +585,17 @@ describe("the planning chat as a guest", () => {
     expect(world.calls).not.toContain("guest:ListProviderConfigs");
     expect(world.calls).not.toContain("guest:GetCampaignRoster");
     expect(world.denied).toEqual([]);
+  });
+
+  it("words the header for a guest: this campaign's Butler, not 'your Butler'", async () => {
+    renderAt("/t/guest-c9/campaign/planning", {
+      acting: CITADEL,
+      shared: [shared([R.WIKI_READ, R.WIKI_SECRETS, R.PLANNING_USE])],
+    });
+    expect(
+      await screen.findByText("Plan with this campaign's Butler. Your conversations stay saved with the campaign."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/your Butler/)).not.toBeInTheDocument();
   });
 });
 
