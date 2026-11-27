@@ -45,6 +45,8 @@ type Seed = ReturnType<typeof create<typeof NodeSchema>>[];
 type Opts = {
   failDelete?: boolean;
   failSearch?: boolean;
+  /** Holds the answer to one search query open until the promise settles. */
+  holdSearch?: { query: string; until: Promise<void> };
   failEdges?: boolean;
   hangEdges?: boolean;
   edges?: PbEdge[];
@@ -139,9 +141,10 @@ function mockTransport(seed?: Seed, opts: Opts = {}) {
       },
       // Stand-in for the tsvector search: a case-insensitive substring over
       // name + body, in list order. Relevance ranking is asserted server-side.
-      searchNodes: (req) => {
+      searchNodes: async (req) => {
         searchCalls.push(req.query);
         if (opts.failSearch) throw new ConnectError("search boom", Code.Internal);
+        if (opts.holdSearch?.query === req.query) await opts.holdSearch.until;
         const q = req.query.trim().toLowerCase();
         const hits = nodes.filter(
           (n) => n.name.toLowerCase().includes(q) || n.body.toLowerCase().includes(q),
@@ -459,6 +462,31 @@ describe("KnowledgePanel filters", () => {
     expect(await screen.findByText("No entries match “dragon”.")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
     expect(await screen.findByRole("button", { name: "The sealed vault" })).toBeInTheDocument();
+  });
+
+  it("does not claim no match for a search that is still in flight", async () => {
+    let release!: () => void;
+    const until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { searchCalls } = renderPanel([note("n1", "The sealed vault")], {
+      holdSearch: { query: "vault", until },
+    });
+    await screen.findByRole("button", { name: "The sealed vault" });
+    const box = screen.getByRole("searchbox");
+    fireEvent.change(box, { target: { value: "xvault" } });
+    expect(await screen.findByText("No entries match “xvault”.")).toBeInTheDocument();
+
+    // "vault" is asked but unanswered: the kept empty answer is for "xvault".
+    fireEvent.change(box, { target: { value: "vault" } });
+    await waitFor(() => expect(searchCalls).toContain("vault"));
+    expect(screen.queryByText(/No entries match/)).not.toBeInTheDocument();
+    // Nor does the unfiltered list stand in for the answer.
+    expect(screen.queryByRole("button", { name: "The sealed vault" })).not.toBeInTheDocument();
+
+    release();
+    expect(await screen.findByRole("button", { name: "The sealed vault" })).toBeInTheDocument();
+    expect(screen.queryByText(/No entries match/)).not.toBeInTheDocument();
   });
 
   it("folds the tag row behind a count past eight tags, and a tag filters", async () => {
