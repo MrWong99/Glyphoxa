@@ -62,6 +62,6 @@ func (s *AdminServer) SetClockForTest(now func() time.Time) { s.now = now }
 // invitation-token mint, so a minted link's expiry and token are asserted
 // against known values.
 func (s *CampaignServer) SetAccessClockAndMintForTest(now func() time.Time, mint func() (string, error)) {
-	s.campaignAccess.now = now
-	s.campaignAccess.mint = mint
+	s.now = now
+	s.mint = mint
 }

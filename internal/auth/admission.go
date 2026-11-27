@@ -115,9 +115,9 @@ func (a Admission) grants() bool {
 type admissionRoute int
 
 const (
-	// admitNobody is the zero value on purpose: a decision nobody filled in
+	// The zero value admits nobody on purpose: a decision nobody filled in
 	// rejects.
-	admitNobody admissionRoute = iota
+	_ admissionRoute = iota
 	// admitPlatformAdmin is the ADR-0041 claim-or-create login.
 	admitPlatformAdmin
 	// admitOpenSignup is ADR-0055 self-signup (create-only, Plan bound).
@@ -157,7 +157,7 @@ type admissionDecision struct {
 	platformKeys bool
 	// guestCampaign is the Campaign the session starts in (admitGuest only).
 	guestCampaign uuid.UUID
-	// why is set when route is admitNobody.
+	// why is set when the route admits nobody.
 	why rejection
 }
 
