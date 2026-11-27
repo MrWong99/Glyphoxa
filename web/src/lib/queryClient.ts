@@ -3,7 +3,7 @@ import { createConnectQueryKey } from "@connectrpc/connect-query";
 import { MutationCache, QueryCache, QueryClient, type QueryKey } from "@tanstack/react-query";
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
-import { isUnauthenticated } from "@/lib/connectError";
+import { isPermissionDenied, isUnauthenticated } from "@/lib/connectError";
 import { connectionStore } from "@/lib/connectionStatus";
 
 // The session probe's cache key (every variant of it).
@@ -32,6 +32,13 @@ function isCurrentUserProbe(queryKey: QueryKey): boolean {
 // loop), which also keeps the public pages — where an Unauthenticated probe is
 // the normal signed-out answer — untouched.
 //
+// A CodePermissionDenied re-runs the probe too (ADR-0065). What a session may
+// do can change under it — a GM edits a Campaign Guest's rights or removes
+// them, a Platform Admin revokes — and the first sign of that is a call the
+// shell thought was allowed coming back refused. The probe's fresh answer
+// carries the new Guest Rights (or no Workspace at all), and the shell redraws
+// itself for them instead of leaving a screen of refused reads on display.
+//
 // The same two caches feed the connection status the shell's banner shows
 // (lib/connectionStatus.ts): a READ that nobody answered raises "can't reach
 // Glyphoxa", and any call the server did answer lowers it again. Only reads
@@ -39,7 +46,9 @@ function isCurrentUserProbe(queryKey: QueryKey): boolean {
 // button — but a write that succeeds is as good a sign of life as a read.
 export function makeQueryClient(): QueryClient {
   const reprobeSession = (error: unknown) => {
-    if (isUnauthenticated(error)) void client.invalidateQueries({ queryKey: currentUserKey });
+    if (isUnauthenticated(error) || isPermissionDenied(error)) {
+      void client.invalidateQueries({ queryKey: currentUserKey });
+    }
   };
   const client: QueryClient = new QueryClient({
     queryCache: new QueryCache({
@@ -57,6 +66,12 @@ export function makeQueryClient(): QueryClient {
       queries: {
         staleTime: 30_000,
         refetchOnWindowFocus: true,
+        // A refusal is an answer, not a blip: asking again cannot change it, and
+        // three backed-off retries would hold the re-probe above (and the page
+        // that explains what happened) back for seven seconds. Everything else
+        // keeps React Query's three retries; a query that sets its own `retry`
+        // is not affected.
+        retry: (failureCount, error) => !isPermissionDenied(error) && failureCount < 3,
       },
     },
   });

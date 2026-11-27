@@ -218,10 +218,10 @@ else
   ask_secret GX_DISCORD_CLIENT_SECRET "Discord OAuth client secret"
   ask_secret GX_DISCORD_BOT_TOKEN "Discord bot token"
 
-  ask GX_ADMISSION_MODE "Admission Mode (ADR-0055): 'allowlist' (only the operators below may log in) or 'open' (any Discord user founds a Tenant)" "allowlist"
+  ask GX_ADMISSION_MODE "Admission Mode (ADR-0055): 'allowlist' (invite-only: the Platform Admins below, plus whoever they admit from the Admin screen) or 'open' (any Discord user founds a Tenant)" "allowlist"
   case "$GX_ADMISSION_MODE" in
     allowlist)
-      ask GX_OPERATOR_IDS "Operator Discord snowflake(s), comma-separated (Discord: Settings > Advanced > Developer Mode, then Copy ID)"
+      ask GX_OPERATOR_IDS "Platform Admin Discord snowflake(s), comma-separated (Discord: Settings > Advanced > Developer Mode, then Copy ID)"
       GX_SIGNUP_PLAN_SLUG=""
       ;;
     open)

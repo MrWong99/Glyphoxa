@@ -503,6 +503,8 @@ type fakeKGNodeStore struct {
 	searchCalls         int
 	searchNodesCampaign uuid.UUID
 	nodeSearchErr       error
+	publicSearchResults []storage.KGNode
+	publicSearchCalls   int
 
 	// aspects is the per-Node Aspect store (#542), keyed by node id; aspectWrites
 	// records every ReplaceNodeAspects call so a test can assert the replace-in-full
@@ -665,6 +667,21 @@ func (f *fakeKGNodeStore) SearchNodes(_ context.Context, campaignID uuid.UUID, q
 		return nil, f.nodeSearchErr
 	}
 	return f.searchResults, nil
+}
+
+// SearchPublicNodes is the public-material search a Campaign Guest without
+// wiki.secrets is served from (ADR-0065). It records that the PUBLIC variant
+// ran and returns its own scripted results, so a test can tell which of the
+// two searches a handler chose.
+func (f *fakeKGNodeStore) SearchPublicNodes(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
+	f.publicSearchCalls++
+	f.searchNodesCampaign = campaignID
+	f.searchQuery = query
+	f.searchLimit = limit
+	if f.nodeSearchErr != nil {
+		return nil, f.nodeSearchErr
+	}
+	return f.publicSearchResults, nil
 }
 
 // UpdateEdgeDetails records the relation texture write (#546) and echoes it back.

@@ -329,7 +329,7 @@ func (e *Engine) Exchange(ctx context.Context, tenantID uuid.UUID, campaign stor
 		}
 	}
 
-	registry, err := e.chatTools(campaign.ID)
+	registry, err := e.chatTools(ctx, campaign.ID)
 	if err != nil {
 		return Result{}, err
 	}

@@ -3,7 +3,8 @@ Web-mode Deployment (#118, ADR-0039) — the operator console + Connect API tier
 
 It runs the single image as `glyphoxa -mode web` (or `all`), serving the SPA and
 the auth-gated Connect API behind a Discord-OAuth login (ADR-0016) with a
-mandatory operator allowlist (ADR-0041).
+Platform Admin list (GLYPHOXA_OPERATOR_IDS, ADR-0041/0065) that is mandatory in
+`allowlist` Admission Mode.
 
 - ONE replica. `all` Mode drives Voice Sessions in-process; `web` Mode hands
   them to the voice pool through the Postgres claim plane (ADR-0057, #491:
@@ -29,12 +30,12 @@ mandatory operator allowlist (ADR-0041).
   key — the web RPC layer DECRYPTS BYOK provider credentials for Provider Config
   CRUD, ADR-0004; the voice pod reads it too since ADR-0057 (d)), DISCORD_BOT_TOKEN
   (the central bot, the fallback rung under per-Tenant BYOK tokens), the three provider keys (BYOK env fallback), the three
-  Discord OAuth credentials, GLYPHOXA_OPERATOR_IDS (the allowlist, ADR-0041),
+  Discord OAuth credentials, GLYPHOXA_OPERATOR_IDS (the Platform Admin list, ADR-0041/0065),
   and the Admission Mode pair GLYPHOXA_ADMISSION_MODE +
   GLYPHOXA_SIGNUP_PLAN_SLUG (ADR-0055). Without the OAuth trio the process
-  refuses to boot in EITHER mode; the allowlist is additionally required in
-  `allowlist` mode, while `open` mode requires the signup plan slug instead
-  (and re-scopes the allowlist to the platform-admin list). The corresponding
+  refuses to boot in EITHER mode; a non-empty Platform Admin list is
+  additionally required in `allowlist` mode, while `open` mode requires the
+  signup plan slug instead (the list may then be empty). The corresponding
   Secret keys are `required` under the same conditions (see secret.yaml).
 - Two container ports: the PUBLIC `http` port (the Connect API + console, the
   Service targets it) and the INTERNAL `metrics` port. Health/metrics (#33,
@@ -191,18 +192,23 @@ spec:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: discord-oauth-redirect-url
-            # The operator allowlist (ADR-0041): in `allowlist` Admission Mode
-            # the single authorization gate at the OAuth callback and the
-            # boot-time session sweep (non-empty `required` then); in `open`
-            # mode (ADR-0055) the platform-admin list, which may be empty.
+            # The Platform Admin list (ADR-0041, re-scoped by ADR-0065), in both
+            # Admission Modes: who may always sign in and who gets the Admin
+            # screen. It is NOT the list of people who may use the instance —
+            # everyone else is admitted from the Admin screen (Access Grants
+            # and invitation links), and Campaign Guests by a GM from a
+            # Campaign's Sharing view. Non-empty `required` in `allowlist`
+            # mode; may be empty in `open` mode (ADR-0055).
             - name: GLYPHOXA_OPERATOR_IDS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "glyphoxa.secretName" . }}
                   key: operator-ids
-            # Admission Mode (ADR-0055): `allowlist` keeps the list above as
-            # the sole admission gate; `open` admits any Discord User who
-            # completes OAuth (self-signup, create-only Tenant provisioning).
+            # Admission Mode (ADR-0055): `allowlist` is invite-only — the
+            # Platform Admins above plus whoever was admitted from the Admin
+            # screen or as a Campaign Guest (ADR-0065); `open` admits any
+            # Discord User who completes OAuth (self-signup, create-only
+            # Tenant provisioning).
             - name: GLYPHOXA_ADMISSION_MODE
               valueFrom:
                 secretKeyRef:

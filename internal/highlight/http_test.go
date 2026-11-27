@@ -1,6 +1,7 @@
 package highlight
 
 import (
+	"cmp"
 	"context"
 	"io"
 	"net/http"
@@ -29,6 +30,9 @@ type fakeClipStore struct {
 	// validators; a zero createdAt falls back to time.Now().
 	createdAt        time.Time
 	soundRequestedAt *time.Time
+	// status is the row's status; empty = a Highlight Candidate (what the
+	// detector writes), which is what every GM-facing test here serves.
+	status string
 }
 
 func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) (storage.Highlight, error) {
@@ -43,7 +47,7 @@ func (f *fakeClipStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) 
 		ID:               f.id,
 		TenantID:         f.tenantID,
 		CampaignID:       f.campaignID,
-		Status:           storage.HighlightCandidate,
+		Status:           cmp.Or(f.status, storage.HighlightCandidate),
 		ClipKey:          f.clipKey,
 		ClipContentType:  "audio/wav",
 		ImageKey:         f.imageKey,

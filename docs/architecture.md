@@ -551,9 +551,18 @@ Authorization is ADR-0041's **mandatory operator allowlist**:
   *before* any session issuance or Tenant write. There is **no** trust-on-first-use.
 - A `web`/`all` Instance **refuses to boot** unless all three `DISCORD_OAUTH_*`
   variables and a non-empty allowlist are set — or `GLYPHOXA_DEV_MODE` is.
-- Every non-dev boot sweeps sessions whose owner has left the allowlist
-  (`storage.RevokeSessionsOutsideAllowlist`), so a restart applies a grant change
-  fully.
+- The allowlist names the **Platform Admins**. Everyone else on an `allowlist`
+  deployment is admitted from the web (ADR-0065): an **Access Grant**
+  (`access_grant`, by snowflake or through a `/join/<token>` invitation link)
+  lets its holder found a Tenant of their own; the per-Tenant
+  `tenant.platform_keys` switch decides whether that Tenant may spend the
+  deployment's Platform Keys. The Platform-Admin-only `AdminService` manages
+  both.
+- Every non-dev `allowlist` boot sweeps sessions whose owner is no longer
+  admitted — off the allowlist, no Access Grant, not a Campaign Guest
+  (`storage.RevokeSessionsOutsideAllowlist`) — so a restart applies an
+  allowlist change fully. Revoking a grant needs no restart: it deletes the
+  holder's sessions itself.
 - `GLYPHOXA_DEV_MODE` auto-authenticates a synthetic Operator **and forces the
   listen address to `127.0.0.1`**, making production misuse structurally
   ineffective.

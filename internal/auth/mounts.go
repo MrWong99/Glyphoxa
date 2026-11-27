@@ -27,6 +27,10 @@ type GuardedMount struct {
 	Pattern string
 	Tenant  TenantMode
 	Handler http.Handler
+	// Guest is what the mount requires of a Campaign Guest (ADR-0065). The
+	// zero value is GM-only — unlike Tenant it needs no validation, because
+	// forgetting it denies instead of exposing.
+	Guest GuestPosture
 
 	// BodyReadTimeout, when set, is the body read deadline the guard arms once
 	// the request has PASSED the policy gate, replacing the listener's short
@@ -102,6 +106,7 @@ func MustGuardMounts(p *Policy, rows []GuardedMount) []GuardedMount {
 		guarded = append(guarded, GuardedMount{
 			Pattern:         row.Pattern,
 			Tenant:          row.Tenant,
+			Guest:           row.Guest,
 			Handler:         p.guard(row),
 			BodyReadTimeout: row.BodyReadTimeout,
 		})
@@ -115,6 +120,7 @@ func (p *Policy) guard(row GuardedMount) http.Handler {
 		v := p.Evaluate(r.Context(), InputFromHeader(r.Header), Check{
 			CSRF:   !safeMethod(r.Method),
 			Tenant: row.Tenant,
+			Guest:  row.Guest,
 		})
 		if v.Deny != DenyNone {
 			// Refused before the handler read anything: do not sit draining a

@@ -16,6 +16,7 @@
 // per-fragment `Record<keyof typeof en, string>` annotation is still what
 // guarantees completeness; i18n.test.tsx additionally checks the assembled
 // catalog key-for-key against English.
+import { de as access } from "./messages/access?de";
 import { de as auth } from "./messages/auth?de";
 import { de as campaign } from "./messages/campaign?de";
 import { de as campaigns } from "./messages/campaigns?de";
@@ -46,4 +47,5 @@ export const de: Record<string, string> = {
   ...palette,
   ...session,
   ...auth,
+  ...access,
 };

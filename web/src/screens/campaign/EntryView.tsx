@@ -44,7 +44,8 @@ export function EntryView({
   node: Node;
   /** The entry's free-form tags, already resolved by the panel. */
   tags: readonly string[];
-  onEdit: () => void;
+  /** Opens the editor. Absent for a reader who may not edit the wiki (ADR-0065): no Edit is offered. */
+  onEdit?: () => void;
   onClose: () => void;
   /** Open another entry (a connection's name). */
   onOpenNode: (nodeID: string) => void;
@@ -118,9 +119,11 @@ export function EntryView({
           </div>
         </div>
         <div className="gx-wiki-pane__actions">
-          <Button ref={editRef} variant="secondary" size="sm" iconStart={<Pencil size={14} />} onClick={onEdit}>
-            {t("knowledge.editEntry")}
-          </Button>
+          {onEdit && (
+            <Button ref={editRef} variant="secondary" size="sm" iconStart={<Pencil size={14} />} onClick={onEdit}>
+              {t("knowledge.editEntry")}
+            </Button>
+          )}
           <IconButton size="sm" label={t("knowledge.closeEntry")} onClick={onClose}>
             <X size={16} />
           </IconButton>
@@ -170,11 +173,13 @@ export function EntryView({
           <EmptyState
             size="inline"
             title={t("knowledge.entryBlankTitle")}
-            description={t("knowledge.entryBlankDesc")}
+            description={onEdit ? t("knowledge.entryBlankDesc") : undefined}
             action={
-              <Button variant="secondary" size="sm" onClick={onEdit}>
-                {t("knowledge.entryBlankAction")}
-              </Button>
+              onEdit && (
+                <Button variant="secondary" size="sm" onClick={onEdit}>
+                  {t("knowledge.entryBlankAction")}
+                </Button>
+              )
             }
           />
         )}

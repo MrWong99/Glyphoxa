@@ -1,0 +1,251 @@
+/* ── Admin screen (ADR-0065) ─────────────────────────────────────────────────
+ * People and invitation links are lists of cards, not tables: every row is a
+ * wrapping flex line, so at phone width its parts stack under one another
+ * instead of pushing the page sideways.
+ */
+
+.gx-admin {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  min-width: 0;
+}
+
+/* The Admission Mode line reads as part of the page. */
+.gx-admin__mode {
+  margin: 0;
+}
+
+.gx-admin__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-admin__section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.gx-admin .gx-section-title {
+  margin: 0;
+}
+
+.gx-admin__lede {
+  margin: 0 0 var(--spacing-xs);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+.gx-admin__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── A person ──────────────────────────────────────────────────────────────── */
+
+.gx-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm) var(--spacing-lg);
+  min-width: 0;
+  padding: var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* A suspended person stays listed, visibly set aside. */
+.gx-access-row[data-suspended="true"] {
+  border-style: dashed;
+}
+
+.gx-access-row__who {
+  display: flex;
+  align-items: center;
+  flex: 1 1 15rem;
+  gap: var(--spacing-md);
+  min-width: 0;
+}
+
+.gx-access-row__id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gx-access-row__name {
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.gx-access-row__sub,
+.gx-access-row__note {
+  color: var(--text-muted);
+  font-size: var(--body-xs);
+  overflow-wrap: anywhere;
+}
+
+.gx-access-row__note {
+  font-style: italic;
+}
+
+.gx-access-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.gx-access-row__facts {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-lg);
+  margin: 0;
+  min-width: 0;
+}
+
+.gx-access-row__facts div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gx-access-row__facts dt {
+  color: var(--text-muted);
+  font-size: var(--body-2xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gx-access-row__facts dd {
+  margin: 0;
+  color: var(--text-default);
+  font-size: var(--body-sm);
+  overflow-wrap: anywhere;
+}
+
+.gx-access-row__keys {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
+
+.gx-access-row__hint,
+.gx-admin__hint {
+  color: var(--text-muted);
+  font-size: var(--body-xs);
+}
+
+.gx-access-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-left: auto;
+}
+
+/* ── An invitation link ────────────────────────────────────────────────────── */
+
+.gx-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs) var(--spacing-lg);
+  min-width: 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* A link that no longer works is the record of one that did. */
+.gx-link-row:not([data-state="active"]) .gx-link-row__label {
+  color: var(--text-muted);
+}
+
+.gx-link-row__main {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.gx-link-row__label {
+  color: var(--text-strong);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.gx-link-row__meta {
+  display: flex;
+  flex: 2 1 16rem;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs) var(--spacing-md);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+.gx-link-row__actions {
+  margin-left: auto;
+}
+
+/* ── Forms: "Add a person" and the create-link dialog ──────────────────────── */
+
+.gx-admin__card {
+  padding: var(--spacing-md);
+}
+
+.gx-admin__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  max-width: 32rem;
+}
+
+.gx-admin__pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--spacing-md);
+}
+
+.gx-admin__switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-admin__submit,
+.gx-admin__copy {
+  display: flex;
+  justify-content: flex-start;
+}
+
+/* The link is one long unbreakable string: monospace, and selected whole on
+ * focus so it can be copied by hand where the clipboard is refused. */
+.gx-admin__link {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+}
+
+@media (max-width: 640px) {
+  /* Actions get a line of their own, left-aligned under the row they act on. */
+  .gx-access-row__actions,
+  .gx-link-row__actions {
+    margin-left: 0;
+    width: 100%;
+  }
+}

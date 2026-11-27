@@ -9,8 +9,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Open-mode signup provisioning (ADR-0055): one transactional write composing
-// the existing auth/billing pieces. It deliberately never touches
+// Signup provisioning (ADR-0055, extended by ADR-0065): one transactional
+// write composing the existing auth/billing pieces. Open-mode self-signup and
+// an `allowlist` deployment admitting an Access Grant holder both run it. It deliberately never touches
 // ResolveOperatorTenant — the claim-earliest-unbound path is exactly what
 // ADR-0041's no-TOFU rejection forbids for strangers, so signups are
 // CREATE-ONLY: an existing unbound (seed) Tenant stays claimable by an
@@ -27,8 +28,16 @@ var ErrUserSuspended = errors.New("storage: user is suspended")
 type SignupParams struct {
 	User       UpsertUserParams
 	TenantName string
-	PlanSlug   string
-	Session    NewSession
+	// PlanSlug is the Plan a freshly founded Tenant is bound to. Empty binds
+	// none: an Access Grant holder on an `allowlist` deployment (ADR-0065),
+	// which runs with zero Plan rows. Open-mode signup always sets it.
+	PlanSlug string
+	// PlatformKeys, when non-nil, is the founded Tenant's platform_keys — an
+	// Access Grant's choice (ADR-0065). nil leaves the column default, which is
+	// what open-mode signup wants: there the Plan decides, not this flag. It
+	// never touches a Tenant that already exists.
+	PlatformKeys *bool
+	Session      NewSession
 	// AUPAcceptedAt is when this signup acknowledged the Nutzungsbedingungen +
 	// Datenschutzerklärung (#518): the OAuth start carried the acknowledgment
 	// and the callback stamps its time here, so users.aup_accepted_at always
@@ -48,9 +57,9 @@ type SignupResult struct {
 	Created bool
 }
 
-// ProvisionSignup admits an open-mode signup in ONE transaction: Discord user
-// upsert → bound-tenant lookup → (when none) create-only Tenant founding +
-// default-Plan bind → session mint. All-or-nothing per ADR-0055: a failure at
+// ProvisionSignup admits a signup in ONE transaction: Discord user upsert →
+// bound-tenant lookup → (when none) create-only Tenant founding + Plan bind
+// (skipped for an empty PlanSlug) → session mint. All-or-nothing per ADR-0055: a failure at
 // any step (most plausibly an unknown or archived default plan slug) leaves no
 // user, tenant, subscription, or session behind. A returning signup — the user
 // already bound to a Tenant — founds nothing and just refreshes identity +
@@ -92,10 +101,19 @@ func (s *Store) ProvisionSignup(ctx context.Context, p SignupParams) (SignupResu
 				&res.Tenant.CreatedAt, &res.Tenant.UpdatedAt); err != nil {
 				return fmt.Errorf("storage: found signup tenant: %w", err)
 			}
+			if p.PlatformKeys != nil {
+				if _, err := tx.db.Exec(ctx,
+					`UPDATE tenant SET platform_keys = $2 WHERE id = $1`,
+					res.Tenant.ID, *p.PlatformKeys); err != nil {
+					return fmt.Errorf("storage: set signup tenant platform keys: %w", err)
+				}
+			}
 			// SetTenantPlan's internal InTx flattens into this transaction, so
 			// its failure rolls back the founding above too.
-			if _, err := tx.SetTenantPlan(ctx, res.Tenant.ID, p.PlanSlug); err != nil {
-				return fmt.Errorf("storage: bind signup plan %q: %w", p.PlanSlug, err)
+			if p.PlanSlug != "" {
+				if _, err := tx.SetTenantPlan(ctx, res.Tenant.ID, p.PlanSlug); err != nil {
+					return fmt.Errorf("storage: bind signup plan %q: %w", p.PlanSlug, err)
+				}
 			}
 			res.Created = true
 		default:

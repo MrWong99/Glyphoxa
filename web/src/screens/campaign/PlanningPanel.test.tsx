@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError } from "@connectrpc/connect";
 
-import { message, mockChat, renderPanel, thread, type Script } from "./planningTestKit";
+import { GuestRight } from "@gen/glyphoxa/management/v1/management_pb";
+import { Providers } from "@/app/Providers";
+import { makeQueryClient } from "@/lib/queryClient";
+import { AsGuest } from "@/test/guest";
+import { PlanningPanel } from "./PlanningPanel";
+
+import { CAMPAIGN_ID, message, mockChat, renderPanel, thread, type Script } from "./planningTestKit";
 import { resetPlanningStreams } from "./planningStream";
 
 const HOUR = 60 * 60 * 1000;
-const recent = () => thread("t-recent", "Harbour heist prep", new Date(Date.now() - HOUR));
+// A minute ago, not an hour: an hour ago is "yesterday" for the first hour of
+// the day, and the rail would have no "Today" group.
+const recent = () => thread("t-recent", "Harbour heist prep", new Date(Date.now() - HOUR / 60));
 const older = () => thread("t-older", "Act two loose ends", new Date(Date.now() - 3 * 24 * HOUR));
 const ancient = () => thread("t-ancient", "Session zero", new Date("2026-08-01T18:00:00Z"));
 
@@ -192,6 +200,29 @@ describe("PlanningPanel new conversations", () => {
     expect(await screen.findByText("Last time, the party met Bart.")).toBeInTheDocument();
     // The prefilled draft belonged to the not-yet-started conversation.
     expect(composer().value).toBe("");
+  });
+
+  it("tells the GM the Butler reads their transcripts and files suggestions for them to approve", async () => {
+    renderPanel(mockChat({ threads: [] }));
+    expect(await screen.findByText(/your session transcripts and World wiki .* for you to approve/)).toBeInTheDocument();
+  });
+
+  // The campaign is not a guest's, and its wiki suggestions go to its GM.
+  it("tells a Campaign Guest neither: the starters speak of this campaign", async () => {
+    const chat = mockChat({ threads: [] });
+    render(
+      <Providers transport={chat.transport} queryClient={makeQueryClient()}>
+        <AsGuest rights={[GuestRight.WIKI_READ, GuestRight.WIKI_SECRETS, GuestRight.PLANNING_USE]}>
+          <PlanningPanel campaignId={CAMPAIGN_ID} />
+        </AsGuest>
+      </Providers>,
+    );
+    expect(
+      await screen.findByText(
+        "It looks things up in this campaign before it answers. Start with one of these, or ask anything.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/for you to approve/)).not.toBeInTheDocument();
   });
 
   it("starts with the starters when the campaign has no conversations", async () => {

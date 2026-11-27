@@ -14,6 +14,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { Menu, MenuItem, MenuLabel, MenuSeparator } from "./ui/Menu";
 import { LANGS, LANG_NAMES, useI18n, type Lang, type MessageKey, type TFunc } from "@/i18n";
 import { errorMessage } from "@/lib/connectError";
+import { useCan } from "@/app/capabilities";
 import { useLiveSession } from "@/lib/useLiveSession";
 
 // SidebarUser is the app-shell footer identity (ADR-0016 / ADR-0039) and the
@@ -78,7 +79,10 @@ export function SidebarUser({ user }: { user: User }) {
     else logout.mutate({});
   };
 
-  const role = roleLabel(user.role, t);
+  // While acting as a Campaign Guest the user is not this table's GM, whatever
+  // role their own table gives them.
+  const { guest } = useCan();
+  const role = guest ? t("access.roleGuest") : roleLabel(user.role, t);
 
   return (
     <div className="gx-sidebar__user">

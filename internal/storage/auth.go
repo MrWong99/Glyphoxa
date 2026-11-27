@@ -80,8 +80,22 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 	return u, nil
 }
 
+// GetUserByID loads a user by internal id, or ErrNotFound.
+func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
+	row := s.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, id)
+	u, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("storage: get user %s: %w", id, err)
+	}
+	return u, nil
+}
+
 // SetUserSuspended stamps or clears users.suspended_at by Discord snowflake —
-// the open-mode revocation mechanism (ADR-0055). Suspension is enforced by
+// Suspension (ADR-0055), which since ADR-0065 a Platform Admin applies from
+// the web in every Admission Mode. Suspension is enforced by
 // AuthenticateSession's per-request re-check, so it takes effect immediately
 // without deleting sessions; clearing it restores access with the same tokens.
 // Idempotent per direction; ErrNotFound for an unknown user.
@@ -205,14 +219,19 @@ type TenantOperatorBinding struct {
 // ListTenantOperatorDiscordIDs and shares its exclusions: the synthetic dev operator
 // ([DevOperatorDiscordID]) never appears (it can match no real speaker/interaction
 // user) and a SUSPENDED operator drops out (open-mode revocation reaches GM on the
-// next snapshot refresh). Sorted for determinism. An empty result is not an error.
+// next snapshot refresh). On an `allowlist` deployment an operator who is neither
+// a Platform Admin nor an Access Grant holder drops out too ([AccessPolicy],
+// ADR-0065): revoking a grant ends GM standing on Discord, not just the web
+// session. Sorted for determinism. An empty result is not an error.
 func (s *Store) ListTenantOperatorBindings(ctx context.Context) ([]TenantOperatorBinding, error) {
+	needGrant, admins, recorded := s.accessArgs()
 	rows, err := s.db.Query(ctx,
 		`SELECT t.id, u.discord_user_id
 		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
 		  WHERE u.discord_user_id <> $1
 		    AND u.suspended_at IS NULL
-		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID)
+		    AND `+operatorAdmittedClause("u", 2)+`
+		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID, needGrant, admins, recorded)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
 	}
@@ -240,6 +259,11 @@ type NewSession struct {
 	ExpiresAt time.Time
 	IP        string
 	UA        string
+	// GuestCampaignID, when set, starts the session acting as a Campaign Guest
+	// of that Campaign (ADR-0065, sessions.guest_campaign_id). It is only a
+	// selection: [Store.ResolveWorkspace] re-authorizes it on every request, so
+	// a value the user is not a guest of simply does not resolve.
+	GuestCampaignID *uuid.UUID
 }
 
 // sessionTokenHash is what the sessions.token column holds: the SHA-256 of the
@@ -257,10 +281,10 @@ func sessionTokenHash(token string) string {
 // Session.Token is the stored digest, never the cookie secret.
 func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error) {
 	row := s.db.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, token, expires_at, ip, ua)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO sessions (user_id, token, expires_at, ip, ua, guest_campaign_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, user_id, token, created_at, last_seen_at, expires_at, ip, ua`,
-		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA)
+		n.UserID, sessionTokenHash(n.Token), n.ExpiresAt, n.IP, n.UA, n.GuestCampaignID)
 	var sess Session
 	err := row.Scan(
 		&sess.ID, &sess.UserID, &sess.Token, &sess.CreatedAt,
@@ -352,19 +376,23 @@ func (s *Store) PurgeExpiredSessions(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// RevokeSessionsOutsideAllowlist deletes every session whose owning user's
-// discord_user_id is not on the operator allowlist (ADR-0041 amendment, issue
-// #184). The allowlist gates only NEW logins at the OAuth callback; this sweep
-// is the revocation half, run at every non-dev ALLOWLIST-Admission-Mode web/all
-// boot — which is exactly when a grant change takes effect, since the env var
+// RevokeSessionsOutsideAllowlist deletes every session whose owning user is
+// no longer admitted to an `allowlist` deployment: not a Platform Admin (their
+// discord_user_id is not on the operator allowlist, ADR-0041 amendment, issue
+// #184), holds no Access Grant, and is no Campaign Guest (ADR-0065 — both are
+// managed from the web and revoked there, immediately, so the sweep must not
+// log their holders out on every restart). The allowlist gates only NEW
+// Platform Admin logins at the OAuth callback; this sweep is the revocation
+// half for the env list, run at every non-dev ALLOWLIST-Admission-Mode web/all
+// boot — which is exactly when a change to it takes effect, since the env var
 // is parsed at boot. The sweep splits by Admission Mode (ADR-0055): an `open`
 // boot must never run it (it would log out every signup each restart —
 // revocation there is suspension-based), and flipping open -> allowlist plus a
-// restart evicts every signup, the deliberate lock-down. It also clears
-// leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is never
-// allowlisted). An empty allowlist is refused defensively: it would revoke
-// every session, and in allowlist mode the boot preflight guarantees a
-// non-empty list at the only call site (sweepAllowlistSessions).
+// restart evicts every signup without a grant, the deliberate lock-down. It
+// also clears leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is
+// never allowlisted). An empty allowlist is refused defensively: in allowlist
+// mode the boot preflight guarantees a non-empty list at the only call site
+// (sweepAllowlistSessions), so an empty one is a caller bug.
 func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserIDs []string) (int64, error) {
 	if len(discordUserIDs) == 0 {
 		return 0, errors.New("storage: refusing to revoke sessions against an empty allowlist")
@@ -372,7 +400,9 @@ func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserI
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM sessions USING users
 		  WHERE sessions.user_id = users.id
-		    AND users.discord_user_id <> ALL($1)`, discordUserIDs)
+		    AND users.discord_user_id <> ALL($1)
+		    AND NOT EXISTS (SELECT 1 FROM access_grant g WHERE g.discord_user_id = users.discord_user_id)
+		    AND NOT EXISTS (SELECT 1 FROM campaign_guest cg WHERE cg.user_id = users.id)`, discordUserIDs)
 	if err != nil {
 		return 0, fmt.Errorf("storage: revoke sessions outside allowlist: %w", err)
 	}
@@ -475,14 +505,18 @@ func (s *Store) TenantForUser(ctx context.Context, userID uuid.UUID) (uuid.UUID,
 // ([DevOperatorDiscordID]) is excluded: it can never match a real Discord
 // speaker or interaction user, so on a dev-touched DB it would only make the
 // GM set look non-empty — suppressing the "Butler unaddressable" boot warning
-// — while admitting nobody. An empty result is not an error.
+// — while admitting nobody. Like [Store.ListTenantOperatorBindings] it drops a
+// suspended operator and, on an `allowlist` deployment, one who is not admitted
+// ([AccessPolicy]). An empty result is not an error.
 func (s *Store) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, error) {
+	needGrant, admins, recorded := s.accessArgs()
 	rows, err := s.db.Query(ctx,
 		`SELECT DISTINCT u.discord_user_id
 		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
 		  WHERE u.discord_user_id <> $1
 		    AND u.suspended_at IS NULL
-		  ORDER BY u.discord_user_id`, DevOperatorDiscordID)
+		    AND `+operatorAdmittedClause("u", 2)+`
+		  ORDER BY u.discord_user_id`, DevOperatorDiscordID, needGrant, admins, recorded)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list tenant operator discord ids: %w", err)
 	}

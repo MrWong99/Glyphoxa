@@ -55,6 +55,7 @@ describe("Placeholder (unknown screen)", () => {
       ["Players", "/t/acme/campaign/players"],
       ["Suggestions", "/t/acme/campaign/proposals"],
       ["Planning", "/t/acme/campaign/planning"],
+      ["Sharing", "/t/acme/campaign/sharing"],
       ["Settings", "/t/acme/campaign/settings"],
       // …then the other screens.
       ["Session", "/t/acme/session"],

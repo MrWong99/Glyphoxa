@@ -61,8 +61,20 @@ type activeCampaignResolver interface {
 // pivoting every campaign-scoped surface onto the victim tenant (self-signup design
 // §0a). The RPC interceptor stack always injects a tenant; a request with none
 // resolves against the nil tenant and matches nothing (fail closed).
+//
+// A CAMPAIGN GUEST IS PINNED (ADR-0065): their Active Campaign is the guest
+// Campaign on every surface, full stop. The walk above never runs for them —
+// not the live step (another Campaign of the host Tenant going live must not
+// pull a guest into it), not the durable selection (a guest has their own
+// /glyphoxa use selection from their own Tenant, which means nothing here),
+// not the most-recent fallback. The read stays tenant-scoped, so a guest
+// scope that somehow named a Campaign outside the resolved host Tenant
+// resolves to nothing.
 func resolveActiveCampaign(ctx context.Context, live func(context.Context) (uuid.UUID, bool), store activeCampaignResolver) (storage.Campaign, error) {
 	tenantID, _ := auth.TenantID(ctx)
+	if g, ok := auth.Guest(ctx); ok {
+		return store.GetCampaignInTenant(ctx, tenantID, g.CampaignID)
+	}
 	if live != nil {
 		if id, active := live(ctx); active {
 			return store.GetCampaignInTenant(ctx, tenantID, id)
@@ -99,6 +111,11 @@ type activeCampaignSource struct {
 	// another Tenant's session. Nil until SetSessions wires it (unwired = never live).
 	campaignLive func(campaignID uuid.UUID) bool
 	store        activeCampaignResolver
+	// secrets lists the Campaign's gm_private Nodes for the handlers that must
+	// withhold them from a Campaign Guest without wiki.secrets (ADR-0065, see
+	// guest.go). Nil in compositions that never serve a guest; a guest who
+	// reaches such a handler anyway is refused, not served unfiltered.
+	secrets privateNodeReader
 	// log is the CampaignService's logger, shared by every feature module
 	// through this one instance (CampaignServer.SetLogger). nil = slog.Default.
 	log *slog.Logger

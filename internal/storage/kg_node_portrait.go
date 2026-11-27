@@ -90,6 +90,25 @@ func (s *Store) NodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID) 
 	return key, updatedAt, nil
 }
 
+// PublicNodePortrait is [Store.NodePortrait] for a reader without the
+// wiki.secrets Guest Right (ADR-0065): a gm_private Node is ErrNotFound, in
+// the query, exactly like a Node of another Campaign — its picture is as much
+// the secret as its name.
+func (s *Store) PublicNodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID) (string, time.Time, error) {
+	var key string
+	var updatedAt time.Time
+	err := s.db.QueryRow(ctx,
+		`SELECT portrait_blob_key, updated_at FROM kg_node
+		  WHERE id = $1 AND campaign_id = $2 AND NOT gm_private`, nodeID, campaignID).Scan(&key, &updatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, ErrNotFound
+	}
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("storage: public kg node portrait %s: %w", nodeID, err)
+	}
+	return key, updatedAt, nil
+}
+
 // ListCampaignPortraitKeys returns every non-empty portrait blob key in a
 // Campaign — the campaign hard delete's sweep input (#590), mirroring
 // ListCampaignMapBlobKeys: captured BEFORE the delete, because the row cascade

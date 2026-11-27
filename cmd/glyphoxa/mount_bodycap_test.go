@@ -30,10 +30,10 @@ func (m *meteredBody) Read(p []byte) (int, error) {
 
 // TestManagementMounts_UnauthenticatedLargeBodyIsNeverBuffered pins the R2
 // wiring against the REAL mount table: an unauthenticated caller POSTing a
-// 4 MiB body to any of the six Connect services must be refused without the
+// 4 MiB body to any of the seven Connect services must be refused without the
 // server reading more than the 1 MiB default cap. The property is easy to lose
 // at the composition root — one service mounted with the upload cap but
-// without the pre-body session check, or a seventh service added with the
+// without the pre-body session check, or an eighth service added with the
 // large cap — so it is asserted on managementMounts itself, and the service
 // list is checked against the mounts so a new service cannot be forgotten
 // here.
@@ -52,6 +52,7 @@ func TestManagementMounts_UnauthenticatedLargeBodyIsNeverBuffered(t *testing.T) 
 		managementv1connect.VoiceServiceName:    managementv1connect.VoiceServiceListVoicesProcedure,
 		managementv1connect.SessionServiceName:  managementv1connect.SessionServiceGenerateRecapProcedure,
 		managementv1connect.ChatServiceName:     managementv1connect.ChatServiceCreatePlanningThreadProcedure,
+		managementv1connect.AdminServiceName:    managementv1connect.AdminServiceGrantAccessProcedure,
 	}
 
 	// No request here carries a session, so nothing ever reaches the (nil-pool)
@@ -59,7 +60,7 @@ func TestManagementMounts_UnauthenticatedLargeBodyIsNeverBuffered(t *testing.T) 
 	store, log := storage.New(nil), slog.New(slog.DiscardHandler)
 	sessions := session.NewIntentControl(store, log, session.IntentControlConfig{})
 	mounts := managementMounts(store, nil, nil, nil, log,
-		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, "", nil,
+		sessions, nil, nil, nil, nil, nil, nil, nil, nil, "", auth.AdmissionAllowlist, auth.PlatformAdmins{}, "", nil,
 		newOffSessionMetering(auth.AdmissionAllowlist, store, log), llmbuild.DeploymentDefault{})
 	mux := http.NewServeMux()
 	services := 0

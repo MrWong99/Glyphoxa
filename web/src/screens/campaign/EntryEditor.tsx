@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 
 import { NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useI18n } from "@/i18n";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -103,6 +104,9 @@ export function EntryEditor({
   onOpenNode?: (nodeID: string) => void;
 }) {
   const { t } = useI18n();
+  // The editor is only ever open for someone who may edit the wiki; the
+  // portrait (generate, upload, clear) stays the GM's on top of that.
+  const { manage } = useCan();
   const isEdit = node != null;
   const [nodeType, setNodeType] = useState<NodeType>(node?.nodeType ?? createType);
   const [name, setName] = useState(node?.name ?? "");
@@ -332,7 +336,7 @@ export function EntryEditor({
           </div>
           {isEdit && node && (
             <>
-              <NodePortrait node={node} />
+              {manage && <NodePortrait node={node} />}
               <NodeTags nodeID={node.id} />
               <NodeBoards nodeID={node.id} />
               <NodeRelations node={node} onOpenNode={onOpenNode} />

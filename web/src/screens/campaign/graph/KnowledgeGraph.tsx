@@ -5,6 +5,7 @@ import { Sparkles } from "lucide-react";
 
 import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { GraphEdge, GraphNode } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useI18n, type TFunc } from "@/i18n";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
@@ -130,7 +131,14 @@ export function KnowledgeGraph({
 
   // The pending queue. It is the SAME read the Proposals panel uses, so the two
   // review surfaces can never disagree about what is pending.
-  const proposalsQuery = useQuery(CampaignService.method.listKnowledgeProposals, {});
+  // (The GM's alone, like the lens above; drawing a connection needs the
+  // right to edit the wiki — ADR-0065.)
+  const can = useCan();
+  const proposalsQuery = useQuery(
+    CampaignService.method.listKnowledgeProposals,
+    {},
+    { enabled: can.manage },
+  );
   const resolved = useMemo(
     () => resolveProposals(proposalsQuery.data?.proposals ?? [], nodes),
     [proposalsQuery.data, nodes],
@@ -265,7 +273,7 @@ export function KnowledgeGraph({
 
   return (
     <div className="gx-kg-graph">
-      <AgentLensBar agentID={lensAgentID} onAgentChange={setLensAgentID} lens={lens} />
+      {can.manage && <AgentLensBar agentID={lensAgentID} onAgentChange={setLensAgentID} lens={lens} />}
 
       <div className="gx-kg-graph__filters">
         <div
@@ -501,7 +509,7 @@ export function KnowledgeGraph({
                   onMouseUp={() => {
                     // A drag that started on ANOTHER node lands here: offer the relation
                     // picker. A press and release on the same node is a click, not a link.
-                    if (dragFrom && dragFrom !== p.node.id) {
+                    if (can.wikiEdit && dragFrom && dragFrom !== p.node.id) {
                       setPendingLink({ from: dragFrom, to: p.node.id });
                       setLinkError(null);
                     }

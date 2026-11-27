@@ -1,0 +1,48 @@
+/* The page shown instead of the shell when there is no Workspace to render it
+ * for (app/WorkspaceNotice.tsx): one centred card, readable at phone width. */
+
+.gx-workspace-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 100vh;
+  padding: var(--spacing-2xl) var(--spacing-md);
+  background: var(--surface-base);
+}
+
+.gx-workspace-notice > * {
+  width: 100%;
+  max-width: 32rem;
+}
+
+.gx-workspace-notice__title {
+  margin: 0 0 var(--spacing-sm);
+  font-size: var(--heading-md, 1.25rem);
+}
+
+.gx-workspace-notice__body {
+  margin: 0 0 var(--spacing-md);
+  color: var(--text-muted);
+}
+
+.gx-workspace-notice__exits {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-md);
+}
+
+.gx-workspace-notice__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* "Set up my table": a link dressed as the buttons beside it (a full page load). */
+.gx-workspace-notice__link {
+  text-decoration: none;
+}

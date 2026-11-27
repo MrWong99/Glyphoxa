@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
@@ -46,6 +47,20 @@ type AuthServer struct {
 	mode     AdmissionMode
 	secure   bool // clear cookies with the Secure attribute ([EdgeConfig.SecureCookies])
 	log      *slog.Logger
+
+	// ADR-0065 seams, wired post-construction by the composition root. Each
+	// zero value fails closed: nobody is a Platform Admin, no invitation
+	// previews as valid.
+	admins      PlatformAdmins
+	ownTenants  TenantResolver
+	invitations InvitationReader
+	now         func() time.Time
+	// workspaces / guests back the Campaign Guest half of the service
+	// (ADR-0065): has_own_tenant under the workspace rule, the "shared with
+	// me" list, and SwitchWorkspace. Unset, nobody has guest workspaces and
+	// SwitchWorkspace is unavailable.
+	workspaces *Workspaces
+	guests     GuestWorkspaceStore
 }
 
 var _ managementv1connect.AuthServiceHandler = (*AuthServer)(nil)
@@ -60,12 +75,48 @@ func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, renamer TenantR
 	if log == nil {
 		log = slog.Default()
 	}
-	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, secure: edge.SecureCookies, log: log}
+	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, secure: edge.SecureCookies, log: log, now: time.Now}
+}
+
+// SetPlatformAdmins wires the deployment's Platform Admin identity (ADR-0065)
+// — GetCurrentUser reports is_platform_admin from it. Unset, nobody is one.
+func (s *AuthServer) SetPlatformAdmins(admins PlatformAdmins) { s.admins = admins }
+
+// SetOwnTenants wires the lookup behind GetCurrentUser.has_own_tenant: the
+// Tenant the caller OPERATES, read directly rather than off the request's
+// resolved Tenant, which names a host Tenant while a session acts as a
+// Campaign Guest (ADR-0065). *storage.Store satisfies it via TenantForUser.
+// Unset, the request's resolved Tenant stands in.
+func (s *AuthServer) SetOwnTenants(tr TenantResolver) { s.ownTenants = tr }
+
+// SetInvitations wires the store behind GetInvitation. Unset, every token
+// previews as invalid.
+func (s *AuthServer) SetInvitations(r InvitationReader) { s.invitations = r }
+
+// GuestWorkspaceStore is what the workspace switcher reads and writes: the
+// Campaigns a user is a Campaign Guest of, and the session's selection among
+// them. *storage.Store satisfies it.
+type GuestWorkspaceStore interface {
+	ListGuestWorkspaces(ctx context.Context, userID uuid.UUID) ([]storage.GuestWorkspace, error)
+	SetSessionWorkspace(ctx context.Context, userID uuid.UUID, sessionToken string, campaignID *uuid.UUID) error
+}
+
+// SetWorkspaces wires the Campaign Guest half of the service (ADR-0065). ws
+// must be the SAME [Workspaces] the policy resolves with, so GetCurrentUser's
+// has_own_tenant and SwitchWorkspace agree with what a request then acts as;
+// it supersedes [AuthServer.SetOwnTenants].
+func (s *AuthServer) SetWorkspaces(ws Workspaces, guests GuestWorkspaceStore) {
+	s.workspaces = &ws
+	s.guests = guests
 }
 
 // GetCurrentUser returns the signed-in operator's identity — display fields,
-// the internal user id, and the resolved bound Tenant's id/name (ADR-0055; the
-// tenant interceptor already resolved the id server-side, ADR-0039). The auth
+// the internal user id, the resolved bound Tenant's id/name (ADR-0055; the
+// tenant interceptor already resolved the id server-side, ADR-0039), whether
+// they are a Platform Admin and whether they operate a Tenant (ADR-0065).
+// When the session acts as a Campaign Guest the Tenant fields name the HOST
+// Tenant and `guest` describes the Campaign and rights; `guest_workspaces`
+// lists every Campaign shared with the caller either way. The auth
 // interceptor leaves this procedure reachable unauthenticated (it is in the
 // public set), so a missing/expired session reaches here with no operator in the
 // context and yields CodeUnauthenticated — the SPA's 401 → /login signal. An
@@ -86,6 +137,13 @@ func (s *AuthServer) GetCurrentUser(
 			Avatar: u.Avatar,
 		},
 	}
+	resp.IsPlatformAdmin = s.admins.Is(u)
+	hasOwn, err := s.hasOwnTenant(ctx, u)
+	if err != nil {
+		s.log.Error("get current user: resolve own tenant", "user_id", u.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	resp.HasOwnTenant = hasOwn
 	if tid, ok := TenantID(ctx); ok {
 		resp.TenantId = tid.String()
 		switch tn, err := s.tenants.GetTenant(ctx, tid); {
@@ -99,7 +157,80 @@ func (s *AuthServer) GetCurrentUser(
 			resp.TenantName = tn.Name
 		}
 	}
+	if err := s.fillGuestWorkspaces(ctx, u, resp); err != nil {
+		s.log.Error("get current user: list guest workspaces", "user_id", u.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
 	return connect.NewResponse(resp), nil
+}
+
+// fillGuestWorkspaces sets guest_workspaces and, for a session acting as a
+// Campaign Guest, guest. The rights reported for the CURRENT workspace are the
+// ones the policy authorized this request with (the context's scope), never a
+// second read that could disagree with them.
+func (s *AuthServer) fillGuestWorkspaces(ctx context.Context, u storage.User, resp *managementv1.GetCurrentUserResponse) error {
+	scope, acting := Guest(ctx)
+	var list []storage.GuestWorkspace
+	if s.guests != nil {
+		var err error
+		if list, err = s.guests.ListGuestWorkspaces(ctx, u.ID); err != nil {
+			return err
+		}
+	}
+	for _, w := range list {
+		pb := &managementv1.GuestWorkspace{
+			CampaignId:   w.CampaignID.String(),
+			CampaignName: w.CampaignName,
+			TenantName:   w.TenantName,
+			Rights:       GuestRightsToProto(GuestRightsFromStrings(w.Rights)),
+		}
+		resp.GuestWorkspaces = append(resp.GuestWorkspaces, pb)
+		if acting && w.CampaignID == scope.CampaignID {
+			resp.Guest = &managementv1.GuestWorkspace{
+				CampaignId:   pb.CampaignId,
+				CampaignName: pb.CampaignName,
+				TenantName:   pb.TenantName,
+				Rights:       GuestRightsToProto(scope.Rights.List()),
+			}
+		}
+	}
+	if acting && resp.Guest == nil {
+		// The guest row vanished between the policy's resolution and the list
+		// read (a removal race), or no list store is wired. The request WAS
+		// authorized as this guest, so say so rather than render a GM shell.
+		resp.Guest = &managementv1.GuestWorkspace{
+			CampaignId: scope.CampaignID.String(),
+			TenantName: resp.GetTenantName(),
+			Rights:     GuestRightsToProto(scope.Rights.List()),
+		}
+	}
+	return nil
+}
+
+// hasOwnTenant reports whether the user operates a Tenant of their own.
+func (s *AuthServer) hasOwnTenant(ctx context.Context, u storage.User) (bool, error) {
+	if s.workspaces != nil {
+		switch _, err := s.workspaces.OwnTenant(ctx, u); {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, storage.ErrNotFound):
+			return false, nil
+		default:
+			return false, err
+		}
+	}
+	if s.ownTenants == nil {
+		_, ok := TenantID(ctx)
+		return ok, nil
+	}
+	switch _, err := s.ownTenants.TenantForUser(ctx, u.ID); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // Logout deletes the server-side session row and clears the session + CSRF
@@ -153,6 +284,13 @@ func (s *AuthServer) RenameTenant(
 	}
 	if utf8.RuneCountInString(name) > 200 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must be at most 200 characters"))
+	}
+	// The guest gate refuses a Campaign Guest before this handler runs
+	// (ADR-0065). It is repeated here because of what a miss would do: the
+	// context's Tenant is the HOST's, so a guest who got through would rename
+	// someone else's Tenant.
+	if _, guest := Guest(ctx); guest {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New(DenyGuest.Message()))
 	}
 	tid, ok := TenantID(ctx)
 	if !ok {

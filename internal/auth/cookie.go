@@ -153,6 +153,53 @@ func csrfCookie(token string, secure bool, expires time.Time) *http.Cookie {
 	}
 }
 
+// joinCookieName carries an invitation token across the OAuth round trip
+// (ADR-0065). It is a cookie of its own — never the OAuth `state`, which is
+// sent to Discord and comes back in a URL (ADR-0056's reasoning).
+const joinCookieName = "glyphoxa_join"
+
+// joinCookiePath scopes the join cookie to the two OAuth routes: the browser
+// sends an invitation token nowhere else on the origin.
+const joinCookiePath = "/auth/discord"
+
+// joinCookie stashes an invitation token for the callback.
+func joinCookie(token string, secure bool, expires time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     joinCookieName,
+		Value:    token,
+		Path:     joinCookiePath,
+		Expires:  expires,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// clearJoinCookie expires the join cookie (it has its own Path, so
+// [clearCookie] would not match it).
+func clearJoinCookie(secure bool) *http.Cookie {
+	c := clearCookie(joinCookieName, true, secure)
+	c.Path = joinCookiePath
+	return c
+}
+
+// validJoinToken reports whether s has the shape of an invitation token
+// ([NewToken]: unpadded URL-safe base64). The token is echoed into a redirect
+// path and a cookie value, so anything else is refused before it gets there.
+func validJoinToken(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // clearCookie builds an immediately-expiring cookie that deletes name on the
 // client (logout, and clearing the one-shot OAuth state).
 func clearCookie(name string, httpOnly, secure bool) *http.Cookie {

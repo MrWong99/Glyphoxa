@@ -67,6 +67,15 @@ export function apiErrorMessage(err: unknown, t: TFunc): string {
 // CodeNotFound exactly when the Tenant has zero campaigns (resolution otherwise
 // falls back to the most-recently-created one), which the web turns into a
 // create-first-campaign flow rather than an error card.
+/**
+ * isPermissionDenied is true when the server refused the call for THIS
+ * principal (CodePermissionDenied) — for a Campaign Guest, a procedure their
+ * Guest Rights do not cover (ADR-0065).
+ */
+export function isPermissionDenied(error: unknown): boolean {
+  return ConnectError.from(error).code === Code.PermissionDenied;
+}
+
 export function isNotFound(error: unknown): boolean {
   return ConnectError.from(error).code === Code.NotFound;
 }

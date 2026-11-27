@@ -174,6 +174,13 @@ func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	view := r.snapshot(req.Context(), id)
+	if _, guest := auth.Guest(req.Context()); guest {
+		// The speakers' Discord ids are the GM's attribution data, not part of
+		// the transcript a guest was given to read.
+		for i := range view.Lines {
+			view.Lines[i].SpeakerID = ""
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
@@ -192,6 +199,29 @@ func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 // failure is 500: an infra error must neither open the door nor masquerade as
 // absence. Returns false when it wrote a response and the handler must stop.
 func (r *Relay) authorizeTenant(w http.ResponseWriter, req *http.Request, sid uuid.UUID) bool {
+	// A Campaign Guest (ADR-0065) is checked against their ONE Campaign, never
+	// the Tenant: the request's Tenant is the host's, and the tenant scope
+	// would pass every session of every Campaign the host runs. This branch
+	// comes first and does not depend on the tenant scope being wired — a
+	// relay with no campaign scope serves a guest nothing.
+	if g, guest := auth.Guest(req.Context()); guest {
+		scope := r.guestScope()
+		if scope == nil {
+			http.NotFound(w, req)
+			return false
+		}
+		owns, err := scope(req.Context(), g.CampaignID, sid)
+		if err != nil {
+			r.log.Error("transcript: campaign scope check", "err", err, "session", sid)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return false
+		}
+		if !owns {
+			http.NotFound(w, req)
+			return false
+		}
+		return true
+	}
 	scope := r.tenantScope()
 	if scope == nil {
 		return true

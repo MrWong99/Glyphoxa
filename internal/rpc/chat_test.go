@@ -88,6 +88,61 @@ func (f *fakeChatStore) CreatePlanningThread(_ context.Context, campaignID uuid.
 	return t, nil
 }
 
+// The creator-scoped twins (ADR-0065) mirror the store: a thread whose
+// CreatedBy is not the given user reads as absent.
+
+func (f *fakeChatStore) ownedBy(campaignID, id, createdBy uuid.UUID) (storage.PlanningThread, bool) {
+	t, ok := f.threads[id]
+	if !ok || t.CampaignID != campaignID || !t.CreatedBy.Valid || t.CreatedBy.UUID != createdBy {
+		return storage.PlanningThread{}, false
+	}
+	return t, true
+}
+
+func (f *fakeChatStore) CreatePlanningThreadBy(_ context.Context, campaignID uuid.UUID, title string, createdBy uuid.UUID) (storage.PlanningThread, error) {
+	t := storage.PlanningThread{ID: uuid.New(), CampaignID: campaignID, Title: title,
+		CreatedBy: uuid.NullUUID{UUID: createdBy, Valid: true}}
+	f.threads[t.ID] = t
+	return t, nil
+}
+
+func (f *fakeChatStore) GetPlanningThreadBy(_ context.Context, campaignID, id, createdBy uuid.UUID) (storage.PlanningThread, error) {
+	t, ok := f.ownedBy(campaignID, id, createdBy)
+	if !ok {
+		return storage.PlanningThread{}, storage.ErrNotFound
+	}
+	return t, nil
+}
+
+func (f *fakeChatStore) ListPlanningThreadsBy(_ context.Context, campaignID, createdBy uuid.UUID) ([]storage.PlanningThread, error) {
+	var out []storage.PlanningThread
+	for id := range f.threads {
+		if t, ok := f.ownedBy(campaignID, id, createdBy); ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeChatStore) RenamePlanningThreadBy(_ context.Context, campaignID, id, createdBy uuid.UUID, title string) (storage.PlanningThread, error) {
+	t, ok := f.ownedBy(campaignID, id, createdBy)
+	if !ok {
+		return storage.PlanningThread{}, storage.ErrNotFound
+	}
+	t.Title = title
+	f.threads[id] = t
+	return t, nil
+}
+
+func (f *fakeChatStore) DeletePlanningThreadBy(_ context.Context, campaignID, id, createdBy uuid.UUID) error {
+	if _, ok := f.ownedBy(campaignID, id, createdBy); !ok {
+		return storage.ErrNotFound
+	}
+	delete(f.threads, id)
+	delete(f.messages, id)
+	return nil
+}
+
 func (f *fakeChatStore) RenamePlanningThread(_ context.Context, campaignID, id uuid.UUID, title string) (storage.PlanningThread, error) {
 	t, ok := f.threads[id]
 	if !ok || t.CampaignID != campaignID {

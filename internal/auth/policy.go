@@ -35,17 +35,42 @@ type TenantResolver interface {
 	TenantForUser(ctx context.Context, userID uuid.UUID) (uuid.UUID, error)
 }
 
+// WorkspaceResolver decides what a session acts as (ADR-0065): the user's own
+// Tenant, or — as a Campaign Guest — one Campaign of a host Tenant. It is
+// asked on EVERY request with the session token the request presented, so a
+// guest who was removed, or whose rights changed, is re-authorized on their
+// very next call. storage.ErrNotFound means the user has no workspace at all.
+// [Workspaces] is the production implementation.
+type WorkspaceResolver interface {
+	ResolveWorkspace(ctx context.Context, u storage.User, sessionToken string) (storage.Workspace, error)
+}
+
 // Policy owns the auth decisions both transports enforce. Construct with
 // [NewPolicy]; evaluate with [Policy.Evaluate].
 type Policy struct {
 	authn   Authenticator
 	tenants TenantResolver
+	// workspaces, when wired ([Policy.WithWorkspaces]), replaces tenants: the
+	// policy then resolves a WORKSPACE and runs the guest gate.
+	workspaces WorkspaceResolver
 }
 
 // NewPolicy builds the shared policy. tr may be nil only when every evaluation
 // uses [TenantNone] (a nil resolver fails tenant resolution closed).
 func NewPolicy(a Authenticator, tr TenantResolver) *Policy {
 	return &Policy{authn: a, tenants: tr}
+}
+
+// WithWorkspaces makes the policy resolve a workspace instead of just a Tenant
+// (ADR-0065) and returns it for chaining. It is an explicit opt-in — not a
+// type assertion on the [TenantResolver] — so a policy can only ever produce a
+// guest principal when its composition root said so, and with it the guest
+// gate: a request that resolves to a Campaign Guest is refused unless its
+// [Check] declares a [GuestPosture] the guest's rights satisfy. Without it no
+// request is ever a guest. A nil resolver leaves the policy as it was.
+func (p *Policy) WithWorkspaces(wr WorkspaceResolver) *Policy {
+	p.workspaces = wr
+	return p
 }
 
 // Input is the transport-free request evidence the policy inspects: the two
@@ -107,6 +132,9 @@ type Check struct {
 	CSRF bool
 	// Tenant is the tenant-resolution posture. Must be set explicitly.
 	Tenant TenantMode
+	// Guest is what the mount/procedure requires of a Campaign Guest
+	// (ADR-0065). The zero value is GM-only: a guest is denied.
+	Guest GuestPosture
 }
 
 // Denial classifies why the policy rejected a request. Adapters map it onto
@@ -129,6 +157,11 @@ const (
 	// unauthenticated answer: a presented token that could not be verified must
 	// not read as "please sign in" (the SPA logs the operator out on that).
 	DenyUnavailable
+	// DenyGuest is the guest gate's refusal (ADR-0065): the session acts as a
+	// Campaign Guest and this mount/procedure is GM-only, or needs a Guest
+	// Right the guest does not hold: CodePermissionDenied / 403. One denial
+	// for both, so the answer does not reveal which rights exist.
+	DenyGuest
 )
 
 // Message is the user-facing rejection text, identical on both transports.
@@ -138,6 +171,8 @@ func (d Denial) Message() string {
 		return "csrf check failed, retry"
 	case DenyUnavailable:
 		return "sign-in check temporarily unavailable, retry"
+	case DenyGuest:
+		return "your access to this campaign does not include this"
 	default:
 		return "please sign in"
 	}
@@ -152,6 +187,10 @@ type Verdict struct {
 	HasUser   bool
 	Tenant    uuid.UUID
 	HasTenant bool
+	// Guest is set (IsGuest) when the session acts as a Campaign Guest: Tenant
+	// is then the HOST Tenant.
+	Guest   GuestScope
+	IsGuest bool
 }
 
 // Context injects the verdict's resolved operator ([WithUser]) and tenant
@@ -164,14 +203,17 @@ func (v Verdict) Context(ctx context.Context) context.Context {
 	if v.HasTenant {
 		ctx = WithTenant(ctx, v.Tenant)
 	}
+	if v.IsGuest {
+		ctx = WithGuest(ctx, v.Guest)
+	}
 	return ctx
 }
 
 // Evaluate runs the full gate in the canonical order — session (who) → CSRF
-// (anti-forgery) → tenant (which tenant) — and returns the verdict. It is the
-// ONLY decision path: the Connect interceptor and the plain-mount guard both
-// call it per request, so a check cannot exist on one transport and not the
-// other (the #408 drift class).
+// (anti-forgery) → workspace (which Tenant, and as whom) → guest gate — and
+// returns the verdict. It is the ONLY decision path: the Connect interceptor
+// and the plain-mount guard both call it per request, so a check cannot exist
+// on one transport and not the other (the #408 drift class).
 func (p *Policy) Evaluate(ctx context.Context, in Input, c Check) Verdict {
 	u, hasUser, deny := p.evaluateSession(ctx, in.SessionToken, c.Public)
 	if deny != DenyNone {
@@ -182,11 +224,56 @@ func (p *Policy) Evaluate(ctx context.Context, in Input, c Check) Verdict {
 	if deny := evaluateCSRF(in.CSRFCookie, in.CSRFHeader, c.CSRF); deny != DenyNone {
 		return Verdict{Deny: deny}
 	}
+	if p.workspaces != nil && hasUser {
+		return p.evaluateWorkspace(ctx, u, in.SessionToken, c)
+	}
 	tenant, hasTenant, deny := p.evaluateTenant(ctx, u, hasUser, c.Tenant)
 	if deny != DenyNone {
 		return Verdict{Deny: deny}
 	}
 	return Verdict{User: u, HasUser: hasUser, Tenant: tenant, HasTenant: hasTenant}
+}
+
+// evaluateWorkspace is the tenant step of a policy with a [WorkspaceResolver]
+// (ADR-0065), plus the guest gate. The workspace is resolved for EVERY
+// authenticated request — including a [TenantNone] one, which injects no
+// Tenant but must still learn whether the caller is a guest, or a guest could
+// reach a mount merely because that mount resolves its Tenant itself.
+//
+// The denial postures mirror [Policy.evaluateTenant]: a resolver FAILURE is
+// [DenyUnavailable] (#661), no workspace at all is "no tenant" (denied only by
+// [TenantRequired]), and an undeclared tenant mode fails closed. A guest
+// workspace then has to pass c.Guest, whose zero value admits nobody.
+func (p *Policy) evaluateWorkspace(ctx context.Context, u storage.User, token string, c Check) Verdict {
+	switch c.Tenant {
+	case TenantNone, TenantOptional, TenantRequired:
+	default:
+		return Verdict{Deny: DenyUnauthenticated}
+	}
+	v := Verdict{User: u, HasUser: true}
+	w, err := p.workspaces.ResolveWorkspace(ctx, u, token)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		slog.Default().Warn("auth policy: no workspace for user", "user_id", u.ID)
+		if c.Tenant == TenantRequired {
+			return Verdict{Deny: DenyUnauthenticated}
+		}
+		return v
+	case err != nil:
+		slog.Default().Warn("auth policy: resolve workspace", "user_id", u.ID, "err", err)
+		return Verdict{Deny: DenyUnavailable}
+	}
+	if w.Guest {
+		scope := GuestScope{CampaignID: w.CampaignID, Rights: RightSetFromStrings(w.Rights)}
+		if !c.Guest.Admits(scope.Rights) {
+			return Verdict{Deny: DenyGuest}
+		}
+		v.Guest, v.IsGuest = scope, true
+	}
+	if c.Tenant != TenantNone {
+		v.Tenant, v.HasTenant = w.TenantID, true
+	}
+	return v
 }
 
 // evaluateSession validates the session token and resolves the operator. A

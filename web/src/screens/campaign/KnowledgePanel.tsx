@@ -25,6 +25,7 @@ import {
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useGuardedSearchKeys, useScreenNav } from "@/app/screenNav";
 import { errorMessage } from "@/lib/connectError";
 import { isAtMost, watchBreakpoint } from "@/lib/breakpoints";
@@ -109,7 +110,12 @@ export function KnowledgePanel({
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const nav = useScreenNav();
-  const { openAgent } = useCampaignScreen();
+  const { openAgent, campaign } = useCampaignScreen();
+  // What this principal may do here (ADR-0065). The GM: everything, as ever. A
+  // Campaign Guest reads the wiki with wiki.read and gets the editing controls
+  // only with wiki.edit; AI drafting, the checkup and everything about the
+  // cast stay the GM's, whatever the guest's rights.
+  const can = useCan();
   useGuardedSearchKeys("node");
   const stacked = useStacked();
 
@@ -145,7 +151,13 @@ export function KnowledgePanel({
   const [layoutStacked, setLayoutStacked] = useState(stacked);
   if (!editorOpen && layoutStacked !== stacked) setLayoutStacked(stacked);
 
-  const [mode, setMode] = useCampaignPanelState<ViewMode>("wiki.mode", "list");
+  const [pickedMode, setMode] = useCampaignPanelState<ViewMode>("wiki.mode", "list");
+  // A mode this principal is not offered (rights that changed under an open
+  // panel) falls back to the list rather than rendering a view of refusals.
+  const mode: ViewMode =
+    (pickedMode === "health" && !can.manage) || (pickedMode === "boards" && !can.wikiEdit)
+      ? "list"
+      : pickedMode;
   const [sort, setSort] = useCampaignPanelState<SortKey>("wiki.sort", "name");
   const [collapsed, setCollapsed] = useCampaignPanelState<readonly NodeType[]>("wiki.collapsed", []);
 
@@ -411,9 +423,14 @@ export function KnowledgePanel({
   // is not in it, though the palette's server-side search just found it. So
   // an id the list does not know is looked up once more before it is called
   // missing.
-  const rosterQuery = useQuery(CampaignService.method.getCampaignRoster, {}, { retry: rosterRetry });
-  const campaignName = rosterQuery.data?.campaign?.name;
-  const rosterSettled = !rosterQuery.isPending;
+  // (A guest's campaign is named by their Workspace; the roster is not theirs.)
+  const rosterQuery = useQuery(
+    CampaignService.method.getCampaignRoster,
+    {},
+    { retry: rosterRetry, enabled: can.manage },
+  );
+  const campaignName = can.manage ? rosterQuery.data?.campaign?.name : campaign?.name;
+  const rosterSettled = !can.manage || !rosterQuery.isPending;
   const reported = useRef<string | null>(null);
   // The id a second look was started for, and the id it has come back for.
   // The answer is the refetch's own settling: one that returns the same rows
@@ -595,7 +612,7 @@ export function KnowledgePanel({
         }}
         onDirtyChange={edits.markDirty}
         onDelete={() => setConfirmNode(selected)}
-        onOpenLine={onOpenLine}
+        onOpenLine={can.transcriptsRead ? onOpenLine : undefined}
         onOpenNode={openEntry}
       />
     ) : (
@@ -604,13 +621,18 @@ export function KnowledgePanel({
         node={selected}
         tags={tagIndex.byNode.get(selected.id) ?? []}
         editRef={editButton}
-        onEdit={() => {
-          resetMutations();
-          setEditFor(selected.id);
-        }}
+        onEdit={
+          can.wikiEdit
+            ? () => {
+                resetMutations();
+                setEditFor(selected.id);
+              }
+            : undefined
+        }
         onClose={closeEntry}
         onOpenNode={openEntry}
-        onOpenLine={onOpenLine}
+        // The jump lands on a transcript, which is its own right.
+        onOpenLine={can.transcriptsRead ? onOpenLine : undefined}
       />
     );
   }
@@ -648,6 +670,7 @@ export function KnowledgePanel({
       grouped={grouped}
       selected={creating === null && n.id === selectedId}
       onOpen={() => openEntry(n.id)}
+      editable={can.wikiEdit}
       onEdit={() => openEntry(n.id, "edit")}
       onDelete={() => setConfirmNode(n)}
       deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
@@ -683,30 +706,34 @@ export function KnowledgePanel({
         icon={<BookOpen size={22} />}
         titleAs="h2"
         title={t("knowledge.emptyTitle")}
-        description={t("knowledge.emptyList")}
+        description={can.wikiEdit ? t("knowledge.emptyList") : t("access.wikiEmptyGuest")}
         action={
-          <>
-            <Button variant="primary" onClick={() => startCreate(NodeType.NPC)}>
-              {t("knowledge.starterNpc")}
-            </Button>
-            <Button variant="secondary" onClick={() => startCreate(NodeType.LOCATION)}>
-              {t("knowledge.starterLocation")}
-            </Button>
-            <Button
-              variant="secondary"
-              iconStart={<Sparkles size={14} />}
-              onClick={() =>
-                setDraftState({
-                  open: true,
-                  // A starting point the GM edits, not a prompt sent for them.
-                  prompt: draftState.prompt || t("knowledge.starterWorldPrompt"),
-                  draft: draftState.draft,
-                })
-              }
-            >
-              {t("knowledge.starterWorld")}
-            </Button>
-          </>
+          can.wikiEdit && (
+            <>
+              <Button variant="primary" onClick={() => startCreate(NodeType.NPC)}>
+                {t("knowledge.starterNpc")}
+              </Button>
+              <Button variant="secondary" onClick={() => startCreate(NodeType.LOCATION)}>
+                {t("knowledge.starterLocation")}
+              </Button>
+              {can.manage && (
+                <Button
+                  variant="secondary"
+                  iconStart={<Sparkles size={14} />}
+                  onClick={() =>
+                    setDraftState({
+                      open: true,
+                      // A starting point the GM edits, not a prompt sent for them.
+                      prompt: draftState.prompt || t("knowledge.starterWorldPrompt"),
+                      draft: draftState.draft,
+                    })
+                  }
+                >
+                  {t("knowledge.starterWorld")}
+                </Button>
+              )}
+            </>
+          )
         }
       />
     ) : searchFailed ? null : visible.length === 0 ? (
@@ -808,34 +835,58 @@ export function KnowledgePanel({
                 options={[
                   { value: "list", label: t("knowledge.viewList"), icon: <Rows3 size={14} /> },
                   { value: "graph", label: t("knowledge.viewMap"), icon: <Network size={14} /> },
-                  { value: "health", label: t("knowledge.viewCheckup"), icon: <Stethoscope size={14} /> },
-                  { value: "boards", label: t("knowledge.viewBoards"), icon: <ClipboardList size={14} /> },
+                  // The checkup reads the cast and runs the duplicate scan: the GM's.
+                  ...(can.manage
+                    ? [
+                        {
+                          value: "health" as const,
+                          label: t("knowledge.viewCheckup"),
+                          icon: <Stethoscope size={14} />,
+                        },
+                      ]
+                    : []),
+                  // Boards are edited where they are read, so they come with wiki.edit.
+                  ...(can.wikiEdit
+                    ? [
+                        {
+                          value: "boards" as const,
+                          label: t("knowledge.viewBoards"),
+                          icon: <ClipboardList size={14} />,
+                        },
+                      ]
+                    : []),
                 ]}
               />
-              <Menu
-                trigger={
-                  <Button variant="primary" iconStart={<Plus size={14} />} iconEnd={<ChevronDown size={14} />}>
-                    {t("knowledge.newEntry")}
-                  </Button>
-                }
-              >
-                <MenuLabel>{t("knowledge.newEntryMenuLabel")}</MenuLabel>
-                {TYPE_ORDER.map((type) => {
-                  const meta = TYPE_META[type];
-                  return (
-                    <MenuItem key={type} icon={<meta.Icon />} onSelect={() => startCreate(type)}>
-                      {t(meta.labelKey)}
-                    </MenuItem>
-                  );
-                })}
-                <MenuSeparator />
-                <MenuItem
-                  icon={<Sparkles />}
-                  onSelect={() => setDraftState({ ...draftState, open: true })}
+              {can.wikiEdit && (
+                <Menu
+                  trigger={
+                    <Button variant="primary" iconStart={<Plus size={14} />} iconEnd={<ChevronDown size={14} />}>
+                      {t("knowledge.newEntry")}
+                    </Button>
+                  }
                 >
-                  {t("knowledge.draftOpen")}
-                </MenuItem>
-              </Menu>
+                  <MenuLabel>{t("knowledge.newEntryMenuLabel")}</MenuLabel>
+                  {TYPE_ORDER.map((type) => {
+                    const meta = TYPE_META[type];
+                    return (
+                      <MenuItem key={type} icon={<meta.Icon />} onSelect={() => startCreate(type)}>
+                        {t(meta.labelKey)}
+                      </MenuItem>
+                    );
+                  })}
+                  {can.manage && (
+                    <>
+                      <MenuSeparator />
+                      <MenuItem
+                        icon={<Sparkles />}
+                        onSelect={() => setDraftState({ ...draftState, open: true })}
+                      >
+                        {t("knowledge.draftOpen")}
+                      </MenuItem>
+                    </>
+                  )}
+                </Menu>
+              )}
             </div>
 
             {filterable && (
@@ -927,14 +978,16 @@ export function KnowledgePanel({
                         {u.tag}
                       </button>
                     ))}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      iconStart={<Tags size={13} />}
-                      onClick={() => setTagManagerOpen(true)}
-                    >
-                      {t("knowledge.manageTags")}
-                    </Button>
+                    {can.wikiEdit && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        iconStart={<Tags size={13} />}
+                        onClick={() => setTagManagerOpen(true)}
+                      >
+                        {t("knowledge.manageTags")}
+                      </Button>
+                    )}
                   </div>
                 )}
 
@@ -957,7 +1010,7 @@ export function KnowledgePanel({
             )}
           </div>
 
-          {draftState.open && (
+          {can.manage && draftState.open && (
             <KnowledgeDraftCard state={draftState} onStateChange={setDraftState} onApplied={invalidate} />
           )}
 
@@ -1120,6 +1173,7 @@ function EntryCard({
   tags,
   grouped,
   selected,
+  editable,
   onOpen,
   onEdit,
   onDelete,
@@ -1130,6 +1184,8 @@ function EntryCard({
   /** Under a type heading: the per-card type badge would only repeat it. */
   grouped: boolean;
   selected: boolean;
+  /** The viewer may edit the wiki: the card carries Edit and Delete. */
+  editable: boolean;
   onOpen: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -1222,20 +1278,22 @@ function EntryCard({
           </div>
         )}
       </div>
-      <div className="gx-wiki-card__actions">
-        <IconButton size="sm" label={t("knowledge.editEntryAria", { name: node.name })} onClick={onEdit}>
-          <Pencil size={14} />
-        </IconButton>
-        <IconButton
-          size="sm"
-          tone="danger"
-          label={t("knowledge.deleteNamedEntryAria", { name: node.name })}
-          onClick={onDelete}
-          disabled={deleting}
-        >
-          <Trash2 size={14} />
-        </IconButton>
-      </div>
+      {editable && (
+        <div className="gx-wiki-card__actions">
+          <IconButton size="sm" label={t("knowledge.editEntryAria", { name: node.name })} onClick={onEdit}>
+            <Pencil size={14} />
+          </IconButton>
+          <IconButton
+            size="sm"
+            tone="danger"
+            label={t("knowledge.deleteNamedEntryAria", { name: node.name })}
+            onClick={onDelete}
+            disabled={deleting}
+          >
+            <Trash2 size={14} />
+          </IconButton>
+        </div>
+      )}
     </li>
   );
 }

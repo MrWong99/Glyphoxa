@@ -123,6 +123,16 @@ func (c *ClipServer) serve(w http.ResponseWriter, req *http.Request, kind string
 		return
 	}
 
+	// A Campaign Guest (ADR-0065) is served PROMOTED Highlights only — a
+	// candidate is the GM's private curation and 404s like a foreign id — and
+	// only ever through a resolver: the row was loaded by the HOST Tenant, so
+	// without the campaign check below a guest could fetch another Campaign's
+	// asset by id.
+	if _, guest := auth.Guest(req.Context()); guest && (c.resolve == nil || h.Status != storage.HighlightPromoted) {
+		http.NotFound(w, req)
+		return
+	}
+
 	// Active-Campaign scoping (#308): an asset whose highlight belongs to another
 	// campaign than the resolved Active Campaign is 404 — existence never leaked, the
 	// same posture the Highlight RPCs adopt. A nil resolver leaves scoping tenant-only.

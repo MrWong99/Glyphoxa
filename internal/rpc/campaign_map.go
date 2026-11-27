@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -51,14 +52,87 @@ type campaignMapStore interface {
 	MapAncestors(ctx context.Context, campaignID, id uuid.UUID) ([]storage.CampaignMap, error)
 
 	CreatePin(ctx context.Context, n storage.NewMapPin) (storage.MapPin, error)
+	// GetPin backs the Campaign Guest checks on a Pin write (ADR-0065): a guest
+	// without wiki.secrets must not move or delete a Pin they cannot see.
+	GetPin(ctx context.Context, campaignID, id uuid.UUID) (storage.MapPin, error)
 	ListPins(ctx context.Context, campaignID, mapID uuid.UUID) ([]storage.MapPin, error)
 	UpdatePin(ctx context.Context, u storage.MapPinUpdate) (storage.MapPin, error)
 	DeletePin(ctx context.Context, campaignID, id uuid.UUID) error
 	UnpinnedNodes(ctx context.Context, campaignID, mapID uuid.UUID) ([]storage.KGNode, error)
 }
 
-// ListMaps returns the active campaign's Maps. GM-facing: gm_private Maps are
-// included, because every caller of this surface is the operator (ADR-0041).
+// visibleMaps is what a caller may see of a Map list. A GM (and a Campaign
+// Guest holding wiki.secrets) sees it unchanged. A guest without it
+// (ADR-0065) loses every gm_private Map, and the anchor of a Map that is
+// anchored to a withheld entry — the anchor is that entry's id.
+func (s *campaignMaps) visibleMaps(ctx context.Context, op string, campaignID uuid.UUID, maps []storage.CampaignMap) ([]storage.CampaignMap, error) {
+	withheld, err := s.active.withheldFor(ctx, op, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if seesSecrets(ctx) {
+		return maps, nil
+	}
+	out := make([]storage.CampaignMap, 0, len(maps))
+	for _, m := range maps {
+		if m.GMPrivate {
+			continue
+		}
+		if m.AnchorNodeID.Valid && isWithheld(withheld, m.AnchorNodeID.UUID) {
+			m.AnchorNodeID = uuid.NullUUID{}
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// guestPinTarget refuses a Pin write that a Campaign Guest without
+// wiki.secrets must not be able to make (ADR-0065): on a gm_private Map, or
+// bound to a gm_private entry. Both answer the caller's own "not found" — for
+// that guest neither exists. A no-op for everyone who sees secrets.
+func (s *campaignMaps) guestPinTarget(ctx context.Context, op string, campaignID, mapID, nodeID uuid.UUID, notFound error) error {
+	if seesSecrets(ctx) {
+		return nil
+	}
+	withheld, err := s.active.withheldFor(ctx, op, campaignID)
+	if err != nil {
+		return err
+	}
+	if isWithheld(withheld, nodeID) {
+		return connect.NewError(connect.CodeNotFound, notFound)
+	}
+	m, err := s.store.GetMap(ctx, campaignID, mapID)
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && m.GMPrivate) {
+		return connect.NewError(connect.CodeNotFound, notFound)
+	}
+	if err != nil {
+		s.active.logger().Error(op+": load map failed", "map_id", mapID, "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return nil
+}
+
+// guestPin is [campaignMaps.guestPinTarget] for a write addressed by Pin id:
+// the Pin is loaded first, and one the guest cannot see (its own gm_private
+// flag included) is "pin not found".
+func (s *campaignMaps) guestPin(ctx context.Context, op string, campaignID, pinID uuid.UUID) error {
+	if seesSecrets(ctx) {
+		return nil
+	}
+	notFound := errors.New("pin not found")
+	pin, err := s.store.GetPin(ctx, campaignID, pinID)
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && pin.Hidden()) {
+		return connect.NewError(connect.CodeNotFound, notFound)
+	}
+	if err != nil {
+		s.active.logger().Error(op+": load pin failed", "pin_id", pinID, "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return s.guestPinTarget(ctx, op, campaignID, pin.MapID, pin.NodeID, notFound)
+}
+
+// ListMaps returns the active campaign's Maps. For a GM, gm_private Maps are
+// included; a Campaign Guest without wiki.secrets gets [campaignMaps.visibleMaps].
 func (s *campaignMaps) ListMaps(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListMapsRequest],
@@ -72,6 +146,9 @@ func (s *campaignMaps) ListMaps(
 		s.active.logger().Error("ListMaps: store list failed", "campaign_id", c.ID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
+	if maps, err = s.visibleMaps(ctx, "ListMaps", c.ID, maps); err != nil {
+		return nil, err
+	}
 	out := &managementv1.ListMapsResponse{Maps: make([]*managementv1.Map, 0, len(maps))}
 	for _, m := range maps {
 		out.Maps = append(out.Maps, toProtoMap(m))
@@ -82,6 +159,15 @@ func (s *campaignMaps) ListMaps(
 // GetMapView returns one Map with everything the Maps tab draws: its Pins, its
 // ancestor breadcrumb, its direct children, and the entries not yet pinned on it.
 // One call rather than five, because they are one screen.
+//
+// For a Campaign Guest (ADR-0065) the view is cut to what their rights cover.
+// Without wiki.secrets: a gm_private Map is "map not found"; a Pin that is
+// private, or bound to a private entry, is absent; private ancestors and
+// children are absent. The unpinned-entries tray carries whole wiki entries
+// (name AND body), so it needs wiki.read on top of the maps right, and then
+// lists public entries only without wiki.secrets. A visible Pin does show its
+// entry's name and type to a guest holding only maps.read: that label is what
+// a Pin on a Map is.
 func (s *campaignMaps) GetMapView(
 	ctx context.Context,
 	req *connect.Request[managementv1.GetMapViewRequest],
@@ -102,6 +188,11 @@ func (s *campaignMaps) GetMapView(
 	if err != nil {
 		s.active.logger().Error("GetMapView: load map failed", "map_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	secrets := seesSecrets(ctx)
+	if !secrets && m.GMPrivate {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
 	}
 
 	pins, err := s.store.ListPins(ctx, c.ID, id)
@@ -127,8 +218,30 @@ func (s *campaignMaps) GetMapView(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
-	out := &managementv1.GetMapViewResponse{Map: toProtoMap(m)}
+	// visibleMaps runs over every Map list the view carries, the Map itself
+	// included (it may be anchored to a withheld entry).
+	self, err := s.visibleMaps(ctx, "GetMapView", c.ID, []storage.CampaignMap{m})
+	if err != nil {
+		return nil, err
+	}
+	if len(self) != 1 {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("map not found"))
+	}
+	if ancestors, err = s.visibleMaps(ctx, "GetMapView", c.ID, ancestors); err != nil {
+		return nil, err
+	}
+	if all, err = s.visibleMaps(ctx, "GetMapView", c.ID, all); err != nil {
+		return nil, err
+	}
+	if auth.GuestLacks(ctx, auth.RightWikiRead) {
+		unpinned = nil
+	}
+
+	out := &managementv1.GetMapViewResponse{Map: toProtoMap(self[0])}
 	for _, p := range pins {
+		if !secrets && p.Hidden() {
+			continue
+		}
 		out.Pins = append(out.Pins, toProtoPin(p))
 	}
 	for _, a := range ancestors {
@@ -139,7 +252,7 @@ func (s *campaignMaps) GetMapView(
 			out.Children = append(out.Children, toProtoMap(child))
 		}
 	}
-	for _, n := range unpinned {
+	for _, n := range redactNodes(ctx, unpinned) {
 		out.Unpinned = append(out.Unpinned, toProtoNode(n))
 	}
 	return connect.NewResponse(out), nil
@@ -411,12 +524,17 @@ func (s *campaignMaps) CreatePin(
 	if err != nil {
 		return nil, err
 	}
+	if err := s.guestPinTarget(ctx, "CreatePin", c.ID, mapID, nodeID, errors.New("map or entry not found")); err != nil {
+		return nil, err
+	}
 
 	pin, err := s.store.CreatePin(ctx, storage.NewMapPin{
 		MapID: mapID, CampaignID: c.ID, NodeID: nodeID,
 		X: m.GetX(), Y: m.GetY(),
 		LabelOverride: strings.TrimSpace(m.GetLabelOverride()),
-		GMPrivate:     m.GetGmPrivate(),
+		// Marking a Pin private is a secrets decision: a caller who cannot see
+		// private Pins would be creating one they immediately lose sight of.
+		GMPrivate: m.GetGmPrivate() && seesSecrets(ctx),
 	})
 	switch {
 	case errors.Is(err, storage.ErrConflict):
@@ -449,10 +567,13 @@ func (s *campaignMaps) UpdatePin(
 	if err != nil {
 		return nil, err
 	}
+	if err := s.guestPin(ctx, "UpdatePin", c.ID, id); err != nil {
+		return nil, err
+	}
 	pin, err := s.store.UpdatePin(ctx, storage.MapPinUpdate{
 		ID: id, CampaignID: c.ID, X: m.GetX(), Y: m.GetY(),
 		LabelOverride: strings.TrimSpace(m.GetLabelOverride()),
-		GMPrivate:     m.GetGmPrivate(),
+		GMPrivate:     m.GetGmPrivate() && seesSecrets(ctx),
 	})
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
@@ -477,6 +598,9 @@ func (s *campaignMaps) DeletePin(
 	}
 	c, err := s.active.campaignFor(ctx, "DeletePin")
 	if err != nil {
+		return nil, err
+	}
+	if err := s.guestPin(ctx, "DeletePin", c.ID, id); err != nil {
 		return nil, err
 	}
 	switch err := s.store.DeletePin(ctx, c.ID, id); {

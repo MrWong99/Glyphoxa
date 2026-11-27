@@ -57,11 +57,15 @@ type TenantOperatorLister interface {
 // allowlist's second account. Member-Role-based GM replaces this when
 // tenant_members lands.
 //
-// A bound operator REMOVED from the allowlist stays GM (in its own Tenant): the
-// binding is Tenant ownership and nothing unbinds it (ADR-0055 — GM identity now
-// derives from ownership, not list membership). Allowlist removal still revokes
-// what it always governed — admission at the OAuth callback and live web sessions
-// at the boot sweep. Full GM revocation of an ex-owner is a Tenant reassignment.
+// On an `open` deployment a bound operator stays GM (in its own Tenant) whatever
+// the allowlist says: the binding is Tenant ownership and nothing unbinds it
+// (ADR-0055 — GM identity derives from ownership, not list membership), and
+// suspension is what revokes it. On an `allowlist` deployment ownership is not
+// enough (ADR-0065): the binding source ([storage.AccessPolicy]) only lists
+// operators who are Platform Admins or hold an Access Grant, so revoking a grant
+// — or removing someone from the env list — ends their GM standing on Discord
+// within one snapshot TTL, exactly as it ends their web session. The Tenant and
+// its data are kept; granting again restores the binding.
 //
 // Neither verdict blocks or does I/O: they serve the cached binding snapshot and,
 // when it has expired, kick ONE deduplicated background reload — the same

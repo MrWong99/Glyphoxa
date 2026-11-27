@@ -50,6 +50,8 @@ type Opts = {
   transcriptsFail?: boolean;
   live?: boolean;
   noCampaign?: boolean;
+  /** Mount the palette for a Platform Admin (ADR-0065). */
+  platformAdmin?: boolean;
 };
 
 function backend(opts: Opts = {}) {
@@ -163,7 +165,7 @@ function renderPalette(opts: Opts = {}) {
     <Providers transport={b.transport} queryClient={queryClient}>
       <MemoryScreenNav initial={{ screen: "configuration" }} onNavigate={(next) => moves.push(next)}>
         <button type="button">somewhere on the page</button>
-        <CommandPalette />
+        <CommandPalette platformAdmin={opts.platformAdmin} />
       </MemoryScreenNav>
     </Providers>,
   );
@@ -284,6 +286,7 @@ describe("CommandPalette navigation layer", () => {
       "Players",
       "Suggestions",
       "Planning",
+      "Sharing",
       "Settings",
       "Session",
       "Campaigns",
@@ -306,6 +309,26 @@ describe("CommandPalette navigation layer", () => {
     fireEvent.click(palette().getByRole("option", { name: label }));
     expect(moves).toEqual([location]);
     expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+  });
+
+  // The Admin screen is offered to a Platform Admin only (ADR-0065); the list
+  // above — the default, a GM — pins that nobody else is shown it.
+  it("adds Admin to 'Go to' for a Platform Admin, and goes there", () => {
+    const { moves } = renderPalette({ platformAdmin: true });
+    openPalette();
+    const goTo = palette().getByRole("group", { name: "Go to" });
+    expect(within(goTo).getAllByRole("option").map((o) => o.textContent).slice(-2)).toEqual(["Setup", "Admin"]);
+
+    fireEvent.click(palette().getByRole("option", { name: "Admin" }));
+    expect(moves).toEqual([{ screen: "admin", view: undefined, search: {} }]);
+  });
+
+  it("never finds Admin for a GM, however it is typed", () => {
+    renderPalette();
+    openPalette();
+    expect(palette().queryByRole("option", { name: "Admin" })).not.toBeInTheDocument();
+    type("admin");
+    expect(palette().queryByRole("option", { name: "Admin" })).not.toBeInTheDocument();
   });
 
   it("narrows the destinations as the GM types, ignoring case and accents", () => {
@@ -458,7 +481,7 @@ describe("CommandPalette navigation layer", () => {
     const { queryClient } = renderPalette({ noCampaign: true });
     openPalette();
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(within(palette().getByRole("group", { name: "Go to" })).getAllByRole("option")).toHaveLength(11);
+    expect(within(palette().getByRole("group", { name: "Go to" })).getAllByRole("option")).toHaveLength(12);
     expect(palette().getByRole("option", { name: "New campaign" })).toBeInTheDocument();
     expect(palette().queryByRole("alert")).not.toBeInTheDocument();
   });

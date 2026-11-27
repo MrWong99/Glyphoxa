@@ -6,11 +6,12 @@ import (
 	"unicode"
 )
 
-// OperatorAllowlist is the parsed GLYPHOXA_OPERATOR_IDS gate (ADR-0041): the set
-// of Discord User snowflakes a self-host deployment grants web-tier access to.
-// It is the single authorization gate at the OAuth callback — a Discord User
-// whose snowflake is absent is rejected before any session or Tenant write.
-// The zero value denies every snowflake.
+// OperatorAllowlist is the parsed GLYPHOXA_OPERATOR_IDS list (ADR-0041): the
+// Discord User snowflakes of the deployment's Platform Admins (ADR-0065, see
+// [PlatformAdmins]). At the OAuth callback its members take the claim-or-create
+// login in every Admission Mode; it was once the ONLY way in, and is now the
+// only way in that the web cannot edit — everyone else is admitted through an
+// Access Grant ([Admission.decide]). The zero value contains no snowflake.
 type OperatorAllowlist struct {
 	ids map[string]struct{}
 }

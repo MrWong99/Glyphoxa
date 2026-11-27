@@ -16,6 +16,10 @@ export const en = {
   // Mode-neutral and non-leaky by design (ADR-0041/ADR-0055): the copy must
   // name neither the allowlist nor a suspension as the cause.
   "auth.notAuthorized": "This Discord account isn't authorized here.",
+  // The same refusal on a deployment known to be invite-only (ADR-0065): it
+  // adds the way in, and still says nothing about WHY this account was refused.
+  "auth.notAuthorizedInviteOnly":
+    "This Discord account isn't authorized here. This instance is invite-only — ask its admin for an invitation link.",
   "auth.aupRequired": "Please accept the Nutzungsbedingungen below before signing in.",
   // The AUP consent sentence, split around the two document links (the JSX
   // anchors live in the component; the document names stay verbatim).
@@ -210,6 +214,8 @@ export const de: Record<keyof typeof en, string> = {
   "auth.ledeOpen": "Melde dich mit Discord an — deine erste Anmeldung erstellt deinen eigenen Tisch.",
   "auth.ledeAllowlist": "Melde dich an, um deinen Tisch zu leiten.",
   "auth.notAuthorized": "Dieser Discord-Account ist hier nicht freigeschaltet.",
+  "auth.notAuthorizedInviteOnly":
+    "Dieser Discord-Account ist hier nicht freigeschaltet. Diese Instanz ist nur auf Einladung zugänglich — bitte ihren Admin um einen Einladungslink.",
   "auth.aupRequired": "Bitte akzeptiere unten die Nutzungsbedingungen, bevor du dich anmeldest.",
   // "Ich akzeptiere die <Nutzungsbedingungen> und habe die
   // <Datenschutzerklärung> gelesen." — the verb lands in the Post segment.

@@ -352,18 +352,51 @@ func (chatRecapTool) Description() string {
 		"Use when the GM asks what happened last time, or to ground next-session planning in recent events."
 }
 
+// noTranscriptsKey marks an exchange that must not read the spoken record.
+type noTranscriptsKey struct{}
+
+// WithoutTranscripts marks ctx so the exchange it starts runs WITHOUT the
+// tools that read transcript text: search_transcripts, appearances_of (it
+// quotes lines) and recap (it summarizes them). The RPC layer sets it for a
+// Campaign Guest who holds planning.use but not transcripts.read (ADR-0065).
+// The tools are left out of the registry rather than told to return nothing,
+// so the model is never offered them and no grant row can bring them back — a
+// grant naming an unregistered Tool grants nothing (tool.GrantSet).
+//
+// What such an exchange can still do: find_node at the GM tier (planning.use
+// implies wiki.secrets) and propose_knowledge, whose only write is a Knowledge
+// Proposal that waits in the GM's review queue — a guest cannot change the
+// wiki through the chat, only suggest.
+func WithoutTranscripts(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noTranscriptsKey{}, true)
+}
+
+// TranscriptsWithheld reports whether ctx carries the [WithoutTranscripts]
+// mark.
+func TranscriptsWithheld(ctx context.Context) bool {
+	withheld, _ := ctx.Value(noTranscriptsKey{}).(bool)
+	return withheld
+}
+
 // chatTools builds the exchange's tool registry, every tool bound to the
-// exchange's Campaign. The registry carries the full belt; which tools the
-// model may actually see and call is the grant rows' decision (ADR-0029).
-func (e *Engine) chatTools(campaignID uuid.UUID) (*tool.Registry, error) {
+// exchange's Campaign. The registry carries the full belt — minus the
+// transcript-reading tools under [WithoutTranscripts]; which of the registered
+// tools the model may actually see and call is the grant rows' decision
+// (ADR-0029).
+func (e *Engine) chatTools(ctx context.Context, campaignID uuid.UUID) (*tool.Registry, error) {
 	reg := tool.NewRegistry()
-	for _, t := range []tool.Tool{
-		searchTranscriptsTool{eng: e.search, campaignID: campaignID},
+	belt := []tool.Tool{
 		findNodeTool{eng: e.search, campaignID: campaignID},
-		appearancesOfTool{eng: e.search, store: e.store, campaignID: campaignID},
 		proposeKnowledgeTool{tool.NewRememberKnowledge(e.writer)},
-		chatRecapTool{tool.NewRecap(e.recapper)},
-	} {
+	}
+	if !TranscriptsWithheld(ctx) {
+		belt = append(belt,
+			searchTranscriptsTool{eng: e.search, campaignID: campaignID},
+			appearancesOfTool{eng: e.search, store: e.store, campaignID: campaignID},
+			chatRecapTool{tool.NewRecap(e.recapper)},
+		)
+	}
+	for _, t := range belt {
 		if err := reg.Register(t); err != nil {
 			return nil, fmt.Errorf("planchat: register %s: %w", t.Name(), err)
 		}

@@ -8,6 +8,7 @@ import { LegalFooter } from "@/components/LegalFooter";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { useI18n } from "@/i18n";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
+import { AupConsent } from "./AupConsent";
 
 import "./login.css";
 
@@ -23,7 +24,11 @@ import "./login.css";
 // mode-broad — an allowlist miss (ADR-0041) or, in open admission mode, a
 // suspended account (ADR-0055) — and DELIBERATELY undifferentiated: the banner
 // is non-leaky, never echoing the rejected account's id or WHY it was denied,
-// so the copy must stay mode-neutral. A normal first visit renders unchanged.
+// so the copy never names the cause. On a deployment that answers `allowlist`
+// it does add the way in — the instance is invite-only, ask its admin for an
+// invitation link (ADR-0065) — which is true whichever of the causes it was. In
+// `open` mode, and while the mode is unknown, it stays the bare refusal:
+// "invite-only" would be false there. A normal first visit renders unchanged.
 //
 // In `open` mode this screen IS the signup screen, so it carries the AUP/ToS
 // acknowledgment (#518): the Discord OAuth start is disabled until the visitor
@@ -51,8 +56,8 @@ export function Login({
   useDocumentTitle(t("auth.loginDocTitle"));
   const { data, status } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
   const open = data?.admissionMode === AdmissionMode.OPEN;
+  const inviteOnly = data?.admissionMode === AdmissionMode.ALLOWLIST;
   const [accepted, setAccepted] = useState(false);
-  const aupId = useId();
   const reasonId = useId();
   // Open mode = signing up: the acknowledgment gates the OAuth start. While the
   // probe is still IN FLIGHT the start is briefly disabled too — otherwise the
@@ -88,7 +93,7 @@ export function Login({
 
         {notAuthorized && (
           <p className="gx-login__error" role="alert">
-            {t("auth.notAuthorized")}
+            {inviteOnly ? t("auth.notAuthorizedInviteOnly") : t("auth.notAuthorized")}
           </p>
         )}
 
@@ -98,26 +103,7 @@ export function Login({
           </p>
         )}
 
-        {open && (
-          <label className="gx-login__consent" htmlFor={aupId}>
-            <input
-              id={aupId}
-              type="checkbox"
-              checked={accepted}
-              onChange={(e) => setAccepted(e.target.checked)}
-            />
-            {/* The sentence is split around the two document links; the
-                documents' German proper names stay verbatim in both display
-                languages — they are the titles of the authored pages (#518). */}
-            <span>
-              {t("auth.consentPre")}
-              <a href="/terms">Nutzungsbedingungen</a>
-              {t("auth.consentMid")}
-              <a href="/privacy">Datenschutzerklärung</a>
-              {t("auth.consentPost")}
-            </span>
-          </label>
-        )}
+        {open && <AupConsent accepted={accepted} onChange={setAccepted} />}
 
         {/* An anchor cannot be `disabled`, so the blocked state is rendered as a
             real disabled button — aria-disabled alone would still navigate on

@@ -13,6 +13,7 @@ import { stripMarkdown } from "@/components/ui/Markdown";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { invalidateMethodQueries } from "@/lib/queryClient";
+import { useCan } from "@/app/capabilities";
 import { useI18n, type Lang } from "@/i18n";
 import { formatClock } from "./useSessionEvents";
 import { formatDay } from "./sessionFormat";
@@ -78,6 +79,9 @@ export function HighlightsStrip({
 }) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
+  // Promoting, deleting, sound and sharing are the GM's (ADR-0065): a Campaign
+  // Guest with highlights.read is shown the promoted highlights and no actions.
+  const { manage } = useCan();
   const query = useHighlights(sessionId, live);
   const highlights = query.data?.highlights ?? [];
 
@@ -175,7 +179,15 @@ export function HighlightsStrip({
           <EmptyState
             icon={<Sparkles size={22} />}
             title={t("session.highlightsNoneTitle")}
-            description={live ? t("session.highlightsNoneLiveDesc") : t("session.highlightsNoneDesc")}
+            // A guest sees promoted highlights only, and cannot know whether
+            // recording was on: say what is true for them.
+            description={
+              !manage
+                ? t("access.highlightsEmptyGuest")
+                : live
+                  ? t("session.highlightsNoneLiveDesc")
+                  : t("session.highlightsNoneDesc")
+            }
           />
         )}
       </>
@@ -255,33 +267,35 @@ export function HighlightsStrip({
                 {t("session.soundPending")}
               </p>
             )}
-            <div className="gx-highlight__actions">
-              {isCandidate && (
+            {manage && (
+              <div className="gx-highlight__actions">
+                {isCandidate && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    iconStart={<Sparkles size={14} />}
+                    onClick={() => promote.mutate({ id: h.id })}
+                    disabled={promote.isPending}
+                  >
+                    {t("session.promote")}
+                  </Button>
+                )}
                 <Button
-                  variant="secondary"
+                  variant="ghost"
                   size="sm"
-                  iconStart={<Sparkles size={14} />}
-                  onClick={() => promote.mutate({ id: h.id })}
-                  disabled={promote.isPending}
+                  iconStart={<Trash2 size={14} />}
+                  aria-label={t("session.deleteHighlightAria", { range })}
+                  onClick={() => setConfirming(h)}
+                  disabled={remove.isPending}
                 >
-                  {t("session.promote")}
+                  {t("common.delete")}
                 </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                iconStart={<Trash2 size={14} />}
-                aria-label={t("session.deleteHighlightAria", { range })}
-                onClick={() => setConfirming(h)}
-                disabled={remove.isPending}
-              >
-                {t("common.delete")}
-              </Button>
-              {/* Sound is opt-in AFTER promotion (#312), so the action renders
-                  on promoted rows only — everywhere the strip renders them. */}
-              {!isCandidate && <HighlightSoundMenu highlight={h} />}
-              {renderActions?.(h)}
-            </div>
+                {/* Sound is opt-in AFTER promotion (#312), so the action renders
+                    on promoted rows only — everywhere the strip renders them. */}
+                {!isCandidate && <HighlightSoundMenu highlight={h} />}
+                {renderActions?.(h)}
+              </div>
+            )}
           </li>
         );
       })}

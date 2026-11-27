@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { EyeOff, Map as MapIcon, Plus, Sparkles, Upload } from "lucide-react";
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import { useCan } from "@/app/capabilities";
 import { useScreenNav } from "@/app/screenNav";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -41,7 +42,11 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
   const listQuery = useQuery(CampaignService.method.listMaps, {});
   // The campaign's entries: the Location ones a map can depict (and a generated
   // map is drawn from, #541), and every one for the pin cards' excerpts.
-  const nodesQuery = useQuery(CampaignService.method.listNodes, {});
+  // What this principal may do with maps (ADR-0065). Creating, generating,
+  // replacing and deleting maps are the GM's; pins come with maps.edit; and
+  // the entries behind the pins are the wiki's, which is its own right.
+  const can = useCan();
+  const nodesQuery = useQuery(CampaignService.method.listNodes, {}, { enabled: can.wikiRead });
   const nodes = useMemo(() => nodesQuery.data?.nodes ?? [], [nodesQuery.data]);
   const locations = useMemo(() => nodes.filter((n) => n.nodeType === NodeType.LOCATION), [nodes]);
 
@@ -120,9 +125,9 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
           <EmptyState
             icon={<MapIcon size={22} />}
             title={t("maps.emptyTitle")}
-            description={t("maps.emptyDesc")}
+            description={can.manage ? t("maps.emptyDesc") : t("access.mapsEmptyGuest")}
             titleAs="h2"
-            action={addButtons}
+            action={can.manage && addButtons}
           />
         ) : (
           <>
@@ -143,9 +148,11 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
                   }))}
                 />
               </div>
-              <Button variant="secondary" size="sm" iconStart={<Plus size={13} />} onClick={() => setAdding("upload")}>
-                {t("campaign.addMap")}
-              </Button>
+              {can.manage && (
+                <Button variant="secondary" size="sm" iconStart={<Plus size={13} />} onClick={() => setAdding("upload")}>
+                  {t("campaign.addMap")}
+                </Button>
+              )}
             </div>
 
             {currentID && (
@@ -160,7 +167,7 @@ export function MapsPanel({ onOpenNode }: { onOpenNode?: (nodeID: string) => voi
                 onNavigate={open}
                 onChanged={refresh}
                 onDeleted={(id) => setDeleted((d) => new Set(d).add(id))}
-                onOpenNode={onOpenNode}
+                onOpenNode={can.wikiRead ? onOpenNode : undefined}
               />
             )}
           </>

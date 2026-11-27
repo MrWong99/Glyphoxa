@@ -26,6 +26,7 @@ import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { toastUndo } from "@/components/ui/toast";
 import { apiErrorMessage, errorMessage } from "@/lib/connectError";
+import { useCan } from "@/app/capabilities";
 import { useI18n } from "@/i18n";
 import { MapSettingsDialog } from "./MapDialogs";
 import { PinGlyph, type PinChange } from "./MapPin";
@@ -113,6 +114,10 @@ export function MapView({
   onOpenNode?: (nodeID: string) => void;
 }) {
   const { t } = useI18n();
+  // can.mapsEdit: place, move, relabel and remove pins. can.manage: the map
+  // itself — its settings, its image, deleting it — and AI pin suggestions.
+  // Without either the map is a picture with pins that open their cards.
+  const can = useCan();
   const viewQuery = useQuery(CampaignService.method.getMapView, { id: mapID });
   const transport = useTransport();
   const hintID = useId();
@@ -623,49 +628,51 @@ export function MapView({
           </Button>
         </div>
 
-        <div className="gx-maps__actions">
-          <Button
-            variant="secondary"
-            size="sm"
-            iconStart={<Settings2 size={13} />}
-            onClick={() => setSettingsOpen(true)}
-          >
-            {t("maps.settingsButton")}
-          </Button>
-          <Menu
-            trigger={
-              // Busy through ARIA, not `loading` (native disabled): the menu
-              // hands focus back to this trigger, and a disabled trigger would
-              // drop it to <body> for the length of the upload.
-              <IconButton label={t("maps.moreActions")} size="sm" aria-busy={replacing || undefined}>
-                <MoreVertical size={15} />
-              </IconButton>
-            }
-          >
-            <MenuItem icon={<ImageUp size={14} />} onSelect={() => fileRef.current?.click()}>
-              {t("maps.replaceImage")}
-            </MenuItem>
-            <MenuSeparator />
-            <MenuItem tone="danger" icon={<Trash2 size={14} />} onSelect={() => setConfirmDelete(true)}>
-              {t("campaign.deleteMap")}
-            </MenuItem>
-          </Menu>
-          {/* One hidden picker behind both "Replace image" and the no-image
-              placeholder's upload button. */}
-          <input
-            ref={fileRef}
-            type="file"
-            hidden
-            accept={MAP_IMAGE_ACCEPT}
-            aria-label={t("maps.replaceImageFileAria")}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              // Cleared so picking the SAME file again (after an error) fires a change.
-              e.target.value = "";
-              if (file) void replaceWith(file);
-            }}
-          />
-        </div>
+        {can.manage && (
+          <div className="gx-maps__actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              iconStart={<Settings2 size={13} />}
+              onClick={() => setSettingsOpen(true)}
+            >
+              {t("maps.settingsButton")}
+            </Button>
+            <Menu
+              trigger={
+                // Busy through ARIA, not `loading` (native disabled): the menu
+                // hands focus back to this trigger, and a disabled trigger would
+                // drop it to <body> for the length of the upload.
+                <IconButton label={t("maps.moreActions")} size="sm" aria-busy={replacing || undefined}>
+                  <MoreVertical size={15} />
+                </IconButton>
+              }
+            >
+              <MenuItem icon={<ImageUp size={14} />} onSelect={() => fileRef.current?.click()}>
+                {t("maps.replaceImage")}
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem tone="danger" icon={<Trash2 size={14} />} onSelect={() => setConfirmDelete(true)}>
+                {t("campaign.deleteMap")}
+              </MenuItem>
+            </Menu>
+            {/* One hidden picker behind both "Replace image" and the no-image
+                placeholder's upload button. */}
+            <input
+              ref={fileRef}
+              type="file"
+              hidden
+              accept={MAP_IMAGE_ACCEPT}
+              aria-label={t("maps.replaceImageFileAria")}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                // Cleared so picking the SAME file again (after an error) fires a change.
+                e.target.value = "";
+                if (file) void replaceWith(file);
+              }}
+            />
+          </div>
+        )}
       </div>
 
       {error && (
@@ -793,18 +800,20 @@ export function MapView({
               ) : (
                 <div className="gx-maps__noimage">
                   <p className="gx-maps__noimage-text">{t("campaign.mapNoImage")}</p>
-                  <div className="gx-maps__noimage-action">
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      iconStart={<Upload size={13} />}
-                      loading={replacing}
-                      onClick={() => fileRef.current?.click()}
-                    >
-                      {t("maps.uploadImage")}
-                    </Button>
-                    <span className="gx-maps__noimage-hint">{t("maps.imageHint", { mb: MAP_IMAGE_MAX_MB })}</span>
-                  </div>
+                  {can.manage && (
+                    <div className="gx-maps__noimage-action">
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        iconStart={<Upload size={13} />}
+                        loading={replacing}
+                        onClick={() => fileRef.current?.click()}
+                      >
+                        {t("maps.uploadImage")}
+                      </Button>
+                      <span className="gx-maps__noimage-hint">{t("maps.imageHint", { mb: MAP_IMAGE_MAX_MB })}</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -820,12 +829,14 @@ export function MapView({
                     node={nodesByID.get(pin.nodeId)}
                     open={openPin === pin.id}
                     onOpenChange={(open) => setOpenPin(open ? pin.id : null)}
-                    describedBy={hintID}
+                    describedBy={can.mapsEdit ? hintID : undefined}
                     updating={updatePin.isPending}
-                    onChange={(change) => changePin(pin, change)}
+                    onChange={can.mapsEdit ? (change) => changePin(pin, change) : undefined}
                     onOpenEntry={onOpenNode ? () => onOpenNode(pin.nodeId) : undefined}
-                    onRemove={() => removePin(pin)}
-                    dotProps={{
+                    onRemove={can.mapsEdit ? () => removePin(pin) : undefined}
+                    // Without maps.edit a pin has no gestures: a click opens
+                    // its card (the Popover's own doing) and that is all.
+                    dotProps={!can.mapsEdit ? {} : {
                       onPointerDown: (ev) => grab(pin, ev),
                       onKeyDown: (ev) => onPinKeyDown(pin, ev),
                       onClick: (ev) => onPinClick(pin, ev),
@@ -853,9 +864,11 @@ export function MapView({
             </div>
           </div>
 
-          <p id={hintID} className="gx-maps__gesture-hint">
-            {t("maps.pinGestureHint")}
-          </p>
+          {can.mapsEdit && (
+            <p id={hintID} className="gx-maps__gesture-hint">
+              {t("maps.pinGestureHint")}
+            </p>
+          )}
 
           {view.children.length > 0 && (
             <div className="gx-maps__children">
@@ -869,20 +882,22 @@ export function MapView({
           )}
         </div>
 
-        <MapTray
-          unpinned={view.unpinned}
-          suggested={suggested}
-          placingID={placing?.id ?? null}
-          onToggle={(n, viaKeyboard) => {
-            if (viaKeyboard && placing?.id !== n.id) focusPlace.current = true;
-            setPlacing((p) => (p?.id === n.id ? null : n));
-          }}
-          canSuggest={map.anchorNodeId !== ""}
-          suggesting={suggest.isPending}
-          suggestError={suggest.isError ? apiErrorMessage(suggest.error, t) : null}
-          onSuggest={() => suggest.mutate({ mapId: map.id })}
-          onLinkEntry={() => setSettingsOpen(true)}
-        />
+        {can.mapsEdit && (
+          <MapTray
+            unpinned={view.unpinned}
+            suggested={suggested}
+            placingID={placing?.id ?? null}
+            onToggle={(n, viaKeyboard) => {
+              if (viaKeyboard && placing?.id !== n.id) focusPlace.current = true;
+              setPlacing((p) => (p?.id === n.id ? null : n));
+            }}
+            canSuggest={can.manage && map.anchorNodeId !== ""}
+            suggesting={suggest.isPending}
+            suggestError={suggest.isError ? apiErrorMessage(suggest.error, t) : null}
+            onSuggest={() => suggest.mutate({ mapId: map.id })}
+            onLinkEntry={can.manage ? () => setSettingsOpen(true) : undefined}
+          />
+        )}
       </div>
 
       <p className="gx-visually-hidden" role="status" aria-live="polite">

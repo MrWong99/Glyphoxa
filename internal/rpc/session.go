@@ -471,8 +471,11 @@ func (s *SessionServer) SearchTranscriptLines(
 		s.log.Error("SearchTranscriptLines: resolve active campaign failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	if !ok {
-		// No Active Campaign: nothing to search yet (never-run state), not an error.
+	if !ok || auth.GuestLacks(ctx, auth.RightTranscriptsRead) {
+		// No Active Campaign: nothing to search yet (never-run state), not an
+		// error. A Campaign Guest without transcripts.read is refused by the
+		// guest gate before this handler runs; should one arrive anyway, they
+		// get no transcript text.
 		return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{}), nil
 	}
 
@@ -516,6 +519,16 @@ func (s *SessionServer) ListSessions(
 	}
 
 	out := mapSlice(sessions, toProtoVoiceSession)
+	// A Campaign Guest gets the session's metadata — when, how long, how it
+	// ended — but not WHY it ended (ADR-0065): end_reason is the host's
+	// operational detail (raw loop and provider error text, the spend-cap or
+	// allowance cause), none of which a Guest Right covers. The status still
+	// says whether the session ended or failed.
+	if _, guest := auth.Guest(ctx); guest {
+		for _, vs := range out {
+			vs.EndReason = ""
+		}
+	}
 	return connect.NewResponse(&managementv1.ListSessionsResponse{Sessions: out}), nil
 }
 
@@ -629,7 +642,21 @@ func (s *SessionServer) ResolveActiveCampaign(ctx context.Context) (uuid.UUID, b
 // the most-recently-created fallback). ok is false only when neither resolves — a
 // never-run state the caller answers with an empty result. A storage error other
 // than ErrNotFound is returned.
+//
+// A Campaign Guest (ADR-0065) never takes the live shortcut: the host Tenant's
+// live session may belong to ANOTHER of its Campaigns. startCampaign pins them
+// to the guest Campaign (resolveActiveCampaign).
 func (s *SessionServer) searchCampaign(ctx context.Context) (uuid.UUID, bool, error) {
+	if _, guest := auth.Guest(ctx); guest {
+		campaign, err := s.startCampaign(ctx)
+		if errors.Is(err, storage.ErrNotFound) {
+			return uuid.Nil, false, nil
+		}
+		if err != nil {
+			return uuid.Nil, false, err
+		}
+		return campaign.ID, true, nil
+	}
 	if tenantID, ok := auth.TenantID(ctx); ok {
 		if vs, active, err := s.mgr.Active(ctx, tenantID); err == nil && active {
 			return vs.CampaignID, true, nil

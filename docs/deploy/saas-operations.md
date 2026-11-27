@@ -8,9 +8,12 @@ revenue out. The design and its deliberate boundaries are
 
 **Current honest scope, before you sell anything:**
 
-- Admission is a switch now (ADR-0055). The default posture is still the
-  single-operator allowlist (ADR-0039/0041): you onboard each customer by
-  adding their snowflake to `GLYPHOXA_OPERATOR_IDS` and assigning a Plan. Set
+- Admission is a switch now (ADR-0055). The default posture is still
+  `allowlist`: `GLYPHOXA_OPERATOR_IDS` names the Platform Admins, and you admit
+  each customer from the Admin screen — an Access Grant by Discord User ID, or
+  an invitation link (ADR-0065;
+  [configuration.md, *Managing access*](../configuration.md#managing-access)) —
+  never by editing the env list, which would make them an administrator. Set
   `GLYPHOXA_ADMISSION_MODE=open` (chart: `web.admissionMode`) and any Discord
   User who completes OAuth can sign up and found their own Tenant, bound at
   creation to the `GLYPHOXA_SIGNUP_PLAN_SLUG` plan (chart:
@@ -163,9 +166,12 @@ always wins over the env fallback.
 > ADR-0055):** with `GLYPHOXA_ADMISSION_MODE=open`, a Tenant without an active
 > `key_source: "platform"` subscription is refused the env-fallback keys at
 > resolution — a BYOK-plan signup must save its own keys and can never silently
-> spend your platform pool. In the default `allowlist` mode the ADR-0039 hybrid
-> policy stands unchanged (every Tenant is someone you admitted, so nothing is
-> refused). The monthly allowance gate on `included_usage_usd` is live in
+> spend your platform pool. In the default `allowlist` mode there are no Plans;
+> the gate is the per-Tenant **Platform Keys switch** instead (ADR-0065): on
+> for every Tenant that predates it, off by default for everyone you admit from
+> the Admin screen, and yours to flip there per Tenant. A Tenant with the
+> switch off is refused the env-fallback keys exactly like a BYOK-plan signup.
+> The monthly allowance gate on `included_usage_usd` is live in
 > `open` mode too (ADR-0055 gate (b)): session starts refuse and running
 > sessions hard-cap once the month-to-date estimate spends the allowance.
 

@@ -25,6 +25,9 @@ import (
 // it.
 type PortraitStore interface {
 	NodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID) (blobKey string, updatedAt time.Time, err error)
+	// PublicNodePortrait is the same read with gm_private Nodes absent — what a
+	// Campaign Guest without wiki.secrets is served from (ADR-0065).
+	PublicNodePortrait(ctx context.Context, campaignID, nodeID uuid.UUID) (blobKey string, updatedAt time.Time, err error)
 }
 
 // CampaignResolver resolves the request's Active Campaign server-side,
@@ -90,7 +93,14 @@ func (s *Server) ServePortrait(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	key, updatedAt, err := s.store.NodePortrait(req.Context(), campaignID, id)
+	// A gm_private entry does not exist for a Campaign Guest without
+	// wiki.secrets (ADR-0065); the filter is in the query, so its portrait
+	// 404s exactly like an entry of another Campaign.
+	read := s.store.NodePortrait
+	if auth.GuestLacks(req.Context(), auth.RightWikiSecrets) {
+		read = s.store.PublicNodePortrait
+	}
+	key, updatedAt, err := read(req.Context(), campaignID, id)
 	if errors.Is(err, storage.ErrNotFound) {
 		http.NotFound(w, req)
 		return

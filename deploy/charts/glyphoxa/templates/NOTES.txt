@@ -27,7 +27,7 @@ What this release stands up (ADR-0034):
   - A web-mode Deployment (single replica) + Service running
       glyphoxa -mode {{ .Values.web.mode }}
     serving the operator console + the Connect API behind a Discord-OAuth login
-    with a mandatory operator allowlist (ADR-0041). Reach it in-cluster at:
+    with a Platform Admin list (ADR-0041/0065). Reach it in-cluster at:
       {{ include "glyphoxa.web.fullname" . }}:{{ .Values.web.service.port }}
     The /healthz, /readyz, /metrics endpoints stay on the internal metrics port
     {{ .Values.web.metricsPort }}, never the public API port. It never migrates:
@@ -131,9 +131,12 @@ browser (the SPA), then complete the Discord OAuth login.
 Admission Mode is `open` (ADR-0055): ANY Discord User may complete signup and
 found their own Tenant, bound to the {{ .Values.web.signupPlanSlug | quote }} Plan
 (keep that slug in plans.catalog). GLYPHOXA_OPERATOR_IDS is the
-platform-administration list, not the admission gate.
+Platform Admin list, not the admission gate.
 {{- else }}
-A Discord User must be on GLYPHOXA_OPERATOR_IDS to obtain a session (ADR-0041).
+Admission Mode is `allowlist` (invite-only, ADR-0065): the Platform Admins on
+GLYPHOXA_OPERATOR_IDS can sign in, and admit everyone else from the Admin
+screen (Access Grants and invitation links). A GM shares a single Campaign with
+Campaign Guests from its Sharing view.
 {{- end }}
 
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.web.fullname" . }}

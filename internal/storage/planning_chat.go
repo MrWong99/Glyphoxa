@@ -26,6 +26,10 @@ type PlanningThread struct {
 	Title     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// CreatedBy is the user who started the thread (ADR-0065). Unset for a
+	// thread from before the column, or one a Campaign Bundle import created:
+	// those belong to the GM and no Campaign Guest ever sees them.
+	CreatedBy uuid.NullUUID
 }
 
 // PlanningMessage is one prose turn of a planning thread. Role is the two-value
@@ -48,12 +52,108 @@ const (
 )
 
 const planningThreadColumns = `
-	id, campaign_id, title, created_at, updated_at`
+	id, campaign_id, title, created_at, updated_at, created_by`
 
 func scanPlanningThread(row pgx.Row) (PlanningThread, error) {
 	var t PlanningThread
-	err := row.Scan(&t.ID, &t.CampaignID, &t.Title, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.CampaignID, &t.Title, &t.CreatedAt, &t.UpdatedAt, &t.CreatedBy)
 	return t, err
+}
+
+// The four *By variants below are the creator-scoped twins of the thread
+// reads and writes (ADR-0065): a Campaign Guest with planning.use works in
+// threads of their own and must never see, rename or delete anyone else's —
+// the GM's, or another guest's. A thread whose created_by is NULL matches no
+// creator, so it stays the GM's. Like the campaign scope, a miss is ErrNotFound:
+// the caller cannot tell "not yours" from "does not exist".
+
+// CreatePlanningThreadBy is [Store.CreatePlanningThread] recording who started
+// the thread.
+func (s *Store) CreatePlanningThreadBy(ctx context.Context, campaignID uuid.UUID, title string, createdBy uuid.UUID) (PlanningThread, error) {
+	row := s.db.QueryRow(ctx,
+		`INSERT INTO planning_thread (campaign_id, title, created_by)
+		 VALUES ($1, $2, $3)
+		 RETURNING `+planningThreadColumns,
+		campaignID, title, createdBy)
+	t, err := scanPlanningThread(row)
+	if err != nil {
+		return PlanningThread{}, fmt.Errorf("storage: create planning thread: %w", err)
+	}
+	return t, nil
+}
+
+// GetPlanningThreadBy loads a thread only if createdBy started it.
+func (s *Store) GetPlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID) (PlanningThread, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+planningThreadColumns+`
+		   FROM planning_thread
+		  WHERE id = $1 AND campaign_id = $2 AND created_by = $3`, id, campaignID, createdBy)
+	t, err := scanPlanningThread(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PlanningThread{}, ErrNotFound
+	}
+	if err != nil {
+		return PlanningThread{}, fmt.Errorf("storage: get planning thread %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// ListPlanningThreadsBy lists the Campaign's threads createdBy started, most
+// recently active first.
+func (s *Store) ListPlanningThreadsBy(ctx context.Context, campaignID, createdBy uuid.UUID) ([]PlanningThread, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+planningThreadColumns+`
+		   FROM planning_thread
+		  WHERE campaign_id = $1 AND created_by = $2
+		  ORDER BY updated_at DESC, id`, campaignID, createdBy)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list planning threads for %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []PlanningThread
+	for rows.Next() {
+		t, err := scanPlanningThread(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan planning thread: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list planning threads for %s: %w", campaignID, err)
+	}
+	return out, nil
+}
+
+// RenamePlanningThreadBy renames a thread only if createdBy started it.
+func (s *Store) RenamePlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID, title string) (PlanningThread, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE planning_thread SET title = $3, updated_at = now()
+		  WHERE id = $1 AND campaign_id = $2 AND created_by = $4
+		 RETURNING `+planningThreadColumns,
+		id, campaignID, title, createdBy)
+	t, err := scanPlanningThread(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PlanningThread{}, ErrNotFound
+	}
+	if err != nil {
+		return PlanningThread{}, fmt.Errorf("storage: rename planning thread %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// DeletePlanningThreadBy deletes a thread only if createdBy started it.
+func (s *Store) DeletePlanningThreadBy(ctx context.Context, campaignID, id, createdBy uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM planning_thread WHERE id = $1 AND campaign_id = $2 AND created_by = $3`,
+		id, campaignID, createdBy)
+	if err != nil {
+		return fmt.Errorf("storage: delete planning thread %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CreatePlanningThread inserts a thread for the campaign and returns it. title

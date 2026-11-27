@@ -62,6 +62,16 @@ func (s *Store) ArchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (Ca
 			  WHERE active_campaign_id = $1`, id); err != nil {
 			return fmt.Errorf("storage: clear active selections for archived campaign %s: %w", id, err)
 		}
+		// Same for a browser session acting as a guest of this Campaign
+		// (ADR-0065). Resolution already skips an archived Campaign, but a
+		// selection left behind would start resolving again the moment the GM
+		// unarchives it — silently moving a session that has since been working
+		// in the user's own Tenant back into this Campaign. The guest rows are
+		// kept, so after an unarchive the Campaign is back in the switcher.
+		if _, err := tx.db.Exec(ctx,
+			`UPDATE sessions SET guest_campaign_id = NULL WHERE guest_campaign_id = $1`, id); err != nil {
+			return fmt.Errorf("storage: clear guest session selections for archived campaign %s: %w", id, err)
+		}
 		c = got
 		return nil
 	})
