@@ -46,10 +46,13 @@ func (f *fakeWhere) ListPins(context.Context, uuid.UUID, uuid.UUID) ([]storage.M
 	return f.pins, nil
 }
 
+// The two resolvers mirror storage's one-match rule (party_marker.go): the stored
+// name is compared as-is against the trimmed argument, case-insensitively, and
+// zero or many matches are refused rather than the first row winning.
 func (f *fakeWhere) ResolveMapByName(_ context.Context, _ uuid.UUID, name string) (storage.CampaignMap, error) {
 	var found []storage.CampaignMap
 	for _, m := range f.maps {
-		if strings.EqualFold(strings.TrimSpace(m.Name), strings.TrimSpace(name)) {
+		if strings.EqualFold(m.Name, strings.TrimSpace(name)) {
 			found = append(found, m)
 		}
 	}
@@ -64,12 +67,20 @@ func (f *fakeWhere) ResolveMapByName(_ context.Context, _ uuid.UUID, name string
 }
 
 func (f *fakeWhere) ResolvePinByLabel(_ context.Context, _, mapID uuid.UUID, label string) (storage.MapPin, error) {
+	var found []storage.MapPin
 	for _, p := range f.pins {
 		if p.MapID == mapID && strings.EqualFold(p.Label(), strings.TrimSpace(label)) {
-			return p, nil
+			found = append(found, p)
 		}
 	}
-	return storage.MapPin{}, storage.ErrNotFound
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return storage.MapPin{}, storage.ErrNotFound
+	default:
+		return storage.MapPin{}, storage.ErrConflict
+	}
 }
 
 func (f *fakeWhere) SetPartyMarker(_ context.Context, _, _ uuid.UUID, mapID, pinID uuid.NullUUID, _, _ *float64) error {
@@ -184,6 +195,65 @@ func TestWhere_UnknownPinIsRefusedWithoutMovingTheParty(t *testing.T) {
 	}
 	if len(f.setCalls) != 0 {
 		t.Fatalf("the party moved despite an unresolved pin: %+v", f.setCalls)
+	}
+	if !strings.Contains(lastReply(resp), "Nothing called") {
+		t.Errorf("unhelpful refusal: %q", lastReply(resp))
+	}
+}
+
+// TestWhere_AmbiguousMapIsRefused: two Maps sharing a name (case aside) must be
+// refused, not resolved to whichever row sorted first — the GM renames one rather
+// than the party being silently teleported to the wrong one.
+func TestWhere_AmbiguousMapIsRefused(t *testing.T) {
+	f := whereWorld()
+	f.maps = append(f.maps, storage.CampaignMap{ID: uuid.New(), Name: "SALTMARSH"})
+	resp := &fakeResponder{}
+	if err := WhereCommand(f, f).Handle(context.Background(), whereIC(f, resp, " Saltmarsh ", "")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.setCalls) != 0 {
+		t.Fatalf("the party moved despite an ambiguous map: %+v", f.setCalls)
+	}
+	if !strings.Contains(lastReply(resp), "More than one map") {
+		t.Errorf("unhelpful refusal: %q", lastReply(resp))
+	}
+}
+
+// TestWhere_AmbiguousPinIsRefusedWithoutMovingTheParty: two Pins on the Map showing
+// the same label (here one by its Node's name, one by its override) refuse the
+// WHOLE placement — neither the first Pin nor the bare Map is a fair guess.
+func TestWhere_AmbiguousPinIsRefusedWithoutMovingTheParty(t *testing.T) {
+	f := whereWorld()
+	f.pins = append(f.pins, storage.MapPin{
+		ID: uuid.New(), MapID: f.maps[0].ID, NodeName: "Harbour Inn", LabelOverride: "the rusty anchor",
+	})
+	resp := &fakeResponder{}
+	if err := WhereCommand(f, f).Handle(context.Background(), whereIC(f, resp, "Saltmarsh", "The Rusty Anchor")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.setCalls) != 0 {
+		t.Fatalf("the party moved despite an ambiguous pin: %+v", f.setCalls)
+	}
+	if !strings.Contains(lastReply(resp), "More than one pin") {
+		t.Errorf("unhelpful refusal: %q", lastReply(resp))
+	}
+}
+
+// TestWhere_SameLabelOnAnotherMapIsNotAmbiguous: the one-match rule is per Map, so
+// a like-named Pin elsewhere in the Campaign neither blocks the placement nor
+// steals it.
+func TestWhere_SameLabelOnAnotherMapIsNotAmbiguous(t *testing.T) {
+	f := whereWorld()
+	f.pins = append(f.pins, storage.MapPin{ID: uuid.New(), MapID: f.maps[1].ID, NodeName: "The Rusty Anchor"})
+	resp := &fakeResponder{}
+	if err := WhereCommand(f, f).Handle(context.Background(), whereIC(f, resp, "Saltmarsh", "The Rusty Anchor")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.setCalls) != 1 {
+		t.Fatalf("marker not written: %+v (reply %q)", f.setCalls, lastReply(resp))
+	}
+	if got := f.setCalls[0]; got.mapID.UUID != f.maps[0].ID || got.pinID.UUID != f.pins[0].ID {
+		t.Errorf("wrong placement: %+v", got)
 	}
 }
 
