@@ -154,6 +154,15 @@ export const en = {
   // Standing Discord integration badge (#489).
   "config.discordIntegrationFailed": "Discord connection failed",
   "config.discordIntegrationReconnecting": "Reconnecting to Discord",
+  // Why it failed — one sentence per code, saying what to do on this screen (#695).
+  "config.integrationReasonInvalidBotToken":
+    "Discord rejected the bot token. Paste a current token under “Use your own Discord bot” below.",
+  "config.integrationReasonDisallowedIntents":
+    "Discord refused the bot's permissions (gateway intents). Check the bot's intents in the Discord Developer Portal.",
+  "config.integrationReasonBotNotAuthorized":
+    "Discord did not authorize the bot. Check the bot in the Discord Developer Portal, then paste its token again below.",
+  "config.integrationReasonGatewayRejected":
+    "Discord refused the connection. If it stays this way, check the bot token under “Use your own Discord bot” below.",
   "config.botConnected": "Bot connected",
 
   // Discord connection card, as two numbered steps (#695).
@@ -386,6 +395,14 @@ export const de: Record<keyof typeof en, string> = {
 
   "config.discordIntegrationFailed": "Discord-Verbindung fehlgeschlagen",
   "config.discordIntegrationReconnecting": "Verbindet neu mit Discord",
+  "config.integrationReasonInvalidBotToken":
+    "Discord hat den Bot-Token abgelehnt. Füge unten unter „Eigenen Discord-Bot verwenden“ einen aktuellen Token ein.",
+  "config.integrationReasonDisallowedIntents":
+    "Discord hat die Berechtigungen des Bots (Gateway Intents) abgelehnt. Prüfe die Intents des Bots im Discord Developer Portal.",
+  "config.integrationReasonBotNotAuthorized":
+    "Discord hat den Bot nicht autorisiert. Prüfe den Bot im Discord Developer Portal und füge seinen Token unten erneut ein.",
+  "config.integrationReasonGatewayRejected":
+    "Discord hat die Verbindung abgelehnt. Bleibt es dabei, prüfe den Bot-Token unten unter „Eigenen Discord-Bot verwenden“.",
   "config.botConnected": "Bot verbunden",
 
   "config.discordTitle": "Discord",
