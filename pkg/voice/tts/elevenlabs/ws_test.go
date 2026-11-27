@@ -986,14 +986,16 @@ func TestWS_WarmPreDialsKnownVoices(t *testing.T) {
 
 // TestWS_WarmKeepsAnIdleSocketPastItsTTL: a speech start means a reply is
 // coming, so Warm restarts the idle clock of the sockets it would otherwise have
-// to dial again a moment later.
+// to dial again a moment later. The TTL is long against the gap between two
+// warms, so that a stalled test goroutine does not let the socket run out.
 func TestWS_WarmKeepsAnIdleSocketPastItsTTL(t *testing.T) {
+	const idleTTL = 500 * time.Millisecond
 	srv := newTTDServer(t, echoScript)
-	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 120*time.Millisecond, 0, 0, 0))
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, idleTTL, 0, 0, 0))
 	ctx := context.Background()
 	mustDrain(t, say(t, c, ctx, wsVoice("voice-1"), "Ein Satz."))
-	for i := 0; i < 6; i++ { // 240 ms of warms, twice the TTL
-		time.Sleep(40 * time.Millisecond)
+	for until := time.Now().Add(2 * idleTTL); time.Now().Before(until); {
+		time.Sleep(20 * time.Millisecond)
 		if err := c.Warm(ctx); err != nil {
 			t.Fatalf("Warm: %v", err)
 		}
@@ -1038,10 +1040,12 @@ func TestWS_WarmStopsHoldingAVoiceThatWentQuiet(t *testing.T) {
 
 // TestWS_WarmHoldsOneSocketPerVoice: the look-ahead pair leaves a voice with two
 // idle sockets, but the reply to a speech start begins with ONE sentence, so
-// Warm keeps one of them past its TTL and lets the other go.
+// Warm keeps one of them past its TTL and lets the other go. As above, the TTL
+// is long against the gap between two warms.
 func TestWS_WarmHoldsOneSocketPerVoice(t *testing.T) {
+	const idleTTL = 500 * time.Millisecond
 	srv := newTTDServer(t, echoScript)
-	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, 60*time.Millisecond, 0, 0, 0))
+	c := wsClient(t, srv, elevenlabs.WithWSTuning(10*time.Millisecond, idleTTL, 0, 0, 0))
 	ctx := context.Background()
 	voice := wsVoice("voice-1")
 	a := say(t, c, ctx, voice, "Eins.")
@@ -1055,11 +1059,11 @@ func TestWS_WarmHoldsOneSocketPerVoice(t *testing.T) {
 		if err := c.Warm(ctx); err != nil {
 			t.Errorf("Warm: %v", err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 		return c.WSStats().Open == 1
 	}
 	eventually(t, "the pair to shrink to one socket under steady warms", warm)
-	for i := 0; i < 12; i++ { // twice the TTL
+	for until := time.Now().Add(2 * idleTTL); time.Now().Before(until); {
 		warm()
 	}
 	if st := c.WSStats(); st.Open != 1 || st.Dials != 2 {
