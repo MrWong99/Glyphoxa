@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -773,4 +774,89 @@ func TestResolveProvider(t *testing.T) {
 			t.Fatal("ResolveProvider(openai) = nil error, want an unsupported-provider error")
 		}
 	})
+}
+
+// headerTimeout is the net.Error the HTTP client returns when a response does
+// not start in time.
+type headerTimeout struct{}
+
+func (headerTimeout) Error() string   { return "net/http: timeout awaiting response headers" }
+func (headerTimeout) Timeout() bool   { return true }
+func (headerTimeout) Temporary() bool { return true }
+
+// slowProvider fails any batch larger than max, the way a CPU-only Ollama does
+// when a batch of long texts cannot finish inside the HTTP header timeout.
+type slowProvider struct {
+	max   int
+	calls []int
+	inner embeddings.Provider
+}
+
+func (p *slowProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	p.calls = append(p.calls, len(texts))
+	if len(texts) > p.max {
+		return nil, headerTimeout{}
+	}
+	return p.inner.Embed(ctx, texts)
+}
+
+// A batch the provider cannot finish in time must not be retried at the same
+// size forever (prod 2026-11-27: a 37-entry bundle import kept Ollama at full
+// CPU for hours, every 16-text batch timing out and nothing ever embedded).
+// The worker shrinks the batch until it fits, so the backlog still drains.
+func TestPassShrinksBatchUntilTheProviderKeepsUp(t *testing.T) {
+	var pending []storage.KGNode
+	for i := 0; i < 20; i++ {
+		pending = append(pending, node(fmt.Sprintf("entry %d", i), "body"))
+	}
+	store := &fakeStore{pendingNodes: pending}
+	prov := &slowProvider{max: 3, inner: embeddingstest.Deterministic{}}
+	w := New(store, prov, "m", nil, discardLog(), Config{})
+
+	for i := 0; i < 20 && store.pendingNodeCount() > 0; i++ {
+		w.pass(context.Background())
+	}
+
+	if got := store.pendingNodeCount(); got != 0 {
+		t.Fatalf("pending nodes after 20 passes = %d, want 0; batch sizes tried: %v", got, prov.calls)
+	}
+}
+
+// After shrinking, the batch grows back once calls succeed, but stays below the
+// size that just failed, so the worker does not bounce into it every other pass.
+func TestPassGrowsBatchBackBelowTheFailedSize(t *testing.T) {
+	var pending []storage.KGNode
+	for i := 0; i < 64; i++ {
+		pending = append(pending, node(fmt.Sprintf("entry %d", i), "body"))
+	}
+	store := &fakeStore{pendingNodes: pending}
+	prov := &slowProvider{max: 15, inner: embeddingstest.Deterministic{}}
+	w := New(store, prov, "m", nil, discardLog(), Config{BatchSize: 16})
+
+	w.pass(context.Background()) // 16 times out: next is 8
+	if !w.pass(context.Background()) {
+		t.Fatal("a cleanly written full (shrunk) batch must report more work waiting")
+	}
+	w.pass(context.Background())
+	w.pass(context.Background())
+	if got, want := fmt.Sprint(prov.calls), "[16 8 15 15]"; got != want {
+		t.Fatalf("batch sizes = %s, want %s", got, want)
+	}
+}
+
+// A failure that is not a timeout (provider down) says nothing about the batch
+// size, so the next pass retries at full size.
+func TestPassKeepsBatchSizeOnNonTimeoutError(t *testing.T) {
+	var pending []storage.KGNode
+	for i := 0; i < 16; i++ {
+		pending = append(pending, node(fmt.Sprintf("entry %d", i), "body"))
+	}
+	store := &fakeStore{pendingNodes: pending}
+	w := New(store, &flakyProvider{inner: embeddingstest.Deterministic{}}, "m", nil, discardLog(), Config{BatchSize: 16})
+
+	w.pass(context.Background())
+	w.pass(context.Background())
+	if got := store.pendingNodeCount(); got != 0 {
+		t.Fatalf("pending after an outage and one retry = %d, want 0", got)
+	}
 }
