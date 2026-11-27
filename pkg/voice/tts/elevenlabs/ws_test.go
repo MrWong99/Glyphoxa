@@ -619,7 +619,18 @@ func TestWS_RefusedHandshakeIsATypedHTTPError(t *testing.T) {
 func TestWS_DialogueSessionCapFallsBackToHTTP(t *testing.T) {
 	srv := newTTDServer(t, echoScript)
 	srv.refuse.Store(http.StatusTooManyRequests)
-	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(80*time.Millisecond))
+	// The hold is measured on a clock the test owns: it runs out when the test
+	// says so, not when a loaded machine takes too long between two sentences.
+	var (
+		clockMu sync.Mutex
+		clock   = time.Now()
+	)
+	now := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	c := wsClient(t, srv, elevenlabs.WithWSCapBackoff(time.Minute), elevenlabs.WithWSClock(now))
 	ctx := context.Background()
 	voice := wsVoice("voice-1")
 
@@ -632,12 +643,16 @@ func TestWS_DialogueSessionCapFallsBackToHTTP(t *testing.T) {
 	if err := c.Warm(ctx); err != nil {
 		t.Fatalf("Warm: %v", err)
 	}
+	elevenlabs.WaitWSBackground(c)
 	if st := c.WSStats(); st.Fallbacks != 2 || st.Open != 0 || srv.refused.Load() != 1 {
 		t.Errorf("stats = %+v, refused handshakes = %d; want 2 fallbacks and ONE handshake (dials held back)", st, srv.refused.Load())
 	}
 
 	// The cap clears and the hold runs out: sentences ride a socket again.
 	srv.refuse.Store(0)
+	clockMu.Lock()
+	clock = clock.Add(time.Minute + time.Second)
+	clockMu.Unlock()
 	eventually(t, "a sentence on a socket once the hold ran out", func() bool {
 		pcm, _, terminal := collect(t, say(t, c, ctx, voice, "Wieder da."))
 		if terminal != nil {

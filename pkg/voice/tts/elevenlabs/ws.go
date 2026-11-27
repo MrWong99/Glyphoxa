@@ -99,6 +99,9 @@ type wsTuning struct {
 	warmFor    time.Duration
 	perKey     int
 	total      int
+	// now is the clock the cap hold is measured on; tests swap it so the hold
+	// does not run out under them.
+	now func() time.Time
 }
 
 func defaultWSTuning() wsTuning {
@@ -110,6 +113,7 @@ func defaultWSTuning() wsTuning {
 		warmFor:    wsWarmFor,
 		perKey:     wsSocketsPerKey,
 		total:      wsSocketsTotal,
+		now:        time.Now,
 	}
 }
 
@@ -256,7 +260,7 @@ func (p *wsPool) acquire(ctx context.Context, key wsKey, fresh bool) (c *wsConn,
 		p.reuses.Add(1)
 		return c, true, nil
 	}
-	if time.Now().Before(p.held) {
+	if p.tune.now().Before(p.held) {
 		p.mu.Unlock()
 		return nil, false, nil
 	}
@@ -412,7 +416,7 @@ func (p *wsPool) prewarm(key wsKey) {
 		l[len(l)-1].idleSince = time.Now()
 		return
 	}
-	if p.dialing[key] > 0 || time.Now().Before(p.held) {
+	if p.dialing[key] > 0 || p.tune.now().Before(p.held) {
 		return
 	}
 	if _, ok := p.reserveLocked(key, false); !ok {
@@ -449,7 +453,7 @@ func wsSessionCap(err error) bool {
 // already holds keep serving sentences.
 func (p *wsPool) holdDials() {
 	p.mu.Lock()
-	p.held = time.Now().Add(p.tune.capBackoff)
+	p.held = p.tune.now().Add(p.tune.capBackoff)
 	p.mu.Unlock()
 }
 
