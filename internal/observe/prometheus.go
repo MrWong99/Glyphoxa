@@ -141,10 +141,11 @@ type PrometheusRecorder struct {
 
 	// #604: duration of the two BUDGETED turn-path recalls, alongside their existing
 	// outcome counters. memoryRecall_total says WHICH way a recall went;
-	// memoryRecallSeconds says how close it ran to the hard 250ms budget (ADR-0042)
-	// and kgFactsSeconds to the 50ms one — so a slow drift toward the budget edge is
-	// visible before it turns into a skip rate. outcome stays the only label
-	// (ADR-0032); the histograms mirror their counters' names and namespaces.
+	// memoryRecallSeconds says how close it ran to the recall budget (500ms by
+	// default, ADR-0042) and kgFactsSeconds to the 50ms one — so a slow drift
+	// toward the budget edge is visible before it turns into a skip rate. outcome
+	// stays the only label (ADR-0032); the histograms mirror their counters'
+	// names and namespaces.
 	memoryRecallSeconds *prometheus.HistogramVec // outcome
 	kgFactsSeconds      *prometheus.HistogramVec // outcome
 
@@ -204,12 +205,19 @@ var jobDurationBuckets = []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120}
 // Bucket sets for new histograms append HERE, each in its own comment-tagged
 // block.
 
-// recallBuckets bracket the hard 250ms memory-recall budget (#604, ADR-0042): fine
-// bins below it, since a speculation hit is expected in single-digit ms and the
-// interesting question is how much headroom an inline miss still has, plus one bin
-// past the budget so the near-misses that a timeout would otherwise hide are
-// countable.
-var recallBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.25, 0.5}
+// recallBuckets bracket the memory-recall budget (#604, ADR-0042): 500ms by
+// default and configurable via GLYPHOXA_RECALL_BUDGET (ADR-0042 amendment, #666;
+// 800ms is the recommendation on a CPU-only embeddings node). Fine bins below it,
+// since a speculation hit is expected in single-digit ms and the interesting
+// question is how much headroom an inline miss still has — 0.35 sits where a
+// CPU-only embed lands. The bins past the default (0.75, 1) keep a skip that
+// burned the whole budget, at the default or at 800ms, in a finite bin: in +Inf
+// it would be uncountable and histogram_quantile would clamp to the budget itself.
+// That holds for a budget below 1s, the top bin; a larger GLYPHOXA_RECALL_BUDGET
+// puts full-budget skips back in +Inf and needs a longer tail here.
+// Memory search is an exact per-campaign scan whose cost grows with the campaign
+// (#691), so this series is the early warning before recall drifts into skips.
+var recallBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.25, 0.35, 0.5, 0.75, 1}
 
 // kgFactsBuckets bracket the 50ms KG-fact-read budget (#604): one indexed OLTP read
 // is sub-millisecond, so the bins start at 1ms and run to 250ms — five times the
@@ -220,8 +228,8 @@ var kgFactsBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2
 // dbQueryBuckets size the Postgres query-latency histogram (#605): OLTP reads
 // are sub-second work, so the bins run 1ms..1s — dense at the bottom, where a
 // healthy indexed read lives, with boundaries at 0.25s and 0.5s so the ANN
-// search's p95 reads directly against the 250ms recall budget (ADR-0042). A
-// query slower than 1s lands in +Inf, which is itself the alert.
+// search's p95 reads directly against the recall budget (500ms by default,
+// ADR-0042). A query slower than 1s lands in +Inf, which is itself the alert.
 var dbQueryBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1}
 
 // #606 gapBuckets size the inter-sentence playback gap: it is not an SLO span but
@@ -467,7 +475,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	r.memoryRecallSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: subsystem,
 		Name:    "memory_recall_seconds",
-		Help:    "NPC memory recall duration by outcome (#604, ADR-0042), against the hard 250ms inline budget. Budget headroom: histogram_quantile(0.95, rate(glyphoxa_voice_memory_recall_seconds_bucket[5m])) / 0.25.",
+		Help:    "NPC memory recall duration by outcome (#604, ADR-0042), against the inline recall budget (500ms by default, GLYPHOXA_RECALL_BUDGET). Share of the default budget the p95 recall uses, all outcomes together: histogram_quantile(0.95, sum by (le) (rate(glyphoxa_voice_memory_recall_seconds_bucket[5m]))) / 0.5.",
 		Buckets: recallBuckets,
 	}, []string{"outcome"})
 	r.kgFactsSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -650,7 +658,7 @@ func (r *PrometheusRecorder) MalformedToolGen(p Provider, path MalformedPath) {
 // separate from the StageRecorder contract: recall is not an orchestrator stage.
 //
 // Counter and histogram move together, on purpose: the counter alone cannot say
-// whether a hit is running at 5ms or at 240ms of its 250ms budget.
+// whether a hit is running at 5ms or at 490ms of a 500ms (default) budget.
 func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome, d time.Duration) {
 	r.memoryRecall.WithLabelValues(string(o)).Inc()
 	r.memoryRecallSeconds.WithLabelValues(string(o)).Observe(d.Seconds())
@@ -787,8 +795,8 @@ func (r *PrometheusRecorder) SetTranscriptSSESubscribers(n int) {
 // (#605). query MUST come from storage's const family registry — the pgx
 // QueryTracer is the sole caller and emits only registered names or "other", so
 // this method does no clamping and the label space stays bounded (ADR-0032).
-// Called on the query hot path (the ANN search inside the 250ms recall budget,
-// ADR-0042), so it is one Observe and nothing else.
+// Called on the query hot path (the ANN search inside the recall budget, 500ms
+// by default, ADR-0042), so it is one Observe and nothing else.
 func (r *PrometheusRecorder) DBQuery(query string, d time.Duration) {
 	r.dbQuery.WithLabelValues(query).Observe(d.Seconds())
 }

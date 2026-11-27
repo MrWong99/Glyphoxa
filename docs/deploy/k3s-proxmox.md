@@ -232,12 +232,13 @@ ollamaUrl: "http://<ollama-host>:11434"
 #       requests:             # pod can be throttled to near-zero under node
 #         cpu: "2"            # contention, and speculative memory recall
 #         memory: 2Gi         # (ADR-0042) falls back to an inline embedding
-#       limits:               # call under a hard ~250ms budget — a CPU-starved
-#         memory: 4Gi         # Ollama pod cannot meet that, and recall
+#       limits:               # call under a hard budget (500ms by default,
+#         memory: 4Gi         # GLYPHOXA_RECALL_BUDGET) — a CPU-starved
+#                             # Ollama pod cannot meet that, and recall
 #                             # degrades to no-memory on timeout.
 #                             #
 #                             # "2" is a starting point, not a measured
-#                             # guarantee under 250ms — no benchmark backs a
+#                             # guarantee under 500ms — no benchmark backs a
 #                             # specific core count for nomic-embed-text.
 #                             # Needs the 4-vCPU recommended sizing above
 #                             # (500m already goes to the web pod); on a

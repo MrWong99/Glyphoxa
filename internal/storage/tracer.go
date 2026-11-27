@@ -52,7 +52,7 @@ type queryStartKey struct{}
 // QueryTracer implements pgx.QueryTracer, timing every query the pool runs and
 // recording it under its bounded family label (#605). It is deliberately
 // alloc-light on the hot path — the ANN search it measures runs inside the
-// 250ms recall budget (ADR-0042), so End does a context read and one Observe:
+// recall budget (500ms by default, ADR-0042), so End does a context read and one Observe:
 // no logging, no map allocation, no SQL inspection.
 //
 // SendBatch (pgx.BatchTracer) is out of scope: this tracer only implements
