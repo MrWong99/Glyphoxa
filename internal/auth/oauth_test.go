@@ -1,7 +1,10 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -355,5 +358,120 @@ func TestOAuthCallback_SessionAuditIP(t *testing.T) {
 				t.Errorf("session IP = %q, want %q", store.created.IP, tc.want)
 			}
 		})
+	}
+}
+
+// countingBody counts the request-body bytes a handler pulls, so a test can
+// assert an unauthenticated body was refused unread.
+type countingBody struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// The OAuth carve-out is reachable without a session or CSRF token, so it must
+// never parse a request body: a multipart POST to the callback is refused with
+// 405 before a single body byte is read (no in-memory form, no temp-file
+// spill).
+func TestOAuthCallback_PostMultipart_RefusedUnread(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{}
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("state", "st-1")
+	_ = mw.WriteField("code", "the-code")
+	part, err := mw.CreateFormFile("blob", "blob.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := &countingBody{r: &buf}
+	req := httptest.NewRequest(http.MethodPost, "/auth/discord/callback", body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+	}
+	if got := rec.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection = %q, want close (do not drain the refused body)", got)
+	}
+	if body.n != 0 {
+		t.Errorf("read %d body bytes, want 0", body.n)
+	}
+	if req.MultipartForm != nil || req.PostForm != nil {
+		t.Error("request body was parsed as a form")
+	}
+	if disc.gotCode != "" {
+		t.Errorf("exchanged code %q from a POST body", disc.gotCode)
+	}
+}
+
+// `state` and `code` are honoured from the query string only: a urlencoded
+// POST body carrying a state that matches the cookie must not reach the
+// Discord exchange or create a session.
+func TestOAuthCallback_PostBodyParams_NotHonoured(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77"}}
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, auth.EdgeConfig{}, nil)
+
+	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+	req := httptest.NewRequest(http.MethodPost, "/auth/discord/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if disc.gotCode != "" {
+		t.Errorf("exchanged code %q from a POST body", disc.gotCode)
+	}
+	if store.upsertCalls != 0 || store.createCalls != 0 {
+		t.Errorf("store written on a refused POST: upsert=%d create=%d", store.upsertCalls, store.createCalls)
+	}
+	if got := rec.Result().Cookies(); len(got) != 0 {
+		t.Errorf("cookies set on a refused POST: %v", got)
+	}
+}
+
+// Login is GET-only too: a POST neither mints a state cookie nor redirects to
+// Discord.
+func TestOAuthLogin_Post_Refused(t *testing.T) {
+	t.Parallel()
+	o := auth.NewOAuth(&fakeOAuthStore{}, &fakeDiscord{authBase: "https://discord/authorize"}, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, auth.EdgeConfig{}, nil)
+
+	rec := httptest.NewRecorder()
+	o.Login(rec, httptest.NewRequest(http.MethodPost, "/auth/discord/login", strings.NewReader("x=1")))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+	}
+	if got := rec.Result().Cookies(); len(got) != 0 {
+		t.Errorf("cookies set on a refused POST: %v", got)
 	}
 }
