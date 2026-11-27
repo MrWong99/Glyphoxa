@@ -501,12 +501,12 @@ func TestChunker_ZeroDeliveredTurnLogsNothing(t *testing.T) {
 	}
 }
 
-// TestChunker_SupersededDispatchPurged is #104 + ADR-0012: dispatch is serial
-// single-in-flight and FirstAudio(sN) precedes TTSInvoked(sN+1), so a sentence
-// still pending when the NEXT dispatch arrives start-errored (never delivered). It
-// is purged, not committed — the delivered sentence's text lands, not the unheard
-// one, and the FirstAudio pairing does not shift.
-func TestChunker_SupersededDispatchPurged(t *testing.T) {
+// TestChunker_StartErrorAnnouncedIsDropped is #104 + ADR-0012: a sentence whose
+// synthesis never started is announced as failed (TTSStreamFailed, right after its
+// TTSInvoked and before the next one's), so it leaves pending and never commits —
+// the delivered sentence's text lands, not the unheard one, and the FirstAudio
+// pairing does not shift.
+func TestChunker_StartErrorAnnouncedIsDropped(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
 	agentID := uuid.New()
@@ -516,6 +516,7 @@ func TestChunker_SupersededDispatchPurged(t *testing.T) {
 		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
 	})
 	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "start-errored", TurnID: "t1"}) // no FirstAudio
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(2), TurnID: "t1"})
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "delivered", TurnID: "t1"})
 	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
 
@@ -524,20 +525,18 @@ func TestChunker_SupersededDispatchPurged(t *testing.T) {
 	}
 	got := store.all()
 	if len(got) != 1 || got[0].Content != "Bart: delivered" {
-		t.Fatalf("content = %+v, want the delivered sentence only (superseded dead dispatch purged)", got)
+		t.Fatalf("content = %+v, want the delivered sentence only (start-errored dispatch dropped)", got)
 	}
 	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
 		t.Errorf("participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
 	}
 }
 
-// TestChunker_RecoveredMidTurnErrorKeepsPairing is #104 + ADR-0012 — the reachable
-// FIFO/purge pin (a depth-2 pending where BOTH commit cannot occur: serial
-// single-in-flight dispatch means FirstAudio(sN) precedes TTSInvoked(sN+1), so
-// pending never holds two undelivered sentences at once). A middle sentence that
-// start-errors while the turn recovers (s1 delivered, s2 lost, s3 delivered) must
-// commit only s1 and s3, in order, coalesced into the one utterance — never the
-// unheard s2, and without shifting s3 onto s2's slot.
+// TestChunker_RecoveredMidTurnErrorKeepsPairing is #104 + ADR-0012: a middle
+// sentence that start-errors while the turn recovers (s1 delivered, s2 lost and
+// announced as failed, s3 delivered) must commit only s1 and s3, in order,
+// coalesced into the one utterance — never the unheard s2, and without shifting
+// s3 onto s2's slot.
 func TestChunker_RecoveredMidTurnErrorKeepsPairing(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
@@ -549,7 +548,8 @@ func TestChunker_RecoveredMidTurnErrorKeepsPairing(t *testing.T) {
 	})
 	agentReply(bus, "t1", "Well met.", at(2))                                     // delivered
 	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "lost", TurnID: "t1"}) // start-error, no FirstAudio
-	agentReply(bus, "t1", "Sit.", at(4))                                          // recovers, delivered
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(3), TurnID: "t1"})
+	agentReply(bus, "t1", "Sit.", at(4)) // recovers, delivered
 
 	if err := c.FlushSession(context.Background(), fs.id); err != nil {
 		t.Fatalf("FlushSession: %v", err)
@@ -560,6 +560,81 @@ func TestChunker_RecoveredMidTurnErrorKeepsPairing(t *testing.T) {
 	}
 	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
 		t.Errorf("participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+}
+
+// TestChunker_LateFirstAudioAfterNextDispatchKeepsPairing (#690): on pipelined
+// sentences the wire publishes FirstAudio from the sender goroutine, so s1's can
+// land AFTER s2's TTSInvoked. pending is a FIFO, not a single slot: both
+// sentences commit, each on its own FirstAudio, in dispatch order.
+func TestChunker_LateFirstAudioAfterNextDispatchKeepsPairing(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "One.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"}) // s1's, late
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(6), TurnID: "t1", Reason: voiceevent.TurnEndCompleted})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if got := store.all(); len(got) != 1 || got[0].Content != "Bart: One. Two." {
+		t.Fatalf("content = %+v, want \"Bart: One. Two.\" (late FirstAudio pairs with its own sentence)", got)
+	}
+}
+
+// TestChunker_LateFirstAudio_OnlyFirstDelivered (#690): with two sentences
+// dispatched and ONE FirstAudio before a barge, the delivered sentence is the
+// OLDER one — the chunk records s1, never s2's text for s1's delivery.
+func TestChunker_LateFirstAudio_OnlyFirstDelivered(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "One.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(4), TurnID: "t1"}) // s1's, late
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if got := store.all(); len(got) != 1 || got[0].Content != "Bart: One." {
+		t.Fatalf("content = %+v, want \"Bart: One.\" (the undelivered s2 dropped on the barge)", got)
+	}
+}
+
+// TestChunker_StreamFailedDropsNewestPending (#690): TTSStreamFailed always
+// refers to the most recently announced sentence (event.go), so with s1 still
+// awaiting a late FirstAudio it removes the TAIL of pending (s2), not the head —
+// s1's FirstAudio then commits s1.
+func TestChunker_StreamFailedDropsNewestPending(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "One.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Two.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"}) // s2 never started
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"})      // s1's, late
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if got := store.all(); len(got) != 1 || got[0].Content != "Bart: One." {
+		t.Fatalf("content = %+v, want \"Bart: One.\" (the failed s2 dropped, s1 kept)", got)
 	}
 }
 
@@ -959,8 +1034,8 @@ func TestChunker_MidStreamFailureOnOpeningSentenceDropsLine(t *testing.T) {
 
 // TestChunker_MidStreamFailureBeforeFirstAudioPurgesPending pins the #436
 // no-audio case: a stream that dies BEFORE its first real chunk fired no
-// FirstAudio, so the sentence still heads pending — the failure purges it so a
-// straggler FirstAudio can never commit it later.
+// FirstAudio, so the sentence is still the tail of pending — the failure purges it
+// so a straggler FirstAudio can never commit it later.
 func TestChunker_MidStreamFailureBeforeFirstAudioPurgesPending(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})

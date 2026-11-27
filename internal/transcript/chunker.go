@@ -88,8 +88,9 @@ type ChunkerConfig struct {
 // delivered, held FIFO and paired with FirstAudio by arrival order within the
 // TurnID (event.go); line, the open-chunk utterance once the turn's first
 // delivered sentence has opened it, which later delivered sentences append to; and
-// ended (TurnEnded seen), after which a late TTSInvoked is dropped and the
-// undelivered pending tail never commits (ADR-0012).
+// ended (TurnEnded seen), after which a late TTSInvoked is dropped; a CUT also
+// clears pending so its undelivered tail never commits (ADR-0012), while a
+// non-cut end keeps it for a late FirstAudio.
 type chunkTurn struct {
 	target  voiceevent.AddressTarget
 	line    *chunkLine
@@ -316,22 +317,22 @@ func (c *Chunker) recordSpeaker(oc *openChunk, speakerID string) {
 // reached the room. A sentence for a turn already ended (barge / tts_error) is
 // dropped + logged.
 //
-// Dispatch is serial single-in-flight and FirstAudio(sN) is published inline
-// before Dispatch(sN) returns (orchestrator.dispatchStream + wire/tee), so
-// FirstAudio(sN) always precedes TTSInvoked(sN+1) on the bus. A sentence still
-// pending when the NEXT dispatch arrives therefore start-errored and was never
-// delivered — purge it (never commit unheard text, ADR-0012), else a mid-turn
-// start-error the turn recovers from would commit the lost sentence AND shift the
-// FirstAudio pairing of every later sentence by one.
+// pending is a true FIFO, the same ordering contract the relay's awaiting queue
+// rests on (relay.go, [turn]): a FirstAudio can arrive LATE — after the next
+// sentence's TTSInvoked, or after the turn's TurnEnded{completed} — because on
+// pipelined sentences 2..N it is published from the wire's sender goroutine
+// (wire/firstaudio.go), not inline. So a sentence still pending when the next
+// dispatch arrives is NOT presumed lost (#690): it stays queued and its own
+// FirstAudio pops it head-first. A sentence that did fail leaves via
+// TTSStreamFailed, which is always published after that sentence's TTSInvoked and
+// before the next one's (abortSentence). Residual, shared with the relay: a
+// sentence synthesized to ZERO chunks (no audio, no error) is never signalled and
+// would be paired with the next sentence's FirstAudio.
 func (c *Chunker) bufferAgentSentence(sid string, ev voiceevent.TTSInvoked) {
 	t := c.proj.Turn(sid, ev.TurnID)
 	if t.ended {
 		c.log.Warn("transcript: chunk sentence after turn ended, dropping", "turn", ev.TurnID)
 		return
-	}
-	if n := len(t.pending); n > 0 {
-		c.log.Warn("transcript: undelivered dispatched sentence superseded, dropping", "turn", ev.TurnID, "dropped", n)
-		t.pending = t.pending[:0]
 	}
 	t.pending = append(t.pending, ev.Sentence)
 }
@@ -374,29 +375,31 @@ func (c *Chunker) commitDelivered(sid string, ev voiceevent.FirstAudio) {
 	t.line.text += s
 }
 
-// abortSentence handles a [voiceevent.TTSStreamFailed] (#436): the turn's
-// in-flight sentence died mid-delivery, so the room heard at most a fragment and
-// the chunk must NOT record its text — parity with Agent history, which omits it
-// (ADR-0012's never-record-unheard bias). Two cases, disambiguated by the FIFO
-// pairing state:
+// abortSentence handles a [voiceevent.TTSStreamFailed] (#436): the turn's most
+// recently announced sentence never started or died mid-delivery, so the room
+// heard at most a fragment and the chunk must NOT record its text — parity with
+// Agent history, which omits it (ADR-0012's never-record-unheard bias). Two
+// cases, disambiguated by the FIFO pairing state:
 //
-//   - The stream died BEFORE its first real chunk: no FirstAudio fired, so the
-//     sentence still heads pending — drop it (it must never commit off a
-//     straggler FirstAudio).
+//   - The synthesis never started, or the stream died BEFORE its first real
+//     chunk: no FirstAudio fired, so the sentence is still the tail of pending —
+//     drop it (it must never commit off a straggler FirstAudio). The TAIL, not
+//     the head: an earlier sentence may still be queued ahead of it awaiting a
+//     late FirstAudio (bufferAgentSentence).
 //   - FirstAudio fired and committed the sentence: retract exactly that trailing
 //     sentence from the turn's line. A sentence that OPENED the line leaves it
 //     with no delivered text at all, so the whole line is removed from the open
 //     chunk (a later delivered sentence re-opens one). A line already detached
 //     by a chunk close was persisted before the failure surfaced — logged and
-//     accepted (the close raced the failure; rare by construction since the
-//     dispatch is serial single-in-flight).
+//     accepted (the close raced the failure; rare, since a close condition
+//     has to fire between the sentence's FirstAudio and its failure).
 func (c *Chunker) abortSentence(sid string, ev voiceevent.TTSStreamFailed) {
 	t := c.proj.Turn(sid, ev.TurnID)
 	if t.ended {
 		return
 	}
-	if len(t.pending) > 0 {
-		t.pending = t.pending[1:]
+	if n := len(t.pending); n > 0 {
+		t.pending = t.pending[:n-1]
 		return
 	}
 	s := t.lastCommitted
