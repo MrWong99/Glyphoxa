@@ -187,17 +187,7 @@ func streamPCM(ctx context.Context, r io.ReadCloser, ch chan<- tts.AudioChunk, s
 	}
 }
 
-// readErrorResponse reads up to 512 bytes of a non-2xx response body for
-// diagnostic context and returns it as a typed [*providererr.HTTPError] so the
-// retry helper can classify the call by status code via errors.As (#124). Its
-// Error() text is byte-identical to the former fmt.Errorf literal, so grep-based
-// harnesses and logs are unchanged.
+// readErrorResponse is [providererr.FromResponse] with the adapter's "elevenlabs." Op prefix.
 func readErrorResponse(resp *http.Response, op string) error {
-	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return &providererr.HTTPError{
-		Op:         "elevenlabs." + op,
-		StatusCode: resp.StatusCode,
-		Status:     resp.Status,
-		Body:       strings.TrimSpace(string(snippet)),
-	}
+	return providererr.FromResponse(resp, "elevenlabs."+op)
 }

@@ -167,16 +167,7 @@ func clampDuration(d, min, max time.Duration) time.Duration {
 	return d
 }
 
-// readErrorResponse reads up to 512 bytes of a non-2xx response body for
-// diagnostic context and returns it as a typed [*providererr.HTTPError] so
-// callers can classify the call by status code via errors.As (ADR-0044) —
-// byte-identical in shape to the tts/stt adapters' helper.
+// readErrorResponse is [providererr.FromResponse] with the adapter's "elevenlabs." Op prefix.
 func readErrorResponse(resp *http.Response, op string) error {
-	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return &providererr.HTTPError{
-		Op:         "elevenlabs." + op,
-		StatusCode: resp.StatusCode,
-		Status:     resp.Status,
-		Body:       strings.TrimSpace(string(snippet)),
-	}
+	return providererr.FromResponse(resp, "elevenlabs."+op)
 }

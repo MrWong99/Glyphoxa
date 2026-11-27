@@ -6,7 +6,17 @@
 // the message changes.
 package providererr
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+)
+
+// errorSnippetBytes caps how much of a non-2xx response body [FromResponse]
+// keeps as [HTTPError.Body]: enough for the provider's error JSON, bounded so a
+// misbehaving endpoint cannot bloat a log line.
+const errorSnippetBytes = 512
 
 // HTTPError is a non-2xx response from a provider's start call — the STT POST,
 // the TTS POST, or the LLM Messages request. It is what makes retry
@@ -16,7 +26,7 @@ import "fmt"
 // Op is the adapter operation name INCLUDING its package prefix (e.g.
 // "elevenlabs.Transcribe", "anthropic.Complete") so [HTTPError.Error] reproduces
 // the exact string the adapter used before it was typed. Body is the trimmed
-// response snippet (up to 512 bytes) the adapters already read for diagnostics.
+// response snippet (up to 512 bytes) [FromResponse] reads for diagnostics.
 type HTTPError struct {
 	Op         string
 	StatusCode int
@@ -28,6 +38,24 @@ type HTTPError struct {
 // adapters' pre-typed-error readErrorResponse message.
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d %s: %s", e.Op, e.StatusCode, e.Status, e.Body)
+}
+
+// FromResponse builds the [HTTPError] for a non-2xx resp: it reads up to 512
+// bytes of the body as the diagnostic snippet (a read failure just leaves the
+// snippet short — the status is what classification needs) and trims it. op is
+// the full operation name including the provider prefix, as [HTTPError.Op]
+// documents. It does NOT close resp.Body; that stays with the caller.
+//
+// The result is returned as error, not *HTTPError, so an adapter's
+// `return nil, providererr.FromResponse(...)` can never produce a typed nil.
+func FromResponse(resp *http.Response, op string) error {
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, errorSnippetBytes))
+	return &HTTPError{
+		Op:         op,
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Body:       strings.TrimSpace(string(snippet)),
+	}
 }
 
 // ToolSyntaxError is a provider "tool_use_failed": the model emitted malformed
