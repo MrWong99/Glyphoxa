@@ -402,7 +402,7 @@ func (o *OAuth) issueSession(w http.ResponseWriter, r *http.Request, what string
 		Token:           sessionToken,
 		ExpiresAt:       expires,
 		IP:              o.edge.clientIP(r),
-		UA:              r.UserAgent(),
+		UA:              auditUA(r),
 		GuestCampaignID: guestCampaign,
 	}); err != nil {
 		o.log.Error(what+": create session", "err", err)
@@ -466,7 +466,7 @@ func (o *OAuth) loginPlatformAdmin(w http.ResponseWriter, r *http.Request, du Di
 		Token:     sessionToken,
 		ExpiresAt: expires,
 		IP:        o.edge.clientIP(r),
-		UA:        r.UserAgent(),
+		UA:        auditUA(r),
 	}); err != nil {
 		o.log.Error("oauth callback: create session", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -553,7 +553,7 @@ func (o *OAuth) provision(w http.ResponseWriter, r *http.Request, du DiscordUser
 		Token:     sessionToken,
 		ExpiresAt: expires,
 		IP:        o.edge.clientIP(r),
-		UA:        r.UserAgent(),
+		UA:        auditUA(r),
 	}
 	res, err := o.adm.Signup.ProvisionSignup(r.Context(), p)
 	if errors.Is(err, storage.ErrUserSuspended) {

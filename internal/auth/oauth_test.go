@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -474,4 +475,97 @@ func TestOAuthLogin_Post_Refused(t *testing.T) {
 	if got := rec.Result().Cookies(); len(got) != 0 {
 		t.Errorf("cookies set on a refused POST: %v", got)
 	}
+}
+
+// callbackSession drives one admitted OAuth callback carrying the given request
+// headers and returns the session row it stored.
+func callbackSession(t *testing.T, edge auth.EdgeConfig, header http.Header) storage.NewSession {
+	t.Helper()
+	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora"}}
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}, edge, nil)
+
+	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+	}
+	return store.created
+}
+
+// TestOAuthCallback_SessionAuditIPBounded pins that the audit address is
+// bounded whatever the header carried: net/http admits a header of up to 1 MiB,
+// and sessions.ip is an unbounded text column written on every login. A real
+// address is stored in its canonical form; anything else is still recorded
+// (it is what the proxy — or a misconfigured header — said) but cut short.
+func TestOAuthCallback_SessionAuditIPBounded(t *testing.T) {
+	t.Parallel()
+	const maxIP = 64
+	huge := strings.Repeat("9", 100<<10)
+	for _, tc := range []struct {
+		name    string
+		trusted string
+		header  http.Header
+		want    string // "" = only the bound is asserted
+	}{
+		{"IPv4 unchanged", "", http.Header{"X-Forwarded-For": {"203.0.113.7"}}, "203.0.113.7"},
+		{"IPv6 unchanged", "", http.Header{"X-Forwarded-For": {"6.6.6.6, 2001:db8::1"}}, "2001:db8::1"},
+		{"IPv6 canonicalised", "", http.Header{"X-Forwarded-For": {"2001:DB8:0:0:0:0:0:1"}}, "2001:db8::1"},
+		{"short non-address is kept as sent", "", http.Header{"X-Forwarded-For": {"unknown"}}, "unknown"},
+		{"oversized forwarded-for hop", "", http.Header{"X-Forwarded-For": {"6.6.6.6, " + huge}}, ""},
+		{"oversized configured header", "CF-Connecting-IP", http.Header{"Cf-Connecting-Ip": {huge}}, ""},
+		{"oversized IPv6 zone", "", http.Header{"X-Forwarded-For": {"fe80::1%" + huge}}, ""},
+		{"invalid UTF-8 is dropped", "", http.Header{"X-Forwarded-For": {"bad\xffhop"}}, "badhop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := callbackSession(t, auth.EdgeConfig{ClientIPHeader: tc.trusted}, tc.header).IP
+			if tc.want != "" && got != tc.want {
+				t.Errorf("session IP = %q, want %q", got, tc.want)
+			}
+			if got == "" || len(got) > maxIP || !utf8.ValidString(got) {
+				t.Errorf("session IP is %d bytes (valid UTF-8: %t), want 1..%d valid bytes", len(got), utf8.ValidString(got), maxIP)
+			}
+		})
+	}
+}
+
+// TestOAuthCallback_SessionAuditUA pins the User-Agent the session row records:
+// an ordinary one verbatim, an oversized one cut to a bound, and never bytes
+// Postgres would refuse as text (which would fail the login outright).
+func TestOAuthCallback_SessionAuditUA(t *testing.T) {
+	t.Parallel()
+	const maxUA = 512
+	const firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+
+	t.Run("ordinary User-Agent is stored verbatim", func(t *testing.T) {
+		t.Parallel()
+		if got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {firefox}}).UA; got != firefox {
+			t.Errorf("session UA = %q, want %q", got, firefox)
+		}
+	})
+	t.Run("oversized User-Agent is cut on a rune boundary", func(t *testing.T) {
+		t.Parallel()
+		// One ASCII byte then 3-byte runes: byte 512 falls inside a rune.
+		ua := "x" + strings.Repeat("€", 100<<10/3)
+		got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {ua}}).UA
+		if len(got) > maxUA || len(got) <= maxUA-utf8.UTFMax || !utf8.ValidString(got) || !strings.HasPrefix(ua, got) {
+			t.Errorf("session UA is %d bytes (valid UTF-8: %t), want a valid prefix of at most %d", len(got), utf8.ValidString(got), maxUA)
+		}
+	})
+	t.Run("invalid UTF-8 is dropped", func(t *testing.T) {
+		t.Parallel()
+		if got := callbackSession(t, auth.EdgeConfig{}, http.Header{"User-Agent": {"curl\xff/8"}}).UA; got != "curl/8" {
+			t.Errorf("session UA = %q, want %q", got, "curl/8")
+		}
+	})
 }
