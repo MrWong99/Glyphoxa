@@ -62,6 +62,17 @@ note() { printf '    %s\n' "$*"; }
 die()  { echo "update.sh: ERROR: $*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command '$1' not found"; }
 
+# values_duplicate_keys FILE — prints each top-level key that appears more than
+# once, with both line numbers. Only column-0 keys count, so comments, nested
+# keys and list items are ignored. YAML keeps one of two same-named blocks and
+# helm drops the other without a word (#693), so the file is refused instead.
+values_duplicate_keys() {
+  awk '/^[A-Za-z_][A-Za-z0-9_.-]*:([ \t]|$)/ {
+    k = $1; sub(/:.*/, "", k)
+    if (k in seen) printf "%s (lines %d and %d)\n", k, seen[k], NR; else seen[k] = NR
+  }' "$1"
+}
+
 need_cmd curl
 need_cmd tar
 
@@ -85,6 +96,9 @@ GX_FULLNAME="${GX_FULLNAME:-$GX_RELEASE}"
 GX_REPO="${GX_REPO:-MrWong99/Glyphoxa}"
 GX_TIMEOUT="${GX_TIMEOUT:-600s}"
 [ -f "$GX_VALUES_FILE" ] || die "values file ${GX_VALUES_FILE} (from state) does not exist"
+DUP_KEYS="$(values_duplicate_keys "$GX_VALUES_FILE" | paste -sd ';' -)"
+[ -z "$DUP_KEYS" ] \
+  || die "${GX_VALUES_FILE} repeats a top-level key — YAML keeps only one block and silently drops the other: ${DUP_KEYS}. Merge the blocks into one and re-run."
 
 # Target the cluster the install recorded, unless the caller already exported
 # a KUBECONFIG of their own.

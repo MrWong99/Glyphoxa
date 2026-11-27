@@ -244,4 +244,18 @@ grep -q '^GX_HOST=edited.selftest.example$' "$d/install.env" \
   || fail "hand-edited values host was not adopted into the state"
 pass "reuse-run refuses a conflicting GX_HOST env override and adopts a hand-edited values host"
 
+# --- 10. a reused values file repeating a top-level key is refused ------------
+# YAML keeps only one of two same-named blocks and helm drops the other
+# without a word (#693: a second postgres: block lost persistence.size).
+d6="$workdir/dup-key"; mkdir -p "$d6"
+run_dry "$d6" >/dev/null 2>&1 || fail "dup-key setup dry-run failed"
+run_dry "$d6" >/dev/null 2>&1 || fail "reuse-run of a freshly generated values file failed"
+printf '\npostgres:\n  resources: {}\n' >>"$d6/values.yaml"
+if out="$(run_dry "$d6" 2>&1)"; then
+  fail "a reused values file with two top-level postgres: blocks was accepted"
+fi
+grep -q 'repeats a top-level key' <<<"$out" && grep -Eq 'postgres \(lines [0-9]+ and [0-9]+\)' <<<"$out" \
+  || fail "the duplicate-key refusal does not name the key and both lines: $out"
+pass "a reused values file repeating a top-level key is refused with both line numbers"
+
 echo "install-test: OK"

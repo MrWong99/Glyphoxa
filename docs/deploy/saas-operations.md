@@ -104,7 +104,10 @@ deleted, so revenue history always resolves.
 **On Kubernetes**, the chart does this for you: put the same catalog under
 `plans.catalog` in your values file and set `plans.enabled=true` — a hook Job
 runs the sync on every `helm upgrade` (see `deploy/charts/glyphoxa/values.yaml`
-for the annotated example). Tier edits become values edits.
+for the annotated example). Tier edits become values edits. On a scripted
+install, edit the existing top-level block rather than adding a second one:
+`deploy/saas/install.sh` and `update.sh` refuse a values file that repeats a
+top-level key (YAML would keep one block and silently drop the other).
 
 ### Public-beta launch defaults (#521)
 

@@ -94,4 +94,38 @@ fi
 grep -q 'ADR-0055' <<<"$out" || fail "the GA -> rc refusal does not cite ADR-0055: $out"
 pass "prerelease ordering is semver-correct in both directions"
 
+# --- 8. a values file repeating a top-level key is refused before the plan ---
+# YAML keeps only one of two same-named blocks and helm drops the other
+# without a word (#693: a second postgres: block lost persistence.size).
+d="$workdir/dup-key"; make_state "$d" v1.2.3
+cat >"$d/values.yaml" <<'EOF'
+postgres:
+  persistence:
+    size: 20Gi
+
+web:
+  enabled: true
+
+postgres:
+  resources: {}
+EOF
+if out="$(run_update "$d" --dry-run --version v1.3.0 2>&1)"; then
+  fail "a values file with two top-level postgres: blocks was accepted"
+fi
+grep -q 'postgres (lines 1 and 8)' <<<"$out" \
+  || fail "the duplicate-key refusal does not name the key and both lines: $out"
+# Only column-0 keys count: a nested key and a comment of the same name are fine.
+cat >"$d/values.yaml" <<'EOF'
+# postgres: tuned below
+backup:
+  postgres:
+    enabled: true
+postgres:
+  persistence:
+    size: 20Gi
+EOF
+out="$(run_update "$d" --dry-run --version v1.3.0 2>&1)" \
+  || fail "a nested/commented postgres: next to one top-level block was refused: $out"
+pass "a repeated top-level values key is refused with both line numbers; nested keys and comments are not"
+
 echo "update-test: OK"

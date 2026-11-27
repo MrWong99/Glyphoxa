@@ -88,6 +88,17 @@ die()  { echo "install.sh: ERROR: $*" >&2; exit 1; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command '$1' not found"; }
 
+# values_duplicate_keys FILE — prints each top-level key that appears more than
+# once, with both line numbers. Only column-0 keys count, so comments, nested
+# keys and list items are ignored. YAML keeps one of two same-named blocks and
+# helm drops the other without a word (#693), so the file is refused instead.
+values_duplicate_keys() {
+  awk '/^[A-Za-z_][A-Za-z0-9_.-]*:([ \t]|$)/ {
+    k = $1; sub(/:.*/, "", k)
+    if (k in seen) printf "%s (lines %d and %d)\n", k, seen[k], NR; else seen[k] = NR
+  }' "$1"
+}
+
 # yesc escapes a value for a double-quoted YAML scalar (backslash, then quote).
 yesc() { local s="${1-}"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
 
@@ -184,6 +195,12 @@ GX_BACKUP_RETENTION_DAYS="${GX_BACKUP_RETENTION_DAYS:-14}"
 
 REUSE_VALUES=""
 [ -f "$VALUES_FILE" ] && [ -z "$FRESH_VALUES" ] && REUSE_VALUES=1
+# A reused file deploys verbatim, so refuse a broken one before asking anything.
+if [ -n "$REUSE_VALUES" ]; then
+  DUP_KEYS="$(values_duplicate_keys "$VALUES_FILE" | paste -sd ';' -)"
+  [ -z "$DUP_KEYS" ] \
+    || die "${VALUES_FILE} repeats a top-level key — YAML keeps only one block and silently drops the other: ${DUP_KEYS}. Merge the blocks into one and re-run."
+fi
 
 # ---------------------------------------------------------------- parameters --
 log "Glyphoxa SaaS install — parameters"
