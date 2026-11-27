@@ -118,7 +118,7 @@ func TestStreamScrubberLongDivergingRunFlushed(t *testing.T) {
 
 // TestStreamScrubberOrphanCloserSuppressed is #423 item 1: a JSON string arg that
 // contains the literal closer ends the swallow early, so the call's REAL closer
-// arrives in prose mode. It must be dropped like the batch ReplaceAll drops it —
+// arrives in prose mode. It must be dropped like the batch scrub drops it —
 // never spoken — at every split point, and the stream must match the batch scrub.
 func TestStreamScrubberOrphanCloserSuppressed(t *testing.T) {
 	full := `Note this <function=note {"text":"a </function> tag"}</function> done`
