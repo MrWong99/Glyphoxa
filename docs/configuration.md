@@ -1,10 +1,14 @@
 # Configuration & self-host setup
 
-This runbook takes a fresh checkout to a working **Operator** login for the
-single-operator web tier (ADR-0039), and lists every environment variable the
-`glyphoxa` binary reads. The access policy — a **mandatory Discord allowlist,
-no trust-on-first-use** — is decided by
-[ADR-0041](adr/0041-operator-allowlist-access-policy.md); read it for the *why*.
+This runbook takes a fresh checkout to a working **Platform Admin** (historically
+**Operator**) login on the web tier, and lists every environment variable the
+`glyphoxa` binary reads. The web tier began as the single-operator MVP of
+ADR-0039; who else may sign in is the deployment's **Admission Mode** (§6). The
+default access policy — a **mandatory Discord allowlist, no trust-on-first-use**
+— is decided by [ADR-0041](adr/0041-operator-allowlist-access-policy.md) and
+widened by [ADR-0055](adr/0055-self-signup-admission-modes.md) (`open` mode) and
+[ADR-0065](adr/0065-web-managed-access-platform-admins-grants-campaign-guests.md)
+(Access Grants, invitation links); read them for the *why*.
 For the `voice`-only live loop, see
 [docs/agents/live-npc-run.md](agents/live-npc-run.md).
 
@@ -555,7 +559,7 @@ CPU-starved pod cannot meet, degrading recall to no-memory on timeout.
 | `GLYPHOXA_GOROUTINE_LEAK_SAMPLE_INTERVAL` | optional | Go duration arming the `glyphoxa_goroutine_leaks` gauge: on scrape, at most once per interval, the Go 1.27 goroutineleak profile is sampled and the count of permanently blocked goroutines exported — the leak-trend companion to `GLYPHOXA_VOICE_GOROUTINE_CEILING`'s raw count. Each sample runs a GC cycle, so pick minutes, not seconds (e.g. `5m`). Default off; not-a-duration/≤0 ⇒ off. Independent of `GLYPHOXA_PPROF` (a count exposes no stacks). |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
-| `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |
+| `GEMINI_API_KEY` | if Gemini used | LLM provider key; also the image-generation key (Highlight images, portraits, Maps). |
 | `ANTHROPIC_API_KEY` | if Anthropic used | LLM provider key: the platform key behind `GLYPHOXA_LLM_DEFAULT_PROVIDER=anthropic` and behind the Anthropic slot of the Configuration screen for Tenants on the Platform Keys. Helm: the top-level `anthropicApiKey` value, which lands in the chart Secret and reaches the web and voice pods exactly like `groqApiKey`. An OAuth access token of the `ant` CLI (`sk-ant-oat…`) is also accepted and sent as a bearer; it expires within hours, so it suits a developer machine or a bench run, not a deployment. A voice session on Anthropic with no model configured runs `claude-haiku-5-5`. It is also the key a Tenant on the Platform Keys rides when it puts its **Planning chat** on Anthropic (Setup → Planning chat): the chat then runs `claude-sonnet-5-5` unless the Tenant picks another priced model (`claude-opus-5-5`, `claude-haiku-5-5`, …), with adaptive thinking at effort `medium` and a 16000-token reply cap. Voice requests are unaffected. Each exchange logs one `planchat: llm usage` line with `provider`, `model`, `llm_source` (`choice` / `voice` / `default`) and `key_source` (`chat` / `provider` / `platform`), which is where to look when a Tenant asks what answered. |
 
 ## See also
