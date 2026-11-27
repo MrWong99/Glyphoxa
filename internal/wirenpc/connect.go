@@ -107,7 +107,8 @@ func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *sl
 	// that burns budget without reaching Ready still counts) and its RESUMEs on the
 	// Resumed event. Only the OWNED client is instrumented here; the borrowed
 	// standing client (handled above) is instrumented by the presence, so no
-	// establishment is double-counted. A nil budget yields no opts.
+	// establishment is double-counted. A nil budget still installs the IDENTIFY
+	// pacing, which protects the token and is not observability.
 	opts = append(opts, GatewayBudgetClientOpts(cfg.Token, cfg.GatewayBudget)...)
 	// Standalone voice mode has no boot-owned presence to answer the tape consent
 	// disclosure's buttons (#306, finding 5), so THIS per-cycle client must carry

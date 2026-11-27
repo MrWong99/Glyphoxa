@@ -277,11 +277,14 @@ Two Prometheus counters on `/metrics` (the `-metrics-addr` listener, default
 (never the token):
 
 - `glyphoxa_gateway_identify_total{application_id="…"}` — **IDENTIFYs sent**
-  (budget-consuming). Counted at the point the gateway sends the IDENTIFY, not
-  when a session reaches `Ready` — so a connect that spends the budget but never
-  succeeds (an `InvalidSession` reply, a close before dispatch, a reconnect loop
-  that keeps re-identifying) is still counted. That is the whole point: a silent
-  connect-fail loop is the fastest way to burn the budget.
+  (budget-consuming). Counted when the connection to the gateway is open and
+  the IDENTIFY is about to go out, not when a session reaches `Ready` — so a
+  connect that spends the budget but never succeeds (an `InvalidSession` reply,
+  a close before dispatch, a reconnect loop that keeps re-identifying) is still
+  counted. That is the whole point: a silent connect-fail loop is the fastest
+  way to burn the budget. An attempt whose network dial fails (DNS or TCP, as
+  in an outage) reached nobody and is not counted. The process paces what it
+  counts to at most 484 per application per 24h.
 - `glyphoxa_gateway_resume_total{application_id="…"}` — reattached sessions
   (budget-free), counted on the `Resumed` event.
 
