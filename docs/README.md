@@ -39,7 +39,7 @@ Running Glyphoxa **for others**, beyond the single-machine self-host:
 
 ### [adr/](adr/) — Architecture Decision Records
 
-The 64 ADRs recording the decisions behind the system are indexed in full at
+The ADRs recording the decisions behind the system are indexed in full at
 [the end of this page](#architecture-decision-records). Where an ADR and the
 shipped tree disagree, `architecture.md` follows the tree and says so; later
 decisions are recorded as dated amendments inside the original ADR.
@@ -127,3 +127,4 @@ decisions are recorded as dated amendments inside the original ADR.
 | [0062](adr/0062-butler-planning-chat.md) | Butler planning chat: Connect streaming, persisted threads, per-exchange metering under the allowance gate |
 | [0063](adr/0063-campaign-subnav-in-sidebar.md) | Campaign sub-views move into the sidebar, addressed by path |
 | [0064](adr/0064-voice-media-path-liveness.md) | Voice media-path liveness: UDP keepalive, receive watchdog, honest close reason |
+| [0065](adr/0065-web-managed-access-platform-admins-grants-campaign-guests.md) | Web-managed access: Platform Admins in the environment, Access Grants and Campaign Guests in the database |
