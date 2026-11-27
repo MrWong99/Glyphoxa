@@ -202,6 +202,22 @@ func (r admissionResolution) record(ctx context.Context, settings admissionSetti
 	return nil
 }
 
+// accessPolicyFor builds the store's operator-standing rule (ADR-0065,
+// [storage.AccessPolicy]) from the same facts the boot sweep is given: on an
+// `allowlist` deployment a Tenant's operator must be a Platform Admin or hold
+// an Access Grant to keep GM standing on Discord and to keep their Campaigns
+// reachable for guests. `open` mode requires nothing (suspension revokes
+// there), and neither does GLYPHOXA_DEV_MODE, which preempts Admission Mode
+// entirely. recordedAdmins is for a process that is not given the env list (a
+// voice worker): it additionally trusts the list the web tier recorded.
+func accessPolicyFor(dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist, recordedAdmins bool) storage.AccessPolicy {
+	return storage.AccessPolicy{
+		OperatorsNeedGrant: !dev && admission != auth.AdmissionOpen,
+		PlatformAdmins:     allow.IDs(),
+		RecordedAdmins:     recordedAdmins,
+	}
+}
+
 // sessionSweeper is the revocation write [sweepAllowlistSessions] needs.
 // *storage.Store satisfies it.
 type sessionSweeper interface {

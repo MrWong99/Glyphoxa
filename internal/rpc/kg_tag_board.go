@@ -142,8 +142,10 @@ func (s *kgOrganize) ListBoards(
 	if err != nil {
 		return nil, internalErr(s.active.logger(), "ListBoards: store read failed", err, "campaign_id", c.ID)
 	}
-	// A board keeps its name for a Campaign Guest without wiki.secrets
-	// (ADR-0065) but lists only the entries they may see.
+	// The guest gate admits a Campaign Guest here only with wiki.edit, which
+	// implies wiki.secrets (ADR-0065), so through the gate nothing is ever
+	// withheld. The filter stays as the handler's own guard: should a caller
+	// without secrets ever reach it, a board lists only what they may see.
 	withheld, err := s.active.withheldFor(ctx, "ListBoards", c.ID)
 	if err != nil {
 		return nil, err

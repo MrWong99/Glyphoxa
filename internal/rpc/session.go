@@ -519,6 +519,16 @@ func (s *SessionServer) ListSessions(
 	}
 
 	out := mapSlice(sessions, toProtoVoiceSession)
+	// A Campaign Guest gets the session's metadata — when, how long, how it
+	// ended — but not WHY it ended (ADR-0065): end_reason is the host's
+	// operational detail (raw loop and provider error text, the spend-cap or
+	// allowance cause), none of which a Guest Right covers. The status still
+	// says whether the session ended or failed.
+	if _, guest := auth.Guest(ctx); guest {
+		for _, vs := range out {
+			vs.EndReason = ""
+		}
+	}
 	return connect.NewResponse(&managementv1.ListSessionsResponse{Sessions: out}), nil
 }
 

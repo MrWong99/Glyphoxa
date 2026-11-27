@@ -1076,3 +1076,42 @@ func TestGuest_PlanningIsOwnThreadsInOwnCampaign(t *testing.T) {
 		t.Errorf("the GM's exchange in a guest's thread: err %v, calls %d, withoutTranscripts %v", err, engine.calls, engine.withoutTranscripts)
 	}
 }
+
+// TestGuest_ListSessionsWithholdsEndReason: a guest sees that a session
+// failed, never why — end_reason is the host's operational detail (raw loop
+// and provider errors, the spend-cap cause), which no Guest Right covers. The
+// GM, on the same rows, still gets it.
+func TestGuest_ListSessionsWithholdsEndReason(t *testing.T) {
+	t.Parallel()
+	w, srv, store, _ := sessionWorld(t)
+	reason := "loop_error: dial tcp 10.0.0.7:443: connection refused"
+	store.listSessions = []storage.VoiceSession{
+		{ID: uuid.New(), CampaignID: w.guestCampaign.ID, Status: "failed", EndReason: &reason},
+	}
+
+	for _, right := range []auth.GuestRight{auth.RightTranscriptsRead, auth.RightHighlightsRead} {
+		resp, err := srv.ListSessions(asGuest(w.tenant, w.guestCampaign.ID, right),
+			connect.NewRequest(&managementv1.ListSessionsRequest{}))
+		if err != nil {
+			t.Fatalf("ListSessions as a %s guest: %v", right, err)
+		}
+		if len(resp.Msg.GetSessions()) != 1 {
+			t.Fatalf("a %s guest got %d sessions, want 1", right, len(resp.Msg.GetSessions()))
+		}
+		got := resp.Msg.GetSessions()[0]
+		if got.GetEndReason() != "" {
+			t.Errorf("a %s guest got end_reason %q, want it withheld", right, got.GetEndReason())
+		}
+		if got.GetStatus() != "failed" {
+			t.Errorf("a %s guest lost the session status with the reason", right)
+		}
+	}
+
+	resp, err := srv.ListSessions(asGM(w.tenant), connect.NewRequest(&managementv1.ListSessionsRequest{}))
+	if err != nil {
+		t.Fatalf("ListSessions as the GM: %v", err)
+	}
+	if got := resp.Msg.GetSessions()[0].GetEndReason(); got != reason {
+		t.Errorf("the GM got end_reason %q, want %q", got, reason)
+	}
+}

@@ -100,7 +100,6 @@ var guestProcedures = map[string]GuestPosture{
 	managementv1connect.CampaignServiceListNodeEdgesProcedure:     GuestWith(RightWikiRead),
 	managementv1connect.CampaignServiceGetKnowledgeGraphProcedure: GuestWith(RightWikiRead),
 	managementv1connect.CampaignServiceGetCampaignTagsProcedure:   GuestWith(RightWikiRead),
-	managementv1connect.CampaignServiceListBoardsProcedure:        GuestWith(RightWikiRead),
 	managementv1connect.CampaignServiceSearchNodesProcedure:       GuestWith(RightWikiRead),
 	// Appearances quote transcript text; the handler returns none without
 	// transcripts.read as well.
@@ -118,9 +117,13 @@ var guestProcedures = map[string]GuestPosture{
 	managementv1connect.CampaignServiceUpdateEdgeDetailsProcedure: GuestWith(RightWikiEdit),
 	managementv1connect.CampaignServiceSetNodeTagsProcedure:       GuestWith(RightWikiEdit),
 	managementv1connect.CampaignServiceRenameTagProcedure:         GuestWith(RightWikiEdit),
-	managementv1connect.CampaignServiceCreateBoardProcedure:       GuestWith(RightWikiEdit),
-	managementv1connect.CampaignServiceUpdateBoardProcedure:       GuestWith(RightWikiEdit),
-	managementv1connect.CampaignServiceDeleteBoardProcedure:       GuestWith(RightWikiEdit),
+	// Prep boards are the GM's working surface, not campaign material: a board
+	// NAME can itself be a spoiler, and the web only shows boards to a guest
+	// who may edit the wiki. So even READING them needs wiki.edit.
+	managementv1connect.CampaignServiceListBoardsProcedure:  GuestWith(RightWikiEdit),
+	managementv1connect.CampaignServiceCreateBoardProcedure: GuestWith(RightWikiEdit),
+	managementv1connect.CampaignServiceUpdateBoardProcedure: GuestWith(RightWikiEdit),
+	managementv1connect.CampaignServiceDeleteBoardProcedure: GuestWith(RightWikiEdit),
 
 	// ── maps.read / maps.edit ───────────────────────────────────────────────
 	// NOT here: CreateMap, UpdateMap, DeleteMap, ReplaceMapImage (the map
@@ -137,7 +140,7 @@ var guestProcedures = map[string]GuestPosture{
 	managementv1connect.SessionServiceSearchTranscriptLinesProcedure: GuestWith(RightTranscriptsRead),
 	managementv1connect.SessionServiceSearchTranscriptsProcedure:     GuestWith(RightTranscriptsRead),
 	// ListSessions carries session metadata only (when, how long, how many
-	// lines) and no transcript text. A guest with highlights.read needs it
+	// lines) and no transcript text; the handler blanks end_reason for a guest. A guest with highlights.read needs it
 	// too: ListHighlights is per session, so without the list they could not
 	// find the Highlights they were granted.
 	managementv1connect.SessionServiceListSessionsProcedure: GuestWith(RightTranscriptsRead, RightHighlightsRead),

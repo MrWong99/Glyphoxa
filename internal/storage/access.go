@@ -208,7 +208,9 @@ func (s *Store) GetAccessGrant(ctx context.Context, discordUserID string) (Acces
 // Granting again updates the note and the Platform Keys choice. When the user
 // already operates a Tenant, that Tenant's platform_keys follows the grant —
 // otherwise re-granting someone whose access was revoked would silently keep
-// whatever the Tenant had before.
+// whatever the Tenant had before. It is the admin's explicit decision, so it
+// also clears any invitation refusal the person carries for access links
+// (see recordInvitationRefusal).
 func (s *Store) GrantAccess(ctx context.Context, discordUserID, note string, platformKeys bool, grantedBy uuid.UUID) (AccessGrant, error) {
 	var g AccessGrant
 	err := s.InTx(ctx, func(tx *Store) error {
@@ -222,6 +224,12 @@ func (s *Store) GrantAccess(ctx context.Context, discordUserID, note string, pla
 		var err error
 		if g, err = scanAccessGrant(row); err != nil {
 			return fmt.Errorf("storage: grant access to %q: %w", discordUserID, err)
+		}
+		if _, err := tx.db.Exec(ctx,
+			`DELETE FROM invitation_refusal r USING invitation i
+			  WHERE i.id = r.invitation_id AND i.kind = 'access' AND r.discord_user_id = $1`,
+			discordUserID); err != nil {
+			return fmt.Errorf("storage: grant access to %q: clear invitation refusals: %w", discordUserID, err)
 		}
 		return tx.syncOperatorPlatformKeys(ctx, discordUserID, platformKeys)
 	})
@@ -250,14 +258,39 @@ func (s *Store) syncOperatorPlatformKeys(ctx context.Context, discordUserID stri
 // sessions, so the revocation lands on their very next request rather than at
 // the next boot. Their Tenant and its data are kept: granting again restores
 // everything. ErrNotFound when no grant exists.
+//
+// In the same transaction it also:
+//   - switches Platform Keys OFF on every Tenant they operate. The web session
+//     is not the only way to spend: the Tenant's Discord surface and its
+//     Campaign Guests' planning chat resolve keys through tenant.platform_keys,
+//     which would otherwise keep the granted value. Re-granting re-syncs the
+//     switch from the new grant ([Store.GrantAccess]);
+//   - refuses them the invitation link their grant came through
+//     (recordInvitationRefusal), so a still-live multi-use link is not a way
+//     to undo the revocation by opening it again.
+//
+// Their standing as GM on Discord and their Tenant's guests end with the
+// grant too — not here, but because every read of them tests the grant
+// ([AccessPolicy]).
 func (s *Store) RevokeAccess(ctx context.Context, discordUserID string) error {
 	return s.InTx(ctx, func(tx *Store) error {
-		tag, err := tx.db.Exec(ctx, `DELETE FROM access_grant WHERE discord_user_id = $1`, discordUserID)
+		var invitationID uuid.NullUUID
+		err := tx.db.QueryRow(ctx,
+			`DELETE FROM access_grant WHERE discord_user_id = $1 RETURNING invitation_id`, discordUserID).
+			Scan(&invitationID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
 		if err != nil {
 			return fmt.Errorf("storage: revoke access of %q: %w", discordUserID, err)
 		}
-		if tag.RowsAffected() == 0 {
-			return ErrNotFound
+		if invitationID.Valid {
+			if err := tx.recordInvitationRefusal(ctx, invitationID.UUID, discordUserID); err != nil {
+				return err
+			}
+		}
+		if err := tx.syncOperatorPlatformKeys(ctx, discordUserID, false); err != nil {
+			return err
 		}
 		if _, err := tx.db.Exec(ctx,
 			`DELETE FROM sessions USING users
@@ -276,7 +309,9 @@ func (s *Store) RevokeAccess(ctx context.Context, discordUserID string) error {
 // opening the link twice, or a link for someone already admitted, is harmless.
 // A redeemer who already operates a Tenant (their earlier access was revoked)
 // has it follow the new grant's Platform Keys choice, exactly as GrantAccess
-// does. Every refusal is ErrInvitationInvalid.
+// does. Every refusal is ErrInvitationInvalid — including a redeemer this link
+// was refused to because their access was revoked after they came in through
+// it (recordInvitationRefusal): no use is counted and nothing is written.
 func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID string) (AccessGrant, error) {
 	var g AccessGrant
 	err := s.InTx(ctx, func(tx *Store) error {
@@ -301,6 +336,13 @@ func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return err
+		}
+		refused, err := tx.invitationRefused(ctx, inv.ID, discordUserID)
+		if err != nil {
+			return err
+		}
+		if refused {
+			return ErrInvitationInvalid
 		}
 
 		// ON CONFLICT DO NOTHING covers the one race the invitation lock does
@@ -331,6 +373,39 @@ func (s *Store) RedeemAccessInvitation(ctx context.Context, token, discordUserID
 		return AccessGrant{}, err
 	}
 	return g, nil
+}
+
+// recordInvitationRefusal notes that the invitation must no longer admit this
+// Discord User (invitation_refusal, migration 00064). It is written when the
+// thing the link gave them is taken away again — [Store.RevokeAccess] for an
+// access link, [Store.RemoveCampaignGuest] for a campaign link — because the
+// link itself usually stays live: a multi-use link has other people still to
+// admit, and revoking it for everyone is a separate decision.
+//
+// The refusal is per (link, person). A NEW link admits them, and so does an
+// explicit [Store.GrantAccess] / [Store.AddCampaignGuest], which also clears
+// their refusals for that scope: whoever removed them may change their mind,
+// but the removed person cannot change it for them.
+func (s *Store) recordInvitationRefusal(ctx context.Context, invitationID uuid.UUID, discordUserID string) error {
+	if _, err := s.db.Exec(ctx,
+		`INSERT INTO invitation_refusal (invitation_id, discord_user_id) VALUES ($1, $2)
+		 ON CONFLICT (invitation_id, discord_user_id) DO NOTHING`, invitationID, discordUserID); err != nil {
+		return fmt.Errorf("storage: record invitation refusal: %w", err)
+	}
+	return nil
+}
+
+// invitationRefused reports whether the invitation was refused to this
+// Discord User (see recordInvitationRefusal).
+func (s *Store) invitationRefused(ctx context.Context, invitationID uuid.UUID, discordUserID string) (bool, error) {
+	var refused bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM invitation_refusal
+		                 WHERE invitation_id = $1 AND discord_user_id = $2)`,
+		invitationID, discordUserID).Scan(&refused); err != nil {
+		return false, fmt.Errorf("storage: read invitation refusal: %w", err)
+	}
+	return refused, nil
 }
 
 // AccessPerson is one row of the Platform Admin's people list: a Discord User

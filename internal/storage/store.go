@@ -35,6 +35,9 @@ type querier interface {
 type Store struct {
 	db   querier
 	pool *pgxpool.Pool // nil for a tx-bound Store; used only to begin transactions
+	// access is the deployment's operator-standing rule (see [AccessPolicy]).
+	// Written once by the composition root before the Store is shared.
+	access AccessPolicy
 }
 
 // New wraps a pgx pool in a Store. The caller owns the pool's lifecycle.
@@ -66,7 +69,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 		return fmt.Errorf("storage: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
-	if err := fn(&Store{db: tx}); err != nil {
+	if err := fn(&Store{db: tx, access: s.access}); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

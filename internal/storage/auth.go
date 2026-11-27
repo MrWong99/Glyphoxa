@@ -219,14 +219,19 @@ type TenantOperatorBinding struct {
 // ListTenantOperatorDiscordIDs and shares its exclusions: the synthetic dev operator
 // ([DevOperatorDiscordID]) never appears (it can match no real speaker/interaction
 // user) and a SUSPENDED operator drops out (open-mode revocation reaches GM on the
-// next snapshot refresh). Sorted for determinism. An empty result is not an error.
+// next snapshot refresh). On an `allowlist` deployment an operator who is neither
+// a Platform Admin nor an Access Grant holder drops out too ([AccessPolicy],
+// ADR-0065): revoking a grant ends GM standing on Discord, not just the web
+// session. Sorted for determinism. An empty result is not an error.
 func (s *Store) ListTenantOperatorBindings(ctx context.Context) ([]TenantOperatorBinding, error) {
+	needGrant, admins, recorded := s.accessArgs()
 	rows, err := s.db.Query(ctx,
 		`SELECT t.id, u.discord_user_id
 		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
 		  WHERE u.discord_user_id <> $1
 		    AND u.suspended_at IS NULL
-		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID)
+		    AND `+operatorAdmittedClause("u", 2)+`
+		  ORDER BY u.discord_user_id, t.id`, DevOperatorDiscordID, needGrant, admins, recorded)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list tenant operator bindings: %w", err)
 	}
@@ -500,14 +505,18 @@ func (s *Store) TenantForUser(ctx context.Context, userID uuid.UUID) (uuid.UUID,
 // ([DevOperatorDiscordID]) is excluded: it can never match a real Discord
 // speaker or interaction user, so on a dev-touched DB it would only make the
 // GM set look non-empty — suppressing the "Butler unaddressable" boot warning
-// — while admitting nobody. An empty result is not an error.
+// — while admitting nobody. Like [Store.ListTenantOperatorBindings] it drops a
+// suspended operator and, on an `allowlist` deployment, one who is not admitted
+// ([AccessPolicy]). An empty result is not an error.
 func (s *Store) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, error) {
+	needGrant, admins, recorded := s.accessArgs()
 	rows, err := s.db.Query(ctx,
 		`SELECT DISTINCT u.discord_user_id
 		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
 		  WHERE u.discord_user_id <> $1
 		    AND u.suspended_at IS NULL
-		  ORDER BY u.discord_user_id`, DevOperatorDiscordID)
+		    AND `+operatorAdmittedClause("u", 2)+`
+		  ORDER BY u.discord_user_id`, DevOperatorDiscordID, needGrant, admins, recorded)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list tenant operator discord ids: %w", err)
 	}

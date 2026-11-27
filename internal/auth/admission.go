@@ -170,9 +170,10 @@ type admissionDecision struct {
 //     the link does not admit them the join fails, it never falls through to
 //     a step that would found a Tenant;
 //  1. a Platform Admin — in every Admission Mode;
-//  2. `open` mode: someone who is a Campaign Guest and operates no Tenant
-//     signs in as that guest; everyone else self-signs-up (grants and access
-//     invitations are not consulted);
+//  2. `open` mode: someone who JOINED a Campaign as a guest (redeemed a
+//     campaign link at some point) and operates no Tenant signs in as that
+//     guest; everyone else self-signs-up (grants and access invitations are
+//     not consulted);
 //  3. the holder of an Access Grant;
 //  4. someone redeeming a live ACCESS invitation, which creates their grant;
 //  5. someone who already is a Campaign Guest;
@@ -182,6 +183,15 @@ type admissionDecision struct {
 // would otherwise found a Tenant the moment they signed in, which is not what
 // "open the campaign I was invited to" means. A guest founding their own
 // Tenant later is not built (ADR-0065).
+//
+// It applies only to a guest who chose to be one ([storage.GuestStanding]
+// Joined). A GM can add ANY Discord User ID as a guest, without that person's
+// consent and before they ever signed in; if that alone routed them to the
+// guest sign-in, any GM could keep anybody from founding a Tenant on an open
+// deployment, for good. Someone merely added therefore self-signs-up like
+// everyone else, and reaches the Campaign they were added to from the
+// workspace switcher. Step 5 (`allowlist`) has no such split: there the guest
+// row is the only thing that admits them at all.
 //
 // joinToken is the invitation token the join cookie carried ("" for an
 // ordinary login) and aupAccepted whether this round trip acknowledged the
@@ -209,7 +219,7 @@ func (a Admission) decide(ctx context.Context, discordUserID, joinToken string, 
 		if err != nil {
 			return admissionDecision{}, err
 		}
-		if isGuest && !standing.OperatesTenant {
+		if isGuest && standing.Joined && !standing.OperatesTenant {
 			return admissionDecision{route: admitGuest, guestCampaign: standing.CampaignID}, nil
 		}
 		return admissionDecision{route: admitOpenSignup}, nil

@@ -328,33 +328,40 @@ func TestRedeemCampaignInvitation(t *testing.T) {
 		}
 	})
 
-	t.Run("an existing guest keeps the union of old and new rights", func(t *testing.T) {
+	// A link someone can still reach must never be a way to change what they
+	// hold: their rights are whatever the GM last decided.
+	t.Run("an existing guest's rights are never changed by a redemption", func(t *testing.T) {
+		before := []string{"maps.read", "wiki.read"}
 		w.mintCampaign(t, w.alpha, "wider-link", func(n *storage.NewInvitation) {
 			n.Rights = []string{"maps.read", "transcripts.read"}
 		})
 		wider, err := w.st.RedeemCampaignInvitation(ctx, "wider-link", redemption(guestDiscordID, "Mika"))
-		if err != nil || !wider.Changed {
-			t.Fatalf("widening redemption = %+v, %v", wider, err)
-		}
-		want := []string{"maps.read", "transcripts.read", "wiki.read"}
-		if got := sortedRights(wider.Rights); !slices.Equal(got, want) {
-			t.Errorf("returned rights = %v, want the union %v", got, want)
+		if err != nil || wider.Changed || !slices.Equal(sortedRights(wider.Rights), before) {
+			t.Fatalf("a wider link = %+v, %v; want an unchanged success with rights %v", wider, err, before)
 		}
 		g, _ := w.st.GetCampaignGuest(ctx, w.alpha, res.User.ID)
-		if got := sortedRights(g.Rights); !slices.Equal(got, want) {
-			t.Errorf("stored rights = %v, want the union %v", got, want)
+		if got := sortedRights(g.Rights); !slices.Equal(got, before) {
+			t.Errorf("stored rights = %v after a wider link, want them untouched (%v)", got, before)
 		}
-		if invitationUses(t, w.st, "wider-link") != 1 {
-			t.Errorf("uses of the widening link = %d, want 1", invitationUses(t, w.st, "wider-link"))
+		if invitationUses(t, w.st, "wider-link") != 0 {
+			t.Error("a redemption by an existing guest counted a use")
 		}
-		// A NARROWER link never takes rights away, and counts no use.
-		w.mintCampaign(t, w.alpha, "narrow-link", func(n *storage.NewInvitation) { n.Rights = []string{"wiki.read"} })
-		narrow, err := w.st.RedeemCampaignInvitation(ctx, "narrow-link", redemption(guestDiscordID, "Mika"))
-		if err != nil || narrow.Changed || !slices.Equal(sortedRights(narrow.Rights), want) {
-			t.Errorf("narrower redemption = %+v, %v; want unchanged rights %v", narrow, err, want)
+
+		// The GM narrows the guest; reopening the link that let them in — which
+		// carries MORE — must not undo that.
+		if _, err := w.st.UpdateCampaignGuest(ctx, w.alpha, res.User.ID, []string{"wiki.read"}); err != nil {
+			t.Fatalf("UpdateCampaignGuest: %v", err)
 		}
-		if invitationUses(t, w.st, "narrow-link") != 0 {
-			t.Error("a redemption that changed nothing counted a use")
+		back, err := w.st.RedeemCampaignInvitation(ctx, "open-link", redemption(guestDiscordID, "Mika"))
+		if err != nil || back.Changed || !slices.Equal(back.Rights, []string{"wiki.read"}) {
+			t.Fatalf("reopening the link after a narrowing = %+v, %v; want the narrowed rights, unchanged", back, err)
+		}
+		g, _ = w.st.GetCampaignGuest(ctx, w.alpha, res.User.ID)
+		if !slices.Equal(g.Rights, []string{"wiki.read"}) {
+			t.Errorf("stored rights = %v, want the GM's narrowing to stand", g.Rights)
+		}
+		if invitationUses(t, w.st, "open-link") != 1 {
+			t.Errorf("uses of the original link = %d, want still 1", invitationUses(t, w.st, "open-link"))
 		}
 	})
 
@@ -454,7 +461,7 @@ func TestRedeemCampaignInvitation(t *testing.T) {
 
 // TestRedeemCampaignInvitation_Races: the last use of a link goes to exactly
 // one redeemer, and one person racing two links of the same Campaign ends with
-// one guest row holding both links' rights.
+// one guest row holding ONE link's rights, with one use counted between them.
 func TestRedeemCampaignInvitation_Races(t *testing.T) {
 	w := newGuestWorld(t)
 	ctx := context.Background()
@@ -510,8 +517,11 @@ func TestRedeemCampaignInvitation_Races(t *testing.T) {
 	}
 	u, _ := w.st.GetUserByDiscordID(ctx, guestDiscordID)
 	g, err := w.st.GetCampaignGuest(ctx, w.beta, u.ID)
-	if err != nil || !slices.Equal(sortedRights(g.Rights), []string{"maps.read", "wiki.read"}) {
-		t.Errorf("after racing two links, guest = %+v, %v; want one row with both rights", g, err)
+	if err != nil || len(g.Rights) != 1 || (g.Rights[0] != "wiki.read" && g.Rights[0] != "maps.read") {
+		t.Errorf("after racing two links, guest = %+v, %v; want one row with exactly one link's rights", g, err)
+	}
+	if uses := invitationUses(t, w.st, "link-a") + invitationUses(t, w.st, "link-b"); uses != 1 {
+		t.Errorf("the two raced links counted %d uses, want 1: the loser redeemed as an existing guest", uses)
 	}
 }
 

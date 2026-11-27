@@ -204,7 +204,7 @@ func TestOAuthCallback_CampaignJoin_Refusals(t *testing.T) {
 			store := &fakeOAuthStore{}
 			// The visitor is ALSO an existing guest elsewhere: that must not
 			// rescue a join that failed.
-			tc.gs.standing = map[string]storage.GuestStanding{"888": {CampaignID: uuid.New()}}
+			tc.gs.standing = map[string]storage.GuestStanding{"888": {CampaignID: uuid.New(), Joined: true}}
 			tc.gs.redeemedTokens, tc.gs.redemptions = nil, nil
 			rec := accessRound{du: invitee, aup: tc.aup, join: campaignToken}.run(t, guestAdmission(mode, sp, &fakeAccess{}, tc.gs), store)
 
@@ -226,12 +226,14 @@ func TestOAuthCallback_CampaignJoin_Refusals(t *testing.T) {
 
 // Someone who already is a Campaign Guest signs in as that guest with no
 // invitation at all — on an allowlist deployment whatever else they are, on an
-// open one only while they operate no Tenant.
+// open one only when they JOINED (redeemed a link) and operate no Tenant.
 func TestOAuthCallback_ExistingGuest(t *testing.T) {
 	t.Parallel()
 	campaignID := uuid.New()
 	userID := uuid.New()
+	// guestOnly was ADDED by Discord User ID; joined redeemed a campaign link.
 	guestOnly := map[string]storage.GuestStanding{"888": {CampaignID: campaignID}}
+	joined := map[string]storage.GuestStanding{"888": {CampaignID: campaignID, Joined: true}}
 	alsoOperator := map[string]storage.GuestStanding{"888": {CampaignID: campaignID, OperatesTenant: true}}
 
 	t.Run("admitted as a guest", func(t *testing.T) {
@@ -242,13 +244,15 @@ func TestOAuthCallback_ExistingGuest(t *testing.T) {
 			standing map[string]storage.GuestStanding
 			aup      bool
 		}{
-			{"allowlist, guest only", auth.AdmissionAllowlist, guestOnly, false},
+			{"allowlist, added by id", auth.AdmissionAllowlist, guestOnly, false},
+			{"allowlist, joined through a link", auth.AdmissionAllowlist, joined, false},
 			// A GM whose Access Grant was revoked: still someone's guest, so
 			// they get in — as a guest. (auth.Workspaces keeps them out of
 			// their own Tenant on every request.)
 			{"allowlist, operates a Tenant but holds no grant", auth.AdmissionAllowlist, alsoOperator, false},
-			// Open mode: a guest is NOT turned into a Tenant founder by signing in.
-			{"open, guest only", auth.AdmissionOpen, guestOnly, true},
+			// Open mode: a guest who CHOSE to be one is NOT turned into a Tenant
+			// founder by signing in.
+			{"open, joined through a link", auth.AdmissionOpen, joined, true},
 		} {
 			sp := &fakeSignup{created: true}
 			store := &fakeOAuthStore{userID: userID}
@@ -271,6 +275,28 @@ func TestOAuthCallback_ExistingGuest(t *testing.T) {
 			if len(gs.redeemedTokens) != 0 {
 				t.Errorf("%s: a redemption ran with no invitation: %v", tc.name, gs.redeemedTokens)
 			}
+		}
+	})
+
+	// The lockout this guards against: a GM can add ANY Discord User ID as a
+	// guest, with no consent and before that person ever signed in. If that
+	// alone made them "a guest" at sign-in, any GM could keep anybody from
+	// founding a Tenant on an open deployment, for good. Being added is not
+	// choosing: they self-sign-up, and the Campaign waits in the switcher.
+	t.Run("open mode: someone merely ADDED as a guest still self-signs-up", func(t *testing.T) {
+		t.Parallel()
+		sp := &fakeSignup{created: true}
+		store := &fakeOAuthStore{userID: userID}
+		rec := accessRound{du: invitee, aup: true}.run(t,
+			guestAdmission(auth.AdmissionOpen, sp, &fakeAccess{}, &fakeGuests{standing: guestOnly}), store)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status = %d, want a redirect into the app", rec.Code)
+		}
+		if sp.calls != 1 {
+			t.Errorf("ProvisionSignup ran %d times, want 1: being added as a guest must not block self-signup", sp.calls)
+		}
+		if store.createCalls != 0 {
+			t.Errorf("a guest-only session was issued (%d) to someone who never chose to be a guest", store.createCalls)
 		}
 	})
 
@@ -319,7 +345,7 @@ func TestOAuthCallback_ExistingGuest(t *testing.T) {
 			sp := &fakeSignup{}
 			store := &fakeOAuthStore{userID: userID, suspendedAt: &now}
 			rec := accessRound{du: invitee, aup: true}.run(t,
-				guestAdmission(mode, sp, &fakeAccess{}, &fakeGuests{standing: guestOnly}), store)
+				guestAdmission(mode, sp, &fakeAccess{}, &fakeGuests{standing: joined}), store)
 			if loc := rec.Header().Get("Location"); loc != "/login?error=not_authorized" {
 				t.Errorf("%s: Location = %q, want the not_authorized bounce", mode, loc)
 			}

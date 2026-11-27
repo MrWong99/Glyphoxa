@@ -173,7 +173,19 @@ spell out. None changes what was decided; each says how it holds.
 - **An archived Campaign is not reachable for its guests**; the guest rows are
   kept and unarchiving restores them.
 - **`ListSessions` needs `transcripts.read` OR `highlights.read`.** It carries
-  session metadata only, and Highlights are listed per session.
+  session metadata only, and Highlights are listed per session. For a guest
+  the metadata stops at the status: `end_reason` is blanked, because it holds
+  the host's operational detail (raw error text, the spend-cap cause).
+- **Prep boards need `wiki.edit`, even to read.** Boards are the GM's working
+  surface and a board's name can be a spoiler; the web only shows them to a
+  guest who may edit. Tags on public entries stay readable with `wiki.read`.
+- **Archiving a Campaign clears the session selections pointing at it**, so
+  unarchiving does not move a session back into it. The guest rows are kept.
+- **Known limit: a RUNNING Voice Session is not stopped by a revoke or by
+  switching Platform Keys off** — keys are resolved once at session start, so
+  the session keeps what it started with until it ends; suspending the
+  operator and the session's own stop are the tools, and no new session
+  starts.
 - **`planning.use` does not reveal the spoken record.** Without
   `transcripts.read` the exchange runs with no transcript-reading tool
   (`search_transcripts`, `appearances_of`, `recap`). Its one write,
@@ -216,8 +228,66 @@ request, and no request carries it. What this adds is how the SPA *names* it.
 - **Known gap:** between another tab switching the session and this tab
   noticing (its next probe: a refused call, a window focus, or the 30-second
   guest poll), a request from this tab is answered for the other Workspace.
-  Nothing is written to the wrong place (by-id writes are scoped server-side)
-  and the cache is dropped on recovery, but closing the window entirely needs
+  By-id writes are scoped server-side and the cache is dropped on recovery,
+  but a write that names no id — creating an entry or a board, renaming a tag
+  — lands in the other Workspace when the user holds `wiki.edit` there.
+  Archiving no longer opens this window from the host's side (the selection
+  is cleared, see above); closing it entirely needs
   the client to state the Workspace it expects per request and the server to
   refuse a mismatch — the shape the "workspace header" alternative above
   rejected as an *authorization* mechanism, used only as an assertion.
+
+## Review hardening (2026-11-27)
+
+Three holes found reviewing the build, and how each was closed. None changes
+the model above; each makes a sentence in it true.
+
+1. **`open` mode: being added as a guest no longer blocks self-signup.** A GM
+   adds a guest by Discord User ID without that person's consent, possibly
+   before they ever signed in. The sign-in rule "a Campaign Guest who operates
+   no Tenant signs in as that guest" therefore let any GM keep anybody from
+   founding a Tenant, with no way out for the person or a Platform Admin. It
+   now applies only to someone who **joined** — at least one reachable guest
+   row of theirs came through a campaign invitation link. Someone merely added
+   self-signs-up like everyone else and finds the shared Campaign in the
+   workspace switcher. `allowlist` deployments are unchanged: there the guest
+   row is the only thing that admits them.
+2. **Revoking a grant is complete.** "Revocation is immediate" held for the
+   web session only. Now, on an `allowlist` deployment:
+   - revoking switches **Platform Keys off** on every Tenant the person
+     operates (re-granting re-syncs the switch from the new grant);
+   - **GM identity on Discord follows the grant**: the operator binding that
+     feeds the slash-command gate and the Butler voice gate lists only
+     operators who are Platform Admins or hold an Access Grant, so a revoked
+     operator stops being GM within one snapshot refresh (a minute). This
+     amends ADR-0055's "a bound operator stays GM whatever the allowlist
+     says", which now holds in `open` mode only;
+   - **host standing**: a Campaign of a Tenant whose operator is suspended
+     (any mode), or is neither Platform Admin nor grant holder (`allowlist`),
+     is not reachable for its guests, and its campaign invitation links do not
+     redeem or preview. One predicate, applied wherever a guest resolves,
+     lists, selects or joins a Campaign. Guest rows are kept, so re-granting or
+     un-suspending restores every guest. A Tenant with no operator is
+     unaffected.
+
+   The rule reaches storage as a per-process policy set at boot from the same
+   Admission Mode and Platform Admin list as the boot sweep; `open` mode and
+   `GLYPHOXA_DEV_MODE` require nothing. Voice workers are not given
+   `GLYPHOXA_OPERATOR_IDS`, so the web tier records the list at boot
+   (`deployment_settings.platform_admin_ids`) as a read-only copy for them —
+   the environment stays the only place Platform Admins are configured. Until
+   a web boot has recorded one, a worker requires nothing rather than dropping
+   the deployment's own admin.
+3. **A removal cannot be undone through the link that admitted.** A multi-use
+   link stays live for the people it has yet to admit, so a revoked GM or a
+   removed guest could simply open it again. Revoking a grant, or removing a
+   guest, that came through a link now records a refusal for that (link,
+   person) (`invitation_refusal`); redemption refuses the pair and counts no
+   use. A new link still admits them, and so does an explicit grant or add by
+   Discord User ID, which also clears their refusals for that scope — the
+   person who removed them may change their mind, the removed person cannot
+   change it for them. Separately, redeeming a campaign link as someone who
+   already is a guest of that Campaign is now only a sign-in: it never widens
+   or resets the rights their GM last set, and counts no use. (The original
+   build merged the link's rights in, which let a narrowed guest restore
+   themselves.)

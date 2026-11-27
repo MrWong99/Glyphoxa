@@ -122,10 +122,11 @@ var wantGuestProcedures = map[string][]auth.GuestRight{
 	"/glyphoxa.management.v1.CampaignService/ListNodeEdges":       {auth.RightWikiRead},
 	"/glyphoxa.management.v1.CampaignService/GetKnowledgeGraph":   {auth.RightWikiRead},
 	"/glyphoxa.management.v1.CampaignService/GetCampaignTags":     {auth.RightWikiRead},
-	"/glyphoxa.management.v1.CampaignService/ListBoards":          {auth.RightWikiRead},
 	"/glyphoxa.management.v1.CampaignService/SearchNodes":         {auth.RightWikiRead},
 	"/glyphoxa.management.v1.CampaignService/ListNodeAppearances": {auth.RightWikiRead},
 
+	// Prep boards are the GM's working surface: reading them needs wiki.edit.
+	"/glyphoxa.management.v1.CampaignService/ListBoards":        {auth.RightWikiEdit},
 	"/glyphoxa.management.v1.CampaignService/CreateNode":        {auth.RightWikiEdit},
 	"/glyphoxa.management.v1.CampaignService/UpdateNode":        {auth.RightWikiEdit},
 	"/glyphoxa.management.v1.CampaignService/DeleteNode":        {auth.RightWikiEdit},

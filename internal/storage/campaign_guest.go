@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +26,12 @@ import (
 // workspace list, the session selection, redemption) skips an archived
 // Campaign. The campaign_guest rows are kept, so unarchiving restores every
 // guest exactly as they were.
+//
+// NEITHER IS A CAMPAIGN WHOSE HOST LOST THEIR STANDING. The same reads apply
+// hostStandingClause: a Campaign of a Tenant whose operator is suspended — or,
+// on an `allowlist` deployment, is neither a Platform Admin nor an Access
+// Grant holder — is not reachable for its guests and its links do not redeem.
+// Again the rows are kept, so restoring the operator restores the guests.
 
 // ErrGuestIsOperator refuses making a Tenant's own operator a Campaign Guest
 // of one of that Tenant's Campaigns: they already hold everything a guest row
@@ -79,6 +84,10 @@ func nonNilRights(rights []string) []string {
 // already a guest replaces their rights. The operator of the Campaign's own
 // Tenant is refused with [ErrGuestIsOperator]; an unknown campaign is
 // ErrNotFound.
+//
+// It is the GM's explicit decision, so it also clears any invitation refusal
+// (see recordInvitationRefusal) this person carries for the Campaign's links:
+// someone removed and then added back may use those links again.
 func (s *Store) AddCampaignGuest(ctx context.Context, campaignID uuid.UUID, discordUserID string, rights []string, addedBy uuid.UUID) (CampaignGuest, error) {
 	discordUserID = strings.TrimSpace(discordUserID)
 	if discordUserID == "" {
@@ -115,6 +124,12 @@ func (s *Store) AddCampaignGuest(ctx context.Context, campaignID uuid.UUID, disc
 			   SET rights = EXCLUDED.rights, updated_at = now()`,
 			campaignID, userID, nonNilRights(rights), addedBy); err != nil {
 			return fmt.Errorf("storage: add campaign guest: %w", err)
+		}
+		if _, err := tx.db.Exec(ctx,
+			`DELETE FROM invitation_refusal r USING invitation i
+			  WHERE i.id = r.invitation_id AND i.campaign_id = $1 AND r.discord_user_id = $2`,
+			campaignID, discordUserID); err != nil {
+			return fmt.Errorf("storage: add campaign guest: clear invitation refusals: %w", err)
 		}
 		g, err = tx.GetCampaignGuest(ctx, campaignID, userID)
 		return err
@@ -189,15 +204,33 @@ func (s *Store) UpdateCampaignGuest(ctx context.Context, campaignID, userID uuid
 // cleared in the same transaction so the session falls back cleanly instead of
 // carrying a dead pointer. ErrNotFound when the user is not a guest of THIS
 // Campaign.
+//
+// A guest who came in through an invitation link is additionally REFUSED that
+// link from now on (recordInvitationRefusal): a multi-use link stays live for
+// everyone else, and without the refusal the removed person would undo the
+// removal by opening it again. A new link, or adding them by Discord User ID,
+// still lets them back in.
 func (s *Store) RemoveCampaignGuest(ctx context.Context, campaignID, userID uuid.UUID) error {
 	return s.InTx(ctx, func(tx *Store) error {
-		tag, err := tx.db.Exec(ctx,
-			`DELETE FROM campaign_guest WHERE campaign_id = $1 AND user_id = $2`, campaignID, userID)
+		var (
+			invitationID  uuid.NullUUID
+			discordUserID string
+		)
+		err := tx.db.QueryRow(ctx,
+			`DELETE FROM campaign_guest cg USING users u
+			  WHERE cg.campaign_id = $1 AND cg.user_id = $2 AND u.id = cg.user_id
+			 RETURNING cg.invitation_id, u.discord_user_id`, campaignID, userID).
+			Scan(&invitationID, &discordUserID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
 		if err != nil {
 			return fmt.Errorf("storage: remove campaign guest: %w", err)
 		}
-		if tag.RowsAffected() == 0 {
-			return ErrNotFound
+		if invitationID.Valid {
+			if err := tx.recordInvitationRefusal(ctx, invitationID.UUID, discordUserID); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.db.Exec(ctx,
 			`UPDATE sessions SET guest_campaign_id = NULL
@@ -265,23 +298,9 @@ type CampaignRedeemed struct {
 	CampaignID uuid.UUID
 	// Rights is the guest's resulting set.
 	Rights []string
-	// Changed reports whether the redemption created the guest row or widened
-	// its rights — which is exactly when a use of the link was counted.
+	// Changed reports whether the redemption created the guest row — which is
+	// exactly when a use of the link was counted.
 	Changed bool
-}
-
-// unionRights returns old ∪ add, old's order first, and whether add
-// contributed anything.
-func unionRights(old, add []string) ([]string, bool) {
-	out := slices.Clone(nonNilRights(old))
-	changed := false
-	for _, r := range add {
-		if !slices.Contains(out, r) {
-			out = append(out, r)
-			changed = true
-		}
-	}
-	return out, changed
 }
 
 // RedeemCampaignInvitation turns a `campaign` invitation into a Campaign Guest
@@ -291,18 +310,22 @@ func unionRights(old, add []string) ([]string, bool) {
 // discipline). It writes the users row from the redeemer's Discord identity
 // (this IS a sign-in) and NOTHING else: no Tenant, no Plan, no session.
 //
-// Someone who already is a guest of the Campaign keeps the UNION of their old
-// rights and the link's. When that union adds nothing, the redemption is a
-// harmless no-op that counts no use and succeeds even on a link that has since
-// been spent, expired or revoked — they are reopening the link that let them
-// in, and they already hold everything it grants.
+// Someone who ALREADY is a guest of the Campaign keeps exactly the rights they
+// have: the redemption is a sign-in that counts no use, and succeeds even on a
+// link that has since been spent, expired or revoked — they are reopening the
+// link that let them in. It never widens or resets their rights: what a guest
+// holds is whatever their GM last decided (UpdateCampaignGuest), and a link
+// they can still reach must not be a way to undo a narrowing.
 //
 // Refusals, none of which writes anything:
 //   - [ErrUserSuspended] for a suspended redeemer;
 //   - [ErrInvitationInvalid] for everything else — unknown token, an access
-//     invitation, dead link, pinned to someone else, an archived Campaign, or
-//     the redeemer being the operator of the Campaign's own Tenant (who gains
-//     nothing from a guest row, and must not be admitted through one).
+//     invitation, dead link, pinned to someone else, an archived Campaign, a
+//     Campaign whose host lost their standing (hostStandingClause), the
+//     redeemer being the operator of the Campaign's own Tenant (who gains
+//     nothing from a guest row, and must not be admitted through one), or a
+//     redeemer this link was refused to because their GM removed them after
+//     they came in through it (recordInvitationRefusal).
 func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p CampaignRedemption) (CampaignRedeemed, error) {
 	var res CampaignRedeemed
 	err := s.InTx(ctx, func(tx *Store) error {
@@ -334,14 +357,16 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 		}
 
 		var (
-			operator uuid.NullUUID
-			archived *time.Time
+			operator     uuid.NullUUID
+			archived     *time.Time
+			hostStanding bool
 		)
+		needGrant, admins, recorded := tx.accessArgs()
 		err = tx.db.QueryRow(ctx,
-			`SELECT t.operator_user_id, c.archived_at
+			`SELECT t.operator_user_id, c.archived_at, `+hostStandingClause("t", 2)+`
 			   FROM campaign c JOIN tenant t ON t.id = c.tenant_id
-			  WHERE c.id = $1`, campaignID).Scan(&operator, &archived)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && archived != nil) {
+			  WHERE c.id = $1`, campaignID, needGrant, admins, recorded).Scan(&operator, &archived, &hostStanding)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && (archived != nil || !hostStanding)) {
 			return ErrInvitationInvalid
 		}
 		if err != nil {
@@ -367,11 +392,18 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 				return fmt.Errorf("storage: redeem campaign invitation: load guest: %w", err)
 			}
 		}
-		merged, widened := unionRights(oldRights, inv.Rights)
-		changed := !isGuest || widened
-		if changed && (!inv.Live(time.Now()) ||
-			(inv.DiscordUserID != "" && inv.DiscordUserID != p.User.DiscordUserID)) {
-			return ErrInvitationInvalid
+		if !isGuest {
+			if !inv.Live(time.Now()) ||
+				(inv.DiscordUserID != "" && inv.DiscordUserID != p.User.DiscordUserID) {
+				return ErrInvitationInvalid
+			}
+			refused, err := tx.invitationRefused(ctx, inv.ID, p.User.DiscordUserID)
+			if err != nil {
+				return err
+			}
+			if refused {
+				return ErrInvitationInvalid
+			}
 		}
 
 		u, err := tx.UpsertUser(ctx, p.User)
@@ -386,26 +418,36 @@ func (s *Store) RedeemCampaignInvitation(ctx context.Context, token string, p Ca
 			}
 			u.AUPAcceptedAt = &p.AUPAcceptedAt
 		}
-		res = CampaignRedeemed{User: u, CampaignID: campaignID, Rights: merged, Changed: changed}
-		if !changed {
+		res = CampaignRedeemed{User: u, CampaignID: campaignID, Rights: nonNilRights(oldRights)}
+		if isGuest {
 			return nil
 		}
 
-		// ON CONFLICT covers the race the invitation lock does not: the same
-		// person redeeming two DIFFERENT links of one Campaign at once (or the
-		// GM adding them mid-redeem). Both writers serialize on the unique
-		// index and the later one merges into what the earlier one committed.
-		if err := tx.db.QueryRow(ctx,
+		// ON CONFLICT DO NOTHING covers the race the invitation lock does not:
+		// the same person redeeming two DIFFERENT links of one Campaign at once
+		// (or the GM adding them mid-redeem). Both writers serialize on the
+		// unique index; the later one inserts nothing and is then exactly the
+		// "already a guest" case above — it keeps the rights the earlier one
+		// committed and counts no use.
+		err = tx.db.QueryRow(ctx,
 			`INSERT INTO campaign_guest (campaign_id, user_id, rights, added_by, invitation_id)
 			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (campaign_id, user_id) DO UPDATE
-			   SET rights = (SELECT COALESCE(array_agg(DISTINCT r), '{}')
-			                   FROM unnest(campaign_guest.rights || EXCLUDED.rights) AS r),
-			       updated_at = now()
+			 ON CONFLICT (campaign_id, user_id) DO NOTHING
 			 RETURNING rights`,
-			campaignID, u.ID, merged, inv.CreatedBy, inv.ID).Scan(&res.Rights); err != nil {
+			campaignID, u.ID, nonNilRights(inv.Rights), inv.CreatedBy, inv.ID).Scan(&res.Rights)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.db.QueryRow(ctx,
+				`SELECT rights FROM campaign_guest WHERE campaign_id = $1 AND user_id = $2`,
+				campaignID, u.ID).Scan(&res.Rights); err != nil {
+				return fmt.Errorf("storage: redeem campaign invitation: reload guest: %w", err)
+			}
+			res.Rights = nonNilRights(res.Rights)
+			return nil
+		}
+		if err != nil {
 			return fmt.Errorf("storage: write guest from invitation: %w", err)
 		}
+		res.Changed = true
 		if _, err := tx.db.Exec(ctx, `UPDATE invitation SET uses = uses + 1 WHERE id = $1`, inv.ID); err != nil {
 			return fmt.Errorf("storage: count invitation use: %w", err)
 		}
@@ -448,13 +490,16 @@ type Workspace struct {
 // this, a GM whose access was revoked — but who is someone's Campaign Guest —
 // would sign in as a guest and land back in their own Tenant.
 //
-// Archived Campaigns never resolve (see the file comment), and neither does a
-// guest row on a Campaign of a Tenant the user operates themselves.
+// Archived Campaigns never resolve (see the file comment), nor Campaigns whose
+// host lost their standing (steps 1 and 3 apply hostStandingClause), and
+// neither does a guest row on a Campaign of a Tenant the user operates
+// themselves.
 func (s *Store) ResolveWorkspace(ctx context.Context, userID uuid.UUID, sessionToken string, ownTenantNeedsGrant bool) (Workspace, error) {
 	var (
 		w        Workspace
 		campaign uuid.NullUUID
 	)
+	hostNeedsGrant, admins, recorded := s.accessArgs()
 	// ord sorts within a step: the OLDEST own Tenant first (TenantForUser's
 	// order), the NEWEST guest row first.
 	err := s.db.QueryRow(ctx,
@@ -469,6 +514,7 @@ func (s *Store) ResolveWorkspace(ctx context.Context, userID uuid.UUID, sessionT
 		          WHERE se.token = $2 AND se.user_id = $1
 		            AND c.archived_at IS NULL
 		            AND t.operator_user_id IS DISTINCT FROM $1
+		            AND `+hostStandingClause("t", 4)+`
 		         UNION ALL
 		         SELECT 2, t.id, NULL::uuid, NULL::text[],
 		                extract(epoch FROM t.created_at)::float8, t.id
@@ -483,9 +529,10 @@ func (s *Store) ResolveWorkspace(ctx context.Context, userID uuid.UUID, sessionT
 		          WHERE cg.user_id = $1
 		            AND c.archived_at IS NULL
 		            AND t.operator_user_id IS DISTINCT FROM $1
+		            AND `+hostStandingClause("t", 4)+`
 		        ) ws
 		  ORDER BY ws.step, ws.ord, ws.tie
-		  LIMIT 1`, userID, sessionTokenHash(sessionToken), ownTenantNeedsGrant).
+		  LIMIT 1`, userID, sessionTokenHash(sessionToken), ownTenantNeedsGrant, hostNeedsGrant, admins, recorded).
 		Scan(&w.TenantID, &campaign, &w.Rights)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Workspace{}, ErrNotFound
@@ -536,7 +583,8 @@ func (s *Store) OwnTenantForUser(ctx context.Context, userID uuid.UUID, needsGra
 // SetSessionWorkspace records what the session acts as. A nil campaignID
 // clears the selection (the user's own Tenant, or — having none — whatever
 // [Store.ResolveWorkspace] falls back to). A campaign is only ever selected
-// when the user is a guest of it right now and it is not archived; anything
+// when the user is a guest of it right now, it is not archived and its host is
+// in good standing (hostStandingClause); anything
 // else is ErrNotFound and leaves the session untouched. The selection is a
 // convenience, never the authorization: every request re-joins it against
 // campaign_guest.
@@ -552,8 +600,10 @@ func (s *Store) SetSessionWorkspace(ctx context.Context, userID uuid.UUID, sessi
 			            JOIN tenant t ON t.id = c.tenant_id
 			           WHERE cg.user_id = $1 AND cg.campaign_id = $3
 			             AND c.archived_at IS NULL
-			             AND t.operator_user_id IS DISTINCT FROM $1)`
-		args = append(args, *campaignID)
+			             AND t.operator_user_id IS DISTINCT FROM $1
+			             AND ` + hostStandingClause("t", 4) + `)`
+		needGrant, admins, recorded := s.accessArgs()
+		args = append(args, *campaignID, needGrant, admins, recorded)
 	}
 	tag, err := s.db.Exec(ctx, query, args...)
 	if err != nil {
@@ -578,9 +628,10 @@ type GuestWorkspace struct {
 
 // ListGuestWorkspaces returns every Campaign the user can act in as a guest,
 // most recently added first — the same set [Store.ResolveWorkspace] would
-// resolve (archived Campaigns and Campaigns of a Tenant the user operates are
-// absent).
+// resolve (archived Campaigns, Campaigns whose host lost their standing and
+// Campaigns of a Tenant the user operates are absent).
 func (s *Store) ListGuestWorkspaces(ctx context.Context, userID uuid.UUID) ([]GuestWorkspace, error) {
+	needGrant, admins, recorded := s.accessArgs()
 	rows, err := s.db.Query(ctx,
 		`SELECT c.id, c.name, t.name, cg.rights, cg.created_at
 		   FROM campaign_guest cg
@@ -589,7 +640,8 @@ func (s *Store) ListGuestWorkspaces(ctx context.Context, userID uuid.UUID) ([]Gu
 		  WHERE cg.user_id = $1
 		    AND c.archived_at IS NULL
 		    AND t.operator_user_id IS DISTINCT FROM $1
-		  ORDER BY cg.created_at DESC, cg.id`, userID)
+		    AND `+hostStandingClause("t", 2)+`
+		  ORDER BY cg.created_at DESC, cg.id`, userID, needGrant, admins, recorded)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list guest workspaces of user %s: %w", userID, err)
 	}
@@ -617,15 +669,26 @@ type GuestStanding struct {
 	CampaignID uuid.UUID
 	// OperatesTenant is true when they also operate a Tenant of their own.
 	OperatesTenant bool
+	// Joined is true when at least one of their reachable guest rows came
+	// through an invitation link — they CHOSE to be a guest. False means every
+	// row was written by a GM adding their Discord User ID, which needs no
+	// consent and may have happened before they ever signed in. `open`
+	// admission tells the two apart: only a guest who joined signs in as a
+	// guest instead of self-signing-up, otherwise any GM could keep any
+	// Discord User from ever founding a Tenant by adding their id.
+	Joined bool
 }
 
 // GuestStandingOf reports a Discord User's standing as a Campaign Guest, or
-// ErrNotFound when they are a guest of no reachable Campaign (archived ones do
-// not count — see the file comment) or have no users row at all.
+// ErrNotFound when they are a guest of no reachable Campaign (archived ones
+// and ones whose host lost their standing do not count — see the file
+// comment) or have no users row at all.
 func (s *Store) GuestStandingOf(ctx context.Context, discordUserID string) (GuestStanding, error) {
 	var st GuestStanding
+	needGrant, admins, recorded := s.accessArgs()
 	err := s.db.QueryRow(ctx,
-		`SELECT c.id, EXISTS (SELECT 1 FROM tenant own WHERE own.operator_user_id = u.id)
+		`SELECT c.id, EXISTS (SELECT 1 FROM tenant own WHERE own.operator_user_id = u.id),
+		        bool_or(cg.invitation_id IS NOT NULL) OVER ()
 		   FROM users u
 		   JOIN campaign_guest cg ON cg.user_id = u.id
 		   JOIN campaign c ON c.id = cg.campaign_id
@@ -633,8 +696,9 @@ func (s *Store) GuestStandingOf(ctx context.Context, discordUserID string) (Gues
 		  WHERE u.discord_user_id = $1
 		    AND c.archived_at IS NULL
 		    AND t.operator_user_id IS DISTINCT FROM u.id
+		    AND `+hostStandingClause("t", 2)+`
 		  ORDER BY cg.created_at DESC, cg.id
-		  LIMIT 1`, discordUserID).Scan(&st.CampaignID, &st.OperatesTenant)
+		  LIMIT 1`, discordUserID, needGrant, admins, recorded).Scan(&st.CampaignID, &st.OperatesTenant, &st.Joined)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return GuestStanding{}, ErrNotFound
 	}
@@ -652,13 +716,16 @@ type InvitationTarget struct {
 }
 
 // GetInvitationCampaign loads the display names behind a campaign invitation's
-// campaign id. An archived Campaign is ErrNotFound: its links cannot be
-// redeemed, so they must not preview as working.
+// campaign id. An archived Campaign — or one whose host lost their standing
+// (hostStandingClause) — is ErrNotFound: its links cannot be redeemed, so
+// they must not preview as working.
 func (s *Store) GetInvitationCampaign(ctx context.Context, campaignID uuid.UUID) (InvitationTarget, error) {
 	var ic InvitationTarget
+	needGrant, admins, recorded := s.accessArgs()
 	err := s.db.QueryRow(ctx,
 		`SELECT c.name, t.name FROM campaign c JOIN tenant t ON t.id = c.tenant_id
-		  WHERE c.id = $1 AND c.archived_at IS NULL`, campaignID).Scan(&ic.CampaignName, &ic.TenantName)
+		  WHERE c.id = $1 AND c.archived_at IS NULL
+		    AND `+hostStandingClause("t", 2), campaignID, needGrant, admins, recorded).Scan(&ic.CampaignName, &ic.TenantName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InvitationTarget{}, ErrNotFound
 	}

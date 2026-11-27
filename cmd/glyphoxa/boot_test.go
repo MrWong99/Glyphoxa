@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1672,5 +1673,36 @@ func TestDeploymentLLMDefault_WarnsOnUnpricedModel(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "no price") {
 		t.Errorf("priced model warned: %q", buf.String())
+	}
+}
+
+// TestAccessPolicyFor pins the operator-standing rule each process hands its
+// store (ADR-0065): only an allowlist deployment requires a Tenant's operator
+// to be admitted, dev mode preempts the Admission Mode, and only a process
+// without the env list trusts the recorded Platform Admin list.
+func TestAccessPolicyFor(t *testing.T) {
+	t.Parallel()
+	allow := auth.ParseOperatorAllowlist("111,222")
+	for _, tc := range []struct {
+		name      string
+		dev       bool
+		admission auth.AdmissionMode
+		recorded  bool
+		wantNeed  bool
+	}{
+		{"allowlist web", false, auth.AdmissionAllowlist, false, true},
+		{"allowlist voice worker", false, auth.AdmissionAllowlist, true, true},
+		{"open", false, auth.AdmissionOpen, false, false},
+		{"dev mode preempts the admission mode", true, auth.AdmissionAllowlist, false, false},
+		// An unknown posture is treated as allowlist: it fails closed.
+		{"unset mode", false, auth.AdmissionMode(""), false, true},
+	} {
+		got := accessPolicyFor(tc.dev, tc.admission, allow, tc.recorded)
+		if got.OperatorsNeedGrant != tc.wantNeed || got.RecordedAdmins != tc.recorded {
+			t.Errorf("%s: policy = %+v, want OperatorsNeedGrant=%v RecordedAdmins=%v", tc.name, got, tc.wantNeed, tc.recorded)
+		}
+		if !slices.Equal(got.PlatformAdmins, []string{"111", "222"}) {
+			t.Errorf("%s: PlatformAdmins = %v, want the env list", tc.name, got.PlatformAdmins)
+		}
 	}
 }
