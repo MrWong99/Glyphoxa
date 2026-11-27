@@ -87,6 +87,8 @@ const (
 
 	// outcomeWriteTimeout bounds one outcome write (complete / retry / mark-dead).
 	// The write runs detached from the runner context, so it needs its own bound.
+	// The budget starts when the write is about to happen — after the handler has
+	// returned — never while the handler runs.
 	outcomeWriteTimeout = 5 * time.Second
 )
 
@@ -236,15 +238,18 @@ func (r *Runner) refreshBacklog(ctx context.Context) {
 // as SIGTERM arrived used to have its outcome write fail on the dead context,
 // leaving the row claimed until the lease ran out (5 minutes) and, for a job
 // that had actually succeeded, running it a second time.
+//
+// That detached context is built only once the handler has returned: its
+// timeout is the write's budget, and a handler may legitimately run far longer
+// than outcomeWriteTimeout (up to the Lease).
 func (r *Runner) runOne(ctx context.Context, job storage.Job) {
-	outCtx, cancelOut := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
-	defer cancelOut()
-
 	handler, ok := r.handlers[job.Kind]
 	if !ok {
 		// Only registered kinds are claimed, so this is defensive; dead-letter rather
 		// than spin, since no handler will ever run it.
 		r.log.Error("job runner: claimed a job with no handler; dead-lettering", "kind", job.Kind, "job_id", job.ID)
+		outCtx, cancelOut := outcomeCtx(ctx)
+		defer cancelOut()
 		r.markDead(outCtx, job, "no handler registered for kind")
 		return
 	}
@@ -257,6 +262,9 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	if r.metrics != nil {
 		r.metrics.JobDuration(job.Kind, time.Since(start))
 	}
+
+	outCtx, cancelOut := outcomeCtx(ctx)
+	defer cancelOut()
 
 	if err == nil {
 		if !r.terminalWrite(job, "complete", r.store.CompleteJob(outCtx, job.ID, job.Attempts)) {
@@ -282,6 +290,12 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	if r.metrics != nil {
 		r.metrics.JobOutcome(job.Kind, outcomeRetry)
 	}
+}
+
+// outcomeCtx returns the context for one job's outcome write: detached from the
+// runner context's cancellation and bounded by outcomeWriteTimeout from now.
+func outcomeCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
 }
 
 func (r *Runner) markDead(ctx context.Context, job storage.Job, lastError string) {

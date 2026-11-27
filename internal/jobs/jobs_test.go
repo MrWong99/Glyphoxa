@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,9 +92,12 @@ func (f *fakeStore) RetryJob(ctx context.Context, id uuid.UUID, attempts int, la
 	return nil
 }
 
-func (f *fakeStore) MarkJobDead(_ context.Context, id uuid.UUID, attempts int, lastError string) error {
+func (f *fakeStore) MarkJobDead(ctx context.Context, id uuid.UUID, attempts int, lastError string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.terminalErr != nil {
 		return f.terminalErr
 	}
@@ -311,6 +316,49 @@ func TestRunOneOutcomeSurvivesShutdownCancel(t *testing.T) {
 	if len(store.retried) != 1 || store.retried[0].id != interrupted.ID {
 		t.Errorf("retried = %+v, want the interrupted job %s released for retry at once, not after its lease", store.retried, interrupted.ID)
 	}
+}
+
+// TestRunOneOutcomeWriteBudgetStartsAfterHandler: the outcome-write budget must
+// not run while the handler does. A handler that outlasts outcomeWriteTimeout
+// (provider image/sound generation routinely does) must still have its outcome
+// recorded; otherwise every such job stays claimed until its lease expires — a
+// success is run twice, a failure gets no backoff and no last_error.
+func TestRunOneOutcomeWriteBudgetStartsAfterHandler(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &fakeStore{}
+		metrics := newFakeMetrics()
+		r := New(store, metrics, testLog(), Config{})
+
+		slow := func(err error) HandlerFunc {
+			return func(context.Context, json.RawMessage) error {
+				time.Sleep(2 * outcomeWriteTimeout) // fake clock: no real wait
+				return err
+			}
+		}
+		r.Register("test.slow", slow(nil))
+		r.Register("test.slowfail", slow(errors.New("boom")))
+
+		done := testJob("test.slow", 1, 5, `{}`)
+		r.runOne(t.Context(), done)
+		retry := testJob("test.slowfail", 1, 5, `{}`)
+		r.runOne(t.Context(), retry)
+		dead := testJob("test.slowfail", 5, 5, `{}`) // attempt 5 of 5 — exhausted
+		r.runOne(t.Context(), dead)
+
+		if len(store.completed) != 1 || store.completed[0] != done.ID {
+			t.Errorf("completed = %v, want the slow job %s completed", store.completed, done.ID)
+		}
+		if len(store.retried) != 1 || store.retried[0].id != retry.ID || store.retried[0].lastError != "boom" {
+			t.Errorf("retried = %+v, want the slow failure %s retried with last_error boom", store.retried, retry.ID)
+		}
+		if len(store.dead) != 1 || store.dead[0].id != dead.ID || store.dead[0].lastError != "boom" {
+			t.Errorf("dead = %+v, want the exhausted slow failure %s dead-lettered with last_error boom", store.dead, dead.ID)
+		}
+		want := []outcomeKV{{"test.slow", outcomeDone}, {"test.slowfail", outcomeRetry}, {"test.slowfail", outcomeDead}}
+		if !slices.Equal(metrics.outcomes, want) {
+			t.Errorf("outcomes = %v, want %v", metrics.outcomes, want)
+		}
+	})
 }
 
 func TestRunOneSupersededCompleteCountsNoOutcome(t *testing.T) {
