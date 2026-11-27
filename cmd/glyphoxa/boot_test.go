@@ -1611,6 +1611,46 @@ func TestApplyVoiceEnv(t *testing.T) {
 	}
 }
 
+// TestApplyLLMDefault pins the same hop for the deployment-default LLM (#712
+// item 4): the parsed default has to LAND on the wirenpc.Config every Voice
+// Session is copied from. Without the assignment the parser tests stay green
+// and every Voice Session of a row-less Tenant runs Groq.
+func TestApplyLLMDefault(t *testing.T) {
+	discard := slog.New(slog.DiscardHandler)
+
+	var cfg wirenpc.Config
+	if err := applyLLMDefault(&cfg, envMap(map[string]string{
+		llmbuild.EnvDefaultProvider: "anthropic",
+		llmbuild.EnvDefaultModel:    "claude-haiku-4-5",
+		"ANTHROPIC_API_KEY":         "x",
+	}), discard); err != nil {
+		t.Fatalf("anthropic default: %v", err)
+	}
+	if p, m := cfg.LLMDefault.Select(nil); p != "anthropic" || m != "claude-haiku-4-5" {
+		t.Errorf("Config.LLMDefault resolves to (%q, %q), want (anthropic, claude-haiku-4-5)", p, m)
+	}
+
+	// An unset environment is the code default.
+	cfg = wirenpc.Config{}
+	if err := applyLLMDefault(&cfg, envMap(nil), discard); err != nil {
+		t.Fatalf("unset envs: %v", err)
+	}
+	wantP, wantM := llmbuild.DeploymentDefault{}.Select(nil)
+	if p, m := cfg.LLMDefault.Select(nil); p != wantP || m != wantM {
+		t.Errorf("unset envs: Config.LLMDefault resolves to (%q, %q), want the code default (%q, %q)", p, m, wantP, wantM)
+	}
+
+	// A bad value is the boot's to report, and leaves the Config alone.
+	cfg = wirenpc.Config{}
+	err := applyLLMDefault(&cfg, envMap(map[string]string{llmbuild.EnvDefaultProvider: "openai"}), discard)
+	if err == nil || !strings.Contains(err.Error(), llmbuild.EnvDefaultProvider) {
+		t.Errorf("applyLLMDefault(openai) = %v, want an error naming %s", err, llmbuild.EnvDefaultProvider)
+	}
+	if cfg.LLMDefault != (llmbuild.DeploymentDefault{}) {
+		t.Errorf("Config.LLMDefault = %+v after a rejected value, want it untouched", cfg.LLMDefault)
+	}
+}
+
 // TestDeploymentLLMDefault pins the boot read of the deployment-default LLM
 // (#702): unset is the code default, a named provider is validated, and a bad
 // value stops the boot with a message naming the variable to fix.

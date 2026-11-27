@@ -317,7 +317,7 @@ func (e *Engine) resolveLLMConfig(ctx context.Context, tenantID uuid.UUID, butle
 	pc, err := e.st.GetProviderConfigByComponent(ctx, tenantID, storage.ComponentLLM)
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
-		return nil, nil // no config -> default Groq + env key
+		return nil, nil // no config -> the deployment default (Select) + env key
 	case err != nil:
 		return nil, fmt.Errorf("assist: load tenant LLM provider config: %w", err)
 	default:
